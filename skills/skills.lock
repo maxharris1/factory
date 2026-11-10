@@ -1,6 +1,7 @@
 # A pin bump updates version, commit, and files together.
 version: "0.15.36"
 commit: c742dd61706fbacc1b95f1a20b7b988cf096ce6c
+token: "You run the program, never the code. Decide which agent does each piece of work, then check what each one produces."
 files:
   .cursor-plugin/plugin.json: d9e56eed06fc8f8920ff532873a403355d35f2905d2c86d1968ec4da0d1a5191
   .gitignore: 8ffe9de56bd30c1a95cd945262d6e3ac355ada4111551dde41f67851b9f1fc55

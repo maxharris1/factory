@@ -58,6 +58,12 @@ def tiny_tree(tmp_path: Path) -> Path:
         "---\nname: poteto-mode\ndescription: token-one\n---\n\n",
         encoding="utf-8",
     )
+    playbook = skill / "playbooks"
+    playbook.mkdir()
+    (playbook / "orchestrate.md").write_text(
+        "### Orchestrate\n\n**token-one** the rest.\n",
+        encoding="utf-8",
+    )
     manifest = '{"name": "pstack", "version": "0.15.36"}\n'
     for rel in (".cursor-plugin/plugin.json", "plugin.json"):
         path = root / "skills" / "pstack" / rel
@@ -85,11 +91,13 @@ def test_canary_asks_for_poteto_mode_and_a_token_from_the_skill() -> None:
     prompt = result.stdout
     token = pinned_token(ROOT)
     assert "poteto-mode" in prompt
-    assert "description token" in prompt
+    assert "playbooks/orchestrate.md" in prompt
+    assert "first bold sentence" in prompt
     assert "claude-bot" in prompt
     assert "codex-bot" in prompt
     assert "cursor-bot" in prompt
-    assert token in (ROOT / "skills" / "pstack" / "skills" / "poteto-mode" / "SKILL.md").read_text()
+    playbook = ROOT / "skills" / "pstack" / "skills" / "poteto-mode" / "playbooks" / "orchestrate.md"
+    assert token in playbook.read_text(encoding="utf-8")
     assert token not in prompt
     assert "ok" not in prompt.splitlines()
 
@@ -134,16 +142,13 @@ def test_install_vendors_each_skill_into_the_cloud_project_paths(tmp_path: Path)
     assert not (project / ".codex").exists()
 
 
-def test_install_is_idempotent_and_replaces_a_stale_link(tmp_path: Path) -> None:
+def test_install_is_idempotent_for_an_owned_symlink(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert run(["install-skills", "--home", str(home)]).returncode == 0
-    link = home / ".claude" / "skills" / "poteto-mode"
-    link.unlink()
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    link.symlink_to(elsewhere, target_is_directory=True)
     again = run(["install-skills", "--home", str(home)])
     assert again.returncode == 0, again.stderr
+    link = home / ".claude" / "skills" / "poteto-mode"
+    assert link.is_symlink()
     assert link.resolve() == (ROOT / "skills" / "pstack" / "skills" / "poteto-mode").resolve()
 
 
@@ -294,6 +299,117 @@ def test_bump_pin_does_not_write_a_commit_for_a_different_version(tmp_path: Path
         bump_pin(root, "b" * 40, "9.9.9")
     assert (root / "skills" / "skills.lock").read_text(encoding="utf-8") == before
     assert verify_pin(root) == []
+
+
+TOKEN_0_15_35 = (
+    "poteto's agent style for concise, detailed responses, deliberate subagents, "
+    "unslopped prose, simple code, and verified work. Use for poteto, /poteto-mode, "
+    "or requests to work in this style."
+)
+
+
+def test_install_refuses_unowned_paths(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    notes = home / ".claude" / "skills" / "poteto-mode" / "notes.md"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("keep-notes", encoding="utf-8")
+    state = home / ".agents" / "skills" / "statechart"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"keep-state")
+    result = run(["install-skills", "--home", str(home)])
+    assert result.returncode == 1
+    assert "refusing to replace unowned path" in result.stderr
+    assert "poteto-mode" in result.stderr
+    assert "statechart" in result.stderr
+    assert notes.read_text(encoding="utf-8") == "keep-notes"
+    assert state.read_bytes() == b"keep-state"
+    assert list(notes.parent.iterdir()) == [notes]
+    assert list(state.parent.iterdir()) == [state]
+    assert not (home / ".cursor").exists()
+
+
+def test_install_refuses_a_symlinked_skills_dir(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "user.txt").write_text("keep", encoding="utf-8")
+    skills = home / ".claude" / "skills"
+    skills.parent.mkdir(parents=True)
+    skills.symlink_to(outside, target_is_directory=True)
+    result = run(["install-skills", "--home", str(home)])
+    assert result.returncode == 1
+    assert "symlinked skills dir" in result.stderr
+    assert "outside the target" in result.stderr
+    assert (outside / "user.txt").read_text(encoding="utf-8") == "keep"
+    assert not (outside / "poteto-mode").exists()
+    assert not (home / ".agents").exists()
+
+
+def test_interrupted_install_leaves_the_old_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    home = tmp_path / "home"
+    assert install_skills(root, home, "cloud") == []
+    dest = home / ".claude" / "skills" / "poteto-mode"
+    skill = dest / "SKILL.md"
+    skill.write_text("owned-old\n", encoding="utf-8")
+
+    def boom(_src: Path, _dest: Path) -> None:
+        raise OSError("interrupted")
+
+    monkeypatch.setattr("lib.pstack_pin._copy_tree", boom)
+    errors = install_skills(root, home, "cloud")
+    assert errors
+    assert "interrupted" in errors[0]
+    assert skill.read_text(encoding="utf-8") == "owned-old\n"
+    assert (dest / ".orch-owned").is_file()
+
+
+def test_pin_rejects_a_symlink_and_a_non_regular_file(tmp_path: Path) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("escaped", encoding="utf-8")
+    link = root / "skills" / "pstack" / "skills" / "extra"
+    link.symlink_to(outside, target_is_directory=True)
+    fifo = root / "skills" / "pstack" / "skills" / "poteto-mode" / "fifo"
+    os.mkfifo(fifo)
+    errors = verify_pin(root)
+    assert any("symlink is not allowed: skills/extra" in error for error in errors)
+    assert any("not a regular file: skills/poteto-mode/fifo" in error for error in errors)
+    home = tmp_path / "home"
+    installed = install_skills(root, home, "local")
+    assert installed
+    assert not home.exists()
+    assert (outside / "SKILL.md").read_text(encoding="utf-8") == "escaped"
+
+
+def test_doctor_rejects_the_0_15_35_token(tmp_path: Path) -> None:
+    description = TOKEN_0_15_35
+    skill = (ROOT / "skills" / "pstack" / "skills" / "poteto-mode" / "SKILL.md").read_text(encoding="utf-8")
+    assert description in skill
+    assert pinned_token(ROOT) != description
+    home = tmp_path / "home"
+    assert run(["install-skills", "--home", str(home)]).returncode == 0
+    replies = tmp_path / "replies"
+    write_replies(replies, pinned_token(ROOT), token_for={"claude": description})
+    result = run(["doctor", "--home", str(home), "--responses", str(replies)])
+    assert result.returncode == 1
+    assert "claude: did not load the pinned version (token does not match the pin)" in result.stderr
+
+
+def test_doctor_cloud_rejects_symlinked_copies(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    assert install_skills(ROOT, project, "local") == []
+    replies = tmp_path / "replies"
+    write_replies(replies, pinned_token(ROOT))
+    code, _prompt, errors = doctor(ROOT, project, "cloud", replies, print_canary=False)
+    assert code == 1
+    assert any("must be a real copy" in error for error in errors)
+    link = project / ".claude" / "skills" / "poteto-mode"
+    assert link.is_symlink()
+    assert link.resolve() == (ROOT / "skills" / "pstack" / "skills" / "poteto-mode").resolve()
 
 
 def test_project_flag_requires_cloud(tmp_path: Path) -> None:
