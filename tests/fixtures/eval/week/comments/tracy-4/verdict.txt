@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/3 head=abc1234 ac=met verdict=APPROVE risk=low -->
+Second low-risk round.
