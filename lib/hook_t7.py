@@ -5,8 +5,9 @@ Events:
 - kind=verdict verdict=BLOCKED from the ticket's reviewer bot.
 - kind=stuck from any trusted bot. Its state= names the stop: blocked,
   capped or refused; anything else is stuck.
-- A comment that contains orch:v but has no parseable header, from a
-  trusted login. Untrusted ones are recorded and ignored.
+- A comment with a header-shaped line (one starting with <!-- orch:v)
+  that does not parse, from a trusted login. Untrusted ones are recorded
+  and ignored. Prose that only mentions orch:v is not a header.
 
 blocked and capped wake once per ticket and head: the reported head, or
 the PR head when the report names none. Short heads are not expanded.
@@ -17,12 +18,14 @@ T3, call Dispatcher.wake_grok_once directly.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 
 STOP_STATES = ("blocked", "capped", "refused")
+_HEADER_SHAPED = re.compile(r"^\s*<!--\s*orch:v", re.MULTILINE)
 
 
 class T7Hook:
@@ -74,7 +77,7 @@ class T7Hook:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        if "orch:v" not in comment.body:
+        if _HEADER_SHAPED.search(comment.body) is None:
             return None
         if comment.author not in dispatcher.trusted_logins:
             return True, "ignored-unparsed-untrusted"
