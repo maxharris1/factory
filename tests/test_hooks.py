@@ -743,8 +743,8 @@ def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
                 "claude-login",
                 1,
             ),
-            say("bad-2", "orch:v1 kind=ready", "codex-login", 2),
-            say("bad-3", "orch:v1 kind=ready", "someone-else", 3),
+            say("bad-2", "<!-- orch:v1 kind=ready", "codex-login", 2),
+            say("bad-3", "<!-- orch:v1 kind=ready", "someone-else", 3),
         )
     )
 
@@ -799,3 +799,180 @@ def test_t7_capped_wakes_once_per_head_and_refused_once_per_ticket(
         ("capped", HEAD_B),
         ("refused", HEAD_A),
     ]
+
+
+def test_t7_prose_that_mentions_orch_v_is_not_unparsed(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.process(
+        ticket(
+            say(
+                "prose-1",
+                "I will post the orch:v1 ready header once CI is green.",
+                "claude-login",
+                1,
+            ),
+            say("prose-2", "See `<!-- orch:v1 kind=ready -->` above.", "codex-login", 2),
+        )
+    )
+
+    assert jobs(queue) == []
+
+
+def test_t8_crash_before_third_decline_marks_stuck_never_ships_a_later_ok(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    heads = ("1" * 40, "2" * 40, "3" * 40)
+    comments: tuple[Comment, ...] = ()
+    for number, head in enumerate(heads[:2], start=1):
+        comments += (
+            approve(f"verdict-{number}", head, number * 10),
+            say(f"decline-{number}", DECLINE, "tracy-login", number * 10 + 1),
+        )
+        dispatcher.process(ticket(*comments, head=head))
+    comments += (
+        approve("verdict-3", heads[2], 30),
+        say("decline-3", DECLINE, "tracy-login", 31),
+    )
+
+    def crash(**_kwargs: object) -> None:
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(dispatcher, "_mark_stuck_and_wake", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dispatcher.process(ticket(*comments, head=heads[2]))
+    monkeypatch.undo()
+
+    head = "4" * 40
+    downtime = comments + (
+        approve("verdict-4", head, 40),
+        say("ok-4", OK.format(head=head), "tracy-login", 41),
+    )
+    restarted, _queue = restart(tmp_path, shipper)
+    restarted.process(ticket(*downtime, head=head))
+
+    assert shipper.requests == []
+    assert restarted.is_stuck(ticket(head=head))
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["stuck"]
+
+
+@pytest.mark.parametrize("change", ["head-moved", "newer-verdict"])
+def test_t8_orphaned_ship_claim_goes_to_ship_failed_and_wakes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    comments = (
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    original = hook_t8._set_outcome
+
+    def crash(
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        approve_id: str,
+        outcome: str,
+    ) -> bool:
+        if outcome == "shipped":
+            raise RuntimeError("simulated crash")
+        return original(dispatcher, ticket, approve_id, outcome)
+
+    monkeypatch.setattr(hook_t8, "_set_outcome", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dispatcher.process(ticket(*comments))
+    monkeypatch.setattr(hook_t8, "_set_outcome", original)
+
+    if change == "head-moved":
+        after = ticket(*comments, head=HEAD_B)
+    else:
+        revise = say(
+            "verdict-2",
+            VERDICT.format(head=HEAD_A, verdict="REVISE"),
+            "codex-login",
+            3,
+        )
+        after = ticket(*comments, revise)
+    for _poll in range(2):
+        restart(tmp_path, shipper)[0].process(after)
+
+    assert len(shipper.requests) == 1
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM external_previews"
+        ).fetchone()["outcome"]
+    assert outcome == "ship-failed"
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+
+
+def test_t8_losing_dispatcher_cannot_overwrite_shipped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shipper = FakeShipper()
+    winner, queue = setup(tmp_path, shipper)
+    loser, _queue = setup(tmp_path, FakeShipper())
+    snapshot = ticket(
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    stale = {"orphan": "verdict-1"}
+
+    def stale_read(
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        comment_id: str,
+    ) -> str | None:
+        return stale.pop("orphan", None)
+
+    winner.process(snapshot)
+    monkeypatch.setattr(hook_t8, "_shipping_claim", stale_read)
+    loser.process(snapshot)
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM external_previews"
+        ).fetchone()["outcome"]
+    assert outcome == "shipped"
+    assert len(shipper.requests) == 1
+    assert jobs(queue) == []
+
+
+def test_ready_never_reaches_the_hooks(tmp_path: Path) -> None:
+    hook = GreedyHook((True, "claimed"))
+    dispatcher, _queue = setup(tmp_path, hooks=(hook,))
+    ready = (
+        "<!-- orch:v1 kind=ready from=claude-bot role=builder "
+        f"head={HEAD_A} -->\nReady.\n"
+    )
+
+    dispatcher.process(ticket(say("ready-1", ready, "claude-login", 1)))
+
+    assert hook.seen == []
+
+
+def test_t8_two_declines_competing_for_one_preview_queue_one_fix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, queue = setup(tmp_path, FakeShipper())
+    second, _queue = setup(tmp_path, FakeShipper())
+    approved = approve("verdict-1", HEAD_A, 1)
+
+    first.process(ticket(approved, say("decline-1", DECLINE, "tracy-login", 2)))
+    monkeypatch.setattr(hook_t8, "_claimed_by", lambda *_args: None)
+    second.process(ticket(approved, say("decline-2", DECLINE, "tracy-login", 3)))
+
+    assert jobs(queue) == [("fix", "claude")]
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT comment_id FROM external_previews"
+        ).fetchall()
+    assert [str(row["comment_id"]) for row in rows] == ["decline-1"]
