@@ -1,10 +1,10 @@
-"""F1-04 dispatcher transitions T1, T2 and T6."""
+"""F1-04 dispatcher transitions T1, T2 and T6, plus project hooks."""
 
 from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +16,15 @@ from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 POLL_SECONDS = 60
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
+GROK_WAKE_REASONS = (
+    "blocked",
+    "capped",
+    "refused",
+    "stuck",
+    "unparsed",
+    "ship-failed",
+)
+CORE_KINDS = ("go", "ready")
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,28 @@ class PollSource(Protocol):
     ) -> tuple[TrackedTicket, ...]: ...
 
 
+class Hook(Protocol):
+    """A project hook (T7, T8) sees each unhandled comment before T1/T2.
+
+    fields is None when the comment has no parseable orch:v1 header.
+    handle returns None when the comment is not the hook's event, or
+    (handled, outcome); handled comments go into the ledger. Hooks run in
+    order and the first answer wins, so (False, outcome) leaves the
+    comment for the next poll without offering it to later hooks or the
+    core rows. kind=go and kind=ready are never offered to hooks.
+    """
+
+    def initialize(self, dispatcher: Dispatcher) -> None: ...
+
+    def handle(
+        self,
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str] | None,
+    ) -> tuple[bool, str] | None: ...
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -78,6 +109,7 @@ class Dispatcher:
         queue: SQLiteJobQueue,
         *,
         trusted_logins: Mapping[str, str],
+        hooks: Sequence[Hook] = (),
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -86,7 +118,10 @@ class Dispatcher:
         self.state_path = state_path
         self.queue = queue
         self.trusted_logins = dict(trusted_logins)
+        self.hooks = tuple(hooks)
         self._initialize()
+        for hook in self.hooks:
+            hook.initialize(self)
 
     def poll_once(self, source: PollSource) -> None:
         self._discover(
@@ -106,9 +141,18 @@ class Dispatcher:
         for comment in comments:
             if self._is_handled(ticket, comment.id):
                 continue
+            fields: dict[str, str] | None
             try:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
+                fields = None
+            hooked = self._run_hooks(ticket, comment, fields)
+            if hooked is not None:
+                handled, outcome = hooked
+                if handled:
+                    self._mark_handled(ticket, comment.id, outcome)
+                continue
+            if fields is None:
                 continue
             kind = fields["kind"]
             if kind not in ("go", "ready"):
@@ -149,6 +193,70 @@ class Dispatcher:
 
     def is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck(ticket)
+
+    def wake_grok_once(
+        self,
+        *,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        source_comment_id: str,
+        timeout_seconds: int,
+        detail: str,
+        head: str | None = None,
+    ) -> None:
+        """T7: one Grok wake per stop, across restarts.
+
+        refused wakes once per ticket. blocked and capped wake once per
+        ticket and head. unparsed and ship-failed wake once per comment.
+        stuck goes through the ticket's stuck flag, which wakes once.
+        """
+        if reason not in GROK_WAKE_REASONS:
+            raise ValueError(f"unknown wake reason {reason!r}")
+        if reason in ("unparsed", "ship-failed"):
+            once_key = source_comment_id
+        elif reason in ("blocked", "capped"):
+            once_key = head or "-"
+        else:
+            once_key = "-"
+        if reason == "stuck":
+            self._mark_stuck_and_wake(
+                repo=repo,
+                ticket_id=ticket_id,
+                source_comment_id=source_comment_id,
+                timeout_seconds=timeout_seconds,
+                reason="t7-stuck",
+                detail=detail,
+            )
+            return
+        self.queue.enqueue(
+            JobRequest(
+                repo=repo,
+                ticket_id=ticket_id,
+                action=reason,
+                recipient="grok",
+                source_comment_id=source_comment_id,
+                timeout_seconds=timeout_seconds,
+                generation=self._generation(repo, ticket_id),
+                head=head,
+                detail=detail,
+            ),
+            dedupe_key=f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}",
+        )
+
+    def _run_hooks(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str] | None,
+    ) -> tuple[bool, str] | None:
+        if fields is not None and fields["kind"] in CORE_KINDS:
+            return None
+        for hook in self.hooks:
+            result = hook.handle(self, ticket, comment, fields)
+            if result is not None:
+                return result
+        return None
 
     def _t1(
         self,
