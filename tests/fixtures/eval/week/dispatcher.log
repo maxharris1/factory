@@ -1,0 +1,33 @@
+2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=12 enter state=intake
+2026-11-03T15:01:00Z repo=maxharris1/Cleffy pr=12 comment path=comments/cleffy-12/brief.txt
+2026-11-03T15:01:00Z repo=maxharris1/Cleffy pr=12 enter state=questions
+2026-11-03T15:02:00Z repo=maxharris1/Cleffy pr=12 comment path=comments/cleffy-12/go.txt
+2026-11-03T15:02:00Z repo=maxharris1/Cleffy pr=12 enter state=building
+2026-11-03T15:03:00Z repo=maxharris1/Cleffy pr=12 comment path=comments/cleffy-12/ready-red.txt
+2026-11-03T15:03:00Z repo=maxharris1/Cleffy pr=12 enter state=building
+2026-11-03T15:04:00Z repo=maxharris1/Cleffy pr=12 wake role=claude-bot reason=fix handled=ready-red
+2026-11-03T15:04:30Z repo=maxharris1/Cleffy pr=12 wake role=claude-bot reason=fix handled=ready-red
+2026-11-03T15:06:00Z repo=maxharris1/Cleffy pr=12 comment path=comments/cleffy-12/ready.txt
+2026-11-03T15:06:00Z repo=maxharris1/Cleffy pr=12 enter state=review
+2026-11-03T15:07:00Z repo=maxharris1/Cleffy pr=12 comment path=comments/cleffy-12/verdict.txt
+2026-11-03T15:07:00Z repo=maxharris1/Cleffy pr=12 enter state=ship
+2026-11-03T15:07:30Z repo=maxharris1/Cleffy pr=12 enter state=merged
+2026-11-03T15:08:00Z repo=maxharris1/Cleffy pr=12 enter state=done
+2026-11-03T15:08:00Z repo=maxharris1/Cleffy pr=12 wake role=grok-bot reason=nobody wasted=yes
+2026-11-03T15:08:00Z repo=maxharris1/Cleffy pr=12 end
+2026-11-03T16:00:00Z repo=maxharris1/Cleffy pr=9 enter state=intake
+2026-11-03T16:00:10Z repo=maxharris1/Cleffy pr=9 enter state=questions
+2026-11-03T16:00:20Z repo=maxharris1/Cleffy pr=9 enter state=building
+2026-11-03T16:02:00Z repo=maxharris1/Cleffy pr=9 comment path=comments/cleffy-9/stuck.txt
+2026-11-03T16:02:00Z repo=maxharris1/Cleffy pr=9 enter state=stuck
+2026-11-03T16:02:00Z repo=maxharris1/Cleffy pr=9 end
+2026-11-03T17:00:00Z repo=maxharris1/tracy-harris-coaching pr=3 enter state=review
+2026-11-03T17:01:00Z repo=maxharris1/tracy-harris-coaching pr=3 enter state=qa
+2026-11-03T17:01:00Z repo=maxharris1/tracy-harris-coaching pr=3 end
+2026-11-03T18:00:00Z repo=maxharris1/tracy-harris-coaching pr=4 enter state=review
+2026-11-03T18:00:10Z repo=maxharris1/tracy-harris-coaching pr=4 comment path=comments/tracy-4/verdict.txt
+2026-11-03T18:00:10Z repo=maxharris1/tracy-harris-coaching pr=4 enter state=ship
+2026-11-03T18:00:10Z repo=maxharris1/tracy-harris-coaching pr=4 end
+2026-11-03T19:00:00Z repo=maxharris1/Cleffy pr=15 enter state=merged
+2026-11-03T19:00:05Z repo=maxharris1/Cleffy pr=15 enter state=post-merge
+2026-11-03T19:00:05Z repo=maxharris1/Cleffy pr=15 end

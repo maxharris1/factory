@@ -1,4 +1,4 @@
-"""orch check-config, wait, and job done."""
+"""orch check-config, install-skills, doctor, and eval-report."""
 
 from __future__ import annotations
 
@@ -7,42 +7,42 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from lib.dispatcher_queue import (
-    JobQueueError,
-    default_queue_path,
-    is_job_id,
-    open_queue,
-)
+from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
-from lib.handoff import HandoffError
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
-from lib.wait import format_wait_output, wait_for_job
+from lib.pstack_pin import Mode, doctor, install_skills
 
 ROOT = Path(__file__).resolve().parent.parent
 
 USAGE = """\
-usage: orch <command> [args]
+usage: orch <command> [options]
 
 commands:
-  check-config [--orch PATH] [--factory PATH ...]
-  wait <role> [--queue PATH]
-  job done <job-id> [--queue PATH]
+  check-config     validate orch.yml and factory.md
+  install-skills   install the pinned pstack skills
+  doctor           canary the pinned poteto-mode skill
+  eval-report      weekly eval report from a local log directory
 
-check-config validates orch.yml and factory.md. With no paths, it checks
-orch.yml and the example factory.md files in this repo. Warnings (an
-unknown model name) are printed to stderr and still exit 0.
+check-config [--orch PATH] [--factory PATH ...]
+  With no paths, checks orch.yml and the example factory.md files.
+  An unknown model name warns on stderr and still exits 0.
 
-wait blocks until the local job list has a job for <role>. It prints
-that job and its orch:v1 handoff, then exits. It does not start a harness.
+install-skills [--home PATH] [--project PATH] [--cloud]
+  Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
+  and ~/.cursor/skills. --cloud copies them into the project at
+  .claude/skills, .agents/skills, and .cursor/skills.
 
-job done <job-id> marks a job returned by wait as complete.
-"""
+doctor [--home PATH] [--project PATH] [--cloud]
+       [--responses DIR] [--print-canary]
+  Print a canary that asks the harness to name poteto-mode and quote
+  a token from the pinned skill. Score the replies the owning bots
+  write. Exit 1 if any harness did not load that version.
+  --print-canary prints the prompt and does not read replies.
 
-JOB_USAGE = """\
-usage: orch job done <job-id> [--queue PATH]
-
-Mark a job returned by orch wait as complete.
+eval-report --input PATH [--since TIME] [--until TIME]
+  Print the weekly eval report for one directory of fixtures or
+  collected logs. It does not contact GitHub or Linear.
 """
 
 
@@ -52,30 +52,35 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE, end="")
         return 0 if argv and argv[0] in ("-h", "--help") else 2
-    command, rest = argv[0], argv[1:]
-    if command == "check-config":
-        return _guard(_check_config, rest)
-    if command == "wait":
-        return _guard(_wait, rest)
-    if command == "job":
-        return _guard(_job, rest)
-    print(f"unknown command: {command}", file=sys.stderr)
+    if argv[0] == "check-config":
+        return _call(_check_config, argv[1:])
+    if argv[0] == "install-skills":
+        return _call(_install_skills, argv[1:])
+    if argv[0] == "doctor":
+        return _call(_doctor, argv[1:])
+    if argv[0] == "eval-report":
+        return _call(_eval_report, argv[1:])
+    print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
 
 
-def _guard(fn: Callable[[list[str]], int], argv: list[str]) -> int:
+def _call(command: Callable[[list[str]], int], argv: list[str]) -> int:
     try:
-        return fn(argv)
+        return command(argv)
     except ValueError:
         return 2
     except SystemExit as exc:
-        code = exc.code
-        if code is None or code == 0:
-            return 0
-        if isinstance(code, int):
-            return code
-        return 2
+        return _exit_code(exc)
+
+
+def _exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if code is None or code == 0:
+        return 0
+    if isinstance(code, int):
+        return code
+    return 2
 
 
 def _check_config(argv: list[str]) -> int:
@@ -96,51 +101,6 @@ def _check_config(argv: list[str]) -> int:
     return 0
 
 
-def _wait(argv: list[str]) -> int:
-    parser = _Parser(prog="orch wait", add_help=True)
-    parser.add_argument("role")
-    parser.add_argument("--queue", type=Path)
-    args = parser.parse_args(argv)
-    queue = open_queue(_queue_path(args.queue))
-    try:
-        job = wait_for_job(queue, args.role)
-    except HandoffError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    sys.stdout.write(format_wait_output(job))
-    return 0
-
-
-def _job(argv: list[str]) -> int:
-    if not argv or argv[0] in ("-h", "--help"):
-        print(JOB_USAGE, end="")
-        return 0 if argv and argv[0] in ("-h", "--help") else 2
-    if argv[0] != "done":
-        print(f"unknown job command: {argv[0]}", file=sys.stderr)
-        print(JOB_USAGE, end="", file=sys.stderr)
-        return 2
-    parser = _Parser(prog="orch job done", add_help=True)
-    parser.add_argument("job_id")
-    parser.add_argument("--queue", type=Path)
-    args = parser.parse_args(argv[1:])
-    if not is_job_id(args.job_id):
-        print(f"bad job id {args.job_id!r}", file=sys.stderr)
-        return 2
-    try:
-        open_queue(_queue_path(args.queue)).complete(args.job_id)
-    except JobQueueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    print(f"done {args.job_id}")
-    return 0
-
-
-def _queue_path(path: Path | None) -> Path:
-    if path is not None:
-        return path
-    return default_queue_path()
-
-
 def _report(path: Path, findings: list[Finding]) -> bool:
     failed = False
     for finding in findings:
@@ -157,8 +117,96 @@ class _Parser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
+def _eval_report(argv: list[str]) -> int:
+    parser = _Parser(prog="orch eval-report", add_help=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--since")
+    parser.add_argument("--until")
+    args = parser.parse_args(argv)
+    try:
+        built = build_report(args.input, since=args.since, until=args.until)
+    except EvalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for warning in built.warnings:
+        print(warning, file=sys.stderr)
+    print(render(built.report), end="")
+    return 0
+
+
 def _parser() -> _Parser:
     parser = _Parser(prog="orch check-config", add_help=True)
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--factory", type=Path, action="append")
     return parser
+
+
+def _install_skills(argv: list[str]) -> int:
+    parser = _Parser(prog="orch install-skills", add_help=True)
+    parser.add_argument("--home", type=Path)
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--cloud", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    errors = install_skills(ROOT, anchor, mode)
+    if errors:
+        for message in errors:
+            print(message, file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def _doctor(argv: list[str]) -> int:
+    parser = _Parser(prog="orch doctor", add_help=True)
+    parser.add_argument("--home", type=Path)
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--cloud", action="store_true")
+    parser.add_argument("--responses", type=Path)
+    parser.add_argument("--print-canary", action="store_true")
+    args = parser.parse_args(argv)
+    if args.print_canary and args.responses is not None:
+        print("orch doctor: --print-canary does not take --responses", file=sys.stderr)
+        return 2
+    try:
+        anchor, mode = _anchor("doctor", args.home, args.project, args.cloud)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    code, prompt, errors = doctor(
+        ROOT,
+        anchor,
+        mode,
+        args.responses,
+        print_canary=args.print_canary,
+    )
+    if prompt:
+        print(prompt, end="")
+    for message in errors:
+        print(message, file=sys.stderr)
+    if code == 0 and not args.print_canary:
+        print("ok")
+    return code
+
+
+def _anchor(
+    command: str,
+    home: Path | None,
+    project: Path | None,
+    cloud: bool,
+) -> tuple[Path, Mode]:
+    if cloud and home is not None:
+        raise ValueError(f"orch {command}: --home is the local install; use --project with --cloud")
+    if not cloud and project is not None:
+        raise ValueError(f"orch {command}: --project is the cloud install; pass --cloud")
+    if cloud:
+        anchor = project if project is not None else Path.cwd()
+        mode: Mode = "cloud"
+        return anchor, mode
+    anchor = home if home is not None else Path.home()
+    mode = "local"
+    return anchor, mode

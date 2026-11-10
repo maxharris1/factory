@@ -2,14 +2,35 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts and the F1-06 blocking wait. The F1-04 dispatcher is not built here; `orch wait` uses the stub job queue in [`lib/dispatcher_queue.py`](lib/dispatcher_queue.py).
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
+F1-03, and F1-04 contracts, the F1-02 pstack pin, the F1-07
+`orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
+model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
 ## Contracts
 
 - [`orch.yml`](orch.yml) lists the projects to poll and the dispatcher settings ([docs/SPEC.md](docs/SPEC.md) section 7). [`config/orch.example.yml`](config/orch.example.yml) is the minimal file.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
-- The local job list is [`lib/dispatcher_queue.py`](lib/dispatcher_queue.py). `open_queue` returns `StubJobQueue` until F1-04 replaces it.
+- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T2 and T6 to
+  tickets discovered through `orch:state/` GitHub labels or the Linear handoff
+  search. It stores a ticket after the first `brief` or `go` from the trusted
+  Grok login. A `go` must name `state=planning` or `state=building`.
+
+## Queue interface
+
+[`lib/queue.py`](lib/queue.py) is the integration boundary for waiting bots and
+routing. A producer calls `enqueue`; an owning bot calls `claim`, periodically
+calls `heartbeat`, then calls `finish` with the handoff comment ID. Finishing
+without a handoff ID invokes T6. `claim` is intentionally non-blocking so
+`orch wait` can add blocking behavior without changing the queue contract. One
+clock is injected when the queue opens; all timestamps use that clock.
+
+Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, or `stuck`),
+one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
+dispatcher and queue use one SQLite database so terminal state and its wake
+commit atomically. The dispatcher queues jobs; it never executes a harness
+binary.
 
 ## Check config
 
@@ -19,20 +40,54 @@ bin/orch check-config
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
 
-## Wait
+## orchestrate-project
+
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+
+## pstack pin
+
+[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
 
 ```sh
-bin/orch wait claude-bot
-bin/orch job done <job-id>
+bin/orch install-skills
+bin/orch install-skills --cloud --project .
+bin/orch doctor --print-canary
+bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`orch wait <role>` blocks until the local job list has a job for that owning bot. It prints one JSON job line (`id`, `role`, `step`, `note`) and the `orch:v1` handoff, then exits. It does not start a harness. The bot that ran the command starts its harness, then runs `orch job done` with the printed id. The default directory is `~/.factory/job-queue` (`ORCH_JOB_QUEUE` or `--queue` overrides it). Claude Bot, Codex Bot, and Cursor Bot each document this in one "orch jobs" paragraph under [`bots/`](bots/).
+`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
+
+`doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+
+## Usage reserve
+
+`orchestrate-project` (F1-07) calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md`. The best fit for a role is that role's harness and model hint; the other harnesses follow in `claude`, `codex`, `cursor` order. The reviewer is a different model family from the builder this call selected.
+
+The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to the next fit that is outside the reserve. A resumed paused step, past-ship work, or a job Max marks urgent may use the reserve. Each owning bot calls `reserve_check` on its own harness before starting, when it has a verified report. No verified report leaves the route on best fit. Routing reads no live usage; tests use [`tests/fixtures/usage/`](tests/fixtures/usage/).
+
+## Weekly eval report
+
+```sh
+bin/orch eval-report --input tests/fixtures/eval/week
+```
+
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
 
 - A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
-- A `cursor` harness takes its family only from the model hint. `claude*` is Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
+
+## Model
+
+[`model/Orchestrator.tla`](model/Orchestrator.tla) is the section 4 ticket loop. State names are the `orch:state` labels (`waiting-max`, `post-merge`, …). T1 is the `kind=go` handoff. T9 is in the model and is off when `AllowPostMerge = FALSE` (Phase 1).
+
+```sh
+bash model/check.sh
+```
+
+That runs pstack `/statechart` (TLC, one worker). [`model/chart.mmd`](model/chart.mmd) is the section 4.1 chart, including post-merge. The Phase 1 drawing config does not reach post-merge. [`model/fixtures/omit-t1.cfg`](model/fixtures/omit-t1.cfg) drops T1 and must fail.

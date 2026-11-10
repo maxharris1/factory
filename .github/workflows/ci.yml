@@ -18,3 +18,18 @@ jobs:
       - run: pip install -r requirements.txt
       - run: pytest
       - run: python bin/orch check-config
+      - run: python bin/orch eval-report --input tests/fixtures/eval/week
+
+  statechart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: bash model/check.sh

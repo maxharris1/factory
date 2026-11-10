@@ -98,6 +98,7 @@ stateDiagram-v2
   Questions --> Planning: no open product calls, ticket over 3 files (D36)
   Questions --> Building: no open product calls, 3 files or fewer
   Planning --> PlanCheck: plan.md maps each AC to code and a test
+  Planning --> Stuck: job dies twice (T6)
   PlanCheck --> Planning: an AC is unmapped (once)
   PlanCheck --> Building: every AC mapped
   PlanCheck --> Stuck: gaps a 2nd time
@@ -106,15 +107,18 @@ stateDiagram-v2
   Building --> Stuck: CI red 3 times in a row, or the job dies twice
   Review --> Fixing: REVISE, under the round cap
   Fixing --> Review: fixed head ready, CI green
+  Fixing --> Stuck: job dies twice (T6)
   Review --> Capped: REVISE at the cap, or a 2nd AC-unmet verdict
   Review --> Blocked: BLOCKED
   Review --> Ship: APPROVE on the current head
+  Review --> Stuck: job dies twice (T6)
   Ship --> Review: head changed and the patch differs (D33-D)
   Ship --> Merged: ship = merge
   Ship --> HandedOff: ship = handoff (Max merges, or the Aut0 RfR handoff)
   Ship --> WaitingExternal: ship = after an approver (Tracy Site)
   WaitingExternal --> Merged: OK names the previewed SHA
   WaitingExternal --> Fixing: declined (one fix pass, 3rd decline = Stuck)
+  WaitingExternal --> Stuck: 3rd decline
   Merged --> PostMerge: project has a post-merge check
   Merged --> Done
   PostMerge --> Done: passes
