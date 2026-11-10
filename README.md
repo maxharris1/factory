@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts and the F1-07 `orchestrate-project` skill. Later Phase 1 items are not built.
 
 ## Contracts
 
@@ -17,6 +17,10 @@ bin/orch check-config
 ```
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+
+## orchestrate-project
+
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). F1-08 adds `lib.usage.choose_fit`; until that function exists, routing stays on the `factory.md` pair.
 
 ## Model family
 
