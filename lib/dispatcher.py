@@ -190,7 +190,8 @@ class Dispatcher:
                 generation=generation,
             ),
             dedupe_key=(
-                f"t1:{_scope(ticket.repo, ticket.ticket_id)}:g{generation}"
+                f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
+                f"g{generation}"
             ),
         )
         return True, f"queued-{action}"
@@ -302,14 +303,13 @@ class Dispatcher:
                 head=job.request.head,
                 detail=job.request.detail,
             )
-            self.queue.enqueue(
+            self.queue.enqueue_retry(
+                job.id,
                 request,
                 dedupe_key=(
-                    f"t6-retry:{_scope(job.request.repo, job.request.ticket_id)}:"
-                    f"{job.request.action}:g{generation}"
+                    f"t6-retry:{job.id}:g{generation}"
                 ),
             )
-            self.queue.mark_failure_handled(job.id)
             return
         self._mark_stuck_and_wake(
             repo=job.request.repo,
@@ -538,7 +538,7 @@ class Dispatcher:
         state = connection.execute(
             """
             SELECT stuck, stuck_reason, stuck_source_comment_id,
-                   timeout_seconds, generation
+                   timeout_seconds, generation, stuck_wake_job_id
             FROM ticket_state
             WHERE repo = ? AND ticket_id = ?
             """,
@@ -546,27 +546,17 @@ class Dispatcher:
         ).fetchone()
         if state is None or not bool(state["stuck"]):
             return
-        active = connection.execute(
-            """
-            SELECT 1 FROM jobs
-            WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
-              AND state IN ('queued', 'running')
-            LIMIT 1
-            """,
-            (repo.lower(), ticket_id),
-        ).fetchone()
-        if active is not None:
-            return
+        wake_job_id = state["stuck_wake_job_id"]
+        if wake_job_id is not None:
+            wake = connection.execute(
+                "SELECT state FROM jobs WHERE id = ?",
+                (wake_job_id,),
+            ).fetchone()
+            if wake is None or str(wake["state"]) != "failed":
+                return
         generation = int(state["generation"]) + 1
-        connection.execute(
-            """
-            UPDATE ticket_state SET generation = ?
-            WHERE repo = ? AND ticket_id = ?
-            """,
-            (generation, repo.lower(), ticket_id),
-        )
         reason = detail or str(state["stuck_reason"] or "ticket is stuck")
-        self.queue.enqueue_in_transaction(
+        queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
                 repo=repo,
@@ -579,6 +569,14 @@ class Dispatcher:
                 detail=reason,
             ),
             dedupe_key=f"stuck:{_scope(repo, ticket_id)}:g{generation}",
+        )
+        connection.execute(
+            """
+            UPDATE ticket_state
+            SET generation = ?, stuck_wake_job_id = ?
+            WHERE repo = ? AND ticket_id = ?
+            """,
+            (generation, queued.id, repo.lower(), ticket_id),
         )
 
     def _record_ci_result(
@@ -655,12 +653,23 @@ class Dispatcher:
                     stuck INTEGER NOT NULL DEFAULT 0,
                     stuck_reason TEXT,
                     stuck_source_comment_id TEXT,
+                    stuck_wake_job_id TEXT,
                     timeout_seconds INTEGER,
                     generation INTEGER NOT NULL DEFAULT 1,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(ticket_state)"
+                ).fetchall()
+            }
+            if "stuck_wake_job_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE ticket_state ADD COLUMN stuck_wake_job_id TEXT"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_events (

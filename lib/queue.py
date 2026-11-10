@@ -108,6 +108,35 @@ class SQLiteJobQueue:
                 dedupe_key=dedupe_key,
             )
 
+    def enqueue_retry(
+        self,
+        failed_job_id: str,
+        request: JobRequest,
+        *,
+        dedupe_key: str,
+    ) -> tuple[Job, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            before = connection.total_changes
+            job = self.enqueue_in_transaction(
+                connection,
+                request,
+                dedupe_key=dedupe_key,
+            )
+            inserted = connection.total_changes > before
+            if inserted:
+                handled = connection.execute(
+                    """
+                    UPDATE jobs SET failure_handled = 1
+                    WHERE id = ? AND state = 'failed' AND failure_handled = 0
+                    """,
+                    (failed_job_id,),
+                ).rowcount
+                if handled != 1:
+                    raise QueueError("retry requires one unhandled failed job")
+            connection.commit()
+            return job, inserted
+
     def enqueue_in_transaction(
         self,
         connection: sqlite3.Connection,
