@@ -898,6 +898,10 @@ def test_t3_counts_rounds_using_ticket_risk_and_factory_cap(
     assert row["review_round"] == cap
     assert row["workflow_state"] == "capped"
     assert fix_count == cap - 1
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert (wake.request.action, wake.request.head) == ("capped", head)
+    assert queue.claim("grok") is None
 
 
 def test_t3_rejects_untrusted_reviewer_and_stale_head(tmp_path: Path) -> None:
@@ -1852,6 +1856,11 @@ def test_pending_non_merge_intent_holds_without_repeating_side_effect(
         ).fetchone()[0]
     assert intent == "unconfirmed"
     assert outcome == "ship-unconfirmed"
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "ship-failed"
+    assert wake.request.source_comment_id == "approve-1"
+    assert queue.claim("grok") is None
 
 
 def test_completed_intent_replays_label_write_before_stale_gates(
@@ -2014,6 +2023,8 @@ def test_merge_error_is_recorded_and_later_comments_continue(
 
     wake = queue.claim("grok")
     assert wake is not None
+    assert wake.request.action == "ship-failed"
+    assert "merge unavailable" in str(wake.request.detail)
     with queue.connect() as connection:
         outcomes = dict(
             connection.execute(

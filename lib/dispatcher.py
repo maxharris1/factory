@@ -237,7 +237,16 @@ class Dispatcher:
                     raise
                 if kind not in ("verdict", "questions", "answers"):
                     raise
-                self._mark_ship_intent_failed(ticket, comment.id, type(exc).__name__)
+                if self._mark_ship_intent_failed(
+                    ticket,
+                    comment.id,
+                    type(exc).__name__,
+                ):
+                    self._wake_ship_failed(
+                        ticket,
+                        comment,
+                        f"ship raised {type(exc).__name__}: {exc}",
+                    )
                 self._mark_handled(
                     ticket,
                     comment.id,
@@ -479,6 +488,8 @@ class Dispatcher:
                 replay_state = (
                     "capped" if outcome == "capped-review" else "fixing"
                 )
+                if replay_state == "capped":
+                    self._wake_capped(ticket, comment)
                 self._write_state_label(ticket, replay_state)
                 return True, outcome
             connection.execute(
@@ -556,8 +567,21 @@ class Dispatcher:
                 ),
             )
             connection.commit()
+        if next_state == "capped":
+            self._wake_capped(ticket, comment)
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _wake_capped(self, ticket: TrackedTicket, comment: Comment) -> None:
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="capped",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=f"review round cap reached, {_comment_link(comment)}",
+            head=ticket.current_head,
+        )
 
     def _t4(
         self,
@@ -984,10 +1008,13 @@ class Dispatcher:
                 self._write_state_label(ticket, "merged")
                 return True, "merge-confirmed"
             self._hold_ship_intent(ticket, comment.id)
+            self._wake_ship_failed(ticket, comment, f"{policy} ship is unconfirmed")
             return True, "ship-unconfirmed"
         if status == "unconfirmed":
+            self._wake_ship_failed(ticket, comment, f"{policy} ship is unconfirmed")
             return True, "ship-unconfirmed"
         if status == "failed":
+            self._wake_ship_failed(ticket, comment, f"{policy} ship failed")
             return True, "ship-failed"
         raise RuntimeError(f"unknown ship intent status {status!r}")
 
@@ -1090,16 +1117,32 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment_id: str,
         error: str,
-    ) -> None:
+    ) -> bool:
         with self._connect() as connection:
-            connection.execute(
+            changed = connection.execute(
                 """
                 UPDATE ship_intents SET status = 'failed', error = ?
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
                   AND status = 'pending'
                 """,
                 (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
-            )
+            ).rowcount
+        return changed == 1
+
+    def _wake_ship_failed(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        detail: str,
+    ) -> None:
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="ship-failed",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=detail,
+        )
 
     def _has_completed_ship_intent(
         self,
