@@ -55,7 +55,11 @@ class FakeBot:
         job = self.queue.claim(self.recipient)
         if job is None:
             return None
-        self.queue.finish(job.id, handoff_comment_id=f"handoff-{job.id}")
+        self.queue.finish(
+            job.id,
+            owner=self.recipient,
+            handoff_comment_id=f"handoff-{job.id}",
+        )
         self.handled.append(job)
         return job
 
