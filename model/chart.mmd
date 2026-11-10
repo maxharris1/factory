@@ -51,13 +51,13 @@ stateDiagram-v2
   s8 --> s9: BLOCKED
   s8 --> s10: APPROVE on the current head
   s8 --> s12: REVISE, under the round cap
-  s3 --> s11: job dies twice or CI red three times
-  s4 --> s11: job dies twice
+  s3 --> s11: job dies twice (T6) or CI red three times
+  s4 --> s11: job dies twice (T6)
   s10 --> s8: head changed and the patch differs
   s10 --> s13: ship = handoff
   s10 --> s14: ship = merge
   s10 --> s15: ship = after an approver
-  s8 --> s11: job dies twice
+  s8 --> s11: job dies twice (T6)
   s12 --> s5: a product question
   s12 --> s8: ready, CI green
   s5 --> s12: answer, same step resumes
@@ -66,12 +66,12 @@ stateDiagram-v2
   s15 --> s14: OK names the previewed SHA
   s15 --> s12: declined
   s7 --> s11: gaps a second time
-  s12 --> s11: job dies twice or CI red three times
+  s12 --> s11: job dies twice (T6) or CI red three times
   s17 --> s16: post-merge fails, follow-up filed or post-merge passes
-  s17 --> s11: job dies twice
+  s17 --> s11: job dies twice (T6)
   s8 --> s18: REVISE at the cap
   s18 --> s12: Max okays one more round
-  s15 --> s11: third decline
+  s15 --> s11: 3rd decline
   class s0 blue
   class s1 blue
   class s2 tan

@@ -217,6 +217,7 @@ T2CiRedStuck ==
   /\ counts' = [counts EXCEPT !.gate = 3, !.deaths = 0]
 
 \* T6. No handoff, or the job timeout. Retry once. Second time: stuck.
+\* Section 4.1 draws that edge from Planning, Review, and Fixing, and from Building.
 T6JobRetry ==
   /\ "T6" \notin Omit
   /\ state \in JobStates
@@ -314,7 +315,8 @@ T4ShipAfter ==
   /\ flags' = flags
   /\ counts' = counts
 
-\* T8. ok head=<sha> on the previewed SHA ships. Decline fixes. The third decline is stuck.
+\* T8. ok head=<sha> on the previewed SHA ships. Decline fixes.
+\* The third decline is WaitingExternal --> Stuck.
 T8Ok ==
   /\ "T8" \notin Omit
   /\ state = "waiting-external"

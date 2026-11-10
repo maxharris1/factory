@@ -48,7 +48,7 @@ export const step = (action, from, to) => {
   if (action === "T2CiRed") return "CI red, fix";
   if (action === "T2CiRedStuck") return "CI red three times";
   if (action === "T6JobRetry") return "job dies, retry once";
-  if (action === "T6JobStuck") return "job dies twice";
+  if (action === "T6JobStuck") return "job dies twice (T6)";
   if (action === "T3Revise" && to.state === "fixing") return "REVISE, under the round cap";
   if (action === "T3Revise" && from.counts.acUnmet === 1 && to.counts.acUnmet === 2) {
     return "a second AC-unmet verdict";
@@ -62,7 +62,7 @@ export const step = (action, from, to) => {
   if (action === "T4ShipAfter") return "ship = after an approver";
   if (action === "T8Ok") return "OK names the previewed SHA";
   if (action === "T8Decline") return "declined";
-  if (action === "T8DeclineStuck") return "third decline";
+  if (action === "T8DeclineStuck") return "3rd decline";
   if (action === "T9PostMerge") return "project has a post-merge check";
   if (action === "MergedDone") return "merged";
   if (action === "T9Pass") return "post-merge passes";
