@@ -101,3 +101,24 @@ def test_unknown_command_is_rejected() -> None:
     result = run(["poll"])
     assert result.returncode == 2
     assert "unknown command: poll" in result.stderr
+
+
+def test_check_config_warns_on_a_bot_login_mapped_to_an_after_approver(
+    tmp_path: Path,
+) -> None:
+    data = copy.deepcopy(VALID)
+    data["ship"] = "after:tracy-site"
+    factory = write_factory(tmp_path, data)
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
+        "logins:\n  tracy-harris: tracy-site\n  'tracy-site[bot]': tracy-site\n",
+        encoding="utf-8",
+    )
+
+    result = run(["check-config", "--orch", str(orch), "--factory", str(factory)])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+    assert "warning: bot login 'tracy-site[bot]'" in result.stderr
+    assert "tracy-harris" not in result.stderr

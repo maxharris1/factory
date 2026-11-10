@@ -10,7 +10,7 @@ from pathlib import Path
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.load import Finding
-from lib.orch_yml import load_orch_yml
+from lib.orch_yml import approver_login_findings, load_orch_yml
 from lib.pstack_pin import Mode, doctor, install_skills
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +26,8 @@ commands:
 
 check-config [--orch PATH] [--factory PATH ...]
   With no paths, checks orch.yml and the example factory.md files.
-  An unknown model name warns on stderr and still exits 0.
+  An unknown model name warns on stderr and still exits 0. So does a
+  bot login that orch.yml logins maps to a factory.md after: approver.
 
 install-skills [--home PATH] [--project PATH] [--cloud]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
@@ -92,9 +93,16 @@ def _check_config(argv: list[str]) -> int:
     else:
         factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
 
-    failed = _report(orch_path, load_orch_yml(orch_path)[1])
+    orch, orch_findings = load_orch_yml(orch_path)
+    failed = _report(orch_path, orch_findings)
+    approvers: set[str] = set()
     for path in factory_paths:
-        failed = _report(path, load_factory_md(path)[1]) or failed
+        config, findings = load_factory_md(path)
+        failed = _report(path, findings) or failed
+        if config is not None and config.ship.startswith("after:"):
+            approvers.add(config.ship[len("after:") :])
+    if orch is not None:
+        _report(orch_path, approver_login_findings(orch, approvers))
     if failed:
         return 1
     print("ok")
