@@ -114,6 +114,19 @@ class RetryableStateError(RuntimeError):
     pass
 
 
+class ShipError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ShipRequest:
+    repo: str
+    ticket_id: str
+    head: str
+    approver: str
+    source_comment_id: str
+
+
 class Hook(Protocol):
     """A project hook (T7, T8) sees each unhandled comment before T1/T2.
 
@@ -1088,6 +1101,98 @@ class Dispatcher:
                 (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
 
+    def _has_completed_ship_intent(
+        self,
+        repo: str,
+        ticket_id: str,
+        head: str,
+        policy: str,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND head = ? AND policy = ?
+                  AND status = 'completed'
+                """,
+                (repo.lower(), ticket_id, head, policy),
+            ).fetchone()
+        return row is not None
+
+    def _tracker(self, repo: str, ticket_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT tracker FROM tracked_tickets
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return str(row["tracker"]) if row is not None else None
+
+    def _prepare_external_ship(self, request: ShipRequest) -> tuple[str, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT head, status FROM external_ship_intents
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                """,
+                (request.repo.lower(), request.ticket_id, request.source_comment_id),
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                if existing["head"] != request.head:
+                    raise ShipError("ship intent does not match the request head")
+                return str(existing["status"]), False
+            connection.execute(
+                """
+                INSERT INTO external_ship_intents (
+                    repo, ticket_id, source_comment_id, head, status
+                ) VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (
+                    request.repo.lower(),
+                    request.ticket_id,
+                    request.source_comment_id,
+                    request.head,
+                ),
+            )
+            connection.commit()
+        return "pending", True
+
+    def _finish_external_ship(
+        self,
+        request: ShipRequest,
+        status: str,
+        error: str | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE external_ship_intents SET status = ?, error = ?
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                  AND status = 'pending'
+                """,
+                (
+                    status,
+                    error,
+                    request.repo.lower(),
+                    request.ticket_id,
+                    request.source_comment_id,
+                ),
+            )
+            if status == "completed":
+                connection.execute(
+                    """
+                    UPDATE ticket_state SET workflow_state = 'merged'
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (request.repo.lower(), request.ticket_id),
+                )
+            connection.commit()
+
     def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
         try:
             self.review_actions.set_state(ticket, state)
@@ -1593,6 +1698,19 @@ class Dispatcher:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS external_ship_intents (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    source_comment_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    PRIMARY KEY (repo, ticket_id, source_comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS review_events (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
@@ -1613,6 +1731,84 @@ class Dispatcher:
                 )
                 """
             )
+
+
+class ReviewShipper:
+    """F1-05's ship for T8's after:<approver> ok (the hook_t8 Shipper).
+
+    ship raises unless F1-05 completed an after:<approver> ship intent on
+    request.head, CI on request.head is green, and request.head is a full
+    SHA that is still the PR head. Then it squash-merges exactly that head,
+    or confirms it is already merged. Its own intent is keyed on the ok
+    comment, so one request never merges twice. The ticket is re-read
+    from source.
+    """
+
+    def __init__(self, dispatcher: Dispatcher, source: PollSource):
+        self.dispatcher = dispatcher
+        self.source = source
+
+    def ship(self, request: ShipRequest) -> None:
+        dispatcher = self.dispatcher
+        head = request.head
+        policy = f"after:{request.approver}"
+        if not _is_full_sha(head):
+            raise ShipError(f"ship head {head!r} is not a 40-character SHA")
+        if not dispatcher._has_completed_ship_intent(
+            request.repo,
+            request.ticket_id,
+            head,
+            policy,
+        ):
+            raise ShipError(f"no completed {policy} ship intent for {head}")
+        ticket = self._ticket(request)
+        if ticket.factory.ship != policy:
+            raise ShipError(f"ticket ship policy is {ticket.factory.ship}")
+        if ticket.current_head != head:
+            raise ShipError(f"PR head is {ticket.current_head}, not {head}")
+        result = ticket.ci.get(head)
+        if result is None or result.status != "success":
+            raise ShipError(f"CI on {head} is not green")
+        status, fresh = dispatcher._prepare_external_ship(request)
+        if status == "pending":
+            if dispatcher.review_actions.is_merged(ticket, head):
+                pass
+            elif not fresh:
+                raise ShipError(f"ship of {head} has no recorded result")
+            else:
+                try:
+                    dispatcher.review_actions.merge(
+                        ticket,
+                        squash=True,
+                        match_head_commit=head,
+                    )
+                except Exception as exc:
+                    dispatcher._finish_external_ship(
+                        request,
+                        "failed",
+                        type(exc).__name__,
+                    )
+                    raise
+            dispatcher._finish_external_ship(request, "completed", None)
+        elif status != "completed":
+            raise ShipError(f"ship of {head} is {status}; not shipping again")
+        dispatcher._write_state_label(ticket, "merged")
+
+    def _ticket(self, request: ShipRequest) -> TrackedTicket:
+        tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
+        if tracker is None:
+            raise ShipError(f"{request.repo}#{request.ticket_id} is not tracked")
+        found = [
+            item
+            for item in self.source.tracked_tickets(
+                (TicketRef(request.repo, request.ticket_id, tracker),)
+            )
+            if item.repo.lower() == request.repo.lower()
+            and item.ticket_id == request.ticket_id
+        ]
+        if len(found) != 1:
+            raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
+        return found[0]
 
 
 class PollLoop:
@@ -1657,6 +1853,10 @@ def _comment_link(comment: Comment) -> str:
 
 def _is_patch_id(value: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def _is_full_sha(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
 def _ship_state(policy: str) -> str:

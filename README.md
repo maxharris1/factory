@@ -16,15 +16,19 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
   tickets discovered through `orch:state/` GitHub labels or the Linear handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.
-- Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), T8Hook(shipper)))`.
+- Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), t8))` with
+  `t8 = T8Hook()`, then `t8.shipper = ReviewShipper(dispatcher, source)`.
   [`lib/hook_t7.py`](lib/hook_t7.py) wakes Grok Bot once for `verdict=BLOCKED`,
   `kind=stuck` (with `state=capped`, `refused` or `blocked` for those stops),
   and trusted comments with an unparseable `orch:v` header;
   `Dispatcher.wake_grok_once` is the same wake for a later config refusal or
   a T3 cap. [`lib/hook_t8.py`](lib/hook_t8.py) handles the `after:<approver>`
-  `ok` and `decline`. An `ok` on the full previewed SHA, while the reviewer's
-  latest verdict is still that APPROVE, calls the `Shipper` it was given at
-  most once; a ship error wakes Grok Bot (`ship-failed`) instead of retrying.
+  `ok` and `decline`. The previewed SHA is the full head T4 passed to
+  `await_approver`. An `ok` on it, while the reviewer's latest verdict is
+  still that APPROVE, calls the `Shipper` it was given at most once; a ship
+  error wakes Grok Bot (`ship-failed`) instead of retrying. `ReviewShipper`
+  (F1-05) squash-merges exactly that head only when T4 completed the
+  `after:` ship intent, CI on it is green and it is still the PR head.
   Hooks never see `kind=go` or `kind=ready`.
 
 ## Queue interface

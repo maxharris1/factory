@@ -12,6 +12,8 @@ from lib.dispatcher import (
     Comment,
     Dispatcher,
     Hook,
+    ReviewShipper,
+    ShipError,
     TicketRef,
     TrackedTicket,
 )
@@ -28,7 +30,7 @@ TRUSTED_LOGINS = {
 }
 VERDICT = (
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
-    "head={head} verdict={verdict} -->\nVerdict.\n"
+    "round=1 head={head} verdict={verdict} -->\nVerdict.\n"
 )
 STOP = "<!-- orch:v1 kind=stuck from={sender} role={role}{state} -->\nStop.\n"
 OK = "<!-- orch:v1 kind=ok from=tracy-site role=approver head={head} -->\nOK.\n"
@@ -46,16 +48,24 @@ class FakeShipper:
 
 
 class FakeReviewActions:
+    def __init__(self) -> None:
+        self.states: list[str] = []
+        self.merges: list[tuple[bool, str]] = []
+        self.merged_heads: set[str] = set()
+        self.merge_error: Exception | None = None
+        self.approvals: list[tuple[str, str]] = []
+
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
-        del ticket, state
+        del ticket
+        self.states.append(state)
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
         del ticket, head
         return "0" * 40
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
-        del ticket, head
-        return False
+        del ticket
+        return head in self.merged_heads
 
     def merge(
         self,
@@ -64,7 +74,11 @@ class FakeReviewActions:
         squash: bool,
         match_head_commit: str,
     ) -> None:
-        del ticket, squash, match_head_commit
+        del ticket
+        if self.merge_error is not None:
+            raise self.merge_error
+        self.merges.append((squash, match_head_commit))
+        self.merged_heads.add(match_head_commit)
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
         del ticket, head
@@ -75,7 +89,8 @@ class FakeReviewActions:
         head: str,
         approver: str,
     ) -> None:
-        del ticket, head, approver
+        del ticket
+        self.approvals.append((head, approver))
 
 
 class FakeBot:
@@ -166,6 +181,7 @@ def setup(
     *,
     hooks: tuple[Hook, ...] | None = None,
     now: list[float] | None = None,
+    actions: FakeReviewActions | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     path = tmp_path / "d.db"
     clock = now if now is not None else [100.0]
@@ -174,10 +190,42 @@ def setup(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
-        review_actions=FakeReviewActions(),
+        review_actions=actions or FakeReviewActions(),
         hooks=hooks if hooks is not None else (T7Hook(), T8Hook(shipper)),
     )
     return dispatcher, queue
+
+
+def in_review(queue: SQLiteJobQueue, head: str, ticket_id: str = "42") -> None:
+    """Put the ticket in F1-05's review state at head, as T2 would."""
+    with queue.connect() as connection:
+        seeded = connection.execute(
+            "SELECT count(*) FROM jobs WHERE dedupe_key LIKE 'seed-review:%'"
+        ).fetchone()[0]
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id=ticket_id,
+            action="review",
+            recipient="codex",
+            source_comment_id=f"ready-{head}",
+            timeout_seconds=5400,
+            head=head,
+        ),
+        dedupe_key=f"seed-review:{ticket_id}:{head}:{seeded}",
+    )
+    review = queue.claim("codex")
+    assert review is not None
+    queue.finish(review.id, owner="codex", handoff_comment_id=f"review-{head}")
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (repo, ticket_id, workflow_state)
+            VALUES ('owner/repo', ?, 'review')
+            ON CONFLICT(repo, ticket_id) DO UPDATE SET workflow_state = 'review'
+            """,
+            (ticket_id,),
+        )
 
 
 def restart(
@@ -190,7 +238,11 @@ def restart(
 def jobs(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
     with queue.connect() as connection:
         rows = connection.execute(
-            "SELECT action, recipient FROM jobs ORDER BY created_at, id"
+            """
+            SELECT action, recipient FROM jobs
+            WHERE dedupe_key NOT LIKE 'seed-review:%'
+            ORDER BY created_at, id
+            """
         ).fetchall()
     return [(str(row["action"]), str(row["recipient"])) for row in rows]
 
@@ -310,6 +362,7 @@ def test_t7_refuses_forged_blocked_and_stuck(tmp_path: Path) -> None:
 def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
 
     dispatcher.process(
         ticket(
@@ -342,7 +395,8 @@ def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
     )
 
-    unwired, _queue = setup(tmp_path / "unwired")
+    unwired, unwired_queue = setup(tmp_path / "unwired")
+    in_review(unwired_queue, HEAD_A)
     unwired.process(ticket(*approved_then_ok))
     shipper = FakeShipper()
     rewired, _queue = setup(tmp_path / "unwired", shipper)
@@ -351,6 +405,7 @@ def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
 
     one_poll_shipper = FakeShipper()
     one_poll, queue = setup(tmp_path / "one-poll", one_poll_shipper)
+    in_review(queue, HEAD_A)
     declined = say("decline-1", DECLINE, "tracy-login", 2.5)
     one_poll.process(ticket(*approved_then_ok, declined, revise))
     assert one_poll_shipper.requests == []
@@ -359,7 +414,8 @@ def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
 
 def test_t8_ok_on_any_other_sha_is_refused(tmp_path: Path) -> None:
     shipper = FakeShipper()
-    dispatcher, _queue = setup(tmp_path, shipper)
+    dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
     comments = (
         approve("verdict-1", HEAD_A, 1),
         say("ok-wrong", OK.format(head=HEAD_B), "tracy-login", 2),
@@ -378,7 +434,7 @@ def test_t8_ok_is_refused_without_a_waiting_preview_or_after_head_moves(
     tmp_path: Path,
 ) -> None:
     shipper = FakeShipper()
-    dispatcher, _queue = setup(tmp_path, shipper)
+    dispatcher, queue = setup(tmp_path, shipper)
     revise = say(
         "verdict-2",
         VERDICT.format(head=HEAD_A, verdict="REVISE"),
@@ -387,6 +443,7 @@ def test_t8_ok_is_refused_without_a_waiting_preview_or_after_head_moves(
     )
 
     dispatcher.process(ticket(say("ok-0", OK.format(head=HEAD_A), "tracy-login", 0)))
+    in_review(queue, HEAD_A)
     dispatcher.process(
         ticket(
             approve("verdict-1", HEAD_A, 1),
@@ -394,15 +451,27 @@ def test_t8_ok_is_refused_without_a_waiting_preview_or_after_head_moves(
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 3),
         )
     )
+    in_review(queue, HEAD_A)
+    approved = approve("verdict-3", HEAD_A, 4)
+    dispatcher.process(ticket(approved))
     dispatcher.process(
         ticket(
-            approve("verdict-3", HEAD_A, 4),
+            approved,
             say("ok-2", OK.format(head=HEAD_A), "tracy-login", 5),
             head=HEAD_B,
         )
     )
 
     assert shipper.requests == []
+    with queue.connect() as connection:
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+    assert outcomes["ok-0"] == "rejected-ok-not-waiting"
+    assert outcomes["ok-1"] == "rejected-ok-not-waiting"
+    assert outcomes["ok-2"] == "refused-ok-head-moved"
 
 
 @pytest.mark.parametrize(
@@ -429,7 +498,8 @@ def test_t8_ok_from_non_approver_or_without_after_ship_is_refused(
 
 
 def test_t8_ok_without_a_wired_shipper_stays_unhandled(tmp_path: Path) -> None:
-    dispatcher, _queue = setup(tmp_path)
+    dispatcher, queue = setup(tmp_path)
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -443,7 +513,8 @@ def test_t8_ok_without_a_wired_shipper_stays_unhandled(tmp_path: Path) -> None:
 
 def test_t8_ships_once_across_restart_and_repeated_ok(tmp_path: Path) -> None:
     shipper = FakeShipper()
-    dispatcher, _queue = setup(tmp_path, shipper)
+    dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -467,6 +538,7 @@ def test_t8_decline_queues_fix_and_third_decline_is_stuck(tmp_path: Path) -> Non
             approve(f"verdict-{number}", head, number * 10),
             say(f"decline-{number}", DECLINE, "tracy-login", number * 10 + 1),
         )
+        in_review(queue, head)
         dispatcher.process(ticket(*comments, head=head))
         fixes = [job for job in builder.drain() if job.request.head == head]
         if number < 3:
@@ -488,6 +560,7 @@ def test_t8_decline_queues_fix_and_third_decline_is_stuck(tmp_path: Path) -> Non
 
 def test_t8_repeated_decline_of_one_preview_queues_one_fix(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path, FakeShipper())
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("decline-1", DECLINE, "tracy-login", 2),
@@ -502,6 +575,7 @@ def test_t8_repeated_decline_of_one_preview_queues_one_fix(tmp_path: Path) -> No
 
 def test_t8_decline_naming_another_sha_is_refused(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path, FakeShipper())
+    in_review(queue, HEAD_A)
     body = DECLINE.replace("role=approver", f"role=approver head={HEAD_B}")
 
     dispatcher.process(
@@ -514,6 +588,7 @@ def test_t8_decline_naming_another_sha_is_refused(tmp_path: Path) -> None:
 def test_no_post_merge_job_is_queued_in_phase_1(tmp_path: Path) -> None:
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
 
     dispatcher.process(
         ticket(
@@ -541,6 +616,7 @@ def test_hooks_cannot_execute_a_harness_binary(
     monkeypatch.setattr(subprocess, "Popen", fail)
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
     dispatcher.process(
         ticket(
             say("bad-1", "<!-- orch:v1 kind=nope -->\n", "claude-login", 1),
@@ -634,27 +710,20 @@ class FakeSource:
         return tuple(item for item in self.tickets if item.ticket_id in wanted)
 
 
-def test_t8_preview_is_a_full_sha_and_short_heads_are_not_expanded(
+def test_t8_short_approve_previews_the_full_head_f1_05_showed(
     tmp_path: Path,
 ) -> None:
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
+    approved = approve("verdict-1", HEAD_A[:7], 1)
+    short_ok = say("ok-1", OK.format(head=HEAD_A[:7]), "tracy-login", 2)
 
-    dispatcher.process(
-        ticket(
-            approve("verdict-1", HEAD_A[:7], 1),
-            say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
-        )
-    )
-    full = (
-        approve("verdict-2", HEAD_A, 3),
-        say("ok-2", OK.format(head=HEAD_A[:7]), "tracy-login", 4),
-    )
-    dispatcher.process(ticket(*full))
+    dispatcher.process(ticket(approved, short_ok))
     assert shipper.requests == []
 
     dispatcher.process(
-        ticket(*full, say("ok-3", OK.format(head=HEAD_A), "tracy-login", 5))
+        ticket(approved, short_ok, say("ok-2", OK.format(head=HEAD_A), "tracy-login", 3))
     )
     assert [request.head for request in shipper.requests] == [HEAD_A]
     with queue.connect() as connection:
@@ -678,6 +747,7 @@ def test_t8_two_dispatchers_cannot_both_ship(tmp_path: Path) -> None:
     other_shipper = FakeShipper()
     first, queue = setup(tmp_path, racing)
     second, _queue = setup(tmp_path, other_shipper)
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -704,6 +774,7 @@ def test_t8_crash_after_ship_returns_never_ships_again(
 ) -> None:
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -737,6 +808,7 @@ def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> Non
     now = [0.0]
     shipper = RaisingShipper()
     dispatcher, queue = setup(tmp_path, shipper, now=now)
+    in_review(queue, HEAD_A)
     queue.enqueue(
         JobRequest(
             repo="owner/repo",
@@ -872,11 +944,13 @@ def test_t8_crash_before_third_decline_marks_stuck_never_ships_a_later_ok(
             approve(f"verdict-{number}", head, number * 10),
             say(f"decline-{number}", DECLINE, "tracy-login", number * 10 + 1),
         )
+        in_review(queue, head)
         dispatcher.process(ticket(*comments, head=head))
     comments += (
         approve("verdict-3", heads[2], 30),
         say("decline-3", DECLINE, "tracy-login", 31),
     )
+    in_review(queue, heads[2])
 
     def crash(**_kwargs: object) -> None:
         raise RuntimeError("simulated crash")
@@ -908,6 +982,7 @@ def test_t8_orphaned_ship_claim_goes_to_ship_failed_and_wakes_once(
 ) -> None:
     shipper = FakeShipper()
     dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
     comments = (
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -959,6 +1034,7 @@ def test_t8_losing_dispatcher_cannot_overwrite_shipped(
     shipper = FakeShipper()
     winner, queue = setup(tmp_path, shipper)
     loser, _queue = setup(tmp_path, FakeShipper())
+    in_review(queue, HEAD_A)
     snapshot = ticket(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
@@ -1021,6 +1097,7 @@ def test_t8_two_declines_competing_for_one_preview_queue_one_fix(
 ) -> None:
     first, queue = setup(tmp_path, FakeShipper())
     second, _queue = setup(tmp_path, FakeShipper())
+    in_review(queue, HEAD_A)
     approved = approve("verdict-1", HEAD_A, 1)
 
     first.process(ticket(approved, say("decline-1", DECLINE, "tracy-login", 2)))
@@ -1071,3 +1148,224 @@ def test_t8_stored_declines_do_not_rewrite_another_stuck_reason(
         "t7-stuck",
         "stuck-1",
     )
+
+
+class RecordingShipper:
+    def __init__(self, inner: ReviewShipper):
+        self.inner = inner
+        self.requests: list[ShipRequest] = []
+
+    def ship(self, request: ShipRequest) -> None:
+        self.requests.append(request)
+        self.inner.ship(request)
+
+
+def wired(
+    tmp_path: Path,
+    actions: FakeReviewActions,
+    source: FakeSource,
+) -> tuple[Dispatcher, SQLiteJobQueue, RecordingShipper]:
+    t8 = T8Hook()
+    dispatcher, queue = setup(tmp_path, hooks=(T7Hook(), t8), actions=actions)
+    shipper = RecordingShipper(ReviewShipper(dispatcher, source))
+    t8.shipper = shipper
+    return dispatcher, queue, shipper
+
+
+def ship_request(head: str = HEAD_A) -> ShipRequest:
+    return ShipRequest(
+        repo="owner/repo",
+        ticket_id="42",
+        head=head,
+        approver="tracy-site",
+        source_comment_id="ok-1",
+    )
+
+
+def outcomes(queue: SQLiteJobQueue) -> dict[str, str]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT comment_id, outcome FROM handled_comments"
+        ).fetchall()
+    return {str(row["comment_id"]): str(row["outcome"]) for row in rows}
+
+
+def workflow_state(queue: SQLiteJobQueue) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute(
+                """
+                SELECT workflow_state FROM ticket_state
+                WHERE repo = 'owner/repo' AND ticket_id = '42'
+                """
+            ).fetchone()[0]
+        )
+
+
+def test_p13_ok_covers_the_head_f1_05_previewed_after_a_patch_id_rebase(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    source = FakeSource(
+        ticket(
+            say("brief-1", BRIEF, "grok-login", 0),
+            approve("verdict-1", HEAD_A, 1),
+            say("ok-a", OK.format(head=HEAD_A), "tracy-login", 2),
+            say("ok-b", OK.format(head=HEAD_B), "tracy-login", 3),
+            head=HEAD_B,
+        )
+    )
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+
+    assert actions.approvals == [(HEAD_B, "tracy-site")]
+    assert outcomes(queue)["ok-a"] == "refused-ok-wrong-sha"
+    assert outcomes(queue)["ok-b"] == "shipped"
+    assert [request.head for request in shipper.requests] == [HEAD_B]
+    assert actions.merges == [(True, HEAD_B)]
+    assert actions.states[-1] == "merged"
+    assert workflow_state(queue) == "merged"
+
+
+def test_p14_ok_on_a_stale_red_approve_never_reaches_ship(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    snapshot = ticket(
+        say("brief-1", BRIEF, "grok-login", 0),
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    source = FakeSource(replace(snapshot, ci={HEAD_A: CIResult("failure")}))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["verdict-1"] == "stale-approve"
+    assert outcomes(queue)["ok-1"] == "rejected-ok-not-waiting"
+    assert shipper.requests == []
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    ("gate", "message"),
+    [
+        ("stale-approve", "no completed after:tracy-site ship intent"),
+        ("red-ci", "is not green"),
+        ("pending-ci", "is not green"),
+        ("head-moved", "PR head is"),
+        ("not-a-full-sha", "not a 40-character SHA"),
+    ],
+)
+def test_p14_review_shipper_raises_unless_every_gate_holds(
+    tmp_path: Path,
+    gate: str,
+    message: str,
+) -> None:
+    actions = FakeReviewActions()
+    head = HEAD_A.upper() if gate == "not-a-full-sha" else HEAD_A
+    snapshot = ticket(
+        say("brief-1", BRIEF, "grok-login", 0),
+        approve("verdict-1", head, 1),
+        head=head,
+    )
+    source = FakeSource(snapshot)
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    if gate != "stale-approve":
+        in_review(queue, head)
+    dispatcher.poll_once(source)
+    if gate == "red-ci":
+        source.tickets = (replace(snapshot, ci={head: CIResult("failure")}),)
+    elif gate == "pending-ci":
+        source.tickets = (replace(snapshot, ci={head: CIResult("pending")}),)
+    elif gate == "head-moved":
+        source.tickets = (ticket(*snapshot.comments, head=HEAD_B),)
+
+    with pytest.raises(ShipError, match=message):
+        shipper.inner.ship(ship_request(head))
+
+    assert actions.merges == []
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM external_ship_intents"
+        ).fetchone()[0] == 0
+
+
+def test_review_shipper_takes_already_merged_as_shipped_and_never_merges_twice(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    actions.merged_heads.add(HEAD_A)
+    source = FakeSource(
+        ticket(
+            say("brief-1", BRIEF, "grok-login", 0),
+            approve("verdict-1", HEAD_A, 1),
+            say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+        )
+    )
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+    shipper.inner.ship(ship_request())
+
+    assert outcomes(queue)["ok-1"] == "shipped"
+    assert actions.merges == []
+    assert workflow_state(queue) == "merged"
+    assert actions.states[-2:] == ["merged", "merged"]
+
+
+def test_review_shipper_raises_on_merge_error_and_never_retries(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    actions.merge_error = RuntimeError("merge refused")
+    source = FakeSource(
+        ticket(
+            say("brief-1", BRIEF, "grok-login", 0),
+            approve("verdict-1", HEAD_A, 1),
+            say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+        )
+    )
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+    actions.merge_error = None
+    with pytest.raises(ShipError, match="is failed"):
+        shipper.inner.ship(ship_request())
+
+    assert outcomes(queue)["ok-1"] == "ship-failed"
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert "merge refused" in str(grok[0].request.detail)
+    assert actions.merges == []
+    assert workflow_state(queue) == "waiting-external"
+
+
+def test_review_shipper_never_merges_again_after_a_crash_inside_merge(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    actions.merge_error = SystemExit("simulated crash")
+    source = FakeSource(
+        ticket(
+            say("brief-1", BRIEF, "grok-login", 0),
+            approve("verdict-1", HEAD_A, 1),
+        )
+    )
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    with pytest.raises(SystemExit):
+        shipper.inner.ship(ship_request())
+    actions.merge_error = None
+
+    with pytest.raises(ShipError, match="no recorded result"):
+        shipper.inner.ship(ship_request())
+    assert actions.merges == []
+
+    actions.merged_heads.add(HEAD_A)
+    shipper.inner.ship(ship_request())
+    assert actions.merges == []
+    assert workflow_state(queue) == "merged"
