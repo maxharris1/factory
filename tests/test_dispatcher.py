@@ -1350,18 +1350,25 @@ def test_t4_patch_id_error_fails_closed_to_review(tmp_path: Path) -> None:
     assert queue.claim("codex") is not None
 
 
-def test_t4_refuses_to_ship_a_non_full_head(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("approved", "head"),
+    [("abcdef1", "abcdef1"), ("a" * 40, "A" * 40)],
+)
+def test_t4_refuses_to_ship_a_non_full_lowercase_head(
+    tmp_path: Path,
+    approved: str,
+    head: str,
+) -> None:
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
-    head = "abcdef1"
-    seed_review_job(dispatcher, queue, head)
+    seed_review_job(dispatcher, queue, approved)
     dispatcher.process(
         ticket(
             comment(
                 "approve-short-head",
                 VERDICT.format(
                     round=1,
-                    head=head,
+                    head=approved,
                     verdict="APPROVE",
                     risk="high",
                 ),
@@ -1369,6 +1376,7 @@ def test_t4_refuses_to_ship_a_non_full_head(tmp_path: Path) -> None:
             ),
             head=head,
             ci={head: CIResult("success")},
+            factory_config=factory(ship="after:tracy-site"),
         )
     )
 
@@ -1381,7 +1389,15 @@ def test_t4_refuses_to_ship_a_non_full_head(tmp_path: Path) -> None:
               AND comment_id = 'approve-short-head'
             """
         ).fetchone()[0]
-    assert outcome == "failed-verdict-ValueError"
+    assert outcome == "refused-ship-head"
+    assert actions.approvals == []
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "ship-failed"
+    assert "lowercase 40-character" in str(wake.request.detail)
+    with queue.connect() as connection:
+        intents = connection.execute("SELECT count(*) FROM ship_intents").fetchone()[0]
+    assert intents == 0
 
 
 @pytest.mark.parametrize(

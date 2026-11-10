@@ -618,8 +618,13 @@ class Dispatcher:
             or _matching_head(approved_head, review_head) is None
         ):
             return True, "stale-approve"
-        if not _is_patch_id(current_head):
-            raise ValueError("ship head must be a 40-character hexadecimal SHA")
+        if not _is_full_sha(current_head):
+            self._wake_ship_failed(
+                ticket,
+                comment,
+                f"PR head {current_head!r} is not a lowercase 40-character SHA",
+            )
+            return True, "refused-ship-head"
         result = ticket.ci.get(current_head)
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
