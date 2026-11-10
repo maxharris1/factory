@@ -654,6 +654,11 @@ def test_t8_two_dispatchers_cannot_both_ship(tmp_path: Path) -> None:
 
     assert len(racing.requests) == 1
     assert other_shipper.requests == []
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM external_previews"
+        ).fetchone()["outcome"]
+    assert outcome == "shipped"
     grok = FakeBot(queue, "grok").drain()
     assert [job.request.action for job in grok] == ["ship-failed"]
 
@@ -923,19 +928,36 @@ def test_t8_losing_dispatcher_cannot_overwrite_shipped(
         approve("verdict-1", HEAD_A, 1),
         say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
     )
-    stale = {"orphan": "verdict-1"}
+    stale_reads: list[str] = []
+    writes: list[tuple[str, bool]] = []
+    original = hook_t8._set_outcome
 
     def stale_read(
         dispatcher: Dispatcher,
         ticket: TrackedTicket,
         comment_id: str,
     ) -> str | None:
-        return stale.pop("orphan", None)
+        stale_reads.append(comment_id)
+        return "verdict-1"
+
+    def spy(
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        approve_id: str,
+        outcome: str,
+    ) -> bool:
+        changed = original(dispatcher, ticket, approve_id, outcome)
+        writes.append((outcome, changed))
+        return changed
 
     winner.process(snapshot)
+    monkeypatch.setattr(loser, "_is_handled", lambda *_args: False)
     monkeypatch.setattr(hook_t8, "_shipping_claim", stale_read)
+    monkeypatch.setattr(hook_t8, "_set_outcome", spy)
     loser.process(snapshot)
 
+    assert stale_reads == ["ok-1"]
+    assert writes == [("ship-failed", False)]
     with queue.connect() as connection:
         outcome = connection.execute(
             "SELECT outcome FROM external_previews"
@@ -976,3 +998,41 @@ def test_t8_two_declines_competing_for_one_preview_queue_one_fix(
             "SELECT comment_id FROM external_previews"
         ).fetchall()
     assert [str(row["comment_id"]) for row in rows] == ["decline-1"]
+
+
+def test_t8_stored_declines_do_not_rewrite_another_stuck_reason(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path, FakeShipper())
+    dispatcher.process(ticket(stop("stuck-1", 1)))
+    with queue.connect() as connection:
+        for number in range(1, 4):
+            connection.execute(
+                """
+                INSERT INTO external_previews (
+                    repo, ticket_id, approve_comment_id, head, outcome, comment_id
+                ) VALUES ('owner/repo', '42', ?, ?, 'declined', ?)
+                """,
+                (f"verdict-{number}", HEAD_A, f"decline-{number}"),
+            )
+
+    dispatcher.process(
+        ticket(
+            stop("stuck-1", 1),
+            approve("verdict-4", HEAD_A, 2),
+            say("ok-4", OK.format(head=HEAD_A), "tracy-login", 3),
+            say("decline-5", DECLINE, "tracy-login", 4),
+        )
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT stuck_reason, stuck_source_comment_id FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()
+    assert (row["stuck_reason"], row["stuck_source_comment_id"]) == (
+        "t7-stuck",
+        "stuck-1",
+    )
