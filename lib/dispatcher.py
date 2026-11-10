@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
@@ -45,11 +46,14 @@ class TrackedTicket:
     comments: tuple[Comment, ...]
     current_head: str | None
     ci: Mapping[str, CIResult]
+    risk: str
     job_timeout_minutes: int = 90
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
             raise ValueError("repo and ticket_id must not be empty")
+        if self.risk not in ("low", "high"):
+            raise ValueError("risk must be low or high")
         if self.job_timeout_minutes < 1:
             raise ValueError("job_timeout_minutes must be positive")
 
@@ -77,6 +81,8 @@ class ReviewActions(Protocol):
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
 
+    def is_merged(self, ticket: TrackedTicket, head: str) -> bool: ...
+
     def merge(
         self,
         ticket: TrackedTicket,
@@ -95,38 +101,6 @@ class ReviewActions(Protocol):
     ) -> None: ...
 
 
-class _MissingReviewActions:
-    def set_state(self, ticket: TrackedTicket, state: str) -> None:
-        del ticket, state
-
-    def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
-        del ticket, head
-        raise RuntimeError("review actions are not configured")
-
-    def merge(
-        self,
-        ticket: TrackedTicket,
-        *,
-        squash: bool,
-        match_head_commit: str,
-    ) -> None:
-        del ticket, squash, match_head_commit
-        raise RuntimeError("review actions are not configured")
-
-    def handoff(self, ticket: TrackedTicket, head: str) -> None:
-        del ticket, head
-        raise RuntimeError("review actions are not configured")
-
-    def await_approver(
-        self,
-        ticket: TrackedTicket,
-        head: str,
-        approver: str,
-    ) -> None:
-        del ticket, head, approver
-        raise RuntimeError("review actions are not configured")
-
-
 class Dispatcher:
     def __init__(
         self,
@@ -134,16 +108,18 @@ class Dispatcher:
         queue: SQLiteJobQueue,
         *,
         trusted_logins: Mapping[str, str],
-        review_actions: ReviewActions | None = None,
+        review_actions: ReviewActions,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
         if not trusted_logins:
             raise ValueError("trusted_logins must not be empty")
+        if review_actions is None:
+            raise ValueError("review_actions must be configured")
         self.state_path = state_path
         self.queue = queue
         self.trusted_logins = dict(trusted_logins)
-        self.review_actions = review_actions or _MissingReviewActions()
+        self.review_actions = review_actions
         self._initialize()
 
     def poll_once(self, source: PollSource) -> None:
@@ -175,22 +151,33 @@ class Dispatcher:
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
                 self._mark_handled(ticket, comment.id, "ticket-stuck")
                 continue
-            if kind == "go":
-                handled, outcome = self._t1(ticket, comment, fields)
-            elif kind == "ready":
-                handled, outcome = self._t2(ticket, comment, fields)
-            elif kind == "verdict":
-                verdict = fields["verdict"]
-                if verdict == "REVISE":
-                    handled, outcome = self._t3(ticket, comment, fields)
-                elif verdict == "APPROVE":
-                    handled, outcome = self._t4(ticket, comment, fields)
+            try:
+                if kind == "go":
+                    handled, outcome = self._t1(ticket, comment, fields)
+                elif kind == "ready":
+                    handled, outcome = self._t2(ticket, comment, fields)
+                elif kind == "verdict":
+                    verdict = fields["verdict"]
+                    if verdict == "REVISE":
+                        handled, outcome = self._t3(ticket, comment, fields)
+                    elif verdict == "APPROVE":
+                        handled, outcome = self._t4(ticket, comment, fields)
+                    else:
+                        continue
+                elif kind == "questions":
+                    handled, outcome = self._t5_questions(ticket, comment, fields)
                 else:
-                    continue
-            elif kind == "questions":
-                handled, outcome = self._t5_questions(ticket, comment)
-            else:
-                handled, outcome = self._t5_answers(ticket, comment, fields)
+                    handled, outcome = self._t5_answers(ticket, comment, fields)
+            except Exception as exc:
+                if kind not in ("verdict", "questions", "answers"):
+                    raise
+                self._mark_ship_intent_failed(ticket, comment.id, type(exc).__name__)
+                self._mark_handled(
+                    ticket,
+                    comment.id,
+                    f"failed-{kind}-{type(exc).__name__}",
+                )
+                continue
             if handled:
                 self._mark_handled(ticket, comment.id, outcome)
 
@@ -264,6 +251,7 @@ class Dispatcher:
                 f"g{generation}"
             ),
         )
+        self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
 
     def _t2(
@@ -289,22 +277,13 @@ class Dispatcher:
         recorded_status, count = self._record_ci_result(ticket, head, result.status)
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if recorded_status == "success":
-            self.queue.enqueue(
-                JobRequest(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    action="review",
-                    recipient=ticket.factory.reviewer_harness,
-                    source_comment_id=comment.id,
-                    timeout_seconds=timeout_seconds,
-                    generation=generation,
-                    head=head,
-                ),
-                dedupe_key=(
-                    f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:"
-                    f"g{generation}"
-                ),
+            self._queue_review(
+                ticket,
+                source_comment_id=comment.id,
+                head=head,
+                generation=generation,
             )
+            self._set_workflow_state(ticket, "review")
             return True, "queued-review"
         if count >= 3:
             self._mark_stuck_and_wake(
@@ -343,40 +322,105 @@ class Dispatcher:
     ) -> tuple[bool, str]:
         if not self._trusted_reviewer(ticket, comment, fields):
             return True, "rejected-revise-author"
-        risk = fields.get("risk")
-        round_field = fields.get("round")
-        if risk not in ("low", "high") or round_field is None:
-            return True, "rejected-revise-without-risk-or-round"
-        round_number = int(round_field.split("/", 1)[0])
+        verdict_head = fields.get("head")
+        if _matching_head(verdict_head or "", ticket.current_head) is None:
+            return True, "stale-revise-head"
         cap = (
             ticket.factory.rounds_low
-            if risk == "low"
+            if ticket.risk == "low"
             else ticket.factory.rounds_high
         )
-        self._record_review_round(ticket, round_number)
-        if round_number >= cap:
-            self._set_workflow_state(ticket, "capped")
-            return True, "capped-review"
-        generation = self._generation(ticket.repo, ticket.ticket_id)
-        self.queue.enqueue(
-            JobRequest(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
-                action="fix",
-                recipient=ticket.factory.builder_harness,
-                source_comment_id=comment.id,
-                timeout_seconds=ticket.job_timeout_minutes * 60,
-                generation=generation,
-                head=ticket.current_head,
-                detail=_comment_link(comment),
-            ),
-            dedupe_key=(
-                f"t3:{_scope(ticket.repo, ticket.ticket_id)}:"
-                f"r{round_number}:g{generation}"
-            ),
-        )
-        self._set_workflow_state(ticket, "fixing")
-        return True, "queued-review-fix"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT outcome FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+            if prior is not None:
+                connection.commit()
+                outcome = str(prior["outcome"])
+                replay_state = (
+                    "capped" if outcome == "capped-review" else "fixing"
+                )
+                self.review_actions.set_state(ticket, replay_state)
+                return True, outcome
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ticket_state (
+                    repo, ticket_id, gate_count, stuck, generation
+                ) VALUES (?, ?, 0, 0, 1)
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+            state = connection.execute(
+                """
+                SELECT workflow_state, review_round, generation
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            assert state is not None
+            if state["workflow_state"] not in ("review", "fixing"):
+                connection.commit()
+                return True, "stale-revise-state"
+            round_number = int(state["review_round"]) + 1
+            next_state = "capped" if round_number >= cap else "fixing"
+            if next_state == "fixing":
+                self.queue.enqueue_in_transaction(
+                    connection,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="fix",
+                        recipient=ticket.factory.builder_harness,
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=int(state["generation"]),
+                        head=ticket.current_head,
+                        detail=_comment_link(comment),
+                    ),
+                    dedupe_key=(
+                        f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET review_round = ?, workflow_state = ?
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (
+                    round_number,
+                    next_state,
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                ),
+            )
+            outcome = (
+                "capped-review"
+                if next_state == "capped"
+                else "queued-review-fix"
+            )
+            connection.execute(
+                """
+                INSERT INTO review_events (
+                    repo, ticket_id, comment_id, outcome
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment.id,
+                    outcome,
+                ),
+            )
+            connection.commit()
+        self.review_actions.set_state(ticket, next_state)
+        return True, outcome
 
     def _t4(
         self,
@@ -390,59 +434,87 @@ class Dispatcher:
         if current_head is None:
             return False, "pr-head-unavailable"
         approved_head = fields["head"]
+        state, review_round = self._review_context(ticket)
+        round_field = fields.get("round")
+        reported_round = (
+            int(round_field.split("/", 1)[0]) if round_field is not None else None
+        )
+        review_head = self._latest_review_head(ticket)
+        if (
+            state != "review"
+            or reported_round != review_round + 1
+            or review_head is None
+            or _matching_head(approved_head, review_head) is None
+        ):
+            return True, "stale-approve"
+        result = ticket.ci.get(current_head)
+        if result is None or result.status != "success":
+            return False, "approve-ci-not-green"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
+            try:
+                approved_patch = self.review_actions.stable_patch_id(
+                    ticket,
+                    approved_head,
+                )
+                current_patch = self.review_actions.stable_patch_id(
+                    ticket,
+                    current_head,
+                )
+            except Exception:
+                return self._queue_patch_review(ticket, comment, current_head)
             covered = (
-                self.review_actions.stable_patch_id(ticket, approved_head)
-                == self.review_actions.stable_patch_id(ticket, current_head)
+                _is_patch_id(approved_patch)
+                and _is_patch_id(current_patch)
+                and approved_patch.lower() == current_patch.lower()
             )
         if not covered:
-            generation = self._generation(ticket.repo, ticket.ticket_id)
-            self.queue.enqueue(
-                JobRequest(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    action="review",
-                    recipient=ticket.factory.reviewer_harness,
-                    source_comment_id=comment.id,
-                    timeout_seconds=ticket.job_timeout_minutes * 60,
-                    generation=generation,
-                    head=current_head,
-                    detail=(
-                        f"Approved head {approved_head} differs from "
-                        f"current head {current_head}"
-                    ),
-                ),
-                dedupe_key=(
-                    f"t4-review:{_scope(ticket.repo, ticket.ticket_id)}:"
-                    f"{current_head}:g{generation}"
-                ),
-            )
-            self._set_workflow_state(ticket, "review")
-            return True, "queued-patch-review"
+            return self._queue_patch_review(ticket, comment, current_head)
         ship = ticket.factory.ship
+        intent_status, replay = self._prepare_ship_intent(
+            ticket,
+            comment.id,
+            current_head,
+            ship,
+        )
+        if intent_status == "completed":
+            self.review_actions.set_state(ticket, _ship_state(ship))
+            return True, f"ship-already-completed-{ship}"
+        if replay and ship == "merge" and self.review_actions.is_merged(
+            ticket,
+            current_head,
+        ):
+            self._complete_ship_intent(ticket, comment.id, "merged")
+            self.review_actions.set_state(ticket, "merged")
+            return True, "merge-confirmed"
         if ship == "merge":
             self.review_actions.merge(
                 ticket,
                 squash=True,
                 match_head_commit=current_head,
             )
-            self._set_workflow_state(ticket, "merged")
+            self._complete_ship_intent(ticket, comment.id, "merged")
+            self.review_actions.set_state(ticket, "merged")
             return True, "merged"
         if ship == "handoff":
             self.review_actions.handoff(ticket, current_head)
-            self._set_workflow_state(ticket, "handed-off")
+            self._complete_ship_intent(ticket, comment.id, "handed-off")
+            self.review_actions.set_state(ticket, "handed-off")
             return True, "handed-off"
         approver = ship.removeprefix("after:")
         self.review_actions.await_approver(ticket, current_head, approver)
-        self._set_workflow_state(ticket, "waiting-external")
+        self._complete_ship_intent(ticket, comment.id, "waiting-external")
+        self.review_actions.set_state(ticket, "waiting-external")
         return True, "waiting-external"
 
     def _t5_questions(
         self,
         ticket: TrackedTicket,
         comment: Comment,
+        fields: Mapping[str, str],
     ) -> tuple[bool, str]:
+        if not self._trusted_session(comment, fields):
+            return True, "rejected-questions-author"
         step = self._latest_step(ticket)
         if step is None:
             action = "clarify"
@@ -452,6 +524,17 @@ class Dispatcher:
         else:
             action, recipient, head, generation = step
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            waiting = connection.execute(
+                """
+                SELECT workflow_state FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            if waiting is not None and waiting["workflow_state"] == "waiting-max":
+                connection.commit()
+                return True, "already-waiting-max"
             connection.execute(
                 """
                 INSERT INTO ticket_state (
@@ -479,6 +562,24 @@ class Dispatcher:
                     comment.id,
                 ),
             )
+            self.queue.enqueue_in_transaction(
+                connection,
+                JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action="clarify",
+                    recipient="grok",
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=generation,
+                    head=head,
+                    detail=_comment_link(comment),
+                ),
+                dedupe_key=(
+                    f"t5-wait:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
+                ),
+            )
+            connection.commit()
         self.review_actions.set_state(ticket, "waiting-max")
         return True, "waiting-max"
 
@@ -555,6 +656,14 @@ class Dispatcher:
             role="reviewer",
         )
 
+    def _trusted_session(
+        self,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> bool:
+        sender = fields.get("from")
+        return sender is not None and self.trusted_logins.get(comment.author) == sender
+
     def _latest_step(
         self,
         ticket: TrackedTicket,
@@ -580,21 +689,156 @@ class Dispatcher:
             int(row["generation"]),
         )
 
-    def _record_review_round(
+    def _queue_review(
         self,
         ticket: TrackedTicket,
-        round_number: int,
+        *,
+        source_comment_id: str,
+        head: str,
+        generation: int,
+        detail: str | None = None,
+    ) -> None:
+        self.queue.enqueue(
+            JobRequest(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                action="review",
+                recipient=ticket.factory.reviewer_harness,
+                source_comment_id=source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                generation=generation,
+                head=head,
+                detail=detail,
+            ),
+            dedupe_key=f"review:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
+        )
+
+    def _queue_patch_review(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        current_head: str,
+    ) -> tuple[bool, str]:
+        self._queue_review(
+            ticket,
+            source_comment_id=comment.id,
+            head=current_head,
+            generation=self._generation(ticket.repo, ticket.ticket_id),
+            detail=f"Approval does not cover current head {current_head}",
+        )
+        self._set_workflow_state(ticket, "review")
+        return True, "queued-patch-review"
+
+    def _review_context(self, ticket: TrackedTicket) -> tuple[str | None, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT workflow_state, review_round FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return None, 0
+        state = (
+            str(row["workflow_state"])
+            if row["workflow_state"] is not None
+            else None
+        )
+        return state, int(row["review_round"])
+
+    def _latest_review_head(self, ticket: TrackedTicket) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None or row["head"] is None:
+            return None
+        return str(row["head"])
+
+    def _prepare_ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+        head: str,
+        policy: str,
+    ) -> tuple[str, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT head, policy, status FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            ).fetchone()
+            if existing is not None:
+                if existing["head"] != head or existing["policy"] != policy:
+                    raise RuntimeError("ship intent does not match approval")
+                connection.commit()
+                return str(existing["status"]), True
+            connection.execute(
+                """
+                INSERT INTO ship_intents (
+                    repo, ticket_id, comment_id, head, policy, status
+                ) VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment_id,
+                    head,
+                    policy,
+                ),
+            )
+            connection.commit()
+        return "pending", False
+
+    def _complete_ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+        state: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE ship_intents
+                SET status = 'completed', error = NULL
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            )
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = ?
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (state, ticket.repo.lower(), ticket.ticket_id),
+            )
+            connection.commit()
+
+    def _mark_ship_intent_failed(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+        error: str,
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, review_round
-                ) VALUES (?, ?, 0, 0, ?)
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET review_round = max(review_round, excluded.review_round)
+                UPDATE ship_intents SET status = 'failed', error = ?
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND status = 'pending'
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, round_number),
+                (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
 
     def _set_workflow_state(
@@ -1064,6 +1308,31 @@ class Dispatcher:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ship_intents (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    policy TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_events (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
 
 
 class PollLoop:
@@ -1104,6 +1373,18 @@ def _matching_head(reported: str, current: str | None) -> str | None:
 
 def _comment_link(comment: Comment) -> str:
     return comment.url or f"comment:{comment.id}"
+
+
+def _is_patch_id(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def _ship_state(policy: str) -> str:
+    if policy == "merge":
+        return "merged"
+    if policy == "handoff":
+        return "handed-off"
+    return "waiting-external"
 
 
 def _state_for_action(action: str) -> str:
