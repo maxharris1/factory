@@ -2160,9 +2160,10 @@ def test_merge_error_is_recorded_and_later_comments_continue(
 
     wake = queue.claim("grok")
     assert wake is not None
-    assert wake.request.action == "ship-failed"
-    assert "merge unavailable" in str(wake.request.detail)
     with queue.connect() as connection:
+        wakes = connection.execute(
+            "SELECT action, detail FROM jobs WHERE recipient = 'grok'"
+        ).fetchall()
         outcomes = dict(
             connection.execute(
                 """
@@ -2181,6 +2182,8 @@ def test_merge_error_is_recorded_and_later_comments_continue(
     assert outcomes["approve-1"] == "failed-verdict-RuntimeError"
     assert outcomes["questions-1"] == "waiting-max"
     assert intent == "failed"
+    assert sorted(str(row["action"]) for row in wakes) == ["clarify", "ship-failed"]
+    assert any("merge unavailable" in str(row["detail"]) for row in wakes)
 
 
 def test_merge_error_on_one_pr_does_not_stop_polling_other_repos(
