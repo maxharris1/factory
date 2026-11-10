@@ -207,8 +207,8 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
 def canary_prompt() -> str:
     return (
         "Name the skill you loaded: poteto-mode.\n"
-        "Quote the first bold sentence of the pinned poteto-mode playbook "
-        "playbooks/orchestrate.md, exactly, on one line.\n"
+        "Quote the whole first bold passage of the pinned poteto-mode playbook "
+        "playbooks/orchestrate.md, exactly as written, on one line.\n"
         "The owning bot starts this harness.\n"
         "Claude Bot writes started-by: claude-bot.\n"
         "Codex Bot writes started-by: codex-bot.\n"
@@ -216,7 +216,7 @@ def canary_prompt() -> str:
         "Reply with these three lines:\n"
         "started-by: <bot>\n"
         "skill: poteto-mode\n"
-        "token: <that sentence>\n"
+        "token: <that passage>\n"
     )
 
 
