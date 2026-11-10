@@ -366,7 +366,7 @@ def test_wait_polls_once_per_second_with_one_claim_per_tick(
             calls.append(recipient)
             return real.claim(recipient) if len(calls) == 4 else None
 
-        def finish(self, job_id: str, *, handoff_comment_id: str | None):
+        def finish(self, job_id: str, *, owner: str, handoff_comment_id: str | None):
             raise AssertionError("delivered jobs are not failed")
 
     job = wait_for_job(Queue(), "codex", io.StringIO(), sleep=sleeps.append)
@@ -473,8 +473,8 @@ class SignalOnClaim:
         os.kill(os.getpid(), self.signum)
         return job
 
-    def finish(self, job_id: str, *, handoff_comment_id: str | None):
-        return self.queue.finish(job_id, handoff_comment_id=handoff_comment_id)
+    def finish(self, job_id: str, *, owner: str, handoff_comment_id: str | None):
+        return self.queue.finish(job_id, owner=owner, handoff_comment_id=handoff_comment_id)
 
 
 # F2.2: signals cannot split a claim from its delivery.
@@ -604,7 +604,9 @@ def test_a_finish_failure_after_a_failed_delivery_is_one_line(
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
 
-    def finish(self: SQLiteJobQueue, job_id: str, *, handoff_comment_id: str | None):
+    def finish(
+        self: SQLiteJobQueue, job_id: str, *, owner: str, handoff_comment_id: str | None
+    ):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(ExistingJobQueue, "finish", finish)

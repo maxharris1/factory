@@ -225,13 +225,17 @@ def _job(argv: list[str]) -> int:
         return 2
     try:
         if args.command == "heartbeat":
-            queue.heartbeat(args.job_id)
+            queue.heartbeat(args.job_id, owner=recipient_for(args.bot))
             print(f"heartbeat {args.job_id}")
             return 0
         if args.handoff == "":
             print(f"{prog}: --handoff must not be empty", file=sys.stderr)
             return 2
-        job = queue.finish(args.job_id, handoff_comment_id=args.handoff)
+        job = queue.finish(
+            args.job_id,
+            owner=recipient_for(args.bot),
+            handoff_comment_id=args.handoff,
+        )
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1

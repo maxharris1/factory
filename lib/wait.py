@@ -138,7 +138,7 @@ def deliver(queue: JobQueue, job: Job, out: TextIO) -> None:
     except Exception as exc:
         reason = _one_line(exc)
         try:
-            queue.finish(job.id, handoff_comment_id=None)
+            queue.finish(job.id, owner=job.request.recipient, handoff_comment_id=None)
         except Exception as finish_exc:
             raise WaitError(
                 f"could not deliver job {job.id} ({reason}) or fail it "
