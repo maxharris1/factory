@@ -92,7 +92,8 @@ def test_canary_asks_for_poteto_mode_and_a_token_from_the_skill() -> None:
     token = pinned_token(ROOT)
     assert "poteto-mode" in prompt
     assert "playbooks/orchestrate.md" in prompt
-    assert "first bold sentence" in prompt
+    assert "whole first bold passage" in prompt
+    assert "exactly as written" in prompt
     assert "claude-bot" in prompt
     assert "codex-bot" in prompt
     assert "cursor-bot" in prompt
@@ -156,7 +157,9 @@ def test_doctor_passes_when_each_owning_bot_quotes_the_pinned_token(tmp_path: Pa
     home = tmp_path / "home"
     assert run(["install-skills", "--home", str(home)]).returncode == 0
     replies = tmp_path / "replies"
-    write_replies(replies, pinned_token(ROOT))
+    token = pinned_token(ROOT)
+    assert ". " in token
+    write_replies(replies, token)
     result = run(["doctor", "--home", str(home), "--responses", str(replies)])
     assert result.returncode == 0, result.stderr
     assert "poteto-mode" in result.stdout
@@ -199,6 +202,19 @@ def test_doctor_fails_when_the_token_is_not_the_pinned_skill(tmp_path: Path) -> 
     assert run(["install-skills", "--home", str(home)]).returncode == 0
     replies = tmp_path / "replies"
     write_replies(replies, pinned_token(ROOT), token_for={"claude": "some other sentence"})
+    result = run(["doctor", "--home", str(home), "--responses", str(replies)])
+    assert result.returncode == 1
+    assert "claude: did not load the pinned version (token does not match the pin)" in result.stderr
+
+
+def test_doctor_fails_when_reply_quotes_only_first_sentence(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert run(["install-skills", "--home", str(home)]).returncode == 0
+    token = pinned_token(ROOT)
+    first_sentence, separator, _rest = token.partition(". ")
+    assert separator
+    replies = tmp_path / "replies"
+    write_replies(replies, token, token_for={"claude": f"{first_sentence}."})
     result = run(["doctor", "--home", str(home), "--responses", str(replies)])
     assert result.returncode == 1
     assert "claude: did not load the pinned version (token does not match the pin)" in result.stderr
