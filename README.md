@@ -3,8 +3,9 @@
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
 The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
-F1-03, and F1-04 contracts, the F1-02 pstack pin, the F1-08 usage reserve, and
-the F1-14 weekly eval report. Later Phase 1 items are not built.
+F1-03, and F1-04 contracts, the F1-02 pstack pin, the F1-07
+`orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
+model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
 ## Contracts
 
@@ -39,6 +40,10 @@ bin/orch check-config
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
 
+## orchestrate-project
+
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+
 ## pstack pin
 
 [`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
@@ -52,7 +57,7 @@ bin/orch doctor --home "$HOME" --responses DIR
 
 `install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
 
-`doctor` prints a canary that asks the harness to name poteto-mode and quote the first bold sentence of the pinned poteto-mode orchestrate playbook. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+`doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
 
 ## Usage reserve
 
@@ -76,3 +81,13 @@ The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run'
 - A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
+
+## Model
+
+[`model/Orchestrator.tla`](model/Orchestrator.tla) is the section 4 ticket loop. State names are the `orch:state` labels (`waiting-max`, `post-merge`, …). T1 is the `kind=go` handoff. T9 is in the model and is off when `AllowPostMerge = FALSE` (Phase 1).
+
+```sh
+bash model/check.sh
+```
+
+That runs pstack `/statechart` (TLC, one worker). [`model/chart.mmd`](model/chart.mmd) is the section 4.1 chart, including post-merge. The Phase 1 drawing config does not reach post-merge. [`model/fixtures/omit-t1.cfg`](model/fixtures/omit-t1.cfg) drops T1 and must fail.

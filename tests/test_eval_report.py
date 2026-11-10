@@ -214,6 +214,22 @@ def test_chart_edges_match_section_4_1() -> None:
         assert dst in STATES
 
 
+def test_chart_mmd_edges_match_transitions() -> None:
+    text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
+    names: dict[str, str] = {}
+    edges: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        state = re.fullmatch(r"  s(\d+): (.+)", line)
+        if state:
+            names[state.group(1)] = state.group(2)
+            continue
+        edge = re.fullmatch(r"  s(\d+) --> s(\d+): .+", line)
+        if edge is None:
+            continue
+        edges.add((names[edge.group(1)], names[edge.group(2)]))
+    assert edges == CHART_TRANSITIONS
+
+
 def test_week_window_uses_the_same_directory_shape() -> None:
     text = render(
         build_report(
