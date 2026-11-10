@@ -23,6 +23,6 @@ Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
 
 - A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
-- A `cursor` harness takes its family only from the model hint. `claude*` is Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
