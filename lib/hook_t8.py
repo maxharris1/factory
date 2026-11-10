@@ -14,9 +14,12 @@ never expanded.
 
 One ok or one decline claims a preview, through an insert into
 external_previews that only one dispatcher can win. A claimed ok calls
-Shipper.ship at most once. If ship raises, or a restart finds a claim
-with no recorded result, the preview is marked ship-failed and Grok Bot
-is woken once. The dispatcher never ships the same request again.
+Shipper.ship at most once. If ship raises, or a later poll finds the
+ok's claim still marked shipping, the preview is marked ship-failed and
+Grok Bot is woken once. A result is written only over shipping, so a
+recorded shipped is never overwritten. The dispatcher never ships the
+same request again. Three stored declines mark the ticket stuck before
+any ok or decline is read, even after a crash.
 
 The approver posts with from=<approver> role=approver from a login that
 trusted_logins maps to <approver>. T8 queues no post-merge job (T9 is
@@ -93,6 +96,17 @@ class T8Hook:
         approver = ticket.factory.ship[len("after:") :]
         if not dispatcher._trusted(comment, fields, approver, role="approver"):
             return True, f"rejected-{kind}-author"
+        orphan = _shipping_claim(dispatcher, ticket, comment.id)
+        if orphan is not None:
+            return _ship_failed(
+                dispatcher,
+                ticket,
+                comment,
+                orphan,
+                "ship has no recorded result; not shipping again",
+            )
+        if _declines(dispatcher, ticket) >= DECLINES_TO_STUCK:
+            _mark_declined_stuck(dispatcher, ticket, comment.id, approver)
         if dispatcher.is_stuck(ticket):
             dispatcher._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return True, "ticket-stuck"
@@ -219,15 +233,53 @@ def _decline(
         connection.commit()
     if declines < DECLINES_TO_STUCK:
         return True, "queued-decline-fix"
+    _mark_declined_stuck(dispatcher, ticket, comment.id, approver)
+    return True, "stuck-declined-3"
+
+
+def _declines(dispatcher: Dispatcher, ticket: TrackedTicket) -> int:
+    with dispatcher.queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT count(*) FROM external_previews
+            WHERE repo = ? AND ticket_id = ? AND outcome = 'declined'
+            """,
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+    return int(row[0])
+
+
+def _mark_declined_stuck(
+    dispatcher: Dispatcher,
+    ticket: TrackedTicket,
+    source_comment_id: str,
+    approver: str,
+) -> None:
     dispatcher._mark_stuck_and_wake(
         repo=ticket.repo,
         ticket_id=ticket.ticket_id,
-        source_comment_id=comment.id,
-        timeout_seconds=timeout_seconds,
+        source_comment_id=source_comment_id,
+        timeout_seconds=ticket.job_timeout_minutes * 60,
         reason="declined-3",
-        detail=f"{approver} declined three times; latest {previewed}",
+        detail=f"{approver} declined three times",
     )
-    return True, "stuck-declined-3"
+
+
+def _shipping_claim(
+    dispatcher: Dispatcher,
+    ticket: TrackedTicket,
+    comment_id: str,
+) -> str | None:
+    with dispatcher.queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT approve_comment_id FROM external_previews
+            WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+              AND outcome = 'shipping'
+            """,
+            (ticket.repo.lower(), ticket.ticket_id, comment_id),
+        ).fetchone()
+    return str(row["approve_comment_id"]) if row is not None else None
 
 
 def _ship_failed(
@@ -237,7 +289,10 @@ def _ship_failed(
     approve_id: str,
     detail: str,
 ) -> tuple[bool, str]:
-    _set_outcome(dispatcher, ticket, approve_id, "ship-failed")
+    if not _set_outcome(dispatcher, ticket, approve_id, "ship-failed"):
+        claimed = _claimed_by(dispatcher, ticket, approve_id)
+        if claimed is not None and claimed[1] == "shipped":
+            return True, "shipped"
     dispatcher.wake_grok_once(
         repo=ticket.repo,
         ticket_id=ticket.ticket_id,
@@ -319,12 +374,15 @@ def _set_outcome(
     ticket: TrackedTicket,
     approve_id: str,
     outcome: str,
-) -> None:
+) -> bool:
+    """Record a ship result. Only a claim still marked shipping changes."""
     with dispatcher.queue.connect() as connection:
-        connection.execute(
+        changed = connection.execute(
             """
             UPDATE external_previews SET outcome = ?
             WHERE repo = ? AND ticket_id = ? AND approve_comment_id = ?
+              AND outcome = 'shipping'
             """,
             (outcome, ticket.repo.lower(), ticket.ticket_id, approve_id),
-        )
+        ).rowcount
+    return changed == 1
