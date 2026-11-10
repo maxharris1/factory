@@ -1,9 +1,12 @@
 import inspect
+import sqlite3
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+from lib.dispatcher import Dispatcher
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 
 
@@ -26,6 +29,50 @@ def request(
         timeout_seconds=5400,
         attempt=attempt,
     )
+
+
+class _SingleRow:
+    def __init__(self, row: sqlite3.Row | None):
+        self.row = row
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self.row
+
+
+class _InterleavingConnection(sqlite3.Connection):
+    interleave: Callable[[], None] | None = None
+
+    def execute(self, sql: str, parameters=()):
+        if self.interleave is not None and sql == "BEGIN IMMEDIATE":
+            interleave = self.interleave
+            self.interleave = None
+            interleave()
+        cursor = super().execute(sql, parameters)
+        if (
+            self.interleave is not None
+            and not self.in_transaction
+            and sql.strip().startswith("SELECT * FROM jobs WHERE id = ?")
+        ):
+            row = cursor.fetchone()
+            interleave = self.interleave
+            self.interleave = None
+            interleave()
+            return _SingleRow(row)
+        return cursor
+
+
+class _InterleavingQueue(SQLiteJobQueue):
+    interleave: Callable[[], None] | None = None
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.path,
+            timeout=30,
+            factory=_InterleavingConnection,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.interleave = self.interleave
+        return connection
 
 
 def test_queue_contract_is_durable_and_deduplicates_enqueue(tmp_path: Path) -> None:
@@ -71,15 +118,17 @@ def test_heartbeat_and_successful_finish_record_the_handoff(tmp_path: Path) -> N
     assert running is not None
 
     now[0] = 30
-    heartbeat = queue.heartbeat(running.id)
+    heartbeat = queue.heartbeat(running.id, owner="claude")
     now[0] = 40
     finished = queue.finish(
         running.id,
+        owner="claude",
         handoff_comment_id="handoff-9",
     )
     now[0] = 50
     repeated = queue.finish(
         running.id,
+        owner="claude",
         handoff_comment_id="handoff-9",
     )
 
@@ -100,7 +149,7 @@ def test_finish_without_handoff_exposes_one_t6_failure(tmp_path: Path) -> None:
     assert running is not None
 
     now[0] = 30
-    failed = queue.finish(running.id, handoff_comment_id=None)
+    failed = queue.finish(running.id, owner="claude", handoff_comment_id=None)
     assert failed.state == "failed"
     assert queue.unhandled_failures() == (failed,)
 
@@ -108,6 +157,64 @@ def test_finish_without_handoff_exposes_one_t6_failure(tmp_path: Path) -> None:
     assert queue.unhandled_failures() == ()
     with pytest.raises(QueueError, match="already handled"):
         queue.mark_failure_handled(failed.id)
+
+
+def test_finish_refuses_the_wrong_owner(tmp_path: Path) -> None:
+    queue = make_queue(tmp_path / "queue.sqlite3", [10.0])
+    queue.enqueue(request(), dedupe_key="build")
+    running = queue.claim("claude")
+    assert running is not None
+
+    with pytest.raises(QueueError, match="belongs to claude, not codex"):
+        queue.finish(
+            running.id,
+            owner="codex",
+            handoff_comment_id="handoff-9",
+        )
+
+    assert queue.outstanding() == (running,)
+
+
+def test_finish_does_not_overwrite_a_t6_timeout_or_duplicate_its_retry(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "queue.sqlite3"
+    now = [10.0]
+    queue = make_queue(path, now)
+    queue.enqueue(request(), dedupe_key="build")
+    running = queue.claim("claude")
+    assert running is not None
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={"grok-bot": "grok"},
+    )
+    finishing_queue = _InterleavingQueue(path, clock=lambda: now[0])
+
+    def time_out_and_retry() -> None:
+        now[0] = 20
+        assert queue.mark_timed_out(running) is True
+        dispatcher.reconcile_jobs()
+
+    finishing_queue.interleave = time_out_and_retry
+    with pytest.raises(QueueError, match="running"):
+        finishing_queue.finish(
+            running.id,
+            owner="claude",
+            handoff_comment_id="handoff-9",
+        )
+
+    with queue.connect() as connection:
+        original = connection.execute(
+            "SELECT state FROM jobs WHERE id = ?",
+            (running.id,),
+        ).fetchone()
+        retries = connection.execute(
+            "SELECT id FROM jobs WHERE attempt = 2",
+        ).fetchall()
+    assert original is not None
+    assert original["state"] == "failed"
+    assert len(retries) == 1
 
 
 def test_timed_out_update_fails_closed_after_a_concurrent_heartbeat(
@@ -121,7 +228,7 @@ def test_timed_out_update_fails_closed_after_a_concurrent_heartbeat(
     stale = queue.claim("claude")
     assert stale is not None
     now[0] = 30
-    make_queue(path, now).heartbeat(stale.id)
+    make_queue(path, now).heartbeat(stale.id, owner="claude")
 
     now[0] = 40
     assert queue.mark_timed_out(stale) is False
