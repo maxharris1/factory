@@ -20,7 +20,7 @@ Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md` and `marked_urgent`.
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
 
 ## Usage reserve
 

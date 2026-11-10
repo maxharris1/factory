@@ -3,14 +3,15 @@
 Stable names for F1-08, which owns best fit and the usage reserve:
 
 - `RouteRequest` — input. Do not add a required field.
-- `FitChoice` — harness pair only. `lib.usage.choose_fit(request) -> FitChoice`.
+- `FitChoice` — harness pair built from a `route_job` result.
 - `RouteDecision` — what `orch:go` posts. Families and `job` are set here.
-- `choose_route(request)` — preferred pair until `choose_fit` exists, then that fit.
+- `choose_route(request)` — calls `lib.usage.route_job(config, marked_urgent=urgent)`.
 - `route_from_fit(request, fit)` — cross-family check, then a decision.
 - `assert_cross_family(...)` — the check-config family rule. Same family raises.
 
-`choose_route` does not apply the 20% reserve and does not rank fits.
-A missing `lib.usage` module leaves the `factory.md` pair in place.
+`choose_route` does not rank fits and does not read a usage source.
+`lib.usage` must not import `FitChoice`. The import stays inside
+`choose_route` so the two modules do not cycle.
 """
 
 from __future__ import annotations
@@ -291,22 +292,42 @@ def refused_stop(findings: Sequence[Finding]) -> StopReport:
     )
 
 
-def choose_route(request: RouteRequest) -> RouteDecision:
-    """Preferred factory.md pair, or `lib.usage.choose_fit` when that function exists.
+def choose_route(
+    request: RouteRequest,
+    usage: object | None = None,
+) -> RouteDecision:
+    """Adapt `lib.usage.route_job(config, marked_urgent=urgent)` into a decision.
 
-    `importlib` is called here, not at import time: `lib.usage` imports the
-    types above, so a top-level import would cycle. A missing `lib.usage`
-    module is the Phase 1 default, not an error.
+    The import is lazy so this module does not cycle with `lib.usage`.
+    `lib.usage` must not import `FitChoice`. A route that is not ok raises
+    `RouteError`. `usage`, when given, is forwarded and is the only extra
+    argument.
     """
     _check_request(request)
-    fit = _usage_choose_fit(request)
-    if fit is None:
-        fit = FitChoice(
-            builder_harness=request.config.builder_harness,
-            builder_model=request.config.builder_model,
-            reviewer_harness=request.config.reviewer_harness,
-            reviewer_model=request.config.reviewer_model,
+    usage_mod = importlib.import_module("lib.usage")
+    if usage is None:
+        route = usage_mod.route_job(request.config, marked_urgent=request.urgent)
+    else:
+        route = usage_mod.route_job(
+            request.config,
+            usage=usage,
+            marked_urgent=request.urgent,
         )
+    if not route.ok:
+        reason = route.reason
+        if not isinstance(reason, str) or reason.strip() == "":
+            raise RouteError("route not ok")
+        raise RouteError(reason)
+    builder = route.builder
+    reviewer = route.reviewer
+    if builder is None or reviewer is None:
+        raise RouteError("route not ok")
+    fit = FitChoice(
+        builder_harness=builder.harness,
+        builder_model=builder.model,
+        reviewer_harness=reviewer.harness,
+        reviewer_model=reviewer.model,
+    )
     return route_from_fit(request, fit)
 
 
@@ -503,22 +524,6 @@ def stuck_comment(report: StopReport) -> str:
         {"kind": "stuck", "from": FROM, "role": ROLE, "state": "stuck"},
         format_stop_report(report),
     )
-
-
-def _usage_choose_fit(request: RouteRequest) -> FitChoice | None:
-    try:
-        usage = importlib.import_module("lib.usage")
-    except ModuleNotFoundError as exc:
-        if exc.name == "lib.usage":
-            return None
-        raise
-    choose_fit = getattr(usage, "choose_fit", None)
-    if choose_fit is None:
-        raise RouteError("lib.usage must define choose_fit(request) -> FitChoice")
-    fit = choose_fit(request)
-    if not isinstance(fit, FitChoice):
-        raise RouteError("choose_fit must return a FitChoice")
-    return fit
 
 
 def _check_request(request: RouteRequest) -> None:

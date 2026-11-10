@@ -31,15 +31,17 @@ FitChoice fields: `builder_harness`, `builder_model`, `reviewer_harness`, `revie
 
 RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`, `builder_family`, `reviewer_family`, `job`, `urgent`, `risk`, `file_count`, `scope_changed`
 
-F1-08 entry point: `lib.usage.choose_fit(request) -> FitChoice`
+F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False) -> JobRoute`
 
-F1-07 entry points: `choose_route(request) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
+`JobRoute` has `builder`, `reviewer`, `reason`, and `ok`. `ok` is true only when both sides are set and `reason` is none. Each side has `harness` and `model`.
 
-`choose_route` uses the `factory.md` preferred pair until `lib.usage.choose_fit` exists. When that function exists, `choose_route` uses its `FitChoice`, then `assert_cross_family`. F1-08 owns best fit and each owning bot's reserve check. This skill does not rank harnesses and does not read a usage source. A missing `lib.usage` module is not an error.
+F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
+
+`choose_route(request)` calls `route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. A usage source passed as `usage` is forwarded and is the only extra argument. This skill does not pass one. A route that is not ok raises `RouteError`. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
 
 Question classes: `observable`, `default-able`, `product`
 
-`job` is `plan` when `likely_files` has more than 3 paths, or when `scope_changed` is true. Otherwise `job` is `build`. Three files are a build. `choose_fit` does not set `job`.
+`job` is `plan` when `likely_files` has more than 3 paths, or when `scope_changed` is true. Otherwise `job` is `build`. Three files are a build. `route_job` does not set `job`.
 
 ## Intake
 
@@ -100,9 +102,9 @@ An answer comment is Max's words for one product question:
 
 Build a `RouteRequest` from `project.config`, the brief's risk, the likely files, a one-line summary, `urgent`, and `scope_changed`.
 
-`urgent` is true only for a resumed paused step, past-ship work, or a ticket Max has marked urgent. Otherwise it is false. Pass it through. Do not change harnesses because of it. The owning bot applies its own reserve check when it has one.
+`urgent` is true only for a resumed paused step, past-ship work, or a ticket Max has marked urgent. Otherwise it is false. `choose_route` passes that flag as `marked_urgent` and does not pass `usage`. The owning bot applies its own reserve check when it has one.
 
-Call `choose_route(request)`. The reviewer family must differ from the builder family that will actually do the work. `assert_cross_family` uses the same rule as `orch check-config`. If `choose_route` raises `RouteError`, do not post `orch:go`. Report stop `blocked` once, with the error as the evidence.
+Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence. `assert_cross_family` uses the same rule as `orch check-config`.
 
 Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. The verify value is the skill name from `factory.md`, or `none`.
 

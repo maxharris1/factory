@@ -1,7 +1,5 @@
 import ast
 import re
-import sys
-import types
 from dataclasses import fields, replace
 from pathlib import Path
 
@@ -33,12 +31,17 @@ from lib.orchestrate import (
     stuck_comment,
 )
 from lib.schema import AUT0_REPO
+from lib.usage import StaticUsage, UsageReport
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "grok" / "orchestrate-project" / "SKILL.md"
 PROJECTS = tuple(
     relative for relative in EXAMPLE_PATHS if relative.endswith("/factory.md")
 )
+
+
+def reports(*items: UsageReport) -> StaticUsage:
+    return StaticUsage({item.harness: item for item in items})
 
 
 def write_factory(directory: Path, data: dict, body: str = "") -> Path:
@@ -257,12 +260,14 @@ def test_go_is_allowed_when_no_product_question_is_open() -> None:
     assert parse_comment(empty.post_go(decision, "none")).as_dict()["kind"] == "go"
 
 
-def test_choose_route_keeps_the_factory_md_pair_and_a_cross_family_reviewer() -> None:
+def test_choose_route_uses_route_job_and_keeps_a_cross_family_reviewer() -> None:
     for relative in PROJECTS:
         request = request_for(relative)
         decision = choose_route(request)
         assert decision.builder_harness == request.config.builder_harness
+        assert decision.builder_model == request.config.builder_model
         assert decision.reviewer_harness == request.config.reviewer_harness
+        assert decision.reviewer_model == request.config.reviewer_model
         assert decision.builder_family != decision.reviewer_family
         assert decision.job == "build"
         assert decision.file_count == 1
@@ -274,35 +279,46 @@ def test_choose_route_keeps_the_factory_md_pair_and_a_cross_family_reviewer() ->
     assert urgent.urgent is True
 
 
-def test_choose_route_uses_choose_fit_when_usage_defines_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = request_for("examples/cleffy/factory.md", likely_files=("a", "b", "c", "d"))
-
-    def choose_fit(incoming: RouteRequest) -> FitChoice:
-        assert incoming.summary == request.summary
-        return FitChoice("cursor", "claude-sonnet", "codex", None)
-
-    module = types.ModuleType("lib.usage")
-    module.choose_fit = choose_fit  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "lib.usage", module)
-    decision = choose_route(request)
-    assert decision.builder_harness == "cursor"
-    assert decision.builder_model == "claude-sonnet"
+def test_choose_route_builds_fit_from_the_route_job_result() -> None:
+    base = request_for("examples/cleffy/factory.md", likely_files=("a", "b", "c", "d"))
+    request = replace(
+        base,
+        config=replace(
+            base.config,
+            reviewer_harness="cursor",
+            reviewer_model="gpt-5",
+        ),
+    )
+    source = reports(UsageReport("cursor", 0.0, True))
+    decision = choose_route(request, usage=source)
+    assert decision.builder_harness == "claude"
+    assert decision.builder_model is None
     assert decision.reviewer_harness == "codex"
+    assert decision.reviewer_model is None
     assert decision.builder_family == "anthropic"
     assert decision.reviewer_family == "openai"
     assert decision.job == "plan"
     assert decision.file_count == 4
-    assert decision.builder_harness != request.config.builder_harness
+    assert decision.reviewer_harness != request.config.reviewer_harness
+    urgent = choose_route(replace(request, urgent=True), usage=source)
+    assert urgent.reviewer_harness == "cursor"
+    assert urgent.reviewer_model == "gpt-5"
+    assert urgent.urgent is True
 
 
-def test_usage_module_without_choose_fit_is_an_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setitem(sys.modules, "lib.usage", types.ModuleType("lib.usage"))
-    with pytest.raises(RouteError, match="choose_fit"):
-        choose_route(request_for("examples/cleffy/factory.md"))
+def test_choose_route_raises_when_the_route_is_not_ok() -> None:
+    request = request_for("examples/cleffy/factory.md")
+    source = reports(
+        UsageReport("claude", 0.0, True),
+        UsageReport("codex", 0.0, True),
+        UsageReport("cursor", 0.0, True),
+    )
+    with pytest.raises(RouteError, match="^reserve$"):
+        choose_route(request, usage=source)
+    decision = choose_route(replace(request, urgent=True), usage=source)
+    assert decision.builder_harness == "claude"
+    assert decision.reviewer_harness == "codex"
+    assert decision.builder_family != decision.reviewer_family
 
 
 def test_same_family_reviewer_is_refused() -> None:
@@ -324,8 +340,11 @@ def test_same_family_reviewer_is_refused() -> None:
         ship="merge",
         skills=(),
     )
-    with pytest.raises(RouteError, match="same-family"):
-        choose_route(replace(request, config=same))
+    decision = choose_route(replace(request, config=same))
+    assert decision.builder_harness == "codex"
+    assert decision.reviewer_harness == "claude"
+    assert decision.builder_family == "openai"
+    assert decision.reviewer_family == "anthropic"
     families = assert_cross_family("cursor", "claude-opus", "codex", None)
     assert families == ("anthropic", "openai")
 
@@ -420,9 +439,16 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "auth.json",
         ".runner",
         "GH_TOKEN",
-        "lib.usage.choose_fit(request) -> FitChoice",
+        "lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False) -> JobRoute",
+        "route_job(config, marked_urgent=urgent)",
     ):
         assert phrase in text
+    assert "choose_fit" not in text
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "lib.usage.route_job(config, marked_urgent=urgent)" in readme
+    assert "choose_fit" not in readme
+    source = (ROOT / "lib" / "orchestrate.py").read_text(encoding="utf-8")
+    assert "choose_fit" not in source
     assert _named_fields(text, "RouteRequest") == tuple(
         field.name for field in fields(RouteRequest)
     )
@@ -440,7 +466,6 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
     assert headers
     for header in headers:
         assert parse_header_line(header)["from"] == "grok-bot"
-    source = (ROOT / "lib" / "orchestrate.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     modules: set[str] = set()
     for node in ast.walk(tree):
