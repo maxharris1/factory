@@ -191,6 +191,7 @@ class Dispatcher:
         self.reconcile_jobs()
 
     def process(self, ticket: TrackedTicket) -> None:
+        self._settle_external_ships(ticket)
         comments = sorted(ticket.comments, key=lambda item: (item.created_at, item.id))
         for comment in comments:
             if self._is_handled(ticket, comment.id):
@@ -1231,15 +1232,43 @@ class Dispatcher:
                     request.source_comment_id,
                 ),
             )
-            if status == "completed":
-                connection.execute(
-                    """
-                    UPDATE ticket_state SET workflow_state = 'merged'
-                    WHERE repo = ? AND ticket_id = ?
-                    """,
-                    (request.repo.lower(), request.ticket_id),
-                )
             connection.commit()
+
+    def _settle_external_ship(
+        self,
+        ticket: TrackedTicket,
+        source_comment_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'merged'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+        self._write_state_label(ticket, "merged")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE external_ship_intents SET settled = 1
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+            )
+
+    def _settle_external_ships(self, ticket: TrackedTicket) -> None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_comment_id FROM external_ship_intents
+                WHERE repo = ? AND ticket_id = ?
+                  AND status = 'completed' AND settled = 0
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        for row in rows:
+            self._settle_external_ship(ticket, str(row["source_comment_id"]))
 
     def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
         try:
@@ -1753,6 +1782,7 @@ class Dispatcher:
                     head TEXT NOT NULL,
                     status TEXT NOT NULL,
                     error TEXT,
+                    settled INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (repo, ticket_id, source_comment_id)
                 )
                 """
@@ -1789,7 +1819,8 @@ class ReviewShipper:
     SHA that is still the PR head. Then it squash-merges exactly that head,
     or confirms it is already merged. Its own intent is keyed on the ok
     comment, so one request never merges twice. The ticket is re-read
-    from source.
+    from source. Once the merge is recorded, ship returns even if the
+    merged state or label write fails; Dispatcher.process retries those.
     """
 
     def __init__(self, dispatcher: Dispatcher, source: PollSource):
@@ -1840,7 +1871,11 @@ class ReviewShipper:
             dispatcher._finish_external_ship(request, "completed", None)
         elif status != "completed":
             raise ShipError(f"ship of {head} is {status}; not shipping again")
-        dispatcher._write_state_label(ticket, "merged")
+        try:
+            dispatcher._settle_external_ship(ticket, request.source_comment_id)
+        except Exception:
+            # The merge is recorded; Dispatcher.process retries the settle.
+            pass
 
     def _ticket(self, request: ShipRequest) -> TrackedTicket:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
