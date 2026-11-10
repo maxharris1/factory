@@ -1,0 +1,93 @@
+---
+title: "Ticket loop"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Ask
+    lg1: Plan
+    lg2: Build
+    lg3: Review
+    lg4: Ship
+    lg5: Stop
+  }
+  class lg0 blue
+  class lg1 purple
+  class lg2 orange
+  class lg3 yellow
+  class lg4 teal
+  class lg5 tan
+  s0: intake
+  s1: questions
+  s2: refused
+  s3: building
+  s4: planning
+  s5: waiting-max
+  s6: abandoned
+  s7: plan-check
+  s8: review
+  s9: blocked
+  s10: ship
+  s11: stuck
+  s12: fixing
+  s13: handed-off
+  s14: merged
+  s15: waiting-external
+  s16: done
+  s17: post-merge
+  s18: capped
+  [*] --> s0
+  s0 --> s2: project config invalid
+  s0 --> s1: brief and acceptance criteria posted
+  s1 --> s3: kind=go, queue build
+  s1 --> s4: kind=go, queue plan
+  s1 --> s5: a product question
+  s3 --> s5: a product question
+  s3 --> s8: ready, CI green
+  s4 --> s7: plan maps each acceptance criterion
+  s5 --> s1: Max answers
+  s5 --> s6: Max drops it
+  s5 --> s3: answer, same step resumes
+  s7 --> s4: an acceptance criterion is unmapped
+  s8 --> s9: BLOCKED
+  s8 --> s10: APPROVE on the current head
+  s8 --> s12: REVISE, under the round cap
+  s3 --> s11: job dies twice or CI red three times
+  s4 --> s11: job dies twice
+  s10 --> s8: head changed and the patch differs
+  s10 --> s13: ship = handoff
+  s10 --> s14: ship = merge
+  s10 --> s15: ship = after an approver
+  s8 --> s11: job dies twice
+  s12 --> s5: a product question
+  s12 --> s8: ready, CI green
+  s5 --> s12: answer, same step resumes
+  s14 --> s16: merged
+  s14 --> s17: project has a post-merge check
+  s15 --> s14: OK names the previewed SHA
+  s15 --> s12: declined
+  s7 --> s11: gaps a second time
+  s12 --> s11: job dies twice or CI red three times
+  s17 --> s16: post-merge fails, follow-up filed or post-merge passes
+  s17 --> s11: job dies twice
+  s8 --> s18: REVISE at the cap
+  s18 --> s12: Max okays one more round
+  s15 --> s11: third decline
+  class s0 blue
+  class s1 blue
+  class s2 tan
+  class s3 orange
+  class s4 purple
+  class s5 blue
+  class s6 tan
+  class s7 purple
+  class s8 yellow
+  class s9 tan
+  class s10 teal
+  class s11 tan
+  class s12 orange
+  class s13 teal
+  class s14 teal
+  class s15 teal
+  class s16 teal
+  class s17 teal
+  class s18 yellow
