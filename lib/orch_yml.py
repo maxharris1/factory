@@ -4,11 +4,6 @@ Required: poll_seconds (the decided interval, 60) and projects[].repo.
 job_timeout is optional and measured in minutes. When the file and the
 project both omit it, the timeout is 90 minutes. Unknown fields are
 refused so v1 stays closed.
-
-logins is optional: a mapping from a tracker login to the identity the
-dispatcher trusts it as (claude-bot, tracy-site, ...). check-config
-warns when a bot login is mapped to a factory.md after: approver,
-because another agent's OK is never a person's.
 """
 
 from __future__ import annotations
@@ -25,8 +20,7 @@ POLL_SECONDS = 60
 DEFAULT_JOB_TIMEOUT_MINUTES = 90
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_IDENTITY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_TOP_KEYS = {"poll_seconds", "job_timeout", "projects", "logins"}
+_TOP_KEYS = {"poll_seconds", "job_timeout", "projects"}
 _PROJECT_KEYS = {"repo", "job_timeout"}
 
 
@@ -41,31 +35,6 @@ class OrchConfig:
     poll_seconds: int
     projects: tuple[Project, ...]
     job_timeout: int | None = None
-    logins: tuple[tuple[str, str], ...] = ()
-
-
-def approver_login_findings(
-    config: OrchConfig,
-    approvers: set[str],
-) -> list[Finding]:
-    """Warn for each bot login mapped to an after: approver."""
-    findings: list[Finding] = []
-    for login, identity in config.logins:
-        if identity not in approvers:
-            continue
-        if _is_bot_login(login) or identity.endswith("-bot"):
-            findings.append(
-                Finding(
-                    "warning",
-                    f"bot login {login!r} is mapped to after: approver {identity!r}",
-                )
-            )
-    return findings
-
-
-def _is_bot_login(login: str) -> bool:
-    lowered = login.lower()
-    return lowered.endswith("[bot]") or "bot" in re.split(r"[-_\[\]]", lowered)
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -107,45 +76,19 @@ def _validate(data: dict) -> tuple[OrchConfig | None, list[Finding]]:
     poll_seconds = _poll_seconds(data, findings)
     job_timeout = _timeout(data.get("job_timeout", None), "job_timeout", "job_timeout" in data, findings)
     projects = _projects(data, findings)
-    logins = _logins(data, findings)
 
     if any(item.severity == "error" for item in findings):
         return None, findings
     assert poll_seconds is not None
     assert projects is not None
-    assert logins is not None
     return (
         OrchConfig(
             poll_seconds=poll_seconds,
             projects=projects,
             job_timeout=job_timeout,
-            logins=logins,
         ),
         findings,
     )
-
-
-def _logins(data: dict, findings: list[Finding]) -> tuple[tuple[str, str], ...] | None:
-    if "logins" not in data:
-        return ()
-    value = data["logins"]
-    if not isinstance(value, dict):
-        findings.append(Finding("error", "logins must map a login to an identity"))
-        return None
-    logins: list[tuple[str, str]] = []
-    for login, identity in value.items():
-        if (
-            not isinstance(login, str)
-            or not login
-            or not isinstance(identity, str)
-            or _IDENTITY.fullmatch(identity) is None
-        ):
-            findings.append(
-                Finding("error", f"logins.{login} must name a lowercase identity")
-            )
-            return None
-        logins.append((login, identity))
-    return tuple(logins)
 
 
 def _poll_seconds(data: dict, findings: list[Finding]) -> int | None:

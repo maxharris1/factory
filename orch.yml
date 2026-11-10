@@ -2,8 +2,6 @@
 # Required: poll_seconds, projects[].repo.
 # Optional: job_timeout and projects[].job_timeout, in minutes.
 # When both are omitted the job timeout is 90 minutes.
-# Optional: logins, a map from tracker login to trusted identity.
-# check-config warns when a bot login maps to an after: approver.
 # log path and Linear access are not v1 fields.
 poll_seconds: 60
 projects:

@@ -2,9 +2,7 @@ from pathlib import Path
 
 from lib.orch_yml import (
     DEFAULT_JOB_TIMEOUT_MINUTES,
-    OrchConfig,
     POLL_SECONDS,
-    approver_login_findings,
     load_orch_yml,
     resolve_job_timeout,
 )
@@ -146,46 +144,3 @@ def test_job_timeout_must_be_a_positive_integer(tmp_path: Path) -> None:
     config, findings = load_orch_yml(path)
     assert config is None
     assert any("job_timeout must be a positive integer" in finding.message for finding in findings)
-
-
-def test_logins_are_optional_and_must_name_a_lowercase_identity(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "orch.yml"
-    path.write_text(
-        "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
-        "logins:\n  tracy-harris: tracy-site\n",
-        encoding="utf-8",
-    )
-    config, findings = load_orch_yml(path)
-    assert findings == []
-    assert config is not None
-    assert config.logins == (("tracy-harris", "tracy-site"),)
-
-    path.write_text(
-        "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
-        "logins:\n  tracy-harris: Tracy Site\n",
-        encoding="utf-8",
-    )
-    config, findings = load_orch_yml(path)
-    assert config is None
-    assert [item.severity for item in findings] == ["error"]
-
-
-def test_bot_login_mapped_to_an_after_approver_warns() -> None:
-    config = OrchConfig(
-        poll_seconds=60,
-        projects=(),
-        logins=(
-            ("tracy-harris", "tracy-site"),
-            ("tracy-site[bot]", "tracy-site"),
-            ("max-claude-bot", "tracy-site"),
-            ("someone", "claude-bot"),
-            ("claude-bot-gh", "claude-bot"),
-        ),
-    )
-
-    findings = approver_login_findings(config, {"tracy-site", "claude-bot"})
-
-    assert [item.severity for item in findings] == ["warning"] * 4
-    assert "tracy-harris" not in " ".join(item.message for item in findings)
