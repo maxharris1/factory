@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-08 usage reserve, and the F1-14 weekly eval report. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-02 pstack pin, the F1-08 usage reserve, and the F1-14 weekly eval report. Later Phase 1 items are not built.
 
 ## Contracts
 
@@ -17,6 +17,21 @@ bin/orch check-config
 ```
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+
+## pstack pin
+
+[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
+
+```sh
+bin/orch install-skills
+bin/orch install-skills --cloud --project .
+bin/orch doctor --print-canary
+bin/orch doctor --home "$HOME" --responses DIR
+```
+
+`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
+
+`doctor` prints a canary that asks the harness to name poteto-mode and quote the first bold sentence of the pinned poteto-mode orchestrate playbook. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
 
 ## Usage reserve
 
