@@ -39,7 +39,11 @@ class OrchConfig:
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
     """Project override, then the file override, then 90 minutes."""
-    project = next((item for item in config.projects if item.repo == repo), None)
+    wanted = repo.lower()
+    project = next(
+        (item for item in config.projects if item.repo.lower() == wanted),
+        None,
+    )
     if project is None:
         raise KeyError(repo)
     if project.job_timeout is not None:
@@ -141,10 +145,11 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             findings.append(Finding("error", f"projects[{index}].repo must be owner/name"))
             ok = False
             continue
-        if repo in seen:
+        identity = repo.lower()
+        if identity in seen:
             findings.append(Finding("error", f"duplicate project {repo!r}"))
             ok = False
-        seen.add(repo)
+        seen.add(identity)
         timeout = _timeout(
             item.get("job_timeout"),
             f"projects[{index}].job_timeout",

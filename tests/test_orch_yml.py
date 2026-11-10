@@ -97,6 +97,44 @@ def test_unknown_field_is_not_required_and_is_refused(tmp_path: Path) -> None:
     assert any("unknown field 'log_path'" in finding.message for finding in findings)
 
 
+def test_duplicate_repos_are_case_insensitive(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        """
+poll_seconds: 60
+projects:
+  - repo: Acme/Widgets
+    job_timeout: 15
+  - repo: acme/widgets
+    job_timeout: 30
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(path)
+    assert config is None
+    assert any("duplicate project" in finding.message for finding in findings)
+
+
+def test_timeout_lookup_is_case_insensitive(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        """
+poll_seconds: 60
+projects:
+  - repo: Acme/Widgets
+    job_timeout: 15
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None
+    assert resolve_job_timeout(config, "acme/widgets") == 15
+    assert resolve_job_timeout(config, "ACME/WIDGETS") == 15
+
+
 def test_job_timeout_must_be_a_positive_integer(tmp_path: Path) -> None:
     path = tmp_path / "orch.yml"
     path.write_text(

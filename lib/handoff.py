@@ -20,6 +20,7 @@ KINDS = (
     "brief",
     "questions",
     "answers",
+    "go",
     "plan",
     "ready",
     "verdict",
@@ -48,7 +49,7 @@ STATES = (
     "intake",
     "refused",
     "questions",
-    "waiting-on-max",
+    "waiting-max",
     "planning",
     "plan-check",
     "building",
@@ -74,6 +75,7 @@ REQUIRED_BY_KIND = {
     "brief": frozenset(),
     "questions": frozenset(),
     "answers": frozenset(),
+    "go": frozenset(),
     "plan": frozenset(),
     "ready": frozenset({"head"}),
     "verdict": frozenset({"verdict"}),
@@ -126,6 +128,10 @@ def parse_header_line(line: str) -> dict[str, str]:
         raise HandoffError(f"unknown kind {kind!r}")
     for key, value in found.items():
         _check_value(key, value)
+    if kind != "verdict" and "verdict" in found:
+        raise HandoffError("verdict is only valid on kind=verdict")
+    if kind != "verdict" and "ac" in found:
+        raise HandoffError("ac is only valid on kind=verdict")
     for key in sorted(REQUIRED_BY_KIND[kind]):
         if key not in found:
             raise HandoffError(f"missing required key {key!r}")
@@ -138,12 +144,20 @@ def format_header(fields: Mapping[str, str]) -> str:
     extra = [key for key in fields if key not in KEYS]
     if extra:
         raise HandoffError(f"unknown key {extra[0]!r}")
+    for key in KEYS:
+        if key not in fields:
+            continue
+        if _unsafe_value(fields[key]):
+            raise HandoffError(f"bad {key} {fields[key]!r}")
     parts = ["orch:v1"]
     for key in KEYS:
         if key in fields:
             parts.append(f"{key}={fields[key]}")
     line = "<!-- " + " ".join(parts) + " -->"
-    parse_header_line(line)
+    parsed = parse_header_line(line)
+    expected = {key: fields[key] for key in KEYS if key in fields}
+    if parsed != expected:
+        raise HandoffError("header does not round-trip")
     return line
 
 
@@ -174,7 +188,9 @@ def labels_for(
     """Labels for a GitHub-issue repo. Linear and Aut0 get none."""
     if tickets not in TICKETS:
         raise HandoffError("tickets must be github or linear")
-    if tickets == "linear" or repo == AUT0_REPO:
+    if tickets == "linear" or (
+        repo is not None and repo.lower() == AUT0_REPO.lower()
+    ):
         return ()
     fields = handoff.as_dict()
     labels: list[str] = []
@@ -187,6 +203,10 @@ def labels_for(
     if "builder" in fields:
         labels.append(f"orch:builder/{fields['builder']}")
     return tuple(labels)
+
+
+def _unsafe_value(value: str) -> bool:
+    return any(character.isspace() for character in value) or "=" in value or "-->" in value
 
 
 def _check_value(key: str, value: str) -> None:

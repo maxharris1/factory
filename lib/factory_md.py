@@ -4,7 +4,11 @@ check-config enforces the YAML front matter. Review, Ship and Context
 prose is not required to pass. github_issues and github_labels are
 optional booleans; either one set true with tickets: linear is refused.
 Model hints have no allow-list: an unrecognized name warns and the
-check still passes. Builder and reviewer harnesses are the model families.
+check still passes. A side's model family comes from a claude* hint
+(Anthropic), a gpt* or codex* hint (OpenAI), or from a claude or codex
+harness. A cursor harness takes the family of its model hint. Matching
+families are refused. review.rounds.low is at most 1 and
+review.rounds.high is at most 3 (SPEC section 8).
 """
 
 from __future__ import annotations
@@ -94,19 +98,18 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     github_issues = _optional_bool(data, "github_issues", findings)
     github_labels = _optional_bool(data, "github_labels", findings)
 
-    if (
-        builder_harness is not None
-        and reviewer_harness is not None
-        and builder_harness == reviewer_harness
-    ):
-        findings.append(
-            Finding(
-                "error",
-                "same-family reviewer: "
-                f"builder harness {builder_harness!r} and "
-                f"reviewer harness {reviewer_harness!r}",
+    if builder_harness is not None and reviewer_harness is not None:
+        builder_family = _model_family(builder_harness, builder_model)
+        reviewer_family = _model_family(reviewer_harness, reviewer_model)
+        if builder_family is not None and builder_family == reviewer_family:
+            findings.append(
+                Finding(
+                    "error",
+                    "same-family reviewer: "
+                    f"builder family {builder_family!r} and "
+                    f"reviewer family {reviewer_family!r}",
+                )
             )
-        )
     if tickets == "linear" and github_issues is True:
         findings.append(
             Finding("error", "tickets is linear and github_issues is true")
@@ -262,7 +265,33 @@ def _round(rounds: dict, name: str, findings: list[Finding]) -> int | None:
     if not is_strict_int(value) or value < 1:
         findings.append(Finding("error", f"{field} must be a positive integer"))
         return None
+    ceiling = 1 if name == "low" else 3
+    if value > ceiling:
+        findings.append(Finding("error", f"{field} must be at most {ceiling}"))
+        return None
     return int(value)
+
+
+def _model_family(harness: str, model: str | None) -> str | None:
+    """Anthropic, OpenAI, or another family taken from a cursor hint."""
+    if model is not None:
+        hinted = _family_name(model)
+        if hinted is not None:
+            return hinted
+        if harness == "cursor":
+            return "other:" + model.lower()
+    if harness == "cursor":
+        return None
+    return _family_name(harness)
+
+
+def _family_name(name: str) -> str | None:
+    lowered = name.lower()
+    if lowered.startswith("claude"):
+        return "anthropic"
+    if lowered.startswith("gpt") or lowered.startswith("codex"):
+        return "openai"
+    return None
 
 
 def _ship(data: dict, findings: list[Finding]) -> str | None:

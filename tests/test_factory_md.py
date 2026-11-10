@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
-from lib.schema import AUT0_REPO, HARNESSES
+from lib.schema import AUT0_REPO
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -155,7 +155,23 @@ def test_missing_required_field(tmp_path: Path, remove: str, message: str) -> No
     assert any(finding.severity == "error" for finding in findings)
 
 
-@pytest.mark.parametrize("harness", HARNESSES)
+def _actors(
+    builder_harness: str,
+    builder_model: str | None,
+    reviewer_harness: str,
+    reviewer_model: str | None,
+) -> dict:
+    data = copy.deepcopy(VALID)
+    data["builder"] = {"harness": builder_harness}
+    if builder_model is not None:
+        data["builder"]["model"] = builder_model
+    data["reviewer"] = {"harness": reviewer_harness}
+    if reviewer_model is not None:
+        data["reviewer"]["model"] = reviewer_model
+    return data
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
 def test_same_family_reviewer_is_refused(tmp_path: Path, harness: str) -> None:
     data = copy.deepcopy(VALID)
     data["builder"]["harness"] = harness
@@ -163,6 +179,39 @@ def test_same_family_reviewer_is_refused(tmp_path: Path, harness: str) -> None:
     config, findings = load_factory_md(write_factory(tmp_path, data))
     assert config is None
     assert any("same-family reviewer" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize(
+    ("builder_harness", "builder_model", "reviewer_harness", "reviewer_model"),
+    [
+        ("claude", "claude-sonnet", "cursor", "claude-sonnet"),
+        ("claude", None, "cursor", "claude-opus"),
+        ("codex", None, "cursor", "gpt-6-astra"),
+        ("codex", "codex-mini", "cursor", "codex-mini"),
+        ("cursor", "claude-sonnet", "claude", None),
+        ("cursor", "claude-sonnet", "claude", "claude-haiku"),
+    ],
+)
+def test_cursor_hint_in_the_same_family_is_refused(
+    tmp_path: Path,
+    builder_harness: str,
+    builder_model: str | None,
+    reviewer_harness: str,
+    reviewer_model: str | None,
+) -> None:
+    data = _actors(builder_harness, builder_model, reviewer_harness, reviewer_model)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any("same-family reviewer" in finding.message for finding in findings)
+
+
+def test_cursor_reviewer_with_another_family_is_accepted(tmp_path: Path) -> None:
+    data = _actors("claude", "claude-sonnet", "cursor", "gpt-6-astra")
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is not None
+    assert findings == []
+    assert config.reviewer_harness == "cursor"
+    assert config.reviewer_model == "gpt-6-astra"
 
 
 def test_different_models_on_one_harness_are_still_same_family(tmp_path: Path) -> None:
@@ -203,6 +252,28 @@ def test_github_flags_are_allowed_when_tickets_are_github(tmp_path: Path) -> Non
     assert config is not None
     assert config.github_issues is True
     assert config.github_labels is True
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("low", 2),
+        ("high", 4),
+        ("high", 10),
+    ],
+)
+def test_round_caps_above_section_8_are_refused(
+    tmp_path: Path, name: str, value: int
+) -> None:
+    data = copy.deepcopy(VALID)
+    data["review"]["rounds"][name] = value
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    ceiling = 1 if name == "low" else 3
+    assert any(
+        f"review.rounds.{name} must be at most {ceiling}" in finding.message
+        for finding in findings
+    )
 
 
 def test_unknown_model_warns_and_still_passes(tmp_path: Path) -> None:
