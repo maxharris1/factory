@@ -45,6 +45,39 @@ class FakeShipper:
         self.requests.append(request)
 
 
+class FakeReviewActions:
+    def set_state(self, ticket: TrackedTicket, state: str) -> None:
+        del ticket, state
+
+    def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
+        del ticket, head
+        return "0" * 40
+
+    def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
+        del ticket, head
+        return False
+
+    def merge(
+        self,
+        ticket: TrackedTicket,
+        *,
+        squash: bool,
+        match_head_commit: str,
+    ) -> None:
+        del ticket, squash, match_head_commit
+
+    def handoff(self, ticket: TrackedTicket, head: str) -> None:
+        del ticket, head
+
+    def await_approver(
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        approver: str,
+    ) -> None:
+        del ticket, head, approver
+
+
 class FakeBot:
     def __init__(self, queue: SQLiteJobQueue, recipient: str):
         self.queue = queue
@@ -96,6 +129,7 @@ def ticket(
         comments=comments,
         current_head=head,
         ci={head: CIResult("success")} if head else {},
+        risk="high",
     )
 
 
@@ -140,6 +174,7 @@ def setup(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
         hooks=hooks if hooks is not None else (T7Hook(), T8Hook(shipper)),
     )
     return dispatcher, queue
