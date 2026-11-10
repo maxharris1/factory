@@ -2,13 +2,29 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
+F1-03 and F1-04 contracts. Later Phase 1 items are not built.
 
 ## Contracts
 
 - [`orch.yml`](orch.yml) lists the projects to poll and the dispatcher settings ([docs/SPEC.md](docs/SPEC.md) section 7). [`config/orch.example.yml`](config/orch.example.yml) is the minimal file.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
+- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T2 and T6 to
+  already-tracked ticket snapshots. Its poll source must read policy from the
+  trusted base branch and provide the plan/build decision.
+
+## Queue interface
+
+[`lib/queue.py`](lib/queue.py) is the integration boundary for waiting bots and
+routing. A producer calls `enqueue`; an owning bot calls `claim`, periodically
+calls `heartbeat`, then calls `finish` with the handoff comment ID. Finishing
+without a handoff ID invokes T6. `claim` is intentionally non-blocking so
+`orch wait` can add blocking behavior without changing the queue contract.
+
+Jobs name one action (`plan`, `build`, `review`, `fix`, or `stuck`) and one
+recipient (`claude`, `codex`, `cursor`, or `grok`). The dispatcher queues jobs;
+it never executes a harness binary.
 
 ## Check config
 
