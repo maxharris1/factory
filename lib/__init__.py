@@ -5,6 +5,7 @@
 - lib.handoff: orch:v1 comments, labels, and the Aut0 no-label path
 - lib.queue: durable jobs shared with owning bots
 - lib.dispatcher: poll loop and transitions T1 through T6
+- lib.wait: blocking orch wait and the orch job helpers on lib.queue
 - lib.orchestrate: orchestrate-project intake, questions, routing, and stops
 - lib.pstack_pin: pinned pstack, install-skills, and the doctor canary
 - lib.usage: best-fit routing and the usage reserve. F1-07 calls route_job
