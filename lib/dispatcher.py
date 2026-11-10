@@ -101,6 +101,10 @@ class ReviewActions(Protocol):
     ) -> None: ...
 
 
+class RetryableStateError(RuntimeError):
+    pass
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -132,7 +136,10 @@ class Dispatcher:
             tracker="linear",
         )
         for ticket in source.tracked_tickets(self._tracked_refs()):
-            self.process(ticket)
+            try:
+                self.process(ticket)
+            except Exception as exc:
+                self._record_poll_error(ticket, type(exc).__name__)
         self.reconcile_jobs()
 
     def process(self, ticket: TrackedTicket) -> None:
@@ -169,6 +176,8 @@ class Dispatcher:
                 else:
                     handled, outcome = self._t5_answers(ticket, comment, fields)
             except Exception as exc:
+                if isinstance(exc, RetryableStateError):
+                    raise
                 if kind not in ("verdict", "questions", "answers"):
                     raise
                 self._mark_ship_intent_failed(ticket, comment.id, type(exc).__name__)
@@ -324,7 +333,11 @@ class Dispatcher:
             return True, "rejected-revise-author"
         verdict_head = fields.get("head")
         if _matching_head(verdict_head or "", ticket.current_head) is None:
-            return True, "stale-revise-head"
+            return True, "stale-revise"
+        round_field = fields.get("round")
+        reported_round = (
+            int(round_field.split("/", 1)[0]) if round_field is not None else None
+        )
         cap = (
             ticket.factory.rounds_low
             if ticket.risk == "low"
@@ -345,7 +358,7 @@ class Dispatcher:
                 replay_state = (
                     "capped" if outcome == "capped-review" else "fixing"
                 )
-                self.review_actions.set_state(ticket, replay_state)
+                self._write_state_label(ticket, replay_state)
                 return True, outcome
             connection.execute(
                 """
@@ -364,10 +377,13 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
             assert state is not None
-            if state["workflow_state"] not in ("review", "fixing"):
-                connection.commit()
-                return True, "stale-revise-state"
             round_number = int(state["review_round"]) + 1
+            if (
+                state["workflow_state"] != "review"
+                or reported_round != round_number
+            ):
+                connection.commit()
+                return True, "stale-revise"
             next_state = "capped" if round_number >= cap else "fixing"
             if next_state == "fixing":
                 self.queue.enqueue_in_transaction(
@@ -419,7 +435,7 @@ class Dispatcher:
                 ),
             )
             connection.commit()
-        self.review_actions.set_state(ticket, next_state)
+        self._write_state_label(ticket, next_state)
         return True, outcome
 
     def _t4(
@@ -433,6 +449,16 @@ class Dispatcher:
         current_head = ticket.current_head
         if current_head is None:
             return False, "pr-head-unavailable"
+        ship = ticket.factory.ship
+        intent = self._ship_intent(ticket, comment.id)
+        if intent is not None:
+            return self._replay_ship_intent(
+                ticket,
+                comment,
+                current_head,
+                ship,
+                intent,
+            )
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
         round_field = fields.get("round")
@@ -447,9 +473,13 @@ class Dispatcher:
             or _matching_head(approved_head, review_head) is None
         ):
             return True, "stale-approve"
+        if not _is_patch_id(current_head):
+            raise ValueError("ship head must be a 40-character hexadecimal SHA")
         result = ticket.ci.get(current_head)
-        if result is None or result.status != "success":
+        if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
+        if result.status == "failure":
+            return True, "approve-ci-red"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -470,41 +500,45 @@ class Dispatcher:
             )
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
-        ship = ticket.factory.ship
         intent_status, replay = self._prepare_ship_intent(
             ticket,
             comment.id,
             current_head,
             ship,
         )
-        if intent_status == "completed":
-            self.review_actions.set_state(ticket, _ship_state(ship))
-            return True, f"ship-already-completed-{ship}"
-        if replay and ship == "merge" and self.review_actions.is_merged(
-            ticket,
-            current_head,
-        ):
-            self._complete_ship_intent(ticket, comment.id, "merged")
-            self.review_actions.set_state(ticket, "merged")
-            return True, "merge-confirmed"
+        if replay:
+            intent = self._ship_intent(ticket, comment.id)
+            assert intent is not None
+            return self._replay_ship_intent(
+                ticket,
+                comment,
+                current_head,
+                ship,
+                intent,
+            )
+        assert intent_status == "pending"
         if ship == "merge":
+            if self.review_actions.is_merged(ticket, current_head):
+                self._complete_ship_intent(ticket, comment.id, "merged")
+                self._write_state_label(ticket, "merged")
+                return True, "merge-confirmed"
             self.review_actions.merge(
                 ticket,
                 squash=True,
                 match_head_commit=current_head,
             )
             self._complete_ship_intent(ticket, comment.id, "merged")
-            self.review_actions.set_state(ticket, "merged")
+            self._write_state_label(ticket, "merged")
             return True, "merged"
         if ship == "handoff":
             self.review_actions.handoff(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "handed-off")
-            self.review_actions.set_state(ticket, "handed-off")
+            self._write_state_label(ticket, "handed-off")
             return True, "handed-off"
         approver = ship.removeprefix("after:")
         self.review_actions.await_approver(ticket, current_head, approver)
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
-        self.review_actions.set_state(ticket, "waiting-external")
+        self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
 
     def _t5_questions(
@@ -527,13 +561,16 @@ class Dispatcher:
             connection.execute("BEGIN IMMEDIATE")
             waiting = connection.execute(
                 """
-                SELECT workflow_state FROM ticket_state
+                SELECT workflow_state, paused_question_id FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
             if waiting is not None and waiting["workflow_state"] == "waiting-max":
                 connection.commit()
+                if waiting["paused_question_id"] == comment.id:
+                    self._write_state_label(ticket, "waiting-max")
+                    return True, "waiting-max"
                 return True, "already-waiting-max"
             connection.execute(
                 """
@@ -580,7 +617,7 @@ class Dispatcher:
                 ),
             )
             connection.commit()
-        self.review_actions.set_state(ticket, "waiting-max")
+        self._write_state_label(ticket, "waiting-max")
         return True, "waiting-max"
 
     def _t5_answers(
@@ -594,15 +631,34 @@ class Dispatcher:
         with self._connect() as connection:
             paused = connection.execute(
                 """
-                SELECT paused_action, paused_recipient, paused_head,
-                       paused_generation, paused_question_id
+                SELECT workflow_state, paused_action, paused_recipient,
+                       paused_head, paused_generation, paused_question_id
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
-                  AND workflow_state = 'waiting-max'
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        if paused is None or paused["paused_action"] is None:
+            resumed = connection.execute(
+                """
+                SELECT action FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND source_comment_id = ? AND dedupe_key LIKE 't5:%'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+        if (
+            paused is not None
+            and paused["workflow_state"] != "waiting-max"
+            and resumed is not None
+        ):
+            resumed_state = str(paused["workflow_state"])
+            self._write_state_label(ticket, resumed_state)
+            return True, f"resumed-{resumed['action']}"
+        if (
+            paused is None
+            or paused["workflow_state"] != "waiting-max"
+            or paused["paused_action"] is None
+        ):
             return True, "rejected-answers-without-question"
         action = str(paused["paused_action"])
         recipient = str(paused["paused_recipient"])
@@ -640,7 +696,7 @@ class Dispatcher:
                 """,
                 (resumed_state, ticket.repo.lower(), ticket.ticket_id),
             )
-        self.review_actions.set_state(ticket, resumed_state)
+        self._write_state_label(ticket, resumed_state)
         return True, f"resumed-{action}"
 
     def _trusted_reviewer(
@@ -698,6 +754,8 @@ class Dispatcher:
         generation: int,
         detail: str | None = None,
     ) -> None:
+        _state, completed_rounds = self._review_context(ticket)
+        review_round = completed_rounds + 1
         self.queue.enqueue(
             JobRequest(
                 repo=ticket.repo,
@@ -710,7 +768,10 @@ class Dispatcher:
                 head=head,
                 detail=detail,
             ),
-            dedupe_key=f"review:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
+            dedupe_key=(
+                f"review:{_scope(ticket.repo, ticket.ticket_id)}:"
+                f"{head}:r{review_round}"
+            ),
         )
 
     def _queue_patch_review(
@@ -762,6 +823,53 @@ class Dispatcher:
             return None
         return str(row["head"])
 
+    def _ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+    ) -> tuple[str, str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT head, policy, status FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["head"]), str(row["policy"]), str(row["status"])
+
+    def _replay_ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        current_head: str,
+        policy: str,
+        intent: tuple[str, str, str],
+    ) -> tuple[bool, str]:
+        intent_head, intent_policy, status = intent
+        if intent_head != current_head or intent_policy != policy:
+            raise RuntimeError("ship intent does not match approval")
+        if status == "completed":
+            self._write_state_label(ticket, _ship_state(policy))
+            return True, f"ship-already-completed-{policy}"
+        if status == "pending":
+            if policy == "merge" and self.review_actions.is_merged(
+                ticket,
+                current_head,
+            ):
+                self._complete_ship_intent(ticket, comment.id, "merged")
+                self._write_state_label(ticket, "merged")
+                return True, "merge-confirmed"
+            self._hold_ship_intent(ticket, comment.id)
+            return True, "ship-unconfirmed"
+        if status == "unconfirmed":
+            return True, "ship-unconfirmed"
+        if status == "failed":
+            return True, "ship-failed"
+        raise RuntimeError(f"unknown ship intent status {status!r}")
+
     def _prepare_ship_intent(
         self,
         ticket: TrackedTicket,
@@ -797,8 +905,39 @@ class Dispatcher:
                     policy,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'ship'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
             connection.commit()
         return "pending", False
+
+    def _hold_ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE ship_intents SET status = 'unconfirmed'
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND status = 'pending'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            )
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'ship'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+            connection.commit()
 
     def _complete_ship_intent(
         self,
@@ -841,12 +980,18 @@ class Dispatcher:
                 (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
 
+    def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
+        try:
+            self.review_actions.set_state(ticket, state)
+        except Exception as exc:
+            raise RetryableStateError(state) from exc
+
     def _set_workflow_state(
         self,
         ticket: TrackedTicket,
         state: str,
     ) -> None:
-        self.review_actions.set_state(ticket, state)
+        self._write_state_label(ticket, state)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1063,6 +1208,22 @@ class Dispatcher:
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
+            )
+
+    def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO poll_errors (
+                    repo, ticket_id, error, recorded_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    error,
+                    self.queue.now(),
+                ),
             )
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
@@ -1330,6 +1491,17 @@ class Dispatcher:
                     comment_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
                     PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS poll_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
                 )
                 """
             )
