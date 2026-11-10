@@ -1000,6 +1000,141 @@ def test_t3_duplicate_revise_in_fixing_is_stale(tmp_path: Path) -> None:
     assert fix_count == 1
 
 
+def test_p4b_late_revise_for_the_previous_round_is_stale(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    revise = VERDICT.format(round=1, head=head, verdict="REVISE", risk="high")
+    first = comment("verdict-1", revise, author="codex-login", created_at=1)
+    dispatcher.process(ticket(first, head=head))
+    fix = queue.claim("claude")
+    assert fix is not None
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
+    ready = comment(
+        "ready-2",
+        READY.format(head=head),
+        author="claude-login",
+        created_at=2,
+    )
+    green = {head: CIResult("success")}
+    dispatcher.process(ticket(first, ready, head=head, ci=green))
+    review = queue.claim("codex")
+    assert review is not None and review.request.head == head
+    late = comment("verdict-late", revise, author="codex-login", created_at=3)
+
+    dispatcher.process(ticket(first, ready, late, head=head, ci=green))
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+              AND comment_id = 'verdict-late'
+            """
+        ).fetchone()[0]
+        fix_count = connection.execute(
+            """
+            SELECT count(*) FROM jobs
+            WHERE repo = 'owner/repo' AND ticket_id = '42' AND action = 'fix'
+            """
+        ).fetchone()[0]
+    assert outcome == "stale-revise"
+    assert fix_count == 1
+
+
+def track(queue: SQLiteJobQueue) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+            VALUES ('owner/repo', '42', 'github', 0)
+            """
+        )
+
+
+def handled_outcome(queue: SQLiteJobQueue, comment_id: str) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute(
+                """
+                SELECT outcome FROM handled_comments
+                WHERE repo = 'owner/repo' AND ticket_id = '42'
+                  AND comment_id = ?
+                """,
+                (comment_id,),
+            ).fetchone()[0]
+        )
+
+
+def job_count(queue: SQLiteJobQueue, action: str) -> int:
+    with queue.connect() as connection:
+        return int(
+            connection.execute(
+                """
+                SELECT count(*) FROM jobs
+                WHERE repo = 'owner/repo' AND ticket_id = '42' AND action = ?
+                """,
+                (action,),
+            ).fetchone()[0]
+        )
+
+
+def test_p10_t3_replays_a_failed_fixing_label_write(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    actions.state_failures.add(("owner/repo", "fixing"))
+    revise = comment(
+        "verdict-1",
+        VERDICT.format(round=1, head=head, verdict="REVISE", risk="high"),
+        author="codex-login",
+    )
+    track(queue)
+    source = FakeSource(ticket(revise, head=head))
+
+    dispatcher.poll_once(source)
+    before = len(actions.states)
+    actions.state_failures.clear()
+    dispatcher.poll_once(source)
+
+    assert "fixing" in actions.states[before:]
+    assert handled_outcome(queue, "verdict-1") == "queued-review-fix"
+    assert job_count(queue, "fix") == 1
+
+
+@pytest.mark.parametrize("kind", ["questions", "answers"])
+def test_p10_t5_replays_a_failed_label_write(tmp_path: Path, kind: str) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", QUESTIONS, author="claude-login", created_at=1)
+    answer = comment("answers-1", ANSWERS, author="grok-login", created_at=2)
+    comments: tuple[Comment, ...] = (question,)
+    label = "waiting-max"
+    if kind == "answers":
+        dispatcher.process(ticket(question, head=head))
+        comments += (answer,)
+        label = "review"
+    actions.state_failures.add(("owner/repo", label))
+    track(queue)
+    source = FakeSource(ticket(*comments, head=head))
+
+    dispatcher.poll_once(source)
+    before = len(actions.states)
+    actions.state_failures.clear()
+    dispatcher.poll_once(source)
+
+    assert label in actions.states[before:]
+    if kind == "questions":
+        assert handled_outcome(queue, "questions-1") == "waiting-max"
+        assert job_count(queue, "clarify") == 1
+    else:
+        assert handled_outcome(queue, "answers-1") == "resumed-review"
+        assert job_count(queue, "review") == 2
+
+
 def test_t3_comment_replay_does_not_increment_round_twice(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     head = "a" * 40
@@ -1895,9 +2030,11 @@ def test_completed_intent_replays_label_write_before_stale_gates(
     source = FakeSource(snapshot)
 
     dispatcher.poll_once(source)
+    before = len(actions.states)
     actions.state_failures.clear()
     dispatcher.poll_once(source)
 
+    assert actions.states[before:] == ["merged"]
     assert actions.merges == [(True, head)]
     with queue.connect() as connection:
         intent = connection.execute(
