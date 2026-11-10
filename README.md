@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, and the F1-14 weekly eval report. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-08 usage reserve, and the F1-14 weekly eval report. Later Phase 1 items are not built.
 
 ## Contracts
 
@@ -17,6 +17,12 @@ bin/orch check-config
 ```
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+
+## Usage reserve
+
+`orchestrate-project` (F1-07) calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md`. The best fit for a role is that role's harness and model hint; the other harnesses follow in `claude`, `codex`, `cursor` order. The reviewer is a different model family from the builder this call selected.
+
+The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to the next fit that is outside the reserve. A resumed paused step, past-ship work, or a job Max marks urgent may use the reserve. Each owning bot calls `reserve_check` on its own harness before starting, when it has a verified report. No verified report leaves the route on best fit. Routing reads no live usage; tests use [`tests/fixtures/usage/`](tests/fixtures/usage/).
 
 ## Weekly eval report
 
