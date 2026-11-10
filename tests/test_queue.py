@@ -1,8 +1,14 @@
+import inspect
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
+
+
+def make_queue(path: Path, now: list[float]) -> SQLiteJobQueue:
+    return SQLiteJobQueue(path, clock=lambda: now[0])
 
 
 def request(
@@ -24,50 +30,57 @@ def request(
 
 def test_queue_contract_is_durable_and_deduplicates_enqueue(tmp_path: Path) -> None:
     path = tmp_path / "queue.sqlite3"
-    first_queue = SQLiteJobQueue(path)
-    first = first_queue.enqueue(request(), dedupe_key="t1:42", now=10)
-    duplicate = first_queue.enqueue(request(), dedupe_key="t1:42", now=20)
-    restarted_queue = SQLiteJobQueue(path)
-    claimed = restarted_queue.claim("claude", now=30)
+    now = [10.0]
+    first_queue = make_queue(path, now)
+    first = first_queue.enqueue(request(), dedupe_key="t1:42")
+    now[0] = 20
+    duplicate = first_queue.enqueue(request(), dedupe_key="t1:42")
+    restarted_queue = make_queue(path, now)
+    now[0] = 30
+    claimed = restarted_queue.claim("claude")
 
     assert duplicate.id == first.id
     assert claimed is not None
     assert claimed.id == first.id
     assert claimed.state == "running"
     assert claimed.last_activity_at == 30
-    assert restarted_queue.claim("claude", now=31) is None
+    assert restarted_queue.claim("claude") is None
 
 
 def test_claim_only_returns_jobs_for_the_requested_recipient(tmp_path: Path) -> None:
-    queue = SQLiteJobQueue(tmp_path / "queue.sqlite3")
+    now = [10.0]
+    queue = make_queue(tmp_path / "queue.sqlite3", now)
     queue.enqueue(
         request(action="review", recipient="codex"),
         dedupe_key="review",
-        now=10,
     )
 
-    assert queue.claim("claude", now=20) is None
-    claimed = queue.claim("codex", now=20)
+    now[0] = 20
+    assert queue.claim("claude") is None
+    claimed = queue.claim("codex")
     assert claimed is not None
     assert claimed.request.action == "review"
 
 
 def test_heartbeat_and_successful_finish_record_the_handoff(tmp_path: Path) -> None:
-    queue = SQLiteJobQueue(tmp_path / "queue.sqlite3")
-    queued = queue.enqueue(request(), dedupe_key="build", now=10)
-    running = queue.claim("claude", now=20)
+    now = [10.0]
+    queue = make_queue(tmp_path / "queue.sqlite3", now)
+    queued = queue.enqueue(request(), dedupe_key="build")
+    now[0] = 20
+    running = queue.claim("claude")
     assert running is not None
 
-    heartbeat = queue.heartbeat(running.id, now=30)
+    now[0] = 30
+    heartbeat = queue.heartbeat(running.id)
+    now[0] = 40
     finished = queue.finish(
         running.id,
         handoff_comment_id="handoff-9",
-        now=40,
     )
+    now[0] = 50
     repeated = queue.finish(
         running.id,
         handoff_comment_id="handoff-9",
-        now=50,
     )
 
     assert queued.id == heartbeat.id
@@ -79,12 +92,15 @@ def test_heartbeat_and_successful_finish_record_the_handoff(tmp_path: Path) -> N
 
 
 def test_finish_without_handoff_exposes_one_t6_failure(tmp_path: Path) -> None:
-    queue = SQLiteJobQueue(tmp_path / "queue.sqlite3")
-    queue.enqueue(request(), dedupe_key="build", now=10)
-    running = queue.claim("claude", now=20)
+    now = [10.0]
+    queue = make_queue(tmp_path / "queue.sqlite3", now)
+    queue.enqueue(request(), dedupe_key="build")
+    now[0] = 20
+    running = queue.claim("claude")
     assert running is not None
 
-    failed = queue.finish(running.id, handoff_comment_id=None, now=30)
+    now[0] = 30
+    failed = queue.finish(running.id, handoff_comment_id=None)
     assert failed.state == "failed"
     assert queue.unhandled_failures() == (failed,)
 
@@ -98,14 +114,18 @@ def test_timed_out_update_fails_closed_after_a_concurrent_heartbeat(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "queue.sqlite3"
-    queue = SQLiteJobQueue(path)
-    queue.enqueue(request(), dedupe_key="build", now=10)
-    stale = queue.claim("claude", now=20)
+    now = [10.0]
+    queue = make_queue(path, now)
+    queue.enqueue(request(), dedupe_key="build")
+    now[0] = 20
+    stale = queue.claim("claude")
     assert stale is not None
-    SQLiteJobQueue(path).heartbeat(stale.id, now=30)
+    now[0] = 30
+    make_queue(path, now).heartbeat(stale.id)
 
-    assert queue.mark_timed_out(stale, now=40) is False
-    current = queue.running()
+    now[0] = 40
+    assert queue.mark_timed_out(stale) is False
+    current = queue.outstanding()
     assert len(current) == 1
     assert current[0].last_activity_at == 30
 
@@ -119,6 +139,38 @@ def test_timed_out_update_fails_closed_after_a_concurrent_heartbeat(
     ],
 )
 def test_queue_refuses_invalid_jobs(tmp_path: Path, invalid: JobRequest) -> None:
-    queue = SQLiteJobQueue(tmp_path / "queue.sqlite3")
+    queue = make_queue(tmp_path / "queue.sqlite3", [10.0])
     with pytest.raises(QueueError):
-        queue.enqueue(invalid, dedupe_key="invalid", now=10)
+        queue.enqueue(invalid, dedupe_key="invalid")
+
+
+def test_concurrent_claim_dispatches_one_job_once(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    now = [10.0]
+    queue = make_queue(path, now)
+    queue.enqueue(request(), dedupe_key="build")
+    source = inspect.getsource(SQLiteJobQueue.claim)
+    assert 'execute("BEGIN IMMEDIATE")' in source
+
+    def claim() -> str | None:
+        job = make_queue(path, now).claim("claude")
+        return job.id if job is not None else None
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        claimed = list(executor.map(lambda _index: claim(), range(32)))
+
+    assert len([job_id for job_id in claimed if job_id is not None]) == 1
+
+
+@pytest.mark.parametrize("contents", [b"", b"not a sqlite database"])
+def test_queue_refuses_empty_or_garbage_database(
+    tmp_path: Path,
+    contents: bytes,
+) -> None:
+    path = tmp_path / "d.db"
+    path.write_bytes(contents)
+
+    with pytest.raises(QueueError, match="database file"):
+        make_queue(path, [10.0])
+
+    assert path.read_bytes() == contents

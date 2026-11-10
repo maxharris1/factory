@@ -11,9 +11,9 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
-ACTIONS = ("plan", "build", "review", "fix", "stuck")
+ACTIONS = ("plan", "build", "review", "fix", "clarify", "stuck")
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")
 
@@ -30,6 +30,7 @@ class JobRequest:
     recipient: str
     source_comment_id: str
     timeout_seconds: int
+    generation: int = 1
     attempt: int = 1
     head: str | None = None
     detail: str | None = None
@@ -53,26 +54,24 @@ class JobQueue(Protocol):
         request: JobRequest,
         *,
         dedupe_key: str,
-        now: float,
     ) -> Job: ...
 
-    def claim(self, recipient: str, *, now: float) -> Job | None: ...
+    def claim(self, recipient: str) -> Job | None: ...
 
-    def heartbeat(self, job_id: str, *, now: float) -> Job: ...
+    def heartbeat(self, job_id: str) -> Job: ...
 
     def finish(
         self,
         job_id: str,
         *,
         handoff_comment_id: str | None,
-        now: float,
     ) -> Job: ...
 
 
 class DispatcherQueue(JobQueue, Protocol):
-    def running(self) -> tuple[Job, ...]: ...
+    def outstanding(self) -> tuple[Job, ...]: ...
 
-    def mark_timed_out(self, job: Job, *, now: float) -> bool: ...
+    def mark_timed_out(self, job: Job) -> bool: ...
 
     def unhandled_failures(self) -> tuple[Job, ...]: ...
 
@@ -80,56 +79,83 @@ class DispatcherQueue(JobQueue, Protocol):
 
 
 class SQLiteJobQueue:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock: Callable[[], float],
+    ):
         self.path = path
+        self.clock = clock
         self._initialize()
+
+    def now(self) -> float:
+        return self.clock()
+
+    def connect(self) -> sqlite3.Connection:
+        return self._connect()
 
     def enqueue(
         self,
         request: JobRequest,
         *,
         dedupe_key: str,
-        now: float,
+    ) -> Job:
+        with self._connect() as connection:
+            return self.enqueue_in_transaction(
+                connection,
+                request,
+                dedupe_key=dedupe_key,
+            )
+
+    def enqueue_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        request: JobRequest,
+        *,
+        dedupe_key: str,
     ) -> Job:
         _validate_request(request)
         if not dedupe_key:
             raise QueueError("dedupe_key must not be empty")
         job_id = uuid.uuid4().hex
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO jobs (
-                    id, dedupe_key, repo, ticket_id, action, recipient,
-                    source_comment_id, timeout_seconds, attempt, head, detail,
-                    state, created_at, last_activity_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-                """,
-                (
-                    job_id,
-                    dedupe_key,
-                    request.repo,
-                    request.ticket_id,
-                    request.action,
-                    request.recipient,
-                    request.source_comment_id,
-                    request.timeout_seconds,
-                    request.attempt,
-                    request.head,
-                    request.detail,
-                    now,
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM jobs WHERE dedupe_key = ?",
-                (dedupe_key,),
-            ).fetchone()
+        now = self.now()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO jobs (
+                id, dedupe_key, repo, ticket_id, action, recipient,
+                source_comment_id, timeout_seconds, generation, attempt,
+                head, detail, state, created_at, last_activity_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            """,
+            (
+                job_id,
+                dedupe_key,
+                request.repo,
+                request.ticket_id,
+                request.action,
+                request.recipient,
+                request.source_comment_id,
+                request.timeout_seconds,
+                request.generation,
+                request.attempt,
+                request.head,
+                request.detail,
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchone()
         assert row is not None
         return _job(row)
 
-    def claim(self, recipient: str, *, now: float) -> Job | None:
+    def claim(self, recipient: str) -> Job | None:
         if recipient not in RECIPIENTS:
             raise QueueError(f"unknown recipient {recipient!r}")
+        now = self.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -160,7 +186,8 @@ class SQLiteJobQueue:
         assert updated is not None
         return _job(updated)
 
-    def heartbeat(self, job_id: str, *, now: float) -> Job:
+    def heartbeat(self, job_id: str) -> Job:
+        now = self.now()
         with self._connect() as connection:
             changed = connection.execute(
                 """
@@ -183,8 +210,8 @@ class SQLiteJobQueue:
         job_id: str,
         *,
         handoff_comment_id: str | None,
-        now: float,
     ) -> Job:
+        now = self.now()
         target = "done" if handoff_comment_id is not None else "failed"
         if handoff_comment_id == "":
             raise QueueError("handoff_comment_id must not be empty")
@@ -215,22 +242,35 @@ class SQLiteJobQueue:
         assert updated is not None
         return _job(updated)
 
-    def running(self) -> tuple[Job, ...]:
+    def outstanding(self) -> tuple[Job, ...]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM jobs WHERE state = 'running' ORDER BY created_at, id"
+                """
+                SELECT * FROM jobs
+                WHERE state IN ('queued', 'running')
+                ORDER BY created_at, id
+                """
             ).fetchall()
         return tuple(_job(row) for row in rows)
 
-    def mark_timed_out(self, job: Job, *, now: float) -> bool:
+    def mark_timed_out(self, job: Job) -> bool:
+        now = self.now()
+        if job.state == "queued":
+            predicate = "state = 'queued' AND created_at = ?"
+            expected = job.created_at
+        elif job.state == "running":
+            predicate = "state = 'running' AND last_activity_at = ?"
+            expected = job.last_activity_at
+        else:
+            return False
         with self._connect() as connection:
             changed = connection.execute(
-                """
+                f"""
                 UPDATE jobs
                 SET state = 'failed', finished_at = ?, last_activity_at = ?
-                WHERE id = ? AND state = 'running' AND last_activity_at = ?
+                WHERE id = ? AND {predicate}
                 """,
-                (now, now, job.id, job.last_activity_at),
+                (now, now, job.id, expected),
             ).rowcount
         return changed == 1
 
@@ -264,31 +304,37 @@ class SQLiteJobQueue:
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY,
-                    dedupe_key TEXT NOT NULL UNIQUE,
-                    repo TEXT NOT NULL,
-                    ticket_id TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    recipient TEXT NOT NULL,
-                    source_comment_id TEXT NOT NULL,
-                    timeout_seconds INTEGER NOT NULL,
-                    attempt INTEGER NOT NULL,
-                    head TEXT,
-                    detail TEXT,
-                    state TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_activity_at REAL NOT NULL,
-                    finished_at REAL,
-                    handoff_comment_id TEXT,
-                    failure_handled INTEGER NOT NULL DEFAULT 0
+        if self.path.exists() and self.path.stat().st_size == 0:
+            raise QueueError("database file is empty")
+        try:
+            with self._connect() as connection:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id TEXT PRIMARY KEY,
+                        dedupe_key TEXT NOT NULL UNIQUE,
+                        repo TEXT NOT NULL,
+                        ticket_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        recipient TEXT NOT NULL,
+                        source_comment_id TEXT NOT NULL,
+                        timeout_seconds INTEGER NOT NULL,
+                        generation INTEGER NOT NULL,
+                        attempt INTEGER NOT NULL,
+                        head TEXT,
+                        detail TEXT,
+                        state TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        last_activity_at REAL NOT NULL,
+                        finished_at REAL,
+                        handoff_comment_id TEXT,
+                        failure_handled INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
                 )
-                """
-            )
+        except sqlite3.DatabaseError as exc:
+            raise QueueError("database file is not valid SQLite") from exc
 
 
 def _validate_request(request: JobRequest) -> None:
@@ -300,6 +346,8 @@ def _validate_request(request: JobRequest) -> None:
         raise QueueError(f"unknown recipient {request.recipient!r}")
     if request.timeout_seconds < 1:
         raise QueueError("timeout_seconds must be positive")
+    if request.generation < 1:
+        raise QueueError("generation must be positive")
     if request.attempt not in (1, 2):
         raise QueueError("attempt must be 1 or 2")
 
@@ -312,6 +360,7 @@ def _job(row: sqlite3.Row) -> Job:
         recipient=str(row["recipient"]),
         source_comment_id=str(row["source_comment_id"]),
         timeout_seconds=int(row["timeout_seconds"]),
+        generation=int(row["generation"]),
         attempt=int(row["attempt"]),
         head=str(row["head"]) if row["head"] is not None else None,
         detail=str(row["detail"]) if row["detail"] is not None else None,

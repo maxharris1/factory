@@ -12,8 +12,9 @@ the F1-14 weekly eval report. Later Phase 1 items are not built.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
 - [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T2 and T6 to
-  already-tracked ticket snapshots. Its poll source must read policy from the
-  trusted base branch and provide the plan/build decision.
+  tickets discovered through `orch:state/` GitHub labels or the Linear handoff
+  search. It stores a ticket after the first `brief` or `go` from the trusted
+  Grok login. A `go` must name `state=planning` or `state=building`.
 
 ## Queue interface
 
@@ -21,11 +22,14 @@ the F1-14 weekly eval report. Later Phase 1 items are not built.
 routing. A producer calls `enqueue`; an owning bot calls `claim`, periodically
 calls `heartbeat`, then calls `finish` with the handoff comment ID. Finishing
 without a handoff ID invokes T6. `claim` is intentionally non-blocking so
-`orch wait` can add blocking behavior without changing the queue contract.
+`orch wait` can add blocking behavior without changing the queue contract. One
+clock is injected when the queue opens; all timestamps use that clock.
 
-Jobs name one action (`plan`, `build`, `review`, `fix`, or `stuck`) and one
-recipient (`claude`, `codex`, `cursor`, or `grok`). The dispatcher queues jobs;
-it never executes a harness binary.
+Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, or `stuck`),
+one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
+dispatcher and queue use one SQLite database so terminal state and its wake
+commit atomically. The dispatcher queues jobs; it never executes a harness
+binary.
 
 ## Check config
 
