@@ -1,6 +1,6 @@
 # Simple orchestrator plan (draft for Max, 2026-11-10)
 
-Status: **draft in [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet.** Decisions through 9:42 AM ET on 2026-11-10 are folded in below. The old factory repo was wiped and recreated; see section 13.
+Status: **draft in [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet.** Decisions through 9:49 AM ET on 2026-11-10 are folded in below. The old factory repo was wiped and recreated; see section 14.
 
 ## 1. Goal
 
@@ -75,7 +75,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 | RerouteKeepsCrossFamily, OnlyUrgentUsesReserve, 20% reserve | Routing table in `factory.md` plus the owning bot's usage check (section 6) |
 | ContradictoryConfigNeverRuns | `orch check-config` refuses an inconsistent `factory.md` (e.g. a same-family reviewer) |
 | ExitCodesMeanOneThing (15/16/17/18) | Default labels: `waiting:max`, `abandoned`, `waiting:external`, `waiting:deploy`. Aut0: the same states on the Linear ticket and in PR `orch:` comments, with no GitHub labels |
-| Slots, PC offline 60 min, LivePatch, lane cutover, MissionControl | Phase 2 (slots), or dropped (section 10) |
+| Slots, PC offline 60 min, LivePatch, lane cutover, MissionControl | Phase 2 (slots), or dropped (section 11) |
 
 ## 4. Dispatcher transition table
 
@@ -91,9 +91,9 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 | T6 | Job exits with no handoff comment, or runs past its timeout | Retry once. 2nd time → `stuck` | Grok Bot on the 2nd |
 | T7 | `verdict=BLOCKED`, `stuck`, `capped`, config refused, anything unparsed | No known answer | Grok Bot, once |
 | T8 | `ok sha=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
-| T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job (e.g. deployed QA once the SHA is served, bounded wait). A fail files a blocking follow-up on the project's ticket tracker (Linear on Aut0) | QA owner bot |
+| T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job (e.g. deployed QA once the SHA is served, bounded wait). A fail files a blocking follow-up on the project's ticket tracker (Linear on Aut0). Deferred from Phase 1 (Cleffy QA, below). | QA owner bot |
 
-T1–T6 are the core loop. T7–T9 are added only when a project needs them. Any new row needs a real run that showed a wasted wake.
+T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 (Cleffy's deployed QA and post-merge audit) is deferred; Phase 1 stays lean. Any new row needs a real run that showed a wasted wake.
 
 ## 5. Handoff comment format
 
@@ -178,7 +178,15 @@ PRs target `main`. Mention any repo-specific gotchas here, not in the YAML.
 
 A Tracy-style file would set `ship: after:tracy-site` and describe the Site OK in **Ship**. The Aut0 draft (Linear, `ship: handoff`, `verify-aut0`, Oliver's flow after Ready for Review) is in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
 
-## 8. Installing pstack in each harness
+## 8. Measuring the factory
+
+`statechart` is a core pstack skill (plugin README and `docs/guide/06-verify-and-ship.md`). Max (9:49 AM ET, 2026-11-10) wants it kept so we can build evaluation systems that measure the factory.
+
+Keep the orchestrator's loop as a TLA+ model plus a Mermaid statechart in this repo, under `model/`. Check it with pstack `/statechart`. Re-run that check in CI whenever the dispatcher's transition table changes, so the picture, the model and the code cannot drift apart.
+
+The evaluation compares real runs against the chart's states, using the `orch:` comment headers and the dispatcher log. It measures time in each state, wasted agent wakes, review rounds per PR, stuck jobs, and the rule breaks the model finds. A small weekly report is built from that data (Phase 1 items 13 and 14). This is not the old self-improvement routine list; those stay out until a real run shows they are needed.
+
+## 9. Installing pstack in each harness
 
 One source: `skills/` in this repo, holding a pinned pstack (0.15.36 today) plus a `skills.lock` with the commit and sha256 of each file. `orch install-skills` symlinks the same files into:
 
@@ -190,7 +198,7 @@ One source: `skills/` in this repo, holding a pinned pstack (0.15.36 today) plus
 
 `orch doctor` runs a canary prompt in each harness, started by that harness's own bot. The canary asks the harness to name the poteto-mode skill and quote a token from it. It fails if any harness didn't load the pinned version. Bumps go through one PR that updates the pin and the lock together.
 
-## 9. Build list (each item is one PR, except Aut0 work which follows Aut0's own PR + Linear flow)
+## 10. Build list (each item is one PR, except Aut0 work which follows Aut0's own PR + Linear flow)
 
 **Phase 1: one machine (the box), end-to-end loop**
 
@@ -202,38 +210,41 @@ One source: `skills/` in this repo, holding a pinned pstack (0.15.36 today) plus
 6. `orch wait <role>`, the blocking wait for each owning bot, and an `orch job done` helper. Add a one-paragraph "orch jobs" section to the Claude Bot, Codex Bot and Cursor Bot handoff skills.
 7. Grok Bot skill `orchestrate-project`: intake, questions, routing, and stop handling.
 8. Usage reserve and routing: the fit table, the 20% reserve check in each owning bot, and best-fit-only while a source is unverified.
-9. Project hooks: T7 + T8 (external OK, for Tracy) + T9 (post-merge check, for Cleffy deployed QA and the 1-in-10 post-merge audit task).
+9. Project hooks: T7 + T8 (external OK, for Tracy). Cleffy's deployed QA and its 1-in-10 post-merge audit (T9) are deferred to later (Max skipped that question; Phase 1 stays lean).
 10. Live acceptance: three real tickets, one each on three projects that Max picks, run end to end. Fix only what those runs expose.
 11. **Aut0 Linear ticket** for the cleanup in item 12, filed in Aut0's board in the aut0-linear-board skill shape (Description, Acceptance Criteria, Notes). Priority is required; ask Max if it is unset. Do not invent one. The title and body are drafted in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Do not file it until Max says go.
-12. **Aut0 cleanup PR** on `aut0-code/aut0` targeting `dev`, after the Linear ticket exists: add the slim `factory.md`, replace the `## Factory` block in `AGENTS.md` with a pointer, and remove the retired statechart tooling. Leave the vendored pstack skills and the open verify-aut0 PRs (#1305, #1318) alone. File-level keep/remove lists are in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Items 11–12 can start immediately and should land before the Aut0 live ticket in item 10.
+12. **Aut0 cleanup PR** on `aut0-code/aut0` targeting `dev`, after the Linear ticket exists: add the slim `factory.md`, replace the `## Factory` block in `AGENTS.md` with a pointer, and delete `docs/aut-2166-factory-follow-up.md`. Leave vendored pstack in place, including `statechart`, `create-formal-verification-skill`, the install/preflight scripts, and the open verify-aut0 PRs (#1305, #1318). File-level keep/remove lists are in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Items 11–12 can start immediately and should land before the Aut0 live ticket in item 10.
+13. **Orchestrator model and chart:** a small TLA+ model of the loop in `model/`, plus the Mermaid statechart `/statechart` draws from it. CI re-checks the model whenever the dispatcher transition table changes.
+14. **Weekly eval report:** a small script that reads `orch:` comment headers and the dispatcher log, compares each run to the chart, and reports time in each state, wasted agent wakes, review rounds per PR, stuck jobs, and rule breaks the model finds. It can run against fixtures until item 10 produces live data.
 
 **Phase 2: more compute and self-hosted CI (after Phase 1 works)**
 
-13. Device pool: `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness counted as eligible only where Max has provisioned its login under that bot's user.
-14. Remote start: each owning bot starts its harness on a device over Tailscale SSH as its own user (claude-bot, codex-bot, cursor-bot). A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
-15. Self-hosted CI: runner labels per project in `orch.yml` or `factory.md`, plus a registration checklist for Max. Max registers the runners himself, and the plan never touches runner tokens. Credential-holding deploy workflows stay hosted (D21).
-16. `orch status`: a read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
+15. Device pool: `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness counted as eligible only where Max has provisioned its login under that bot's user.
+16. Remote start: each owning bot starts its harness on a device over Tailscale SSH as its own user (claude-bot, codex-bot, cursor-bot). A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
+17. Self-hosted CI: runner labels per project in `orch.yml` or `factory.md`, plus a registration checklist for Max. Max registers the runners himself, and the plan never touches runner tokens. Credential-holding deploy workflows stay hosted (D21).
+18. `orch status`: a read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
 
-## 10. Deliberately left out
+## 11. Deliberately left out
 
 These are out until a real run shows they're needed:
 - The bash driver, exit-code protocol and run directories. Labels and comments replace them (PR comments and Linear, on Aut0).
 - Two reviewers plus a separate Judge. One cross-family reviewer gives the verdict. Aut0 Judge, if it still runs, is part of Oliver's flow after handoff, not of the factory loop.
 - A separate pre-merge QA stage. The reviewer runs `verify-<repo>` when the project has one.
+- Cleffy's deployed QA and its 1-in-10 post-merge audit (dispatcher T9). Max skipped that question; they wait until after Phase 1.
 - Byte-identical rebase proofs. These are replaced by patch-id plus re-review.
 - The live reader patch, lane coexistence and old/new cutover, since there's no old lane in a fresh repo.
-- The mission-control dashboard. `orch status` (item 16) covers it.
+- The mission-control dashboard. `orch status` (item 18) covers it.
 - Per-run `decisions.tsv` and receipts. The PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs).
 - Webhooks, and any new credential or login.
 - The genericity purge and protected-field base reads. The repo starts generic, and `factory.md` is read from the base branch.
 - Arena and swarm by default. They stay available to the builder as pstack tools.
 
-## 11. Phase 1 estimate
+## 12. Phase 1 estimate
 
-Items 1–9 are small, and most can run in parallel after item 3: items 2, 7 and 8 are independent of 4–6. Items 11–12 (Aut0 cleanup) are also independent of 1–9 and can start as soon as Max OKs the Linear ticket. Expect about **2–3 working days**, with a first end-to-end ticket on day 2 and item 10 on day 3. If Max says go on Tue 11-10, Phase 1 would finish **Thu 11-12 to Fri 11-13 ET**. Phase 2 is about 2 more days, plus Max's runner and login setup.
+Items 1–9 are small, and most can run in parallel after item 3: items 2, 7 and 8 are independent of 4–6. Items 11–12 (Aut0 cleanup) are also independent of 1–9 and can start as soon as Max OKs the Linear ticket. Items 13–14 are small: the model can start once the transition table in item 5 is stable, and the weekly report can use fixtures until item 10 produces live runs. Phase 1 is **14 items**. Expect about **2–3 working days**, with a first end-to-end ticket on day 2 and item 10 on day 3. If Max says go on Tue 11-10, Phase 1 would finish **Thu 11-12 to Fri 11-13 ET**. Phase 2 is about 2 more days, plus Max's runner and login setup.
 
-## 12. Repo layout
+## 13. Repo layout
 
 This is [maxharris1/factory](https://github.com/maxharris1/factory) (private). Today it holds only the plan and the Aut0 cleanup draft.
 
@@ -246,15 +257,16 @@ factory/
   grok/orchestrate-project/SKILL.md
   bots/                  # short "orch jobs" sections for Claude/Codex/Cursor Bot skills
   config/orch.example.yml
+  model/                 # TLA+ model + Mermaid statechart of the orchestrator loop
   docs/PLAN.md           # this file
   docs/AUT0-CLEANUP.md   # Aut0 keep/remove lists, factory.md draft, Linear ticket draft
   docs/factory.example.md
   tests/                 # fake GitHub + fake bots, one test per transition row
 ```
 
-## 13. Migration and Aut0 cleanup
+## 14. Migration and Aut0 cleanup
 
 1. **Old repo wiped and recreated.** On 2026-11-10 Max had `maxharris1/factory` deleted and recreated empty for this plan. A full backup of the retired repo (git history, 134 issues, 87 PRs) is on the box at `/workspace/factory-backup-20261110`. This new repo's `main` started at `c3c354ab` with a README and this plan.
 2. **Closed Aut0 PRs.** At 9:42 AM ET on 2026-11-10, three Aut0 PRs from the old factory plan were closed without merging: [#1306](https://github.com/aut0-code/aut0/pull/1306) (self-hosted `factory-local` CI), [#1317](https://github.com/aut0-code/aut0/pull/1317) (the bloated `factory.md` move), and [#1321](https://github.com/aut0-code/aut0/pull/1321) (statechart offline-boundary follow-up). They stay closed.
-3. **Keep / remove and the Aut0 `factory.md` draft.** Merged Aut0 PRs [#1303](https://github.com/aut0-code/aut0/pull/1303), [#1304](https://github.com/aut0-code/aut0/pull/1304) and [#1314](https://github.com/aut0-code/aut0/pull/1314) left pstack and old-plan config on `dev`. **Keep** the 51 vendored pstack skills and their vendor scripts (248 files). **Remove** 421 files: the `statechart` skill tree (410, brought back in #1314 only for factory formal verification), `create-formal-verification-skill` (4, it needs `statechart`), and 7 factory statechart scripts/docs. Replace the `## Factory` section in `AGENTS.md` with a pointer to a slim `factory.md`. Open verify-aut0 PRs [#1305](https://github.com/aut0-code/aut0/pull/1305) and [#1318](https://github.com/aut0-code/aut0/pull/1318) stay open; they do not overlap the cleanup paths, though #1318 already conflicts with its #1305 base. File-level lists, the drafted Aut0 `factory.md`, and the Linear ticket body are in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
+3. **Keep / remove and the Aut0 `factory.md` draft.** Merged Aut0 PRs [#1303](https://github.com/aut0-code/aut0/pull/1303), [#1304](https://github.com/aut0-code/aut0/pull/1304) and [#1314](https://github.com/aut0-code/aut0/pull/1314) left pstack and old-plan config on `dev`. **Keep** the 53 vendored pstack skills (including `statechart` and `create-formal-verification-skill`) plus vendor scripts and the shared statechart install/preflight tooling (**668** files). Max (9:49 AM ET) wants `statechart` kept as a core pstack skill so we can measure the factory. **Remove** only `docs/aut-2166-factory-follow-up.md` (**1** file). Replace the `## Factory` section in `AGENTS.md` with a pointer to a slim `factory.md`; retarget Factory-section pointers, and keep the pstack router row for `statechart`. Open verify-aut0 PRs [#1305](https://github.com/aut0-code/aut0/pull/1305) and [#1318](https://github.com/aut0-code/aut0/pull/1318) stay open; they do not overlap the cleanup paths, though #1318 already conflicts with its #1305 base. File-level lists, the drafted Aut0 `factory.md`, and the Linear ticket body are in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
 4. **Cleanup PR and Linear ticket are Phase 1 items 11 and 12.** The orchestrator does not file the Linear ticket or open the Aut0 PR until Max says go. Both follow Aut0's existing handoff: Linear is the source of truth, and the change lands through a PR into `dev`.

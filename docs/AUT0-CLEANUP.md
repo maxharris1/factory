@@ -4,72 +4,75 @@ Status: **draft only.** Do not file the Linear ticket, open a PR, or push to `au
 
 Sourced from `dev` of `aut0-code/aut0` on 2026-11-10, plus merged PRs [#1303](https://github.com/aut0-code/aut0/pull/1303), [#1304](https://github.com/aut0-code/aut0/pull/1304) and [#1314](https://github.com/aut0-code/aut0/pull/1314), closed PRs [#1306](https://github.com/aut0-code/aut0/pull/1306), [#1317](https://github.com/aut0-code/aut0/pull/1317) and [#1321](https://github.com/aut0-code/aut0/pull/1321), and open PRs [#1305](https://github.com/aut0-code/aut0/pull/1305) and [#1318](https://github.com/aut0-code/aut0/pull/1318).
 
+Corrected 9:49 AM ET, 2026-11-10: Max wants the pstack `statechart` skill kept (it is a core pstack skill; see the plugin README and `docs/guide/06-verify-and-ship.md`) so we can build evaluation systems that measure the factory. `create-formal-verification-skill` and the install/preflight scripts stay with it.
+
 ## Goal
 
-Put Aut0 on the slim `factory.md` the new orchestrator reads, and drop the old factory plan's config and statechart tooling, without touching pstack or the in-flight verify-aut0 work.
+Put Aut0 on the slim `factory.md` the new orchestrator reads, and drop only the old factory plan's config, without touching pstack (including `statechart`) or the in-flight verify-aut0 work.
 
-Max's rules for Aut0 (9:38–9:42 AM ET, 2026-11-10):
+Max's rules for Aut0 (9:38–9:49 AM ET, 2026-11-10):
 
 - Linear is the ticket source of truth. Every repo change goes through a PR. The orchestrator creates no GitHub issues or labels here.
 - Keep a slim per-repo `factory.md` (models, review process, special skills, extra context).
 - One reviewer from a different model family gives the final verdict, and that reviewer runs the UI and database checks through `verify-aut0` once it lands.
+- Keep `statechart`, `create-formal-verification-skill`, and the scripts those skills need to run in Aut0.
 
 ## Counts
 
 | Bucket | Files on `dev` now | What happens |
 |---|---|---|
-| Keep (vendored pstack + vendor scripts) | **248** | Leave in place (6 of these get a small edit; see below) |
-| Remove | **421** | Delete in the cleanup PR |
-| Edit (repo docs / vendor support) | **10** | Pointer and exclusion updates; not deleted |
+| Keep (vendored pstack, vendor scripts, statechart tooling) | **668** | Leave in place (a few of these get a small edit; see below) |
+| Remove | **1** | Delete in the cleanup PR |
+| Edit (repo docs and pointers) | **6** | Drop old-plan config and retarget Factory-section pointers; not deleted |
 | Add | **1** | New root `factory.md` (draft below) |
 
-Remove breaks down as:
-
-- 410 files under `.claude/skills/statechart/` plus the `.agents/skills/statechart` symlink (brought back in #1314 only so the old factory could formally verify its state charts)
-- 4 files in `create-formal-verification-skill` (`.claude/skills/create-formal-verification-skill/{.pstack-vendored,SKILL.md,agents/openai.yaml}` and `.agents/skills/create-formal-verification-skill`). #1304 had already excluded this skill because it needs `statechart`; #1314 brought it back with `statechart`.
-- 7 factory statechart scripts and docs (listed below)
-
-`maintain-formal-verification-skill` stays. It was vendored in #1303, was not part of the #1314 statechart bring-back, and does not need the statechart tools.
+Keep includes 53 vendored pstack skills (410 files in `statechart`, 4 in `create-formal-verification-skill`) plus 6 shared statechart tooling files. The only delete is the old-plan follow-up doc.
 
 ## Keep
 
-The 51 vendored pstack skills already on `dev`, their `.agents/skills/` symlinks, and the vendor support files from #1303 / #1304. This matches the post-#1304 vendor set (`statechart` and `create-formal-verification-skill` were not in it).
+The 53 vendored pstack skills already on `dev`, their `.agents/skills/` symlinks, the vendor support files from #1303 / #1304 / #1314, and the shared statechart install/preflight scripts. Do **not** add `statechart` or `create-formal-verification-skill` to `EXCLUDE` in `scripts/vendor-pstack.sh`.
 
-**Skills (51):** `architect`, `arena`, `benchmark-checklist`, `blast-radius`, `bro`, `correct`, `create-verification-skill`, `figure-it-out`, `how`, `in-your-own-words`, `interrogate`, `ketchup`, `maintain-formal-verification-skill`, `maintain-verification-skill`, `no-comments`, `poteto-help`, `principle-attack-the-premise`, `principle-boundary-discipline`, `principle-build-the-lever`, `principle-encode-lessons-in-structure`, `principle-exhaust-the-design-space`, `principle-experience-first`, `principle-explain-the-number`, `principle-fix-root-causes`, `principle-foundational-thinking`, `principle-guard-the-context-window`, `principle-laziness-protocol`, `principle-make-operations-idempotent`, `principle-migrate-callers-then-delete-legacy-apis`, `principle-minimize-reader-load`, `principle-model-the-domain`, `principle-never-block-on-the-human`, `principle-outcome-oriented-execution`, `principle-prove-it-works`, `principle-redesign-from-first-principles`, `principle-separate-before-serializing-shared-state`, `principle-sequence-verifiable-units`, `principle-subtract-before-you-add`, `principle-test-behavior-not-implementation`, `principle-type-system-discipline`, `recall`, `reflect`, `sharpen`, `show-me-your-work`, `swarm`, `tdd`, `teach`, `technical-writing`, `typescript-best-practices`, `unslop`, `why`.
+**Skills (53):** `architect`, `arena`, `benchmark-checklist`, `blast-radius`, `bro`, `correct`, `create-formal-verification-skill`, `create-verification-skill`, `figure-it-out`, `how`, `in-your-own-words`, `interrogate`, `ketchup`, `maintain-formal-verification-skill`, `maintain-verification-skill`, `no-comments`, `poteto-help`, `principle-attack-the-premise`, `principle-boundary-discipline`, `principle-build-the-lever`, `principle-encode-lessons-in-structure`, `principle-exhaust-the-design-space`, `principle-experience-first`, `principle-explain-the-number`, `principle-fix-root-causes`, `principle-foundational-thinking`, `principle-guard-the-context-window`, `principle-laziness-protocol`, `principle-make-operations-idempotent`, `principle-migrate-callers-then-delete-legacy-apis`, `principle-minimize-reader-load`, `principle-model-the-domain`, `principle-never-block-on-the-human`, `principle-outcome-oriented-execution`, `principle-prove-it-works`, `principle-redesign-from-first-principles`, `principle-separate-before-serializing-shared-state`, `principle-sequence-verifiable-units`, `principle-subtract-before-you-add`, `principle-test-behavior-not-implementation`, `principle-type-system-discipline`, `recall`, `reflect`, `sharpen`, `show-me-your-work`, `statechart`, `swarm`, `tdd`, `teach`, `technical-writing`, `typescript-best-practices`, `unslop`, `why`.
 
 `poteto-mode` is already not vendored (`EXCLUDE` in `scripts/vendor-pstack.sh`). Leave that exclusion as it is.
 
-**Vendor support (keep, some edited):**
+**Statechart tooling (keep — the skill needs these to run in Aut0):**
 
-- `scripts/vendor-pstack.sh` — add `statechart` and `create-formal-verification-skill` back to `EXCLUDE`, so a later vendor rerun does not restore them. Current pin stays `519d36aa98955bf680db01bcde5fdfba686dc901` (pstack 0.15.34) until a later bump.
+- `.claude/skills/statechart/` and `.agents/skills/statechart`
+- `.claude/skills/create-formal-verification-skill/` and `.agents/skills/create-formal-verification-skill`
+- `scripts/factory/install-statechart-tools.sh`
+- `scripts/statechart-mise.sh`
+- `scripts/statechart-preflight.sh`
+- `scripts/statechart-preflight.test.ts`
+- `scripts/test-statechart-preflight.sh`
+- `package.json` script `test:statechart-preflight`
+- `docs/factory/statechart-hosts.md` — this is shared install/preflight documentation, not only old-plan host routing. Keep the file; edit it to drop the pointer to the Factory section's host-routing table and the old `factory-local` runner as a required host. The install, mise-resolution, and `--env` instructions stay.
+
+**Vendor support (keep, some pointers edited):**
+
+- `scripts/vendor-pstack.sh` — no exclusion change. Current pin stays `519d36aa98955bf680db01bcde5fdfba686dc901` (pstack 0.15.34) until a later bump.
 - `scripts/vendor-pstack.test.ts`, `scripts/test-vendor-pstack.sh`
-- `scripts/codex-adapter.md` and `.claude/docs/harness/codex.md` — drop the statechart-preflight / Factory-section wording; repo rules still win over pstack, now pointing at `factory.md`
+- `scripts/codex-adapter.md` and `.claude/docs/harness/codex.md` — keep the statechart-preflight instructions; retarget "Factory section of AGENTS.md" to `factory.md`. Repo rules still win over pstack.
 - `.claude/docs/harness/claude-code.md` — only if a Factory-section pointer is present
-- `.claude/vendor/pstack/{LICENSE,README.md,SOURCE_SHA,MANIFEST}` — MANIFEST and README update when the two skills are un-vendored
+- `.claude/vendor/pstack/{LICENSE,README.md,SOURCE_SHA,MANIFEST}`
 - `.claude/agents/comment-sicko.md`
 - `.gitignore` entry `/.claude/vendor/pstack/.staging.*/` — keep
+
+The pstack router row in `AGENTS.md` that names `statechart` and `create-formal-verification-skill` stays. Retarget "see Statechart in the Factory notes" to `scripts/statechart-preflight.sh` and `docs/factory/statechart-hosts.md`.
 
 Do **not** touch Aut0-owned skills or agents (`aut0-review`, `ci-and-pr-workflow`, `cloud-dev-stack`, `cpt-acuity-blurbs`, `drive-app-ui`, `nsa-process`, `post-build-polish`, `.claude/agents/aut0-implementer.md`, `.claude/agents/aut0-reviewer.md`). The factory PRs did not add them.
 
 ## Remove
 
-Delete these paths, then drop the `test:statechart-preflight` script from `package.json`. Jest already matches `scripts/**/*.test.ts`, so deleting `scripts/statechart-preflight.test.ts` is enough to keep Unit Tests from loading it. `.github/workflows/ci.yml` has no statechart or factory-runner hooks (closed #1306 never merged).
-
-**Tooling and docs (7 files):**
+Delete only what is specific to the old factory plan:
 
 - `docs/aut-2166-factory-follow-up.md`
-- `docs/factory/statechart-hosts.md` (and the then-empty `docs/factory/` directory)
-- `scripts/factory/install-statechart-tools.sh` (and the then-empty `scripts/factory/` directory)
-- `scripts/statechart-mise.sh`
-- `scripts/statechart-preflight.sh`
-- `scripts/statechart-preflight.test.ts`
-- `scripts/test-statechart-preflight.sh`
 
-**Skills (414 files):** the entire `.claude/skills/statechart/` tree (409 blobs plus the folder markers as listed on `dev`; 410 files when the `.agents/skills/statechart` symlink is included) and the 4 `create-formal-verification-skill` files named above.
-
-Also strip from `AGENTS.md`: the `## Factory` fenced block and notes (today lines 84–120, including the statechart host-routing table), the pstack-router row that sends people to `statechart` / `create-formal-verification-skill` and "Factory notes", and the Platforms parenthetical around line 1294. Leave the rest of the pstack router. Replace the Factory section with one pointer line: agent factory config is in `factory.md` (Grok Bot / orchestrator only; human developers can ignore it).
+Also strip from `AGENTS.md` the `## Factory` fenced block and notes (today lines 84–120, including the old-plan host-routing table). Leave the rest of the pstack router, including the statechart row, as above. Replace the Factory section with one pointer line: agent factory config is in `factory.md` (Grok Bot / orchestrator only; human developers can ignore it). The Platforms parenthetical around line 1294 should point at the pstack section, not at Factory notes.
 
 `.claude/CLAUDE.md` line 5 today says "Factory settings and agent notes: see the Factory section of AGENTS.md." Retarget that line to `factory.md`.
+
+`.github/workflows/ci.yml` has no factory-runner hooks (closed #1306 never merged). Do not drop `test:statechart-preflight` from `package.json`.
 
 ## Open verify-aut0 PRs
 
@@ -124,21 +127,21 @@ YAML that #1317 had and this draft drops on purpose: `owner_bot`, `stages` (judg
 
 Do not file this until Max says go. Do not invent a priority; ask Max if it is unset. Shape follows the aut0-linear-board skill (chore: Description, Acceptance Criteria, Notes). Status after filing: unassigned, not In Progress, then Ready for Review once the PR is open.
 
-**Title:** chore: slim factory.md and remove retired statechart tooling
+**Title:** chore: slim factory.md and remove old factory plan config
 
 **Description:**
-The old factory plan left a `## Factory` block in `AGENTS.md` and vendored the pstack `statechart` skill plus install/preflight scripts so that plan could formally verify its state charts (#1314). That factory repo has been wiped and restarted as a thin pstack orchestrator. Aut0 stays on the existing handoff: Linear is the ticket source of truth, every repo change goes through a PR, and the orchestrator will not create GitHub issues or labels here.
+The old factory plan left a `## Factory` block in `AGENTS.md` and a follow-up doc for that plan. That factory repo has been wiped and restarted as a thin pstack orchestrator. Aut0 stays on the existing handoff: Linear is the ticket source of truth, every repo change goes through a PR, and the orchestrator will not create GitHub issues or labels here.
 
-This ticket adds a one-screen root `factory.md` (builder/reviewer preferences, one cross-family reviewer who also runs `verify-aut0`, handoff to Ready for Review, Linear ticket-first rules, special skills, short repo context). It removes the old Factory section, the `statechart` skill tree, `create-formal-verification-skill` (it needs `statechart`), and the seven factory statechart scripts/docs. Vendored pstack otherwise stays. Open verify-aut0 PRs #1305 and #1318 are out of scope.
+This ticket adds a one-screen root `factory.md` (builder/reviewer preferences, one cross-family reviewer who also runs `verify-aut0`, handoff to Ready for Review, Linear ticket-first rules, special skills, short repo context). It removes the old Factory section and `docs/aut-2166-factory-follow-up.md`. Vendored pstack stays, including the core `statechart` skill, `create-formal-verification-skill`, and the install/preflight scripts those skills need to run here (Max, 9:49 AM ET, 2026-11-10). Open verify-aut0 PRs #1305 and #1318 are out of scope.
 
 File-level keep/remove lists and the drafted `factory.md` are in maxharris1/factory `docs/AUT0-CLEANUP.md`.
 
 **Acceptance Criteria:**
 
 1. Root `factory.md` matches the slim format in maxharris1/factory `docs/PLAN.md` section 7 and the Aut0 draft in `docs/AUT0-CLEANUP.md` (Linear tickets, `ship: handoff` to Ready for Review, Max merges, one cross-family reviewer, `verify: verify-aut0`, skills `nsa-process` / `aut0-review` / `verify-aut0`).
-2. `AGENTS.md` has no `## Factory` section and no statechart host-routing table. It has one pointer to `factory.md`. The pstack skill router remains, without the `statechart` / `create-formal-verification-skill` row. `.claude/CLAUDE.md` (and any harness adapter that pointed at the Factory section) points at `factory.md`.
-3. These paths are gone from `dev`: `.claude/skills/statechart/`, `.agents/skills/statechart`, `.claude/skills/create-formal-verification-skill/`, `.agents/skills/create-formal-verification-skill`, `docs/aut-2166-factory-follow-up.md`, `docs/factory/`, `scripts/factory/`, `scripts/statechart-mise.sh`, `scripts/statechart-preflight.sh`, `scripts/statechart-preflight.test.ts`, `scripts/test-statechart-preflight.sh`. `package.json` no longer has `test:statechart-preflight`.
-4. `scripts/vendor-pstack.sh` lists `statechart` and `create-formal-verification-skill` in `EXCLUDE`. The other 51 vendored pstack skills, `scripts/vendor-pstack.sh` itself, and `npm run test:vendor-pstack` still pass. Aut0-owned skills and the open verify-aut0 PRs (#1305, #1318) are untouched.
+2. `AGENTS.md` has no `## Factory` section and no old-plan host-routing table. It has one pointer to `factory.md`. The pstack skill router remains, including the `statechart` / `create-formal-verification-skill` row, which points at `scripts/statechart-preflight.sh` and `docs/factory/statechart-hosts.md` rather than Factory notes. `.claude/CLAUDE.md` (and any harness adapter that pointed at the Factory section) points at `factory.md`. Statechart preflight instructions in the Codex adapter stay.
+3. `docs/aut-2166-factory-follow-up.md` is gone. These paths remain: `.claude/skills/statechart/`, `.agents/skills/statechart`, `.claude/skills/create-formal-verification-skill/`, `.agents/skills/create-formal-verification-skill`, `scripts/factory/install-statechart-tools.sh`, `scripts/statechart-mise.sh`, `scripts/statechart-preflight.sh`, `scripts/statechart-preflight.test.ts`, `scripts/test-statechart-preflight.sh`, and `docs/factory/statechart-hosts.md` (edited only to drop old-plan host-routing references). `package.json` still has `test:statechart-preflight`.
+4. `scripts/vendor-pstack.sh` does **not** list `statechart` or `create-formal-verification-skill` in `EXCLUDE`. All 53 vendored pstack skills stay. `npm run test:vendor-pstack` and `npm run test:statechart-preflight` still pass. Aut0-owned skills and the open verify-aut0 PRs (#1305, #1318) are untouched.
 5. No GitHub issues or labels are created for this work. The PR targets `dev`. Max picks the merge.
 
 **Notes:**
