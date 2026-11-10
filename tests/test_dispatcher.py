@@ -27,11 +27,66 @@ READY = (
     "<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n"
     "Ready.\n"
 )
+VERDICT = (
+    "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+    "round={round} head={head} verdict={verdict} risk={risk} -->\n"
+    "Verdict.\n"
+)
+QUESTIONS = (
+    "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+    "Questions.\n"
+)
+ANSWERS = (
+    "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\n"
+    "Answers.\n"
+)
 TRUSTED_LOGINS = {
     "grok-login": "grok-bot",
     "claude-login": "claude-bot",
     "codex-login": "codex-bot",
 }
+
+
+class FakeReviewActions:
+    def __init__(self, patch_ids: dict[str, str] | None = None):
+        self.patch_ids = patch_ids or {}
+        self.patch_id_calls: list[str] = []
+        self.merges: list[tuple[bool, str]] = []
+        self.handoffs: list[str] = []
+        self.approvals: list[tuple[str, str]] = []
+        self.states: list[str] = []
+
+    def set_state(self, ticket: TrackedTicket, state: str) -> None:
+        del ticket
+        self.states.append(state)
+
+    def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
+        del ticket
+        self.patch_id_calls.append(head)
+        return self.patch_ids[head]
+
+    def merge(
+        self,
+        ticket: TrackedTicket,
+        *,
+        squash: bool,
+        match_head_commit: str,
+    ) -> None:
+        del ticket
+        self.merges.append((squash, match_head_commit))
+
+    def handoff(self, ticket: TrackedTicket, head: str) -> None:
+        del ticket
+        self.handoffs.append(head)
+
+    def await_approver(
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        approver: str,
+    ) -> None:
+        del ticket
+        self.approvals.append((head, approver))
 
 
 class FakeSource:
@@ -72,16 +127,22 @@ class FakeSource:
         )
 
 
-def factory(*, tickets: str = "github") -> FactoryConfig:
+def factory(
+    *,
+    tickets: str = "github",
+    rounds_low: int = 1,
+    rounds_high: int = 3,
+    ship: str = "merge",
+) -> FactoryConfig:
     return FactoryConfig(
         base_branch="main",
         tickets=tickets,
         builder_harness="claude",
         reviewer_harness="codex",
-        rounds_low=1,
-        rounds_high=3,
+        rounds_low=rounds_low,
+        rounds_high=rounds_high,
         verify="none",
-        ship="merge",
+        ship=ship,
         skills=(),
     )
 
@@ -92,12 +153,14 @@ def comment(
     *,
     author: str,
     created_at: float = 1,
+    url: str | None = None,
 ) -> Comment:
     return Comment(
         id=comment_id,
         author=author,
         body=body,
         created_at=created_at,
+        url=url,
     )
 
 
@@ -107,11 +170,12 @@ def ticket(
     ci: dict[str, CIResult] | None = None,
     timeout: int = 90,
     tickets: str = "github",
+    factory_config: FactoryConfig | None = None,
 ) -> TrackedTicket:
     return TrackedTicket(
         repo="owner/repo",
         ticket_id="42",
-        factory=factory(tickets=tickets),
+        factory=factory_config or factory(tickets=tickets),
         comments=comments,
         current_head=head,
         ci=ci or {},
@@ -122,6 +186,7 @@ def ticket(
 def setup(
     tmp_path: Path,
     now: list[float] | None = None,
+    review_actions: FakeReviewActions | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     current = now if now is not None else [100.0]
     path = tmp_path / "d.db"
@@ -130,6 +195,7 @@ def setup(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
+        review_actions=review_actions,
     )
     return dispatcher, queue
 
@@ -667,6 +733,231 @@ def test_green_ci_resets_the_consecutive_red_count(tmp_path: Path) -> None:
         dispatcher.process(snapshot)
         assert dispatcher.gate_count(snapshot) == count
     assert not dispatcher.is_stuck(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("risk", "round_number", "rounds_high", "expected"),
+    [
+        ("low", 1, 3, "capped"),
+        ("high", 1, 3, "fix"),
+        ("high", 3, 3, "capped"),
+        ("high", 2, 2, "capped"),
+    ],
+)
+def test_t3_applies_risk_cap_and_factory_override(
+    tmp_path: Path,
+    risk: str,
+    round_number: int,
+    rounds_high: int,
+    expected: str,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    verdict = comment(
+        "verdict-1",
+        VERDICT.format(
+            round=round_number,
+            head=head,
+            verdict="REVISE",
+            risk=risk,
+        ),
+        author="codex-login",
+        url="https://example.test/verdict-1",
+    )
+    dispatcher.process(
+        ticket(
+            verdict,
+            head=head,
+            factory_config=factory(rounds_high=rounds_high),
+        )
+    )
+
+    fix = queue.claim("claude")
+    if expected == "fix":
+        assert fix is not None
+        assert fix.request.action == "fix"
+        assert fix.request.detail == "https://example.test/verdict-1"
+        assert actions.states == ["fixing"]
+    else:
+        assert fix is None
+        assert actions.states == ["capped"]
+
+
+@pytest.mark.parametrize(
+    ("approved_head", "current_head", "patch_ids", "expected"),
+    [
+        ("a" * 40, "a" * 40, {}, "merge"),
+        ("a" * 40, "b" * 40, {"a" * 40: "same", "b" * 40: "same"}, "merge"),
+        ("a" * 40, "b" * 40, {"a" * 40: "old", "b" * 40: "new"}, "review"),
+    ],
+)
+def test_t4_merges_exact_or_equal_patch_and_rereviews_different_patch(
+    tmp_path: Path,
+    approved_head: str,
+    current_head: str,
+    patch_ids: dict[str, str],
+    expected: str,
+) -> None:
+    actions = FakeReviewActions(patch_ids)
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    dispatcher.process(
+        ticket(
+            comment(
+                "approve-1",
+                VERDICT.format(
+                    round=1,
+                    head=approved_head,
+                    verdict="APPROVE",
+                    risk="high",
+                ),
+                author="codex-login",
+            ),
+            head=current_head,
+        )
+    )
+
+    review = queue.claim("codex")
+    if expected == "merge":
+        assert actions.merges == [(True, current_head)]
+        assert review is None
+        assert actions.states == ["merged"]
+    else:
+        assert actions.merges == []
+        assert review is not None
+        assert review.request.action == "review"
+        assert review.request.head == current_head
+        assert actions.states == ["review"]
+    expected_patch_calls = (
+        [] if approved_head == current_head else [approved_head, current_head]
+    )
+    assert actions.patch_id_calls == expected_patch_calls
+
+
+@pytest.mark.parametrize(
+    ("ship", "expected_state"),
+    [
+        ("handoff", "handed-off"),
+        ("after:tracy-site", "waiting-external"),
+    ],
+)
+def test_t4_handoff_and_after_never_merge(
+    tmp_path: Path,
+    ship: str,
+    expected_state: str,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, _queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    dispatcher.process(
+        ticket(
+            comment(
+                "approve-1",
+                VERDICT.format(
+                    round=1,
+                    head=head,
+                    verdict="APPROVE",
+                    risk="high",
+                ),
+                author="codex-login",
+            ),
+            head=head,
+            factory_config=factory(ship=ship),
+        )
+    )
+
+    assert actions.merges == []
+    assert actions.states == [expected_state]
+    if ship == "handoff":
+        assert actions.handoffs == [head]
+        assert actions.approvals == []
+    else:
+        assert actions.handoffs == []
+        assert actions.approvals == [(head, "tracy-site")]
+
+
+def test_t5_answers_resume_same_step_without_incrementing_round(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    revise = comment(
+        "verdict-1",
+        VERDICT.format(
+            round=1,
+            head=head,
+            verdict="REVISE",
+            risk="high",
+        ),
+        author="codex-login",
+    )
+    snapshot = ticket(revise, head=head)
+    dispatcher.process(snapshot)
+    running = queue.claim("claude")
+    assert running is not None
+    queue.finish(running.id, handoff_comment_id="questions-1")
+
+    question = comment(
+        "questions-1",
+        QUESTIONS,
+        author="any-session",
+        created_at=2,
+    )
+    dispatcher.process(ticket(revise, question, head=head))
+    answer = comment(
+        "answers-1",
+        ANSWERS,
+        author="grok-login",
+        created_at=3,
+        url="https://example.test/answers-1",
+    )
+    dispatcher.process(ticket(revise, question, answer, head=head))
+
+    resumed = queue.claim("claude")
+    assert resumed is not None
+    assert resumed.request.action == "fix"
+    assert resumed.request.head == head
+    assert resumed.request.detail == "https://example.test/answers-1"
+    with queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT review_round, workflow_state FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()
+    assert row["review_round"] == 1
+    assert row["workflow_state"] == "fixing"
+
+
+def test_restart_ledger_does_not_repeat_t4_merge(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    snapshot = ticket(
+        comment(
+            "approve-1",
+            VERDICT.format(
+                round=1,
+                head=head,
+                verdict="APPROVE",
+                risk="high",
+            ),
+            author="codex-login",
+        ),
+        head=head,
+    )
+    dispatcher.process(snapshot)
+
+    restarted = Dispatcher(
+        queue.path,
+        SQLiteJobQueue(queue.path, clock=lambda: 200),
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=actions,
+    )
+    restarted.process(snapshot)
+
+    assert actions.merges == [(True, head)]
 
 
 def test_t6_retries_no_handoff_once_then_marks_stuck(tmp_path: Path) -> None:
