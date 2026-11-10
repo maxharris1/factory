@@ -1,0 +1,4 @@
+poll_seconds: 60
+projects:
+  - repo: maxharris1/Cleffy
+  - repo: maxharris1/tracy-harris-coaching

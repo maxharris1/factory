@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts and the F1-07 `orchestrate-project` skill. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-07 `orchestrate-project` skill, the F1-08 usage reserve, and the F1-14 weekly eval report. Later Phase 1 items are not built.
 
 ## Contracts
 
@@ -20,7 +20,21 @@ Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). F1-08 adds `lib.usage.choose_fit`; until that function exists, routing stays on the `factory.md` pair.
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md` and `marked_urgent`.
+
+## Usage reserve
+
+`orchestrate-project` (F1-07) calls `route_job` in [`lib/usage.py`](lib/usage.py) with the loaded `factory.md`. The best fit for a role is that role's harness and model hint; the other harnesses follow in `claude`, `codex`, `cursor` order. The reviewer is a different model family from the builder this call selected.
+
+The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to the next fit that is outside the reserve. A resumed paused step, past-ship work, or a job Max marks urgent may use the reserve. Each owning bot calls `reserve_check` on its own harness before starting, when it has a verified report. No verified report leaves the route on best fit. Routing reads no live usage; tests use [`tests/fixtures/usage/`](tests/fixtures/usage/).
+
+## Weekly eval report
+
+```sh
+bin/orch eval-report --input tests/fixtures/eval/week
+```
+
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
