@@ -3,6 +3,7 @@ import sqlite3
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -188,6 +189,7 @@ def test_finish_does_not_overwrite_a_t6_timeout_or_duplicate_its_retry(
         path,
         queue,
         trusted_logins={"grok-bot": "grok"},
+        review_actions=Mock(),
     )
     finishing_queue = _InterleavingQueue(path, clock=lambda: now[0])
 
