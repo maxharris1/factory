@@ -110,6 +110,10 @@ class ReviewActions(Protocol):
     ) -> None: ...
 
 
+class GrokDelivery(Protocol):
+    def deliver(self, job: Job) -> str: ...
+
+
 class RetryableStateError(RuntimeError):
     pass
 
@@ -144,6 +148,7 @@ class Dispatcher:
         *,
         trusted_logins: Mapping[str, str],
         review_actions: ReviewActions,
+        grok_delivery: GrokDelivery,
         hooks: Sequence[Hook] = (),
     ):
         if state_path.resolve() != queue.path.resolve():
@@ -152,10 +157,13 @@ class Dispatcher:
             raise ValueError("trusted_logins must not be empty")
         if review_actions is None:
             raise ValueError("review_actions must be configured")
+        if grok_delivery is None:
+            raise ValueError("grok_delivery must be configured")
         self.state_path = state_path
         self.queue = queue
         self.trusted_logins = dict(trusted_logins)
         self.review_actions = review_actions
+        self.grok_delivery = grok_delivery
         self.hooks = tuple(hooks)
         self._initialize()
         for hook in self.hooks:
@@ -235,6 +243,7 @@ class Dispatcher:
                 self._mark_handled(ticket, comment.id, outcome)
 
     def reconcile_jobs(self) -> None:
+        self._deliver_grok_jobs()
         now = self.queue.now()
         for job in self.queue.outstanding():
             activity = (
@@ -245,6 +254,16 @@ class Dispatcher:
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
+        self._deliver_grok_jobs()
+
+    def _deliver_grok_jobs(self) -> None:
+        while (job := self.queue.claim("grok")) is not None:
+            receipt = self.grok_delivery.deliver(job)
+            self.queue.finish(
+                job.id,
+                owner="grok",
+                handoff_comment_id=receipt,
+            )
 
     def gate_count(self, ticket: TrackedTicket) -> int:
         with self._connect() as connection:

@@ -190,6 +190,7 @@ def test_finish_does_not_overwrite_a_t6_timeout_or_duplicate_its_retry(
         queue,
         trusted_logins={"grok-bot": "grok"},
         review_actions=Mock(),
+        grok_delivery=Mock(),
     )
     finishing_queue = _InterleavingQueue(path, clock=lambda: now[0])
 

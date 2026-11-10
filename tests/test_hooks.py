@@ -78,6 +78,15 @@ class FakeReviewActions:
         del ticket, head, approver
 
 
+class FakeGrokDelivery:
+    def __init__(self) -> None:
+        self.jobs: list[Job] = []
+
+    def deliver(self, job: Job) -> str:
+        self.jobs.append(job)
+        return f"delivery-{job.id}"
+
+
 class FakeBot:
     def __init__(self, queue: SQLiteJobQueue, recipient: str):
         self.queue = queue
@@ -166,6 +175,7 @@ def setup(
     *,
     hooks: tuple[Hook, ...] | None = None,
     now: list[float] | None = None,
+    grok_delivery: FakeGrokDelivery | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     path = tmp_path / "d.db"
     clock = now if now is not None else [100.0]
@@ -175,6 +185,7 @@ def setup(
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
+        grok_delivery=grok_delivery or FakeGrokDelivery(),
         hooks=hooks if hooks is not None else (T7Hook(), T8Hook(shipper)),
     )
     return dispatcher, queue
@@ -183,8 +194,10 @@ def setup(
 def restart(
     tmp_path: Path,
     shipper: Shipper | None = None,
+    *,
+    grok_delivery: FakeGrokDelivery | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
-    return setup(tmp_path, shipper)
+    return setup(tmp_path, shipper, grok_delivery=grok_delivery)
 
 
 def jobs(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
@@ -227,7 +240,8 @@ def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
     grok = FakeBot(queue, "grok")
     assert sorted(job.request.action for job in grok.drain()) == ["blocked", "capped"]
 
-    restarted, restarted_queue = restart(tmp_path)
+    delivery = FakeGrokDelivery()
+    restarted, restarted_queue = restart(tmp_path, grok_delivery=delivery)
     again = replace(
         first,
         comments=first.comments
@@ -248,8 +262,7 @@ def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
         )
     )
     restarted.reconcile_jobs()
-    stuck = FakeBot(restarted_queue, "grok").drain()
-    assert [job.request.action for job in stuck] == ["stuck"]
+    assert [job.request.action for job in delivery.jobs] == ["stuck"]
     assert jobs(restarted_queue).count(("stuck", "grok")) == 1
     assert len(jobs(restarted_queue)) == 3
 
@@ -736,7 +749,8 @@ def test_t8_crash_after_ship_returns_never_ships_again(
 def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> None:
     now = [0.0]
     shipper = RaisingShipper()
-    dispatcher, queue = setup(tmp_path, shipper, now=now)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, shipper, now=now, grok_delivery=delivery)
     queue.enqueue(
         JobRequest(
             repo="owner/repo",
@@ -765,9 +779,8 @@ def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> Non
     assert sorted(
         (job.request.ticket_id, job.request.attempt) for job in claude
     ) == [("43", 1), ("44", 2)]
-    grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["ship-failed"]
-    assert "merge refused" in str(grok[0].request.detail)
+    assert [job.request.action for job in delivery.jobs] == ["ship-failed"]
+    assert "merge refused" in str(delivery.jobs[0].request.detail)
 
 
 def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(

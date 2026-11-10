@@ -117,6 +117,15 @@ class FakeReviewActions:
             raise SystemExit("simulated approval crash")
 
 
+class FakeGrokDelivery:
+    def __init__(self) -> None:
+        self.jobs: list[Job] = []
+
+    def deliver(self, job: Job) -> str:
+        self.jobs.append(job)
+        return f"delivery-{job.id}"
+
+
 class FakeSource:
     def __init__(
         self,
@@ -219,6 +228,7 @@ def setup(
     tmp_path: Path,
     now: list[float] | None = None,
     review_actions: FakeReviewActions | None = None,
+    grok_delivery: FakeGrokDelivery | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     current = now if now is not None else [100.0]
     path = tmp_path / "d.db"
@@ -228,6 +238,7 @@ def setup(
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=review_actions or FakeReviewActions(),
+        grok_delivery=grok_delivery or FakeGrokDelivery(),
     )
     return dispatcher, queue
 
@@ -290,6 +301,7 @@ def test_dispatcher_refuses_separate_state_and_queue_databases(
             queue,
             trusted_logins=TRUSTED_LOGINS,
             review_actions=FakeReviewActions(),
+            grok_delivery=FakeGrokDelivery(),
         )
 
 
@@ -362,6 +374,64 @@ def test_t1_wakes_grok_when_go_has_no_build_or_plan_state(
     assert wake.request.action == "clarify"
 
 
+@pytest.mark.parametrize("action", ["clarify", "stuck"])
+def test_reconcile_delivers_grok_job_once_and_finishes_it(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    now = [0.0]
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    queued = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action=action,
+            recipient="grok",
+            source_comment_id="source-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key=f"{action}:g1",
+    )
+
+    dispatcher.reconcile_jobs()
+    now[0] = 120
+    dispatcher.reconcile_jobs()
+
+    assert [job.id for job in delivery.jobs] == [queued.id]
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, handoff_comment_id FROM jobs WHERE id = ?",
+            (queued.id,),
+        ).fetchone()
+        count = connection.execute("SELECT count(*) FROM jobs").fetchone()[0]
+    assert row["state"] == "done"
+    assert row["handoff_comment_id"] == f"delivery-{queued.id}"
+    assert count == 1
+    assert queue.unhandled_failures() == ()
+
+
+def test_reconcile_does_not_pick_up_non_grok_jobs(tmp_path: Path) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, [0.0], grok_delivery=delivery)
+    queued = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:g1",
+    )
+
+    dispatcher.reconcile_jobs()
+
+    assert delivery.jobs == []
+    assert queue.outstanding() == (queued,)
+
+
 def test_poll_discovers_and_persists_github_ticket_from_grok_go(
     tmp_path: Path,
 ) -> None:
@@ -386,6 +456,7 @@ def test_poll_discovers_and_persists_github_ticket_from_grok_go(
         restarted_queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
     )
     no_candidates = FakeSource(candidate)
     restarted.poll_once(no_candidates)
@@ -441,6 +512,7 @@ def test_restart_and_semantic_duplicate_do_not_queue_t1_twice(
         restarted_queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
     )
     restarted.process(snapshot)
 
@@ -743,7 +815,8 @@ def test_reconciles_do_not_requeue_completed_stuck_wake(tmp_path: Path) -> None:
 
 def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     now = [100.0]
-    dispatcher, queue = setup(tmp_path, now)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
     seed_builder_job(queue)
     for number in range(1, 4):
         head = str(number) * 7
@@ -764,8 +837,8 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     queue.finish(first.id, owner="grok", handoff_comment_id=None)
     dispatcher.reconcile_jobs()
 
-    second = queue.claim("grok")
-    assert second is not None
+    assert len(delivery.jobs) == 1
+    second = delivery.jobs[0]
     assert second.id != first.id
     assert second.request.generation > first.request.generation
 
@@ -1778,6 +1851,7 @@ def test_ship_intent_checks_already_merged_after_process_crash(
         SQLiteJobQueue(queue.path, clock=lambda: 200),
         trusted_logins=TRUSTED_LOGINS,
         review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
     )
     restarted.process(snapshot)
 
@@ -1826,6 +1900,7 @@ def test_pending_non_merge_intent_holds_without_repeating_side_effect(
         SQLiteJobQueue(queue.path, clock=lambda: 200),
         trusted_logins=TRUSTED_LOGINS,
         review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
     )
     restarted.process(snapshot)
 
@@ -2164,7 +2239,8 @@ def test_go_state_write_failure_does_not_stop_other_repos(
 
 def test_t6_retries_no_handoff_once_then_marks_stuck(tmp_path: Path) -> None:
     now = [100.0]
-    dispatcher, queue = setup(tmp_path, now)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
     snapshot = ticket(
         comment("go-1", GO.format(state="building"), author="grok-login")
     )
@@ -2188,14 +2264,15 @@ def test_t6_retries_no_handoff_once_then_marks_stuck(tmp_path: Path) -> None:
     dispatcher.reconcile_jobs()
     assert dispatcher.is_stuck(snapshot)
     now[0] = 142
-    stopped = queue.claim("grok")
-    assert stopped is not None
+    assert len(delivery.jobs) == 1
+    stopped = delivery.jobs[0]
     assert stopped.request.action == "stuck"
 
 
 def test_t6_does_not_retry_job_for_already_stuck_ticket(tmp_path: Path) -> None:
     now = [100.0]
-    dispatcher, queue = setup(tmp_path, now)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
     snapshot = ticket(
         comment(
             "go-1",
@@ -2224,7 +2301,7 @@ def test_t6_does_not_retry_job_for_already_stuck_ticket(tmp_path: Path) -> None:
         job.request.action == "build" and job.request.attempt == 2
         for job in queue.outstanding()
     )
-    assert queue.claim("grok") is not None
+    assert [job.request.action for job in delivery.jobs] == ["stuck"]
 
 
 def test_t6_times_out_unclaimed_queued_job_from_created_at(
