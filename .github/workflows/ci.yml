@@ -18,6 +18,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: pytest
       - run: python bin/orch check-config
+      - run: python bin/orch eval-report --input tests/fixtures/eval/week
 
   statechart:
     runs-on: ubuntu-latest

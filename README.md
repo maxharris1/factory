@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts and the F1-13 orchestrator model. Other Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-13 orchestrator model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
 ## Contracts
 
@@ -17,6 +17,14 @@ bin/orch check-config
 ```
 
 Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+
+## Weekly eval report
+
+```sh
+bin/orch eval-report --input tests/fixtures/eval/week
+```
+
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
