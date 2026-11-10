@@ -235,12 +235,13 @@ def test_unresolved_family_is_refused(
     assert config is None
     assert any("family not established" in finding.message for finding in findings)
     assert any(
-        "give a claude*/gpt*/codex*/o<n> model hint" in finding.message
+        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint"
+        in finding.message
         for finding in findings
     )
 
 
-@pytest.mark.parametrize("hint", ["o3", "o4-mini"])
+@pytest.mark.parametrize("hint", ["o3", "O3", "o4-mini"])
 def test_o_series_hint_is_openai(tmp_path: Path, hint: str) -> None:
     data = _actors("codex", None, "cursor", hint)
     config, findings = load_factory_md(write_factory(tmp_path, data))
@@ -250,6 +251,56 @@ def test_o_series_hint_is_openai(tmp_path: Path, hint: str) -> None:
         for finding in findings
     )
     assert not any("not established" in finding.message for finding in findings)
+    assert not any("unknown model" in finding.message for finding in findings)
+
+
+def test_opus_hint_is_anthropic_not_openai(tmp_path: Path) -> None:
+    data = _actors("claude", None, "cursor", "opus")
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        "reviewer family 'anthropic'" in finding.message for finding in findings
+    )
+    assert not any("reviewer family 'openai'" in finding.message for finding in findings)
+
+
+def test_ollama_hint_stays_unresolved_not_openai(tmp_path: Path) -> None:
+    data = _actors("claude", None, "cursor", "ollama")
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        "reviewer family not established" in finding.message for finding in findings
+    )
+    assert not any("reviewer family 'openai'" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "hint",
+    ["sonnet-4", "opus-4.1", "haiku-3.5", "SoNnEt-4", "OpUs-4.1", "HaIkU-3.5"],
+)
+def test_cursor_claude_style_hint_matches_claude_builder(
+    tmp_path: Path, hint: str
+) -> None:
+    data = _actors("claude", None, "cursor", hint)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        "builder family 'anthropic' and reviewer family 'anthropic'"
+        in finding.message
+        for finding in findings
+    )
+    assert not any("not established" in finding.message for finding in findings)
+    assert not any("unknown model" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize("hint", ["sonnet-4", "opus-4.1", "haiku-3.5"])
+def test_cursor_claude_style_hint_is_accepted_against_codex(
+    tmp_path: Path, hint: str
+) -> None:
+    data = _actors("codex", None, "cursor", hint)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is not None
+    assert findings == []
 
 
 @pytest.mark.parametrize(
@@ -258,6 +309,7 @@ def test_o_series_hint_is_openai(tmp_path: Path, hint: str) -> None:
         ("claude", "gpt-x", "claude", None, "builder"),
         ("claude", None, "claude", "gpt-x", "reviewer"),
         ("codex", "claude-sonnet", "codex", None, "builder"),
+        ("codex", "sonnet-4", "claude", None, "builder"),
         ("codex", None, "codex", "claude-opus", "reviewer"),
         ("claude", "gpt-x", "cursor", "gpt-6-astra", "builder"),
     ],
