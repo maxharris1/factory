@@ -58,12 +58,13 @@ class JobQueue(Protocol):
 
     def claim(self, recipient: str) -> Job | None: ...
 
-    def heartbeat(self, job_id: str) -> Job: ...
+    def heartbeat(self, job_id: str, *, owner: str) -> Job: ...
 
     def finish(
         self,
         job_id: str,
         *,
+        owner: str,
         handoff_comment_id: str | None,
     ) -> Job: ...
 
@@ -215,22 +216,36 @@ class SQLiteJobQueue:
         assert updated is not None
         return _job(updated)
 
-    def heartbeat(self, job_id: str) -> Job:
+    def heartbeat(self, job_id: str, *, owner: str) -> Job:
+        if owner not in RECIPIENTS:
+            raise QueueError(f"unknown owner {owner!r}")
         now = self.now()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 """
                 UPDATE jobs SET last_activity_at = ?
-                WHERE id = ? AND state = 'running'
+                WHERE id = ? AND state = 'running' AND recipient = ?
                 """,
-                (now, job_id),
+                (now, job_id, owner),
             ).rowcount
             if changed != 1:
+                current = connection.execute(
+                    "SELECT recipient FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                if current is None:
+                    raise QueueError(f"unknown job {job_id!r}")
+                if current["recipient"] != owner:
+                    raise QueueError(
+                        f"job {job_id} belongs to {current['recipient']}, not {owner}"
+                    )
                 raise QueueError("heartbeat requires a running job")
             row = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
+            connection.commit()
         assert row is not None
         return _job(row)
 
@@ -238,37 +253,45 @@ class SQLiteJobQueue:
         self,
         job_id: str,
         *,
+        owner: str,
         handoff_comment_id: str | None,
     ) -> Job:
+        if owner not in RECIPIENTS:
+            raise QueueError(f"unknown owner {owner!r}")
         now = self.now()
         target = "done" if handoff_comment_id is not None else "failed"
         if handoff_comment_id == "":
             raise QueueError("handoff_comment_id must not be empty")
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise QueueError(f"unknown job {job_id!r}")
-            if row["state"] == target and row["handoff_comment_id"] == handoff_comment_id:
-                return _job(row)
-            if row["state"] != "running":
-                raise QueueError("finish requires a running job")
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
                 """
                 UPDATE jobs
                 SET state = ?, finished_at = ?, last_activity_at = ?,
                     handoff_comment_id = ?
-                WHERE id = ?
+                WHERE id = ? AND state = 'running' AND recipient = ?
                 """,
-                (target, now, now, handoff_comment_id, job_id),
-            )
+                (target, now, now, handoff_comment_id, job_id, owner),
+            ).rowcount
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
-        assert updated is not None
+            if updated is None:
+                raise QueueError(f"unknown job {job_id!r}")
+            if changed != 1:
+                if updated["recipient"] != owner:
+                    raise QueueError(
+                        f"job {job_id} belongs to {updated['recipient']}, not {owner}"
+                    )
+                if (
+                    updated["state"] == target
+                    and updated["handoff_comment_id"] == handoff_comment_id
+                ):
+                    connection.commit()
+                    return _job(updated)
+                raise QueueError("finish requires a running job")
+            connection.commit()
         return _job(updated)
 
     def outstanding(self) -> tuple[Job, ...]:
