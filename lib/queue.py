@@ -24,6 +24,7 @@ ACTIONS = (
     "capped",
     "refused",
     "unparsed",
+    "ship-failed",
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")

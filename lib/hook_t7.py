@@ -5,20 +5,21 @@ Events:
 - kind=verdict verdict=BLOCKED from the ticket's reviewer bot.
 - kind=stuck from any trusted bot. Its state= names the stop: blocked,
   capped or refused; anything else is stuck.
-- A comment whose first line looks like an orch: header but does not
-  parse, from a trusted login. Untrusted ones are recorded and ignored.
+- A comment that contains orch:v but has no parseable header, from a
+  trusted login. Untrusted ones are recorded and ignored.
 
-blocked, capped and stuck wake once per ticket and head, so repeated
-reports of the same stop do not wake again. An unparsed comment wakes
-once per comment. Config refused after intake, and capped from T3, call
-Dispatcher.wake_grok_once directly.
+blocked and capped wake once per ticket and head: the reported head, or
+the PR head when the report names none. Short heads are not expanded.
+stuck wakes once per ticket, refused once per ticket, and an unparsed
+comment once per comment. Config refused after intake, and capped from
+T3, call Dispatcher.wake_grok_once directly.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.dispatcher import Comment, Dispatcher, TrackedTicket, _matching_head
+from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 
 STOP_STATES = ("blocked", "capped", "refused")
@@ -55,9 +56,7 @@ class T7Hook:
         if dispatcher.is_stuck(ticket):
             dispatcher._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return True, "ticket-stuck"
-        head = fields.get("head")
-        if head is not None:
-            head = _matching_head(head, ticket.current_head) or head
+        head = fields.get("head") or ticket.current_head
         dispatcher.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -65,7 +64,6 @@ class T7Hook:
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=detail if head is None else f"{detail} on {head}",
-            once_key=head or "-",
             head=head,
         )
         return True, f"woke-grok-{reason}"
@@ -76,8 +74,7 @@ class T7Hook:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        first = comment.body.lstrip().split("\n", 1)[0]
-        if not (first.startswith("<!--") and "orch:" in first):
+        if "orch:v" not in comment.body:
             return None
         if comment.author not in dispatcher.trusted_logins:
             return True, "ignored-unparsed-untrusted"
@@ -97,6 +94,5 @@ class T7Hook:
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=f"unparsed orch header from {comment.author}: {error}",
-            once_key=comment.id,
         )
         return True, "woke-grok-unparsed"

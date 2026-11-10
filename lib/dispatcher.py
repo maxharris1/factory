@@ -16,7 +16,15 @@ from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 POLL_SECONDS = 60
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
-GROK_WAKE_REASONS = ("blocked", "capped", "refused", "stuck", "unparsed")
+GROK_WAKE_REASONS = (
+    "blocked",
+    "capped",
+    "refused",
+    "stuck",
+    "unparsed",
+    "ship-failed",
+)
+CORE_KINDS = ("go", "ready")
 
 
 @dataclass(frozen=True)
@@ -77,7 +85,10 @@ class Hook(Protocol):
 
     fields is None when the comment has no parseable orch:v1 header.
     handle returns None when the comment is not the hook's event, or
-    (handled, outcome); handled comments go into the ledger.
+    (handled, outcome); handled comments go into the ledger. Hooks run in
+    order and the first answer wins, so (False, outcome) leaves the
+    comment for the next poll without offering it to later hooks or the
+    core rows. kind=go and kind=ready are never offered to hooks.
     """
 
     def initialize(self, dispatcher: Dispatcher) -> None: ...
@@ -192,15 +203,22 @@ class Dispatcher:
         source_comment_id: str,
         timeout_seconds: int,
         detail: str,
-        once_key: str = "-",
         head: str | None = None,
     ) -> None:
-        """T7: one Grok wake per (ticket, reason, once_key), across restarts.
+        """T7: one Grok wake per stop, across restarts.
 
+        refused wakes once per ticket. blocked and capped wake once per
+        ticket and head. unparsed and ship-failed wake once per comment.
         stuck goes through the ticket's stuck flag, which wakes once.
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
+        if reason in ("unparsed", "ship-failed"):
+            once_key = source_comment_id
+        elif reason in ("blocked", "capped"):
+            once_key = head or "-"
+        else:
+            once_key = "-"
         if reason == "stuck":
             self._mark_stuck_and_wake(
                 repo=repo,
@@ -232,6 +250,8 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str] | None,
     ) -> tuple[bool, str] | None:
+        if fields is not None and fields["kind"] in CORE_KINDS:
+            return None
         for hook in self.hooks:
             result = hook.handle(self, ticket, comment, fields)
             if result is not None:
