@@ -90,7 +90,9 @@ class ReviewActions(Protocol):
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
 
-    def is_merged(self, ticket: TrackedTicket, head: str) -> bool: ...
+    def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
+        """True only when the PR was merged with exactly this head commit."""
+        ...
 
     def merge(
         self,

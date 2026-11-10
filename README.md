@@ -3,7 +3,7 @@
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
 The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
-F1-03, F1-04 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
+F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
@@ -12,7 +12,8 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - [`orch.yml`](orch.yml) lists the projects to poll and the dispatcher settings ([docs/SPEC.md](docs/SPEC.md) section 7). [`config/orch.example.yml`](config/orch.example.yml) is the minimal file.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
-- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T2 and T6 to
+- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1 through T6 (F1-05 is
+  the T3 review round, T4 ship and T5 questions loop) to
   tickets discovered through `orch:state/` GitHub labels or the Linear handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.

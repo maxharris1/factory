@@ -6,7 +6,10 @@ ticket is an APPROVE that came before the approver's comment, and F1-05
 is that intent's head: the full current head T4 passed to
 await_approver, after a short-prefix or patch-id match. The APPROVE's
 own head= is never the preview. A later verdict of any kind, even in the
-same poll, means the earlier ok or decline is refused.
+same poll, means the earlier ok or decline is refused. An ok or decline
+that arrives before T4 has completed that intent (CI still pending, say)
+is refused as not-waiting by design: the approver has not been shown a
+preview yet, and posts again after await_approver.
 
 - ok head=<40-char sha> equal to the previewed SHA, while the PR head is
   still that SHA, ships it. Any other sha is refused and the preview
