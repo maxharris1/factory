@@ -17,7 +17,8 @@ external_previews that only one dispatcher can win. A claimed ok calls
 Shipper.ship at most once. If ship raises, or a later poll finds the
 ok's claim still marked shipping, the preview is marked ship-failed and
 Grok Bot is woken once. A result is written only over shipping, so a
-recorded shipped is never overwritten. The dispatcher never ships the
+recorded shipped is never overwritten; shipped also replaces a
+ship-failed that a racing dispatcher wrote while ship() was running. The dispatcher never ships the
 same request again. Three stored declines mark the ticket stuck before
 any ok or decline is read, even after a crash.
 
@@ -105,7 +106,10 @@ class T8Hook:
                 orphan,
                 "ship has no recorded result; not shipping again",
             )
-        if _declines(dispatcher, ticket) >= DECLINES_TO_STUCK:
+        if (
+            not dispatcher.is_stuck(ticket)
+            and _declines(dispatcher, ticket) >= DECLINES_TO_STUCK
+        ):
             _mark_declined_stuck(dispatcher, ticket, comment.id, approver)
         if dispatcher.is_stuck(ticket):
             dispatcher._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
@@ -375,14 +379,21 @@ def _set_outcome(
     approve_id: str,
     outcome: str,
 ) -> bool:
-    """Record a ship result. Only a claim still marked shipping changes."""
+    """Record a ship result over a claim still marked shipping.
+
+    shipped also replaces ship-failed: another dispatcher may have marked
+    the claim ship-failed while this one was still inside ship().
+    """
     with dispatcher.queue.connect() as connection:
         changed = connection.execute(
             """
             UPDATE external_previews SET outcome = ?
             WHERE repo = ? AND ticket_id = ? AND approve_comment_id = ?
-              AND outcome = 'shipping'
+              AND (
+                outcome = 'shipping'
+                OR (? = 'shipped' AND outcome = 'ship-failed')
+              )
             """,
-            (outcome, ticket.repo.lower(), ticket.ticket_id, approve_id),
+            (outcome, ticket.repo.lower(), ticket.ticket_id, approve_id, outcome),
         ).rowcount
     return changed == 1
