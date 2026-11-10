@@ -1,7 +1,10 @@
 import ast
+import io
 import json
 import os
 import select
+import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -9,239 +12,455 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatcher_queue import (
-    Job,
-    JobQueue,
-    JobQueueError,
-    StubJobQueue,
-    default_queue_path,
+from lib.dispatcher import Comment, Dispatcher, TrackedTicket
+from lib.factory_md import FactoryConfig
+from lib.queue import JobRequest, SQLiteJobQueue
+from lib.wait import (
+    OWNING_BOTS,
+    POLL_SECONDS,
+    WaitError,
+    deliver,
     open_queue,
+    wait_for_job,
 )
-from lib.handoff import HandoffError, parse_comment
-from lib.wait import POLL_SECONDS, format_wait_output, wait_for_job
 
 ROOT = Path(__file__).resolve().parents[1]
-GO = (ROOT / "tests" / "fixtures" / "comments" / "go.txt").read_text(encoding="utf-8")
+ORCH = ROOT / "bin" / "orch"
 HARNESS_BINARIES = ("claude", "codex", "cursor-agent")
+GO = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\nGo.\n"
+TRUSTED_LOGINS = {"grok-login": "grok-bot", "claude-login": "claude-bot"}
 
 
-def run(args: list[str], queue: Path) -> subprocess.CompletedProcess[str]:
+def make_db(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
+    path = tmp_path / "orch.db"
+    return path, SQLiteJobQueue(path, clock=time.time)
+
+
+def dispatcher_for(path: Path) -> Dispatcher:
+    queue = SQLiteJobQueue(path, clock=time.time)
+    return Dispatcher(path, queue, trusted_logins=TRUSTED_LOGINS)
+
+
+def request(recipient: str = "claude", action: str = "build") -> JobRequest:
+    return JobRequest(
+        repo="owner/repo",
+        ticket_id="42",
+        action=action,
+        recipient=recipient,
+        source_comment_id="go-1",
+        timeout_seconds=5400,
+        head="3f9c2ab",
+    )
+
+
+def tracked(*comments: Comment) -> TrackedTicket:
+    return TrackedTicket(
+        repo="owner/repo",
+        ticket_id="42",
+        factory=FactoryConfig(
+            base_branch="main",
+            tickets="github",
+            builder_harness="claude",
+            reviewer_harness="codex",
+            rounds_low=1,
+            rounds_high=3,
+            verify="none",
+            ship="merge",
+            skills=(),
+        ),
+        comments=comments,
+        current_head=None,
+        ci={},
+        job_timeout_minutes=90,
+    )
+
+
+def run(args: list[str], db: Path | None = None, **env: str) -> subprocess.CompletedProcess[str]:
+    extra = ["--db", str(db)] if db is not None else []
     return subprocess.run(
-        [sys.executable, str(ROOT / "bin" / "orch"), *args, "--queue", str(queue)],
+        [sys.executable, str(ORCH), *args, *extra],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        timeout=30,
+        env={**os.environ, **env},
     )
 
 
-def enqueue(queue: Path, role: str, step: str, comment: str = GO, note: str = "") -> str:
-    job = open_queue(queue).enqueue(role, step, comment, note)
-    return job.id
-
-
-def test_wait_for_job_blocks_until_a_job_is_claimed() -> None:
-    pauses: list[float] = []
-    calls = {"n": 0}
-
-    class Queue:
-        def claim(self, role: str):
-            assert role == "claude-bot"
-            calls["n"] += 1
-            if calls["n"] < 3:
-                return None
-            return Job(
-                id="abc123",
-                role=role,
-                step="build",
-                comment=GO,
-                note="",
-            )
-
-    job = wait_for_job(Queue(), "claude-bot", pause=lambda seconds: pauses.append(seconds))
-    assert pauses == [POLL_SECONDS, POLL_SECONDS]
-    assert job is not None
-    assert job.step == "build"
-    assert job.comment == GO
-
-
-def test_wait_blocks_on_the_shell_until_a_job_arrives(tmp_path: Path) -> None:
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            str(ROOT / "bin" / "orch"),
-            "wait",
-            "claude-bot",
-            "--queue",
-            str(tmp_path),
-        ],
+def start_wait(bot: str, db: Path, **env: str) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, str(ORCH), "wait", bot, "--db", str(db)],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env={**os.environ, "PYTHONUNBUFFERED": "1", **env},
     )
+
+
+def state_of(db: Path, job_id: str) -> sqlite3.Row:
+    connection = sqlite3.connect(db)
+    connection.row_factory = sqlite3.Row
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                out, err = proc.communicate()
-                raise AssertionError(f"wait exited early ({proc.returncode}): {out!r} {err!r}")
-            state = _state(proc.pid)
-            if state.startswith("S"):
-                break
-            time.sleep(0.02)
-        else:
-            raise AssertionError("wait never blocked")
-        time.sleep(0.2)
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return row
+
+
+def wait_until_sleeping(proc: subprocess.Popen[str]) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            out, err = proc.communicate()
+            raise AssertionError(f"wait exited early ({proc.returncode}): {out!r} {err!r}")
+        if _proc_state(proc.pid).startswith("S"):
+            time.sleep(POLL_SECONDS * 1.5)
+            if _proc_state(proc.pid).startswith("S"):
+                return
+        time.sleep(0.02)
+    raise AssertionError("wait never blocked")
+
+
+def test_wait_blocks_on_the_shell_until_the_dispatcher_queues_a_job(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    proc = start_wait("claude-bot", db)
+    try:
+        wait_until_sleeping(proc)
         assert proc.poll() is None
-        assert _pending(proc.stdout) is False
+        assert not _readable(proc.stdout)
         assert _child_pids(proc.pid) == []
         assert _socket_fds(proc.pid) == []
-        job_id = enqueue(tmp_path, "claude-bot", "build", GO, note="failing log")
-        stdout, stderr = proc.communicate(timeout=5)
+        dispatcher_for(db).process(
+            tracked(Comment(id="go-1", author="grok-login", body=GO, created_at=1))
+        )
+        stdout, stderr = proc.communicate(timeout=10)
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
     assert proc.returncode == 0, stderr
     assert stderr == ""
-    meta, comment = _split_output(stdout)
-    assert meta == {
-        "id": job_id,
-        "note": "failing log",
-        "role": "claude-bot",
-        "step": "build",
-    }
-    assert parse_comment(comment).as_dict()["kind"] == "go"
-    assert comment == GO
+    job = json.loads(stdout)
+    assert job["bot"] == "claude-bot"
+    assert job["recipient"] == "claude"
+    assert job["action"] == "build"
+    assert job["repo"] == "owner/repo"
+    assert job["ticket_id"] == "42"
+    assert job["source_comment_id"] == "go-1"
+    assert job["attempt"] == 1
+    assert state_of(db, job["id"])["state"] == "running"
 
 
-def test_wait_does_not_start_a_harness(tmp_path: Path) -> None:
-    enqueue(tmp_path, "codex-bot", "review", GO)
-    result = run(["wait", "codex-bot"], tmp_path)
+def test_wait_delivers_one_job_per_call_oldest_first(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    first = queue.enqueue(request(), dedupe_key="a")
+    second = queue.enqueue(request(action="fix"), dedupe_key="b")
+    queue.enqueue(request(recipient="codex", action="review"), dedupe_key="c")
+    one = run(["wait", "claude-bot"], db)
+    two = run(["wait", "claude-bot"], db)
+    other = run(["wait", "codex-bot"], db)
+    assert [json.loads(r.stdout)["id"] for r in (one, two)] == [first.id, second.id]
+    assert json.loads(other.stdout)["action"] == "review"
+
+
+def test_wait_reads_the_database_from_orch_db(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    result = run(["wait", "claude-bot"], ORCH_DB=str(db))
     assert result.returncode == 0, result.stderr
-    modules = _imports(ROOT / "lib" / "wait.py") | _imports(ROOT / "lib" / "dispatcher_queue.py")
-    assert "subprocess" not in modules
-    assert "socket" not in modules
-    cli = (ROOT / "lib" / "cli.py").read_text(encoding="utf-8")
-    for name in HARNESS_BINARIES:
-        assert name not in cli
+    assert json.loads(result.stdout)["id"] == job.id
 
 
-def test_wait_delivers_only_the_oldest_job_for_that_role(tmp_path: Path) -> None:
-    queue = open_queue(tmp_path)
-    first = queue.enqueue("claude-bot", "build", GO)
-    second = queue.enqueue("claude-bot", "fix", GO, "the log")
-    queue.enqueue("codex-bot", "review", GO)
-    claimed = queue.claim("claude-bot")
-    assert claimed is not None
-    assert claimed.id == first.id
-    assert claimed.note == ""
-    again = queue.claim("claude-bot")
-    assert again is not None
-    assert again.id == second.id
-    assert again.note == "the log"
-    assert queue.claim("claude-bot") is None
-    other = queue.claim("codex-bot")
-    assert other is not None
-    assert other.step == "review"
+def test_wait_without_a_database_is_refused(tmp_path: Path) -> None:
+    env = {key: value for key, value in os.environ.items() if key != "ORCH_DB"}
+    result = subprocess.run(
+        [sys.executable, str(ORCH), "wait", "claude-bot"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 2
+    assert "ORCH_DB" in result.stderr
+    missing = run(["wait", "claude-bot"], tmp_path / "missing.db")
+    assert missing.returncode == 2
+    assert "no dispatcher database" in missing.stderr
+    assert not (tmp_path / "missing.db").exists()
 
 
-def test_job_done_completes_only_a_claimed_job(tmp_path: Path) -> None:
-    job_id = enqueue(tmp_path, "cursor-bot", "fix", GO)
-    queued = run(["job", "done", job_id], tmp_path)
-    assert queued.returncode == 1
-    assert "not claimed" in queued.stderr
+# F1.1: done and heartbeat use F1-04's finish and heartbeat.
 
-    wait = run(["wait", "cursor-bot"], tmp_path)
-    assert wait.returncode == 0, wait.stderr
-    done = run(["job", "done", job_id], tmp_path)
+
+def test_job_done_finishes_with_the_handoff_comment_and_repeats_idempotently(
+    tmp_path: Path,
+) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    unclaimed = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
+    assert unclaimed.returncode == 1
+    assert "running" in unclaimed.stderr
+    run(["wait", "claude-bot"], db)
+    done = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
     assert done.returncode == 0, done.stderr
-    assert done.stdout == f"done {job_id}\n"
-    assert done.stderr == ""
-    again = run(["job", "done", job_id], tmp_path)
-    assert again.returncode == 1
-    assert "not claimed" in again.stderr
-    with pytest.raises(JobQueueError):
-        open_queue(tmp_path).complete(job_id)
+    assert done.stdout == f"done {job.id}\n"
+    row = state_of(db, job.id)
+    assert (row["state"], row["handoff_comment_id"]) == ("done", "c-9")
+    again = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
+    assert again.returncode == 0, again.stderr
+    other = run(["job", "done", "claude-bot", job.id, "--handoff", "c-10"], db)
+    assert other.returncode == 1
 
 
-def test_wait_rejects_a_role_the_handoff_parser_rejects(tmp_path: Path) -> None:
-    result = run(["wait", "Claude-Bot"], tmp_path)
+def test_job_done_failed_hands_the_job_to_t6(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    run(["wait", "claude-bot"], db)
+    failed = run(["job", "done", "claude-bot", job.id, "--failed"], db)
+    assert failed.returncode == 0, failed.stderr
+    assert failed.stdout == f"failed {job.id}\n"
+    dispatcher_for(db).reconcile_jobs()
+    retry = run(["wait", "claude-bot"], db)
+    assert retry.returncode == 0, retry.stderr
+    assert json.loads(retry.stdout)["attempt"] == 2
+
+
+def test_job_done_requires_exactly_one_outcome(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    neither = run(["job", "done", "claude-bot", job.id], db)
+    both = run(["job", "done", "claude-bot", job.id, "--handoff", "c", "--failed"], db)
+    empty = run(["job", "done", "claude-bot", job.id, "--handoff", ""], db)
+    assert (neither.returncode, both.returncode, empty.returncode) == (2, 2, 2)
+
+
+def test_heartbeat_keeps_a_running_job_out_of_t6(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    kept = queue.enqueue(request(), dedupe_key="a")
+    lapsed = queue.enqueue(request(action="fix"), dedupe_key="b")
+    run(["wait", "claude-bot"], db)
+    run(["wait", "claude-bot"], db)
+    stale = time.time() - 5400 + 60
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET last_activity_at = ?", (stale,))
+    beat = run(["job", "heartbeat", "claude-bot", kept.id], db)
+    assert beat.returncode == 0, beat.stderr
+    assert beat.stdout == f"heartbeat {kept.id}\n"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE jobs SET last_activity_at = last_activity_at - 120 WHERE id = ?",
+            (lapsed.id,),
+        )
+    dispatcher_for(db).reconcile_jobs()
+    assert state_of(db, kept.id)["state"] == "running"
+    assert state_of(db, lapsed.id)["state"] == "failed"
+
+
+def test_heartbeat_on_a_finished_job_fails(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    run(["wait", "claude-bot"], db)
+    run(["job", "done", "claude-bot", job.id, "--handoff", "c-1"], db)
+    beat = run(["job", "heartbeat", "claude-bot", job.id], db)
+    assert beat.returncode == 1
+    assert "running" in beat.stderr
+
+
+# F1.3: a claimed job the bot never received goes straight to T6.
+
+
+def test_a_job_that_cannot_be_printed_is_failed_for_t6(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request(), dedupe_key="a")
+    job = wait_for_job(queue, "claude")
+
+    class Broken(io.StringIO):
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError("bot went away")
+
+    with pytest.raises(BrokenPipeError):
+        deliver(queue, job, Broken())
+    assert state_of(db, job.id)["state"] == "failed"
+    dispatcher_for(db).reconcile_jobs()
+    retried = wait_for_job(queue, "claude")
+    assert retried.request.attempt == 2
+
+
+def test_sigterm_while_waiting_claims_nothing(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    proc = start_wait("claude-bot", db)
+    try:
+        wait_until_sleeping(proc)
+        proc.send_signal(signal.SIGTERM)
+        stdout, _ = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode == 143
+    assert stdout == ""
+    job = queue.enqueue(request(), dedupe_key="a")
+    assert state_of(db, job.id)["state"] == "queued"
+
+
+# F1.4: bad storage is reported, and one bad row does not wedge other bots.
+
+
+def test_a_corrupt_database_is_reported_without_a_traceback(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    db.write_bytes(b"not sqlite at all, just bytes" * 10)
+    result = run(["wait", "claude-bot"], db)
     assert result.returncode == 2
+    assert result.stderr.startswith("orch wait: cannot open dispatcher database")
+    assert "Traceback" not in result.stderr
+    empty = tmp_path / "empty.db"
+    empty.write_bytes(b"")
+    result = run(["wait", "claude-bot"], empty)
+    assert result.returncode == 2
+    assert "database file is empty" in result.stderr
+
+
+def test_a_malformed_row_for_one_bot_does_not_block_another(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    bad = queue.enqueue(request(recipient="codex", action="review"), dedupe_key="bad")
+    good = queue.enqueue(request(), dedupe_key="good")
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE jobs SET timeout_seconds = 'oops' WHERE id = ?",
+            (bad.id,),
+        )
+    claude = run(["wait", "claude-bot"], db)
+    assert claude.returncode == 0, claude.stderr
+    assert json.loads(claude.stdout)["id"] == good.id
+    codex = run(["wait", "codex-bot"], db)
+    assert codex.returncode == 1
+    assert codex.stderr.startswith("orch wait: claim failed")
+    assert "Traceback" not in codex.stderr
+
+
+# F1.6: a bounded poll, one claim per tick.
+
+
+def test_wait_polls_once_per_second_with_one_claim_per_tick() -> None:
+    assert POLL_SECONDS == 1.0
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    class Queue:
+        def claim(self, recipient: str):
+            calls.append(recipient)
+            if len(calls) < 4:
+                return None
+            return "job"
+
+    assert wait_for_job(Queue(), "codex", sleep=sleeps.append) == "job"
+    assert calls == ["codex"] * 4
+    assert sleeps == [POLL_SECONDS] * 3
+
+
+# F1.8: only the three owning bots, and only for their own jobs.
+
+
+@pytest.mark.parametrize("bot", ["claude", "reviewer", "grok-bot", "Claude-Bot", "claud-bot"])
+def test_wait_refuses_anything_but_an_owning_bot(tmp_path: Path, bot: str) -> None:
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request(), dedupe_key="a")
+    result = run(["wait", bot], db)
+    assert result.returncode == 2
+    assert "unknown owning bot" in result.stderr
     assert result.stdout == ""
 
 
-def test_job_done_rejects_a_bad_id(tmp_path: Path) -> None:
-    result = run(["job", "done", "../secrets"], tmp_path)
-    assert result.returncode == 2
-    assert result.stdout == ""
+def test_owning_bots_match_the_dispatcher_recipients() -> None:
+    assert OWNING_BOTS == {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor"}
 
 
-def test_enqueue_requires_an_orch_v1_comment_and_a_phase_1_step(tmp_path: Path) -> None:
-    queue = open_queue(tmp_path)
-    with pytest.raises(HandoffError):
-        queue.enqueue("claude-bot", "build", "not a handoff\n")
-    with pytest.raises(JobQueueError):
-        queue.enqueue("claude-bot", "post-merge", GO)
-    with pytest.raises(HandoffError):
-        queue.enqueue("Bad Role", "build", GO)
+def test_a_bot_cannot_finish_or_heartbeat_another_bots_job(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    run(["wait", "claude-bot"], db)
+    done = run(["job", "done", "codex-bot", job.id, "--handoff", "c-1"], db)
+    beat = run(["job", "heartbeat", "cursor-bot", job.id], db)
+    unknown = run(["job", "done", "claude", job.id, "--handoff", "c-1"], db)
+    assert (done.returncode, beat.returncode, unknown.returncode) == (2, 2, 2)
+    assert "belongs to claude-bot" in done.stderr
+    assert state_of(db, job.id)["state"] == "running"
+    missing = run(["job", "done", "claude-bot", "0" * 32, "--handoff", "c-1"], db)
+    assert missing.returncode == 2
+    assert "unknown job" in missing.stderr
 
 
-def test_open_queue_returns_the_stub_seam(tmp_path: Path) -> None:
-    queue = open_queue(tmp_path)
-    assert isinstance(queue, StubJobQueue)
-    assert isinstance(queue, JobQueue)
+# orch never execs a harness binary.
 
 
-def test_default_queue_path_is_the_local_job_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ORCH_JOB_QUEUE", raising=False)
-    assert default_queue_path() == Path.home() / ".factory" / "job-queue"
-    monkeypatch.setenv("ORCH_JOB_QUEUE", "/tmp/factory-jobs")
-    assert default_queue_path() == Path("/tmp/factory-jobs")
+def test_wait_and_job_never_exec_a_harness(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "harness-ran"
+    for name in HARNESS_BINARIES:
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\necho {name} >> {marker}\n", encoding="utf-8")
+        script.chmod(0o755)
+    path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    db, _ = make_db(tmp_path)
+    proc = start_wait("cursor-bot", db, PATH=path)
+    try:
+        wait_until_sleeping(proc)
+        job = SQLiteJobQueue(db, clock=time.time).enqueue(
+            request(recipient="cursor"), dedupe_key="a"
+        )
+        stdout, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode == 0, stderr
+    assert json.loads(stdout)["id"] == job.id
+    assert run(["job", "heartbeat", "cursor-bot", job.id], db, PATH=path).returncode == 0
+    assert run(["job", "done", "cursor-bot", job.id, "--handoff", "c"], db, PATH=path).returncode == 0
+    assert not marker.exists()
+    for name in ("wait.py", "cli.py"):
+        assert _exec_calls(ROOT / "lib" / name) == []
+    wait_imports = _imports(ROOT / "lib" / "wait.py")
+    assert "subprocess" not in wait_imports
+    assert "os" not in wait_imports
 
 
-def test_three_handoff_skills_document_wait_and_job_done() -> None:
-    expected = {
-        "claude-bot": "claude",
-        "codex-bot": "codex",
-        "cursor-bot": "cursor-agent",
-    }
-    for role, harness in expected.items():
-        text = (ROOT / "bots" / role / "SKILL.md").read_text(encoding="utf-8")
-        heading, _, body = text.partition("## orch jobs")
-        assert heading.strip()
+def test_open_queue_is_f1_04s_sqlite_queue(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    assert isinstance(open_queue(db), SQLiteJobQueue)
+    with pytest.raises(WaitError):
+        open_queue(tmp_path / "nope.db")
+    assert not (ROOT / "lib" / "dispatcher_queue.py").exists()
+
+
+def test_three_handoff_skills_document_wait_heartbeat_and_done() -> None:
+    harness = {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor-agent"}
+    for bot, binary in harness.items():
+        text = (ROOT / "bots" / bot / "SKILL.md").read_text(encoding="utf-8")
+        _, _, body = text.partition("## orch jobs")
         paragraph = body.strip()
         assert paragraph
         assert "\n\n" not in paragraph
         assert "\n#" not in paragraph
-        assert f"orch wait {role}" in paragraph
-        assert "orch job done" in paragraph
-        assert harness in paragraph
+        assert f"orch wait {bot}" in paragraph
+        assert f"orch job heartbeat {bot}" in paragraph
+        assert f"orch job done {bot} <id> --handoff" in paragraph
+        assert f"orch job done {bot} <id> --failed" in paragraph
+        assert f"`{binary}` harness" in paragraph
         assert "no model tokens" in paragraph
-        assert "starts" in paragraph
+        assert "never starts a harness" in paragraph
 
 
-def test_format_wait_output_keeps_the_handoff_verbatim() -> None:
-    job = Job(id="abc", role="claude-bot", step="plan", comment=GO, note="")
-    meta, comment = _split_output(format_wait_output(job))
-    assert meta["step"] == "plan"
-    assert comment == GO
-
-
-def _split_output(stdout: str) -> tuple[dict[str, str], str]:
-    line, _, comment = stdout.partition("\n")
-    return json.loads(line), comment
-
-
-def _pending(stream: object) -> bool:
+def _readable(stream: object) -> bool:
     ready, _, _ = select.select([stream], [], [], 0)
     return bool(ready)
 
 
-def _state(pid: int) -> str:
+def _proc_state(pid: int) -> str:
     for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
         if line.startswith("State:"):
             return line.split(":", 1)[1].strip()
@@ -249,8 +468,7 @@ def _state(pid: int) -> str:
 
 
 def _child_pids(pid: int) -> list[str]:
-    text = Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="utf-8")
-    return text.split()
+    return Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="utf-8").split()
 
 
 def _socket_fds(pid: int) -> list[str]:
@@ -266,12 +484,24 @@ def _socket_fds(pid: int) -> list[str]:
 
 
 def _imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
     modules: set[str] = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                modules.add(alias.name.split(".", 1)[0])
+            modules.update(alias.name.split(".", 1)[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             modules.add(node.module.split(".", 1)[0])
     return modules
+
+
+def _exec_calls(path: Path) -> list[str]:
+    found: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        name = f"{node.value.id}.{node.attr}"
+        if node.value.id == "subprocess" or (
+            node.value.id == "os"
+            and (node.attr in ("system", "popen", "fork") or node.attr.startswith(("exec", "spawn")))
+        ):
+            found.append(name)
+    return found

@@ -3,7 +3,7 @@
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
 The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
-F1-03, and F1-04 contracts, the F1-02 pstack pin, the F1-07
+F1-03, and F1-04 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
@@ -31,6 +31,24 @@ one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
 dispatcher and queue use one SQLite database so terminal state and its wake
 commit atomically. The dispatcher queues jobs; it never executes a harness
 binary.
+
+## Wait
+
+```sh
+bin/orch wait claude-bot --db "$ORCH_DB"
+bin/orch job heartbeat claude-bot <job-id>
+bin/orch job done claude-bot <job-id> --handoff <comment-id>
+bin/orch job done claude-bot <job-id> --failed
+```
+
+[`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
+only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
+`codex`, `cursor`). It checks for a job once a second, claims the oldest, and
+prints one JSON line. If that line cannot be printed, the job is finished as
+failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
+the shell call starts its own. `job heartbeat` and `job done` refuse a job that
+belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
+is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
 
 ## Check config
 
