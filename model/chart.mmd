@@ -47,6 +47,7 @@ stateDiagram-v2
   s5 --> s1: Max answers
   s5 --> s6: Max drops it
   s5 --> s3: answer, same step resumes
+  s7 --> s3: every acceptance criterion mapped
   s7 --> s4: an acceptance criterion is unmapped
   s8 --> s9: BLOCKED
   s8 --> s10: APPROVE on the current head
@@ -68,10 +69,10 @@ stateDiagram-v2
   s7 --> s11: gaps a second time
   s12 --> s11: job dies twice (T6) or CI red three times
   s17 --> s16: post-merge fails, follow-up filed or post-merge passes
-  s17 --> s11: job dies twice (T6)
   s8 --> s18: REVISE at the cap
   s18 --> s12: Max okays one more round
   s15 --> s11: 3rd decline
+  s3 --> s3: CI red, fix
   class s0 blue
   class s1 blue
   class s2 tan

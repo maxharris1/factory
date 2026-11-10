@@ -19,7 +19,9 @@ States == {
 
 Terminal == {"refused", "stuck", "blocked", "abandoned", "done", "handed-off"}
 
-JobStates == {"planning", "building", "review", "fixing", "post-merge"}
+\* Phase 1 jobs. post-merge is T9, which Phase 1 leaves off, so it is not a job
+\* and has no edge to stuck.
+JobStates == {"planning", "building", "review", "fixing"}
 
 AfterGo == {
   "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
@@ -495,12 +497,17 @@ ChartEdges ==
 
 \* Drawing bound for the Mermaid chart. The full configs explore every interleaving.
 \* This keeps TLC under statechart's 500-state drawing limit and still reaches
-\* every section 4.1 name. One risk cap, the small-ticket build, and the plan-check
-\* branch. A CI-red streak and a job-death streak are not stacked.
+\* every section 4.1 name. PlanMapped is in the picture: a mapped plan may
+\* enter building. One risk cap. A CI-red streak and a job-death streak are
+\* not stacked, and the mapped plan does not replay those streaks.
 ChartSlice ==
   /\ counts.acUnmet = 0
-  /\ ~flags.planOk
   /\ cap \in {0, 3}
   /\ counts.deaths = 0 \/ counts.gate = 0
+  /\ \/ ~flags.planOk
+     \/ /\ counts.round = 0
+        /\ counts.declines = 0
+        /\ counts.gate = 0
+        /\ counts.deaths = 0
 
 ====
