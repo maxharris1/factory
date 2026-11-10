@@ -13,7 +13,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-ACTIONS = ("plan", "build", "review", "fix", "clarify", "stuck")
+ACTIONS = (
+    "plan",
+    "build",
+    "review",
+    "fix",
+    "clarify",
+    "stuck",
+    "blocked",
+    "capped",
+    "refused",
+    "unparsed",
+    "ship-failed",
+)
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")
 
