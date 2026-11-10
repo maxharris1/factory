@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=ready from=claude-bot role=builder head=3f9c2ab -->
+Ready for review.

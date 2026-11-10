@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=go from=grok-bot role=orchestrator -->
+Start build or plan.

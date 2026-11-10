@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/1 head=3f9c2ab ac=met verdict=APPROVE risk=low -->
+Approve the covered head.

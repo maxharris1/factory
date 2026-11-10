@@ -1,0 +1,5 @@
+<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/3 head=3f9c2ab ac=met verdict=REVISE risk=high -->
+**Review round 2 of 3: REVISE** (Codex Bot, gpt-6-astra high)
+1. [blocking] tools/x.py:40, empty result treated as resolved. Repro: `…`
+2. [minor] … (batched into follow-up if low risk)
+Full report: <link>

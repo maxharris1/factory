@@ -1,0 +1,10 @@
+# orch.yml schema v1. See docs/SPEC.md section 7.
+# Required: poll_seconds, projects[].repo.
+# Optional: job_timeout and projects[].job_timeout, in minutes.
+# When both are omitted the job timeout is 90 minutes.
+# log path and Linear access are not v1 fields.
+poll_seconds: 60
+projects:
+  - repo: aut0-code/aut0
+  - repo: maxharris1/Cleffy
+  - repo: maxharris1/tracy-harris-coaching
