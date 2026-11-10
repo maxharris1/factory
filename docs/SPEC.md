@@ -1,6 +1,6 @@
 # Factory specification, plan and to-do
 
-Status: **draft specification** for [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet. This document is the full spec, plan and to-do list for the simplified factory. It is based on [docs/PLAN.md](PLAN.md) at `aa941d27`, [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md), the approved state chart, and Max's decisions on 2026-11-10 (America/New_York). It does not invent decisions. Anything not decided is in [Open questions](#16-open-questions) and is marked open where it appears.
+Status: **draft specification** for [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet. This document is the full spec, plan and to-do list for the simplified factory. It is based on [docs/PLAN.md](PLAN.md) at `aa941d27`, [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md), the approved state chart, and Max's decisions on 2026-11-10 (America/New_York). It does not invent decisions. Anything still open is in [Open questions](#16-open-questions). Technical decisions by Factory are recorded as "Factory decided (technical)" in the Decisions table and in the section they affect.
 
 Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
 
@@ -16,6 +16,13 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | 9:42 AM | Aut0 PRs #1306, #1317 and #1321 were closed without merging. They stay closed. | Factory, with Max's earlier agreement |
 | 9:49 AM | The pstack `statechart` skill is a core part of pstack and is kept, including `create-formal-verification-skill` and the Aut0 install/preflight scripts, so we can build evaluation systems that measure the factory. | Max |
 | 9:49 AM | Cleffy's deployed QA and its 1-in-10 post-merge audit are deferred. Phase 1 stays lean. | Max skipped that question; recorded as deferred |
+| 10:18 AM | Add F1-15: migrate Cleffy (`maxharris1/Cleffy`) and Tracy (`maxharris1/tracy-harris-coaching`) to slim `factory.md`. | Max |
+| 10:18 AM | Priority for the Aut0 cleanup Linear ticket (F1-11) is High. | Max |
+| 10:19 AM | Default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in `orch.yml`. After that, T6 retries once and then marks the job stuck. | Factory decided (technical) |
+| 10:19 AM | Phase 1 routes on best fit only, plus each owning bot's own reserve check. A verified usage source is added per harness when its bot can report one. This is not a Phase 1 blocker. | Factory decided (technical) |
+| 10:19 AM | Self-hosted runner labels go in each repo's `factory.md` (`ci_runner:`), because they are repo policy. The device inventory goes in `orch.yml`. | Factory decided (technical) |
+| 10:19 AM | Optional model hints have no fixed allow-list. `check-config` warns on an unknown model name, and the owning bot can refuse. | Factory decided (technical) |
+| 10:19 AM | Extra `orch:v1` header keys are added only when a real run needs them. This is a standing rule, not an open question. | Factory decided (technical) |
 | earlier today, still in force | Claude Bot starts every Claude session, Codex Bot every Codex session, Cursor Bot every Cursor CLI job. Grok Bot and the dispatcher never launch those binaries. | Standing rule |
 | earlier today, still in force | Max provisions logins and registers runners himself. The factory does not create logins or credentials without his OK, and never reads credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. | Standing rule |
 | earlier today, still in force | Product questions go to Max, one at a time, in his own words for approvals that need them. Technical questions are decided by the orchestrator. | Standing rule |
@@ -137,12 +144,12 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
 | T5 | `questions` comment from any session, then `answers` | Mark `waiting:max`. On answers, re-queue the same step with the answer linked (not a round) | Grok Bot (it decides technical ones itself) |
-| T6 | Job exits with no handoff comment, or runs past its timeout | Retry once. 2nd time → `stuck` | Grok Bot on the 2nd |
+| T6 | Job exits with no handoff comment, or 90 minutes pass with no heartbeat or progress (or the project's `job_timeout` in `orch.yml`) | Retry once. 2nd time → `stuck` | Grok Bot on the 2nd |
 | T7 | `verdict=BLOCKED`, `stuck`, `capped`, config refused, anything unparsed | No known answer | Grok Bot, once |
 | T8 | `ok sha=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
 | T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job. A fail files a blocking follow-up on the project's ticket tracker. Deferred from Phase 1. | QA owner bot |
 
-T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 is not built in Phase 1. Any new row needs a real run that showed a wasted wake. The job timeout duration is open.
+T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 is not built in Phase 1. Any new row needs a real run that showed a wasted wake. The default job timeout is 90 minutes of no heartbeat or progress; a project may override it with `job_timeout` in `orch.yml` (Factory decided (technical), 10:19 AM ET).
 
 ### 4.3 Invariants, and where they live now
 
@@ -177,7 +184,7 @@ On Aut0, those same facts stay in the `orch:` header and on the Linear ticket. T
 
 Max can read everything on the ticket and the PR. Nothing else is needed to resume.
 
-The exact key set on the `orch:v1` header, beyond the keys in the example (`kind`, `from`, `role`, `round`, `head`, `ac`, `verdict`, `risk`), is open if a later run needs more. Do not add keys until then.
+The `orch:v1` header keys in the example are `kind`, `from`, `role`, `round`, `head`, `ac`, `verdict` and `risk`. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
 
 ## 6. `factory.md` schema
 
@@ -197,7 +204,10 @@ Every project repo keeps a root `factory.md` that the orchestrator reads from th
 | `base_branch` | branch name | Integration branch (`main`, `dev`, …). |
 | `skills` | list of names | Special repo skills to load, besides pstack. |
 
-Optional: `builder.model` and `reviewer.model` as hints. There is no decided allow-list of model names.
+Optional:
+
+- `builder.model` and `reviewer.model` as hints. There is no fixed allow-list. `orch check-config` warns on an unknown model name, and the owning bot can refuse (Factory decided (technical), 10:19 AM ET).
+- `ci_runner` — self-hosted runner label for this repo, when Phase 2 self-hosted CI is in use. Runner labels are repo policy, so they live here, not in `orch.yml` (Factory decided (technical), 10:19 AM ET).
 
 Free-text sections after the front block:
 
@@ -205,7 +215,7 @@ Free-text sections after the front block:
 - **Ship** — what happens on APPROVE, including any external OK or Aut0 Ready-for-Review handoff.
 - **Context** — repo-specific facts that do not belong in the YAML (branch naming, CI caveats, domain skills, human reviewers).
 
-`orch check-config` refuses a file that is missing a required field, names a same-family reviewer as required, or sets `tickets: linear` while also asking the orchestrator to create GitHub issues or labels.
+`orch check-config` refuses a file that is missing a required field, names a same-family reviewer as required, or sets `tickets: linear` while also asking the orchestrator to create GitHub issues or labels. It warns on an unknown optional model name and does not fail the check for that alone.
 
 Generic example (GitHub-issue repo, merge on approval):
 
@@ -239,6 +249,11 @@ PRs target `main`. Mention any repo-specific gotchas here, not in the YAML.
 
 A Tracy-style file would set `ship: after:tracy-site` and describe the Site OK in **Ship**. The Aut0 draft (`tickets: linear`, `ship: handoff`, `verify: verify-aut0`, Ready for Review, Max merges) is in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Until `verify-aut0` merges to Aut0 `dev` (#1305), reviewers list that check as not run.
 
+**F1-15 migrates Cleffy and Tracy to this schema.** Today neither repo has a `factory.md`. Each still has an old-plan `## Factory` block in `AGENTS.md` (Cleffy on `dev`, lines 5–50, from PRs #77 and #81; Tracy on `main`, from line 11, from PRs #2 and #3). Those blocks contradict today's decisions (`reviewers: a+b` or `review: none`, a judge, `qa: browser:click-through` or `qa: none`, `fixer: codex-local`). F1-15 is one cleanup PR per repo (Cleffy targets `dev`, Tracy targets `main`): add a slim root `factory.md`, move the still-valid Context notes, replace the `## Factory` block with a pointer, and keep the pstack router. Do not open those PRs until that to-do is started. Still-valid Context to carry over:
+
+- **Cleffy:** risky areas (migrations, RLS, Edge Functions under `supabase/`, and billing/Stripe); never apply migrations or change config on a hosted Supabase project from an agent session; privacy policy forbids tracking pixels; marketing surfaces use public-domain repertoire only and the primary CTA is always "Start free"; PRs target `dev`; never push to `dev` or `main` directly; `dev` → `main` is Max's merge. Name the repo's verify skill if one exists, otherwise `review.verify: none` (the old block had `verify: off`). The existing `ui-check` skill can stay in Context for UI changes. `ship: merge` applies to PRs into `dev`.
+- **Tracy:** small static marketing site; a push to `main` deploys production on Vercel and other branches get previews; Tracy approves the preview, then `main` is fast-forwarded to that exact SHA (no force-push, no merge commit); work runs on the box; before ship, run lint, typecheck and build plus the "Never ship" grep in `CLAUDE.md`; copy, pricing, photo and motion rules in `CLAUDE.md` stay. `ship: after:tracy-site`. Drop `review: none`; the new review rules apply.
+
 Fields from the old Aut0 Factory block that this schema drops on purpose: `owner_bot`, `stages`, `reviewers: a+b`, `judge` / `judge_session`, fixer lanes and cloud overflow, `tests_gate`, `qa`, `small_ticket` path lists, and cloud env IDs. Those are not part of this factory. Cloud env IDs may come back later if a real run needs them; that is open.
 
 ## 7. `orch.yml` schema
@@ -249,14 +264,17 @@ Decided content:
 
 ```yaml
 poll_seconds: 60
+# Default job timeout. A project may set job_timeout (minutes) to override.
+# job_timeout: 90
 projects:
   - repo: owner/name
     # factory.md is read from that repo's base_branch
+    # optional job_timeout: 90
 ```
 
 Phase 1 polls from the box, using `env -u GH_TOKEN gh` and existing Linear access for Aut0.
 
-Open, and not to be invented in the first skeleton beyond a placeholder comment: job timeout seconds, log path, Linear access details, and whether Phase 2 runner labels live in `orch.yml` or in `factory.md` (the plan allows either). `orch check-config` should also validate `orch.yml` once those fields are decided.
+The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
 ## 8. Review and merge rules
 
@@ -276,7 +294,7 @@ Open, and not to be invented in the first skeleton beyond a placeholder comment:
 
 The builder brief says "run as poteto-mode". The builder follows the playbook that fits the ticket (feature; bug-fix, repro first; refactor). Tickets over 3 files start with an architect scaffold and `plan.md`. Before `ready`, the builder self-checks: prove-it-works, deslop, no-comments.
 
-**Usage (D35/D44).** Before starting a job, each owning bot checks its harness's usage. At the last 20% of the cycle, non-urgent jobs go to the next-best fit. Urgent jobs (a resumed paused step, past-ship work, or anything Max marks urgent) may use the reserve. If a harness has no verified usage source, routing is best fit only. Which sources count as verified is open until each bot actually has one.
+**Usage (D35/D44).** Before starting a job, each owning bot checks its harness's usage. At the last 20% of the cycle, non-urgent jobs go to the next-best fit. Urgent jobs (a resumed paused step, past-ship work, or anything Max marks urgent) may use the reserve. Phase 1 routes on best fit only, plus each owning bot's own reserve check. A verified usage source is added per harness when its bot can report one. That is not a Phase 1 blocker (Factory decided (technical), 10:19 AM ET).
 
 ## 9. Failure handling
 
@@ -286,7 +304,7 @@ The builder brief says "run as poteto-mode". The builder follows the playbook th
 | Product question mid-intake or mid-work | `WaitingOnMax`. On answers, the same step resumes. Not a review round. Max may abandon the ticket. |
 | PlanCheck finds an unmapped acceptance criterion | Return to Planning once. A second gap is `Stuck`. |
 | CI red on a `ready` head | Queue `fix` with the log. Gate count +1. Third in a row: `Stuck`. |
-| Job exits with no handoff comment, or runs past its timeout | Retry once. Second time: `Stuck`. Timeout duration is open. |
+| Job exits with no handoff comment, or 90 minutes pass with no heartbeat or progress (or the project's `job_timeout`) | Retry once. Second time: `Stuck`. |
 | `verdict=REVISE` under the cap | Queue `fix`. |
 | `verdict=REVISE` at the cap, or a second AC-unmet verdict | `Capped`. Grok Bot tells Max once. Max's own words can OK one more round. |
 | `verdict=BLOCKED`, anything unparsed, or config refused later | Wake Grok Bot once. Grok Bot tells Max once, with evidence and a recommended next step. |
@@ -323,9 +341,9 @@ On Aut0, the `statechart` skill, `create-formal-verification-skill`, and the ins
 
 ## 12. Phase 1
 
-One machine (the box). End-to-end loop. About 2–3 working days, with a first end-to-end ticket on day 2 and live acceptance on day 3. If work starts 2026-11-10, Phase 1 would finish Thursday 11-12 to Friday 11-13 ET. The 14 to-do items are listed in [section 17](#17-to-do-checklist).
+One machine (the box). End-to-end loop. The 15 to-do items are listed in [section 17](#17-to-do-checklist). F1-15 (Cleffy and Tracy `factory.md` migrations) can start after F1-01 and must land before live tickets on those repos. Aut0 cleanup and those two PRs can run in parallel with items 2–9, but live acceptance now waits on those merges (Aut0's merge is Max's). Expect about **3 working days**, with a first end-to-end path on day 2 and live acceptance on day 3 or 4. If work starts 2026-11-10, Phase 1 would finish **Friday 11-13 to Saturday 11-14 ET**.
 
-Phase 1 includes Aut0 cleanup (Linear ticket, then a PR into `dev`) and the model, chart and weekly eval report. It does not include T9, Tailscale device scheduling, or self-hosted CI.
+Phase 1 includes Aut0 cleanup (High-priority Linear ticket, then a PR into `dev`), Cleffy and Tracy `factory.md` migrations, and the model, chart and weekly eval report. It does not include T9, Tailscale device scheduling, or self-hosted CI.
 
 Live acceptance is three real tickets, one each on three projects Max picks, run end to end. Fix only what those runs expose. Max will pick the tickets when the build is ready.
 
@@ -335,14 +353,14 @@ Start only after Phase 1 works.
 
 - **Device pool.** `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness eligible only where Max has provisioned its login under that bot's user (`claude-bot`, `codex-bot`, `cursor-bot`).
 - **Remote start.** Each owning bot starts its harness on a device over Tailscale SSH as its own user. A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
-- **Self-hosted CI.** Runner labels per project, plus a registration checklist for Max. Max registers the runners himself. Credential-holding deploy workflows stay hosted. Whether labels live in `orch.yml` or `factory.md` is open.
+- **Self-hosted CI.** Runner labels live in each repo's `factory.md` as `ci_runner:`. The device inventory lives in `orch.yml` (or `machines.yml`). Plus a registration checklist for Max. Max registers the runners himself. Credential-holding deploy workflows stay hosted.
 - **`orch status`.** A read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
 
-About two more days, plus Max's runner and login setup. Exact device names, slot counts and runner labels are open until Max provides them.
+About two more days, plus Max's runner and login setup. Exact device names, slot counts and which logins are provisioned where are open until Max provides them (Q8).
 
 ## 14. Aut0 cleanup (summary)
 
-Do not file the Linear ticket or open the Aut0 PR until Max says go. Do not invent a priority.
+Do not file the Linear ticket or open the Aut0 PR until Max says go. Priority is **High** (Max, 10:18 AM ET).
 
 On Aut0 `dev`, keep 668 factory-added pstack files (53 vendored skills, including `statechart` and `create-formal-verification-skill`, plus vendor scripts and install/preflight tooling). Remove 1 file: `docs/aut-2166-factory-follow-up.md`. Edit `AGENTS.md` (replace the `## Factory` block with a pointer to slim `factory.md`; keep the pstack router row for `statechart`), retarget Factory-section pointers, and add `factory.md`. Open PRs #1305 and #1318 (verify-aut0) stay open and do not overlap the cleanup paths; #1318 already conflicts with its #1305 base and should be rebased separately.
 
@@ -373,31 +391,24 @@ The current pstack pin named in the plan is 0.15.36. Aut0's existing vendor pin 
 
 ## 16. Open questions
 
-Do not invent answers. Ask Max when the work needs one.
+Do not invent answers. Ask Max when the work needs one. The only items still open are:
 
-1. **Which three tickets** run as live acceptance (F1-10)? Max said he will pick when the build is ready.
-2. **Priority** for the Aut0 cleanup Linear ticket (F1-11). Required by Aut0's board rules; do not invent one.
-3. **Job timeout duration** for T6. The plan requires a timeout; it does not name the number of minutes.
-4. **When to schedule T9** (Cleffy's deployed QA and post-merge audit) after Phase 1.
-5. **Whether the 2026-11-10 7:28 AM ET merge delegation** (Factory merges Codex-approved factory PRs; Factory decides technical questions) still applies to this new repo. It was given for the old factory. Confirm before merging build PRs here.
-6. **Verified usage sources** per harness. Until a source is verified, routing is best fit only.
-7. **Where Phase 2 runner labels live:** `orch.yml` or `factory.md`.
-8. **Phase 2 inventory:** Tailscale names, slot maximums per device, and which harness logins Max has provisioned where.
-9. **Optional model hints** in `factory.md`: whether they need a fixed allow-list.
-10. **Extra `orch:v1` header keys** beyond the example. Add only after a real run needs one.
+1. **Which three tickets** run as live acceptance (F1-10)? Max said he will pick them when the build is ready.
+2. **When to schedule T9** (Cleffy's deployed QA and post-merge audit) after Phase 1.
+3. **Phase 2 inventory:** Tailscale names, slot maximums per device, and which harness logins Max has provisioned where.
 
 ## 17. To-do checklist
 
-Each item is one PR, except Aut0 work, which follows Aut0's own Linear ticket plus a PR into `dev`. Sizes: **S** (hours), **M** (about a day or less), **L** (spans the live runs). Phase 1 items are small except F1-10.
+Each item is one PR, except Aut0 work, which follows Aut0's own Linear ticket plus a PR into `dev`, and F1-15, which is one PR on Cleffy and one on Tracy. Sizes: **S** (hours), **M** (about a day or less), **L** (spans the live runs). Phase 1 items are small except F1-10.
 
-Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linear ticket and has picked live tickets.
+Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linear ticket (priority is already High) and has picked live tickets. Do not open the F1-15 PRs until that item is started; this document only plans them.
 
 ### Phase 1
 
 #### F1-01 — Repo skeleton
 
 - **Description:** README, `orch.yml` (repos to poll and dispatcher settings), a `factory.md` schema plus `orch check-config`, and example `factory.md` files (Aut0, Cleffy and Tracy as examples only).
-- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds: 60`. No invented `orch.yml` fields are required to pass.
+- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds: 60`. The default job timeout is 90 minutes; a project may set `job_timeout` to override. `check-config` warns on an unknown optional model name. No other invented `orch.yml` fields are required to pass.
 - **Depends on:** none.
 - **Size:** S.
 
@@ -418,7 +429,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 #### F1-04 — Dispatcher core
 
 - **Description:** Poll loop, handled-comment ledger, and transitions T1, T2 and T6, with fake bots in tests.
-- **Acceptance criteria:** One test per of T1, T2 and T6. A restarted dispatcher does not handle the same comment twice. CI red increments the gate count and marks `stuck` on the third in a row. A job with no handoff is retried once and marked `stuck` the second time. `orch` cannot exec a harness binary.
+- **Acceptance criteria:** One test per of T1, T2 and T6. A restarted dispatcher does not handle the same comment twice. CI red increments the gate count and marks `stuck` on the third in a row. A job with no handoff, or with 90 minutes of no heartbeat or progress (or the project's `job_timeout`), is retried once and marked `stuck` the second time. `orch` cannot exec a harness binary.
 - **Depends on:** F1-03.
 - **Size:** M.
 
@@ -445,8 +456,8 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 
 #### F1-08 — Usage reserve and routing
 
-- **Description:** Fit table, 20% reserve check in each owning bot, and best-fit-only while a usage source is unverified.
-- **Acceptance criteria:** Non-urgent work is rerouted at the last 20% of a verified cycle. Urgent work (resumed paused step, past-ship, or Max-marked urgent) may use the reserve. With no verified source, routing is best fit only and stays cross-family for the reviewer.
+- **Description:** Fit table, and each owning bot's own reserve check. Phase 1 routes on best fit only. A verified usage source is added per harness when its bot can report one; that is not a Phase 1 blocker.
+- **Acceptance criteria:** Phase 1 routing is best fit and stays cross-family for the reviewer. Each owning bot still applies its own reserve check when it can. Missing a verified usage source does not block F1-08 or F1-10.
 - **Depends on:** F1-07.
 - **Size:** S.
 
@@ -461,14 +472,14 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 
 - **Description:** Three real tickets, one each on three projects Max picks, run end to end. Fix only what those runs expose.
 - **Acceptance criteria:** Each of the three tickets reaches `Merged`, `HandedOff`, or the `ship` state that project's `factory.md` defines, without a rule break the model flags as unexpected. Issues found are fixed or filed. No scope is added beyond what the runs expose.
-- **Depends on:** F1-05, F1-06, F1-07, F1-09; F1-12 before the Aut0 ticket; Max picking the three tickets.
+- **Depends on:** F1-05, F1-06, F1-07, F1-09; F1-12 before the Aut0 ticket; F1-15 before the Cleffy or Tracy ticket; Max picking the three tickets.
 - **Size:** L.
 
 #### F1-11 — Aut0 Linear ticket
 
-- **Description:** File the cleanup ticket on Aut0's board in the aut0-linear-board shape (Description, Acceptance Criteria, Notes), using the draft in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Title: `chore: slim factory.md and remove old factory plan config`.
-- **Acceptance criteria:** One ticket, unassigned, not In Progress at filing, with Max-named priority (ask if unset). No GitHub issue is created. Not filed until Max says go.
-- **Depends on:** Max saying go, and Max naming a priority.
+- **Description:** File the cleanup ticket on Aut0's board in the aut0-linear-board skill shape (Description, Acceptance Criteria, Notes), using the draft in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Title: `chore: slim factory.md and remove old factory plan config`. Priority is **High** (Max, 10:18 AM ET).
+- **Acceptance criteria:** One ticket, unassigned, not In Progress at filing, priority High. No GitHub issue is created. Not filed until Max says go.
+- **Depends on:** Max saying go.
 - **Size:** S.
 
 #### F1-12 — Aut0 cleanup PR
@@ -492,6 +503,13 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 - **Depends on:** F1-13. Live data depends on F1-10, fixtures do not.
 - **Size:** S.
 
+#### F1-15 — Migrate Cleffy and Tracy to `factory.md`
+
+- **Description:** One cleanup PR per repo. Cleffy's targets `dev` on `maxharris1/Cleffy`. Tracy's targets `main` on `maxharris1/tracy-harris-coaching`. Each PR adds a slim root `factory.md` in the section 6 schema, with the new review rules (one cross-family reviewer runs the verify skill; low-risk gets 1 round, high-risk gets 3). It moves the still-valid Context notes (for Cleffy: risky areas, the privacy/no-pixels rule, the marketing rules, and that `dev` → `main` is Max's merge; for Tracy: preview-then-fast-forward to `main` after Tracy's OK, pre-push checks, and the CLAUDE.md copy rules). It replaces the `## Factory` block in `AGENTS.md` with a pointer, and keeps the pstack router. Old-plan fields that contradict today's decisions (`reviewers: a+b`, `review: none`, a judge, `qa: browser:click-through`, `fixer: codex-local`) are not carried over. These PRs are planned only until this item is started.
+- **Acceptance criteria:** Each repo has a root `factory.md` that passes `orch check-config`. `AGENTS.md` has no `## Factory` section and has one pointer to `factory.md`. The pstack router remains. Cleffy's `factory.md` uses `base_branch: dev`, `tickets: github`, `ship: merge`, and the Context notes listed in section 6. Tracy's uses `base_branch: main`, `tickets: github`, `ship: after:tracy-site`, and the Context notes listed in section 6. Review policy in both is one cross-family reviewer, `review.rounds.low: 1`, `review.rounds.high: 3`, and `review.verify` set to the repo's verify skill or `none`.
+- **Depends on:** F1-01 (schema and `check-config`).
+- **Size:** M.
+
 ### Phase 2
 
 #### F2-01 — Device pool
@@ -511,7 +529,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 #### F2-03 — Self-hosted CI
 
 - **Description:** Runner labels per project, plus a registration checklist for Max. Max registers the runners. Credential-holding deploy workflows stay hosted. The plan never touches runner tokens.
-- **Acceptance criteria:** The checklist tells Max how to register runners without the factory handling tokens. Credential-holding deploy workflows remain on hosted runners. Labels are applied as Max decided once the open question in section 16 is answered.
+- **Acceptance criteria:** The checklist tells Max how to register runners without the factory handling tokens. Credential-holding deploy workflows remain on hosted runners. Labels are read from each repo's `factory.md` (`ci_runner:`). The device inventory is in `orch.yml` or `machines.yml`.
 - **Depends on:** F2-01, and Max registering runners.
 - **Size:** M.
 

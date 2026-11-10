@@ -1,6 +1,6 @@
 # Simple orchestrator plan (draft for Max, 2026-11-10)
 
-Status: **draft in [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet.** Decisions through 9:49 AM ET on 2026-11-10 are folded in below. The old factory repo was wiped and recreated; see section 14.
+Status: **draft in [maxharris1/factory](https://github.com/maxharris1/factory). Nothing is built yet.** Decisions through 10:19 AM ET on 2026-11-10 are folded in below. The old factory repo was wiped and recreated; see section 14.
 
 ## 1. Goal
 
@@ -178,6 +178,8 @@ PRs target `main`. Mention any repo-specific gotchas here, not in the YAML.
 
 A Tracy-style file would set `ship: after:tracy-site` and describe the Site OK in **Ship**. The Aut0 draft (Linear, `ship: handoff`, `verify-aut0`, Oliver's flow after Ready for Review) is in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
 
+Optional `builder.model` / `reviewer.model` hints have no allow-list; `check-config` warns on an unknown name, and the owning bot can refuse. Self-hosted runner labels go in `factory.md` as `ci_runner:`. F1-15 migrates Cleffy (`dev`) and Tracy (`main`) from their old `## Factory` blocks in `AGENTS.md` to this schema; see [docs/SPEC.md](SPEC.md) section 6 and F1-15.
+
 ## 8. Measuring the factory
 
 `statechart` is a core pstack skill (plugin README and `docs/guide/06-verify-and-ship.md`). Max (9:49 AM ET, 2026-11-10) wants it kept so we can build evaluation systems that measure the factory.
@@ -211,17 +213,18 @@ One source: `skills/` in this repo, holding a pinned pstack (0.15.36 today) plus
 7. Grok Bot skill `orchestrate-project`: intake, questions, routing, and stop handling.
 8. Usage reserve and routing: the fit table, the 20% reserve check in each owning bot, and best-fit-only while a source is unverified.
 9. Project hooks: T7 + T8 (external OK, for Tracy). Cleffy's deployed QA and its 1-in-10 post-merge audit (T9) are deferred to later (Max skipped that question; Phase 1 stays lean).
-10. Live acceptance: three real tickets, one each on three projects that Max picks, run end to end. Fix only what those runs expose.
-11. **Aut0 Linear ticket** for the cleanup in item 12, filed in Aut0's board in the aut0-linear-board skill shape (Description, Acceptance Criteria, Notes). Priority is required; ask Max if it is unset. Do not invent one. The title and body are drafted in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Do not file it until Max says go.
+10. Live acceptance: three real tickets, one each on three projects that Max picks, run end to end. Fix only what those runs expose. Depends on items 12 and 15 landing first for Aut0, Cleffy and Tracy.
+11. **Aut0 Linear ticket** for the cleanup in item 12, filed in Aut0's board in the aut0-linear-board skill shape (Description, Acceptance Criteria, Notes). Priority is **High** (Max, 10:18 AM ET). The title and body are drafted in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Do not file it until Max says go.
 12. **Aut0 cleanup PR** on `aut0-code/aut0` targeting `dev`, after the Linear ticket exists: add the slim `factory.md`, replace the `## Factory` block in `AGENTS.md` with a pointer, and delete `docs/aut-2166-factory-follow-up.md`. Leave vendored pstack in place, including `statechart`, `create-formal-verification-skill`, the install/preflight scripts, and the open verify-aut0 PRs (#1305, #1318). File-level keep/remove lists are in [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md). Items 11–12 can start immediately and should land before the Aut0 live ticket in item 10.
 13. **Orchestrator model and chart:** a small TLA+ model of the loop in `model/`, plus the Mermaid statechart `/statechart` draws from it. CI re-checks the model whenever the dispatcher transition table changes.
 14. **Weekly eval report:** a small script that reads `orch:` comment headers and the dispatcher log, compares each run to the chart, and reports time in each state, wasted agent wakes, review rounds per PR, stuck jobs, and rule breaks the model finds. It can run against fixtures until item 10 produces live data.
+15. **Migrate Cleffy and Tracy to `factory.md`:** one cleanup PR per repo (Cleffy targets `dev`, Tracy targets `main`). Each adds a slim root `factory.md` in the section 7 schema, with one cross-family reviewer who runs the verify skill, low-risk 1 round and high-risk 3, moves the still-valid Context notes, replaces the `## Factory` block in `AGENTS.md` with a pointer, and keeps the pstack router. Depends on item 1. Item 10 depends on this. Planned only; do not open those PRs until this item is started. Detail is in [docs/SPEC.md](SPEC.md) F1-15.
 
 **Phase 2: more compute and self-hosted CI (after Phase 1 works)**
 
 15. Device pool: `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness counted as eligible only where Max has provisioned its login under that bot's user.
 16. Remote start: each owning bot starts its harness on a device over Tailscale SSH as its own user (claude-bot, codex-bot, cursor-bot). A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
-17. Self-hosted CI: runner labels per project in `orch.yml` or `factory.md`, plus a registration checklist for Max. Max registers the runners himself, and the plan never touches runner tokens. Credential-holding deploy workflows stay hosted (D21).
+17. Self-hosted CI: runner labels in each repo's `factory.md` as `ci_runner:`; device inventory in `orch.yml` or `machines.yml`; plus a registration checklist for Max. Max registers the runners himself, and the plan never touches runner tokens. Credential-holding deploy workflows stay hosted (D21).
 18. `orch status`: a read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
 
 ## 11. Deliberately left out
@@ -242,7 +245,7 @@ These are out until a real run shows they're needed:
 
 ## 12. Phase 1 estimate
 
-Items 1–9 are small, and most can run in parallel after item 3: items 2, 7 and 8 are independent of 4–6. Items 11–12 (Aut0 cleanup) are also independent of 1–9 and can start as soon as Max OKs the Linear ticket. Items 13–14 are small: the model can start once the transition table in item 5 is stable, and the weekly report can use fixtures until item 10 produces live runs. Phase 1 is **14 items**. Expect about **2–3 working days**, with a first end-to-end ticket on day 2 and item 10 on day 3. If Max says go on Tue 11-10, Phase 1 would finish **Thu 11-12 to Fri 11-13 ET**. Phase 2 is about 2 more days, plus Max's runner and login setup.
+Items 1–9 are small, and most can run in parallel after item 3: items 2, 7 and 8 are independent of 4–6. Items 11–12 (Aut0 cleanup, High priority) can start as soon as Max OKs filing the Linear ticket. Item 15 (Cleffy and Tracy `factory.md`) can start after item 1 and should land before item 10. Items 13–14 are small: the model can start once the transition table in item 5 is stable, and the weekly report can use fixtures until item 10 produces live runs. Phase 1 is **15 items**. Because live acceptance now waits on the Aut0, Cleffy and Tracy config PRs (Aut0's merge is Max's), expect about **3 working days**, with a first end-to-end path on day 2 and item 10 on day 3 or 4. If work continues from Tue 11-10, Phase 1 would finish **Fri 11-13 to Sat 11-14 ET**. Phase 2 is about 2 more days, plus Max's runner and login setup.
 
 ## 13. Repo layout
 

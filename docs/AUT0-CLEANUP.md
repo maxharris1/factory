@@ -125,7 +125,7 @@ YAML that #1317 had and this draft drops on purpose: `owner_bot`, `stages` (judg
 
 ## Linear ticket draft
 
-Do not file this until Max says go. Do not invent a priority; ask Max if it is unset. Shape follows the aut0-linear-board skill (chore: Description, Acceptance Criteria, Notes). Status after filing: unassigned, not In Progress, then Ready for Review once the PR is open.
+Do not file this until Max says go. Priority is **High** (Max, 10:18 AM ET). Shape follows the aut0-linear-board skill (chore: Description, Acceptance Criteria, Notes). Status after filing: unassigned, not In Progress, then Ready for Review once the PR is open.
 
 **Title:** chore: slim factory.md and remove old factory plan config
 
@@ -149,4 +149,4 @@ File-level keep/remove lists and the drafted `factory.md` are in maxharris1/fact
 - Closed factory PRs #1306, #1317 and #1321 stay closed.
 - #1318 already conflicts with its #1305 base; rebase that separately. This cleanup does not overlap `verify-aut0` paths.
 - Until #1305 merges, `factory.md` may name `verify-aut0`, but reviewers must list that check as not run.
-- Priority is unset in this draft; set it when filing, after Max names it.
+- Priority is **High** (Max, 10:18 AM ET).
