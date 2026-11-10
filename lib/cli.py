@@ -1,11 +1,13 @@
-"""orch check-config, install-skills, and doctor."""
+"""orch check-config, install-skills, doctor, and eval-report."""
 
 from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
+from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
@@ -20,6 +22,7 @@ commands:
   check-config     validate orch.yml and factory.md
   install-skills   install the pinned pstack skills
   doctor           canary the pinned poteto-mode skill
+  eval-report      weekly eval report from a local log directory
 
 check-config [--orch PATH] [--factory PATH ...]
   With no paths, checks orch.yml and the example factory.md files.
@@ -36,6 +39,10 @@ doctor [--home PATH] [--project PATH] [--cloud]
   a token from the pinned skill. Score the replies the owning bots
   write. Exit 1 if any harness did not load that version.
   --print-canary prints the prompt and does not read replies.
+
+eval-report --input PATH [--since TIME] [--until TIME]
+  Print the weekly eval report for one directory of fixtures or
+  collected logs. It does not contact GitHub or Linear.
 """
 
 
@@ -45,28 +52,35 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE, end="")
         return 0 if argv and argv[0] in ("-h", "--help") else 2
-    command = argv[0]
-    if command == "check-config":
-        handler = _check_config
-    elif command == "install-skills":
-        handler = _install_skills
-    elif command == "doctor":
-        handler = _doctor
-    else:
-        print(f"unknown command: {command}", file=sys.stderr)
-        print(USAGE, end="", file=sys.stderr)
-        return 2
+    if argv[0] == "check-config":
+        return _call(_check_config, argv[1:])
+    if argv[0] == "install-skills":
+        return _call(_install_skills, argv[1:])
+    if argv[0] == "doctor":
+        return _call(_doctor, argv[1:])
+    if argv[0] == "eval-report":
+        return _call(_eval_report, argv[1:])
+    print(f"unknown command: {argv[0]}", file=sys.stderr)
+    print(USAGE, end="", file=sys.stderr)
+    return 2
+
+
+def _call(command: Callable[[list[str]], int], argv: list[str]) -> int:
     try:
-        return handler(argv[1:])
+        return command(argv)
     except ValueError:
         return 2
     except SystemExit as exc:
-        code = exc.code
-        if code is None or code == 0:
-            return 0
-        if isinstance(code, int):
-            return code
-        return 2
+        return _exit_code(exc)
+
+
+def _exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if code is None or code == 0:
+        return 0
+    if isinstance(code, int):
+        return code
+    return 2
 
 
 def _check_config(argv: list[str]) -> int:
@@ -101,6 +115,23 @@ class _Parser(argparse.ArgumentParser):
         self.print_usage(sys.stderr)
         print(f"{self.prog}: {message}", file=sys.stderr)
         raise ValueError(message)
+
+
+def _eval_report(argv: list[str]) -> int:
+    parser = _Parser(prog="orch eval-report", add_help=True)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--since")
+    parser.add_argument("--until")
+    args = parser.parse_args(argv)
+    try:
+        built = build_report(args.input, since=args.since, until=args.until)
+    except EvalError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for warning in built.warnings:
+        print(warning, file=sys.stderr)
+    print(render(built.report), end="")
+    return 0
 
 
 def _parser() -> _Parser:

@@ -2,7 +2,7 @@
 
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
-The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts and the F1-02 pstack pin. Later Phase 1 items are not built.
+The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F1-03 contracts, the F1-02 pstack pin, and the F1-14 weekly eval report. Later Phase 1 items are not built.
 
 ## Contracts
 
@@ -32,6 +32,14 @@ bin/orch doctor --home "$HOME" --responses DIR
 `install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
 
 `doctor` prints a canary that asks the harness to name poteto-mode and quote the first bold sentence of the pinned poteto-mode orchestrate playbook. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+
+## Weekly eval report
+
+```sh
+bin/orch eval-report --input tests/fixtures/eval/week
+```
+
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
