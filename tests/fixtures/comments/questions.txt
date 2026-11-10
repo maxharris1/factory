@@ -1,0 +1,2 @@
+<!-- orch:v1 kind=questions from=grok-bot role=orchestrator -->
+One product question for Max.

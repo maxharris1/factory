@@ -1,0 +1,5 @@
+# Minimal orch.yml. No field beyond these is required.
+# Omitted job_timeout means 90 minutes. See docs/SPEC.md section 7.
+poll_seconds: 60
+projects:
+  - repo: owner/name
