@@ -148,7 +148,11 @@ def seed_builder_job(queue: SQLiteJobQueue) -> None:
     )
     running = queue.claim("claude")
     assert running is not None
-    queue.finish(running.id, handoff_comment_id="ready-seed")
+    queue.finish(
+        running.id,
+        owner="claude",
+        handoff_comment_id="ready-seed",
+    )
 
 
 def test_dispatcher_refuses_separate_state_and_queue_databases(
@@ -548,7 +552,7 @@ def test_stuck_short_circuit_does_not_requeue_completed_wake(
     first = queue.claim("grok")
     assert first is not None
     now[0] = 110
-    queue.finish(first.id, handoff_comment_id="stuck-1")
+    queue.finish(first.id, owner="grok", handoff_comment_id="stuck-1")
     dispatcher.process(
         ticket(
             comment(
@@ -587,7 +591,7 @@ def test_reconciles_do_not_requeue_completed_stuck_wake(tmp_path: Path) -> None:
 
     wake = queue.claim("grok")
     assert wake is not None
-    queue.finish(wake.id, handoff_comment_id="stuck-1")
+    queue.finish(wake.id, owner="grok", handoff_comment_id="stuck-1")
     for _iteration in range(5):
         dispatcher.reconcile_jobs()
 
@@ -619,7 +623,7 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
 
     first = queue.claim("grok")
     assert first is not None
-    queue.finish(first.id, handoff_comment_id=None)
+    queue.finish(first.id, owner="grok", handoff_comment_id=None)
     dispatcher.reconcile_jobs()
 
     second = queue.claim("grok")
@@ -680,7 +684,7 @@ def test_t6_retries_no_handoff_once_then_marks_stuck(tmp_path: Path) -> None:
     first = queue.claim("claude")
     assert first is not None
     now[0] = 120
-    queue.finish(first.id, handoff_comment_id=None)
+    queue.finish(first.id, owner="claude", handoff_comment_id=None)
 
     now[0] = 121
     dispatcher.reconcile_jobs()
@@ -689,7 +693,7 @@ def test_t6_retries_no_handoff_once_then_marks_stuck(tmp_path: Path) -> None:
     assert retry is not None
     assert retry.request.attempt == 2
     now[0] = 140
-    queue.finish(retry.id, handoff_comment_id=None)
+    queue.finish(retry.id, owner="claude", handoff_comment_id=None)
 
     now[0] = 141
     dispatcher.reconcile_jobs()
@@ -714,7 +718,7 @@ def test_t6_does_not_retry_job_for_already_stuck_ticket(tmp_path: Path) -> None:
     running = queue.claim("claude")
     assert running is not None
     now[0] = 110
-    queue.finish(running.id, handoff_comment_id=None)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
     with queue.connect() as connection:
         connection.execute(
             """
@@ -786,11 +790,15 @@ def test_t6_retries_separate_failed_fix_jobs_without_dedupe_collision(
     )
     first_fix = queue.claim("claude")
     assert first_fix is not None
-    queue.finish(first_fix.id, handoff_comment_id=None)
+    queue.finish(first_fix.id, owner="claude", handoff_comment_id=None)
     dispatcher.reconcile_jobs()
     first_retry = queue.claim("claude")
     assert first_retry is not None
-    queue.finish(first_retry.id, handoff_comment_id="ready-retry-1")
+    queue.finish(
+        first_retry.id,
+        owner="claude",
+        handoff_comment_id="ready-retry-1",
+    )
 
     head_two = "2" * 7
     dispatcher.process(
@@ -807,7 +815,7 @@ def test_t6_retries_separate_failed_fix_jobs_without_dedupe_collision(
     second_fix = queue.claim("claude")
     assert second_fix is not None
     assert second_fix.request.generation == 1
-    queue.finish(second_fix.id, handoff_comment_id=None)
+    queue.finish(second_fix.id, owner="claude", handoff_comment_id=None)
     dispatcher.reconcile_jobs()
 
     second_retry = queue.claim("claude")
@@ -835,7 +843,7 @@ def test_t6_leaves_failure_unhandled_when_retry_was_not_inserted(
     )
     running = queue.claim("claude")
     assert running is not None
-    queue.finish(running.id, handoff_comment_id=None)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
     queue.enqueue(
         JobRequest(
             repo="owner/repo",
@@ -876,7 +884,7 @@ def test_t6_timeout_uses_project_override_and_heartbeat_progress(
 
     now[0] = 119
     dispatcher.reconcile_jobs()
-    queue.heartbeat(running.id)
+    queue.heartbeat(running.id, owner="claude")
     now[0] = 238
     dispatcher.reconcile_jobs()
     assert queue.claim("claude") is None
@@ -904,7 +912,7 @@ def test_t6_successful_handoff_is_not_retried(tmp_path: Path) -> None:
     running = queue.claim("claude")
     assert running is not None
     now[0] = 10
-    queue.finish(running.id, handoff_comment_id="ready-1")
+    queue.finish(running.id, owner="claude", handoff_comment_id="ready-1")
 
     now[0] = 10000
     dispatcher.reconcile_jobs()
