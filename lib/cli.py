@@ -19,7 +19,6 @@ from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import QueueError
 from lib.wait import (
     WaitError,
-    deliver,
     open_queue,
     owned_job,
     recipient_for,
@@ -180,18 +179,28 @@ def _wait(argv: list[str]) -> int:
         return 2
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        job = wait_for_job(queue, recipient)
+        wait_for_job(queue, recipient, sys.stdout)
     except WaitError as exc:
+        _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130
-    deliver(queue, job, sys.stdout)
     return 0
 
 
 def _exit_on_term(_signum: int, _frame: FrameType | None) -> None:
     raise SystemExit(143)
+
+
+def _quiet_stdout() -> None:
+    """Point a broken stdout at /dev/null so exit does not print a traceback."""
+    try:
+        sys.stdout.flush()
+    except OSError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
 
 
 def _job(argv: list[str]) -> int:
@@ -223,8 +232,8 @@ def _job(argv: list[str]) -> int:
             print(f"{prog}: --handoff must not be empty", file=sys.stderr)
             return 2
         job = queue.finish(args.job_id, handoff_comment_id=args.handoff)
-    except (QueueError, sqlite3.Error) as exc:
-        print(f"{prog}: {exc}", file=sys.stderr)
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{job.state} {job.id}")
     return 0
