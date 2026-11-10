@@ -10,8 +10,8 @@ family rule, also in the README, is fail closed:
   harness decides the family. A hint that names the other family is
   refused.
 - A cursor harness takes its family only from the model hint.
-  claude* is Anthropic. gpt*, codex*, and o<digit> (o3, o4-mini) are
-  OpenAI.
+  claude*, sonnet*, opus*, and haiku* are Anthropic. gpt*, codex*,
+  and o<digit> (o3, o4-mini) are OpenAI.
 - If either side's family cannot be resolved, the check refuses. A
   cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
@@ -323,7 +323,7 @@ def _family_findings(
 def _unresolved(side: str) -> str:
     return (
         f"same-family reviewer: {side} family not established: "
-        "give a claude*/gpt*/codex*/o<n> model hint"
+        "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint"
     )
 
 
@@ -368,7 +368,7 @@ def _resolved_family(harness: str, model: str | None) -> tuple[str | None, str |
 
 def _family_name(name: str) -> str | None:
     lowered = name.lower()
-    if lowered.startswith("claude"):
+    if lowered.startswith(("claude", "sonnet", "opus", "haiku")):
         return "anthropic"
     if (
         lowered.startswith("gpt")
