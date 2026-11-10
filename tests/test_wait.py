@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -39,7 +40,12 @@ def make_db(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:
 
 def dispatcher_for(path: Path) -> Dispatcher:
     queue = SQLiteJobQueue(path, clock=time.time)
-    return Dispatcher(path, queue, trusted_logins=TRUSTED_LOGINS)
+    return Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=Mock(),
+    )
 
 
 def request(recipient: str = "claude", action: str = "build") -> JobRequest:
@@ -72,6 +78,7 @@ def tracked(*comments: Comment) -> TrackedTicket:
         comments=comments,
         current_head=None,
         ci={},
+        risk="high",
         job_timeout_minutes=90,
     )
 
