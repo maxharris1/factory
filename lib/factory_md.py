@@ -3,12 +3,21 @@
 check-config enforces the YAML front matter. Review, Ship and Context
 prose is not required to pass. github_issues and github_labels are
 optional booleans; either one set true with tickets: linear is refused.
-Model hints have no allow-list: an unrecognized name warns and the
-check still passes. A side's model family comes from a claude* hint
-(Anthropic), a gpt* or codex* hint (OpenAI), or from a claude or codex
-harness. A cursor harness takes the family of its model hint. Matching
-families are refused. review.rounds.low is at most 1 and
-review.rounds.high is at most 3 (SPEC section 8).
+Model hints have no allow-list: an unrecognized name warns. The
+family rule, also in the README, is fail closed:
+
+- A claude harness is Anthropic. A codex harness is OpenAI. The
+  harness decides the family. A hint that names the other family is
+  refused.
+- A cursor harness takes its family only from the model hint.
+  claude* is Anthropic. gpt*, codex*, and o<digit> (o3, o4-mini) are
+  OpenAI.
+- If either side's family cannot be resolved, the check refuses. A
+  cursor side needs one of those hints.
+- If both families resolve and they are the same, the check refuses.
+
+review.rounds.low is at most 1 and review.rounds.high is at most 3
+(SPEC section 8).
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ EXAMPLE_PATHS = (
 # Prefixes drawn from names the spec uses. This is not an allow-list.
 ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "gpt", "grok")
 
+_OPENAI_O_SERIES = re.compile(r"^o[0-9]")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -99,17 +109,14 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     github_labels = _optional_bool(data, "github_labels", findings)
 
     if builder_harness is not None and reviewer_harness is not None:
-        builder_family = _model_family(builder_harness, builder_model)
-        reviewer_family = _model_family(reviewer_harness, reviewer_model)
-        if builder_family is not None and builder_family == reviewer_family:
-            findings.append(
-                Finding(
-                    "error",
-                    "same-family reviewer: "
-                    f"builder family {builder_family!r} and "
-                    f"reviewer family {reviewer_family!r}",
-                )
+        findings.extend(
+            _family_findings(
+                builder_harness,
+                builder_model,
+                reviewer_harness,
+                reviewer_model,
             )
+        )
     if tickets == "linear" and github_issues is True:
         findings.append(
             Finding("error", "tickets is linear and github_issues is true")
@@ -272,24 +279,102 @@ def _round(rounds: dict, name: str, findings: list[Finding]) -> int | None:
     return int(value)
 
 
-def _model_family(harness: str, model: str | None) -> str | None:
-    """Anthropic, OpenAI, or another family taken from a cursor hint."""
-    if model is not None:
-        hinted = _family_name(model)
-        if hinted is not None:
-            return hinted
-        if harness == "cursor":
-            return "other:" + model.lower()
+def _family_findings(
+    builder_harness: str,
+    builder_model: str | None,
+    reviewer_harness: str,
+    reviewer_model: str | None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    builder_family, builder_hint_family = _resolved_family(builder_harness, builder_model)
+    reviewer_family, reviewer_hint_family = _resolved_family(
+        reviewer_harness, reviewer_model
+    )
+    findings.extend(
+        _contradiction("builder", builder_harness, builder_model, builder_hint_family, builder_family)
+    )
+    findings.extend(
+        _contradiction(
+            "reviewer",
+            reviewer_harness,
+            reviewer_model,
+            reviewer_hint_family,
+            reviewer_family,
+        )
+    )
+    if builder_family is None or reviewer_family is None:
+        if builder_family is None:
+            findings.append(Finding("error", _unresolved("builder")))
+        if reviewer_family is None:
+            findings.append(Finding("error", _unresolved("reviewer")))
+        return findings
+    if builder_family == reviewer_family:
+        findings.append(
+            Finding(
+                "error",
+                "same-family reviewer: "
+                f"builder family {builder_family!r} and "
+                f"reviewer family {reviewer_family!r}",
+            )
+        )
+    return findings
+
+
+def _unresolved(side: str) -> str:
+    return (
+        f"same-family reviewer: {side} family not established: "
+        "give a claude*/gpt*/codex*/o<n> model hint"
+    )
+
+
+def _contradiction(
+    side: str,
+    harness: str,
+    model: str | None,
+    hint_family: str | None,
+    harness_family: str | None,
+) -> list[Finding]:
+    if (
+        harness_family is None
+        or hint_family is None
+        or model is None
+        or hint_family == harness_family
+    ):
+        return []
+    return [
+        Finding(
+            "error",
+            f"{side} model hint {model!r} contradicts {harness} harness",
+        )
+    ]
+
+
+def _resolved_family(harness: str, model: str | None) -> tuple[str | None, str | None]:
+    """Return (family, hint family).
+
+    For claude and codex the harness family is authoritative. The hint
+    family is returned so a contradicting hint can be refused. Cursor
+    has no harness family; its family is the hint family.
+    """
+    hint_family = _family_name(model) if model is not None else None
+    if harness == "claude":
+        return "anthropic", hint_family
+    if harness == "codex":
+        return "openai", hint_family
     if harness == "cursor":
-        return None
-    return _family_name(harness)
+        return hint_family, hint_family
+    return None, hint_family
 
 
 def _family_name(name: str) -> str | None:
     lowered = name.lower()
     if lowered.startswith("claude"):
         return "anthropic"
-    if lowered.startswith("gpt") or lowered.startswith("codex"):
+    if (
+        lowered.startswith("gpt")
+        or lowered.startswith("codex")
+        or _OPENAI_O_SERIES.match(lowered) is not None
+    ):
         return "openai"
     return None
 
@@ -356,7 +441,9 @@ def _model(value: object, field: str, findings: list[Finding]) -> str | None:
     if not isinstance(value, str) or _MODEL.fullmatch(value) is None:
         findings.append(Finding("error", f"{field} must be a model name"))
         return None
-    if not any(value.lower().startswith(prefix) for prefix in ADVISORY_MODEL_PREFIXES):
+    known_family = _family_name(value) is not None
+    known_prefix = any(value.lower().startswith(prefix) for prefix in ADVISORY_MODEL_PREFIXES)
+    if not known_family and not known_prefix:
         findings.append(Finding("warning", f"unknown model name {value!r} ({field})"))
     return value
 

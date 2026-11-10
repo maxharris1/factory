@@ -16,4 +16,13 @@ The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01 and F
 bin/orch check-config
 ```
 
-Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr and does not fail the check. Exit 1 when a file is refused.
+Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+
+## Model family
+
+`orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
+
+- A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
+- A `cursor` harness takes its family only from the model hint. `claude*` is Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
+- If both families resolve and they are the same, the check refuses.

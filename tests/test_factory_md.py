@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
-from lib.schema import AUT0_REPO
+from lib.schema import AUT0_REPO, HARNESSES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,7 +171,7 @@ def _actors(
     return data
 
 
-@pytest.mark.parametrize("harness", ["claude", "codex"])
+@pytest.mark.parametrize("harness", HARNESSES)
 def test_same_family_reviewer_is_refused(tmp_path: Path, harness: str) -> None:
     data = copy.deepcopy(VALID)
     data["builder"]["harness"] = harness
@@ -212,6 +212,71 @@ def test_cursor_reviewer_with_another_family_is_accepted(tmp_path: Path) -> None
     assert findings == []
     assert config.reviewer_harness == "cursor"
     assert config.reviewer_model == "gpt-6-astra"
+
+
+@pytest.mark.parametrize(
+    ("builder_harness", "builder_model", "reviewer_harness", "reviewer_model"),
+    [
+        ("cursor", None, "cursor", None),
+        ("cursor", None, "claude", None),
+        ("claude", None, "cursor", None),
+        ("cursor", "grok-4", "cursor", "composer-2"),
+    ],
+)
+def test_unresolved_family_is_refused(
+    tmp_path: Path,
+    builder_harness: str,
+    builder_model: str | None,
+    reviewer_harness: str,
+    reviewer_model: str | None,
+) -> None:
+    data = _actors(builder_harness, builder_model, reviewer_harness, reviewer_model)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any("family not established" in finding.message for finding in findings)
+    assert any(
+        "give a claude*/gpt*/codex*/o<n> model hint" in finding.message
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize("hint", ["o3", "o4-mini"])
+def test_o_series_hint_is_openai(tmp_path: Path, hint: str) -> None:
+    data = _actors("codex", None, "cursor", hint)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        "same-family reviewer" in finding.message and "openai" in finding.message
+        for finding in findings
+    )
+    assert not any("not established" in finding.message for finding in findings)
+
+
+@pytest.mark.parametrize(
+    ("builder_harness", "builder_model", "reviewer_harness", "reviewer_model", "role"),
+    [
+        ("claude", "gpt-x", "claude", None, "builder"),
+        ("claude", None, "claude", "gpt-x", "reviewer"),
+        ("codex", "claude-sonnet", "codex", None, "builder"),
+        ("codex", None, "codex", "claude-opus", "reviewer"),
+        ("claude", "gpt-x", "cursor", "gpt-6-astra", "builder"),
+    ],
+)
+def test_hint_that_contradicts_harness_is_refused(
+    tmp_path: Path,
+    builder_harness: str,
+    builder_model: str | None,
+    reviewer_harness: str,
+    reviewer_model: str | None,
+    role: str,
+) -> None:
+    data = _actors(builder_harness, builder_model, reviewer_harness, reviewer_model)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        role in finding.message and "contradicts" in finding.message
+        for finding in findings
+    )
 
 
 def test_different_models_on_one_harness_are_still_same_family(tmp_path: Path) -> None:
