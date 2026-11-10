@@ -74,7 +74,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 | OnlyTheHarnessBotStarts | Only owning bots run harnesses. `orch` refuses to exec a harness binary |
 | RerouteKeepsCrossFamily, OnlyUrgentUsesReserve, 20% reserve | Routing table in `factory.md` plus the owning bot's usage check (section 6) |
 | ContradictoryConfigNeverRuns | `orch check-config` refuses an inconsistent `factory.md` (e.g. a same-family reviewer) |
-| ExitCodesMeanOneThing (15/16/17/18) | Default labels: `waiting:max`, `abandoned`, `waiting:external`, `waiting:deploy`. Aut0: the same states on the Linear ticket and in PR `orch:` comments, with no GitHub labels |
+| ExitCodesMeanOneThing (15/16/17/18) | Default labels: `orch:state/waiting-max`, `orch:state/abandoned`, `orch:state/waiting-external`, `orch:state/waiting-deploy`. Aut0: the same states on the Linear ticket and in PR `orch:` comments, with no GitHub labels |
 | Slots, PC offline 60 min, LivePatch, lane cutover, MissionControl | Phase 2 (slots), or dropped (section 11) |
 
 ## 4. Dispatcher transition table
@@ -83,14 +83,14 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
-| T1 | Issue or Linear ticket gets `orch:go` (Grok Bot, after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
+| T1 | Issue or Linear ticket gets a `kind=go` handoff comment (`orch:go`, Grok Bot, after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
 | T2 | `ready head=<sha>` comment, then CI finishes on that SHA | Green: queue `review` for the reviewer. Red: queue `fix` with the failing log (gate count +1; 3rd in a row → `stuck`) | Reviewer's or builder's bot |
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
-| T5 | `questions` comment from any session, then `answers` | Mark `waiting:max`. On answers, re-queue the same step with the answer linked (not a round) | Grok Bot (it decides technical ones itself) |
+| T5 | `questions` comment from any session, then `answers` | Set `orch:state/waiting-max`. On answers, re-queue the same step with the answer linked (not a round) | Grok Bot (it decides technical ones itself) |
 | T6 | Job exits with no handoff comment, or runs past its timeout | Retry once. 2nd time → `stuck` | Grok Bot on the 2nd |
 | T7 | `verdict=BLOCKED`, `stuck`, `capped`, config refused, anything unparsed | No known answer | Grok Bot, once |
-| T8 | `ok sha=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
+| T8 | `ok head=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
 | T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job (e.g. deployed QA once the SHA is served, bounded wait). A fail files a blocking follow-up on the project's ticket tracker (Linear on Aut0). Deferred from Phase 1 (Cleffy QA, below). | QA owner bot |
 
 T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 (Cleffy's deployed QA and post-merge audit) is deferred; Phase 1 stays lean. Any new row needs a real run that showed a wasted wake.
@@ -116,7 +116,7 @@ The comment kinds are `brief`, `questions`, `answers`, `plan`, `ready`, `verdict
    - Observable: settled with a prototype.
    - Default-able: decided by the bot and recorded.
    - Product call: asked of Max, one at a time, in chat. The answers get posted as an `answers` comment.
-   Then the skill sets `orch:go`.
+   Then the skill posts `orch:go` (a `kind=go` handoff comment).
 3. **Routing (technical, the bot's call).** It picks the builder and the model by fit for the job, from the preferences in `factory.md`. **One reviewer, from a different model family than the builder, gives the final verdict** (Max, 9:38 AM ET). That reviewer also runs the project's verify skill (UI and database checks) when `factory.md` names one. There is no second reviewer and no separate Judge inside the factory loop. Aut0 still hands off after Ready for Review to Oliver's flow, which may run Aut0 Judge on its own; the factory does not.
    - **Risk class:** `low` (docs, cleanup, monitoring) gets one review round, with minors batched into a follow-up ticket. `high` (ship, merge, sign-off, credential, isolation code) gets up to 3 rounds. Every extra round needs Max's own words.
 4. **On a T5/T7 wake.** It answers technical questions itself, relays product ones to Max, and reports a stop once, with evidence and a recommended next step.
