@@ -19,10 +19,13 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), T8Hook(shipper)))`.
   [`lib/hook_t7.py`](lib/hook_t7.py) wakes Grok Bot once for `verdict=BLOCKED`,
   `kind=stuck` (with `state=capped`, `refused` or `blocked` for those stops),
-  and unparsed `orch:` headers; `Dispatcher.wake_grok_once` is the same wake
-  for a later config refusal or a T3 cap. [`lib/hook_t8.py`](lib/hook_t8.py)
-  handles the `after:<approver>` `ok` and `decline`; an `ok` on the previewed
-  SHA calls the `Shipper` it was given.
+  and trusted comments with an unparseable `orch:v` header;
+  `Dispatcher.wake_grok_once` is the same wake for a later config refusal or
+  a T3 cap. [`lib/hook_t8.py`](lib/hook_t8.py) handles the `after:<approver>`
+  `ok` and `decline`. An `ok` on the full previewed SHA, while the reviewer's
+  latest verdict is still that APPROVE, calls the `Shipper` it was given at
+  most once; a ship error wakes Grok Bot (`ship-failed`) instead of retrying.
+  Hooks never see `kind=go` or `kind=ready`.
 
 ## Queue interface
 
@@ -34,7 +37,7 @@ without a handoff ID invokes T6. `claim` is intentionally non-blocking so
 clock is injected when the queue opens; all timestamps use that clock.
 
 Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, `stuck`,
-or the T7 wakes `blocked`, `capped`, `refused` and `unparsed`),
+or the Grok wakes `blocked`, `capped`, `refused`, `unparsed` and `ship-failed`),
 one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
 dispatcher and queue use one SQLite database so terminal state and its wake
 commit atomically. The dispatcher queues jobs; it never executes a harness

@@ -6,11 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatcher import CIResult, Comment, Dispatcher, TrackedTicket
+from lib import hook_t8
+from lib.dispatcher import (
+    CIResult,
+    Comment,
+    Dispatcher,
+    Hook,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.factory_md import FactoryConfig
 from lib.hook_t7 import T7Hook
-from lib.hook_t8 import ShipRequest, T8Hook
-from lib.queue import ACTIONS, Job, SQLiteJobQueue
+from lib.hook_t8 import ShipRequest, Shipper, T8Hook
+from lib.queue import ACTIONS, Job, JobRequest, SQLiteJobQueue
 
 TRUSTED_LOGINS = {
     "grok-login": "grok-bot",
@@ -75,10 +83,11 @@ def ticket(
     *comments: Comment,
     head: str | None = HEAD_A,
     ship: str = "after:tracy-site",
+    ticket_id: str = "42",
 ) -> TrackedTicket:
     return TrackedTicket(
         repo="owner/repo",
-        ticket_id="42",
+        ticket_id=ticket_id,
         factory=factory(ship),
         comments=comments,
         current_head=head,
@@ -115,22 +124,26 @@ def stop(
 
 def setup(
     tmp_path: Path,
-    shipper: FakeShipper | None = None,
+    shipper: Shipper | None = None,
+    *,
+    hooks: tuple[Hook, ...] | None = None,
+    now: list[float] | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     path = tmp_path / "d.db"
-    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    clock = now if now is not None else [100.0]
+    queue = SQLiteJobQueue(path, clock=lambda: clock[0])
     dispatcher = Dispatcher(
         path,
         queue,
         trusted_logins=TRUSTED_LOGINS,
-        hooks=(T7Hook(), T8Hook(shipper)),
+        hooks=hooks if hooks is not None else (T7Hook(), T8Hook(shipper)),
     )
     return dispatcher, queue
 
 
 def restart(
     tmp_path: Path,
-    shipper: FakeShipper | None = None,
+    shipper: Shipper | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     return setup(tmp_path, shipper)
 
@@ -147,7 +160,7 @@ def test_t7_blocked_verdict_wakes_grok_once(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     blocked = say(
         "verdict-1",
-        VERDICT.format(head=HEAD_A[:7], verdict="BLOCKED"),
+        VERDICT.format(head=HEAD_A, verdict="BLOCKED"),
         "codex-login",
         1,
     )
@@ -262,7 +275,7 @@ def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
     dispatcher.process(
         ticket(
             approve("verdict-1", HEAD_A, 1),
-            say("ok-1", OK.format(head=HEAD_A[:7]), "tracy-login", 2),
+            say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
 
@@ -275,6 +288,33 @@ def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
             source_comment_id="ok-1",
         )
     ]
+    assert jobs(queue) == []
+
+
+def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
+    revise = say(
+        "verdict-2",
+        VERDICT.format(head=HEAD_A, verdict="REVISE"),
+        "codex-login",
+        3,
+    )
+    approved_then_ok = (
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+
+    unwired, _queue = setup(tmp_path / "unwired")
+    unwired.process(ticket(*approved_then_ok))
+    shipper = FakeShipper()
+    rewired, _queue = setup(tmp_path / "unwired", shipper)
+    rewired.process(ticket(*approved_then_ok, revise))
+    assert shipper.requests == []
+
+    one_poll_shipper = FakeShipper()
+    one_poll, queue = setup(tmp_path / "one-poll", one_poll_shipper)
+    declined = say("decline-1", DECLINE, "tracy-login", 2.5)
+    one_poll.process(ticket(*approved_then_ok, declined, revise))
+    assert one_poll_shipper.requests == []
     assert jobs(queue) == []
 
 
@@ -486,3 +526,272 @@ def test_hooks_cannot_execute_a_harness_binary(
         )
         assert "subprocess" not in imported
         assert "os" not in imported
+
+
+BRIEF = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nBrief.\n"
+GO = (
+    "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\n"
+    "Go.\n"
+)
+
+
+class RaisingShipper:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ship(self, request: ShipRequest) -> None:
+        self.calls += 1
+        raise RuntimeError("merge refused")
+
+
+class RacingShipper:
+    """While it ships, a second dispatcher on the same database polls."""
+
+    def __init__(self) -> None:
+        self.requests: list[ShipRequest] = []
+        self.other: Dispatcher | None = None
+        self.snapshot: TrackedTicket | None = None
+
+    def ship(self, request: ShipRequest) -> None:
+        self.requests.append(request)
+        assert self.other is not None and self.snapshot is not None
+        self.other.process(self.snapshot)
+
+
+class GreedyHook:
+    def __init__(self, answer: tuple[bool, str]):
+        self.answer = answer
+        self.seen: list[str] = []
+
+    def initialize(self, dispatcher: Dispatcher) -> None:
+        return None
+
+    def handle(
+        self,
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: object,
+    ) -> tuple[bool, str]:
+        self.seen.append(comment.id)
+        return self.answer
+
+
+class FakeSource:
+    def __init__(self, *tickets: TrackedTicket):
+        self.tickets = tickets
+
+    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+        return self.tickets
+
+    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
+        return ()
+
+    def tracked_tickets(
+        self,
+        refs: tuple[TicketRef, ...],
+    ) -> tuple[TrackedTicket, ...]:
+        wanted = {ref.ticket_id for ref in refs}
+        return tuple(item for item in self.tickets if item.ticket_id in wanted)
+
+
+def test_t8_preview_is_a_full_sha_and_short_heads_are_not_expanded(
+    tmp_path: Path,
+) -> None:
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+
+    dispatcher.process(
+        ticket(
+            approve("verdict-1", HEAD_A[:7], 1),
+            say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+        )
+    )
+    full = (
+        approve("verdict-2", HEAD_A, 3),
+        say("ok-2", OK.format(head=HEAD_A[:7]), "tracy-login", 4),
+    )
+    dispatcher.process(ticket(*full))
+    assert shipper.requests == []
+
+    dispatcher.process(
+        ticket(*full, say("ok-3", OK.format(head=HEAD_A), "tracy-login", 5))
+    )
+    assert [request.head for request in shipper.requests] == [HEAD_A]
+    with queue.connect() as connection:
+        stored = connection.execute("SELECT head FROM external_previews").fetchall()
+    assert [str(row["head"]) for row in stored] == [HEAD_A]
+
+
+def test_t8_preview_claim_is_won_by_one_insert(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    snapshot = ticket()
+    with queue.connect() as first:
+        assert hook_t8._claim(first, snapshot, "verdict-1", HEAD_A, "shipping", "ok-1")
+    with queue.connect() as second:
+        assert not hook_t8._claim(
+            second, snapshot, "verdict-1", HEAD_A, "declined", "decline-1"
+        )
+
+
+def test_t8_two_dispatchers_cannot_both_ship(tmp_path: Path) -> None:
+    racing = RacingShipper()
+    other_shipper = FakeShipper()
+    first, queue = setup(tmp_path, racing)
+    second, _queue = setup(tmp_path, other_shipper)
+    snapshot = ticket(
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    racing.other = second
+    racing.snapshot = snapshot
+
+    first.process(snapshot)
+
+    assert len(racing.requests) == 1
+    assert other_shipper.requests == []
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+
+
+def test_t8_crash_after_ship_returns_never_ships_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    snapshot = ticket(
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    original = hook_t8._set_outcome
+
+    def crash(
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        approve_id: str,
+        outcome: str,
+    ) -> None:
+        if outcome == "shipped":
+            raise RuntimeError("simulated crash")
+        original(dispatcher, ticket, approve_id, outcome)
+
+    monkeypatch.setattr(hook_t8, "_set_outcome", crash)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        dispatcher.process(snapshot)
+    monkeypatch.setattr(hook_t8, "_set_outcome", original)
+
+    for _poll in range(2):
+        restart(tmp_path, shipper)[0].process(snapshot)
+
+    assert len(shipper.requests) == 1
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+
+
+def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> None:
+    now = [0.0]
+    shipper = RaisingShipper()
+    dispatcher, queue = setup(tmp_path, shipper, now=now)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="44",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-44",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build-44:g1",
+    )
+    shipping = ticket(
+        say("brief-42", BRIEF, "grok-login", 0),
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+    building = ticket(say("go-43", GO, "grok-login", 0), ticket_id="43")
+    source = FakeSource(shipping, building)
+
+    now[0] = 100
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    assert shipper.calls == 1
+    claude = FakeBot(queue, "claude").drain()
+    assert sorted(
+        (job.request.ticket_id, job.request.attempt) for job in claude
+    ) == [("43", 1), ("44", 2)]
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert "merge refused" in str(grok[0].request.detail)
+
+
+def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.process(
+        ticket(
+            say(
+                "bad-1",
+                "Ready now.\n<!-- orch:v1 kind=ready head=abc1234 -->\n",
+                "claude-login",
+                1,
+            ),
+            say("bad-2", "orch:v1 kind=ready", "codex-login", 2),
+            say("bad-3", "orch:v1 kind=ready", "someone-else", 3),
+        )
+    )
+
+    grok = FakeBot(queue, "grok").drain()
+    assert sorted(job.request.source_comment_id for job in grok) == ["bad-1", "bad-2"]
+    assert {job.request.action for job in grok} == {"unparsed"}
+
+
+def test_hooks_cannot_claim_go_or_ready_and_first_answer_wins(
+    tmp_path: Path,
+) -> None:
+    first = GreedyHook((False, "held"))
+    second = GreedyHook((True, "never"))
+    dispatcher, queue = setup(tmp_path, hooks=(first, second))
+    snapshot = ticket(
+        say("go-1", GO, "grok-login", 1),
+        say("brief-1", BRIEF, "grok-login", 2),
+    )
+
+    dispatcher.process(snapshot)
+    dispatcher.process(snapshot)
+
+    assert first.seen == ["brief-1", "brief-1"]
+    assert second.seen == []
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+
+
+def test_t7_capped_wakes_once_per_head_and_refused_once_per_ticket(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    refused = (
+        "<!-- orch:v1 kind=stuck from=grok-bot role=orchestrator "
+        "head={head} state=refused -->\nRefused.\n"
+    )
+    capped_1 = stop("capped-1", 1, state="capped", sender="grok-bot", author="grok-login")
+    capped_2 = stop("capped-2", 2, state="capped", sender="grok-bot", author="grok-login")
+
+    dispatcher.process(ticket(capped_1, head=HEAD_A))
+    dispatcher.process(ticket(capped_1, capped_2, head=HEAD_B))
+    dispatcher.process(
+        ticket(
+            say("refused-1", refused.format(head=HEAD_A), "grok-login", 3),
+            say("refused-2", refused.format(head=HEAD_B), "grok-login", 4),
+        )
+    )
+
+    grok = FakeBot(queue, "grok").drain()
+    assert sorted((job.request.action, job.request.head) for job in grok) == [
+        ("capped", HEAD_A),
+        ("capped", HEAD_B),
+        ("refused", HEAD_A),
+    ]
