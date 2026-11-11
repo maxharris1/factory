@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import sqlite3
 import subprocess
@@ -434,6 +435,43 @@ def test_t1_reads_kind_go_and_queues_the_builder(
     assert job.request.timeout_seconds == 90 * 60
 
 
+def test_t1_job_detail_contains_tracker_pr_and_review_context(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    snapshot = replace(
+        ticket(
+            comment("go-1", GO.format(state="building"), author="grok-login"),
+            risk="high",
+        ),
+        ticket_url="https://linear.test/AUT-42",
+        git_branch_name="max/aut-42",
+        pr_number="123",
+        brief="https://linear.test/AUT-42#brief",
+    )
+
+    dispatcher.process(snapshot)
+
+    job = queue.claim("claude")
+    assert job is not None
+    detail = json.loads(job.request.detail or "{}")
+    assert detail == {
+        "action": "build",
+        "base_branch": "main",
+        "brief": "https://linear.test/AUT-42#brief",
+        "gitBranchName": "max/aut-42",
+        "head": None,
+        "linear_url": "https://linear.test/AUT-42",
+        "post_to": "PR #123 issue comments (not reviews or inline comments)",
+        "pr_number": "123",
+        "repo_skill_paths": [],
+        "reviewer_harness": "codex",
+        "risk": "high",
+        "round": None,
+        "verify_skill": "none",
+    }
+
+
 def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     dispatcher.process(
@@ -447,6 +485,60 @@ def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     )
 
     assert queue.claim("claude") is None
+
+
+def test_one_github_login_may_speak_only_for_its_declared_marker(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            "github": {
+                "maxharris1": frozenset(
+                    {"grok-bot", "claude-bot", "codex-bot"}
+                )
+            },
+            "linear": {"Max Harris": frozenset({"grok-bot"})},
+        },
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    dispatcher.process(
+        ticket(comment("go-1", GO.format(state="building"), author="maxharris1"))
+    )
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    head = "a" * 40
+    dispatcher.process(
+        ticket(
+            comment(
+                "ready-1",
+                READY.format(head=head),
+                author="maxharris1",
+            ),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    assert queue.claim("codex") is not None
+
+    forged = READY.format(head=head).replace(
+        "from=claude-bot", "from=cursor-bot"
+    )
+    dispatcher.process(
+        ticket(
+            comment("ready-2", forged, author="maxharris1"),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    rejected = queue.claim("grok")
+    assert rejected is not None
+    assert rejected.request.action == "rejected"
 
 
 @pytest.mark.parametrize("state", [None, "review"])
@@ -1316,7 +1408,7 @@ def test_t2_red_increments_gate_count_and_third_in_a_row_is_stuck(
             fix = queue.claim("claude")
             assert fix is not None
             assert fix.request.action == "fix"
-            assert fix.request.detail == f"log-{number}"
+            assert json.loads(fix.request.detail or "{}")["instruction"] == f"log-{number}"
         else:
             assert dispatcher.is_stuck(snapshot)
 
@@ -2159,6 +2251,12 @@ def test_t4_handoff_and_after_never_merge(
     if ship == "handoff":
         assert actions.handoffs == [head]
         assert actions.approvals == []
+        done = queue.claim("grok")
+        assert done is not None
+        assert done.request.action == "done"
+        detail = json.loads(done.request.detail or "{}")
+        assert detail["project_bot"] == "grok-bot"
+        assert detail["outcome"] == "handed-off"
     else:
         assert actions.handoffs == []
         assert actions.approvals == [(head, "tracy-site")]
@@ -2576,7 +2674,9 @@ def test_t5_answers_resume_same_step_without_incrementing_round(
     assert resumed is not None
     assert resumed.request.action == "fix"
     assert resumed.request.head == head
-    assert resumed.request.detail == "https://example.test/answers-1"
+    assert json.loads(resumed.request.detail or "{}")["instruction"] == (
+        "https://example.test/answers-1"
+    )
     with queue.connect() as connection:
         row = connection.execute(
             """
@@ -2619,8 +2719,11 @@ def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
         ticket(forged_question, question, second_question, head=head)
     )
 
-    wake = queue.claim("grok")
-    assert wake is not None
+    grok_jobs = [queue.claim("grok"), queue.claim("grok")]
+    assert all(job is not None for job in grok_jobs)
+    by_action = {job.request.action: job for job in grok_jobs if job is not None}
+    assert set(by_action) == {"clarify", "rejected"}
+    wake = by_action["clarify"]
     assert wake.request.source_comment_id == "questions-1"
     with queue.connect() as connection:
         wake_count = connection.execute(

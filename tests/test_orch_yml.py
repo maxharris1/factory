@@ -21,16 +21,22 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
     assert config.grok is not None
     assert config.grok.webhook_url_env == "FACTORY_WEBHOOK_URL"
     assert config.grok.webhook_key_env == "FACTORY_WEBHOOK_KEY"
-    assert config.trusted_logins["grok-bot"] == "grok-bot"
+    assert config.trusted_logins["github"]["maxharris1"] == frozenset(
+        {"grok-bot", "claude-bot", "codex-bot", "cursor-bot"}
+    )
     assert [project.repo for project in config.projects] == [
         "aut0-code/aut0",
         "maxharris1/Cleffy",
         "maxharris1/tracy-harris-coaching",
     ]
-    for project in config.projects:
+    assert config.projects[0].job_timeout == 150
+    assert resolve_job_timeout(config, "aut0-code/aut0") == 150
+    for project in config.projects[1:]:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
     assert config.projects[0].linear_project == "Aut0"
+    assert config.projects[0].linear_ready_for_review is True
+    assert config.projects[0].grok_bot == "offer-brief-project"
 
 
 def test_minimal_example_has_no_extra_required_fields() -> None:
@@ -41,6 +47,7 @@ def test_minimal_example_has_no_extra_required_fields() -> None:
     assert config.job_timeout is None
     assert config.projects[0].repo == "owner/name"
     assert config.projects[0].job_timeout is None
+    assert config.projects[0].linear_ready_for_review is False
     assert resolve_job_timeout(config, "owner/name") == 90
 
 

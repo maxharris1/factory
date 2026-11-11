@@ -158,6 +158,14 @@ T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 
 
 Grok jobs are pushed by the dispatcher through `GrokDelivery` during reconciliation, never through `orch wait`.
 
+Each builder/reviewer job's `detail` is compact JSON containing the Linear
+URL, `gitBranchName`, base branch, linked PR number when known, brief text or
+link, risk, `round=n/cap`, reviewer harness, verify skill, repo skill paths,
+and the PR issue-comment destination. Rejected author/marker comments and
+verdicts stale for the current state or round wake the configured project bot
+once instead of being silently consumed. Terminal success is also delivered
+once to that project bot.
+
 `orch poll` is the production entry point. It takes `--db` or `$ORCH_DB`;
 `--once` runs exactly one cycle. The live `PollSource` reads GitHub through
 `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u
@@ -196,6 +204,14 @@ Comment kinds: `brief`, `questions`, `answers`, `go`, `plan`, `ready`, `verdict`
 On GitHub-issue repos, labels hold current state, round and counters: `orch:state/<name>`, `orch:round/<n>`, `orch:risk/<low|high>`, `orch:builder/<harness>`.
 
 On Aut0, those same facts stay in the `orch:` header and on the Linear ticket. The orchestrator does not create GitHub issues or labels in `aut0-code/aut0`.
+
+Linear comments may instead use the visible first line
+`` `orch:v1 key=value …` `` when Linear strips or visibly renders HTML
+comments. It has the same keys and validation as `<!-- orch:v1 … -->`.
+For Linear-backed tickets, brief/questions/answers/go stay on Linear;
+ready/verdict/stuck are PR issue comments, not reviews or inline comments.
+The poll source joins both streams by timestamp using the PR linked by the
+ticket's `gitBranchName`.
 
 Max can read everything on the ticket and the PR. Nothing else is needed to resume.
 
@@ -287,11 +303,16 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_key_env: FACTORY_WEBHOOK_KEY
 trusted_logins:
-  tracker-login: grok-bot
+  github:
+    maxharris1: [grok-bot, claude-bot, codex-bot, cursor-bot]
+  linear:
+    linear-author: [grok-bot]
 projects:
   - repo: owner/name
     # Required when this repo's tickets are in Linear.
     # linear_project: Project name or ID
+    # grok_bot: project-bot
+    # linear_ready_for_review: false
     # factory.md is read from that repo's base_branch
     # optional job_timeout: 90
 ```
@@ -299,8 +320,11 @@ projects:
 Phase 1 polls from the box, using the existing `gh` login and the Linear key
 named by `linear.api_key_env`. The key name is configuration; the key value is
 only read from that environment variable at request time. A missing key fails
-with the variable name, never its value. `trusted_logins` maps tracker author
-logins to the `from=` identities accepted by the handoff contract.
+with the variable name, never its value. `trusted_logins` is scoped per
+tracker and maps an author login to the set of `from=` bot labels it may
+speak for. The expected `from=` and `role=` are still mandatory. With the
+shared `maxharris1` GitHub login, the marker is a routing label, not an
+identity or signature; no secret or signing key is added.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,
@@ -308,6 +332,12 @@ with the existing routine's bearer/key headers. The dispatcher never prints
 or includes either webhook value in an exception.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
+
+`grok_bot` names the project bot that receives stops and successful handoffs.
+`linear_ready_for_review` defaults to `false` and controls only the move to
+Linear Ready for Review after a covered cross-family APPROVE. Aut0 sets it to
+`true`; the factory makes no other Linear state transition and never merges
+an Aut0 PR.
 
 ## 8. Review and merge rules
 
@@ -321,7 +351,10 @@ The default job timeout is 90 minutes of no heartbeat or progress. A project may
 - Gate retries (CI red, then fix) do **not** count as review rounds. Three CI-red cycles in a row mark the ticket `stuck`.
 - A second AC-unmet review verdict marks the ticket `capped`, even if rounds remain.
 - **Ship is pinned to the covered head.** `ship: merge` uses `gh pr merge --squash --match-head-commit <sha>`. If the PR head has moved, the approval carries only when `git patch-id --stable` is equal; otherwise the dispatcher queues a re-review.
-- `ship: handoff` (Aut0): on APPROVE, move the Linear ticket to Ready for Review and mark the PR ready. Do not merge. Max picks the merge. Never request `maxharris1` as a reviewer on Aut0.
+- `ship: handoff` (Aut0): on APPROVE, mark the linked PR ready. The
+  per-project `linear_ready_for_review` flag alone controls the Linear Ready
+  for Review move; it defaults off and Aut0 enables it. Do not merge, request
+  `maxharris1` as a reviewer, or make any other Linear state change.
 - `ship: after:<approver>`: wait for `ok head=<sha>` on the previewed SHA, or `decline` (fix; third decline is `stuck`).
 - Another agent's approval is never treated as Max's.
 

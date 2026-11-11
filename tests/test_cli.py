@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from lib import cli
+
 ROOT = Path(__file__).resolve().parents[1]
 
 VALID = {
@@ -123,3 +125,23 @@ def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert {"jobs", "tracked_tickets", "handled_comments"} <= tables
+
+
+def test_doctor_runtime_requires_orch_db(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("ORCH_DB", raising=False)
+
+    assert cli.main(["doctor-runtime"]) == 1
+    assert "ORCH_DB is not set" in capsys.readouterr().err
+
+
+def test_doctor_runtime_accepts_existing_sqlite_db(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    database = tmp_path / "orch.db"
+    sqlite3.connect(database).close()
+    monkeypatch.setenv("ORCH_DB", str(database))
+
+    assert cli.main(["doctor-runtime"]) == 0
+    assert capsys.readouterr().out == "ok\n"

@@ -23,6 +23,7 @@ from lib.github_actions import (
     GitHubAdapterError,
     GitHubReviewActions,
     HeadMismatchError,
+    LinearReviewActions,
     NotFastForwardError,
     review_actions_for,
 )
@@ -588,7 +589,7 @@ def test_pr_numbers_are_validated_before_any_call(ticket_id: str) -> None:
 def test_linear_tickets_are_never_merged_through_github_numbers() -> None:
     actions, gh = adapter()
 
-    with pytest.raises(GitHubAdapterError, match="is a linear ticket"):
+    with pytest.raises(GitHubAdapterError, match="has no linked PR"):
         actions.merge(pr("merge", tickets="linear"), squash=True, match_head_commit=HEAD)
 
     assert gh.calls == []
@@ -703,15 +704,49 @@ def test_ci_status_is_success_when_every_counted_run_arrived() -> None:
     assert actions.ci_status("owner/repo", HEAD).status == "success"
 
 
-def test_stable_patch_id_and_handoff_fail_closed() -> None:
+def test_stable_patch_id_fails_closed_and_handoff_marks_draft_ready() -> None:
     actions, gh = adapter()
 
     with pytest.raises(GitHubAdapterError, match="stable_patch_id is not built"):
         actions.stable_patch_id(pr(), HEAD)
-    with pytest.raises(GitHubAdapterError, match="handoff is not built"):
-        actions.handoff(pr("handoff"), HEAD)
+    draft = served("pull-42-open.json")
+    draft_body = draft.stdout.replace('"draft": false', '"draft": true')
+    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
+    gh.route(PULL, GhResult(0, draft_body, ""))
+    gh.route(ready, served("pull-42-open.json"))
 
-    assert gh.calls == []
+    actions.handoff(pr("handoff"), HEAD)
+
+    assert gh.keys() == [PULL, ready]
+
+
+def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr() -> None:
+    gh = RecordedGh()
+    draft = served("pull-42-open.json")
+    gh.route(PULL, GhResult(0, draft.stdout.replace('"draft": false', '"draft": true'), ""))
+    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
+    gh.route(ready, served("pull-42-open.json"))
+    linear_writes: list[tuple[str, str]] = []
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: linear_writes.append(
+            (ticket.ticket_id, "Ready for Review")
+        ),
+        runner=gh,
+    )
+    linked = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+
+    actions.set_state(linked, "building")
+    actions.set_state(linked, "review")
+    actions.handoff(linked, HEAD)
+
+    assert linear_writes == [("AUT-42", "Ready for Review")]
+    assert gh.keys() == [PULL, ready]
+    assert MERGE not in gh.keys()
 
 
 def test_review_actions_are_picked_from_factory_md_tickets() -> None:

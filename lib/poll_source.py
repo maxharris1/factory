@@ -13,9 +13,15 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from lib.dispatcher import Comment, TicketRef, TrackedTicket
+from lib.dispatcher import Comment, ReviewActions, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, parse_factory_md
-from lib.github_actions import GH, GitHubReviewActions, Runner, run_gh
+from lib.github_actions import (
+    GH,
+    GitHubReviewActions,
+    LinearReviewActions,
+    Runner,
+    run_gh,
+)
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 
@@ -28,13 +34,22 @@ query FactoryPoll($term: String!, $first: Int!, $after: String) {
       id
       identifier
       url
+      gitBranchName: branchName
       project { id name }
+      team {
+        states { nodes { id name } }
+      }
       comments {
         nodes { id body createdAt user { name } }
       }
     }
     pageInfo { hasNextPage endCursor }
   }
+}
+""".strip()
+LINEAR_READY_MUTATION = """
+mutation FactoryReadyForReview($issue: String!, $state: String!) {
+  issueUpdate(id: $issue, input: {stateId: $state}) { success }
 }
 """.strip()
 
@@ -92,6 +107,24 @@ class LivePollSource:
             runner=gh_runner,
             timeout_seconds=timeout_seconds,
         )
+
+    def review_actions_by_repo(self) -> dict[str, ReviewActions]:
+        actions: dict[str, ReviewActions] = {}
+        for project in self.config.projects:
+            if project.linear_project is None:
+                action: ReviewActions = GitHubReviewActions(
+                    runner=self.gh_runner,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            else:
+                action = LinearReviewActions(
+                    move_ready_for_review=project.linear_ready_for_review,
+                    linear_ready=self._move_linear_ready,
+                    runner=self.gh_runner,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            actions[project.repo.lower()] = action
+        return actions
 
     def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
         tickets: list[TrackedTicket] = []
@@ -166,38 +199,13 @@ class LivePollSource:
         return tuple(found)
 
     def _linear_issues(self, query: str) -> tuple[dict[str, Any], ...]:
-        key = self._linear_key()
         issues: list[dict[str, Any]] = []
         after: str | None = None
         while True:
-            payload = json.dumps(
-                {
-                    "query": LINEAR_QUERY,
-                    "variables": {"term": query, "first": 50, "after": after},
-                },
-                separators=(",", ":"),
-            ).encode("utf-8")
-            try:
-                result = self.linear_transport(
-                    LINEAR_ENDPOINT,
-                    {
-                        "Authorization": key,
-                        "Content-Type": "application/json",
-                    },
-                    payload,
-                    self.timeout_seconds,
-                )
-            except PollSourceError:
-                raise
-            except Exception as exc:
-                raise PollSourceError(
-                    f"Linear request failed: {type(exc).__name__}"
-                ) from None
-            if result.status != 200:
-                raise PollSourceError(f"Linear returned HTTP {result.status}")
-            document = _json_object(result.body, "Linear")
-            if document.get("errors"):
-                raise PollSourceError("Linear returned a GraphQL error")
+            document = self._linear_graphql(
+                LINEAR_QUERY,
+                {"term": query, "first": 50, "after": after},
+            )
             connection = _object(
                 _object(document.get("data"), "Linear data").get("searchIssues"),
                 "Linear searchIssues",
@@ -214,6 +222,59 @@ class LivePollSource:
                 raise PollSourceError("Linear pagination has no endCursor")
             after = after_value
         return tuple(issues)
+
+    def _linear_graphql(
+        self,
+        query: str,
+        variables: Mapping[str, object],
+    ) -> dict[str, Any]:
+        payload = json.dumps(
+            {"query": query, "variables": variables},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            result = self.linear_transport(
+                LINEAR_ENDPOINT,
+                {
+                    "Authorization": self._linear_key(),
+                    "Content-Type": "application/json",
+                },
+                payload,
+                self.timeout_seconds,
+            )
+        except PollSourceError:
+            raise
+        except Exception as exc:
+            raise PollSourceError(
+                f"Linear request failed: {type(exc).__name__}"
+            ) from None
+        if result.status != 200:
+            raise PollSourceError(f"Linear returned HTTP {result.status}")
+        document = _json_object(result.body, "Linear")
+        if document.get("errors"):
+            raise PollSourceError("Linear returned a GraphQL error")
+        return document
+
+    def _move_linear_ready(self, ticket: TrackedTicket) -> None:
+        if (
+            not ticket.linear_ready_for_review
+            or ticket.linear_issue_id is None
+            or ticket.linear_ready_state_id is None
+        ):
+            raise PollSourceError("Linear Ready for Review metadata is unavailable")
+        document = self._linear_graphql(
+            LINEAR_READY_MUTATION,
+            {
+                "issue": ticket.linear_issue_id,
+                "state": ticket.linear_ready_state_id,
+            },
+        )
+        updated = _object(
+            _object(document.get("data"), "Linear data").get("issueUpdate"),
+            "Linear issueUpdate",
+        )
+        if updated.get("success") is not True:
+            raise PollSourceError("Linear Ready for Review update was not confirmed")
 
     def _linear_key(self) -> str:
         if self.config.linear is None:
@@ -286,6 +347,13 @@ class LivePollSource:
             ci={head: self.github.ci_status(project.repo, head)},
             risk=_risk(comments),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
+            ticket_url=_optional_string(pull.get("html_url")),
+            git_branch_name=_optional_string(
+                _object(pull.get("head"), "GitHub pull request head").get("ref")
+            ),
+            pr_number=number,
+            brief=_brief(comments),
+            grok_bot=project.grok_bot,
         )
 
     def _linear_ticket(
@@ -297,20 +365,67 @@ class LivePollSource:
         if not isinstance(identifier, str) or not identifier:
             raise PollSourceError("Linear issue has no identifier")
         comments_data = _object(issue.get("comments"), "Linear comments")
-        comments = tuple(
+        linear_comments = tuple(
             _linear_comment(item)
             for item in _array(comments_data.get("nodes"), "Linear comment nodes")
         )
+        branch = _optional_string(issue.get("gitBranchName"))
+        pr = self._pull_for_branch(project.repo, branch) if branch is not None else None
+        pr_number: str | None = None
+        current_head: str | None = _latest_head(linear_comments)
+        ci = {}
+        github_comments: tuple[Comment, ...] = ()
+        if pr is not None:
+            pr_number = str(_positive_int(pr.get("number"), "pull request number"))
+            head = _object(pr.get("head"), "GitHub pull request head").get("sha")
+            if not isinstance(head, str):
+                raise PollSourceError(f"{project.repo}#{pr_number} has no head")
+            current_head = head
+            github_comments = self.github.list_comments(project.repo, pr_number)
+            ci = {head: self.github.ci_status(project.repo, head)}
+        comments = tuple(
+            sorted(
+                (*linear_comments, *github_comments),
+                key=lambda item: (item.created_at, item.id),
+            )
+        )
+        ready_state_id = _linear_ready_state_id(issue)
         return TrackedTicket(
             repo=project.repo,
             ticket_id=identifier,
             factory=self._factory(project),
             comments=comments,
-            current_head=_latest_head(comments),
-            ci={},
+            current_head=current_head,
+            ci=ci,
             risk=_risk(comments),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
+            ticket_url=_optional_string(issue.get("url")),
+            git_branch_name=branch,
+            pr_number=pr_number,
+            brief=_brief(linear_comments),
+            grok_bot=project.grok_bot,
+            linear_issue_id=_optional_string(issue.get("id")),
+            linear_ready_state_id=ready_state_id,
+            linear_ready_for_review=project.linear_ready_for_review,
         )
+
+    def _pull_for_branch(
+        self,
+        repo: str,
+        branch: str,
+    ) -> dict[str, Any] | None:
+        owner = repo.split("/", 1)[0]
+        endpoint = (
+            f"repos/{repo}/pulls?state=all&head={owner}:{branch}&per_page=100"
+        )
+        pulls = [
+            _object(item, "GitHub pull request")
+            for page in self._gh_pages(endpoint)
+            for item in _array(page, "GitHub pull request page")
+        ]
+        if len(pulls) > 1:
+            raise PollSourceError(f"{repo}:{branch} matches more than one pull request")
+        return pulls[0] if pulls else None
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
@@ -387,6 +502,22 @@ def _matches_linear_project(issue: Mapping[str, Any], project: Project) -> bool:
     return configured in (value.get("id"), value.get("name"))
 
 
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
+    team = issue.get("team")
+    if team is None:
+        return None
+    states = _object(_object(team, "Linear team").get("states"), "Linear states")
+    for raw in _array(states.get("nodes"), "Linear state nodes"):
+        state = _object(raw, "Linear state")
+        if state.get("name") == "Ready for Review":
+            return _optional_string(state.get("id"))
+    return None
+
+
 def _linear_comment(value: object) -> Comment:
     item = _object(value, "Linear comment")
     comment_id = item.get("id")
@@ -421,6 +552,17 @@ def _risk(comments: Sequence[Comment]) -> str:
         if "risk" in fields:
             risk = fields["risk"]
     return risk
+
+
+def _brief(comments: Sequence[Comment]) -> str | None:
+    for comment in comments:
+        try:
+            fields = parse_comment(comment.body).as_dict()
+        except HandoffError:
+            continue
+        if fields["kind"] == "brief":
+            return comment.url or comment.body.strip()
+    return None
 
 
 def _latest_head(comments: Sequence[Comment]) -> str | None:

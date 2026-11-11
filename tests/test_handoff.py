@@ -69,6 +69,14 @@ def test_writer_normalizes_key_order() -> None:
     assert parse_header_line(header)["kind"] == "verdict"
 
 
+def test_linear_visible_fallback_and_html_header_parse_the_same_fields() -> None:
+    html = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->"
+    visible = "`orch:v1 kind=go from=grok-bot role=orchestrator state=building`"
+
+    assert parse_header_line(html) == parse_header_line(visible)
+    assert parse_comment(f"{visible}\nBuild.\n").body == "Build.\n"
+
+
 def test_github_issue_repo_gets_the_section_5_labels() -> None:
     handoff = parse_comment((FIXTURES / "github-verdict.txt").read_text(encoding="utf-8"))
     assert labels_for(handoff, tickets="github", repo="maxharris1/Cleffy") == (

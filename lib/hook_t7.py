@@ -25,7 +25,7 @@ from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 
 STOP_STATES = ("blocked", "capped", "refused")
-_HEADER_SHAPED = re.compile(r"^\s*<!--\s*orch:v", re.MULTILINE)
+_HEADER_SHAPED = re.compile(r"^\s*(?:<!--\s*|`)orch:v", re.MULTILINE)
 
 
 class T7Hook:
@@ -43,13 +43,18 @@ class T7Hook:
             return self._unparsed(dispatcher, ticket, comment)
         if fields["kind"] == "verdict" and fields.get("verdict") == "BLOCKED":
             reviewer = f"{ticket.factory.reviewer_harness}-bot"
-            if not dispatcher._trusted(comment, fields, reviewer, role="reviewer"):
+            if not dispatcher._trusted(
+                ticket, comment, fields, reviewer, role="reviewer"
+            ):
                 return True, "rejected-blocked-author"
             reason = "blocked"
             detail = f"verdict=BLOCKED from {reviewer}"
         elif fields["kind"] == "stuck":
-            sender = dispatcher.trusted_logins.get(comment.author)
-            if sender is None or fields.get("from") != sender:
+            sender = fields.get("from")
+            trusted = dispatcher.trusted_logins.get(
+                ticket.factory.tickets, {}
+            ).get(comment.author, frozenset())
+            if sender is None or sender not in trusted:
                 return True, "rejected-stuck-author"
             state = fields.get("state")
             reason = state if state in STOP_STATES else "stuck"
@@ -79,7 +84,9 @@ class T7Hook:
     ) -> tuple[bool, str] | None:
         if _HEADER_SHAPED.search(comment.body) is None:
             return None
-        if comment.author not in dispatcher.trusted_logins:
+        if comment.author not in dispatcher.trusted_logins.get(
+            ticket.factory.tickets, {}
+        ):
             return True, "ignored-unparsed-untrusted"
         if dispatcher.is_stuck(ticket):
             dispatcher._ensure_stuck_wake(ticket.repo, ticket.ticket_id)

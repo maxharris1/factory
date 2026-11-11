@@ -15,7 +15,6 @@ from types import FrameType
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
-from lib.github_actions import GitHubReviewActions
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -43,6 +42,7 @@ commands:
   check-config     validate orch.yml and factory.md
   install-skills   install the pinned pstack skills
   doctor           canary the pinned poteto-mode skill
+  doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
@@ -102,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_install_skills, argv[1:])
     if argv[0] == "doctor":
         return _call(_doctor, argv[1:])
+    if argv[0] == "doctor-runtime":
+        return _call(_doctor_runtime, argv[1:])
     if argv[0] == "eval-report":
         return _call(_eval_report, argv[1:])
     if argv[0] == "poll":
@@ -277,7 +279,7 @@ def _runtime(
         path,
         queue,
         trusted_logins=config.trusted_logins,
-        review_actions=GitHubReviewActions(),
+        review_actions=source.review_actions_by_repo(),
         grok_delivery=delivery,
         hooks=(T7Hook(), t8),
     )
@@ -415,6 +417,35 @@ def _doctor(argv: list[str]) -> int:
     if code == 0 and not args.print_canary:
         print("ok")
     return code
+
+
+def _doctor_runtime(argv: list[str]) -> int:
+    parser = _Parser(prog="orch doctor-runtime", add_help=True)
+    parser.parse_args(argv)
+    errors: list[str] = []
+    try:
+        __import__("yaml")
+    except ImportError:
+        errors.append("PyYAML is not importable")
+    configured = os.environ.get(DB_ENV)
+    if not configured:
+        errors.append(f"{DB_ENV} is not set")
+    else:
+        database = Path(configured)
+        if not database.is_file():
+            errors.append(f"{DB_ENV} database does not exist")
+        else:
+            try:
+                with sqlite3.connect(database) as connection:
+                    connection.execute("SELECT 1").fetchone()
+            except sqlite3.Error:
+                errors.append(f"{DB_ENV} database is not valid SQLite")
+    for error in errors:
+        print(f"orch doctor-runtime: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print("ok")
+    return 0
 
 
 def _anchor(

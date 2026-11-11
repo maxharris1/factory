@@ -61,7 +61,8 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
-| `stable_patch_id`, `handoff` | none | Not built. They raise, so T4 queues a re-review and a handoff ship fails closed |
+| `stable_patch_id` | none | Not built; a moved head queues a re-review |
+| `handoff` | `GET pulls/<n>`, then `POST pulls/<n>/ready_for_review` when draft | Confirms the linked PR is unmerged and still at the approved head; never merges or requests a reviewer |
 
 SHAs must be 40 lowercase hex, and owner, repo, branch and PR number must
 match strict patterns before any call. A non-zero gh exit, malformed JSON or a
@@ -106,7 +107,17 @@ Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
 variable containing the Linear API key. `grok.webhook_url_env` and
 `grok.webhook_key_env` name the existing Grok routine webhook variables.
 `projects[].linear_project` maps a Linear project name or ID to its repo.
-`trusted_logins` maps tracker authors to handoff identities. Missing secrets
+The Linear source finds the PR by the ticket's `gitBranchName`, merges the
+ticket's comments with that PR's issue comments, and reads head/CI from the
+PR. `ready` and `verdict` belong on PR issue comments. `projects[].grok_bot`
+routes terminal results. `projects[].linear_ready_for_review` defaults off
+and controls only the post-APPROVE move to Linear Ready for Review; Aut0 turns
+it on. Other dispatcher states never write Linear, and `ship: handoff` never
+merges.
+`trusted_logins` is keyed by tracker, then maps each author login to the set
+of bot markers it may post. The dispatcher still requires the header's
+`from=` and `role=` to match the expected step. With one shared GitHub login,
+that marker is an operational label, not cryptographic identity. Missing secrets
 fail by environment-variable name; values are never printed or included in
 exceptions.
 
@@ -127,16 +138,28 @@ failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
+While a harness runs, its owning bot loops `orch job heartbeat <bot> <job-id>`
+at least every `timeout_seconds / 3`; running timeouts use the last heartbeat
+or other activity, not the job creation time. Handoffs for Linear-backed work
+are PR issue comments, never reviews or inline comments.
 
 ## Install after merge
 
-Do not run these steps until Max gives the go. From a checkout at
-`$HOME/factory`, initialize the database:
+Do not run these steps until Max gives the go. `deploy/install.sh` creates a
+venv, installs `requirements.txt` (including PyYAML), writes
+`$HOME/.local/bin/orch`, creates one shared database, and writes
+`$HOME/.config/factory/profile.sh`. It does not install or start the poll
+service:
 
 ```sh
-export ORCH_DB="$HOME/.local/state/factory/orch.db"
-bin/orch init-db
+deploy/install.sh
+. "$HOME/.config/factory/profile.sh"
+orch doctor-runtime
 ```
+
+Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh), which loads
+the same `ORCH_DB` and puts the wrapper on `PATH`. `doctor-runtime` checks that
+PyYAML imports, `ORCH_DB` is set, and its SQLite database exists and opens.
 
 [`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
 for the long-running poller. After the named environment variables have been

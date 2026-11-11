@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from lib import cli
-from lib.dispatcher import LINEAR_HANDOFF_QUERY
+from lib.dispatcher import CIResult, Comment, LINEAR_HANDOFF_QUERY
+from lib.factory_md import FactoryConfig
 from lib.github_actions import GhResult
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery, WebhookResult
 from lib.orch_yml import (
@@ -160,6 +161,87 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
     assert requests[0]["variables"]["term"] == LINEAR_HANDOFF_QUERY
 
 
+def test_linear_ticket_joins_linked_pr_issue_comments(monkeypatch) -> None:
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "unused"},
+        gh_runner=lambda argv, timeout: GhResult(1, "", ""),
+    )
+    factory = FactoryConfig(
+        base_branch="dev",
+        tickets="linear",
+        builder_harness="claude",
+        reviewer_harness="codex",
+        rounds_low=1,
+        rounds_high=3,
+        verify="verify-aut0",
+        ship="handoff",
+        skills=("aut0-review",),
+    )
+    head = "a" * 40
+    pr_comment = Comment(
+        "77",
+        "maxharris1",
+        f"<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n",
+        1794398500,
+        "https://github.test/pr/12#issuecomment-77",
+    )
+    monkeypatch.setattr(source, "_factory", lambda project: factory)
+    monkeypatch.setattr(
+        source,
+        "_pull_for_branch",
+        lambda repo, branch: {"number": 12, "head": {"sha": head}},
+    )
+    monkeypatch.setattr(
+        source.github,
+        "list_comments",
+        lambda repo, number: (pr_comment,),
+    )
+    monkeypatch.setattr(
+        source.github,
+        "ci_status",
+        lambda repo, sha: CIResult("success"),
+    )
+    issue = {
+        "id": "issue-id",
+        "identifier": "AUT-42",
+        "url": "https://linear.test/AUT-42",
+        "gitBranchName": "max/aut-42",
+        "comments": {
+            "nodes": [
+                {
+                    "id": "linear-comment",
+                    "body": "`orch:v1 kind=brief from=grok-bot role=orchestrator risk=high`\nBrief.\n",
+                    "createdAt": "2026-11-11T12:00:00Z",
+                    "user": {"name": "Max Harris"},
+                }
+            ]
+        },
+        "team": {
+            "states": {
+                "nodes": [{"id": "ready-state", "name": "Ready for Review"}]
+            }
+        },
+    }
+    project = Project(
+        "acme/widgets",
+        linear_project="project-1",
+        grok_bot="project-bot",
+        linear_ready_for_review=True,
+    )
+
+    result = source._linear_ticket(project, issue)
+
+    assert [comment.id for comment in result.comments] == [
+        "linear-comment",
+        "77",
+    ]
+    assert result.pr_number == "12"
+    assert result.current_head == head
+    assert result.ci[head].status == "success"
+    assert result.linear_ready_state_id == "ready-state"
+
+
 def test_missing_linear_key_names_env_without_exposing_values(caplog) -> None:
     source = LivePollSource(
         config(linear=True),
@@ -238,6 +320,7 @@ def test_webhook_delivery_uses_job_contract_and_does_not_log_key(caplog) -> None
             "repo": "acme/widgets",
             "source_comment_id": "7",
             "ticket_id": "12",
+            "target_bot": None,
         }
     ]
     assert "secret-webhook-key" not in caplog.text

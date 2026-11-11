@@ -85,7 +85,8 @@ REQUIRED_BY_KIND = {
     "stuck": frozenset(),
 }
 
-_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")
+_HTML_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")
+_VISIBLE_LINE = re.compile(r"^`orch:v1\b\s*(.*?)\s*`$")
 _ATTR = re.compile(r"^[a-z][a-z0-9_]*=[A-Za-z0-9_.:/-]+$")
 _TOKEN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _ROUND = re.compile(r"^([1-9][0-9]*)(?:/([1-9][0-9]*))?$")
@@ -106,7 +107,8 @@ class Handoff:
 
 
 def parse_header_line(line: str) -> dict[str, str]:
-    match = _LINE.fullmatch(line.strip())
+    stripped = line.strip()
+    match = _HTML_LINE.fullmatch(stripped) or _VISIBLE_LINE.fullmatch(stripped)
     if match is None:
         raise HandoffError("not an orch:v1 header")
     raw = match.group(1) or ""

@@ -32,7 +32,13 @@ _TOP_KEYS = {
     "grok",
     "trusted_logins",
 }
-_PROJECT_KEYS = {"repo", "job_timeout", "linear_project"}
+_PROJECT_KEYS = {
+    "repo",
+    "job_timeout",
+    "linear_project",
+    "grok_bot",
+    "linear_ready_for_review",
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,8 @@ class Project:
     repo: str
     job_timeout: int | None = None
     linear_project: str | None = None
+    grok_bot: str = "grok-bot"
+    linear_ready_for_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,7 +68,7 @@ class OrchConfig:
     job_timeout: int | None = None
     linear: LinearConfig | None = None
     grok: GrokConfig | None = None
-    trusted_logins: Mapping[str, str] = field(
+    trusted_logins: Mapping[str, Mapping[str, frozenset[str]]] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
@@ -224,11 +232,39 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             ok = False
         if linear_project is not None:
             seen_linear.add(linear_project)
+        grok_bot = item.get("grok_bot", "grok-bot")
+        if not isinstance(grok_bot, str) or _TOKEN.fullmatch(grok_bot) is None:
+            findings.append(
+                Finding("error", f"projects[{index}].grok_bot must be a bot name")
+            )
+            ok = False
+            continue
+        linear_ready = item.get("linear_ready_for_review", False)
+        if not isinstance(linear_ready, bool):
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_ready_for_review must be true or false",
+                )
+            )
+            ok = False
+            continue
+        if linear_ready and linear_project is None:
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_ready_for_review requires linear_project",
+                )
+            )
+            ok = False
+            continue
         projects.append(
             Project(
                 repo=repo,
                 job_timeout=timeout,
                 linear_project=linear_project,
+                grok_bot=grok_bot,
+                linear_ready_for_review=linear_ready,
             )
         )
     if not ok:
@@ -276,26 +312,48 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
     return GrokConfig(url_name, key_name)
 
 
-def _trusted_logins(data: dict, findings: list[Finding]) -> dict[str, str]:
+def _trusted_logins(
+    data: dict,
+    findings: list[Finding],
+) -> dict[str, Mapping[str, frozenset[str]]]:
     value = data.get("trusted_logins")
     if value is None:
         return {}
     if not isinstance(value, dict) or not value:
         findings.append(Finding("error", "trusted_logins must be a non-empty mapping"))
         return {}
-    result: dict[str, str] = {}
-    for login, identity in value.items():
-        if (
-            not isinstance(login, str)
-            or _TOKEN.fullmatch(login) is None
-            or not isinstance(identity, str)
-            or _TOKEN.fullmatch(identity) is None
-        ):
+    result: dict[str, Mapping[str, frozenset[str]]] = {}
+    for tracker, entries in value.items():
+        if tracker not in ("github", "linear") or not isinstance(entries, dict):
             findings.append(
-                Finding("error", "trusted_logins entries must map login to identity")
+                Finding(
+                    "error",
+                    "trusted_logins must map github/linear to login mappings",
+                )
             )
             continue
-        result[login] = identity
+        tracker_result: dict[str, frozenset[str]] = {}
+        for login, identities in entries.items():
+            if (
+                not isinstance(login, str)
+                or not login
+                or not isinstance(identities, list)
+                or not identities
+                or any(
+                    not isinstance(identity, str)
+                    or _TOKEN.fullmatch(identity) is None
+                    for identity in identities
+                )
+            ):
+                findings.append(
+                    Finding(
+                        "error",
+                        "trusted_logins entries must map login to a non-empty bot list",
+                    )
+                )
+                continue
+            tracker_result[login] = frozenset(identities)
+        result[tracker] = MappingProxyType(tracker_result)
     return result
 
 

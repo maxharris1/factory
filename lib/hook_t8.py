@@ -96,7 +96,9 @@ class T8Hook:
         if not ticket.factory.ship.startswith("after:"):
             return True, f"rejected-{kind}-not-after-ship"
         approver = ticket.factory.ship[len("after:") :]
-        if not dispatcher._trusted(comment, fields, approver, role="approver"):
+        if not dispatcher._trusted(
+            ticket, comment, fields, approver, role="approver"
+        ):
             return True, f"rejected-{kind}-author"
         orphan = _shipping_claim(dispatcher, ticket, comment.id)
         if orphan is not None:

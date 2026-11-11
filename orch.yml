@@ -9,12 +9,20 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_key_env: FACTORY_WEBHOOK_KEY
 trusted_logins:
-  grok-bot: grok-bot
-  claude-bot: claude-bot
-  codex-bot: codex-bot
-  cursor-bot: cursor-bot
+  github:
+    maxharris1:
+      - grok-bot
+      - claude-bot
+      - codex-bot
+      - cursor-bot
+  linear:
+    Max Harris:
+      - grok-bot
 projects:
   - repo: aut0-code/aut0
     linear_project: Aut0
+    grok_bot: offer-brief-project
+    linear_ready_for_review: true
+    job_timeout: 150
   - repo: maxharris1/Cleffy
   - repo: maxharris1/tracy-harris-coaching
