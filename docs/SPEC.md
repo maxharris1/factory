@@ -356,18 +356,27 @@ complexity error. Brief and go use separate searches; the poller does not
 depend on full-text `OR` semantics.
 
 Linear's API-key limits are shared per user: 2,500 requests/hour and
-3,000,000 complexity points/hour. For poll interval `P`, the poller caps one
-cycle at `floor(2500 × P / 3600)` requests and
-`floor(3,000,000 × P / 3600)` complexity. At `P = 60`, that is 41 requests
-and 50,000 complexity. Two one-page searches cost about 116 complexity each,
-leaving at most 39 direct issue operations at about 660 each: 2,460
-requests/hour and 1,558,320 complexity/hour. Polling leaves two of those
-operations available for a same-cycle handoff; budget exhaustion makes any
-additional handoff retry next cycle rather than fail its ship intent. Search
-pagination consumes the same budget and preserves capacity for active tracked
-tickets. Search hits already tracked, including `done` and `abandoned`, are
-not fetched, and a direct issue read is reused throughout its cycle. HTTP 429
-or GraphQL `RATELIMITED` pauses Linear requests for `Retry-After`.
+3,000,000 complexity points/hour. Factory owns the named
+`LINEAR_SHARE = 0.5`; the other half remains available to Max's other API
+keys. For poll interval `P`, one cycle is capped at
+`floor(2500 × LINEAR_SHARE × P / 3600)` requests and
+`floor(3,000,000 × LINEAR_SHARE × P / 3600)` complexity. At `P = 60`, that
+is 20 requests and 25,000 complexity per cycle, or at most 1,200 requests and
+1,500,000 complexity per hour.
+
+Brief and go each run a filtered search over configured project IDs and
+workflow states other than `completed` and `canceled`. A page contains 50
+hits, costs about 116 complexity, and each term is limited to two pages. The
+normal one-page-per-term case uses two requests, leaves two requests for a
+same-cycle handoff, and permits up to 16 direct issue reads: at most 1,200
+requests and about 726,720 complexity per hour if all process headroom is
+used. Every additional search page is counted against both budgets and
+reduces direct reads. A page-limit or budget discovery cutoff is recorded.
+Tracked reads and discovery fair-share the remaining budget, and tracked
+reads rotate across cycles so a deferred ticket is served later. Search hits
+already tracked are not fetched directly again, and a direct issue read is
+reused throughout its cycle. HTTP 429 or GraphQL `RATELIMITED` pauses Linear
+requests for `Retry-After`; T4 and T8 pre-write deferrals retry next cycle.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 

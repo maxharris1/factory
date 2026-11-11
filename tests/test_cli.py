@@ -69,6 +69,10 @@ def test_check_config_allows_repo_placeholder_only_with_explicit_flag() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+    assert (
+        "warning: accepted placeholder "
+        "projects[0].linear_project_id"
+    ) in result.stderr
 
 
 def test_allow_placeholders_still_runs_other_orch_validation(

@@ -125,12 +125,14 @@ name; values are never printed or included in exceptions.
 Linear issues are searched by ID with comments included; each hit is then
 fetched directly so the search stays below Linear's complexity limit. Brief
 and go are separate queries rather than relying on undocumented full-text
-`OR` behavior. Search hits already tracked, including done and abandoned
-tickets, are skipped. Direct issue reads are reused for the rest of the cycle,
-and each cycle is capped to its share of Linear's hourly request and
-complexity limits. Linear 429 and `RATELIMITED` responses pause Linear calls
-for `Retry-After`; budget or backoff interruptions leave handoffs pending for
-the next cycle. A linked GitHub PR supplies the current head and CI, and its
+`OR` behavior. Searches are restricted to configured projects and workflow
+states other than completed or canceled, with at most two pages per term.
+Search hits already tracked are skipped. Direct issue reads are reused for the
+rest of the cycle. Factory uses half of Linear's shared hourly request and
+complexity limits, fair-shares discovery and tracked reads, and rotates
+deferred tracked tickets across cycles. Linear 429 and `RATELIMITED` responses
+pause Linear calls for `Retry-After`; T4 and T8 budget or backoff deferrals
+retry next cycle. A linked GitHub PR supplies the current head and CI, and its
 issue comments are joined with the Linear comments. `ready`, `verdict`, and
 `stuck` go on PR issue comments, never reviews or inline comments.
 `projects[].grok_bot` routes stop and terminal results. When a webhook wake's
@@ -228,7 +230,8 @@ bin/orch check-config
 The shipped `orch.yml` intentionally contains install placeholders, so this
 strict command exits 1 until Max fills in the confirmed values. CI checks that
 file with `bin/orch check-config --allow-placeholders`; the flag permits
-`REPLACE_WITH_` install values but still runs every other validation.
+`REPLACE_WITH_` install values, names each accepted placeholder on stderr,
+and still runs every other validation.
 `init-db` and runtime commands are always strict. An unknown model name is a
 warning on stderr.
 

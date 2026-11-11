@@ -69,7 +69,9 @@ def test_placeholder_linear_project_id_can_be_allowed_for_validation() -> None:
         allow_placeholders=True,
     )
 
-    assert findings == []
+    assert [finding.message for finding in findings] == [
+        "accepted placeholder projects[0].linear_project_id"
+    ]
     assert config is not None
     assert (
         config.projects[0].linear_project_id

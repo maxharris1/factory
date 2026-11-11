@@ -42,6 +42,7 @@ from typing import Protocol
 from lib.dispatcher import (
     Comment,
     Dispatcher,
+    RetryableStateError,
     ShipRequest,
     TrackedTicket,
     _comment_order,
@@ -171,6 +172,14 @@ class T8Hook:
                     approve_comment_id=approve_id,
                 )
             )
+        except RetryableStateError:
+            _release_claim(
+                dispatcher,
+                ticket,
+                approve_id,
+                comment.id,
+            )
+            return False, "ship-deferred"
         except Exception as exc:
             return _ship_failed(
                 dispatcher,
@@ -373,6 +382,28 @@ def _claimed_by(
     if row is None:
         return None
     return str(row["comment_id"]), str(row["outcome"])
+
+
+def _release_claim(
+    dispatcher: Dispatcher,
+    ticket: TrackedTicket,
+    approve_id: str,
+    comment_id: str,
+) -> None:
+    with dispatcher.queue.connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM external_previews
+            WHERE repo = ? AND ticket_id = ? AND approve_comment_id = ?
+              AND outcome = 'shipping' AND comment_id = ?
+            """,
+            (
+                ticket.repo.lower(),
+                ticket.ticket_id,
+                approve_id,
+                comment_id,
+            ),
+        )
 
 
 def _set_outcome(

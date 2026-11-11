@@ -35,7 +35,10 @@ from lib.poll_source import (
     LINEAR_ISSUE_COMPLEXITY,
     LINEAR_PROCESS_HEADROOM,
     LINEAR_REQUESTS_PER_HOUR,
+    LINEAR_SEARCH_MAX_PAGES,
     LINEAR_SEARCH_COMPLEXITY,
+    LINEAR_SHARE,
+    LINEAR_TRACKED_RESERVE,
     LivePollSource,
     PollCycleError,
     PollSourceError,
@@ -936,6 +939,7 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
             "term": term,
             "first": 50,
             "after": None,
+            "projectIds": ["project-1"],
             "includeComments": True,
         }
         for term in ("orch:v1 kind=brief", "orch:v1 kind=go")
@@ -944,6 +948,8 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
     search_query = requests[0]["query"]
     assert "comments(" not in search_query
     assert "attachments(" not in search_query
+    assert "project: { id: { in: $projectIds } }" in search_query
+    assert 'state: { type: { nin: ["completed", "canceled"] } }' in search_query
 
 
 def test_linear_search_paginates() -> None:
@@ -968,67 +974,42 @@ def test_linear_search_paginates() -> None:
     assert [item["variables"]["after"] for item in requests] == [None, "next"]
 
 
-def test_linear_search_pagination_preserves_tracked_and_process_budget() -> None:
-    excluded = frozenset(f"AUT-{index:04d}" for index in range(1000))
+def test_linear_search_page_cap_records_discovery_cutoff() -> None:
     requests: list[dict] = []
+    errors: list[str] = []
 
     def transport(url, headers, body, timeout):
         del url, headers, timeout
         request = json.loads(body)
         requests.append(request)
-        if request["query"].startswith("query FactoryPoll"):
-            page = int(request["variables"]["after"] or 0)
-            start = page * 50
-            return linear_search_page(
-                [
-                    {
-                        "id": f"issue-{index:04d}",
-                        "identifier": f"AUT-{index:04d}",
-                        "project": {"id": "project-1"},
-                    }
-                    for index in range(start, start + 50)
-                ],
-                has_next=page < 19,
-                cursor=str(page + 1),
-            )
-        identifier = request["variables"]["id"]
-        return HTTPResult(
-            200,
-            json.dumps(
+        page = len(requests)
+        return linear_search_page(
+            [
                 {
-                    "data": {
-                        "issue": linear_issue(identifier=identifier)
-                    }
+                    "id": f"issue-{page:03d}",
+                    "identifier": f"AUT-{page:03d}",
+                    "project": {"id": "project-1"},
                 }
-            ),
+            ],
+            has_next=True,
+            cursor=str(page),
         )
 
-    errors: list[str] = []
     source = LivePollSource(
         config(linear=True),
         environ={"LINEAR_KEY": "key"},
-        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
         linear_transport=transport,
         error_sink=lambda repo, ticket, error: errors.append(error),
     )
     source.begin_cycle()
 
-    assert source.linear_candidates(
-        LINEAR_HANDOFF_QUERY,
-        exclude=excluded,
-        reserve=5,
-    ) == ()
-    tracked = source.tracked_tickets(
-        tuple(
-            TicketRef("acme/widgets", f"AUT-{index:04d}", "linear")
-            for index in range(5)
-        )
-    )
-    source.end_cycle()
-
-    assert len(tracked) == 5
-    assert len(requests) == 39
-    assert errors == []
+    assert len(source._linear_issues("one term")) == LINEAR_SEARCH_MAX_PAGES
+    assert len(requests) == LINEAR_SEARCH_MAX_PAGES
+    assert errors == [
+        "PollSourceError:Linear search page limit deferred discovery"
+    ]
+    with pytest.raises(PollCycleError):
+        source.end_cycle()
 
 
 def test_linear_request_hard_cap_is_retryable() -> None:
@@ -1047,7 +1028,7 @@ def test_linear_request_hard_cap_is_retryable() -> None:
     )
     source.begin_cycle()
     limit = (
-        LINEAR_REQUESTS_PER_HOUR
+        int(LINEAR_REQUESTS_PER_HOUR * LINEAR_SHARE)
         * source.config.poll_seconds
         // 3600
     )
@@ -1103,12 +1084,60 @@ def test_tracked_budget_deferral_keeps_cached_and_github_tickets() -> None:
 
     assert len(
         [ticket for ticket in found if ticket.ticket_id.startswith("AUT-")]
-    ) == 40
+    ) == 19
     assert any(ticket.ticket_id == "AUT-cached" for ticket in found)
     assert any(ticket.ticket_id == "12" for ticket in found)
-    assert [ticket for _, ticket, _ in errors] == ["AUT-039", "AUT-040"]
+    assert [ticket for _, ticket, _ in errors] == [
+        f"AUT-{index:03d}" for index in range(18, 41)
+    ]
     with pytest.raises(PollCycleError):
         source.end_cycle()
+
+
+def test_tracked_budget_rotation_serves_every_ticket() -> None:
+    reads_by_cycle: list[list[str]] = []
+    current_reads: list[str] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        identifier = request["variables"]["id"]
+        current_reads.append(identifier)
+        return HTTPResult(
+            200,
+            json.dumps(
+                {
+                    "data": {
+                        "issue": linear_issue(identifier=identifier)
+                    }
+                }
+            ),
+        )
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=transport,
+    )
+    refs = tuple(
+        TicketRef("acme/widgets", f"AUT-{index:03d}", "linear")
+        for index in range(41)
+    )
+
+    for _cycle in range(3):
+        source.begin_cycle()
+        source.tracked_tickets(refs)
+        reads_by_cycle.append(list(current_reads))
+        current_reads.clear()
+
+    assert all(len(reads) == 18 for reads in reads_by_cycle)
+    assert reads_by_cycle[0] != reads_by_cycle[1]
+    assert {
+        identifier
+        for reads in reads_by_cycle
+        for identifier in reads
+    } == {f"AUT-{index:03d}" for index in range(41)}
 
 
 @pytest.mark.parametrize(
@@ -1321,10 +1350,11 @@ def test_linear_rate_limit_uses_retry_after_backoff(
     [
         (5, 1, 2, 300, 132_720),
         (25, 5, 10, 1_020, 607_920),
-        (100, 20, 40, 2_340, 1_479_120),
+        (100, 20, 40, 1_080, 582_240),
+        (500, 20, 460, 1_080, 647_520),
     ],
 )
-def test_linear_poll_cycle_stays_within_hourly_budgets(
+def test_linear_poll_hour_stays_within_shared_budget(
     tmp_path: Path,
     matching: int,
     active: int,
@@ -1335,21 +1365,29 @@ def test_linear_poll_cycle_stays_within_hourly_budgets(
     issues = []
     by_id = {}
     for index in range(matching):
-        identifier = f"AUT-{index:03d}"
+        identifier = f"AUT-{index:04d}"
         issue = linear_issue(identifier=identifier)
-        issue["id"] = f"issue-{index:03d}"
-        issue["comments"]["nodes"][0]["id"] = f"comment-{index:03d}"
+        issue["id"] = f"issue-{index:04d}"
+        issue["comments"]["nodes"][0]["id"] = f"comment-{index:04d}"
         issues.append(issue)
         by_id[issue["id"]] = issue
         by_id[identifier] = issue
 
-    requests: list[dict] = []
+    searchable = [
+        issue
+        for index, issue in enumerate(issues)
+        if index < active or index >= active + done
+    ]
+    requests: list[tuple[int, dict]] = []
+    cycle = 0
 
     def transport(url, headers, body, timeout):
         del url, headers, timeout
         request = json.loads(body)
-        requests.append(request)
+        requests.append((cycle, request))
         if request["query"].startswith("query FactoryPoll"):
+            start = int(request["variables"]["after"] or 0)
+            end = min(start + 50, len(searchable))
             return linear_search_page(
                 [
                     {
@@ -1357,8 +1395,10 @@ def test_linear_poll_cycle_stays_within_hourly_budgets(
                         "identifier": issue["identifier"],
                         "project": issue["project"],
                     }
-                    for issue in issues
-                ]
+                    for issue in searchable[start:end]
+                ],
+                has_next=end < len(searchable),
+                cursor=str(end) if end < len(searchable) else None,
             )
         identifier = request["variables"]["id"]
         return HTTPResult(
@@ -1380,7 +1420,7 @@ def test_linear_poll_cycle_stays_within_hourly_budgets(
     )
     with queue.connect() as connection:
         for index in range(active + done):
-            identifier = f"AUT-{index:03d}"
+            identifier = f"AUT-{index:04d}"
             connection.execute(
                 """
                 INSERT INTO tracked_tickets (
@@ -1409,34 +1449,90 @@ def test_linear_poll_cycle_stays_within_hourly_budgets(
         error_sink=dispatcher.record_poll_error,
     )
 
-    dispatcher.poll_once(source)
+    cycles = 3600 // source.config.poll_seconds
+    for cycle in range(cycles):
+        try:
+            dispatcher.poll_once(source)
+        except PollCycleError:
+            pass
 
-    new = matching - active - done
-    max_requests = (
-        LINEAR_REQUESTS_PER_HOUR
-        * source.config.poll_seconds
-        // 3600
-    )
-    expected_requests = min(
-        2 + active + new,
-        max_requests - LINEAR_PROCESS_HEADROOM,
-    )
     searches = sum(
         request["query"].startswith("query FactoryPoll")
-        for request in requests
+        for _, request in requests
     )
     issue_reads = len(requests) - searches
-    requests_per_hour = len(requests) * 3600 // source.config.poll_seconds
+    requests_per_hour = len(requests)
     complexity_per_hour = (
         searches * LINEAR_SEARCH_COMPLEXITY
         + issue_reads * LINEAR_ISSUE_COMPLEXITY
-    ) * 3600 // source.config.poll_seconds
+    )
+    requests_by_cycle = [
+        sum(request_cycle == index for request_cycle, _ in requests)
+        for index in range(cycles)
+    ]
+    read_identifiers = {
+        by_id[request["variables"]["id"]]["identifier"]
+        for _, request in requests
+        if request["query"].startswith("query FactoryIssue")
+    }
+    expected_read = {
+        issue["identifier"]
+        for issue in searchable
+    }
+    finished = {
+        issues[index]["identifier"]
+        for index in range(active, active + done)
+    }
+    shared_request_budget = int(
+        LINEAR_REQUESTS_PER_HOUR * LINEAR_SHARE
+    )
+    shared_complexity_budget = int(
+        LINEAR_COMPLEXITY_PER_HOUR * LINEAR_SHARE
+    )
+    cycle_request_limit = (
+        shared_request_budget
+        * source.config.poll_seconds
+        // 3600
+    )
 
-    assert len(requests) == expected_requests
+    assert len(requests_by_cycle) == cycles == 60
+    assert max(requests_by_cycle) <= cycle_request_limit
     assert requests_per_hour == expected_requests_per_hour
     assert complexity_per_hour == expected_complexity_per_hour
-    assert requests_per_hour <= LINEAR_REQUESTS_PER_HOUR
-    assert complexity_per_hour <= LINEAR_COMPLEXITY_PER_HOUR
+    assert read_identifiers == expected_read
+    assert read_identifiers.isdisjoint(finished)
+    assert requests_per_hour <= shared_request_budget
+    assert complexity_per_hour <= shared_complexity_budget
+    with queue.connect() as connection:
+        recorded_errors = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT error FROM poll_errors"
+            )
+        }
+        discovery_cutoffs = connection.execute(
+            """
+            SELECT count(*) FROM poll_errors
+            WHERE error = (
+                'PollSourceError:Linear poll budget deferred discovery'
+            )
+            """
+        ).fetchone()[0]
+    assert recorded_errors <= {
+        "PollSourceError:Linear poll budget deferred discovery",
+        "PollSourceError:Linear poll budget deferred tracked ticket",
+    }
+    search_pages = 2 * ((len(searchable) + 49) // 50)
+    discovery_capacity = (
+        cycle_request_limit
+        - search_pages
+        - LINEAR_PROCESS_HEADROOM
+        - min(active, LINEAR_TRACKED_RESERVE)
+    )
+    if matching - active - done > discovery_capacity:
+        assert discovery_cutoffs > 0
+    else:
+        assert discovery_cutoffs == 0
 
 
 def test_missing_linear_key_names_env_without_exposing_values(caplog) -> None:

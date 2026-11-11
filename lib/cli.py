@@ -54,7 +54,7 @@ commands:
 
 check-config [--orch PATH] [--factory PATH ...] [--allow-placeholders]
   With no paths, checks orch.yml and the example factory.md files.
-  --allow-placeholders permits REPLACE_WITH_ install values only.
+  --allow-placeholders permits and reports REPLACE_WITH_ install values only.
   An unknown model name warns on stderr and still exits 0.
 
 install-skills [--home PATH] [--project PATH] [--cloud]

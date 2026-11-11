@@ -269,6 +269,18 @@ def _projects(
             )
             ok = False
             continue
+        if (
+            isinstance(linear_project_id, str)
+            and linear_project_id.startswith("REPLACE_WITH_")
+            and allow_placeholders
+        ):
+            findings.append(
+                Finding(
+                    "warning",
+                    "accepted placeholder "
+                    f"projects[{index}].linear_project_id",
+                )
+            )
         if linear_project_id in seen_linear:
             findings.append(
                 Finding("error", f"duplicate Linear project {linear_project_id!r}")
