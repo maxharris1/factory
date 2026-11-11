@@ -2118,19 +2118,62 @@ def test_r2m2_review_shipper_refuses_tied_ok_9_before_approve_10(
 
 
 def test_r2m2_t8_refuses_tied_ok_9_before_approve_10(tmp_path: Path) -> None:
+    """The preview is live, so only T8's own ordering guard can refuse ok 9."""
     actions = FakeReviewActions()
-    source = FakeSource(
-        ticket(
-            BRIEFED,
-            approve("10", HEAD_A, 1),
-            say("9", OK.format(head=HEAD_A), "tracy-login", 1),
-        )
-    )
+    approved = approve("10", HEAD_A, 1)
+    source = FakeSource(ticket(BRIEFED, approved))
     dispatcher, queue, shipper = wired(tmp_path, actions, source)
     in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    assert outcomes(queue)["10"] == "waiting-external"
+    assert dispatcher._ship_intent(ticket(), "10") == (
+        HEAD_A,
+        "after:tracy-site",
+        "completed",
+    )
 
+    source.tickets = (
+        ticket(BRIEFED, approved, say("9", OK.format(head=HEAD_A), "tracy-login", 1)),
+    )
     dispatcher.poll_once(source)
 
     assert outcomes(queue)["9"] == "rejected-ok-not-waiting"
     assert shipper.requests == []
     assert actions.fast_forwards == []
+    assert actions.merges == []
+    assert workflow_state(queue) == "waiting-external"
+
+
+@pytest.mark.parametrize(
+    ("author", "ships"),
+    [("mallory-login", True), ("codex-login", False)],
+    ids=["untrusted-revise-is-ignored", "trusted-revise-blocks"],
+)
+def test_a_later_revise_blocks_the_ship_only_from_a_trusted_reviewer(
+    tmp_path: Path,
+    author: str,
+    ships: bool,
+) -> None:
+    actions = FakeReviewActions()
+    revise = say(
+        "verdict-2", VERDICT.format(head=HEAD_A, verdict="REVISE"), author, 1.5
+    )
+    source = FakeSource(ticket(BRIEFED, APPROVED, revise, OK_1))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["verdict-1"] == "waiting-external"
+    if ships:
+        assert outcomes(queue)["verdict-2"] == "rejected-revise-author"
+        assert outcomes(queue)["ok-1"] == "shipped"
+        assert [request.head for request in shipper.requests] == [HEAD_A]
+        assert actions.fast_forwards == [("main", HEAD_A)]
+        assert workflow_state(queue) == "merged"
+    else:
+        assert outcomes(queue)["ok-1"] == "rejected-ok-not-waiting"
+        assert shipper.requests == []
+        assert actions.fast_forwards == []
+        assert workflow_state(queue) != "merged"
+    assert actions.merges == []
