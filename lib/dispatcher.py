@@ -91,7 +91,13 @@ class TicketRef:
 class PollSource(Protocol):
     def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]: ...
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]: ...
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]: ...
 
     def tracked_tickets(
         self,
@@ -173,6 +179,10 @@ class RetryableStateError(RuntimeError):
     pass
 
 
+class RetryableShipError(RetryableStateError):
+    pass
+
+
 class ShipError(RuntimeError):
     pass
 
@@ -251,8 +261,16 @@ class Dispatcher:
             self.record_poll_error("github", "-", type(exc).__name__)
             github = ()
         self._discover(github, tracker="github")
+        active_refs = self._tracked_refs()
         try:
-            linear = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+            linear = source.linear_candidates(
+                LINEAR_HANDOFF_QUERY,
+                exclude=self._tracked_linear_ids(),
+                reserve=sum(
+                    ref.tracker == "linear"
+                    for ref in active_refs
+                ),
+            )
         except Exception as exc:
             self.record_poll_error("linear", "-", type(exc).__name__)
             linear = ()
@@ -370,6 +388,12 @@ class Dispatcher:
                 else:
                     handled, outcome = self._t5_answers(ticket, comment, fields)
             except Exception as exc:
+                if isinstance(exc, RetryableShipError):
+                    self._discard_pending_ship_intent(
+                        ticket,
+                        comment.id,
+                    )
+                    raise
                 if isinstance(exc, RetryableStateError):
                     raise
                 if kind not in ("verdict", "questions", "answers"):
@@ -1614,6 +1638,31 @@ class Dispatcher:
             ).rowcount
         return changed == 1
 
+    def _discard_pending_ship_intent(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                DELETE FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND status = 'pending'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            ).rowcount
+            if changed == 1:
+                connection.execute(
+                    """
+                    UPDATE ticket_state SET workflow_state = 'review'
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            connection.commit()
+
     def _wake_ship_failed(
         self,
         ticket: TrackedTicket,
@@ -2062,6 +2111,17 @@ class Dispatcher:
             )
             for row in rows
         )
+
+    def _tracked_linear_ids(self) -> frozenset[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT ticket_id
+                FROM tracked_tickets
+                WHERE tracker = 'linear'
+                """
+            ).fetchall()
+        return frozenset(str(row["ticket_id"]) for row in rows)
 
     def _trusted(
         self,

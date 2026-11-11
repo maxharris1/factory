@@ -52,8 +52,9 @@ commands:
   wait             block until the dispatcher queues a job for a bot
   job              heartbeat or finish a job that wait returned
 
-check-config [--orch PATH] [--factory PATH ...]
+check-config [--orch PATH] [--factory PATH ...] [--allow-placeholders]
   With no paths, checks orch.yml and the example factory.md files.
+  --allow-placeholders permits and reports REPLACE_WITH_ install values only.
   An unknown model name warns on stderr and still exits 0.
 
 install-skills [--home PATH] [--project PATH] [--cloud]
@@ -149,7 +150,13 @@ def _check_config(argv: list[str]) -> int:
     else:
         factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
 
-    failed = _report(orch_path, load_orch_yml(orch_path)[1])
+    failed = _report(
+        orch_path,
+        load_orch_yml(
+            orch_path,
+            allow_placeholders=args.allow_placeholders,
+        )[1],
+    )
     for path in factory_paths:
         failed = _report(path, load_factory_md(path)[1]) or failed
     if failed:
@@ -427,6 +434,7 @@ def _parser() -> _Parser:
     parser = _Parser(prog="orch check-config", add_help=True)
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--factory", type=Path, action="append")
+    parser.add_argument("--allow-placeholders", action="store_true")
     return parser
 
 

@@ -13,6 +13,7 @@ from lib.dispatcher import (
     Dispatcher,
     Hook,
     ReviewShipper,
+    RetryableStateError,
     ShipError,
     TicketRef,
     TrackedTicket,
@@ -768,6 +769,18 @@ class RaisingShipper:
         raise RuntimeError("merge refused")
 
 
+class RetryOnceShipper:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[ShipRequest] = []
+
+    def ship(self, request: ShipRequest) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise RetryableStateError("Linear poll budget is exhausted")
+        self.requests.append(request)
+
+
 class RacingShipper:
     """While it ships, a second dispatcher on the same database polls."""
 
@@ -808,7 +821,14 @@ class FakeSource:
     def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
         return self.tickets
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        del query, exclude, reserve
         return ()
 
     def tracked_tickets(
@@ -949,6 +969,40 @@ def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> Non
     ) == [("43", 1), ("44", 2)]
     assert [job.request.action for job in delivery.jobs] == ["ship-failed"]
     assert "merge refused" in str(delivery.jobs[0].request.detail)
+
+
+def test_t8_retryable_ship_releases_claim_and_retries(
+    tmp_path: Path,
+) -> None:
+    shipper = RetryOnceShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
+    snapshot = ticket(
+        approve("verdict-1", HEAD_A, 1),
+        say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
+    )
+
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM external_previews"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """
+            SELECT count(*) FROM handled_comments
+            WHERE comment_id = 'ok-1'
+            """
+        ).fetchone()[0] == 0
+
+    dispatcher.process(snapshot)
+
+    assert shipper.calls == 2
+    assert [request.head for request in shipper.requests] == [HEAD_A]
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT outcome FROM external_previews"
+        ).fetchone()[0] == "shipped"
+    assert FakeBot(queue, "grok").drain() == []
 
 
 def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(

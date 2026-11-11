@@ -8,14 +8,22 @@ import os
 import re
 import subprocess
 import time
+from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from lib.dispatcher import CIResult, Comment, ReviewActions, TicketRef, TrackedTicket
+from lib.dispatcher import (
+    CIResult,
+    Comment,
+    RetryableStateError,
+    ReviewActions,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.factory_md import FactoryConfig, parse_factory_md
 from lib.github_actions import GitHubReviewActions, LinearReviewActions, Runner, run_gh
 from lib.handoff import HandoffError, parse_comment
@@ -28,12 +36,17 @@ query FactoryPoll(
   $term: String!,
   $first: Int!,
   $after: String,
+  $projectIds: [ID!]!,
   $includeComments: Boolean!
 ) {
   searchIssues(
     term: $term,
     first: $first,
     after: $after,
+    filter: {
+      project: { id: { in: $projectIds } }
+      state: { type: { nin: ["completed", "canceled"] } }
+    },
     includeComments: $includeComments
   ) {
     nodes {
@@ -73,6 +86,14 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
+LINEAR_REQUESTS_PER_HOUR = 2_500
+LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
+LINEAR_SHARE = 0.5
+LINEAR_SEARCH_COMPLEXITY = 116
+LINEAR_ISSUE_COMPLEXITY = 660
+LINEAR_PROCESS_HEADROOM = 2
+LINEAR_SEARCH_MAX_PAGES = 2
+LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
 _PR_URL = re.compile(
     r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/"
@@ -88,10 +109,15 @@ class PollCycleError(PollSourceError):
     pass
 
 
+class RetryablePollSourceError(PollSourceError, RetryableStateError):
+    pass
+
+
 @dataclass(frozen=True)
 class HTTPResult:
     status: int
     body: str
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
@@ -123,9 +149,10 @@ def post_json(
             return HTTPResult(
                 response.status,
                 response.read().decode("utf-8"),
+                dict(response.headers.items()),
             )
     except HTTPError as exc:
-        return HTTPResult(exc.code, "")
+        return HTTPResult(exc.code, "", dict(exc.headers.items()))
     except (OSError, URLError, ValueError) as exc:
         raise PollSourceError(
             f"Linear request failed: {type(exc).__name__}"
@@ -155,8 +182,14 @@ class LivePollSource:
         self.clock = clock
         self._factory_cache: dict[str, FactoryConfig] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
+        self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
         self._backoff_until = 0.0
+        self._linear_backoff_until = 0.0
+        self._linear_requests = 0
+        self._linear_complexity = 0
+        self._linear_candidate_cursor: tuple[str, str] | None = None
+        self._linear_tracked_cursor: tuple[str, str] | None = None
         self._cycle_errors = 0
         cleared = _secret_env_names(config)
         self.github = GitHubReviewActions(
@@ -191,6 +224,9 @@ class LivePollSource:
     def begin_cycle(self) -> None:
         self._factory_cache.clear()
         self._ticket_cache.clear()
+        self._linear_issue_cache.clear()
+        self._linear_requests = 0
+        self._linear_complexity = 0
         self._cycle_errors = 0
 
     def end_cycle(self) -> None:
@@ -243,7 +279,13 @@ class LivePollSource:
                         self._record(project.repo, ticket_id, exc)
         return tuple(tickets)
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str] = frozenset(),
+        reserve: int = 0,
+    ) -> tuple[TrackedTicket, ...]:
         projects = {
             project.linear_project_id: project
             for project in self.config.projects
@@ -253,9 +295,21 @@ class LivePollSource:
             return ()
         tickets: list[TrackedTicket] = []
         issues: dict[str, dict[str, Any]] = {}
-        for term in _linear_terms(query):
+        terms = _linear_terms(query)
+        tracked_reserve = min(reserve, LINEAR_TRACKED_RESERVE)
+        for index, term in enumerate(terms):
             try:
-                found = self._linear_issues(term)
+                found = self._linear_issues(
+                    term,
+                    project_ids=tuple(projects),
+                    reserve=(
+                        tracked_reserve
+                        + LINEAR_PROCESS_HEADROOM
+                        + len(terms)
+                        - index
+                        - 1
+                    ),
+                )
             except Exception as exc:
                 self._record("linear", "-", exc)
                 continue
@@ -263,8 +317,21 @@ class LivePollSource:
                 issue_id = issue.get("id")
                 if isinstance(issue_id, str):
                     issues[issue_id] = issue
-        for issue in issues.values():
+        candidate_items = sorted(
+            issues.values(),
+            key=_linear_candidate_key,
+        )
+        candidate_keys = [_linear_candidate_key(issue) for issue in candidate_items]
+        start = (
+            bisect_right(candidate_keys, self._linear_candidate_cursor)
+            if self._linear_candidate_cursor is not None
+            else 0
+        )
+        ordered_candidates = candidate_items[start:] + candidate_items[:start]
+        for issue in ordered_candidates:
             ticket_id = _ticket_hint(issue)
+            if ticket_id in exclude:
+                continue
             project: Project | None = None
             try:
                 project_value = issue.get("project")
@@ -276,6 +343,19 @@ class LivePollSource:
                 issue_id = issue.get("id")
                 if not isinstance(issue_id, str) or not issue_id:
                     raise PollSourceError("Linear search issue has no id")
+                if not self._linear_request_available(
+                    LINEAR_ISSUE_QUERY,
+                    reserve=tracked_reserve + LINEAR_PROCESS_HEADROOM,
+                ):
+                    self._record(
+                        "linear",
+                        "-",
+                        RetryablePollSourceError(
+                            "Linear poll budget deferred discovery"
+                        ),
+                    )
+                    break
+                self._linear_candidate_cursor = _linear_candidate_key(issue)
                 complete = self._linear_issue(issue_id)
                 if complete is None:
                     raise PollSourceError("Linear search issue was not found")
@@ -297,12 +377,42 @@ class LivePollSource:
     ) -> tuple[TrackedTicket, ...]:
         found: list[TrackedTicket] = []
         projects = {project.repo.lower(): project for project in self.config.projects}
-        for ref in tickets:
+        linear_refs = sorted(
+            (ref for ref in tickets if ref.tracker == "linear"),
+            key=_linear_ref_key,
+        )
+        linear_keys = [_linear_ref_key(ref) for ref in linear_refs]
+        start = (
+            bisect_right(linear_keys, self._linear_tracked_cursor)
+            if self._linear_tracked_cursor is not None
+            else 0
+        )
+        ordered = (
+            linear_refs[start:]
+            + linear_refs[:start]
+            + [ref for ref in tickets if ref.tracker != "linear"]
+        )
+        for ref in ordered:
             project = projects.get(ref.repo.lower())
             if project is None:
                 continue
             try:
                 if ref.tracker == "linear":
+                    cached = ref.ticket_id in self._linear_issue_cache
+                    if not cached and not self._linear_request_available(
+                        LINEAR_ISSUE_QUERY,
+                        reserve=LINEAR_PROCESS_HEADROOM,
+                    ):
+                        self._record(
+                            ref.repo,
+                            ref.ticket_id,
+                            RetryablePollSourceError(
+                                "Linear poll budget deferred tracked ticket"
+                            ),
+                        )
+                        continue
+                    if not cached:
+                        self._linear_tracked_cursor = _linear_ref_key(ref)
                     issue = self._linear_issue(ref.ticket_id)
                     if issue is None:
                         raise PollSourceError("Linear issue was not found")
@@ -341,7 +451,14 @@ class LivePollSource:
         if project is None:
             return None
         if ref.tracker == "linear":
-            issue = self._linear_issue(ref.ticket_id)
+            if not self._linear_request_available(
+                LINEAR_ISSUE_QUERY,
+                reserve=1,
+            ):
+                raise RetryablePollSourceError(
+                    "Linear poll budget is exhausted"
+                )
+            issue = self._linear_issue(ref.ticket_id, fresh=True)
             if issue is None or not _matches_linear_project(issue, project):
                 return None
             return self._linear_ticket(project, issue, fresh=True)
@@ -355,10 +472,35 @@ class LivePollSource:
             allow_merged=ref.allow_merged,
         )
 
-    def _linear_issues(self, query: str) -> tuple[dict[str, Any], ...]:
+    def _linear_issues(
+        self,
+        query: str,
+        *,
+        project_ids: tuple[str, ...] | None = None,
+        reserve: int = 0,
+    ) -> tuple[dict[str, Any], ...]:
         issues: list[dict[str, Any]] = []
         after: str | None = None
+        pages = 0
+        if project_ids is None:
+            project_ids = tuple(
+                project.linear_project_id
+                for project in self.config.projects
+                if project.linear_project_id is not None
+            )
         while True:
+            if not self._linear_request_available(
+                LINEAR_SEARCH_QUERY,
+                reserve=reserve,
+            ):
+                self._record(
+                    "linear",
+                    "-",
+                    RetryablePollSourceError(
+                        "Linear poll budget deferred discovery"
+                    ),
+                )
+                break
             document = self._linear_request(
                 {
                     "query": LINEAR_SEARCH_QUERY,
@@ -366,10 +508,12 @@ class LivePollSource:
                         "term": query,
                         "first": 50,
                         "after": after,
+                        "projectIds": project_ids,
                         "includeComments": True,
                     },
                 }
             )
+            pages += 1
             connection = _object(
                 _object(document.get("data"), "Linear data").get("searchIssues"),
                 "Linear searchIssues",
@@ -386,13 +530,29 @@ class LivePollSource:
             page = _object(connection.get("pageInfo"), "Linear pageInfo")
             if page.get("hasNextPage") is not True:
                 break
+            if pages >= LINEAR_SEARCH_MAX_PAGES:
+                self._record(
+                    "linear",
+                    "-",
+                    RetryablePollSourceError(
+                        "Linear search page limit deferred discovery"
+                    ),
+                )
+                break
             after_value = page.get("endCursor")
             if not isinstance(after_value, str) or not after_value:
                 raise PollSourceError("Linear pagination has no endCursor")
             after = after_value
         return tuple(issues)
 
-    def _linear_issue(self, identifier: str) -> dict[str, Any] | None:
+    def _linear_issue(
+        self,
+        identifier: str,
+        *,
+        fresh: bool = False,
+    ) -> dict[str, Any] | None:
+        if not fresh and identifier in self._linear_issue_cache:
+            return self._linear_issue_cache[identifier]
         document = self._linear_request(
             {
                 "query": LINEAR_ISSUE_QUERY,
@@ -401,10 +561,27 @@ class LivePollSource:
         )
         value = _object(document.get("data"), "Linear data").get("issue")
         if value is None:
+            self._linear_issue_cache[identifier] = None
             return None
-        return _object(value, "Linear issue")
+        issue = _object(value, "Linear issue")
+        self._linear_issue_cache[identifier] = issue
+        for key in ("id", "identifier"):
+            alias = issue.get(key)
+            if isinstance(alias, str) and alias:
+                self._linear_issue_cache[alias] = issue
+        return issue
 
     def _linear_request(self, document: Mapping[str, object]) -> dict[str, Any]:
+        if self.clock() < self._linear_backoff_until:
+            raise RetryablePollSourceError(
+                "Linear rate-limit backoff is active"
+            )
+        query = document.get("query")
+        complexity = _linear_request_complexity(query)
+        if not self._linear_request_available(query):
+            raise RetryablePollSourceError("Linear poll budget is exhausted")
+        self._linear_requests += 1
+        self._linear_complexity += complexity
         payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
         try:
             result = self.linear_transport(
@@ -422,12 +599,46 @@ class LivePollSource:
             raise PollSourceError(
                 f"Linear request failed: {type(exc).__name__}"
             ) from None
+        if result.status == 429:
+            self._linear_backoff_until = (
+                self.clock() + _retry_after_seconds(result.headers)
+            )
+            raise RetryablePollSourceError("Linear returned HTTP 429")
         if result.status != 200:
             raise PollSourceError(f"Linear returned HTTP {result.status}")
         parsed = _json_object(result.body, "Linear")
         if parsed.get("errors"):
+            if _linear_rate_limited(parsed["errors"]):
+                self._linear_backoff_until = (
+                    self.clock() + _retry_after_seconds(result.headers)
+                )
+                raise RetryablePollSourceError(
+                    "Linear returned RATELIMITED"
+                )
             raise PollSourceError("Linear returned a GraphQL error")
         return parsed
+
+    def _linear_request_available(
+        self,
+        query: object,
+        *,
+        reserve: int = 0,
+    ) -> bool:
+        interval = self.config.poll_seconds
+        request_limit = int(
+            LINEAR_REQUESTS_PER_HOUR * LINEAR_SHARE
+        ) * interval // 3600
+        complexity_limit = int(
+            LINEAR_COMPLEXITY_PER_HOUR * LINEAR_SHARE
+        ) * interval // 3600
+        complexity = _linear_request_complexity(query)
+        return (
+            self._linear_requests + 1 + reserve <= request_limit
+            and self._linear_complexity
+            + complexity
+            + reserve * LINEAR_ISSUE_COMPLEXITY
+            <= complexity_limit
+        )
 
     def _move_linear_ready(self, ticket: TrackedTicket) -> None:
         if (
@@ -831,6 +1042,56 @@ def _linear_terms(query: str) -> tuple[str, ...]:
         if term.strip()
     )
     return terms if terms else (query,)
+
+
+def _linear_candidate_key(issue: Mapping[str, Any]) -> tuple[str, str]:
+    return (_ticket_hint(issue), str(issue.get("id", "")))
+
+
+def _linear_ref_key(ref: TicketRef) -> tuple[str, str]:
+    return (ref.repo.lower(), ref.ticket_id)
+
+
+def _linear_request_complexity(query: object) -> int:
+    return (
+        LINEAR_SEARCH_COMPLEXITY
+        if query == LINEAR_SEARCH_QUERY
+        else LINEAR_ISSUE_COMPLEXITY
+    )
+
+
+def _linear_rate_limited(errors: object) -> bool:
+    if not isinstance(errors, list):
+        return False
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        extensions = error.get("extensions")
+        code = (
+            extensions.get("code")
+            if isinstance(extensions, dict)
+            else error.get("code")
+        )
+        if code == "RATELIMITED":
+            return True
+    return False
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float:
+    value = next(
+        (
+            header_value
+            for name, header_value in headers.items()
+            if name.lower() == "retry-after"
+        ),
+        None,
+    )
+    if value is None:
+        return BACKOFF_SECONDS
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return BACKOFF_SECONDS
 
 
 def _status_code(value: str) -> int | None:

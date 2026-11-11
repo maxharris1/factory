@@ -63,6 +63,22 @@ def test_placeholder_linear_project_id_is_rejected() -> None:
     )
 
 
+def test_placeholder_linear_project_id_can_be_allowed_for_validation() -> None:
+    config, findings = load_orch_yml(
+        ROOT / "orch.yml",
+        allow_placeholders=True,
+    )
+
+    assert [finding.message for finding in findings] == [
+        "accepted placeholder projects[0].linear_project_id"
+    ]
+    assert config is not None
+    assert (
+        config.projects[0].linear_project_id
+        == "REPLACE_WITH_LINEAR_PROJECT_ID"
+    )
+
+
 def test_minimal_example_has_no_extra_required_fields() -> None:
     config, findings = load_orch_yml(ROOT / "config/orch.example.yml")
     assert findings == []

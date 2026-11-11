@@ -64,10 +64,60 @@ def test_check_config_rejects_repo_placeholder_from_another_directory(
     assert "linear_project_id must be a project id" in result.stderr
 
 
+def test_check_config_allows_repo_placeholder_only_with_explicit_flag() -> None:
+    result = run(["check-config", "--allow-placeholders"])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+    assert (
+        "warning: accepted placeholder "
+        "projects[0].linear_project_id"
+    ) in result.stderr
+
+
+def test_allow_placeholders_still_runs_other_orch_validation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        "poll_seconds: 30\nprojects:\n"
+        "  - repo: owner/name\n"
+        "    linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID\n",
+        encoding="utf-8",
+    )
+
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            str(path),
+            "--allow-placeholders",
+        ]
+    )
+
+    assert result.returncode == 1
+    assert "poll_seconds must be 60" in result.stderr
+
+
 def test_check_config_accepts_the_minimal_orch_example() -> None:
     result = run(["check-config", "--orch", str(ROOT / "config" / "orch.example.yml")])
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+@pytest.mark.parametrize("command", ["init-db", "poll"])
+def test_runtime_commands_reject_repo_placeholder(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    database = tmp_path / "orch.db"
+    if command == "poll":
+        database.write_bytes(b"not-used")
+
+    result = run([command, "--db", str(database)])
+
+    assert result.returncode == 1
+    assert "linear_project_id must be a project id" in result.stderr
 
 
 def test_check_config_refuses_a_missing_field(tmp_path: Path) -> None:

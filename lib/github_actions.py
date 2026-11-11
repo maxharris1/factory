@@ -45,6 +45,8 @@ from lib.dispatcher import (
     CIResult,
     Comment,
     ReviewActions,
+    RetryableShipError,
+    RetryableStateError,
     ShipError,
     TicketRef,
     TrackedTicket,
@@ -443,13 +445,16 @@ class LinearReviewActions(GitHubReviewActions):
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
         if self.fresh_ticket is not None:
-            fresh = self.fresh_ticket(
-                TicketRef(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    tracker="linear",
+            try:
+                fresh = self.fresh_ticket(
+                    TicketRef(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        tracker="linear",
+                    )
                 )
-            )
+            except RetryableStateError as exc:
+                raise RetryableShipError(str(exc)) from None
             if fresh is None:
                 raise GitHubAdapterError("linked Linear ticket is unavailable")
             if fresh.pr_number != ticket.pr_number:
@@ -457,7 +462,13 @@ class LinearReviewActions(GitHubReviewActions):
             ticket = fresh
         super().handoff(ticket, head)
         if self.move_ready_for_review:
-            self.linear_ready(ticket)
+            try:
+                self.linear_ready(ticket)
+            except RetryableStateError as exc:
+                raise GitHubAdapterError(
+                    "Linear handoff update was not confirmed: "
+                    f"{type(exc).__name__}"
+                ) from None
 
 
 def _is_read(args: Sequence[str]) -> bool:

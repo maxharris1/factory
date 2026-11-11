@@ -96,7 +96,11 @@ def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
     return DEFAULT_JOB_TIMEOUT_MINUTES
 
 
-def load_orch_yml(path: Path) -> tuple[OrchConfig | None, list[Finding]]:
+def load_orch_yml(
+    path: Path,
+    *,
+    allow_placeholders: bool = False,
+) -> tuple[OrchConfig | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
@@ -107,10 +111,14 @@ def load_orch_yml(path: Path) -> tuple[OrchConfig | None, list[Finding]]:
         return None, [Finding("error", f"invalid YAML: {text or 'invalid YAML'}")]
     if not isinstance(data, dict):
         return None, [Finding("error", "orch.yml must be a mapping")]
-    return _validate(data)
+    return _validate(data, allow_placeholders=allow_placeholders)
 
 
-def _validate(data: dict) -> tuple[OrchConfig | None, list[Finding]]:
+def _validate(
+    data: dict,
+    *,
+    allow_placeholders: bool,
+) -> tuple[OrchConfig | None, list[Finding]]:
     findings: list[Finding] = []
     for key in sorted(data, key=lambda item: str(item)):
         if key not in _TOP_KEYS:
@@ -118,7 +126,11 @@ def _validate(data: dict) -> tuple[OrchConfig | None, list[Finding]]:
 
     poll_seconds = _poll_seconds(data, findings)
     job_timeout = _timeout(data.get("job_timeout", None), "job_timeout", "job_timeout" in data, findings)
-    projects = _projects(data, findings)
+    projects = _projects(
+        data,
+        findings,
+        allow_placeholders=allow_placeholders,
+    )
     linear = _linear(data, findings)
     grok = _grok(data, findings)
     trusted_logins = _trusted_logins(data, findings)
@@ -178,7 +190,12 @@ def _timeout(
     return int(value)
 
 
-def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None:
+def _projects(
+    data: dict,
+    findings: list[Finding],
+    *,
+    allow_placeholders: bool,
+) -> tuple[Project, ...] | None:
     if "projects" not in data:
         findings.append(Finding("error", "missing required field 'projects'"))
         return None
@@ -239,7 +256,10 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             not isinstance(linear_project_id, str)
             or not linear_project_id.strip()
             or len(linear_project_id) > 200
-            or linear_project_id.startswith("REPLACE_WITH_")
+            or (
+                linear_project_id.startswith("REPLACE_WITH_")
+                and not allow_placeholders
+            )
         ):
             findings.append(
                 Finding(
@@ -249,6 +269,18 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             )
             ok = False
             continue
+        if (
+            isinstance(linear_project_id, str)
+            and linear_project_id.startswith("REPLACE_WITH_")
+            and allow_placeholders
+        ):
+            findings.append(
+                Finding(
+                    "warning",
+                    "accepted placeholder "
+                    f"projects[{index}].linear_project_id",
+                )
+            )
         if linear_project_id in seen_linear:
             findings.append(
                 Finding("error", f"duplicate Linear project {linear_project_id!r}")
