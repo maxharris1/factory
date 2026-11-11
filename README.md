@@ -3,7 +3,7 @@
 Grok Bot orchestrates pstack work across Claude Code, Codex and Cursor.
 
 The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
-F1-03, F1-04 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
+F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 
@@ -12,19 +12,24 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - [`orch.yml`](orch.yml) lists the projects to poll and the dispatcher settings ([docs/SPEC.md](docs/SPEC.md) section 7). [`config/orch.example.yml`](config/orch.example.yml) is the minimal file.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
-- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T2 and T6 to
+- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1 through T6 (F1-05 is
+  the T3 review round, T4 ship and T5 questions loop) to
   tickets discovered through `orch:state/` GitHub labels or the Linear handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.
-- Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), T8Hook(shipper)))`.
+- Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), t8))` with
+  `t8 = T8Hook()`, then `t8.shipper = ReviewShipper(dispatcher, source)`.
   [`lib/hook_t7.py`](lib/hook_t7.py) wakes Grok Bot once for `verdict=BLOCKED`,
   `kind=stuck` (with `state=capped`, `refused` or `blocked` for those stops),
   and trusted comments with an unparseable `orch:v` header;
   `Dispatcher.wake_grok_once` is the same wake for a later config refusal or
   a T3 cap. [`lib/hook_t8.py`](lib/hook_t8.py) handles the `after:<approver>`
-  `ok` and `decline`. An `ok` on the full previewed SHA, while the reviewer's
-  latest verdict is still that APPROVE, calls the `Shipper` it was given at
-  most once; a ship error wakes Grok Bot (`ship-failed`) instead of retrying.
+  `ok` and `decline`. The previewed SHA is the full head T4 passed to
+  `await_approver`. An `ok` on it, while the reviewer's latest verdict is
+  still that APPROVE, calls the `Shipper` it was given at most once; a ship
+  error wakes Grok Bot (`ship-failed`) instead of retrying. `ReviewShipper`
+  (F1-05) squash-merges exactly that head only when T4 completed the
+  `after:` ship intent, CI on it is green and it is still the PR head.
   Hooks never see `kind=go` or `kind=ready`.
 
 ## Queue interface

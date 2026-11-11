@@ -1406,6 +1406,10 @@ def test_t3_counts_rounds_using_ticket_risk_and_factory_cap(
     assert row["review_round"] == cap
     assert row["workflow_state"] == "capped"
     assert fix_count == cap - 1
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert (wake.request.action, wake.request.head) == ("capped", head)
+    assert queue.claim("grok") is None
 
 
 def test_t3_rejects_untrusted_reviewer_and_stale_head(tmp_path: Path) -> None:
@@ -1502,6 +1506,141 @@ def test_t3_duplicate_revise_in_fixing_is_stale(tmp_path: Path) -> None:
     assert tuple(row) == (1, "fixing")
     assert outcomes["verdict-duplicate"] == "stale-revise"
     assert fix_count == 1
+
+
+def test_p4b_late_revise_for_the_previous_round_is_stale(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    revise = VERDICT.format(round=1, head=head, verdict="REVISE", risk="high")
+    first = comment("verdict-1", revise, author="codex-login", created_at=1)
+    dispatcher.process(ticket(first, head=head))
+    fix = queue.claim("claude")
+    assert fix is not None
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
+    ready = comment(
+        "ready-2",
+        READY.format(head=head),
+        author="claude-login",
+        created_at=2,
+    )
+    green = {head: CIResult("success")}
+    dispatcher.process(ticket(first, ready, head=head, ci=green))
+    review = queue.claim("codex")
+    assert review is not None and review.request.head == head
+    late = comment("verdict-late", revise, author="codex-login", created_at=3)
+
+    dispatcher.process(ticket(first, ready, late, head=head, ci=green))
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+              AND comment_id = 'verdict-late'
+            """
+        ).fetchone()[0]
+        fix_count = connection.execute(
+            """
+            SELECT count(*) FROM jobs
+            WHERE repo = 'owner/repo' AND ticket_id = '42' AND action = 'fix'
+            """
+        ).fetchone()[0]
+    assert outcome == "stale-revise"
+    assert fix_count == 1
+
+
+def track(queue: SQLiteJobQueue) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+            VALUES ('owner/repo', '42', 'github', 0)
+            """
+        )
+
+
+def handled_outcome(queue: SQLiteJobQueue, comment_id: str) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute(
+                """
+                SELECT outcome FROM handled_comments
+                WHERE repo = 'owner/repo' AND ticket_id = '42'
+                  AND comment_id = ?
+                """,
+                (comment_id,),
+            ).fetchone()[0]
+        )
+
+
+def job_count(queue: SQLiteJobQueue, action: str) -> int:
+    with queue.connect() as connection:
+        return int(
+            connection.execute(
+                """
+                SELECT count(*) FROM jobs
+                WHERE repo = 'owner/repo' AND ticket_id = '42' AND action = ?
+                """,
+                (action,),
+            ).fetchone()[0]
+        )
+
+
+def test_p10_t3_replays_a_failed_fixing_label_write(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    actions.state_failures.add(("owner/repo", "fixing"))
+    revise = comment(
+        "verdict-1",
+        VERDICT.format(round=1, head=head, verdict="REVISE", risk="high"),
+        author="codex-login",
+    )
+    track(queue)
+    source = FakeSource(ticket(revise, head=head))
+
+    dispatcher.poll_once(source)
+    before = len(actions.states)
+    actions.state_failures.clear()
+    dispatcher.poll_once(source)
+
+    assert "fixing" in actions.states[before:]
+    assert handled_outcome(queue, "verdict-1") == "queued-review-fix"
+    assert job_count(queue, "fix") == 1
+
+
+@pytest.mark.parametrize("kind", ["questions", "answers"])
+def test_p10_t5_replays_a_failed_label_write(tmp_path: Path, kind: str) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", QUESTIONS, author="claude-login", created_at=1)
+    answer = comment("answers-1", ANSWERS, author="grok-login", created_at=2)
+    comments: tuple[Comment, ...] = (question,)
+    label = "waiting-max"
+    if kind == "answers":
+        dispatcher.process(ticket(question, head=head))
+        comments += (answer,)
+        label = "review"
+    actions.state_failures.add(("owner/repo", label))
+    track(queue)
+    source = FakeSource(ticket(*comments, head=head))
+
+    dispatcher.poll_once(source)
+    before = len(actions.states)
+    actions.state_failures.clear()
+    dispatcher.poll_once(source)
+
+    assert label in actions.states[before:]
+    if kind == "questions":
+        assert handled_outcome(queue, "questions-1") == "waiting-max"
+        assert job_count(queue, "clarify") == 1
+    else:
+        assert handled_outcome(queue, "answers-1") == "resumed-review"
+        assert job_count(queue, "review") == 2
 
 
 def test_t3_comment_replay_does_not_increment_round_twice(tmp_path: Path) -> None:
@@ -1719,27 +1858,34 @@ def test_t4_patch_id_error_fails_closed_to_review(tmp_path: Path) -> None:
     assert queue.claim("codex") is not None
 
 
-def test_t4_refuses_to_ship_a_non_full_head(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("approved", "head"),
+    [("abcdef1", "abcdef1"), ("a" * 40, "A" * 40)],
+)
+def test_t4_refuses_to_ship_a_non_full_lowercase_head(
+    tmp_path: Path,
+    approved: str,
+    head: str,
+) -> None:
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
-    head = "abcdef1"
-    seed_review_job(dispatcher, queue, head)
-    dispatcher.process(
-        ticket(
-            comment(
-                "approve-short-head",
-                VERDICT.format(
-                    round=1,
-                    head=head,
-                    verdict="APPROVE",
-                    risk="high",
-                ),
-                author="codex-login",
+    seed_review_job(dispatcher, queue, approved)
+    snapshot = ticket(
+        comment(
+            "approve-short-head",
+            VERDICT.format(
+                round=1,
+                head=approved,
+                verdict="APPROVE",
+                risk="high",
             ),
-            head=head,
-            ci={head: CIResult("success")},
-        )
+            author="codex-login",
+        ),
+        head=head,
+        ci={head: CIResult("success")},
+        factory_config=factory(ship="after:tracy-site"),
     )
+    dispatcher.process(snapshot)
 
     assert actions.merges == []
     with queue.connect() as connection:
@@ -1750,7 +1896,24 @@ def test_t4_refuses_to_ship_a_non_full_head(tmp_path: Path) -> None:
               AND comment_id = 'approve-short-head'
             """
         ).fetchone()[0]
-    assert outcome == "failed-verdict-ValueError"
+    assert outcome == "refused-ship-head"
+    assert actions.approvals == []
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "ship-failed"
+    assert "lowercase 40-character" in str(wake.request.detail)
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM handled_comments")
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        wakes = connection.execute(
+            "SELECT count(*) FROM jobs WHERE recipient = 'grok'"
+        ).fetchone()[0]
+    assert wakes == 1
+    with queue.connect() as connection:
+        intents = connection.execute("SELECT count(*) FROM ship_intents").fetchone()[0]
+    assert intents == 0
 
 
 @pytest.mark.parametrize(
@@ -2362,6 +2525,11 @@ def test_pending_non_merge_intent_holds_without_repeating_side_effect(
         ).fetchone()[0]
     assert intent == "unconfirmed"
     assert outcome == "ship-unconfirmed"
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "ship-failed"
+    assert wake.request.source_comment_id == "approve-1"
+    assert queue.claim("grok") is None
 
 
 def test_completed_intent_replays_label_write_before_stale_gates(
@@ -2396,9 +2564,11 @@ def test_completed_intent_replays_label_write_before_stale_gates(
     source = FakeSource(snapshot)
 
     dispatcher.poll_once(source)
+    before = len(actions.states)
     actions.state_failures.clear()
     dispatcher.poll_once(source)
 
+    assert actions.states[before:] == ["merged"]
     assert actions.merges == [(True, head)]
     with queue.connect() as connection:
         intent = connection.execute(
@@ -2525,6 +2695,9 @@ def test_merge_error_is_recorded_and_later_comments_continue(
     wake = queue.claim("grok")
     assert wake is not None
     with queue.connect() as connection:
+        wakes = connection.execute(
+            "SELECT action, detail FROM jobs WHERE recipient = 'grok'"
+        ).fetchall()
         outcomes = dict(
             connection.execute(
                 """
@@ -2543,6 +2716,8 @@ def test_merge_error_is_recorded_and_later_comments_continue(
     assert outcomes["approve-1"] == "failed-verdict-RuntimeError"
     assert outcomes["questions-1"] == "waiting-max"
     assert intent == "failed"
+    assert sorted(str(row["action"]) for row in wakes) == ["clarify", "ship-failed"]
+    assert any("merge unavailable" in str(row["detail"]) for row in wakes)
 
 
 def test_merge_error_on_one_pr_does_not_stop_polling_other_repos(
