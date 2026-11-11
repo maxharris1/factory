@@ -704,7 +704,11 @@ class Dispatcher:
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
-                        detail=_comment_link(comment),
+                        detail=self._job_detail(
+                            ticket,
+                            action="build",
+                            instruction=_comment_link(comment),
+                        ),
                     ),
                     dedupe_key=(
                         f"plan-build:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -725,7 +729,14 @@ class Dispatcher:
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
-                        detail=f"round=2/2; previous plan {_comment_link(comment)}",
+                        detail=self._job_detail(
+                            ticket,
+                            action="plan",
+                            instruction=(
+                                "round=2/2; previous plan "
+                                f"{_comment_link(comment)}"
+                            ),
+                        ),
                     ),
                     dedupe_key=(
                         f"plan-gap:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -754,7 +765,13 @@ class Dispatcher:
                     connection,
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
-                    detail=f"plan has gaps a second time, {_comment_link(comment)}",
+                    detail=self._project_wake_detail(
+                        ticket,
+                        (
+                            "plan has gaps a second time, "
+                            f"{_comment_link(comment)}"
+                        ),
+                    ),
                 )
             connection.execute(
                 """
@@ -1197,7 +1214,10 @@ class Dispatcher:
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=generation,
                     head=head,
-                    detail=_comment_link(comment),
+                    detail=self._project_wake_detail(
+                        ticket,
+                        _comment_link(comment),
+                    ),
                 ),
                 dedupe_key=(
                     f"t5-wait:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"

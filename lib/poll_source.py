@@ -588,7 +588,12 @@ class LivePollSource:
         comments = linear_comments
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
-        pr_number = self._linked_pr_number(project.repo, identifier, issue)
+        pr_number = self._linked_pr_number(
+            project.repo,
+            identifier,
+            issue,
+            fresh=fresh,
+        )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
             pr_head = _object(
@@ -640,6 +645,8 @@ class LivePollSource:
         repo: str,
         identifier: str,
         issue: Mapping[str, Any],
+        *,
+        fresh: bool = False,
     ) -> str | None:
         attachments = _object(issue.get("attachments"), "Linear attachments")
         page = _object(
@@ -670,6 +677,7 @@ class LivePollSource:
                 "search/issues",
                 "-f",
                 f"q={identifier} repo:{repo} is:pr is:open",
+                fresh=fresh,
             ),
             "GitHub pull request search",
         )

@@ -827,6 +827,51 @@ def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
     assert all("--cache" not in call for call in fresh_calls)
 
 
+def test_fresh_linear_ticket_skips_ticket_cache_and_all_github_caches() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.search_items = [{"number": 12}]
+    issue = linear_issue()
+    issue["attachments"]["nodes"] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        assert request["query"].startswith("query FactoryIssue")
+        return HTTPResult(200, json.dumps({"data": {"issue": issue}}))
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=transport,
+    )
+    project = source.config.projects[0]
+    original = source._linear_ticket(project, issue)
+    before = len(gh.calls)
+    issue["comments"]["nodes"].append(
+        {
+            "id": "comment-2",
+            "body": (
+                "`orch:v1 kind=stuck from=grok-bot role=orchestrator "
+                "state=blocked`\n"
+            ),
+            "createdAt": "2026-11-11T12:02:00Z",
+            "user": {"id": "user-1"},
+        }
+    )
+
+    fresh = source.fresh_ticket(
+        TicketRef("acme/widgets", "AUT-42", "linear")
+    )
+
+    assert fresh is not None
+    assert fresh is not original
+    assert len(original.comments) + 1 == len(fresh.comments)
+    fresh_calls = gh.calls[before:]
+    assert any("search/issues" in call for call in fresh_calls)
+    assert all("--cache" not in call for call in fresh_calls)
+
+
 def test_linear_candidate_parsing_uses_handoff_query() -> None:
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
     gh.comments = [
@@ -1111,6 +1156,36 @@ def test_webhook_delivery_uses_job_contract_and_does_not_log_key(caplog) -> None
         }
     ]
     assert "secret-webhook-key" not in caplog.text
+
+
+def test_webhook_delivery_routes_json_project_bot() -> None:
+    sent: list[dict] = []
+    delivery = WebhookGrokDelivery(
+        url_env="FACTORY_WEBHOOK_URL",
+        key_env="FACTORY_WEBHOOK_KEY",
+        environ={
+            "FACTORY_WEBHOOK_URL": "https://webhook.test",
+            "FACTORY_WEBHOOK_KEY": "key",
+        },
+        transport=lambda url, key, body, timeout: (
+            sent.append(json.loads(body))
+            or WebhookResult(200, {"X-Request-Id": "receipt"})
+        ),
+    )
+    request = JobRequest(
+        repo="aut0-code/aut0",
+        ticket_id="AUT-42",
+        action="stuck",
+        recipient="grok",
+        source_comment_id="7",
+        timeout_seconds=60,
+        detail=json.dumps({"project_bot": "offer-brief-project"}),
+    )
+    job = Job("job-1", "dedupe", request, "running", 1, 1, None, None)
+
+    delivery.deliver(job, logical_key="logical-1")
+
+    assert sent[0]["target_bot"] == "offer-brief-project"
 
 
 def test_webhook_transport_error_does_not_expose_key() -> None:

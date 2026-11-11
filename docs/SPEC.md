@@ -357,7 +357,9 @@ depend on full-text `OR` semantics.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
-`grok_bot` routes stops and successful handoffs to the owning project bot.
+`grok_bot` routes stops and successful handoffs to the owning project bot. If
+the webhook's `target_bot` is set, only that project bot handles the wake. If
+it is `null`, Grok Bot handles the wake for the repo's project.
 `linear_ready_for_review` defaults to `false` and controls only the Linear
 Ready for Review move after a covered cross-family APPROVE. Aut0 enables it;
 no other Linear state transition is written.

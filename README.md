@@ -128,7 +128,9 @@ and go are separate queries rather than relying on undocumented full-text
 `OR` behavior. A linked GitHub PR supplies the current head and CI, and its
 issue comments are joined with the Linear comments. `ready`, `verdict`, and
 `stuck` go on PR issue comments, never reviews or inline comments.
-`projects[].grok_bot` routes stop and terminal results.
+`projects[].grok_bot` routes stop and terminal results. When a webhook wake's
+`target_bot` is set, only that project bot handles it; when it is `null`, Grok
+Bot handles it for the repo's project.
 `projects[].linear_ready_for_review` defaults off and controls only the
 post-APPROVE Linear Ready for Review move; Aut0 enables it. No other dispatcher
 state writes Linear, and `ship: handoff` never merges.
@@ -169,6 +171,8 @@ Do not run these steps until Max gives the go. `deploy/install.sh` creates a
 venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
 under `$HOME/.local/bin`, initializes one shared database, and writes
 `$HOME/.config/factory/profile.sh`. It does not install or start the service.
+Stop `orch-poll` before re-running `deploy/install.sh`; both install paths
+replace the venv.
 Keep the checkout at
 `$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
 The script warns for another checkout or branch, refuses to replace a

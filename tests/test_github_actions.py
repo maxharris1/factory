@@ -773,6 +773,31 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
     assert MERGE not in gh.keys()
 
 
+def test_linear_handoff_refuses_changed_linked_pr_before_any_write() -> None:
+    gh = RecordedGh()
+    linear_writes: list[str] = []
+    linked = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        fresh_ticket=lambda ref: replace(linked, pr_number="43"),
+        runner=gh,
+    )
+
+    with pytest.raises(
+        GitHubAdapterError,
+        match="linked pull request changed",
+    ):
+        actions.handoff(linked, HEAD)
+
+    assert gh.calls == []
+    assert linear_writes == []
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [
