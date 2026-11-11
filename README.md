@@ -30,8 +30,11 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
   error wakes Grok Bot (`ship-failed`) instead of retrying. `ReviewShipper`
   (F1-05) fast-forwards `base_branch` to exactly that head (no merge commit,
   no squash; a non-fast-forward raises) only when T4 completed the
-  `after:` ship intent, CI on it is green and it is still the PR head.
-  Every other repo keeps `ship: merge` as a squash merge.
+  `after:` ship intent, CI on it is green and it is still the PR head. It
+  counts as shipped only when `base_branch`'s tip is exactly that head; a PR
+  merged some other way is refused and wakes Grok Bot. `ship: merge` repos
+  still squash-merge with `--match-head-commit`; `ship: handoff` repos are
+  never merged by the factory.
   Hooks never see `kind=go` or `kind=ready`.
 
 ## Queue interface
