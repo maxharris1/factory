@@ -113,7 +113,7 @@ class ReviewActions(Protocol):
 class GrokDelivery(Protocol):
     """Push a Grok job and return a non-empty delivery receipt.
 
-    A crash after the push but before queue completion can repeat the wake.
+    Any failure after the push but before queue completion can repeat the wake.
     Implementations must deduplicate on logical_key, which is stable across
     T6 retries, rather than on job.id.
     """
@@ -250,7 +250,8 @@ class Dispatcher:
                 self._mark_handled(ticket, comment.id, outcome)
 
     def reconcile_jobs(self) -> None:
-        self._deliver_grok_jobs()
+        deferred_grok_jobs: set[str] = set()
+        self._deliver_grok_jobs(deferred_grok_jobs)
         now = self.queue.now()
         for job in self.queue.outstanding():
             activity = (
@@ -261,9 +262,11 @@ class Dispatcher:
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
-        self._deliver_grok_jobs()
+        self._deliver_grok_jobs(deferred_grok_jobs)
 
-    def _deliver_grok_jobs(self) -> None:
+    def _deliver_grok_jobs(self, deferred: set[str]) -> None:
+        if deferred:
+            return
         while (job := self.queue.claim("grok")) is not None:
             try:
                 receipt = self.grok_delivery.deliver(
@@ -283,16 +286,17 @@ class Dispatcher:
                     f"grok-delivery:{type(exc).__name__}",
                 )
                 try:
-                    self.queue.finish(
+                    self.queue.release(
                         job.id,
                         owner="grok",
-                        handoff_comment_id=None,
                     )
-                except Exception as finish_exc:
+                    deferred.add(job.id)
+                except Exception as release_exc:
                     self._record_job_error(
                         job,
-                        f"grok-delivery-finish:{type(finish_exc).__name__}",
+                        f"grok-delivery-release:{type(release_exc).__name__}",
                     )
+                return
 
     def gate_count(self, ticket: TrackedTicket) -> int:
         with self._connect() as connection:

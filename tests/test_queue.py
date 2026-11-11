@@ -176,6 +176,27 @@ def test_finish_refuses_the_wrong_owner(tmp_path: Path) -> None:
     assert queue.outstanding() == (running,)
 
 
+def test_release_returns_only_the_owners_running_job_to_queued(
+    tmp_path: Path,
+) -> None:
+    now = [10.0]
+    queue = make_queue(tmp_path / "queue.sqlite3", now)
+    queued = queue.enqueue(request(), dedupe_key="build")
+    running = queue.claim("claude")
+    assert running is not None
+
+    with pytest.raises(QueueError, match="belongs to claude, not codex"):
+        queue.release(running.id, owner="codex")
+    now[0] = 20
+    released = queue.release(running.id, owner="claude")
+
+    assert released.id == queued.id
+    assert released.state == "queued"
+    assert released.created_at == 10
+    with pytest.raises(QueueError, match="running"):
+        queue.release(running.id, owner="claude")
+
+
 def test_finish_does_not_overwrite_a_t6_timeout_or_duplicate_its_retry(
     tmp_path: Path,
 ) -> None:
