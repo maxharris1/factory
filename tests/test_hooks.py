@@ -2089,3 +2089,48 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
         shipper.inner.ship(ship_request())
     assert actions.fast_forwards == [("main", HEAD_A)]
 
+
+def test_r2m2_review_shipper_refuses_tied_ok_9_before_approve_10(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    approved = approve("10", HEAD_A, 1)
+    source = FakeSource(ticket(BRIEFED, approved))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    source.tickets = (
+        ticket(BRIEFED, approved, say("9", OK.format(head=HEAD_A), "tracy-login", 1)),
+    )
+
+    with pytest.raises(ShipError, match="APPROVE 10 does not precede ok 9"):
+        shipper.inner.ship(
+            replace(ship_request(), source_comment_id="9", approve_comment_id="10")
+        )
+
+    assert actions.fast_forwards == []
+    assert actions.merges == []
+    assert workflow_state(queue) != "merged"
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM external_ship_intents"
+        ).fetchone()[0] == 0
+
+
+def test_r2m2_t8_refuses_tied_ok_9_before_approve_10(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    source = FakeSource(
+        ticket(
+            BRIEFED,
+            approve("10", HEAD_A, 1),
+            say("9", OK.format(head=HEAD_A), "tracy-login", 1),
+        )
+    )
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["9"] == "rejected-ok-not-waiting"
+    assert shipper.requests == []
+    assert actions.fast_forwards == []
