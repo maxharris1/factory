@@ -7,7 +7,8 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from lib.queue import Job
 
@@ -27,6 +28,14 @@ class WebhookResult:
 WebhookTransport = Callable[[str, str, bytes, float], WebhookResult]
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = build_opener(_NoRedirect)
+
+
 def send_webhook(
     url: str,
     key: str,
@@ -34,6 +43,9 @@ def send_webhook(
     timeout: float,
 ) -> WebhookResult:
     try:
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("webhook URL must use https")
         request = Request(
             url,
             data=body,
@@ -44,7 +56,7 @@ def send_webhook(
                 "X-Automation-Key": key,
             },
         )
-        with urlopen(request, timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return WebhookResult(response.status, dict(response.headers.items()))
     except HTTPError as exc:
         return WebhookResult(exc.code, {})
@@ -73,6 +85,11 @@ class WebhookGrokDelivery:
     def deliver(self, job: Job, *, logical_key: str) -> str:
         url = self._required(self.url_env)
         key = self._required(self.key_env)
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise GrokDeliveryError(
+                f"{self.url_env} must contain an https URL"
+            )
         request = job.request
         body = json.dumps(
             {

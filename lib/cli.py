@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import signal
 import sqlite3
 import sys
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
-from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper
+from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubReviewActions
@@ -216,12 +218,25 @@ def _poll(argv: list[str]) -> int:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     try:
-        dispatcher, source = _runtime(args.db, args.orch)
-        PollLoop(dispatcher, source).run(max_polls=1 if args.once else None)
+        path = _db_path(args.db)
+        with _poll_lock(path):
+            dispatcher, source = _runtime(path, args.orch, create=False)
+            loop = PollLoop(dispatcher, source)
+            if args.once:
+                loop.run(max_polls=1)
+            else:
+                loop.run(
+                    on_error=lambda exc: dispatcher.record_poll_error(
+                        "poll",
+                        "-",
+                        type(exc).__name__,
+                    )
+                )
     except (
         GrokDeliveryError,
         PollSourceError,
         QueueError,
+        ShipError,
         WaitError,
         OSError,
         sqlite3.Error,
@@ -240,11 +255,12 @@ def _init_db(argv: list[str]) -> int:
     parser.add_argument("--orch", type=Path)
     args = parser.parse_args(argv)
     try:
-        _runtime(args.db, args.orch)
+        _runtime(args.db, args.orch, create=True)
     except (
         GrokDeliveryError,
         PollSourceError,
         QueueError,
+        ShipError,
         WaitError,
         OSError,
         sqlite3.Error,
@@ -259,15 +275,36 @@ def _init_db(argv: list[str]) -> int:
 def _runtime(
     db_path: Path | None,
     orch_path: Path | None,
+    *,
+    create: bool,
 ) -> tuple[Dispatcher, LivePollSource]:
     config = _runtime_config(orch_path)
-    if not config.trusted_logins:
+    if not create and not config.trusted_logins:
         raise ValueError("trusted_logins is required for polling")
+    if (
+        not create
+        and any(
+            project.linear_project_id is not None
+            for project in config.projects
+        )
+        and not config.trusted_linear_users
+    ):
+        raise ValueError("trusted_linear_users is required for Linear polling")
     if config.grok is None:
         raise ValueError("grok webhook env names are required for polling")
     path = _db_path(db_path)
-    queue = SQLiteJobQueue(path, clock=time.time)
-    source = LivePollSource(config)
+    queue = (
+        SQLiteJobQueue(path, clock=time.time)
+        if create
+        else open_queue(path)
+    )
+    trusted = dict(config.trusted_logins)
+    trusted.update(config.trusted_linear_users)
+    if create and not trusted:
+        trusted["init-db"] = "init-db"
+    cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
+    if config.linear is not None:
+        cleared.append(config.linear.api_key_env)
     delivery = WebhookGrokDelivery(
         url_env=config.grok.webhook_url_env,
         key_env=config.grok.webhook_key_env,
@@ -276,13 +313,38 @@ def _runtime(
     dispatcher = Dispatcher(
         path,
         queue,
-        trusted_logins=config.trusted_logins,
-        review_actions=GitHubReviewActions(),
+        trusted_logins=trusted,
+        review_actions=GitHubReviewActions(cleared_variables=cleared),
         grok_delivery=delivery,
         hooks=(T7Hook(), t8),
     )
+    source = LivePollSource(
+        config,
+        error_sink=dispatcher.record_poll_error,
+        terminal_sink=dispatcher.record_terminal,
+    )
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+@contextmanager
+def _poll_lock(path: Path):
+    if not path.is_file():
+        raise ValueError(
+            f"dispatcher database {path} does not exist; run orch init-db first"
+        )
+    lock_path = path.with_name(path.name + ".lock")
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(
+                f"another orch poll owns {lock_path}"
+            ) from None
+        yield
+    finally:
+        handle.close()
 
 
 def _runtime_config(path: Path | None) -> OrchConfig:

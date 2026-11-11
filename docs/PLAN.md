@@ -15,7 +15,7 @@ Done means Max can hand Grok Bot a ticket on any project, answer only product qu
    - **Default (GitHub issues):** the GitHub issue is the ticket. Labels show the current state.
    - **Aut0, and any repo whose `factory.md` says `tickets: linear`:** Linear is the ticket source of truth. Every repo change goes through a PR. The orchestrator creates **no GitHub issues or labels** in that repo. State lives on the Linear ticket and in PR comments.
 3. **One Grok Bot skill, `orchestrate-project`.** Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and reviewer, and handles everything the dispatcher can't decide. It reads each project's `factory.md` for models, review policy, ship rule, ticket source, special skills and repo context (section 7).
-4. **One dispatcher script, `orch`, a few hundred lines.** It polls the configured trackers, applies the table in section 4, and wakes an agent only when judgment is needed. Bots wait on it with a blocking `orch wait <role>` shell call. That costs no tokens, and the shell exiting wakes the bot. No webhooks, no new credentials. It uses the existing `gh` login (and Linear, for Aut0). The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. It does not repeat the per-repo policy; that lives in each project's `factory.md`.
+4. **One dispatcher script, `orch`, a few hundred lines.** It polls the configured trackers, applies the table in section 4, and wakes an agent only when judgment is needed. Bots wait on it with a blocking `orch wait <role>` shell call. That costs no tokens, and the shell exiting wakes the bot. It accepts no inbound webhooks or new credentials; outbound Grok delivery uses the existing routine webhook. It uses the existing `gh` login (and Linear, for Aut0). The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. It does not repeat the per-repo policy; that lives in each project's `factory.md`.
 
 Ownership stays as Max decided: **Claude Bot starts every Claude session, Codex Bot every Codex session, Cursor Bot every Cursor CLI job.** Grok Bot and `orch` only queue requests. They never run `claude`, `codex` or `cursor-agent` themselves.
 
@@ -239,7 +239,7 @@ These are out until a real run shows they're needed:
 - The mission-control dashboard. `orch status` (item 18) covers it.
 - Per-run `decisions.tsv` and receipts. The PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs).
-- Webhooks, and any new credential or login.
+- Inbound webhooks, a new routine webhook, and any new credential or login.
 - The genericity purge and protected-field base reads. The repo starts generic, and `factory.md` is read from the base branch.
 - Arena and swarm by default. They stay available to the builder as pstack tools.
 

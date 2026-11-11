@@ -21,7 +21,8 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
     assert config.grok is not None
     assert config.grok.webhook_url_env == "FACTORY_WEBHOOK_URL"
     assert config.grok.webhook_key_env == "FACTORY_WEBHOOK_KEY"
-    assert config.trusted_logins["grok-bot"] == "grok-bot"
+    assert config.trusted_logins == {}
+    assert config.trusted_linear_users == {}
     assert [project.repo for project in config.projects] == [
         "aut0-code/aut0",
         "maxharris1/Cleffy",
@@ -30,7 +31,8 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
     for project in config.projects:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
-    assert config.projects[0].linear_project == "Aut0"
+    assert config.projects[0].factory_ref == "dev"
+    assert config.projects[0].linear_project_id == "REPLACE_WITH_LINEAR_PROJECT_ID"
 
 
 def test_minimal_example_has_no_extra_required_fields() -> None:
@@ -108,7 +110,8 @@ def test_linear_project_requires_api_key_env_name(tmp_path: Path) -> None:
     path = tmp_path / "orch.yml"
     path.write_text(
         "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
-        "    linear_project: Widgets\n",
+        "    factory_ref: main\n"
+        "    linear_project_id: project-1\n",
         encoding="utf-8",
     )
 
@@ -119,6 +122,35 @@ def test_linear_project_requires_api_key_env_name(tmp_path: Path) -> None:
         "linear.api_key_env is required" in finding.message
         for finding in findings
     )
+
+
+def test_trust_maps_accept_github_app_login_and_prefix_linear_id(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        """
+poll_seconds: 60
+trusted_logins:
+  factory-app[bot]: claude-bot
+trusted_linear_users:
+  8f7b-user-id: grok-bot
+projects:
+  - repo: acme/widgets
+    factory_ref: main
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    config, findings = load_orch_yml(path)
+
+    assert findings == []
+    assert config is not None
+    assert config.trusted_logins == {"factory-app[bot]": "claude-bot"}
+    assert config.trusted_linear_users == {
+        "linear:8f7b-user-id": "grok-bot"
+    }
 
 
 def test_duplicate_repos_are_case_insensitive(tmp_path: Path) -> None:

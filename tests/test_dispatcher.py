@@ -3350,6 +3350,58 @@ def test_poll_loop_polls_every_60_seconds(tmp_path: Path) -> None:
     assert sleeps == [60, 60]
 
 
+def test_long_poll_loop_records_cycle_errors_and_continues() -> None:
+    class RaisingDispatcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_once(self, source) -> None:
+            del source
+            self.calls += 1
+            raise RuntimeError("source failed")
+
+    dispatcher = RaisingDispatcher()
+    errors: list[str] = []
+    sleeps: list[float] = []
+
+    PollLoop(
+        dispatcher,  # type: ignore[arg-type]
+        FakeSource(),
+        sleep=sleeps.append,
+    ).run(
+        max_polls=2,
+        on_error=lambda exc: errors.append(type(exc).__name__),
+    )
+
+    assert dispatcher.calls == 2
+    assert errors == ["RuntimeError", "RuntimeError"]
+    assert sleeps == [60]
+
+
+def test_terminal_tickets_are_not_refetched(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    with queue.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+            VALUES ('owner/repo', ?, 'github', 0)
+            """,
+            [("active",), ("done",)],
+        )
+        connection.executemany(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', ?, 0, 0, ?)
+            """,
+            [("active", "building"), ("done", "done")],
+        )
+
+    assert dispatcher._tracked_refs() == (
+        TicketRef("owner/repo", "active", "github"),
+    )
+
+
 def test_dispatcher_cannot_execute_a_harness_binary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

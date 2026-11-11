@@ -28,6 +28,7 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | earlier today, still in force | Max provisions logins and registers runners himself. The factory does not create logins or credentials without his OK, and never reads credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. | Standing rule |
 | earlier today, still in force | Product questions go to Max, one at a time, in his own words for approvals that need them. Technical questions are decided by the orchestrator. | Standing rule |
 | earlier today, still in force | Every ticket gets a clarifying-questions step before building (D31). | Approved invariant, kept |
+| Nov 11, 2:31 PM | The dispatcher may send outbound deliveries to the existing Grok routine webhook. It does not accept inbound webhooks or create credentials. | Factory decided (technical) |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
 
@@ -44,7 +45,7 @@ The factory is four parts and nothing else:
 1. **pstack in every harness.** One pinned pstack source, installed where Claude Code, Codex and Cursor load skills. pstack (poteto-mode plus the principle skills) decides *how* work gets done. The orchestrator adds no work rules of its own.
 2. **One handoff format.** Each piece of work is one ticket plus its PR. The brief, questions, answers, plan, verdicts and "done" are comments, with one small machine-readable header. There is no other state store. The dispatcher's local job list can be rebuilt from the tracker at any time.
 3. **One Grok Bot skill, `orchestrate-project`.** Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and reviewer, and handles everything the dispatcher cannot decide. It reads each project's `factory.md`.
-4. **One dispatcher script, `orch`.** A few hundred lines. It polls the configured trackers, applies the transition table, and wakes an agent only when judgment is needed. Bots wait on a blocking `orch wait <role>` shell call, which costs no tokens. No webhooks. No new credentials. It uses the existing `gh` login, and existing Linear access for Aut0.
+4. **One dispatcher script, `orch`.** A few hundred lines. It polls the configured trackers, applies the transition table, and wakes an agent only when judgment is needed. Bots wait on a blocking `orch wait <role>` shell call, which costs no tokens. It accepts no inbound webhooks and creates no credentials. Outbound Grok delivery uses the existing routine webhook. GitHub uses the existing `gh` login, and Aut0 uses existing Linear access.
 
 The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. Per-repo policy lives in that repo's `factory.md`.
 
@@ -61,7 +62,9 @@ These stay out until a real run shows they are needed. They are not Phase 1 or P
 - A mission-control dashboard. Phase 2 `orch status` is a read-only text summary.
 - Per-run `decisions.tsv` and receipts. PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs). The weekly factory eval report in Phase 1 is a measurement of runs against the chart, not that list.
-- Webhooks, and any new credential or login.
+- Inbound webhooks, any new credential or login, or creating another Grok
+  routine webhook. Outbound delivery to the existing Grok routine is part of
+  the dispatcher.
 - A genericity purge or protected-field base reads. The repo starts generic. `factory.md` is read from the project's base branch.
 - Arena and swarm by default. They stay available to the builder as pstack tools.
 
@@ -286,13 +289,13 @@ linear:
 grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_key_env: FACTORY_WEBHOOK_KEY
-trusted_logins:
-  tracker-login: grok-bot
+# Before install, Max adds confirmed trusted_logins and
+# trusted_linear_users. No production identity ships in this file.
 projects:
   - repo: owner/name
-    # Required when this repo's tickets are in Linear.
-    # linear_project: Project name or ID
-    # factory.md is read from that repo's base_branch
+    factory_ref: main
+    # Required when this repo's tickets are in Linear:
+    # linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
     # optional job_timeout: 90
 ```
 
@@ -301,11 +304,26 @@ named by `linear.api_key_env`. The key name is configuration; the key value is
 only read from that environment variable at request time. A missing key fails
 with the variable name, never its value. `trusted_logins` maps tracker author
 logins to the `from=` identities accepted by the handoff contract.
+`trusted_linear_users` separately maps immutable Linear user IDs to those
+identities. The shipped file contains no production identity and `orch poll`
+refuses to start until Max fills both maps.
+
+`factory_ref` is the trusted base branch from which the poller reads
+`factory.md`; it never discovers policy through the repository's default
+branch. `linear_project_id` is an immutable Linear project ID, not its
+renameable display name.
 
 The Grok webhook fields also contain environment-variable names, not values.
 Delivery sends one JSON object containing the job fields and `logical_key`,
 with the existing routine's bearer/key headers. The dispatcher never prints
 or includes either webhook value in an exception.
+
+Before install, Max must confirm that `LINEAR_API_KEY` names an existing,
+Max-provisioned key on the box. This work does not create one. A read-only
+Linear introspection and known-comment search must also confirm
+`includeComments` and preservation of the `<!-- orch:v1 ... -->` body. Brief
+and go use separate searches; the poller does not depend on full-text `OR`
+semantics.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
@@ -321,7 +339,7 @@ The default job timeout is 90 minutes of no heartbeat or progress. A project may
 - Gate retries (CI red, then fix) do **not** count as review rounds. Three CI-red cycles in a row mark the ticket `stuck`.
 - A second AC-unmet review verdict marks the ticket `capped`, even if rounds remain.
 - **Ship is pinned to the covered head.** `ship: merge` uses `gh pr merge --squash --match-head-commit <sha>`. If the PR head has moved, the approval carries only when `git patch-id --stable` is equal; otherwise the dispatcher queues a re-review.
-- `ship: handoff` (Aut0): on APPROVE, move the Linear ticket to Ready for Review and mark the PR ready. Do not merge. Max picks the merge. Never request `maxharris1` as a reviewer on Aut0.
+- `ship: handoff` (Aut0): on APPROVE, move the Linear ticket to Ready for Review and mark the PR ready. Do not merge. Max picks the merge. Never request `maxharris1` as a reviewer on Aut0. The production poll source resolves Aut0's linked PR, head and CI, so it can reach review. The actual Ready-for-Review handoff action is not yet implemented by `GitHubReviewActions`; an approval therefore fails closed and wakes Grok instead of silently merging.
 - `ship: after:<approver>`: wait for `ok head=<sha>` on the previewed SHA, or `decline` (fix; third decline is `stuck`).
 - Another agent's approval is never treated as Max's.
 

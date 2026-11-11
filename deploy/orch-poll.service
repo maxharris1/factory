@@ -1,16 +1,13 @@
 [Unit]
 Description=Factory dispatcher poll loop
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/factory
-Environment=ORCH_DB=%h/.local/state/factory/orch.db
-PassEnvironment=LINEAR_API_KEY FACTORY_WEBHOOK_URL FACTORY_WEBHOOK_KEY
+EnvironmentFile=%h/.config/factory/orch-poll.env
 ExecStart=%h/factory/bin/orch poll
 Restart=on-failure
-RestartSec=10
+RestartSec=60
 
 [Install]
 WantedBy=default.target

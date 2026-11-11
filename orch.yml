@@ -8,13 +8,13 @@ linear:
 grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_key_env: FACTORY_WEBHOOK_KEY
-trusted_logins:
-  grok-bot: grok-bot
-  claude-bot: claude-bot
-  codex-bot: codex-bot
-  cursor-bot: cursor-bot
+# Before install, Max must add confirmed trusted_logins and
+# trusted_linear_users mappings. The poller refuses to start without them.
 projects:
   - repo: aut0-code/aut0
-    linear_project: Aut0
+    factory_ref: dev
+    linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
   - repo: maxharris1/Cleffy
+    factory_ref: dev
   - repo: maxharris1/tracy-harris-coaching
+    factory_ref: main

@@ -105,10 +105,24 @@ projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
 Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
 variable containing the Linear API key. `grok.webhook_url_env` and
 `grok.webhook_key_env` name the existing Grok routine webhook variables.
-`projects[].linear_project` maps a Linear project name or ID to its repo.
-`trusted_logins` maps tracker authors to handoff identities. Missing secrets
-fail by environment-variable name; values are never printed or included in
-exceptions.
+`projects[].factory_ref` selects the trusted branch containing `factory.md`;
+`projects[].linear_project_id` maps an immutable Linear project ID to its
+repo. `trusted_logins` maps GitHub authors to handoff identities, while
+`trusted_linear_users` maps immutable Linear user IDs separately. The shipped
+config contains placeholders, not production identities. `orch poll` refuses
+to start until Max fills them. Missing secrets fail by environment-variable
+name; values are never printed or included in exceptions.
+
+Linear issues are searched with comments included; brief and go are separate
+queries rather than relying on undocumented full-text `OR` behavior. A linked
+GitHub PR supplies the current head and CI. Aut0 can therefore reach review, but the
+Ready-for-Review `ship: handoff` write remains unimplemented and fails closed
+with a Grok wake on approval.
+
+`orch poll` opens an initialized database without creating it and holds
+`<db>.lock`, so a second poller is refused. Source failures are recorded per
+project or ticket and the long-running loop continues after the 60-second
+interval; `--once` reports a cycle-level failure with a nonzero exit.
 
 ## Wait
 
@@ -130,8 +144,12 @@ is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
 
 ## Install after merge
 
-Do not run these steps until Max gives the go. From a checkout at
-`$HOME/factory`, initialize the database:
+Do not run these steps until Max gives the go. Keep the checkout at
+`$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
+Before initialization, replace the identity and Linear-project placeholders
+in that file with values Max confirms. Confirm that `LINEAR_API_KEY` is an
+existing Max-provisioned key; this repository does not create one. Then
+initialize the database:
 
 ```sh
 export ORCH_DB="$HOME/.local/state/factory/orch.db"
@@ -139,11 +157,13 @@ bin/orch init-db
 ```
 
 [`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
-for the long-running poller. After the named environment variables have been
-configured for the user service manager, copy or link the unit to
+for the long-running poller. Max creates
+`~/.config/factory/orch-poll.env` mode `0600`; it names `ORCH_DB` and the
+Linear/webhook variables named by `orch.yml`. Values are not documented or
+committed. Copy or link the unit to
 `~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
 use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
-repository installs, enables, or starts the unit.
+repository installs, enables, starts, or writes the environment file.
 
 ## Status
 
