@@ -87,7 +87,7 @@ Phase 1 runs on one machine: the box. Phase 2 adds Max's other Tailscale devices
 
 ## 4. Ticket lifecycle and transitions
 
-Max starts a ticket by handing it to Grok Bot (a GitHub issue, a Linear issue, or a description that becomes a ticket on that project's tracker). Grok Bot reads `factory.md`, writes the brief, and always runs the questions step. After product questions are answered, or when there are none, Grok Bot posts `orch:go`, a handoff comment with `kind=go`. That is the mechanical start of build or plan. Max does not have to type "go" a second time unless he is restarting a capped or stuck ticket.
+Max starts a ticket by handing it to Grok Bot (a GitHub pull request in Phase 1, a Linear issue, or a description that becomes a ticket on that project's tracker). GitHub issue-only discovery is deferred; an `orch:state/` label on an issue is not polled. Grok Bot reads `factory.md`, writes the brief, and always runs the questions step. After product questions are answered, or when there are none, Grok Bot posts `orch:go`, a handoff comment with `kind=go`. That is the mechanical start of build or plan. Max does not have to type "go" a second time unless he is restarting a capped or stuck ticket.
 
 ### 4.1 States
 
@@ -147,7 +147,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
-| T1 | Issue or Linear ticket gets a `kind=go` handoff comment (`orch:go`, posted by Grok Bot after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
+| T1 | GitHub PR or Linear ticket gets a `kind=go` handoff comment (`orch:go`, posted by Grok Bot after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
 | T2 | `ready head=<sha>` comment, then CI finishes on that SHA | Green: queue `review` for the reviewer. Red: queue `fix` with the failing log (gate count +1; 3rd in a row → `stuck`) | Reviewer's or builder's bot |
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
@@ -209,7 +209,9 @@ On Aut0, those same facts stay in the `orch:` header and on the Linear ticket. T
 
 Linear comments may use the visible first line
 `` `orch:v1 key=value …` `` when Linear strips or visibly renders HTML
-comments. It has the same validation as `<!-- orch:v1 … -->`. For
+comments. `lib.orchestrate` and `format_comment(..., visible=True)` write that
+form without hand-written headers, and it has the same validation as
+`<!-- orch:v1 … -->`. For
 Linear-backed tickets, brief/questions/answers/go stay on Linear;
 ready/verdict/stuck are PR issue comments, not reviews or inline comments.
 The poll source joins both streams using the linked PR.
@@ -327,7 +329,11 @@ maps immutable Linear user IDs to those sets. The expected `from=` and
 `role=` are mandatory. With one shared GitHub login, the marker is a routing
 label, not an identity or signature; no signing secret is added. The shipped
 file records the known shared GitHub login and leaves the stable Linear ID for
-Max to confirm. `orch poll` refuses Linear polling until that map is filled.
+Max to confirm. Max approved that GitHub map at 3:09 PM ET on November 11,
+2026: "Yes, the factory may trust maxharris1 for comments on factory PRs".
+That approval does not make the marker an identity. While a configured Linear
+project has no trusted Linear-user map, `orch poll` refuses to start at all,
+including for GitHub projects.
 
 `factory_ref` is the trusted base branch from which the poller reads
 `factory.md`; it never discovers policy through the repository's default
@@ -342,9 +348,10 @@ or includes either webhook value in an exception.
 Before install, Max must confirm that `LINEAR_API_KEY` names an existing,
 Max-provisioned key on the box. This work does not create one. A read-only
 Linear introspection and known-comment search must also confirm
-`includeComments` and preservation of the `<!-- orch:v1 ... -->` body. Brief
-and go use separate searches; the poller does not depend on full-text `OR`
-semantics.
+`includeComments`, preservation of the `<!-- orch:v1 ... -->` body, and that
+both the ID-only search query and direct issue query are accepted without a
+complexity error. Brief and go use separate searches; the poller does not
+depend on full-text `OR` semantics.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 

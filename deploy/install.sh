@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${HOME}/.local/share/factory/venv"
 DB="${HOME}/.local/state/factory/orch.db"
+ORCH_CONFIG="${ORCH_CONFIG:-${ROOT}/orch.yml}"
 
 mkdir -p "${HOME}/.local/bin" "${HOME}/.config/factory" "$(dirname "$DB")"
 if [[ "$ROOT" != "${HOME}/factory" ]]; then
@@ -30,6 +31,6 @@ cat >"${HOME}/.config/factory/profile.sh" <<EOF
 export ORCH_DB="${DB}"
 export PATH="\${HOME}/.local/bin:\${PATH}"
 EOF
-ORCH_DB="$DB" "$WRAPPER" init-db
+ORCH_DB="$DB" "$WRAPPER" init-db --orch "$ORCH_CONFIG"
 echo "Source ${HOME}/.config/factory/profile.sh in every bot shell."
 echo "Then run: orch doctor-runtime"

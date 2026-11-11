@@ -41,7 +41,14 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-from lib.dispatcher import CIResult, Comment, ReviewActions, ShipError, TrackedTicket
+from lib.dispatcher import (
+    CIResult,
+    Comment,
+    ReviewActions,
+    ShipError,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.handoff import STATES
 from lib.schema import AUT0_REPO
 
@@ -395,6 +402,7 @@ class LinearReviewActions(GitHubReviewActions):
         *,
         move_ready_for_review: bool,
         linear_ready: Callable[[TrackedTicket], None],
+        fresh_ticket: Callable[[TicketRef], TrackedTicket | None] | None = None,
         runner: Runner = run_gh,
         timeout_seconds: float = TIMEOUT_SECONDS,
         cleared_variables: Sequence[str] = (),
@@ -408,6 +416,7 @@ class LinearReviewActions(GitHubReviewActions):
         )
         self.move_ready_for_review = move_ready_for_review
         self.linear_ready = linear_ready
+        self.fresh_ticket = fresh_ticket
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         del ticket, state
@@ -433,6 +442,19 @@ class LinearReviewActions(GitHubReviewActions):
         raise GitHubAdapterError("Linear tickets can only use handoff")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
+        if self.fresh_ticket is not None:
+            fresh = self.fresh_ticket(
+                TicketRef(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    tracker="linear",
+                )
+            )
+            if fresh is None:
+                raise GitHubAdapterError("linked Linear ticket is unavailable")
+            if fresh.pr_number != ticket.pr_number:
+                raise GitHubAdapterError("linked pull request changed before handoff")
+            ticket = fresh
         super().handoff(ticket, head)
         if self.move_ready_for_review:
             self.linear_ready(ticket)

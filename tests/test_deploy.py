@@ -34,10 +34,20 @@ elif sys.argv[1:3] != ["pip", "install"]:
         encoding="utf-8",
     )
     uv.chmod(0o755)
+    orch_config = tmp_path / "orch.yml"
+    orch_config.write_text(
+        (ROOT / "orch.yml").read_text(encoding="utf-8").replace(
+            "REPLACE_WITH_LINEAR_PROJECT_ID",
+            "test-linear-project-id",
+        )
+        + "\ntrusted_linear_users:\n  test-user-id: [grok-bot]\n",
+        encoding="utf-8",
+    )
     environment = dict(os.environ)
     environment.update(
         {
             "HOME": str(tmp_path),
+            "ORCH_CONFIG": str(orch_config),
             "PATH": f"{fake_bin}:{environment['PATH']}",
         }
     )

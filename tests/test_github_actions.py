@@ -745,11 +745,13 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
     ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
     gh.route(ready, served("pull-42-open.json"))
     linear_writes: list[tuple[str, str]] = []
+    fresh_reads: list[TicketRef] = []
     actions = LinearReviewActions(
         move_ready_for_review=enabled,
         linear_ready=lambda ticket: linear_writes.append(
             (ticket.ticket_id, "Ready for Review")
         ),
+        fresh_ticket=lambda ref: fresh_reads.append(ref) or linked,
         runner=gh,
     )
     linked = replace(
@@ -763,7 +765,11 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
     actions.handoff(linked, HEAD)
 
     assert linear_writes == expected_writes
+    assert fresh_reads == [
+        TicketRef(repo="owner/repo", ticket_id="AUT-42", tracker="linear")
+    ]
     assert gh.keys() == [PULL, ready]
+    assert all("--cache" not in call for call in gh.calls)
     assert MERGE not in gh.keys()
 
 

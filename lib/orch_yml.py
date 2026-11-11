@@ -239,6 +239,7 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             not isinstance(linear_project_id, str)
             or not linear_project_id.strip()
             or len(linear_project_id) > 200
+            or linear_project_id.startswith("REPLACE_WITH_")
         ):
             findings.append(
                 Finding(

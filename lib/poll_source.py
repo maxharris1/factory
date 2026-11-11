@@ -39,20 +39,7 @@ query FactoryPoll(
     nodes {
       id
       identifier
-      url
-      gitBranchName: branchName
       project { id }
-      team {
-        states { nodes { id name } }
-      }
-      comments(first: 250) {
-        nodes { id body createdAt user { id } }
-        pageInfo { hasNextPage }
-      }
-      attachments(first: 50) {
-        nodes { url }
-        pageInfo { hasNextPage }
-      }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -86,7 +73,7 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
-_HTTP_STATUS = re.compile(r"\(HTTP ([0-9]{3})\)")
+_HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
 _PR_URL = re.compile(
     r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/"
     r"(?P<number>[1-9][0-9]*)/?$"
@@ -176,7 +163,6 @@ class LivePollSource:
             runner=gh_runner,
             timeout_seconds=timeout_seconds,
             cleared_variables=cleared,
-            cache_ttl="60s",
         )
         self.gh = self.github.gh
 
@@ -189,16 +175,15 @@ class LivePollSource:
                     runner=self.gh_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
-                    cache_ttl="60s",
                 )
             else:
                 action = LinearReviewActions(
                     move_ready_for_review=project.linear_ready_for_review,
                     linear_ready=self._move_linear_ready,
+                    fresh_ticket=self.fresh_ticket,
                     runner=self.gh_runner,
                     timeout_seconds=self.timeout_seconds,
                     cleared_variables=cleared,
-                    cache_ttl="60s",
                 )
             actions[project.repo.lower()] = action
         return actions
@@ -252,6 +237,8 @@ class LivePollSource:
                             self._github_ticket(project, factory, number)
                         )
                     except Exception as exc:
+                        if isinstance(exc, _TerminalTicket):
+                            continue
                         ticket_id = _ticket_hint(raw)
                         self._record(project.repo, ticket_id, exc)
         return tuple(tickets)
@@ -267,7 +254,12 @@ class LivePollSource:
         tickets: list[TrackedTicket] = []
         issues: dict[str, dict[str, Any]] = {}
         for term in _linear_terms(query):
-            for issue in self._linear_issues(term):
+            try:
+                found = self._linear_issues(term)
+            except Exception as exc:
+                self._record("linear", "-", exc)
+                continue
+            for issue in found:
                 issue_id = issue.get("id")
                 if isinstance(issue_id, str):
                     issues[issue_id] = issue
@@ -281,7 +273,17 @@ class LivePollSource:
                 project = projects.get(project_value.get("id"))
                 if project is None:
                     continue
-                ticket = self._linear_ticket(project, issue)
+                issue_id = issue.get("id")
+                if not isinstance(issue_id, str) or not issue_id:
+                    raise PollSourceError("Linear search issue has no id")
+                complete = self._linear_issue(issue_id)
+                if complete is None:
+                    raise PollSourceError("Linear search issue was not found")
+                if not _matches_linear_project(complete, project):
+                    raise PollSourceError(
+                        "Linear issue is not in its configured project"
+                    )
+                ticket = self._linear_ticket(project, complete)
                 if ticket.factory.tickets == "linear":
                     tickets.append(ticket)
             except Exception as exc:
@@ -314,13 +316,44 @@ class LivePollSource:
                     continue
                 factory = self._factory(project)
                 found.append(
-                    self._github_ticket(project, factory, ref.ticket_id)
+                    self._github_ticket(
+                        project,
+                        factory,
+                        ref.ticket_id,
+                        allow_merged=ref.allow_merged,
+                    )
                 )
             except Exception as exc:
                 if isinstance(exc, _TerminalTicket):
                     continue
                 self._record(ref.repo, ref.ticket_id, exc)
         return tuple(found)
+
+    def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
+        project = next(
+            (
+                item
+                for item in self.config.projects
+                if item.repo.lower() == ref.repo.lower()
+            ),
+            None,
+        )
+        if project is None:
+            return None
+        if ref.tracker == "linear":
+            issue = self._linear_issue(ref.ticket_id)
+            if issue is None or not _matches_linear_project(issue, project):
+                return None
+            return self._linear_ticket(project, issue, fresh=True)
+        if ref.tracker != "github":
+            return None
+        return self._github_ticket(
+            project,
+            self._factory(project),
+            ref.ticket_id,
+            fresh=True,
+            allow_merged=ref.allow_merged,
+        )
 
     def _linear_issues(self, query: str) -> tuple[dict[str, Any], ...]:
         issues: list[dict[str, Any]] = []
@@ -477,13 +510,16 @@ class LivePollSource:
         project: Project,
         factory: FactoryConfig,
         number: str,
+        *,
+        fresh: bool = False,
+        allow_merged: bool = False,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
-        cached = self._ticket_cache.get(cache_key)
+        cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
-        pull = self._github_pull(project.repo, number)
-        if pull.get("merged") is True:
+        pull = self._github_pull(project.repo, number, fresh=fresh)
+        if pull.get("merged") is True and not allow_merged:
             if self.terminal_sink is not None:
                 self.terminal_sink(project.repo, number, "merged")
             raise _TerminalTicket()
@@ -511,9 +547,15 @@ class LivePollSource:
         self._ticket_cache[cache_key] = ticket
         return ticket
 
-    def _github_pull(self, repo: str, number: str) -> dict[str, Any]:
+    def _github_pull(
+        self,
+        repo: str,
+        number: str,
+        *,
+        fresh: bool = False,
+    ) -> dict[str, Any]:
         return _json_object(
-            self._gh_call(f"repos/{repo}/pulls/{number}"),
+            self._gh_call(f"repos/{repo}/pulls/{number}", fresh=fresh),
             "GitHub pull request",
         )
 
@@ -521,12 +563,14 @@ class LivePollSource:
         self,
         project: Project,
         issue: Mapping[str, Any],
+        *,
+        fresh: bool = False,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
             raise PollSourceError("Linear issue has no identifier")
         cache_key = ("linear", project.repo.lower(), identifier)
-        cached = self._ticket_cache.get(cache_key)
+        cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
             return cached
         comments_data = _object(issue.get("comments"), "Linear comments")
@@ -546,7 +590,7 @@ class LivePollSource:
         ci: dict[str, CIResult] = {}
         pr_number = self._linked_pr_number(project.repo, identifier, issue)
         if pr_number is not None:
-            pull = self._github_pull(project.repo, pr_number)
+            pull = self._github_pull(project.repo, pr_number, fresh=fresh)
             pr_head = _object(
                 pull.get("head"),
                 "GitHub pull request head",
@@ -655,13 +699,15 @@ class LivePollSource:
             raise PollSourceError("gh returned no JSON")
         return pages
 
-    def _gh_call(self, *args: str) -> str:
+    def _gh_call(self, *args: str, fresh: bool = False) -> str:
         now = self.clock()
         if now < self._backoff_until:
             raise PollSourceError("GitHub rate-limit backoff is active")
-        conditional = "--paginate" not in args
+        conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
-        argv = [*self.gh, "api", "--cache", "60s"]
+        argv = [*self.gh, "api"]
+        if not fresh:
+            argv.extend(("--cache", "60s"))
         if conditional:
             argv.append("--include")
             cached = self._etag_cache.get(cache_key)
@@ -674,16 +720,30 @@ class LivePollSource:
             raise PollSourceError("gh api timed out") from exc
         except OSError as exc:
             raise PollSourceError(f"gh could not run: {type(exc).__name__}") from exc
+        included: tuple[int, dict[str, str], str] | None = None
+        if conditional and result.stdout.startswith("HTTP/"):
+            included = _included_response(result.stdout)
+            if included[0] == 304:
+                cached = self._etag_cache.get(cache_key)
+                if cached is None:
+                    raise PollSourceError("gh returned 304 without a cached response")
+                return cached[1]
         if result.returncode != 0:
-            status = _status_code(result.stderr)
-            if status in (403, 429):
+            status = (
+                included[0]
+                if included is not None
+                else _status_code(result.stderr)
+            )
+            if _is_rate_limited(status, result.stdout, result.stderr):
                 self._backoff_until = now + BACKOFF_SECONDS
             if status is not None:
                 raise PollSourceError(f"gh returned HTTP {status}")
             raise PollSourceError(f"gh exited {result.returncode}")
         if not conditional:
             return result.stdout
-        status, headers, body = _included_response(result.stdout)
+        status, headers, body = (
+            included if included is not None else _included_response(result.stdout)
+        )
         if status == 304:
             cached = self._etag_cache.get(cache_key)
             if cached is None:
@@ -696,8 +756,6 @@ class LivePollSource:
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
         self._cycle_errors += 1
-        if _status_code(str(exc)) in (403, 429):
-            self._backoff_until = self.clock() + BACKOFF_SECONDS
         if self.error_sink is None:
             return
         self.error_sink(repo, ticket_id, _safe_reason(exc))
@@ -772,12 +830,24 @@ def _status_code(value: str) -> int | None:
     return int(found.group(1)) if found is not None else None
 
 
+def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
+    if status == 429:
+        return True
+    if status != 403:
+        return False
+    text = f"{stdout}\n{stderr}".lower()
+    return "rate limit" in text or re.search(
+        r"(?im)^x-ratelimit-remaining:\s*0\s*$",
+        stdout,
+    ) is not None
+
+
 def _safe_reason(exc: Exception) -> str:
+    if isinstance(exc, PollSourceError):
+        return f"PollSourceError:{str(exc)}"
     status = _status_code(str(exc))
     if status is not None:
         return f"{type(exc).__name__}:HTTP-{status}"
-    if isinstance(exc, PollSourceError):
-        return f"PollSourceError:{str(exc)}"
     return type(exc).__name__
 
 
