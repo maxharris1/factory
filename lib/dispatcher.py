@@ -292,9 +292,12 @@ class Dispatcher:
         self._deliver_grok_jobs(deferred_grok_jobs)
 
     def _deliver_grok_jobs(self, deferred: set[str]) -> None:
-        if deferred:
-            return
-        while (job := self.queue.claim("grok")) is not None:
+        while (
+            job := self.queue.claim(
+                "grok",
+                excluded_job_ids=deferred,
+            )
+        ) is not None:
             try:
                 receipt = self.grok_delivery.deliver(
                     job,
@@ -323,7 +326,6 @@ class Dispatcher:
                         job,
                         f"grok-delivery-release:{type(release_exc).__name__}",
                     )
-                return
 
     def gate_count(self, ticket: TrackedTicket) -> int:
         with self._connect() as connection:

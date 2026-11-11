@@ -161,6 +161,19 @@ class FailNTimesGrokDelivery(FakeGrokDelivery):
         return f"delivery-{job.id}"
 
 
+class SelectiveGrokDelivery(FakeGrokDelivery):
+    def __init__(self, failing_tickets: set[str]):
+        super().__init__()
+        self.failing_tickets = failing_tickets
+
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        self.jobs.append(job)
+        self.logical_keys.append(logical_key)
+        if job.request.ticket_id in self.failing_tickets:
+            raise RuntimeError("delivery failed")
+        return f"delivery-{job.id}"
+
+
 class InvalidReceiptGrokDelivery(FakeGrokDelivery):
     def __init__(self, receipt: object):
         super().__init__()
@@ -633,6 +646,183 @@ def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
         (claude_rows[1]["id"], 2, "queued"),
     ]
     assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError"]
+
+
+def test_failed_grok_job_does_not_block_newer_job_in_same_reconcile(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    delivery = SelectiveGrokDelivery({"ticket-a"})
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    failing = queue.enqueue(
+        JobRequest(
+            repo="owner/project-a",
+            ticket_id="ticket-a",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-a",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify-a:g1",
+    )
+    now[0] = 1
+    healthy = queue.enqueue(
+        JobRequest(
+            repo="owner/project-b",
+            ticket_id="ticket-b",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-b",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify-b:g1",
+    )
+
+    dispatcher.reconcile_jobs()
+
+    assert [job.id for job in delivery.jobs] == [failing.id, healthy.id]
+    with queue.connect() as connection:
+        states = {
+            str(row["id"]): str(row["state"])
+            for row in connection.execute("SELECT id, state FROM jobs").fetchall()
+        }
+        errors = connection.execute("SELECT count(*) FROM poll_errors").fetchone()[0]
+    assert states == {failing.id: "queued", healthy.id: "done"}
+    assert errors == 1
+
+
+def test_failed_grok_job_does_not_block_another_tickets_t6_wake(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    delivery = SelectiveGrokDelivery({"ticket-a"})
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    failing = queue.enqueue(
+        JobRequest(
+            repo="owner/project-a",
+            ticket_id="ticket-a",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-a",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify-a:g1",
+    )
+    failed_harness = queue.enqueue(
+        JobRequest(
+            repo="owner/project-b",
+            ticket_id="ticket-b",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-b",
+            timeout_seconds=60,
+            attempt=2,
+        ),
+        dedupe_key="build-b:g2",
+    )
+    running = queue.claim("claude")
+    assert running is not None
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+
+    dispatcher.reconcile_jobs()
+
+    assert delivery.jobs[0].id == failing.id
+    assert [
+        (job.request.repo, job.request.ticket_id, job.request.action)
+        for job in delivery.jobs[1:]
+    ] == [("owner/project-b", "ticket-b", "stuck")]
+    with queue.connect() as connection:
+        harness = connection.execute(
+            "SELECT state, failure_handled FROM jobs WHERE id = ?",
+            (failed_harness.id,),
+        ).fetchone()
+        state = connection.execute(
+            """
+            SELECT stuck, stuck_reason FROM ticket_state
+            WHERE repo = 'owner/project-b' AND ticket_id = 'ticket-b'
+            """
+        ).fetchone()
+    assert (harness["state"], harness["failure_handled"]) == ("failed", 1)
+    assert (state["stuck"], state["stuck_reason"]) == (1, "job-failed-2")
+
+
+def test_failing_job_does_not_starve_short_timeout_healthy_ticket(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    delivery = SelectiveGrokDelivery({"ticket-a"})
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    failing = queue.enqueue(
+        JobRequest(
+            repo="owner/project-a",
+            ticket_id="ticket-a",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-a",
+            timeout_seconds=100,
+        ),
+        dedupe_key="clarify-a:g1",
+    )
+    now[0] = 1
+    healthy = queue.enqueue(
+        JobRequest(
+            repo="owner/project-b",
+            ticket_id="ticket-b",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-b",
+            timeout_seconds=1,
+        ),
+        dedupe_key="clarify-b:g1",
+    )
+
+    for current in (2, 3):
+        now[0] = current
+        dispatcher.reconcile_jobs()
+
+    healthy_attempts = [
+        job for job in delivery.jobs if job.request.ticket_id == "ticket-b"
+    ]
+    assert [job.id for job in healthy_attempts] == [healthy.id]
+    with queue.connect() as connection:
+        healthy_rows = connection.execute(
+            """
+            SELECT attempt, state FROM jobs
+            WHERE repo = 'owner/project-b' AND ticket_id = 'ticket-b'
+            """
+        ).fetchall()
+        ticket_state = connection.execute(
+            """
+            SELECT stuck, stuck_reason FROM ticket_state
+            WHERE repo = 'owner/project-b' AND ticket_id = 'ticket-b'
+            """
+        ).fetchone()
+    assert [(row["attempt"], row["state"]) for row in healthy_rows] == [(1, "done")]
+    assert ticket_state is None or (
+        ticket_state["stuck"] == 0 and ticket_state["stuck_reason"] is None
+    )
+    assert [job.id for job in delivery.jobs].count(failing.id) == 2
+
+
+def test_failed_grok_job_is_deferred_once_per_reconcile(tmp_path: Path) -> None:
+    delivery = SelectiveGrokDelivery({"ticket-a"})
+    dispatcher, queue = setup(tmp_path, [0.0], grok_delivery=delivery)
+    failing = queue.enqueue(
+        JobRequest(
+            repo="owner/project-a",
+            ticket_id="ticket-a",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-a",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify-a:g1",
+    )
+
+    dispatcher.reconcile_jobs()
+
+    assert [job.id for job in delivery.jobs] == [failing.id]
+    assert queue.outstanding()[0].id == failing.id
 
 
 def test_transient_grok_failure_recovers_original_clarify_without_stuck(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -68,7 +69,12 @@ class JobQueue(Protocol):
         dedupe_key: str,
     ) -> Job: ...
 
-    def claim(self, recipient: str) -> Job | None: ...
+    def claim(
+        self,
+        recipient: str,
+        *,
+        excluded_job_ids: Collection[str] = (),
+    ) -> Job | None: ...
 
     def release(self, job_id: str, *, owner: str) -> Job: ...
 
@@ -196,21 +202,34 @@ class SQLiteJobQueue:
         assert row is not None
         return _job(row)
 
-    def claim(self, recipient: str) -> Job | None:
+    def claim(
+        self,
+        recipient: str,
+        *,
+        excluded_job_ids: Collection[str] = (),
+    ) -> Job | None:
         if recipient not in RECIPIENTS:
             raise QueueError(f"unknown recipient {recipient!r}")
         now = self.now()
+        excluded = frozenset(excluded_job_ids)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT * FROM jobs
                 WHERE state = 'queued' AND recipient = ?
                 ORDER BY created_at, id
-                LIMIT 1
                 """,
                 (recipient,),
-            ).fetchone()
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if str(candidate["id"]) not in excluded
+                ),
+                None,
+            )
             if row is None:
                 connection.commit()
                 return None
