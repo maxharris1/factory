@@ -1,0 +1,12 @@
+{
+  "url": "https://api.github.com/repos/owner/repo/issues/comments/12",
+  "html_url": "https://github.com/owner/repo/pull/42#issuecomment-12",
+  "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+  "id": 12,
+  "node_id": "IC_kwDOKfac0s5AAAAM",
+  "user": {"login": "owner", "id": 1000, "type": "User"},
+  "created_at": "2026-11-10T20:05:00Z",
+  "updated_at": "2026-11-10T20:05:00Z",
+  "author_association": "OWNER",
+  "body": "Preview for tracy-site."
+}

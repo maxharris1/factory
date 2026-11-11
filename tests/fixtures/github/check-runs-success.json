@@ -1,0 +1,33 @@
+{
+  "total_count": 2,
+  "check_runs": [
+    {
+      "id": 31000000001,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAHNQ",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/31000000001",
+      "html_url": "https://github.com/owner/repo/runs/31000000001",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:55:00Z",
+      "name": "build",
+      "app": {"slug": "github-actions"}
+    },
+    {
+      "id": 31000000002,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAHNg",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/31000000002",
+      "html_url": "https://github.com/owner/repo/runs/31000000002",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:50:01Z",
+      "name": "deploy-docs",
+      "app": {"slug": "github-actions"}
+    }
+  ]
+}
