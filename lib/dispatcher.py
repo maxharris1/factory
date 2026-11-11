@@ -92,7 +92,12 @@ class ReviewActions(Protocol):
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
-        """True only when the PR was merged with exactly this head commit."""
+        """True only when the PR was merged with exactly this head commit.
+
+        Reads GitHub's PR state at call time, never a local clone. Squash
+        and merge-commit merges also count, so this never proves where the
+        base branch points.
+        """
         ...
 
     def merge(
@@ -112,14 +117,20 @@ class ReviewActions(Protocol):
     ) -> None:
         """Move branch to exactly head, adding no commit.
 
-        Raises when head is not a fast-forward of branch's current tip
-        (branch moved, or history diverged). Never merges, squashes or
-        force-pushes instead.
+        Must be a fast-forward-only update of GitHub's remote ref (for
+        example PATCH git/refs/heads/<branch> with force=false), never a
+        push from a local clone. Raises when head is not a fast-forward of
+        branch's current tip (branch moved, or history diverged). Never
+        merges, squashes or force-pushes instead.
         """
         ...
 
     def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
-        """The full SHA branch points at now, read from the repo itself."""
+        """The full SHA of GitHub's remote ref for branch, read at call time.
+
+        Never a local clone or a cached value: a ship counts only when this
+        equals the approved head.
+        """
         ...
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None: ...
