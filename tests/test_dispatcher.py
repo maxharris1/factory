@@ -1362,23 +1362,22 @@ def test_t4_refuses_to_ship_a_non_full_lowercase_head(
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     seed_review_job(dispatcher, queue, approved)
-    dispatcher.process(
-        ticket(
-            comment(
-                "approve-short-head",
-                VERDICT.format(
-                    round=1,
-                    head=approved,
-                    verdict="APPROVE",
-                    risk="high",
-                ),
-                author="codex-login",
+    snapshot = ticket(
+        comment(
+            "approve-short-head",
+            VERDICT.format(
+                round=1,
+                head=approved,
+                verdict="APPROVE",
+                risk="high",
             ),
-            head=head,
-            ci={head: CIResult("success")},
-            factory_config=factory(ship="after:tracy-site"),
-        )
+            author="codex-login",
+        ),
+        head=head,
+        ci={head: CIResult("success")},
+        factory_config=factory(ship="after:tracy-site"),
     )
+    dispatcher.process(snapshot)
 
     assert actions.merges == []
     with queue.connect() as connection:
@@ -1395,6 +1394,15 @@ def test_t4_refuses_to_ship_a_non_full_lowercase_head(
     assert wake is not None
     assert wake.request.action == "ship-failed"
     assert "lowercase 40-character" in str(wake.request.detail)
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM handled_comments")
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        wakes = connection.execute(
+            "SELECT count(*) FROM jobs WHERE recipient = 'grok'"
+        ).fetchone()[0]
+    assert wakes == 1
     with queue.connect() as connection:
         intents = connection.execute("SELECT count(*) FROM ship_intents").fetchone()[0]
     assert intents == 0
