@@ -1,14 +1,17 @@
 """ReviewActions on GitHub, run on the factory device under Max's gh login.
 
-Every process call is `env -u GH_TOKEN gh api ...`, built as an argv
-list and passed to run_gh, the one subprocess seam. gh therefore uses
-the login stored on the device and ignores any GH_TOKEN in the
-environment. The adapter never reads, passes or logs a token.
+Every process call is `env -u GH_TOKEN -u GITHUB_TOKEN -u
+GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api ...`, built as an
+argv list and passed to run_gh, the one subprocess seam. gh therefore
+uses only the login stored on the device and ignores any of those four
+token variables in the environment. The adapter never reads, passes or
+logs a token.
 
 Every read goes to GitHub's REST API at call time. There is no local
 clone and no cache.
 
-- is_merged: GET pulls/<n>. True only when merged and head.sha is head.
+- is_merged: GET pulls/<n>. head.sha must be a full SHA, open or merged.
+  True only when merged and head.sha is head.
 - branch_tip: GET git/ref/heads/<branch>. The full lowercase SHA, or raise.
 - fast_forward: PATCH git/refs/heads/<branch> with sha=<head> and
   force=false. GitHub's 422 "not a fast forward" raises
@@ -16,7 +19,9 @@ clone and no cache.
 - merge: PUT pulls/<n>/merge with merge_method=squash and sha=<head>,
   the API form of --squash --match-head-commit. GitHub's 409 head
   mismatch raises HeadMismatchError.
-- list_comments and ci_status: GET with --paginate.
+- list_comments and ci_status: GET with --paginate. ci_status is success
+  only with at least one successful check run or a success commit
+  status, and nothing failing or pending.
 - set_state: the orch:state/<state> label. Linear and Aut0 get no labels.
 - stable_patch_id and handoff are not built here and raise, so T4
   queues a re-review and a handoff ship fails closed.
@@ -40,7 +45,13 @@ from lib.dispatcher import CIResult, Comment, ReviewActions, ShipError, TrackedT
 from lib.handoff import STATES
 from lib.schema import AUT0_REPO
 
-GH = ("env", "-u", "GH_TOKEN", "gh")
+TOKEN_VARIABLES = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+GH = ("env", *(part for name in TOKEN_VARIABLES for part in ("-u", name)), "gh")
 TIMEOUT_SECONDS = 60.0
 STATE_LABEL_PREFIX = "orch:state/"
 
@@ -58,7 +69,7 @@ _ISO_8601 = re.compile(
 )
 _HTTP_STATUS = re.compile(r"\(HTTP ([0-9]{3})\)")
 
-_CHECK_PASSED = ("success", "neutral", "skipped")
+_CHECK_NOT_RUN = ("neutral", "skipped")
 _CHECK_FAILED = (
     "failure",
     "cancelled",
@@ -146,8 +157,8 @@ class GitHubReviewActions:
         merged = pull.get("merged")
         if not isinstance(merged, bool):
             raise GitHubAdapterError("pull request has no boolean merged field")
-        pr_head = _object(pull.get("head"))
-        return merged and _sha(pr_head.get("sha"), "pull request head") == head
+        pr_head = _sha(_object(pull.get("head")).get("sha"), "pull request head")
+        return merged and pr_head == head
 
     def merge(
         self,
@@ -253,21 +264,30 @@ class GitHubReviewActions:
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
 
     def ci_status(self, repo: str, head: str) -> CIResult:
-        """Check runs and commit statuses on head. Nothing reported is pending."""
+        """Check runs and commit statuses on head.
+
+        success needs at least one check run that concluded success, or a
+        success combined status, and nothing failing or pending. All
+        neutral or skipped, nothing reported, or fewer runs received than
+        total_count is pending.
+        """
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"
         runs: list[dict[str, Any]] = []
+        counted: set[int] = set()
         for page in self._pages(f"{commit}/check-runs?per_page=100"):
             listed = _object(page).get("check_runs")
             if not isinstance(listed, list):
                 raise GitHubAdapterError("check-runs page has no check_runs list")
+            counted.add(_count(_object(page).get("total_count"), "check-runs"))
             runs.extend(_object(item) for item in listed)
         combined = _object(self._json(f"{commit}/status"))
-        total = combined.get("total_count")
-        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-            raise GitHubAdapterError("combined status has no total_count")
+        total = _count(combined.get("total_count"), "combined status")
+        if counted != {len(runs)}:
+            return CIResult("pending")
         failed: list[str] = []
-        pending = not runs and total == 0
+        pending = False
+        passed = False
         for run in runs:
             name = str(run.get("name"))
             status = run.get("status")
@@ -276,7 +296,9 @@ class GitHubReviewActions:
                 pending = True
             elif conclusion in _CHECK_FAILED:
                 failed.append(name)
-            elif conclusion not in _CHECK_PASSED:
+            elif conclusion == "success":
+                passed = True
+            elif conclusion not in _CHECK_NOT_RUN:
                 raise GitHubAdapterError(f"check run {name} concluded {conclusion!r}")
         if total:
             state = combined.get("state")
@@ -284,11 +306,13 @@ class GitHubReviewActions:
                 failed.append("commit status")
             elif state == "pending":
                 pending = True
-            elif state != "success":
+            elif state == "success":
+                passed = True
+            else:
                 raise GitHubAdapterError(f"combined status is {state!r}")
         if failed:
             return CIResult("failure", "failed: " + ", ".join(failed))
-        return CIResult("pending" if pending else "success")
+        return CIResult("success" if passed and not pending else "pending")
 
     def _call(self, *args: str) -> str:
         argv = [*GH, "api", *args]
@@ -392,6 +416,12 @@ def _ref_sha(ref: dict[str, Any], branch: str) -> str:
     if target.get("type") != "commit":
         raise GitHubAdapterError(f"refs/heads/{branch} does not point at a commit")
     return _sha(target.get("sha"), f"refs/heads/{branch}")
+
+
+def _count(value: object, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise GitHubAdapterError(f"{what} has no total_count")
+    return value
 
 
 def _labels(pages: list[object]) -> list[str]:

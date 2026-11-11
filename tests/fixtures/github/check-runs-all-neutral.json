@@ -1,0 +1,37 @@
+{
+  "total_count": 2,
+  "check_runs": [
+    {
+      "id": 31000000012,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAHNQ",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/31000000012",
+      "html_url": "https://github.com/owner/repo/runs/31000000012",
+      "status": "completed",
+      "conclusion": "neutral",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:55:00Z",
+      "name": "lint",
+      "app": {
+        "slug": "github-actions"
+      }
+    },
+    {
+      "id": 31000000013,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAHNQ",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/31000000013",
+      "html_url": "https://github.com/owner/repo/runs/31000000013",
+      "status": "completed",
+      "conclusion": "neutral",
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": "2026-11-10T19:55:00Z",
+      "name": "advisory",
+      "app": {
+        "slug": "github-actions"
+      }
+    }
+  ]
+}

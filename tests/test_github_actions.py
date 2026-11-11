@@ -39,6 +39,24 @@ from tests.test_hooks import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "github"
+TOKEN_VARIABLES = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+ENV_PREFIX = [
+    "env",
+    "-u",
+    "GH_TOKEN",
+    "-u",
+    "GITHUB_TOKEN",
+    "-u",
+    "GH_ENTERPRISE_TOKEN",
+    "-u",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "gh",
+]
 BASE = "1405df66cbe219b0bf6355bc3d60361a8376b6b4"
 HEAD = "1a954628a960aaef81d7b2d4521929579f3541e6"
 REPO = "repos/owner/repo"
@@ -156,6 +174,10 @@ def adapter() -> tuple[GitHubReviewActions, RecordedGh]:
     return GitHubReviewActions(gh), gh
 
 
+def test_gh_prefix_unsets_every_token_variable() -> None:
+    assert list(GH) == ENV_PREFIX
+
+
 def test_every_invocation_starts_with_env_u_gh_token_gh() -> None:
     actions, gh = adapter()
     gh.route(TIP, served("ref-main-base.json"))
@@ -181,7 +203,7 @@ def test_every_invocation_starts_with_env_u_gh_token_gh() -> None:
 
     assert len(gh.calls) == 11
     for argv in gh.calls:
-        assert argv[:5] == ["env", "-u", "GH_TOKEN", "gh", "api"]
+        assert argv[:11] == [*ENV_PREFIX, "api"]
         assert all(isinstance(part, str) for part in argv)
 
 
@@ -217,10 +239,14 @@ def test_gh_token_in_the_environment_is_not_used(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "gh"
+    checks = "".join(
+        f'if [ "${{{name}+set}}" = set ]; then echo "{name} set"; '
+        f'else echo "{name} unset"; fi\n'
+        for name in TOKEN_VARIABLES
+    )
     stub.write_text(
         "#!/bin/sh\n"
-        'if [ "${GH_TOKEN+set}" = set ]; then echo set; else echo unset; fi'
-        ' > "$STUB_TOKEN_SEEN"\n'
+        f'{{\n{checks}}} > "$STUB_TOKEN_SEEN"\n'
         'printf "%s\\n" "$@" > "$STUB_ARGS"\n'
         'cat "$STUB_RESPONSE"\n'
     )
@@ -228,17 +254,20 @@ def test_gh_token_in_the_environment_is_not_used(
     seen = tmp_path / "token-seen"
     args = tmp_path / "args"
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("GH_TOKEN", "placeholder-not-a-credential")
+    for name in TOKEN_VARIABLES:
+        monkeypatch.setenv(name, "placeholder-not-a-credential")
     monkeypatch.setenv("STUB_TOKEN_SEEN", str(seen))
     monkeypatch.setenv("STUB_ARGS", str(args))
     monkeypatch.setenv("STUB_RESPONSE", str(FIXTURES / "ref-main-base.json"))
 
     subprocess.run([str(stub)], check=True, capture_output=True)
-    assert seen.read_text().strip() == "set"
+    assert seen.read_text().splitlines() == [f"{name} set" for name in TOKEN_VARIABLES]
 
     assert GitHubReviewActions().branch_tip(pr(), "main") == BASE
 
-    assert seen.read_text().strip() == "unset"
+    assert seen.read_text().splitlines() == [
+        f"{name} unset" for name in TOKEN_VARIABLES
+    ]
     assert args.read_text().splitlines() == ["api", f"{REPO}/git/ref/heads/main"]
 
 
@@ -341,6 +370,26 @@ def test_is_merged_reads_the_pull_at_call_time(
 
     assert actions.is_merged(pr(), head) is expected
     assert gh.keys() == [PULL]
+
+
+@pytest.mark.parametrize("fixture", ["pull-42-open.json", "pull-42-merged.json"])
+@pytest.mark.parametrize(
+    "bad_sha",
+    [HEAD[:7], HEAD.upper(), HEAD + "a", "", None],
+    ids=["short", "uppercase", "long", "empty", "null"],
+)
+def test_is_merged_validates_head_sha_even_on_an_open_pr(
+    fixture: str,
+    bad_sha: str | None,
+) -> None:
+    actions, gh = adapter()
+    text = (FIXTURES / fixture).read_text()
+    replacement = "null" if bad_sha is None else f'"{bad_sha}"'
+    text = text.replace(f'"sha": "{HEAD}"', f'"sha": {replacement}')
+    gh.route(PULL, GhResult(0, text, ""))
+
+    with pytest.raises(GitHubAdapterError, match="pull request head"):
+        actions.is_merged(pr(), HEAD)
 
 
 def test_paginated_comments_with_tied_created_at_order_9_before_10() -> None:
@@ -586,8 +635,24 @@ def test_set_state_refuses_an_unknown_state() -> None:
         ("check-runs-success.json", "status-failure.json", "failure"),
         ("check-runs-in-progress.json", "status-empty.json", "pending"),
         ("check-runs-empty.json", "status-empty.json", "pending"),
+        ("check-runs-all-skipped.json", "status-empty.json", "pending"),
+        ("check-runs-all-neutral.json", "status-empty.json", "pending"),
+        ("check-runs-empty.json", "status-success.json", "success"),
+        ("check-runs-all-skipped.json", "status-success.json", "success"),
+        ("check-runs-in-progress.json", "status-success.json", "pending"),
     ],
-    ids=["green", "red-check", "red-status", "running", "nothing-reported"],
+    ids=[
+        "success-plus-skipped",
+        "red-check",
+        "red-status",
+        "running",
+        "nothing-reported",
+        "all-skipped",
+        "all-neutral",
+        "status-success-only",
+        "skipped-plus-status-success",
+        "running-plus-status-success",
+    ],
 )
 def test_ci_status_reads_check_runs_and_statuses(
     checks: str,
@@ -600,6 +665,42 @@ def test_ci_status_reads_check_runs_and_statuses(
 
     assert actions.ci_status("owner/repo", HEAD).status == expected
     assert gh.keys() == [CHECKS, STATUS]
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [
+        ("check-runs-total-3-page-1.json",),
+        ("check-runs-total-3-page-1.json", "check-runs-total-3-page-2.json"),
+    ],
+    ids=["one-of-three", "two-of-three"],
+)
+def test_ci_status_is_pending_when_pages_hold_fewer_runs_than_total_count(
+    pages: tuple[str, ...],
+) -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served(*pages))
+    gh.route(STATUS, served("status-success.json"))
+
+    assert actions.ci_status("owner/repo", HEAD).status == "pending"
+
+
+def test_ci_status_is_success_when_every_counted_run_arrived() -> None:
+    actions, gh = adapter()
+    third = (FIXTURES / "check-runs-total-3-page-2.json").read_text()
+    third = third.replace("31000000015", "31000000016").replace('"test"', '"lint"')
+    gh.route(
+        CHECKS,
+        GhResult(
+            0,
+            served("check-runs-total-3-page-1.json", "check-runs-total-3-page-2.json").stdout
+            + third,
+            "",
+        ),
+    )
+    gh.route(STATUS, served("status-empty.json"))
+
+    assert actions.ci_status("owner/repo", HEAD).status == "success"
 
 
 def test_stable_patch_id_and_handoff_fail_closed() -> None:
@@ -733,7 +834,7 @@ def test_e2e_approve_ok_fast_forward_shipped_with_the_real_adapter(
     assert gh.count(add_label("merged")) == 1
     assert gh.count(remove_label("waiting-external")) == 1
     assert not any("force=true" in part for call in gh.calls for part in call)
-    assert all(call[:4] == ["env", "-u", "GH_TOKEN", "gh"] for call in gh.calls)
+    assert all(call[:10] == ENV_PREFIX for call in gh.calls)
     assert FakeBot(queue, "grok").drain() == []
 
     dispatcher.poll_once(source)
@@ -785,6 +886,49 @@ def test_e2e_adapter_errors_fail_closed_with_ship_error_and_one_wake(
         assert connection.execute(
             "SELECT outcome FROM external_previews"
         ).fetchone()[0] == "ship-failed"
+
+
+@pytest.mark.parametrize("checks", ["check-runs-all-neutral.json", "check-runs-all-skipped.json"])
+def test_e2e_untested_head_never_reaches_t4_ship(tmp_path: Path, checks: str) -> None:
+    for ship in ("after:tracy-site", "merge"):
+        dispatcher, queue, gh, source, shipper = github_dispatcher(tmp_path / ship, ship)
+        gh.route(CHECKS, served(checks))
+        gh.route(COMMENTS, served("e2e-comments-approve.json", "e2e-comments-ok.json"))
+
+        dispatcher.poll_once(source)
+        dispatcher.poll_once(source)
+
+        assert "10" not in outcomes(queue)
+        assert outcomes(queue)["11"] in ("rejected-ok-not-waiting", "rejected-ok-not-after-ship")
+        assert shipper.requests == []
+        for key in (PREVIEW, PULL, TIP, FF, MERGE):
+            assert gh.count(key) == 0
+        assert not any(call[11:12] == ["-X"] for call in gh.calls)
+        with queue.connect() as connection:
+            assert connection.execute("SELECT count(*) FROM ship_intents").fetchone()[0] == 0
+
+
+def test_e2e_all_neutral_ci_at_ok_time_is_refused_by_review_shipper(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh, shipper = approve_then_ok(tmp_path)
+    source = shipper.inner.source
+    gh.route(CHECKS, served("check-runs-all-neutral.json"))
+    gh.route(TIP, served("ref-main-base.json"))
+    gh.route(FF, served("ref-main-head.json"))
+
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["11"] == "ship-failed"
+    assert len(shipper.errors) == 1
+    assert isinstance(shipper.errors[0], ShipError)
+    assert "is not green" in str(shipper.errors[0])
+    assert gh.count(FF) == 0
+    assert gh.count(MERGE) == 0
+    assert workflow_state(queue) != "merged"
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
 
 
 def test_e2e_squash_repo_merges_with_match_head_on_approve(tmp_path: Path) -> None:
