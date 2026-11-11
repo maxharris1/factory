@@ -33,7 +33,7 @@ ReviewAndAfter == {
   "waiting-external", "post-merge", "done"
 }
 
-Decided == {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
+Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
 
 KindGo == "go"
 
@@ -146,7 +146,8 @@ T1KindGoBuild ==
   /\ flags' = [flags EXCEPT !.questionsDone = TRUE]
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0]
 
-PlanPosted ==
+T1PPlanPosted ==
+  /\ "T1P" \notin Omit
   /\ state = "planning"
   /\ state' = "plan-check"
   /\ paused' = "none"
@@ -155,7 +156,8 @@ PlanPosted ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
-PlanGapOnce ==
+T1PPlanGapOnce ==
+  /\ "T1P" \notin Omit
   /\ state = "plan-check"
   /\ counts.planGaps = 0
   /\ state' = "planning"
@@ -165,7 +167,8 @@ PlanGapOnce ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.planGaps = 1, !.deaths = 0]
 
-PlanGapStuck ==
+T1PPlanGapStuck ==
+  /\ "T1P" \notin Omit
   /\ state = "plan-check"
   /\ counts.planGaps = 1
   /\ state' = "stuck"
@@ -175,7 +178,8 @@ PlanGapStuck ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.planGaps = 2, !.deaths = 0]
 
-PlanMapped ==
+T1PPlanMapped ==
+  /\ "T1P" \notin Omit
   /\ state = "plan-check"
   /\ state' = "building"
   /\ paused' = "none"
@@ -394,7 +398,7 @@ Next ==
   \/ IntakeBrief \/ IntakeRefused
   \/ T5Ask \/ T5Answer \/ T5Abandon
   \/ T1KindGoPlan \/ T1KindGoBuild
-  \/ PlanPosted \/ PlanGapOnce \/ PlanGapStuck \/ PlanMapped
+  \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck
   \/ T6JobRetry \/ T6JobStuck
   \/ T3Revise \/ T7Blocked
@@ -452,6 +456,13 @@ OrchDoesNotExec ==
 T1KindGo ==
   state = "questions" => ENABLED T1KindGoBuild /\ ENABLED T1KindGoPlan
 
+T1PDecided ==
+  /\ state = "planning" => ENABLED T1PPlanPosted
+  /\ state = "plan-check" /\ counts.planGaps = 0 =>
+       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped
+  /\ state = "plan-check" /\ counts.planGaps = 1 =>
+       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped
+
 T2Decided ==
   /\ state \in {"building", "fixing"} => ENABLED T2ReadyGreen
   /\ state \in {"building", "fixing"} /\ counts.gate < 2 => ENABLED T2CiRed
@@ -490,14 +501,16 @@ T9Decided ==
 
 ChartEdges ==
   /\ state = "intake" /\ configOk => ENABLED IntakeBrief
-  /\ state = "planning" => ENABLED PlanPosted
-  /\ state = "plan-check" /\ counts.planGaps = 0 => ENABLED PlanGapOnce /\ ENABLED PlanMapped
-  /\ state = "plan-check" /\ counts.planGaps = 1 => ENABLED PlanGapStuck /\ ENABLED PlanMapped
+  /\ state = "planning" => ENABLED T1PPlanPosted
+  /\ state = "plan-check" /\ counts.planGaps = 0 =>
+       ENABLED T1PPlanGapOnce /\ ENABLED T1PPlanMapped
+  /\ state = "plan-check" /\ counts.planGaps = 1 =>
+       ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped
   /\ state = "capped" => ENABLED MaxOkAnotherRound
 
 \* Drawing bound for the Mermaid chart. The full configs explore every interleaving.
 \* This keeps TLC under statechart's 500-state drawing limit and still reaches
-\* every section 4.1 name. PlanMapped is in the picture: a mapped plan may
+\* every section 4.1 name. T1PPlanMapped is in the picture: a mapped plan may
 \* enter building. One risk cap. A CI-red streak and a job-death streak are
 \* not stacked, and the mapped plan does not replay those streaks.
 ChartSlice ==
