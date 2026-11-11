@@ -26,6 +26,7 @@ GROK_WAKE_REASONS = (
     "ship-failed",
 )
 CORE_KINDS = ("go", "ready")
+SETTLE_FAILURES_TO_WAKE = 3
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,9 @@ class ReviewActions(Protocol):
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
 
-    def is_merged(self, ticket: TrackedTicket, head: str) -> bool: ...
+    def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
+        """True only when the PR was merged with exactly this head commit."""
+        ...
 
     def merge(
         self,
@@ -112,6 +115,20 @@ class ReviewActions(Protocol):
 
 class RetryableStateError(RuntimeError):
     pass
+
+
+class ShipError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ShipRequest:
+    repo: str
+    ticket_id: str
+    head: str
+    approver: str
+    source_comment_id: str
+    approve_comment_id: str
 
 
 class Hook(Protocol):
@@ -224,7 +241,16 @@ class Dispatcher:
                     raise
                 if kind not in ("verdict", "questions", "answers"):
                     raise
-                self._mark_ship_intent_failed(ticket, comment.id, type(exc).__name__)
+                if self._mark_ship_intent_failed(
+                    ticket,
+                    comment.id,
+                    type(exc).__name__,
+                ):
+                    self._wake_ship_failed(
+                        ticket,
+                        comment,
+                        f"ship raised {type(exc).__name__}: {exc}",
+                    )
                 self._mark_handled(
                     ticket,
                     comment.id,
@@ -233,6 +259,7 @@ class Dispatcher:
                 continue
             if handled:
                 self._mark_handled(ticket, comment.id, outcome)
+        self._settle_external_ships(ticket)
 
     def reconcile_jobs(self) -> None:
         now = self.queue.now()
@@ -466,6 +493,8 @@ class Dispatcher:
                 replay_state = (
                     "capped" if outcome == "capped-review" else "fixing"
                 )
+                if replay_state == "capped":
+                    self._wake_capped(ticket, comment)
                 self._write_state_label(ticket, replay_state)
                 return True, outcome
             connection.execute(
@@ -543,8 +572,21 @@ class Dispatcher:
                 ),
             )
             connection.commit()
+        if next_state == "capped":
+            self._wake_capped(ticket, comment)
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _wake_capped(self, ticket: TrackedTicket, comment: Comment) -> None:
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="capped",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=f"review round cap reached, {_comment_link(comment)}",
+            head=ticket.current_head,
+        )
 
     def _t4(
         self,
@@ -581,8 +623,13 @@ class Dispatcher:
             or _matching_head(approved_head, review_head) is None
         ):
             return True, "stale-approve"
-        if not _is_patch_id(current_head):
-            raise ValueError("ship head must be a 40-character hexadecimal SHA")
+        if not _is_full_sha(current_head):
+            self._wake_ship_failed(
+                ticket,
+                comment,
+                f"PR head {current_head!r} is not a lowercase 40-character SHA",
+            )
+            return True, "refused-ship-head"
         result = ticket.ci.get(current_head)
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
@@ -971,10 +1018,13 @@ class Dispatcher:
                 self._write_state_label(ticket, "merged")
                 return True, "merge-confirmed"
             self._hold_ship_intent(ticket, comment.id)
+            self._wake_ship_failed(ticket, comment, f"{policy} ship is unconfirmed")
             return True, "ship-unconfirmed"
         if status == "unconfirmed":
+            self._wake_ship_failed(ticket, comment, f"{policy} ship is unconfirmed")
             return True, "ship-unconfirmed"
         if status == "failed":
+            self._wake_ship_failed(ticket, comment, f"{policy} ship failed")
             return True, "ship-failed"
         raise RuntimeError(f"unknown ship intent status {status!r}")
 
@@ -1077,16 +1127,211 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment_id: str,
         error: str,
-    ) -> None:
+    ) -> bool:
         with self._connect() as connection:
-            connection.execute(
+            changed = connection.execute(
                 """
                 UPDATE ship_intents SET status = 'failed', error = ?
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
                   AND status = 'pending'
                 """,
                 (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
+            ).rowcount
+        return changed == 1
+
+    def _wake_ship_failed(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        detail: str,
+    ) -> None:
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="ship-failed",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=detail,
+        )
+
+    def _has_completed_ship_intent(
+        self,
+        repo: str,
+        ticket_id: str,
+        comment_id: str,
+        head: str,
+        policy: str,
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND head = ? AND policy = ?
+                  AND status = 'completed'
+                """,
+                (repo.lower(), ticket_id, comment_id, head, policy),
+            ).fetchone()
+        return row is not None
+
+    def _latest_review_verdict(
+        self,
+        ticket: TrackedTicket,
+    ) -> tuple[Comment, dict[str, str]] | None:
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        latest: tuple[Comment, dict[str, str]] | None = None
+        for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] != "verdict":
+                continue
+            if not self._trusted(item, fields, reviewer, role="reviewer"):
+                continue
+            latest = (item, fields)
+        return latest
+
+    def _tracker(self, repo: str, ticket_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT tracker FROM tracked_tickets
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return str(row["tracker"]) if row is not None else None
+
+    def _prepare_external_ship(self, request: ShipRequest) -> tuple[str, bool]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT head, status FROM external_ship_intents
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                """,
+                (request.repo.lower(), request.ticket_id, request.source_comment_id),
+            ).fetchone()
+            if existing is not None:
+                connection.commit()
+                if existing["head"] != request.head:
+                    raise ShipError("ship intent does not match the request head")
+                return str(existing["status"]), False
+            connection.execute(
+                """
+                INSERT INTO external_ship_intents (
+                    repo, ticket_id, source_comment_id, head, status
+                ) VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (
+                    request.repo.lower(),
+                    request.ticket_id,
+                    request.source_comment_id,
+                    request.head,
+                ),
             )
+            connection.commit()
+        return "pending", True
+
+    def _finish_external_ship(
+        self,
+        request: ShipRequest,
+        status: str,
+        error: str | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE external_ship_intents SET status = ?, error = ?
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                  AND status = 'pending'
+                """,
+                (
+                    status,
+                    error,
+                    request.repo.lower(),
+                    request.ticket_id,
+                    request.source_comment_id,
+                ),
+            )
+            connection.commit()
+
+    def _settle_external_ship(
+        self,
+        ticket: TrackedTicket,
+        source_comment_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'merged'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+        self._write_state_label(ticket, "merged")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE external_ship_intents SET settled = 1
+                WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+            )
+
+    def _settle_external_ships(self, ticket: TrackedTicket) -> None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_comment_id FROM external_ship_intents
+                WHERE repo = ? AND ticket_id = ?
+                  AND status = 'completed' AND settled = 0
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        for row in rows:
+            self._try_settle_external_ship(ticket, str(row["source_comment_id"]))
+
+    def _try_settle_external_ship(
+        self,
+        ticket: TrackedTicket,
+        source_comment_id: str,
+    ) -> None:
+        try:
+            self._settle_external_ship(ticket, source_comment_id)
+        except Exception as exc:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE external_ship_intents
+                    SET settle_failures = settle_failures + 1
+                    WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+                )
+                failures = int(
+                    connection.execute(
+                        """
+                        SELECT settle_failures FROM external_ship_intents
+                        WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+                    ).fetchone()[0]
+                )
+            if failures >= SETTLE_FAILURES_TO_WAKE:
+                self.wake_grok_once(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    reason="ship-failed",
+                    source_comment_id=source_comment_id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    detail=(
+                        f"merged, but the merged state or label write failed "
+                        f"{failures} times: {type(exc).__name__}: {exc}"
+                    ),
+                )
 
     def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
         try:
@@ -1593,6 +1838,33 @@ class Dispatcher:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS external_ship_intents (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    source_comment_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    settled INTEGER NOT NULL DEFAULT 0,
+                    settle_failures INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (repo, ticket_id, source_comment_id)
+                )
+                """
+            )
+            ship_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(external_ship_intents)"
+                ).fetchall()
+            }
+            for name in ("settled", "settle_failures"):
+                if name not in ship_columns:
+                    connection.execute(
+                        f"ALTER TABLE external_ship_intents ADD COLUMN {name} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS review_events (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
@@ -1613,6 +1885,117 @@ class Dispatcher:
                 )
                 """
             )
+
+
+class ReviewShipper:
+    """F1-05's ship for T8's after:<approver> ok (the hook_t8 Shipper).
+
+    ship raises unless F1-05 completed an after:<approver> ship intent for
+    request.approve_comment_id on request.head, CI on request.head is
+    green, and request.head is a full SHA that is still the PR head. The
+    ticket is re-read from source, and in those fresh comments the latest
+    trusted reviewer verdict must still be that APPROVE, before the ok.
+    A verdict posted between that read and the merge is not seen; that
+    gap is accepted. Then ship squash-merges exactly that head, or confirms
+    it is already merged. Its own intent is keyed on the ok comment, so
+    one request never merges twice. Once the completed write for that
+    intent has committed, ship no longer raises: a failed merged state or
+    label write is retried by Dispatcher.process, and wakes Grok after
+    SETTLE_FAILURES_TO_WAKE failures. Before that commit, any failure
+    raises.
+    """
+
+    def __init__(self, dispatcher: Dispatcher, source: PollSource):
+        self.dispatcher = dispatcher
+        self.source = source
+
+    def ship(self, request: ShipRequest) -> None:
+        dispatcher = self.dispatcher
+        head = request.head
+        policy = f"after:{request.approver}"
+        if not _is_full_sha(head):
+            raise ShipError(f"ship head {head!r} is not a 40-character SHA")
+        if not dispatcher._has_completed_ship_intent(
+            request.repo,
+            request.ticket_id,
+            request.approve_comment_id,
+            head,
+            policy,
+        ):
+            raise ShipError(f"no completed {policy} ship intent for {head}")
+        ticket = self._ticket(request)
+        latest = dispatcher._latest_review_verdict(ticket)
+        if (
+            latest is None
+            or latest[0].id != request.approve_comment_id
+            or latest[1].get("verdict") != "APPROVE"
+        ):
+            raise ShipError(
+                f"latest review verdict is not APPROVE {request.approve_comment_id}"
+            )
+        ok = next(
+            (item for item in ticket.comments if item.id == request.source_comment_id),
+            None,
+        )
+        if ok is None or (latest[0].created_at, latest[0].id) >= (
+            ok.created_at,
+            ok.id,
+        ):
+            raise ShipError(
+                f"APPROVE {request.approve_comment_id} does not precede "
+                f"ok {request.source_comment_id}"
+            )
+        if ticket.factory.ship != policy:
+            raise ShipError(f"ticket ship policy is {ticket.factory.ship}")
+        if ticket.current_head != head:
+            raise ShipError(f"PR head is {ticket.current_head}, not {head}")
+        result = ticket.ci.get(head)
+        if result is None or result.status != "success":
+            raise ShipError(f"CI on {head} is not green")
+        status, fresh = dispatcher._prepare_external_ship(request)
+        if status == "pending":
+            if dispatcher.review_actions.is_merged(ticket, head):
+                pass
+            elif not fresh:
+                raise ShipError(f"ship of {head} has no recorded result")
+            else:
+                try:
+                    dispatcher.review_actions.merge(
+                        ticket,
+                        squash=True,
+                        match_head_commit=head,
+                    )
+                except Exception as exc:
+                    dispatcher._finish_external_ship(
+                        request,
+                        "failed",
+                        type(exc).__name__,
+                    )
+                    raise
+            dispatcher._finish_external_ship(request, "completed", None)
+        elif status != "completed":
+            raise ShipError(f"ship of {head} is {status}; not shipping again")
+        try:
+            dispatcher._try_settle_external_ship(ticket, request.source_comment_id)
+        except Exception:
+            # The completed write has committed; Dispatcher.process retries.
+            pass
+
+    def _ticket(self, request: ShipRequest) -> TrackedTicket:
+        tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
+        if tracker is None:
+            raise ShipError(f"{request.repo}#{request.ticket_id} is not tracked")
+        found = [
+            item
+            for item in self.source.tracked_tickets(
+                (TicketRef(request.repo, request.ticket_id, tracker),)
+            )
+            if item.repo.lower() == request.repo.lower()
+            and item.ticket_id == request.ticket_id
+        ]
+        if len(found) != 1:
+            raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
+        return found[0]
 
 
 class PollLoop:
@@ -1657,6 +2040,10 @@ def _comment_link(comment: Comment) -> str:
 
 def _is_patch_id(value: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def _is_full_sha(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
 def _ship_state(policy: str) -> str:

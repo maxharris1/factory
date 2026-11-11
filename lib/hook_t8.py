@@ -1,10 +1,15 @@
 """T8: external ok / decline for ship: after:<approver> (docs/SPEC.md section 4.2).
 
 A preview is waiting when the reviewer's latest verdict on the whole
-ticket is APPROVE with a full 40-character head, and that verdict came
-before the approver's comment. A later verdict of any kind, even in the
-same poll, means the earlier ok or decline is refused. Short heads are
-never expanded.
+ticket is an APPROVE that came before the approver's comment, and F1-05
+(T4) completed an after:<approver> ship intent for it. The previewed SHA
+is that intent's head: the full current head T4 passed to
+await_approver, after a short-prefix or patch-id match. The APPROVE's
+own head= is never the preview. A later verdict of any kind, even in the
+same poll, means the earlier ok or decline is refused. An ok or decline
+that arrives before T4 has completed that intent (CI still pending, say)
+is refused as not-waiting by design: the approver has not been shown a
+preview yet, and posts again after await_approver.
 
 - ok head=<40-char sha> equal to the previewed SHA, while the PR head is
   still that SHA, ships it. Any other sha is refused and the preview
@@ -32,28 +37,17 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Protocol
 
-from lib.dispatcher import Comment, Dispatcher, TrackedTicket, _scope
-from lib.handoff import HandoffError, parse_comment
+from lib.dispatcher import Comment, Dispatcher, ShipRequest, TrackedTicket, _scope
 from lib.queue import JobRequest
 
 DECLINES_TO_STUCK = 3
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
-@dataclass(frozen=True)
-class ShipRequest:
-    repo: str
-    ticket_id: str
-    head: str
-    approver: str
-    source_comment_id: str
-
-
 class Shipper(Protocol):
-    """Ship seam for F1-05.
+    """Ship seam for F1-05 (lib.dispatcher.ReviewShipper).
 
     ship must ship exactly request.head (a full SHA) per the project's
     factory.md, or raise. T8 calls it at most once per request.
@@ -165,6 +159,7 @@ class T8Hook:
                     head=previewed,
                     approver=approver,
                     source_comment_id=comment.id,
+                    approve_comment_id=approve_id,
                 )
             )
         except Exception as exc:
@@ -313,25 +308,23 @@ def _waiting_preview(
     ticket: TrackedTicket,
     comment: Comment,
 ) -> tuple[str, str] | None:
-    reviewer = f"{ticket.factory.reviewer_harness}-bot"
-    latest: tuple[Comment, Mapping[str, str]] | None = None
-    for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
-        try:
-            fields = parse_comment(item.body).as_dict()
-        except HandoffError:
-            continue
-        if fields["kind"] != "verdict":
-            continue
-        if not dispatcher._trusted(item, fields, reviewer, role="reviewer"):
-            continue
-        latest = (item, fields)
+    latest = dispatcher._latest_review_verdict(ticket)
     if latest is None:
         return None
     verdict, fields = latest
     if (verdict.created_at, verdict.id) >= (comment.created_at, comment.id):
         return None
-    head = fields.get("head", "")
-    if fields.get("verdict") != "APPROVE" or _FULL_SHA.fullmatch(head) is None:
+    if fields.get("verdict") != "APPROVE":
+        return None
+    intent = dispatcher._ship_intent(ticket, verdict.id)
+    if intent is None:
+        return None
+    head, policy, status = intent
+    if (
+        policy != ticket.factory.ship
+        or status != "completed"
+        or _FULL_SHA.fullmatch(head) is None
+    ):
         return None
     return verdict.id, head
 
