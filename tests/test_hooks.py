@@ -1618,6 +1618,7 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
     failure: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     source = FakeSource(
         ticket(
             say("brief-1", BRIEF, "grok-login", 0),
@@ -1625,7 +1626,12 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
     if failure == "label":
         actions.state_failures.add("merged")
@@ -1641,6 +1647,7 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
     assert outcomes(queue)["ok-1"] == "shipped"
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert FakeBot(queue, "grok").drain() == []
+    assert delivery.jobs == []
     actions.state_failures.clear()
     monkeypatch.undo()
     before = len(actions.states)
@@ -1656,6 +1663,7 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.branches["main"] = HEAD_A
     actions.merged_heads.add(HEAD_A)
     source = FakeSource(
@@ -1665,7 +1673,12 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1678,6 +1691,7 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
     assert workflow_state(queue) == "merged"
     assert actions.states[-2:] == ["merged", "merged"]
     assert FakeBot(queue, "grok").drain() == []
+    assert delivery.jobs == []
 
 
 def test_review_shipper_raises_on_merge_error_and_never_retries(

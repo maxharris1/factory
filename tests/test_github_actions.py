@@ -28,7 +28,7 @@ from lib.github_actions import (
 )
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
-from lib.queue import SQLiteJobQueue
+from lib.queue import Job, SQLiteJobQueue
 from tests.test_hooks import (
     TRUSTED_LOGINS,
     FakeBot,
@@ -767,6 +767,12 @@ class CatchingShipper:
             raise
 
 
+class UnavailableGrokDelivery:
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        del job, logical_key
+        raise RuntimeError("Grok delivery unavailable in GitHub adapter tests")
+
+
 def github_dispatcher(
     tmp_path: Path,
     ship: str = "after:tracy-site",
@@ -782,6 +788,7 @@ def github_dispatcher(
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=actions,
+        grok_delivery=UnavailableGrokDelivery(),
         hooks=(T7Hook(), t8),
     )
     shipper = CatchingShipper(ReviewShipper(dispatcher, source))
