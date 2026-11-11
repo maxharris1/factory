@@ -119,6 +119,17 @@ class FakeReviewActions:
         self.events.append(f"fast-forward:{branch}:{head}")
         self.merged_heads.add(head)
 
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        del ticket
+        self.events.append(f"branch-tip:{branch}")
+        return self.branches[branch]
+
+    def merged_by_someone_else(self, head: str, tip: str, parent: str) -> None:
+        """The PR was merged at head outside the factory; main is now tip."""
+        self.parents[tip] = parent
+        self.branches["main"] = tip
+        self.merged_heads.add(head)
+
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
         del ticket, head
 
@@ -156,9 +167,9 @@ class FakeBot:
         return self.handled
 
 
-def factory(ship: str = "after:tracy-site") -> FactoryConfig:
+def factory(ship: str = "after:tracy-site", base_branch: str = "main") -> FactoryConfig:
     return FactoryConfig(
-        base_branch="main",
+        base_branch=base_branch,
         tickets="github",
         builder_harness="claude",
         reviewer_harness="codex",
@@ -175,11 +186,12 @@ def ticket(
     head: str | None = HEAD_A,
     ship: str = "after:tracy-site",
     ticket_id: str = "42",
+    base_branch: str = "main",
 ) -> TrackedTicket:
     return TrackedTicket(
         repo="owner/repo",
         ticket_id=ticket_id,
-        factory=factory(ship),
+        factory=factory(ship, base_branch),
         comments=comments,
         current_head=head,
         ci={head: CIResult("success")} if head else {},
@@ -1518,9 +1530,11 @@ def test_review_shipper_ships_when_every_gate_holds(tmp_path: Path) -> None:
 
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert actions.merges == []
-    assert actions.events[-3:] == [
+    assert actions.events[-5:] == [
+        "branch-tip:main",
         f"is-merged:{HEAD_A}",
         f"fast-forward:main:{HEAD_A}",
+        "branch-tip:main",
         "state:merged",
     ]
     assert workflow_state(queue) == "merged"
@@ -1607,10 +1621,11 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
     assert actions.merges == []
 
 
-def test_review_shipper_takes_already_merged_as_shipped_and_never_merges_twice(
+def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forward(
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    actions.branches["main"] = HEAD_A
     actions.merged_heads.add(HEAD_A)
     source = FakeSource(
         ticket(
@@ -1626,9 +1641,12 @@ def test_review_shipper_takes_already_merged_as_shipped_and_never_merges_twice(
     shipper.inner.ship(ship_request())
 
     assert outcomes(queue)["ok-1"] == "shipped"
+    assert actions.fast_forwards == []
     assert actions.merges == []
+    assert actions.branches == {"main": HEAD_A}
     assert workflow_state(queue) == "merged"
     assert actions.states[-2:] == ["merged", "merged"]
+    assert FakeBot(queue, "grok").drain() == []
 
 
 def test_review_shipper_raises_on_merge_error_and_never_retries(
@@ -1677,6 +1695,11 @@ def test_review_shipper_never_merges_again_after_a_crash_inside_merge(
     assert actions.merges == []
 
     actions.merged_heads.add(HEAD_A)
+    with pytest.raises(ShipError, match="no recorded result"):
+        shipper.inner.ship(ship_request())
+    assert workflow_state(queue) == "waiting-external"
+
+    actions.branches["main"] = HEAD_A
     shipper.inner.ship(ship_request())
     assert actions.fast_forwards == []
     assert actions.merges == []
@@ -1915,3 +1938,79 @@ def test_n1_settle_runs_when_the_comment_loop_raises(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT settled FROM external_ship_intents"
         ).fetchone()[0] == 1
+
+
+SQUASHED = "d" * 40
+MERGE_COMMIT = "e" * 40
+
+
+@pytest.mark.parametrize(
+    ("tip", "parent"),
+    [(SQUASHED, BASE), (MERGE_COMMIT, HEAD_A)],
+    ids=["a-squash-merged-elsewhere", "b-main-ahead-via-merge-commit"],
+)
+def test_r1b1_merged_elsewhere_is_refused_with_one_wake(
+    tmp_path: Path,
+    tip: str,
+    parent: str,
+) -> None:
+    actions = FakeReviewActions()
+    actions.merged_by_someone_else(HEAD_A, tip, parent)
+    source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    assert [request.head for request in shipper.requests] == [HEAD_A]
+    assert outcomes(queue)["ok-1"] == "ship-failed"
+    assert actions.branches == {"main": tip}
+    assert actions.fast_forwards == []
+    assert actions.merges == []
+    assert "state:merged" not in actions.events
+    assert workflow_state(queue) != "merged"
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert f"main is {tip}, not {HEAD_A}" in str(grok[0].request.detail)
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT status FROM external_ship_intents"
+        ).fetchone()[0] == "failed"
+
+
+def test_m1_fast_forward_moves_the_configured_base_branch(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    actions.branches = {"release": BASE}
+    source = FakeSource(ticket(BRIEFED, APPROVED, OK_1, base_branch="release"))
+    dispatcher, queue, _shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["ok-1"] == "shipped"
+    assert actions.branches == {"release": HEAD_A}
+    assert actions.fast_forwards == [("release", HEAD_A)]
+    assert actions.merges == []
+
+
+def test_m2_review_shipper_orders_tied_approve_9_before_ok_10(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    approved = approve("9", HEAD_A, 1)
+    source = FakeSource(ticket(BRIEFED, approved))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    source.tickets = (
+        ticket(BRIEFED, approved, say("10", OK.format(head=HEAD_A), "tracy-login", 1)),
+    )
+
+    shipper.inner.ship(
+        replace(ship_request(), source_comment_id="10", approve_comment_id="9")
+    )
+
+    assert actions.fast_forwards == [("main", HEAD_A)]
+    assert workflow_state(queue) == "merged"
+

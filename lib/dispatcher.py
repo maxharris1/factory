@@ -118,6 +118,10 @@ class ReviewActions(Protocol):
         """
         ...
 
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        """The full SHA branch points at now, read from the repo itself."""
+        ...
+
     def handoff(self, ticket: TrackedTicket, head: str) -> None: ...
 
     def await_approver(
@@ -1937,9 +1941,11 @@ class ReviewShipper:
     trusted reviewer verdict must still be that APPROVE, before the ok.
     A verdict posted between that read and the merge is not seen; that
     gap is accepted. Then ship lands exactly that head in the repo's
-    ship_mode (an after: repo fast-forwards base_branch to it, and raises
-    if that is not a fast-forward), or confirms it is already merged.
-    Its own intent is keyed on the ok comment, so
+    ship_mode. An after: repo fast-forwards base_branch to it, raising if
+    that is not a fast-forward, and counts as shipped only when
+    base_branch's tip is exactly that head; a squash repo squash-merges it
+    or confirms it is already merged. Its own intent is keyed on the ok
+    comment, so
     one request never merges twice. Once the completed write for that
     intent has committed, ship no longer raises: a failed merged state or
     label write is retried by Dispatcher.process, and wakes Grok after
@@ -1993,7 +1999,9 @@ class ReviewShipper:
             raise ShipError(f"CI on {head} is not green")
         status, fresh = dispatcher._prepare_external_ship(request)
         if status == "pending":
-            if dispatcher.review_actions.is_merged(ticket, head):
+            if ship_mode(ticket.factory.ship) == "fast-forward":
+                self._fast_forward(request, ticket, fresh)
+            elif dispatcher.review_actions.is_merged(ticket, head):
                 pass
             elif not fresh:
                 raise ShipError(f"ship of {head} has no recorded result")
@@ -2015,6 +2023,44 @@ class ReviewShipper:
         except Exception:
             # The completed write has committed; Dispatcher.process retries.
             pass
+
+    def _fast_forward(
+        self,
+        request: ShipRequest,
+        ticket: TrackedTicket,
+        fresh: bool,
+    ) -> None:
+        """Confirm only when base_branch's tip is exactly request.head.
+
+        is_merged(head) is not enough: a squash or a merge commit made
+        elsewhere also merges the PR at that head, and a merge commit even
+        makes head reachable, but the branch is then not the approved SHA.
+        """
+        actions = self.dispatcher.review_actions
+        head = request.head
+        branch = ticket.factory.base_branch
+        try:
+            tip = actions.branch_tip(ticket, branch)
+            if tip == head:
+                return
+            if not fresh:
+                raise ShipError(f"ship of {head} has no recorded result")
+            if actions.is_merged(ticket, head):
+                raise ShipError(
+                    f"{branch} is {tip}, not {head}; the PR was merged another way"
+                )
+            self.dispatcher._ship_head(ticket, head)
+            tip = actions.branch_tip(ticket, branch)
+            if tip != head:
+                raise ShipError(f"{branch} is {tip}, not {head}, after fast-forward")
+        except Exception as exc:
+            if fresh:
+                self.dispatcher._finish_external_ship(
+                    request,
+                    "failed",
+                    type(exc).__name__,
+                )
+            raise
 
     def _ticket(self, request: ShipRequest) -> TrackedTicket:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
