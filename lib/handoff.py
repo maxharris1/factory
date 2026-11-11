@@ -76,7 +76,7 @@ REQUIRED_BY_KIND = {
     "questions": frozenset(),
     "answers": frozenset(),
     "go": frozenset(),
-    "plan": frozenset(),
+    "plan": frozenset({"ac", "round"}),
     "ready": frozenset({"head"}),
     "verdict": frozenset({"verdict"}),
     "ok": frozenset({"head"}),

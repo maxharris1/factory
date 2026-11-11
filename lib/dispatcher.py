@@ -1,4 +1,4 @@
-"""Dispatcher transitions T1 through T6, plus project hooks."""
+"""Dispatcher transitions T1, T1P and T2 through T6, plus project hooks."""
 
 from __future__ import annotations
 
@@ -173,14 +173,14 @@ class ShipRequest:
 
 
 class Hook(Protocol):
-    """A project hook (T7, T8) sees each unhandled comment before T1/T2.
+    """A project hook (T7, T8) sees each unhandled comment before T1/T1P/T2.
 
     fields is None when the comment has no parseable orch:v1 header.
     handle returns None when the comment is not the hook's event, or
     (handled, outcome); handled comments go into the ledger. Hooks run in
     order and the first answer wins, so (False, outcome) leaves the
     comment for the next poll without offering it to later hooks or the
-    core rows. kind=go and kind=ready are never offered to hooks.
+    core rows. kind=go, kind=plan and kind=ready are never offered to hooks.
     """
 
     def initialize(self, dispatcher: Dispatcher) -> None: ...
@@ -546,11 +546,46 @@ class Dispatcher:
                 state = "stuck" if outcome == "stuck-plan-gaps" else (
                     "planning" if outcome == "queued-plan-gap" else "building"
                 )
-                self._write_state_label(ticket, state)
+                self._set_workflow_state(ticket, "plan-check")
+                self._set_workflow_state(ticket, state)
                 return True, outcome
             state = connection.execute(
                 """
-                SELECT workflow_state, plan_gap_count
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            resuming = (
+                state is not None
+                and state["workflow_state"] == "plan-check"
+                and state["plan_check_comment_id"] == comment.id
+            )
+            if (
+                state is None
+                or (state["workflow_state"] != "planning" and not resuming)
+                or reported_round != int(state["plan_gap_count"]) + 1
+            ):
+                connection.commit()
+                return True, "stale-plan"
+            gap_count = int(state["plan_gap_count"])
+            if not resuming:
+                connection.execute(
+                    """
+                    UPDATE ticket_state
+                    SET workflow_state = 'plan-check', plan_check_comment_id = ?
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (comment.id, ticket.repo.lower(), ticket.ticket_id),
+                )
+            connection.commit()
+        self._write_state_label(ticket, "plan-check")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                """
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -558,7 +593,8 @@ class Dispatcher:
             ).fetchone()
             if (
                 state is None
-                or state["workflow_state"] != "planning"
+                or state["workflow_state"] != "plan-check"
+                or state["plan_check_comment_id"] != comment.id
                 or reported_round != int(state["plan_gap_count"]) + 1
             ):
                 connection.commit()
@@ -598,7 +634,7 @@ class Dispatcher:
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
-                        detail=_comment_link(comment),
+                        detail=f"round=2/2; previous plan {_comment_link(comment)}",
                     ),
                     dedupe_key=(
                         f"plan-gap:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -632,7 +668,8 @@ class Dispatcher:
             connection.execute(
                 """
                 UPDATE ticket_state
-                SET workflow_state = ?, plan_gap_count = ?
+                SET workflow_state = ?, plan_gap_count = ?,
+                    plan_check_comment_id = NULL
                 WHERE repo = ? AND ticket_id = ?
                 """,
                 (
@@ -671,6 +708,9 @@ class Dispatcher:
         expected = f"{builder_harness}-bot"
         if not self._trusted(comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
+        state, _review_round = self._review_context(ticket)
+        if state in ("planning", "plan-check"):
+            return True, "rejected-ready-in-planning"
         reported_head = fields["head"]
         head = _matching_head(reported_head, ticket.current_head)
         if head is None:
@@ -2070,6 +2110,7 @@ class Dispatcher:
                     workflow_state TEXT,
                     review_round INTEGER NOT NULL DEFAULT 0,
                     plan_gap_count INTEGER NOT NULL DEFAULT 0,
+                    plan_check_comment_id TEXT,
                     paused_action TEXT,
                     paused_recipient TEXT,
                     paused_head TEXT,
@@ -2098,6 +2139,7 @@ class Dispatcher:
                 "workflow_state": "TEXT",
                 "review_round": "INTEGER NOT NULL DEFAULT 0",
                 "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
+                "plan_check_comment_id": "TEXT",
                 "paused_action": "TEXT",
                 "paused_recipient": "TEXT",
                 "paused_head": "TEXT",

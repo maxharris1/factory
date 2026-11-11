@@ -395,6 +395,24 @@ def test_t7_unparsed_header_from_trusted_login_wakes_grok_once(
     assert len(jobs(queue)) == 1
 
 
+def test_t7_plan_missing_ac_and_round_wakes_grok_once(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    malformed = say(
+        "plan-1",
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder -->\nPlan.\n",
+        "claude-login",
+        1,
+    )
+
+    dispatcher.process(ticket(malformed))
+    restart(tmp_path)[0].process(ticket(malformed))
+
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["unparsed"]
+    assert grok[0].request.source_comment_id == "plan-1"
+    assert "missing required key 'ac'" in str(grok[0].request.detail)
+
+
 def test_t7_config_refused_wakes_grok_once_across_restart(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     for target in (dispatcher, restart(tmp_path)[0], restart(tmp_path)[0]):
