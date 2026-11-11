@@ -97,7 +97,7 @@ stateDiagram-v2
   WaitingOnMax --> Questions: Max answers
   Questions --> Planning: no open product calls, ticket over 3 files (D36)
   Questions --> Building: no open product calls, 3 files or fewer
-  Planning --> PlanCheck: plan.md maps each AC to code and a test
+  Planning --> PlanCheck: trusted builder posts kind=plan
   Planning --> Stuck: job dies twice (T6)
   PlanCheck --> Planning: an AC is unmapped (once)
   PlanCheck --> Building: every AC mapped
@@ -145,6 +145,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
 | T1 | Issue or Linear ticket gets a `kind=go` handoff comment (`orch:go`, posted by Grok Bot after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
+| T1P | While Planning, the trusted builder for the current plan job posts `kind=plan ac=met\|unmet round=1/2` | `ac=met`: queue `build` for the same builder, with the plan link or comment ID in `detail`. First `ac=unmet`: return to Planning and queue one more `plan`. Second: mark `stuck`. Stale rounds and duplicate comments are no-ops. | Builder's owning bot, or Grok Bot on the second gap |
 | T2 | `ready head=<sha>` comment, then CI finishes on that SHA | Green: queue `review` for the reviewer. Red: queue `fix` with the failing log (gate count +1; 3rd in a row → `stuck`) | Reviewer's or builder's bot |
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
@@ -154,7 +155,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 | T8 | `ok head=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
 | T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job. A fail files a blocking follow-up on the project's ticket tracker. Deferred from Phase 1. | QA owner bot |
 
-T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 is not built in Phase 1. Any new row needs a real run that showed a wasted wake. The default job timeout is 90 minutes of no heartbeat or progress; a project may override it with `job_timeout` in `orch.yml` (Factory decided (technical), 10:19 AM ET).
+T1, T1P and T2–T6 are the core loop. T7–T9 are added only when a project needs them. T9 is not built in Phase 1. Any new row needs a real run that showed a wasted wake. The default job timeout is 90 minutes of no heartbeat or progress; a project may override it with `job_timeout` in `orch.yml` (Factory decided (technical), 10:19 AM ET).
 
 Grok jobs are pushed by the dispatcher through `GrokDelivery` during reconciliation, never through `orch wait`.
 
@@ -191,7 +192,8 @@ On Aut0, those same facts stay in the `orch:` header and on the Linear ticket. T
 
 Max can read everything on the ticket and the PR. Nothing else is needed to resume.
 
-The `orch:v1` header keys in the example are `kind`, `from`, `role`, `round`, `head`, `ac`, `verdict` and `risk`. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
+The `orch:v1` header keys in the example are `kind`, `from`, `role`, `round`, `head`, `ac`, `verdict` and `risk`.
+A `plan` uses `ac=met|unmet` and `round=1/2`; `round` is checked against the persisted plan-gap count. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
 
 ## 6. `factory.md` schema
 

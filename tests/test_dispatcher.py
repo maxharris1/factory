@@ -23,6 +23,10 @@ GO = (
     "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
     "state={state} -->\nGo.\n"
 )
+PLAN = (
+    "<!-- orch:v1 kind=plan from=claude-bot role=builder "
+    "round={round}/2 ac={ac} -->\nPlan.\n"
+)
 BRIEF = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nBrief.\n"
 READY = (
     "<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n"
@@ -447,6 +451,156 @@ def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     )
 
     assert queue.claim("claude") is None
+
+
+def test_plan_queues_build_once_for_the_same_builder(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        url="https://tracker.example/plan-1",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    plan_job = queue.claim("claude")
+    assert plan_job is not None
+    assert plan_job.request.action == "plan"
+    queue.finish(
+        plan_job.id,
+        owner="claude",
+        handoff_comment_id=plan.id,
+    )
+
+    dispatcher.process(ticket(go, plan))
+    dispatcher.process(ticket(go, plan))
+
+    build = queue.claim("claude")
+    assert build is not None
+    assert build.request.action == "build"
+    assert build.request.recipient == plan_job.request.recipient
+    assert build.request.detail == "https://tracker.example/plan-1"
+    with queue.connect() as connection:
+        count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_plan_rejects_an_untrusted_builder(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    dispatcher.process(ticket(go))
+
+    dispatcher.process(
+        ticket(
+            go,
+            comment(
+                "plan-1",
+                PLAN.format(round=1, ac="met"),
+                author="someone-else",
+                created_at=2,
+            ),
+        )
+    )
+
+    with queue.connect() as connection:
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE comment_id = 'plan-1'
+            """
+        ).fetchone()[0]
+    assert build_count == 0
+    assert outcome == "rejected-plan-author"
+
+
+def test_duplicate_plan_is_a_no_op_after_restart(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go, plan))
+    with queue.connect() as connection:
+        connection.execute(
+            "DELETE FROM handled_comments WHERE comment_id = 'plan-1'"
+        )
+
+    restarted = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    restarted.process(ticket(go, plan))
+
+    with queue.connect() as connection:
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-1'"
+        ).fetchone()[0]
+    assert build_count == 1
+    assert event_count == 1
+
+
+def test_plan_gap_replans_once_then_marks_the_second_gap_stuck(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    second_gap = comment(
+        "plan-gap-2",
+        PLAN.format(round=2, ac="unmet"),
+        author="claude-login",
+        created_at=3,
+    )
+    dispatcher.process(ticket(go, first_gap))
+
+    with queue.connect() as connection:
+        first_state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, stuck
+            FROM ticket_state
+            """
+        ).fetchone()
+        plan_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'plan'"
+        ).fetchone()[0]
+    assert tuple(first_state) == ("planning", 1, 0)
+    assert plan_count == 2
+
+    dispatcher.process(ticket(go, first_gap, second_gap))
+
+    with queue.connect() as connection:
+        second_state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, stuck
+            FROM ticket_state
+            """
+        ).fetchone()
+    assert tuple(second_state) == ("stuck", 2, 1)
+    assert dispatcher.is_stuck(ticket())
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "stuck"
+    assert "plan has gaps a second time" in (wake.request.detail or "")
 
 
 @pytest.mark.parametrize("state", [None, "review"])

@@ -25,7 +25,7 @@ GROK_WAKE_REASONS = (
     "unparsed",
     "ship-failed",
 )
-CORE_KINDS = ("go", "ready")
+CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
 
 
@@ -275,7 +275,14 @@ class Dispatcher:
             if fields is None:
                 continue
             kind = fields["kind"]
-            if kind not in ("go", "ready", "verdict", "questions", "answers"):
+            if kind not in (
+                "go",
+                "plan",
+                "ready",
+                "verdict",
+                "questions",
+                "answers",
+            ):
                 continue
             if self._is_stuck(ticket):
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
@@ -284,6 +291,8 @@ class Dispatcher:
             try:
                 if kind == "go":
                     handled, outcome = self._t1(ticket, comment, fields)
+                elif kind == "plan":
+                    handled, outcome = self._t_plan(ticket, comment, fields)
                 elif kind == "ready":
                     handled, outcome = self._t2(ticket, comment, fields)
                 elif kind == "verdict":
@@ -497,6 +506,158 @@ class Dispatcher:
         )
         self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
+
+    def _t_plan(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> tuple[bool, str]:
+        plan_step = self._latest_plan_step(ticket)
+        if plan_step is None:
+            return True, "rejected-plan-without-plan-job"
+        builder_harness, generation = plan_step
+        if not self._trusted(
+            comment,
+            fields,
+            f"{builder_harness}-bot",
+            role="builder",
+        ):
+            return True, "rejected-plan-author"
+        ac = fields.get("ac")
+        if ac not in ("met", "unmet"):
+            return True, "rejected-plan-result"
+        round_field = fields.get("round")
+        reported_round = (
+            int(round_field.split("/", 1)[0]) if round_field is not None else None
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT outcome FROM plan_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+            if prior is not None:
+                connection.commit()
+                outcome = str(prior["outcome"])
+                state = "stuck" if outcome == "stuck-plan-gaps" else (
+                    "planning" if outcome == "queued-plan-gap" else "building"
+                )
+                self._write_state_label(ticket, state)
+                return True, outcome
+            state = connection.execute(
+                """
+                SELECT workflow_state, plan_gap_count
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            if (
+                state is None
+                or state["workflow_state"] != "planning"
+                or reported_round != int(state["plan_gap_count"]) + 1
+            ):
+                connection.commit()
+                return True, "stale-plan"
+            gap_count = int(state["plan_gap_count"])
+            if ac == "met":
+                next_state = "building"
+                outcome = "queued-plan-build"
+                self.queue.enqueue_in_transaction(
+                    connection,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="build",
+                        recipient=builder_harness,
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        detail=_comment_link(comment),
+                    ),
+                    dedupe_key=(
+                        f"plan-build:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{comment.id}"
+                    ),
+                )
+            elif gap_count == 0:
+                next_state = "planning"
+                outcome = "queued-plan-gap"
+                gap_count = 1
+                self.queue.enqueue_in_transaction(
+                    connection,
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="plan",
+                        recipient=builder_harness,
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        detail=_comment_link(comment),
+                    ),
+                    dedupe_key=(
+                        f"plan-gap:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{comment.id}"
+                    ),
+                )
+            else:
+                next_state = "stuck"
+                outcome = "stuck-plan-gaps"
+                gap_count = 2
+                connection.execute(
+                    """
+                    UPDATE ticket_state
+                    SET stuck = 1, stuck_reason = 'plan-gaps-2',
+                        stuck_source_comment_id = ?, timeout_seconds = ?
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (
+                        comment.id,
+                        ticket.job_timeout_minutes * 60,
+                        ticket.repo.lower(),
+                        ticket.ticket_id,
+                    ),
+                )
+                self._ensure_stuck_wake_in_transaction(
+                    connection,
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    detail=f"plan has gaps a second time, {_comment_link(comment)}",
+                )
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET workflow_state = ?, plan_gap_count = ?
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (
+                    next_state,
+                    gap_count,
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO plan_events (
+                    repo, ticket_id, comment_id, outcome
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment.id,
+                    outcome,
+                ),
+            )
+            connection.commit()
+        self._write_state_label(ticket, next_state)
+        return True, outcome
 
     def _t2(
         self,
@@ -1489,6 +1650,21 @@ class Dispatcher:
             return None
         return str(row["recipient"])
 
+    def _latest_plan_step(self, ticket: TrackedTicket) -> tuple[str, int] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recipient, generation FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'plan'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["recipient"]), int(row["generation"])
+
     def _t6(self, job: Job) -> None:
         if job.request.action == "stuck":
             self.queue.mark_failure_handled(job.id)
@@ -1893,6 +2069,7 @@ class Dispatcher:
                     stuck INTEGER NOT NULL DEFAULT 0,
                     workflow_state TEXT,
                     review_round INTEGER NOT NULL DEFAULT 0,
+                    plan_gap_count INTEGER NOT NULL DEFAULT 0,
                     paused_action TEXT,
                     paused_recipient TEXT,
                     paused_head TEXT,
@@ -1920,6 +2097,7 @@ class Dispatcher:
             migrations = {
                 "workflow_state": "TEXT",
                 "review_round": "INTEGER NOT NULL DEFAULT 0",
+                "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
                 "paused_action": "TEXT",
                 "paused_recipient": "TEXT",
                 "paused_head": "TEXT",
@@ -1995,6 +2173,17 @@ class Dispatcher:
                         f"ALTER TABLE external_ship_intents ADD COLUMN {name} "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plan_events (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS review_events (
