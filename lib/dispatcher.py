@@ -111,7 +111,14 @@ class ReviewActions(Protocol):
 
 
 class GrokDelivery(Protocol):
-    def deliver(self, job: Job) -> str: ...
+    """Push a Grok job and return a non-empty delivery receipt.
+
+    A crash after the push but before queue completion can repeat the wake.
+    Implementations must deduplicate on logical_key, which is stable across
+    T6 retries, rather than on job.id.
+    """
+
+    def deliver(self, job: Job, *, logical_key: str) -> str: ...
 
 
 class RetryableStateError(RuntimeError):
@@ -258,12 +265,34 @@ class Dispatcher:
 
     def _deliver_grok_jobs(self) -> None:
         while (job := self.queue.claim("grok")) is not None:
-            receipt = self.grok_delivery.deliver(job)
-            self.queue.finish(
-                job.id,
-                owner="grok",
-                handoff_comment_id=receipt,
-            )
+            try:
+                receipt = self.grok_delivery.deliver(
+                    job,
+                    logical_key=_grok_logical_key(job),
+                )
+                if not isinstance(receipt, str) or not receipt:
+                    raise ValueError("Grok delivery receipt must be a non-empty string")
+                self.queue.finish(
+                    job.id,
+                    owner="grok",
+                    handoff_comment_id=receipt,
+                )
+            except Exception as exc:
+                self._record_job_error(
+                    job,
+                    f"grok-delivery:{type(exc).__name__}",
+                )
+                try:
+                    self.queue.finish(
+                        job.id,
+                        owner="grok",
+                        handoff_comment_id=None,
+                    )
+                except Exception as finish_exc:
+                    self._record_job_error(
+                        job,
+                        f"grok-delivery-finish:{type(finish_exc).__name__}",
+                    )
 
     def gate_count(self, ticket: TrackedTicket) -> int:
         with self._connect() as connection:
@@ -1353,6 +1382,22 @@ class Dispatcher:
                 ),
             )
 
+    def _record_job_error(self, job: Job, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO poll_errors (
+                    repo, ticket_id, error, recorded_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job.request.repo.lower(),
+                    job.request.ticket_id,
+                    error,
+                    self.queue.now(),
+                ),
+            )
+
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)
 
@@ -1660,6 +1705,14 @@ class PollLoop:
 
 def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
+
+
+def _grok_logical_key(job: Job) -> str:
+    request = job.request
+    return (
+        f"{_scope(request.repo, request.ticket_id)}"
+        f"\x1f{request.action}\x1f{request.source_comment_id}"
+    )
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

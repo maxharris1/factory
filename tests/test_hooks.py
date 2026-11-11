@@ -82,7 +82,8 @@ class FakeGrokDelivery:
     def __init__(self) -> None:
         self.jobs: list[Job] = []
 
-    def deliver(self, job: Job) -> str:
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        del logical_key
         self.jobs.append(job)
         return f"delivery-{job.id}"
 

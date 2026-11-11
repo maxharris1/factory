@@ -120,10 +120,45 @@ class FakeReviewActions:
 class FakeGrokDelivery:
     def __init__(self) -> None:
         self.jobs: list[Job] = []
+        self.logical_keys: list[str] = []
 
-    def deliver(self, job: Job) -> str:
+    def deliver(self, job: Job, *, logical_key: str) -> str:
         self.jobs.append(job)
+        self.logical_keys.append(logical_key)
         return f"delivery-{job.id}"
+
+
+class RaisingGrokDelivery(FakeGrokDelivery):
+    def __init__(self, error: BaseException):
+        super().__init__()
+        self.error = error
+
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        self.jobs.append(job)
+        self.logical_keys.append(logical_key)
+        raise self.error
+
+
+class FailOnceGrokDelivery(FakeGrokDelivery):
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        self.jobs.append(job)
+        self.logical_keys.append(logical_key)
+        if len(self.jobs) == 1:
+            raise RuntimeError("delivery failed")
+        return f"delivery-{job.id}"
+
+
+class InvalidReceiptGrokDelivery(FakeGrokDelivery):
+    def __init__(self, receipt: object):
+        super().__init__()
+        self.receipt = receipt
+
+    def deliver(self, job: Job, *, logical_key: str) -> object:
+        self.jobs.append(job)
+        self.logical_keys.append(logical_key)
+        receipt = self.receipt
+        self.receipt = f"delivery-{job.id}"
+        return receipt
 
 
 class FakeSource:
@@ -316,6 +351,26 @@ def test_dispatcher_requires_review_actions(tmp_path: Path) -> None:
         )
 
 
+def test_dispatcher_requires_grok_delivery(tmp_path: Path) -> None:
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 0)
+
+    with pytest.raises(TypeError, match="grok_delivery"):
+        Dispatcher(  # type: ignore[call-arg]
+            tmp_path / "d.db",
+            queue,
+            trusted_logins=TRUSTED_LOGINS,
+            review_actions=FakeReviewActions(),
+        )
+    with pytest.raises(ValueError, match="grok_delivery"):
+        Dispatcher(
+            tmp_path / "d.db",
+            queue,
+            trusted_logins=TRUSTED_LOGINS,
+            review_actions=FakeReviewActions(),
+            grok_delivery=None,  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize(
     ("state", "action"),
     [("building", "build"), ("planning", "plan")],
@@ -382,33 +437,108 @@ def test_reconcile_delivers_grok_job_once_and_finishes_it(
     now = [0.0]
     delivery = FakeGrokDelivery()
     dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    if action == "stuck":
+        dispatcher.wake_grok_once(
+            repo="owner/repo",
+            ticket_id="42",
+            reason="stuck",
+            source_comment_id="source-1",
+            timeout_seconds=60,
+            detail="ticket is stuck",
+        )
+        queued = queue.outstanding()[0]
+    else:
+        queued = queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id="42",
+                action=action,
+                recipient="grok",
+                source_comment_id="source-1",
+                timeout_seconds=60,
+            ),
+            dedupe_key=f"{action}:g1",
+        )
+
+    generation = queued.request.generation
+    now[0] = 60
+    dispatcher.reconcile_jobs()
+
+    assert [job.id for job in delivery.jobs] == [queued.id]
+    assert delivery.jobs[0].request.attempt == 1
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT id, state, generation, handoff_comment_id FROM jobs"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["id"] == queued.id
+    assert rows[0]["state"] == "done"
+    assert rows[0]["generation"] == generation
+    assert rows[0]["handoff_comment_id"] == f"delivery-{queued.id}"
+    assert queue.unhandled_failures() == ()
+
+
+def test_reconcile_delivers_all_queued_grok_jobs(tmp_path: Path) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, [0.0], grok_delivery=delivery)
+    queued = [
+        queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id=str(number),
+                action="clarify",
+                recipient="grok",
+                source_comment_id=f"source-{number}",
+                timeout_seconds=60,
+            ),
+            dedupe_key=f"clarify-{number}",
+        )
+        for number in range(3)
+    ]
+
+    dispatcher.reconcile_jobs()
+
+    assert {job.id for job in delivery.jobs} == {job.id for job in queued}
+    assert len(delivery.jobs) == 3
+    assert queue.outstanding() == ()
+
+
+@pytest.mark.parametrize("receipt", ["", None])
+def test_invalid_grok_receipt_is_recorded_and_failed_for_t6(
+    tmp_path: Path,
+    receipt: object,
+) -> None:
+    delivery = InvalidReceiptGrokDelivery(receipt)
+    dispatcher, queue = setup(tmp_path, [0.0], grok_delivery=delivery)
     queued = queue.enqueue(
         JobRequest(
             repo="owner/repo",
             ticket_id="42",
-            action=action,
+            action="clarify",
             recipient="grok",
             source_comment_id="source-1",
             timeout_seconds=60,
         ),
-        dedupe_key=f"{action}:g1",
+        dedupe_key="clarify:g1",
     )
 
     dispatcher.reconcile_jobs()
-    now[0] = 120
-    dispatcher.reconcile_jobs()
 
-    assert [job.id for job in delivery.jobs] == [queued.id]
     with queue.connect() as connection:
-        row = connection.execute(
-            "SELECT state, handoff_comment_id FROM jobs WHERE id = ?",
+        original = connection.execute(
+            "SELECT state FROM jobs WHERE id = ?",
             (queued.id,),
         ).fetchone()
-        count = connection.execute("SELECT count(*) FROM jobs").fetchone()[0]
-    assert row["state"] == "done"
-    assert row["handoff_comment_id"] == f"delivery-{queued.id}"
-    assert count == 1
-    assert queue.unhandled_failures() == ()
+        errors = connection.execute(
+            "SELECT error FROM poll_errors ORDER BY id"
+        ).fetchall()
+        retry = connection.execute(
+            "SELECT state FROM jobs WHERE attempt = 2"
+        ).fetchone()
+    assert original["state"] == "failed"
+    assert [row["error"] for row in errors] == ["grok-delivery:ValueError"]
+    assert len(delivery.jobs) == 2
+    assert retry["state"] == "done"
 
 
 def test_reconcile_does_not_pick_up_non_grok_jobs(tmp_path: Path) -> None:
@@ -430,6 +560,112 @@ def test_reconcile_does_not_pick_up_non_grok_jobs(tmp_path: Path) -> None:
 
     assert delivery.jobs == []
     assert queue.outstanding() == (queued,)
+
+
+def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    delivery = FailOnceGrokDelivery()
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    grok = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="grok-ticket",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify:g1",
+    )
+    claude = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="claude-ticket",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:g1",
+    )
+    source = FakeSource()
+    now[0] = 60
+
+    PollLoop(dispatcher, source, sleep=lambda _seconds: None).run(max_polls=2)
+
+    assert source.calls == 2
+    with queue.connect() as connection:
+        grok_rows = connection.execute(
+            """
+            SELECT id, attempt, state FROM jobs
+            WHERE ticket_id = 'grok-ticket' ORDER BY attempt
+            """
+        ).fetchall()
+        claude_rows = connection.execute(
+            """
+            SELECT id, attempt, state FROM jobs
+            WHERE ticket_id = 'claude-ticket' ORDER BY attempt
+            """
+        ).fetchall()
+        errors = connection.execute("SELECT error FROM poll_errors").fetchall()
+    assert [(row["id"], row["attempt"], row["state"]) for row in grok_rows] == [
+        (grok.id, 1, "failed"),
+        (delivery.jobs[1].id, 2, "done"),
+    ]
+    assert [(row["id"], row["attempt"], row["state"]) for row in claude_rows] == [
+        (claude.id, 1, "failed"),
+        (claude_rows[1]["id"], 2, "queued"),
+    ]
+    assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError"]
+
+
+def test_crash_after_grok_delivery_repeats_wake_after_timeout(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    crashing = RaisingGrokDelivery(SystemExit("simulated crash"))
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=crashing)
+    original = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify:g1",
+    )
+
+    with pytest.raises(SystemExit, match="simulated crash"):
+        dispatcher.reconcile_jobs()
+
+    recovery = FakeGrokDelivery()
+    restarted_queue = SQLiteJobQueue(queue.path, clock=lambda: now[0])
+    restarted = Dispatcher(
+        queue.path,
+        restarted_queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=recovery,
+    )
+    now[0] = 60
+    restarted.reconcile_jobs()
+
+    assert len(crashing.jobs) + len(recovery.jobs) == 2
+    assert crashing.jobs[0].id == original.id
+    assert recovery.jobs[0].id != original.id
+    assert crashing.logical_keys == recovery.logical_keys
+    with restarted_queue.connect() as connection:
+        states = connection.execute(
+            "SELECT attempt, state FROM jobs ORDER BY attempt"
+        ).fetchall()
+    assert [(row["attempt"], row["state"]) for row in states] == [
+        (1, "failed"),
+        (2, "done"),
+    ]
 
 
 def test_poll_discovers_and_persists_github_ticket_from_grok_go(
