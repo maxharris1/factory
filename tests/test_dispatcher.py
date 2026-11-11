@@ -17,6 +17,7 @@ from lib.dispatcher import (
     ship_mode,
 )
 from lib.factory_md import FactoryConfig
+from lib.handoff import parse_comment
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
 GO = (
@@ -655,7 +656,7 @@ def test_plan_is_stale_after_the_ticket_leaves_planning(tmp_path: Path) -> None:
     )
     stale = comment(
         "plan-2",
-        PLAN.format(round=2, ac="met"),
+        PLAN.format(round=1, ac="met"),
         author="claude-login",
         created_at=3,
     )
@@ -771,6 +772,97 @@ def test_plan_event_replay_restores_state_without_duplicate_build(
             WHERE comment_id = 'plan-1'
             """
         ).fetchone()[0] == "queued-plan-build"
+
+
+def test_plan_gap_event_replay_restores_planning_without_duplicate_replan(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    actions.state_failures.add(("owner/repo", "planning"))
+
+    with pytest.raises(Exception, match="planning"):
+        dispatcher.process(ticket(go, gap))
+
+    actions.state_failures.clear()
+    before = len(actions.states)
+    dispatcher.process(ticket(go, gap))
+
+    assert actions.states[before:] == ["plan-check", "planning"]
+    with queue.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, plan_check_comment_id
+            FROM ticket_state
+            """
+        ).fetchone()
+        plan_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'plan'"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-gap-1'"
+        ).fetchone()[0]
+    assert tuple(state) == ("planning", 1, None)
+    assert plan_count == 2
+    assert event_count == 1
+
+
+def test_plan_stuck_event_replay_restores_stuck_without_duplicate_wake(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    second_gap = comment(
+        "plan-gap-2",
+        PLAN.format(round=2, ac="unmet"),
+        author="claude-login",
+        created_at=3,
+    )
+    dispatcher.process(ticket(go, first_gap))
+    actions.state_failures.add(("owner/repo", "stuck"))
+
+    with pytest.raises(Exception, match="stuck"):
+        dispatcher.process(ticket(go, first_gap, second_gap))
+
+    actions.state_failures.clear()
+    before = len(actions.states)
+    handled, outcome = dispatcher._t_plan(
+        ticket(go, first_gap, second_gap),
+        second_gap,
+        parse_comment(second_gap.body).as_dict(),
+    )
+
+    assert handled
+    assert outcome == "stuck-plan-gaps"
+    assert actions.states[before:] == ["plan-check", "stuck"]
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state, plan_gap_count, stuck FROM ticket_state"
+        ).fetchone()
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        wake_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'stuck'"
+        ).fetchone()[0]
+    assert tuple(state) == ("stuck", 2, 1)
+    assert build_count == 0
+    assert wake_count == 1
 
 
 def test_plan_check_resumes_same_comment_after_state_write_failure(
