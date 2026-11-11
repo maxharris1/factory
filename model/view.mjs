@@ -40,10 +40,10 @@ export const step = (action, from, to) => {
   if (action === "T5Abandon") return "Max drops it";
   if (action === "T1KindGoPlan") return "kind=go, queue plan";
   if (action === "T1KindGoBuild") return "kind=go, queue build";
-  if (action === "PlanPosted") return "plan maps each acceptance criterion";
-  if (action === "PlanGapOnce") return "an acceptance criterion is unmapped";
-  if (action === "PlanGapStuck") return "gaps a second time";
-  if (action === "PlanMapped") return "every acceptance criterion mapped";
+  if (action === "T1PPlanPosted") return "trusted builder posts kind=plan";
+  if (action === "T1PPlanGapOnce") return "an acceptance criterion is unmapped";
+  if (action === "T1PPlanGapStuck") return "gaps a second time";
+  if (action === "T1PPlanMapped") return "every acceptance criterion mapped";
   if (action === "T2ReadyGreen") return "ready, CI green";
   if (action === "T2CiRed") return "CI red, fix";
   if (action === "T2CiRedStuck") return "CI red three times";

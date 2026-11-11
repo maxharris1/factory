@@ -165,6 +165,18 @@ def test_labels_for_does_not_call_process_or_network(monkeypatch: pytest.MonkeyP
         ("<!-- orch:v1 kind=ready -->", "missing required key 'head'"),
         ("<!-- orch:v1 kind=ok -->", "missing required key 'head'"),
         (
+            "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 -->",
+            "missing required key 'ac'",
+        ),
+        (
+            "<!-- orch:v1 kind=plan from=claude-bot role=builder ac=met -->",
+            "missing required key 'round'",
+        ),
+        (
+            "<!-- orch:v1 kind=plan round=1/2 ac=partial -->",
+            "bad ac 'partial'",
+        ),
+        (
             "<!-- orch:v1 kind=verdict verdict=APPROVE -->",
             "missing required key 'head'",
         ),

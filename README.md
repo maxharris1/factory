@@ -12,7 +12,7 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - [`orch.yml`](orch.yml) lists the projects to poll and the dispatcher settings ([docs/SPEC.md](docs/SPEC.md) section 7). [`config/orch.example.yml`](config/orch.example.yml) is the minimal file.
 - `factory.md` is the per-repo policy ([docs/SPEC.md](docs/SPEC.md) section 6). The generic example is [`docs/factory.example.md`](docs/factory.example.md). Aut0, Cleffy and Tracy examples live under [`examples/`](examples/) and are not those repos.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
-- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1 through T6 (F1-05 is
+- [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T1P and T2 through T6 (F1-05 is
   the T3 review round, T4 ship and T5 questions loop) to
   PRs discovered through `orch:state/` GitHub labels or Linear tickets found by the handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
@@ -35,7 +35,7 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
   merged some other way is refused and wakes Grok Bot. `ship: merge` repos
   still squash-merge with `--match-head-commit`; `ship: handoff` repos are
   never merged by the factory.
-  Hooks never see `kind=go` or `kind=ready`.
+  Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter
 
