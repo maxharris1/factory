@@ -1841,13 +1841,19 @@ def test_ff_ship_raises_on_a_non_fast_forward_and_leaves_main_untouched(
     history: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     if history == "main-moved":
         actions.branches["main"] = MOVED
     else:
         actions.parents[HEAD_A] = None
     main_before = dict(actions.branches)
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1858,7 +1864,7 @@ def test_ff_ship_raises_on_a_non_fast_forward_and_leaves_main_untouched(
     assert actions.fast_forwards == []
     assert actions.merges == []
     assert "state:merged" not in actions.events
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "is not a fast-forward of main" in str(grok[0].request.detail)
     with pytest.raises(ShipError, match="is failed"):
@@ -1998,9 +2004,15 @@ def test_r1b1_merged_elsewhere_is_refused_with_one_wake(
     parent: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.merged_by_someone_else(HEAD_A, tip, parent)
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -2013,7 +2025,7 @@ def test_r1b1_merged_elsewhere_is_refused_with_one_wake(
     assert actions.merges == []
     assert "state:merged" not in actions.events
     assert workflow_state(queue) != "merged"
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert f"main is {tip}, not {HEAD_A}" in str(grok[0].request.detail)
     with queue.connect() as connection:
@@ -2093,6 +2105,7 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
     after_fast_forward: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     if after_fast_forward == "1-base-left-elsewhere":
         actions.parents[CONCURRENT] = HEAD_A
         actions.fast_forward_lands_on = CONCURRENT
@@ -2101,7 +2114,12 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
         actions.branch_tip_error_after_fast_forward = RuntimeError("tip read failed")
         expected = "RuntimeError: tip read failed"
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -2113,7 +2131,7 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
     assert actions.merges == []
     assert "state:merged" not in actions.events
     assert workflow_state(queue) != "merged"
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "raised ShipError: " in str(grok[0].request.detail)
     assert expected in str(grok[0].request.detail)
