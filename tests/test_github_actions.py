@@ -587,10 +587,21 @@ def test_pr_numbers_are_validated_before_any_call(ticket_id: str) -> None:
 
 
 def test_linear_tickets_are_never_merged_through_github_numbers() -> None:
-    actions, gh = adapter()
+    gh = RecordedGh()
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: None,
+        runner=gh,
+    )
+    linked = replace(
+        pr("merge", tickets="linear", ticket_id="AUT-12"),
+        pr_number="42",
+    )
 
-    with pytest.raises(GitHubAdapterError, match="has no linked PR"):
-        actions.merge(pr("merge", tickets="linear"), squash=True, match_head_commit=HEAD)
+    with pytest.raises(GitHubAdapterError, match="can only use handoff"):
+        actions.merge(linked, squash=True, match_head_commit=HEAD)
+    with pytest.raises(GitHubAdapterError, match="can only use handoff"):
+        actions.fast_forward(linked, branch="main", head=HEAD)
 
     assert gh.calls == []
 
@@ -720,7 +731,14 @@ def test_stable_patch_id_fails_closed_and_handoff_marks_draft_ready() -> None:
     assert gh.keys() == [PULL, ready]
 
 
-def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr() -> None:
+@pytest.mark.parametrize(
+    ("enabled", "expected_writes"),
+    [(False, []), (True, [("AUT-42", "Ready for Review")])],
+)
+def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
+    enabled: bool,
+    expected_writes: list[tuple[str, str]],
+) -> None:
     gh = RecordedGh()
     draft = served("pull-42-open.json")
     gh.route(PULL, GhResult(0, draft.stdout.replace('"draft": false', '"draft": true'), ""))
@@ -728,7 +746,7 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr() -> None:
     gh.route(ready, served("pull-42-open.json"))
     linear_writes: list[tuple[str, str]] = []
     actions = LinearReviewActions(
-        move_ready_for_review=True,
+        move_ready_for_review=enabled,
         linear_ready=lambda ticket: linear_writes.append(
             (ticket.ticket_id, "Ready for Review")
         ),
@@ -744,9 +762,31 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr() -> None:
     actions.set_state(linked, "review")
     actions.handoff(linked, HEAD)
 
-    assert linear_writes == [("AUT-42", "Ready for Review")]
+    assert linear_writes == expected_writes
     assert gh.keys() == [PULL, ready]
     assert MERGE not in gh.keys()
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        (('"merged": false', '"merged": true'), "merged"),
+        (('"state": "open"', '"state": "closed"'), "not open"),
+        ((HEAD, "b" * 40), "PR head"),
+    ],
+)
+def test_handoff_refuses_unsafe_pr_state_before_writes(
+    replacement: tuple[str, str],
+    message: str,
+) -> None:
+    actions, gh = adapter()
+    pull = served("pull-42-open.json")
+    gh.route(PULL, GhResult(0, pull.stdout.replace(*replacement), ""))
+
+    with pytest.raises(GitHubAdapterError, match=message):
+        actions.handoff(pr("handoff"), HEAD)
+
+    assert gh.keys() == [PULL]
 
 
 def test_review_actions_are_picked_from_factory_md_tickets() -> None:

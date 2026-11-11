@@ -307,7 +307,7 @@ def _ship_failed(
         reason="ship-failed",
         source_comment_id=comment.id,
         timeout_seconds=ticket.job_timeout_minutes * 60,
-        detail=detail,
+        detail=dispatcher._project_wake_detail(ticket, detail),
     )
     return True, "ship-failed"
 

@@ -23,10 +23,13 @@ from lib.hook_t8 import ShipRequest, Shipper, T8Hook
 from lib.queue import ACTIONS, Job, JobRequest, SQLiteJobQueue
 
 TRUSTED_LOGINS = {
-    "grok-login": "grok-bot",
-    "claude-login": "claude-bot",
-    "codex-login": "codex-bot",
-    "tracy-login": "tracy-site",
+    "github": {
+        "grok-login": {"grok-bot"},
+        "claude-login": {"claude-bot"},
+        "codex-login": {"codex-bot"},
+        "tracy-login": {"tracy-site"},
+    },
+    "linear": {},
 }
 VERDICT = (
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "

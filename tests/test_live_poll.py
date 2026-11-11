@@ -15,7 +15,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig
-from lib.github_actions import GhResult
+from lib.github_actions import GhResult, GitHubReviewActions, LinearReviewActions
 from lib.grok_delivery import (
     GrokDeliveryError,
     WebhookGrokDelivery,
@@ -33,6 +33,7 @@ from lib.poll_source import (
     LivePollSource,
     PollCycleError,
     PollSourceError,
+    _linear_ready_state_id,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
@@ -182,6 +183,153 @@ def linear_search_page(
     )
 
 
+def test_review_actions_use_each_projects_linear_ready_flag() -> None:
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(
+                Project(
+                    "aut0-code/aut0",
+                    factory_ref="dev",
+                    linear_project_id="aut0",
+                    linear_ready_for_review=True,
+                ),
+                Project(
+                    "acme/linear",
+                    factory_ref="main",
+                    linear_project_id="linear",
+                ),
+                Project("acme/github", factory_ref="main"),
+            ),
+            linear=LinearConfig("LINEAR_KEY"),
+        )
+    )
+
+    actions = source.review_actions_by_repo()
+
+    assert isinstance(actions["aut0-code/aut0"], LinearReviewActions)
+    assert actions["aut0-code/aut0"].move_ready_for_review is True
+    assert isinstance(actions["acme/linear"], LinearReviewActions)
+    assert actions["acme/linear"].move_ready_for_review is False
+    assert type(actions["acme/github"]) is GitHubReviewActions
+
+
+@pytest.mark.parametrize(
+    ("enabled", "issue_id", "state_id"),
+    [
+        (False, "issue-1", "state-1"),
+        (True, None, "state-1"),
+        (True, "issue-1", None),
+    ],
+)
+def test_move_linear_ready_fails_closed_without_complete_enabled_metadata(
+    enabled: bool,
+    issue_id: str | None,
+    state_id: str | None,
+) -> None:
+    requests: list[dict] = []
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=lambda url, headers, body, timeout: (
+            requests.append(json.loads(body))
+            or HTTPResult(200, json.dumps({"data": {"issueUpdate": {"success": True}}}))
+        ),
+    )
+    tracked = TrackedTicket(
+        repo="acme/widgets",
+        ticket_id="AUT-42",
+        factory=FactoryConfig(
+            base_branch="main",
+            tickets="linear",
+            builder_harness="claude",
+            reviewer_harness="codex",
+            rounds_low=1,
+            rounds_high=3,
+            verify="none",
+            ship="handoff",
+            skills=(),
+        ),
+        comments=(),
+        current_head="a" * 40,
+        ci={},
+        risk="high",
+        linear_issue_id=issue_id,
+        linear_ready_state_id=state_id,
+        linear_ready_for_review=enabled,
+    )
+
+    with pytest.raises(PollSourceError, match="metadata is unavailable"):
+        source._move_linear_ready(tracked)
+
+    assert requests == []
+
+
+def test_move_linear_ready_writes_only_the_exact_state_update() -> None:
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        requests.append(json.loads(body))
+        return HTTPResult(
+            200,
+            json.dumps({"data": {"issueUpdate": {"success": True}}}),
+        )
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=transport,
+    )
+    tracked = TrackedTicket(
+        repo="acme/widgets",
+        ticket_id="AUT-42",
+        factory=FactoryConfig(
+            base_branch="main",
+            tickets="linear",
+            builder_harness="claude",
+            reviewer_harness="codex",
+            rounds_low=1,
+            rounds_high=3,
+            verify="none",
+            ship="handoff",
+            skills=(),
+        ),
+        comments=(),
+        current_head="a" * 40,
+        ci={},
+        risk="high",
+        linear_issue_id="issue-1",
+        linear_ready_state_id="state-1",
+        linear_ready_for_review=True,
+    )
+
+    source._move_linear_ready(tracked)
+
+    assert len(requests) == 1
+    assert requests[0]["variables"] == {"issue": "issue-1", "state": "state-1"}
+    assert "stateId: $state" in requests[0]["query"]
+    assert "issueUpdate" in requests[0]["query"]
+
+
+def test_linear_ready_state_is_selected_only_by_exact_name() -> None:
+    issue = {
+        "team": {
+            "states": {
+                "nodes": [
+                    {"id": "wrong", "name": "ready for review"},
+                    {"id": "right", "name": "Ready for Review"},
+                ]
+            }
+        }
+    }
+
+    assert _linear_ready_state_id(issue) == "right"
+    assert _linear_ready_state_id(
+        {"team": {"states": {"nodes": [{"id": "wrong", "name": "Review"}]}}}
+    ) is None
+
+
 def test_github_candidate_parsing_uses_gh_without_network() -> None:
     comment = {
         "id": 7,
@@ -277,7 +425,10 @@ def test_project_error_is_recorded_in_dispatcher_database(tmp_path: Path) -> Non
     dispatcher = Dispatcher(
         database,
         queue,
-        trusted_logins={"grok-login": "grok-bot"},
+        trusted_logins={
+            "github": {"grok-login": {"grok-bot"}},
+            "linear": {},
+        },
         review_actions=Mock(),
         grok_delivery=Mock(),
     )
@@ -788,7 +939,10 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
     dispatcher = Dispatcher(
         database,
         queue,
-        trusted_logins={"grok-login": "grok-bot"},
+        trusted_logins={
+            "github": {"grok-login": {"grok-bot"}},
+            "linear": {},
+        },
         review_actions=actions,
         grok_delivery=delivery,
     )

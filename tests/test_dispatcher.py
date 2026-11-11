@@ -18,6 +18,7 @@ from lib.dispatcher import (
     ship_mode,
 )
 from lib.factory_md import FactoryConfig
+from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
 GO = (
@@ -43,9 +44,12 @@ ANSWERS = (
     "Answers.\n"
 )
 TRUSTED_LOGINS = {
-    "grok-login": "grok-bot",
-    "claude-login": "claude-bot",
-    "codex-login": "codex-bot",
+    "github": {
+        "grok-login": {"grok-bot"},
+        "claude-login": {"claude-bot"},
+        "codex-login": {"codex-bot"},
+    },
+    "linear": {},
 }
 
 
@@ -464,6 +468,7 @@ def test_t1_job_detail_contains_tracker_pr_and_review_context(
         "linear_url": "https://linear.test/AUT-42",
         "post_to": "PR #123 issue comments (not reviews or inline comments)",
         "pr_number": "123",
+            "project_bot": "grok-bot",
         "repo_skill_paths": [],
         "reviewer_harness": "codex",
         "risk": "high",
@@ -539,6 +544,116 @@ def test_one_github_login_may_speak_only_for_its_declared_marker(
     rejected = queue.claim("grok")
     assert rejected is not None
     assert rejected.request.action == "rejected"
+
+
+def test_real_orch_trust_routes_linear_go_and_github_pr_handoffs(
+    tmp_path: Path,
+) -> None:
+    config, findings = load_orch_yml(Path(__file__).parents[1] / "orch.yml")
+    assert findings == []
+    assert config is not None
+    aut0 = next(project for project in config.projects if project.repo == "aut0-code/aut0")
+    assert aut0.linear_ready_for_review is True
+    trusted = {
+        "github": dict(config.trusted_logins),
+        "linear": {"linear:user-1": frozenset({"grok-bot"})},
+    }
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    actions = FakeReviewActions()
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=trusted,
+        review_actions={"aut0-code/aut0": actions},
+        grok_delivery=FakeGrokDelivery(),
+    )
+    factory_config = factory(tickets="linear", ship="handoff")
+    base = replace(
+        ticket(
+            factory_config=factory_config,
+            repo="aut0-code/aut0",
+            ticket_id="AUT-42",
+        ),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    go = comment(
+        "linear-go",
+        GO.format(state="building"),
+        author="linear:user-1",
+        created_at=1,
+    )
+    dispatcher.process(replace(base, comments=(go,)))
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready")
+    head = "a" * 40
+    ready = comment(
+        "ready",
+        READY.format(head=head),
+        author="maxharris1",
+        created_at=2,
+    )
+    dispatcher.process(
+        replace(
+            base,
+            comments=(go, ready),
+            current_head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    review = queue.claim("codex")
+    assert review is not None
+    queue.finish(review.id, owner="codex", handoff_comment_id="approve")
+    approve = comment(
+        "approve",
+        VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high"),
+        author="maxharris1",
+        created_at=3,
+    )
+    dispatcher.process(
+        replace(
+            base,
+            comments=(go, ready, approve),
+            current_head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+
+    assert actions.handoffs == [head]
+    assert actions.merges == []
+    assert actions.fast_forwards == []
+
+
+def test_linear_identity_trusted_only_for_grok_cannot_post_ready(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            "github": {"maxharris1": {"claude-bot"}},
+            "linear": {"linear:user-1": {"grok-bot"}},
+        },
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    fields = {
+        "kind": "ready",
+        "from": "claude-bot",
+        "role": "builder",
+        "head": "a" * 40,
+    }
+    assert not dispatcher._trusted(
+        ticket(tickets="linear"),
+        comment("ready", READY.format(head="a" * 40), author="linear:user-1"),
+        fields,
+        "claude-bot",
+        role="builder",
+    )
 
 
 @pytest.mark.parametrize("state", [None, "review"])
@@ -1707,6 +1822,27 @@ def test_t3_counts_rounds_using_ticket_risk_and_factory_cap(
     assert queue.claim("grok") is None
 
 
+def test_stop_wakes_carry_the_configured_project_bot(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    tracked = replace(ticket(), grok_bot="offer-brief-project")
+    capped = comment("capped", "not parsed", author="codex-login")
+    failed = comment("failed", "not parsed", author="codex-login")
+
+    dispatcher._wake_capped(tracked, capped)
+    dispatcher._wake_ship_failed(tracked, failed, "handoff failed")
+
+    wakes = [queue.claim("grok"), queue.claim("grok")]
+    assert all(wake is not None for wake in wakes)
+    assert {wake.request.action for wake in wakes if wake is not None} == {
+        "capped",
+        "ship-failed",
+    }
+    for wake in wakes:
+        assert wake is not None
+        detail = json.loads(str(wake.request.detail))
+        assert detail["project_bot"] == "offer-brief-project"
+
+
 def test_t3_rejects_untrusted_reviewer_and_stale_head(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     head = "a" * 40
@@ -2719,11 +2855,10 @@ def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
         ticket(forged_question, question, second_question, head=head)
     )
 
-    grok_jobs = [queue.claim("grok"), queue.claim("grok")]
-    assert all(job is not None for job in grok_jobs)
-    by_action = {job.request.action: job for job in grok_jobs if job is not None}
-    assert set(by_action) == {"clarify", "rejected"}
-    wake = by_action["clarify"]
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "clarify"
+    assert queue.claim("grok") is None
     assert wake.request.source_comment_id == "questions-1"
     with queue.connect() as connection:
         wake_count = connection.execute(

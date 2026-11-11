@@ -51,9 +51,7 @@ class T7Hook:
             detail = f"verdict=BLOCKED from {reviewer}"
         elif fields["kind"] == "stuck":
             sender = fields.get("from")
-            trusted = dispatcher.trusted_logins.get(
-                ticket.factory.tickets, {}
-            ).get(comment.author, frozenset())
+            trusted = dispatcher._trusted_bots(comment)
             if sender is None or sender not in trusted:
                 return True, "rejected-stuck-author"
             state = fields.get("state")
@@ -71,7 +69,10 @@ class T7Hook:
             reason=reason,
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=detail if head is None else f"{detail} on {head}",
+            detail=dispatcher._project_wake_detail(
+                ticket,
+                detail if head is None else f"{detail} on {head}",
+            ),
             head=head,
         )
         return True, f"woke-grok-{reason}"
@@ -84,9 +85,7 @@ class T7Hook:
     ) -> tuple[bool, str] | None:
         if _HEADER_SHAPED.search(comment.body) is None:
             return None
-        if comment.author not in dispatcher.trusted_logins.get(
-            ticket.factory.tickets, {}
-        ):
+        if not dispatcher._trusted_bots(comment):
             return True, "ignored-unparsed-untrusted"
         if dispatcher.is_stuck(ticket):
             dispatcher._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
@@ -103,6 +102,9 @@ class T7Hook:
             reason="unparsed",
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=f"unparsed orch header from {comment.author}: {error}",
+            detail=dispatcher._project_wake_detail(
+                ticket,
+                f"unparsed orch header from {comment.author}: {error}",
+            ),
         )
         return True, "woke-grok-unparsed"

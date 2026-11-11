@@ -528,7 +528,13 @@ class Dispatcher:
                     source_comment_id=comment.id,
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=generation,
-                    detail="kind=go must set state=planning or state=building",
+                    detail=self._job_detail(
+                        ticket,
+                        action="clarify",
+                        instruction=(
+                            "kind=go must set state=planning or state=building"
+                        ),
+                    ),
                 ),
                 dedupe_key=(
                     f"t1-clarify:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -593,7 +599,10 @@ class Dispatcher:
                 source_comment_id=comment.id,
                 timeout_seconds=timeout_seconds,
                 reason="ci-red-3",
-                detail=f"CI failed three times in a row; latest head {head}",
+                detail=self._project_wake_detail(
+                    ticket,
+                    f"CI failed three times in a row; latest head {head}",
+                ),
             )
             return True, "stuck-ci-red-3"
         self.queue.enqueue(
@@ -754,7 +763,10 @@ class Dispatcher:
             reason="capped",
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=f"review round cap reached, {_comment_link(comment)}",
+            detail=self._project_wake_detail(
+                ticket,
+                f"review round cap reached, {_comment_link(comment)}",
+            ),
             head=ticket.current_head,
         )
 
@@ -1076,14 +1088,11 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
+        del ticket
         sender = fields.get("from")
         return (
             sender is not None
-            and sender
-            in self.trusted_logins.get(ticket.factory.tickets, {}).get(
-                comment.author,
-                frozenset(),
-            )
+            and sender in self._trusted_bots(comment)
         )
 
     def _latest_step(
@@ -1368,7 +1377,7 @@ class Dispatcher:
             reason="ship-failed",
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=detail,
+            detail=self._project_wake_detail(ticket, detail),
         )
 
     def _has_completed_ship_intent(
@@ -1546,9 +1555,12 @@ class Dispatcher:
                     reason="ship-failed",
                     source_comment_id=source_comment_id,
                     timeout_seconds=ticket.job_timeout_minutes * 60,
-                    detail=(
-                        f"merged, but the merged state or label write failed "
-                        f"{failures} times: {type(exc).__name__}: {exc}"
+                    detail=self._project_wake_detail(
+                        ticket,
+                        (
+                            f"merged, but the merged state or label write failed "
+                            f"{failures} times: {type(exc).__name__}: {exc}"
+                        ),
                     ),
                 )
 
@@ -1628,7 +1640,14 @@ class Dispatcher:
             source_comment_id=job.request.source_comment_id,
             timeout_seconds=job.request.timeout_seconds,
             reason="job-failed-2",
-            detail=f"{job.request.action} job failed twice",
+            detail=json.dumps(
+                {
+                    "project_bot": _detail_project_bot(job.request.detail),
+                    "detail": f"{job.request.action} job failed twice",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
         )
         self.queue.mark_failure_handled(job.id)
 
@@ -1784,14 +1803,18 @@ class Dispatcher:
         *,
         role: str,
     ) -> bool:
+        del ticket
         return (
             fields.get("from") == expected_bot
             and fields.get("role") == role
-            and expected_bot
-            in self.trusted_logins.get(ticket.factory.tickets, {}).get(
-                comment.author,
-                frozenset(),
-            )
+            and expected_bot in self._trusted_bots(comment)
+        )
+
+    def _trusted_bots(self, comment: Comment) -> frozenset[str]:
+        tracker = "linear" if comment.author.startswith("linear:") else "github"
+        return self.trusted_logins.get(tracker, {}).get(
+            comment.author,
+            frozenset(),
         )
 
     def _review_actions(self, ticket: TrackedTicket) -> ReviewActions:
@@ -1839,6 +1862,7 @@ class Dispatcher:
             ),
             "action": action,
             "head": head,
+            "project_bot": ticket.grok_bot,
         }
         if instruction is not None:
             context["instruction"] = instruction
@@ -1851,6 +1875,8 @@ class Dispatcher:
         reason: str,
         outcome: str,
     ) -> None:
+        if not self._trusted_bots(comment):
+            return
         self.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -1867,6 +1893,20 @@ class Dispatcher:
                 sort_keys=True,
             ),
             head=ticket.current_head,
+        )
+
+    def _project_wake_detail(
+        self,
+        ticket: TrackedTicket,
+        detail: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "project_bot": ticket.grok_bot,
+                "detail": detail,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
         )
 
     def _wake_done(
@@ -2016,15 +2056,22 @@ class Dispatcher:
         if state is None or not bool(state["stuck"]):
             return
         wake_job_id = state["stuck_wake_job_id"]
+        previous_detail: str | None = None
         if wake_job_id is not None:
             wake = connection.execute(
-                "SELECT state FROM jobs WHERE id = ?",
+                "SELECT state, detail FROM jobs WHERE id = ?",
                 (wake_job_id,),
             ).fetchone()
             if wake is None or str(wake["state"]) != "failed":
                 return
+            if isinstance(wake["detail"], str):
+                previous_detail = str(wake["detail"])
         generation = int(state["generation"]) + 1
-        reason = detail or str(state["stuck_reason"] or "ticket is stuck")
+        reason = (
+            detail
+            or previous_detail
+            or str(state["stuck_reason"] or "ticket is stuck")
+        )
         queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -2441,25 +2488,19 @@ def _normalize_trusted_logins(
     value: Mapping[str, object],
 ) -> dict[str, dict[str, frozenset[str]]]:
     normalized: dict[str, dict[str, frozenset[str]]] = {}
-    if all(key in ("github", "linear") for key in value):
-        for tracker, entries in value.items():
-            if not isinstance(entries, Mapping):
-                raise ValueError("trusted_logins tracker entries must be mappings")
-            normalized[tracker] = {}
-            for login, bots in entries.items():
-                if not isinstance(login, str) or not isinstance(
-                    bots, (set, frozenset, tuple, list)
-                ):
-                    raise ValueError("trusted_logins entries must be bot sets")
-                normalized[tracker][login] = frozenset(
-                    str(bot) for bot in bots
-                )
-        return normalized
-    legacy = {
-        str(login): frozenset((str(bot),))
-        for login, bot in value.items()
-    }
-    return {"github": dict(legacy), "linear": dict(legacy)}
+    if not all(key in ("github", "linear") for key in value):
+        raise ValueError("trusted_logins must be keyed by tracker")
+    for tracker, entries in value.items():
+        if not isinstance(entries, Mapping):
+            raise ValueError("trusted_logins tracker entries must be mappings")
+        normalized[tracker] = {}
+        for login, bots in entries.items():
+            if not isinstance(login, str) or not isinstance(
+                bots, (set, frozenset, tuple, list)
+            ):
+                raise ValueError("trusted_logins entries must be bot sets")
+            normalized[tracker][login] = frozenset(str(bot) for bot in bots)
+    return normalized
 
 
 def _grok_logical_key(job: Job) -> str:
@@ -2492,6 +2533,19 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
 
 def _comment_link(comment: Comment) -> str:
     return comment.url or f"comment:{comment.id}"
+
+
+def _detail_project_bot(detail: str | None) -> str | None:
+    if detail is None:
+        return None
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    project_bot = parsed.get("project_bot")
+    return project_bot if isinstance(project_bot, str) else None
 
 
 def _is_patch_id(value: str) -> bool:

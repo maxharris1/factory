@@ -75,6 +75,9 @@ def test_linear_visible_fallback_and_html_header_parse_the_same_fields() -> None
 
     assert parse_header_line(html) == parse_header_line(visible)
     assert parse_comment(f"{visible}\nBuild.\n").body == "Build.\n"
+    parsed = parse_comment(f"{html}\nBuild.\n")
+    assert format_header(parsed.as_dict(), visible=True) == visible
+    assert format_comment(parsed, visible=True) == f"{visible}\nBuild.\n"
 
 
 def test_github_issue_repo_gets_the_section_5_labels() -> None:

@@ -30,7 +30,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
 HARNESS_BINARIES = ("claude", "codex", "cursor-agent")
 GO = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\nGo.\n"
-TRUSTED_LOGINS = {"grok-login": "grok-bot", "claude-login": "claude-bot"}
+TRUSTED_LOGINS = {
+    "github": {
+        "grok-login": {"grok-bot"},
+        "claude-login": {"claude-bot"},
+    },
+    "linear": {},
+}
 
 
 def make_db(tmp_path: Path) -> tuple[Path, SQLiteJobQueue]:

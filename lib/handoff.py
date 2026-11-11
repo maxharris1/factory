@@ -142,7 +142,7 @@ def parse_header_line(line: str) -> dict[str, str]:
     return {key: found[key] for key in KEYS if key in found}
 
 
-def format_header(fields: Mapping[str, str]) -> str:
+def format_header(fields: Mapping[str, str], *, visible: bool = False) -> str:
     extra = [key for key in fields if key not in KEYS]
     if extra:
         raise HandoffError(f"unknown key {extra[0]!r}")
@@ -155,7 +155,8 @@ def format_header(fields: Mapping[str, str]) -> str:
     for key in KEYS:
         if key in fields:
             parts.append(f"{key}={fields[key]}")
-    line = "<!-- " + " ".join(parts) + " -->"
+    marker = " ".join(parts)
+    line = f"`{marker}`" if visible else f"<!-- {marker} -->"
     parsed = parse_header_line(line)
     expected = {key: fields[key] for key in KEYS if key in fields}
     if parsed != expected:
@@ -172,8 +173,8 @@ def parse_comment(text: str) -> Handoff:
     return Handoff(fields=tuple(fields.items()), body=rest)
 
 
-def format_comment(handoff: Handoff) -> str:
-    header = format_header(handoff.as_dict())
+def format_comment(handoff: Handoff, *, visible: bool = False) -> str:
+    header = format_header(handoff.as_dict(), visible=visible)
     if handoff.body == "":
         return header + "\n"
     if handoff.body.endswith("\n"):

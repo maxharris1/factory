@@ -245,6 +245,8 @@ class GitHubReviewActions:
             raise HeadMismatchError(f"PR head is {current}, not {head}")
         if pull.get("merged") is True:
             raise GitHubAdapterError("cannot hand off a merged pull request")
+        if pull.get("state") != "open":
+            raise GitHubAdapterError("cannot hand off a pull request that is not open")
         if pull.get("draft") is True:
             self._call(
                 "-X",
@@ -409,6 +411,26 @@ class LinearReviewActions(GitHubReviewActions):
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         del ticket, state
+
+    def merge(
+        self,
+        ticket: TrackedTicket,
+        *,
+        squash: bool,
+        match_head_commit: str,
+    ) -> None:
+        del ticket, squash, match_head_commit
+        raise GitHubAdapterError("Linear tickets can only use handoff")
+
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        del ticket, branch, head
+        raise GitHubAdapterError("Linear tickets can only use handoff")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
         super().handoff(ticket, head)

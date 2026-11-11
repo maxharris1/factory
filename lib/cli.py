@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import shutil
 import signal
 import sqlite3
 import sys
@@ -489,6 +490,12 @@ def _doctor_runtime(argv: list[str]) -> int:
         __import__("yaml")
     except ImportError:
         errors.append("PyYAML is not importable")
+    expected_orch = Path.home() / ".local/bin/orch"
+    orch = shutil.which("orch")
+    if orch is None:
+        errors.append("orch is not on PATH")
+    elif Path(orch).resolve() != expected_orch.resolve():
+        errors.append(f"orch on PATH is not {expected_orch}")
     configured = os.environ.get(DB_ENV)
     if not configured:
         errors.append(f"{DB_ENV} is not set")
@@ -500,6 +507,16 @@ def _doctor_runtime(argv: list[str]) -> int:
             try:
                 with sqlite3.connect(database) as connection:
                     connection.execute("SELECT 1").fetchone()
+                    tables = {
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        )
+                    }
+                    if not {"jobs", "handled_comments"} <= tables:
+                        errors.append(
+                            f"{DB_ENV} database is missing runtime tables"
+                        )
             except sqlite3.Error:
                 errors.append(f"{DB_ENV} database is not valid SQLite")
     for error in errors:

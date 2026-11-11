@@ -209,7 +209,10 @@ def test_finish_does_not_overwrite_a_t6_timeout_or_duplicate_its_retry(
     dispatcher = Dispatcher(
         path,
         queue,
-        trusted_logins={"grok-bot": "grok"},
+        trusted_logins={
+            "github": {"grok-bot": {"grok"}},
+            "linear": {},
+        },
         review_actions=Mock(),
         grok_delivery=Mock(),
     )

@@ -4,10 +4,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
 
 from lib import cli
+
 ROOT = Path(__file__).resolve().parents[1]
 
 VALID = {
@@ -160,8 +161,34 @@ def test_doctor_runtime_accepts_existing_sqlite_db(
     capsys,
 ) -> None:
     database = tmp_path / "orch.db"
-    sqlite3.connect(database).close()
+    assert cli.main(["init-db", "--db", str(database)]) == 0
+    capsys.readouterr()
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(wrapper.parent))
     monkeypatch.setenv("ORCH_DB", str(database))
 
     assert cli.main(["doctor-runtime"]) == 0
     assert capsys.readouterr().out == "ok\n"
+
+
+def test_doctor_runtime_rejects_database_without_runtime_tables(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    database = tmp_path / "orch.db"
+    sqlite3.connect(database).close()
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(wrapper.parent))
+    monkeypatch.setenv("ORCH_DB", str(database))
+
+    assert cli.main(["doctor-runtime"]) == 1
+    assert "database is missing runtime tables" in capsys.readouterr().err

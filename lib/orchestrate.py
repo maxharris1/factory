@@ -206,6 +206,8 @@ class TicketFlow:
         self,
         restatement: str,
         questions: Sequence[ClassifiedQuestion],
+        *,
+        visible: bool = False,
     ) -> str:
         if self._questions_posted:
             raise QuestionError("questions step already ran")
@@ -220,9 +222,15 @@ class TicketFlow:
             checked.append(question)
         self._questions = tuple(checked)
         self._questions_posted = True
-        return questions_comment(restatement, self._questions)
+        return questions_comment(restatement, self._questions, visible=visible)
 
-    def post_answer(self, text: str, answer: str) -> str:
+    def post_answer(
+        self,
+        text: str,
+        answer: str,
+        *,
+        visible: bool = False,
+    ) -> str:
         if not self._questions_posted:
             raise QuestionError("questions step has not run")
         text = _one_line(text, "question text", QuestionError)
@@ -247,9 +255,15 @@ class TicketFlow:
             else:
                 updated.append(question)
         self._questions = tuple(updated)
-        return answers_comment(text, answer)
+        return answers_comment(text, answer, visible=visible)
 
-    def post_go(self, decision: RouteDecision, verify: str) -> str:
+    def post_go(
+        self,
+        decision: RouteDecision,
+        verify: str,
+        *,
+        visible: bool = False,
+    ) -> str:
         if not self._questions_posted:
             raise GoBlocked("questions step has not run")
         if self._went:
@@ -257,7 +271,7 @@ class TicketFlow:
         if not product_questions_cleared(self._questions):
             raise GoBlocked("product questions are open")
         self._went = True
-        return go_comment(decision, verify)
+        return go_comment(decision, verify, visible=visible)
 
 
 def read_factory(path: Path) -> ReadResult:
@@ -427,6 +441,7 @@ def brief_comment(
     acceptance_criteria: Sequence[str],
     likely_files: Sequence[str],
     done_evidence: str,
+    visible: bool = False,
 ) -> str:
     if risk not in ("low", "high"):
         raise OrchestrateError("risk must be low or high")
@@ -450,12 +465,15 @@ def brief_comment(
     return _comment(
         {"kind": "brief", "from": FROM, "role": ROLE, "risk": risk},
         body,
+        visible=visible,
     )
 
 
 def questions_comment(
     restatement: str,
     questions: Sequence[ClassifiedQuestion],
+    *,
+    visible: bool = False,
 ) -> str:
     if not isinstance(restatement, str) or restatement.strip() == "":
         raise QuestionError("restatement is empty")
@@ -473,17 +491,31 @@ def questions_comment(
     fields: dict[str, str] = {"kind": "questions", "from": FROM, "role": ROLE}
     if next_product_question(questions) is not None:
         fields["state"] = "waiting-max"
-    return _comment(fields, "\n".join(lines) + "\n")
+    return _comment(fields, "\n".join(lines) + "\n", visible=visible)
 
 
-def answers_comment(question: str, answer: str) -> str:
+def answers_comment(
+    question: str,
+    answer: str,
+    *,
+    visible: bool = False,
+) -> str:
     _one_line(question, "question text", QuestionError)
     _one_line(answer, "answer", QuestionError)
     body = f"**Question**\n{question.strip()}\n\n**Answer**\n{answer.strip()}\n"
-    return _comment({"kind": "answers", "from": FROM, "role": ROLE}, body)
+    return _comment(
+        {"kind": "answers", "from": FROM, "role": ROLE},
+        body,
+        visible=visible,
+    )
 
 
-def go_comment(decision: RouteDecision, verify: str) -> str:
+def go_comment(
+    decision: RouteDecision,
+    verify: str,
+    *,
+    visible: bool = False,
+) -> str:
     if not isinstance(decision, RouteDecision):
         raise RouteError("decision must be a RouteDecision")
     if decision.risk not in ("low", "high"):
@@ -504,6 +536,7 @@ def go_comment(decision: RouteDecision, verify: str) -> str:
             "builder": decision.builder_harness,
         },
         body,
+        visible=visible,
     )
 
 
@@ -515,7 +548,7 @@ def format_stop_report(report: StopReport) -> str:
     )
 
 
-def stuck_comment(report: StopReport) -> str:
+def stuck_comment(report: StopReport, *, visible: bool = False) -> str:
     if not isinstance(report, StopReport):
         raise StopError("stop must be a StopReport")
     if report.stop != "stuck":
@@ -523,6 +556,7 @@ def stuck_comment(report: StopReport) -> str:
     return _comment(
         {"kind": "stuck", "from": FROM, "role": ROLE, "state": "stuck"},
         format_stop_report(report),
+        visible=visible,
     )
 
 
@@ -599,9 +633,17 @@ def _block(title: str, text: str) -> str:
     return f"**{title}**\n{text}\n\n"
 
 
-def _comment(fields: Mapping[str, str], body: str) -> str:
+def _comment(
+    fields: Mapping[str, str],
+    body: str,
+    *,
+    visible: bool = False,
+) -> str:
     text = body if body.endswith("\n") else body + "\n"
-    return format_comment(Handoff(fields=tuple(fields.items()), body=text))
+    return format_comment(
+        Handoff(fields=tuple(fields.items()), body=text),
+        visible=visible,
+    )
 
 
 def _one_line(
