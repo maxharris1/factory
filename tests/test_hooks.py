@@ -147,6 +147,16 @@ class FakeReviewActions:
         self.approvals.append((head, approver))
 
 
+class FakeGrokDelivery:
+    def __init__(self) -> None:
+        self.jobs: list[Job] = []
+
+    def deliver(self, job: Job, *, logical_key: str) -> str:
+        del logical_key
+        self.jobs.append(job)
+        return f"delivery-{job.id}"
+
+
 class FakeBot:
     def __init__(self, queue: SQLiteJobQueue, recipient: str):
         self.queue = queue
@@ -236,6 +246,7 @@ def setup(
     *,
     hooks: tuple[Hook, ...] | None = None,
     now: list[float] | None = None,
+    grok_delivery: FakeGrokDelivery | None = None,
     actions: FakeReviewActions | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
     path = tmp_path / "d.db"
@@ -246,6 +257,7 @@ def setup(
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=actions or FakeReviewActions(),
+        grok_delivery=grok_delivery or FakeGrokDelivery(),
         hooks=hooks if hooks is not None else (T7Hook(), T8Hook(shipper)),
     )
     return dispatcher, queue
@@ -286,8 +298,10 @@ def in_review(queue: SQLiteJobQueue, head: str, ticket_id: str = "42") -> None:
 def restart(
     tmp_path: Path,
     shipper: Shipper | None = None,
+    *,
+    grok_delivery: FakeGrokDelivery | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue]:
-    return setup(tmp_path, shipper)
+    return setup(tmp_path, shipper, grok_delivery=grok_delivery)
 
 
 def jobs(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
@@ -334,7 +348,8 @@ def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
     grok = FakeBot(queue, "grok")
     assert sorted(job.request.action for job in grok.drain()) == ["blocked", "capped"]
 
-    restarted, restarted_queue = restart(tmp_path)
+    delivery = FakeGrokDelivery()
+    restarted, restarted_queue = restart(tmp_path, grok_delivery=delivery)
     again = replace(
         first,
         comments=first.comments
@@ -355,8 +370,7 @@ def test_t7_single_wake_on_repeated_terminal_comments(tmp_path: Path) -> None:
         )
     )
     restarted.reconcile_jobs()
-    stuck = FakeBot(restarted_queue, "grok").drain()
-    assert [job.request.action for job in stuck] == ["stuck"]
+    assert [job.request.action for job in delivery.jobs] == ["stuck"]
     assert jobs(restarted_queue).count(("stuck", "grok")) == 1
     assert len(jobs(restarted_queue)) == 3
 
@@ -877,7 +891,8 @@ def test_t8_crash_after_ship_returns_never_ships_again(
 def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> None:
     now = [0.0]
     shipper = RaisingShipper()
-    dispatcher, queue = setup(tmp_path, shipper, now=now)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, shipper, now=now, grok_delivery=delivery)
     in_review(queue, HEAD_A)
     queue.enqueue(
         JobRequest(
@@ -907,9 +922,8 @@ def test_t8_ship_error_fails_closed_and_polling_continues(tmp_path: Path) -> Non
     assert sorted(
         (job.request.ticket_id, job.request.attempt) for job in claude
     ) == [("43", 1), ("44", 2)]
-    grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["ship-failed"]
-    assert "merge refused" in str(grok[0].request.detail)
+    assert [job.request.action for job in delivery.jobs] == ["ship-failed"]
+    assert "merge refused" in str(delivery.jobs[0].request.detail)
 
 
 def test_t7_trusted_comment_with_orch_v_that_fails_to_parse_wakes_unparsed(
@@ -1234,9 +1248,16 @@ def wired(
     tmp_path: Path,
     actions: FakeReviewActions,
     source: FakeSource,
+    *,
+    grok_delivery: FakeGrokDelivery | None = None,
 ) -> tuple[Dispatcher, SQLiteJobQueue, RecordingShipper]:
     t8 = T8Hook()
-    dispatcher, queue = setup(tmp_path, hooks=(T7Hook(), t8), actions=actions)
+    dispatcher, queue = setup(
+        tmp_path,
+        hooks=(T7Hook(), t8),
+        actions=actions,
+        grok_delivery=grok_delivery,
+    )
     shipper = RecordingShipper(ReviewShipper(dispatcher, source))
     t8.shipper = shipper
     return dispatcher, queue, shipper
@@ -1499,6 +1520,7 @@ def test_b1_revise_posted_after_the_poll_snapshot_blocks_the_merge(
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     snapshot = ticket(BRIEFED, APPROVED, OK_1)
     revise = say(
         "verdict-2", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 3
@@ -1506,7 +1528,12 @@ def test_b1_revise_posted_after_the_poll_snapshot_blocks_the_merge(
     source = SnapshotThenFreshSource(
         snapshot, replace(snapshot, comments=snapshot.comments + (revise,))
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1519,7 +1546,7 @@ def test_b1_revise_posted_after_the_poll_snapshot_blocks_the_merge(
         assert connection.execute(
             "SELECT count(*) FROM external_ship_intents"
         ).fetchone()[0] == 0
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "ShipError: latest review verdict is not APPROVE" in str(
         grok[0].request.detail
@@ -1591,6 +1618,7 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
     failure: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     source = FakeSource(
         ticket(
             say("brief-1", BRIEF, "grok-login", 0),
@@ -1598,7 +1626,12 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
     if failure == "label":
         actions.state_failures.add("merged")
@@ -1614,6 +1647,7 @@ def test_review_shipper_keeps_a_confirmed_merge_when_settling_fails(
     assert outcomes(queue)["ok-1"] == "shipped"
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert FakeBot(queue, "grok").drain() == []
+    assert delivery.jobs == []
     actions.state_failures.clear()
     monkeypatch.undo()
     before = len(actions.states)
@@ -1629,6 +1663,7 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.branches["main"] = HEAD_A
     actions.merged_heads.add(HEAD_A)
     source = FakeSource(
@@ -1638,7 +1673,12 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1651,12 +1691,14 @@ def test_r1b1_c_main_already_at_the_head_is_shipped_without_a_second_fast_forwar
     assert workflow_state(queue) == "merged"
     assert actions.states[-2:] == ["merged", "merged"]
     assert FakeBot(queue, "grok").drain() == []
+    assert delivery.jobs == []
 
 
 def test_review_shipper_raises_on_merge_error_and_never_retries(
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.fast_forward_error = RuntimeError("merge refused")
     source = FakeSource(
         ticket(
@@ -1665,7 +1707,12 @@ def test_review_shipper_raises_on_merge_error_and_never_retries(
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
         )
     )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1674,7 +1721,7 @@ def test_review_shipper_raises_on_merge_error_and_never_retries(
         shipper.inner.ship(ship_request())
 
     assert outcomes(queue)["ok-1"] == "ship-failed"
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "merge refused" in str(grok[0].request.detail)
     assert actions.fast_forwards == []
@@ -1714,9 +1761,15 @@ def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.state_failures.add("merged")
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, _shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, _shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1730,7 +1783,7 @@ def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
         dispatcher.poll_once(source)
 
     assert jobs(queue) == [("ship-failed", "grok")]
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert grok[0].request.source_comment_id == "ok-1"
     assert "failed 3 times" in str(grok[0].request.detail)
     assert actions.fast_forwards == [("main", HEAD_A)]
@@ -1802,13 +1855,19 @@ def test_ff_ship_raises_on_a_non_fast_forward_and_leaves_main_untouched(
     history: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     if history == "main-moved":
         actions.branches["main"] = MOVED
     else:
         actions.parents[HEAD_A] = None
     main_before = dict(actions.branches)
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1819,7 +1878,7 @@ def test_ff_ship_raises_on_a_non_fast_forward_and_leaves_main_untouched(
     assert actions.fast_forwards == []
     assert actions.merges == []
     assert "state:merged" not in actions.events
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "is not a fast-forward of main" in str(grok[0].request.detail)
     with pytest.raises(ShipError, match="is failed"):
@@ -1959,9 +2018,15 @@ def test_r1b1_merged_elsewhere_is_refused_with_one_wake(
     parent: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     actions.merged_by_someone_else(HEAD_A, tip, parent)
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -1974,7 +2039,7 @@ def test_r1b1_merged_elsewhere_is_refused_with_one_wake(
     assert actions.merges == []
     assert "state:merged" not in actions.events
     assert workflow_state(queue) != "merged"
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert f"main is {tip}, not {HEAD_A}" in str(grok[0].request.detail)
     with queue.connect() as connection:
@@ -2054,6 +2119,7 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
     after_fast_forward: str,
 ) -> None:
     actions = FakeReviewActions()
+    delivery = FakeGrokDelivery()
     if after_fast_forward == "1-base-left-elsewhere":
         actions.parents[CONCURRENT] = HEAD_A
         actions.fast_forward_lands_on = CONCURRENT
@@ -2062,7 +2128,12 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
         actions.branch_tip_error_after_fast_forward = RuntimeError("tip read failed")
         expected = "RuntimeError: tip read failed"
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    dispatcher, queue, shipper = wired(
+        tmp_path,
+        actions,
+        source,
+        grok_delivery=delivery,
+    )
     in_review(queue, HEAD_A)
 
     dispatcher.poll_once(source)
@@ -2074,7 +2145,7 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
     assert actions.merges == []
     assert "state:merged" not in actions.events
     assert workflow_state(queue) != "merged"
-    grok = FakeBot(queue, "grok").drain()
+    grok = delivery.jobs
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert "raised ShipError: " in str(grok[0].request.detail)
     assert expected in str(grok[0].request.detail)

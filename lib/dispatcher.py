@@ -143,6 +143,17 @@ class ReviewActions(Protocol):
     ) -> None: ...
 
 
+class GrokDelivery(Protocol):
+    """Push a Grok job and return a non-empty delivery receipt.
+
+    Any failure after the push but before queue completion can repeat the wake.
+    Implementations must deduplicate on logical_key, which is stable across
+    T6 retries, rather than on job.id.
+    """
+
+    def deliver(self, job: Job, *, logical_key: str) -> str: ...
+
+
 class RetryableStateError(RuntimeError):
     pass
 
@@ -191,6 +202,7 @@ class Dispatcher:
         *,
         trusted_logins: Mapping[str, str],
         review_actions: ReviewActions,
+        grok_delivery: GrokDelivery,
         hooks: Sequence[Hook] = (),
     ):
         if state_path.resolve() != queue.path.resolve():
@@ -199,10 +211,13 @@ class Dispatcher:
             raise ValueError("trusted_logins must not be empty")
         if review_actions is None:
             raise ValueError("review_actions must be configured")
+        if grok_delivery is None:
+            raise ValueError("grok_delivery must be configured")
         self.state_path = state_path
         self.queue = queue
         self.trusted_logins = dict(trusted_logins)
         self.review_actions = review_actions
+        self.grok_delivery = grok_delivery
         self.hooks = tuple(hooks)
         self._initialize()
         for hook in self.hooks:
@@ -308,6 +323,8 @@ class Dispatcher:
                 self._mark_handled(ticket, comment.id, outcome)
 
     def reconcile_jobs(self) -> None:
+        deferred_grok_jobs: set[str] = set()
+        self._deliver_grok_jobs(deferred_grok_jobs)
         now = self.queue.now()
         for job in self.queue.outstanding():
             activity = (
@@ -318,6 +335,43 @@ class Dispatcher:
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
+        self._deliver_grok_jobs(deferred_grok_jobs)
+
+    def _deliver_grok_jobs(self, deferred: set[str]) -> None:
+        while (
+            job := self.queue.claim(
+                "grok",
+                excluded_job_ids=deferred,
+            )
+        ) is not None:
+            try:
+                receipt = self.grok_delivery.deliver(
+                    job,
+                    logical_key=_grok_logical_key(job),
+                )
+                if not isinstance(receipt, str) or not receipt:
+                    raise ValueError("Grok delivery receipt must be a non-empty string")
+                self.queue.finish(
+                    job.id,
+                    owner="grok",
+                    handoff_comment_id=receipt,
+                )
+            except Exception as exc:
+                self._record_job_error(
+                    job,
+                    f"grok-delivery:{type(exc).__name__}",
+                )
+                try:
+                    self.queue.release(
+                        job.id,
+                        owner="grok",
+                    )
+                    deferred.add(job.id)
+                except Exception as release_exc:
+                    self._record_job_error(
+                        job,
+                        f"grok-delivery-release:{type(release_exc).__name__}",
+                    )
 
     def gate_count(self, ticket: TrackedTicket) -> int:
         with self._connect() as connection:
@@ -1641,6 +1695,22 @@ class Dispatcher:
                 ),
             )
 
+    def _record_job_error(self, job: Job, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO poll_errors (
+                    repo, ticket_id, error, recorded_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job.request.repo.lower(),
+                    job.request.ticket_id,
+                    error,
+                    self.queue.now(),
+                ),
+            )
+
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)
 
@@ -2126,6 +2196,14 @@ class PollLoop:
 
 def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
+
+
+def _grok_logical_key(job: Job) -> str:
+    request = job.request
+    return (
+        f"{_scope(request.repo, request.ticket_id)}"
+        f"\x1f{request.action}\x1f{request.source_comment_id}"
+    )
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

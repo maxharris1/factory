@@ -156,6 +156,8 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 
 T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 is not built in Phase 1. Any new row needs a real run that showed a wasted wake. The default job timeout is 90 minutes of no heartbeat or progress; a project may override it with `job_timeout` in `orch.yml` (Factory decided (technical), 10:19 AM ET).
 
+Grok jobs are pushed by the dispatcher through `GrokDelivery` during reconciliation, never through `orch wait`.
+
 ### 4.3 Invariants, and where they live now
 
 | Rule | Where it lives |

@@ -45,6 +45,7 @@ def dispatcher_for(path: Path) -> Dispatcher:
         queue,
         trusted_logins=TRUSTED_LOGINS,
         review_actions=Mock(),
+        grok_delivery=Mock(deliver=Mock(return_value="grok-delivery")),
     )
 
 

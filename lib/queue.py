@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -68,7 +69,14 @@ class JobQueue(Protocol):
         dedupe_key: str,
     ) -> Job: ...
 
-    def claim(self, recipient: str) -> Job | None: ...
+    def claim(
+        self,
+        recipient: str,
+        *,
+        excluded_job_ids: Collection[str] = (),
+    ) -> Job | None: ...
+
+    def release(self, job_id: str, *, owner: str) -> Job: ...
 
     def heartbeat(self, job_id: str, *, owner: str) -> Job: ...
 
@@ -194,21 +202,34 @@ class SQLiteJobQueue:
         assert row is not None
         return _job(row)
 
-    def claim(self, recipient: str) -> Job | None:
+    def claim(
+        self,
+        recipient: str,
+        *,
+        excluded_job_ids: Collection[str] = (),
+    ) -> Job | None:
         if recipient not in RECIPIENTS:
             raise QueueError(f"unknown recipient {recipient!r}")
         now = self.now()
+        excluded = frozenset(excluded_job_ids)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT * FROM jobs
                 WHERE state = 'queued' AND recipient = ?
                 ORDER BY created_at, id
-                LIMIT 1
                 """,
                 (recipient,),
-            ).fetchone()
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if str(candidate["id"]) not in excluded
+                ),
+                None,
+            )
             if row is None:
                 connection.commit()
                 return None
@@ -226,6 +247,33 @@ class SQLiteJobQueue:
             ).fetchone()
             connection.commit()
         assert updated is not None
+        return _job(updated)
+
+    def release(self, job_id: str, *, owner: str) -> Job:
+        if owner not in RECIPIENTS:
+            raise QueueError(f"unknown owner {owner!r}")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE jobs SET state = 'queued'
+                WHERE id = ? AND state = 'running' AND recipient = ?
+                """,
+                (job_id, owner),
+            ).rowcount
+            updated = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if updated is None:
+                raise QueueError(f"unknown job {job_id!r}")
+            if changed != 1:
+                if updated["recipient"] != owner:
+                    raise QueueError(
+                        f"job {job_id} belongs to {updated['recipient']}, not {owner}"
+                    )
+                raise QueueError("release requires a running job")
+            connection.commit()
         return _job(updated)
 
     def heartbeat(self, job_id: str, *, owner: str) -> Job:
