@@ -2057,7 +2057,10 @@ class ReviewShipper:
                     f"{branch} is {tip}, not {head}; the PR was merged another way"
                 )
             self.dispatcher._ship_head(ticket, head)
-            tip = actions.branch_tip(ticket, branch)
+            try:
+                tip = actions.branch_tip(ticket, branch)
+            except Exception as exc:
+                tip = f"unreadable ({type(exc).__name__}: {exc})"
             if tip != head:
                 raise ShipError(f"{branch} is {tip}, not {head}, after fast-forward")
         except Exception as exc:

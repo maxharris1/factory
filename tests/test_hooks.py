@@ -64,6 +64,8 @@ class FakeReviewActions:
             MOVED: BASE,
         }
         self.branches: dict[str, str] = {"main": BASE}
+        self.fast_forward_lands_on: str | None = None
+        self.branch_tip_error_after_fast_forward: Exception | None = None
         self.approvals: list[tuple[str, str]] = []
         self.state_failures: set[str] = set()
         self.events: list[str] = []
@@ -114,7 +116,7 @@ class FakeReviewActions:
             ancestor = self.parents[ancestor]
         if ancestor != tip:
             raise RuntimeError(f"{head} is not a fast-forward of {branch} at {tip}")
-        self.branches[branch] = head
+        self.branches[branch] = self.fast_forward_lands_on or head
         self.fast_forwards.append((branch, head))
         self.events.append(f"fast-forward:{branch}:{head}")
         self.merged_heads.add(head)
@@ -122,6 +124,8 @@ class FakeReviewActions:
     def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
         del ticket
         self.events.append(f"branch-tip:{branch}")
+        if self.fast_forwards and self.branch_tip_error_after_fast_forward:
+            raise self.branch_tip_error_after_fast_forward
         return self.branches[branch]
 
     def merged_by_someone_else(self, head: str, tip: str, parent: str) -> None:
@@ -2036,3 +2040,52 @@ def test_m4_comment_loop_error_survives_a_failing_settle(
         "ValueError: settle failed" in note
         for note in getattr(raised.value, "__notes__", [])
     )
+
+
+CONCURRENT = "f" * 40
+
+
+@pytest.mark.parametrize(
+    "after_fast_forward",
+    ["1-base-left-elsewhere", "2-tip-re-read-raises"],
+)
+def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
+    tmp_path: Path,
+    after_fast_forward: str,
+) -> None:
+    actions = FakeReviewActions()
+    if after_fast_forward == "1-base-left-elsewhere":
+        actions.parents[CONCURRENT] = HEAD_A
+        actions.fast_forward_lands_on = CONCURRENT
+        expected = f"main is {CONCURRENT}, not {HEAD_A}, after fast-forward"
+    else:
+        actions.branch_tip_error_after_fast_forward = RuntimeError("tip read failed")
+        expected = "RuntimeError: tip read failed"
+    source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    assert [request.head for request in shipper.requests] == [HEAD_A]
+    assert outcomes(queue)["ok-1"] == "ship-failed"
+    assert actions.fast_forwards == [("main", HEAD_A)]
+    assert actions.merges == []
+    assert "state:merged" not in actions.events
+    assert workflow_state(queue) != "merged"
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert "raised ShipError: " in str(grok[0].request.detail)
+    assert expected in str(grok[0].request.detail)
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT status FROM external_ship_intents"
+        ).fetchone()[0] == "failed"
+        assert connection.execute(
+            "SELECT outcome FROM external_previews"
+        ).fetchone()[0] == "ship-failed"
+    with pytest.raises(ShipError, match="is failed"):
+        shipper.inner.ship(ship_request())
+    assert actions.fast_forwards == [("main", HEAD_A)]
+
