@@ -2014,3 +2014,25 @@ def test_m2_review_shipper_orders_tied_approve_9_before_ok_10(
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert workflow_state(queue) == "merged"
 
+
+def test_m4_comment_loop_error_survives_a_failing_settle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatcher, _queue = setup(tmp_path, hooks=(RaisingHook(),))
+    settles: list[str] = []
+
+    def fail(ticket: TrackedTicket) -> None:
+        settles.append(ticket.ticket_id)
+        raise ValueError("settle failed")
+
+    monkeypatch.setattr(dispatcher, "_settle_external_ships", fail)
+
+    with pytest.raises(RuntimeError, match="comment loop failed") as raised:
+        dispatcher.process(ticket(say("any-1", BRIEF, "grok-login", 0)))
+
+    assert settles == ["42"]
+    assert any(
+        "ValueError: settle failed" in note
+        for note in getattr(raised.value, "__notes__", [])
+    )

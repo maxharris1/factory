@@ -217,8 +217,15 @@ class Dispatcher:
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._process_comments(ticket, comments)
-        finally:
-            self._settle_external_ships(ticket)
+        except BaseException as error:
+            try:
+                self._settle_external_ships(ticket)
+            except Exception as settle_error:
+                error.add_note(
+                    f"settle also raised {type(settle_error).__name__}: {settle_error}"
+                )
+            raise
+        self._settle_external_ships(ticket)
 
     def _process_comments(
         self,
