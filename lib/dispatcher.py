@@ -210,7 +210,7 @@ class Dispatcher:
         self.reconcile_jobs()
 
     def process(self, ticket: TrackedTicket) -> None:
-        comments = sorted(ticket.comments, key=lambda item: (item.created_at, item.id))
+        comments = sorted(ticket.comments, key=_comment_order)
         for comment in comments:
             if self._is_handled(ticket, comment.id):
                 continue
@@ -1211,7 +1211,7 @@ class Dispatcher:
     ) -> tuple[Comment, dict[str, str]] | None:
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         latest: tuple[Comment, dict[str, str]] | None = None
-        for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
+        for item in sorted(ticket.comments, key=_comment_order):
             try:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
@@ -1970,10 +1970,7 @@ class ReviewShipper:
             (item for item in ticket.comments if item.id == request.source_comment_id),
             None,
         )
-        if ok is None or (latest[0].created_at, latest[0].id) >= (
-            ok.created_at,
-            ok.id,
-        ):
+        if ok is None or _comment_order(latest[0]) >= _comment_order(ok):
             raise ShipError(
                 f"APPROVE {request.approve_comment_id} does not precede "
                 f"ok {request.source_comment_id}"
@@ -2066,6 +2063,13 @@ def _matching_head(reported: str, current: str | None) -> str | None:
 def ship_mode(policy: str) -> str:
     """after:<approver> repos fast-forward; every other repo squash-merges."""
     return "fast-forward" if policy.startswith("after:") else "squash"
+
+
+def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
+    """(created_at, id) with numeric ids compared as integers, so 9 < 10."""
+    if re.fullmatch(r"[0-9]+", comment.id):
+        return comment.created_at, 0, int(comment.id)
+    return comment.created_at, 1, comment.id
 
 
 def _comment_link(comment: Comment) -> str:

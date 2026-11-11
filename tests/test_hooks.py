@@ -1849,3 +1849,31 @@ def test_ff_ship_head_refuses_a_sha_that_is_not_full_lowercase(
     assert actions.branches == {"main": BASE}
     assert actions.merges == []
 
+def test_fu1_tied_comment_ids_order_as_integers(tmp_path: Path) -> None:
+    dispatcher, _queue = setup(tmp_path)
+    revise_9 = say(
+        "9", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 5
+    )
+    approve_10 = approve("10", HEAD_A, 5)
+
+    latest = dispatcher._latest_review_verdict(ticket(approve_10, revise_9))
+
+    assert latest is not None
+    assert latest[0].id == "10"
+    assert latest[1]["verdict"] == "APPROVE"
+
+
+def test_fu1_ok_with_a_tied_higher_id_follows_the_approve(tmp_path: Path) -> None:
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
+    approved = approve("9", HEAD_A, 5)
+    dispatcher.process(ticket(approved))
+
+    dispatcher.process(
+        ticket(approved, say("10", OK.format(head=HEAD_A), "tracy-login", 5))
+    )
+
+    assert outcomes(queue)["10"] == "shipped"
+    assert [request.approve_comment_id for request in shipper.requests] == ["9"]
+
