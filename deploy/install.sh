@@ -19,8 +19,13 @@ if [[ -e "$WRAPPER" ]] && ! grep -q '^# factory-orch-wrapper$' "$WRAPPER"; then
     echo "refusing to overwrite non-factory wrapper at ${WRAPPER}" >&2
     exit 1
 fi
-UV_VENV_CLEAR=1 uv venv "$VENV"
-uv pip install --python "${VENV}/bin/python" -r "${ROOT}/requirements.txt"
+if command -v uv >/dev/null 2>&1; then
+    UV_VENV_CLEAR=1 uv venv "$VENV"
+    uv pip install --python "${VENV}/bin/python" -r "${ROOT}/requirements.txt"
+else
+    python3 -m venv --clear "$VENV"
+    "${VENV}/bin/python" -m pip install -r "${ROOT}/requirements.txt"
+fi
 cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 # factory-orch-wrapper
