@@ -23,10 +23,13 @@ from lib.hook_t8 import ShipRequest, Shipper, T8Hook
 from lib.queue import ACTIONS, Job, JobRequest, SQLiteJobQueue
 
 TRUSTED_LOGINS = {
-    "grok-login": "grok-bot",
-    "claude-login": "claude-bot",
-    "codex-login": "codex-bot",
-    "tracy-login": "tracy-site",
+    "github": {
+        "grok-login": {"grok-bot"},
+        "claude-login": {"claude-bot"},
+        "codex-login": {"codex-bot"},
+        "tracy-login": {"tracy-site"},
+    },
+    "linear": {},
 }
 VERDICT = (
     "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
@@ -443,7 +446,7 @@ def test_t7_refuses_forged_blocked_and_stuck(tmp_path: Path) -> None:
         )
     )
 
-    assert jobs(queue) == []
+    assert jobs(queue) == [("rejected", "grok"), ("rejected", "grok")]
 
 
 def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
@@ -497,7 +500,11 @@ def test_t8_pending_ok_refused_after_later_revise(tmp_path: Path) -> None:
     declined = say("decline-1", DECLINE, "tracy-login", 2.5)
     one_poll.process(ticket(*approved_then_ok, declined, revise))
     assert one_poll_shipper.requests == []
-    assert jobs(queue) == []
+    assert sorted(action for action, _recipient in jobs(queue)) == [
+        "rejected",
+        "rejected",
+        "stale",
+    ]
 
 
 def test_t8_ok_on_any_other_sha_is_refused(tmp_path: Path) -> None:
@@ -672,7 +679,7 @@ def test_t8_repeated_decline_of_one_preview_queues_one_fix(tmp_path: Path) -> No
     dispatcher.process(snapshot)
     restart(tmp_path)[0].process(snapshot)
 
-    assert jobs(queue) == [("fix", "claude")]
+    assert sorted(jobs(queue)) == [("fix", "claude"), ("rejected", "grok")]
 
 
 def test_t8_decline_naming_another_sha_is_refused(tmp_path: Path) -> None:
@@ -1126,7 +1133,12 @@ def test_t8_orphaned_ship_claim_goes_to_ship_failed_and_wakes_once(
         ).fetchone()["outcome"]
     assert outcome == "ship-failed"
     grok = FakeBot(queue, "grok").drain()
-    assert [job.request.action for job in grok] == ["ship-failed"]
+    expected = (
+        ["stale", "ship-failed"]
+        if change == "newer-verdict"
+        else ["ship-failed"]
+    )
+    assert sorted(job.request.action for job in grok) == sorted(expected)
 
 
 def test_t8_losing_dispatcher_cannot_overwrite_shipped(
@@ -1206,7 +1218,7 @@ def test_t8_two_declines_competing_for_one_preview_queue_one_fix(
     monkeypatch.setattr(hook_t8, "_claimed_by", lambda *_args: None)
     second.process(ticket(approved, say("decline-2", DECLINE, "tracy-login", 3)))
 
-    assert jobs(queue) == [("fix", "claude")]
+    assert sorted(jobs(queue)) == [("fix", "claude"), ("rejected", "grok")]
     with queue.connect() as connection:
         rows = connection.execute(
             "SELECT comment_id FROM external_previews"
@@ -1800,10 +1812,16 @@ def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
     for _poll in range(3):
         dispatcher.poll_once(source)
 
-    assert jobs(queue) == [("ship-failed", "grok")]
+    assert sorted(jobs(queue)) == [
+        ("rejected", "grok"),
+        ("ship-failed", "grok"),
+    ]
     grok = delivery.jobs
-    assert grok[0].request.source_comment_id == "ok-1"
-    assert "failed 3 times" in str(grok[0].request.detail)
+    ship_failed = next(
+        job for job in grok if job.request.action == "ship-failed"
+    )
+    assert ship_failed.request.source_comment_id == "ok-1"
+    assert "failed 3 times" in str(ship_failed.request.detail)
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert actions.merges == []
     assert workflow_state(queue) == "merged"

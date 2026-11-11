@@ -91,6 +91,16 @@ class WebhookGrokDelivery:
                 f"{self.url_env} must contain an https URL"
             )
         request = job.request
+        target_bot = None
+        if request.detail is not None:
+            try:
+                detail = json.loads(request.detail)
+            except json.JSONDecodeError:
+                detail = None
+            if isinstance(detail, dict) and isinstance(
+                detail.get("project_bot"), str
+            ):
+                target_bot = detail["project_bot"]
         body = json.dumps(
             {
                 "action": request.action,
@@ -103,6 +113,7 @@ class WebhookGrokDelivery:
                 "repo": request.repo,
                 "source_comment_id": request.source_comment_id,
                 "ticket_id": request.ticket_id,
+                "target_bot": target_bot,
             },
             separators=(",", ":"),
             sort_keys=True,

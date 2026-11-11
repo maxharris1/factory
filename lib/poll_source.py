@@ -15,9 +15,9 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from lib.dispatcher import CIResult, Comment, TicketRef, TrackedTicket
+from lib.dispatcher import CIResult, Comment, ReviewActions, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, parse_factory_md
-from lib.github_actions import GitHubReviewActions, Runner, run_gh
+from lib.github_actions import GitHubReviewActions, LinearReviewActions, Runner, run_gh
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 
@@ -51,7 +51,11 @@ query FactoryIssue($id: String!) {
     id
     identifier
     url
+    gitBranchName: branchName
     project { id }
+    team {
+      states { nodes { id name } }
+    }
     comments(first: 250) {
       nodes { id body createdAt user { id } }
       pageInfo { hasNextPage }
@@ -61,6 +65,11 @@ query FactoryIssue($id: String!) {
       pageInfo { hasNextPage }
     }
   }
+}
+""".strip()
+LINEAR_READY_MUTATION = """
+mutation FactoryReadyForReview($issue: String!, $state: String!) {
+  issueUpdate(id: $issue, input: {stateId: $state}) { success }
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
@@ -156,6 +165,28 @@ class LivePollSource:
             cleared_variables=cleared,
         )
         self.gh = self.github.gh
+
+    def review_actions_by_repo(self) -> dict[str, ReviewActions]:
+        cleared = _secret_env_names(self.config)
+        actions: dict[str, ReviewActions] = {}
+        for project in self.config.projects:
+            if project.linear_project_id is None:
+                action: ReviewActions = GitHubReviewActions(
+                    runner=self.gh_runner,
+                    timeout_seconds=self.timeout_seconds,
+                    cleared_variables=cleared,
+                )
+            else:
+                action = LinearReviewActions(
+                    move_ready_for_review=project.linear_ready_for_review,
+                    linear_ready=self._move_linear_ready,
+                    fresh_ticket=self.fresh_ticket,
+                    runner=self.gh_runner,
+                    timeout_seconds=self.timeout_seconds,
+                    cleared_variables=cleared,
+                )
+            actions[project.repo.lower()] = action
+        return actions
 
     def begin_cycle(self) -> None:
         self._factory_cache.clear()
@@ -398,6 +429,29 @@ class LivePollSource:
             raise PollSourceError("Linear returned a GraphQL error")
         return parsed
 
+    def _move_linear_ready(self, ticket: TrackedTicket) -> None:
+        if (
+            not ticket.linear_ready_for_review
+            or ticket.linear_issue_id is None
+            or ticket.linear_ready_state_id is None
+        ):
+            raise PollSourceError("Linear Ready for Review metadata is unavailable")
+        document = self._linear_request(
+            {
+                "query": LINEAR_READY_MUTATION,
+                "variables": {
+                    "issue": ticket.linear_issue_id,
+                    "state": ticket.linear_ready_state_id,
+                },
+            }
+        )
+        updated = _object(
+            _object(document.get("data"), "Linear data").get("issueUpdate"),
+            "Linear issueUpdate",
+        )
+        if updated.get("success") is not True:
+            raise PollSourceError("Linear Ready for Review update was not confirmed")
+
     def _linear_key(self) -> str:
         if self.config.linear is None:
             raise PollSourceError("linear.api_key_env is required for Linear projects")
@@ -482,6 +536,13 @@ class LivePollSource:
             ci={head: self.github.ci_status(project.repo, head)},
             risk=_risk(comments),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
+            ticket_url=_optional_string(pull.get("html_url")),
+            git_branch_name=_optional_string(
+                _object(pull.get("head"), "GitHub pull request head").get("ref")
+            ),
+            pr_number=number,
+            brief=_brief(comments),
+            grok_bot=project.grok_bot,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -519,14 +580,20 @@ class LivePollSource:
         )
         if comments_page.get("hasNextPage") is True:
             raise PollSourceError("Linear issue has more than 250 comments")
-        comments = tuple(
+        linear_comments = tuple(
             comment
             for item in _array(comments_data.get("nodes"), "Linear comment nodes")
             if (comment := _linear_comment(item)) is not None
         )
-        head = _latest_head(comments)
+        comments = linear_comments
+        head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
-        pr_number = self._linked_pr_number(project.repo, identifier, issue)
+        pr_number = self._linked_pr_number(
+            project.repo,
+            identifier,
+            issue,
+            fresh=fresh,
+        )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
             pr_head = _object(
@@ -539,7 +606,14 @@ class LivePollSource:
                 )
             head = pr_head
             ci[head] = self.github.ci_status(project.repo, head)
-        elif _has_ready(comments):
+            github_comments = self.github.list_comments(project.repo, pr_number)
+            comments = tuple(
+                sorted(
+                    (*linear_comments, *github_comments),
+                    key=lambda item: (item.created_at, item.id),
+                )
+            )
+        elif _has_ready(linear_comments):
             self._record(
                 project.repo,
                 identifier,
@@ -554,6 +628,14 @@ class LivePollSource:
             ci=ci,
             risk=_risk(comments),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
+            ticket_url=_optional_string(issue.get("url")),
+            git_branch_name=_optional_string(issue.get("gitBranchName")),
+            pr_number=pr_number,
+            brief=_brief(linear_comments),
+            grok_bot=project.grok_bot,
+            linear_issue_id=_optional_string(issue.get("id")),
+            linear_ready_state_id=_linear_ready_state_id(issue),
+            linear_ready_for_review=project.linear_ready_for_review,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -563,6 +645,8 @@ class LivePollSource:
         repo: str,
         identifier: str,
         issue: Mapping[str, Any],
+        *,
+        fresh: bool = False,
     ) -> str | None:
         attachments = _object(issue.get("attachments"), "Linear attachments")
         page = _object(
@@ -593,6 +677,7 @@ class LivePollSource:
                 "search/issues",
                 "-f",
                 f"q={identifier} repo:{repo} is:pr is:open",
+                fresh=fresh,
             ),
             "GitHub pull request search",
         )
@@ -805,6 +890,22 @@ def _matches_linear_project(issue: Mapping[str, Any], project: Project) -> bool:
     return configured == value.get("id")
 
 
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
+    team = issue.get("team")
+    if team is None:
+        return None
+    states = _object(_object(team, "Linear team").get("states"), "Linear states")
+    for raw in _array(states.get("nodes"), "Linear state nodes"):
+        state = _object(raw, "Linear state")
+        if state.get("name") == "Ready for Review":
+            return _optional_string(state.get("id"))
+    return None
+
+
 def _linear_comment(value: object) -> Comment | None:
     item = _object(value, "Linear comment")
     comment_id = item.get("id")
@@ -842,6 +943,17 @@ def _risk(comments: Sequence[Comment]) -> str:
         if "risk" in fields:
             risk = fields["risk"]
     return risk
+
+
+def _brief(comments: Sequence[Comment]) -> str | None:
+    for comment in comments:
+        try:
+            fields = parse_comment(comment.body).as_dict()
+        except HandoffError:
+            continue
+        if fields["kind"] == "brief":
+            return comment.url or comment.body.strip()
+    return None
 
 
 def _latest_head(comments: Sequence[Comment]) -> str | None:

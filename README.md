@@ -40,8 +40,8 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 ## GitHub adapter
 
 [`lib/github_actions.py`](lib/github_actions.py) is the real `ReviewActions`.
-`review_actions_for(factory.tickets)` returns it for `tickets: github` and
-refuses anything else, the way `ship_mode` reads `ship:`. Unit tests still
+The runtime builds one adapter per configured project; Linear projects wrap
+the GitHub PR adapter with the optional Ready for Review state move. Unit tests still
 pass `FakeReviewActions` to `Dispatcher(review_actions=...)`.
 
 Every call is `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u
@@ -61,7 +61,8 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
-| `stable_patch_id`, `handoff` | none | Not built. They raise, so T4 queues a re-review and a handoff ship fails closed |
+| `stable_patch_id` | none | Not built; a moved head queues a re-review |
+| `handoff` | `GET pulls/<n>`, then `POST pulls/<n>/ready_for_review` when draft | Confirms the linked PR is unmerged and still at the approved head; never merges or requests a reviewer |
 
 SHAs must be 40 lowercase hex, and owner, repo, branch and PR number must
 match strict patterns before any call. A non-zero gh exit, malformed JSON or a
@@ -108,23 +109,41 @@ variable containing the Linear API key. `grok.webhook_url_env` and
 `grok.webhook_key_env` name the existing Grok routine webhook variables.
 `projects[].factory_ref` selects the trusted branch containing `factory.md`;
 `projects[].linear_project_id` maps an immutable Linear project ID to its
-repo. `trusted_logins` maps GitHub authors to handoff identities, while
-`trusted_linear_users` maps immutable Linear user IDs separately. The shipped
-config contains placeholders, not production identities. `orch poll` refuses
-to start until Max fills them. Missing secrets fail by environment-variable
+repo. `trusted_logins` maps GitHub authors to sets of bot markers, while
+`trusted_linear_users` maps immutable Linear user IDs to sets separately.
+The dispatcher still requires the expected `from=` and `role=`. With one
+shared GitHub login, the marker is a routing label, not an identity or
+signature. The shipped config records the known shared GitHub login and leaves
+the stable Linear user ID for Max to confirm. Max approved the GitHub map at
+3:09 PM ET on November 11, 2026: "Yes, the factory may trust maxharris1 for
+comments on factory PRs". This approves the login map, not stronger identity:
+any session using that login can choose a marker. While any configured Linear
+project lacks `trusted_linear_users`, `orch poll` refuses to start at all,
+including for GitHub projects. Missing secrets fail by environment-variable
 name; values are never printed or included in exceptions.
 
 Linear issues are searched by ID with comments included; each hit is then
 fetched directly so the search stays below Linear's complexity limit. Brief
 and go are separate queries rather than relying on undocumented full-text
-`OR` behavior. A linked GitHub PR supplies the current head and CI. Aut0 can therefore reach review, but the
-Ready-for-Review `ship: handoff` write remains unimplemented and fails closed
-with a Grok wake on approval.
+`OR` behavior. A linked GitHub PR supplies the current head and CI, and its
+issue comments are joined with the Linear comments. `ready`, `verdict`, and
+`stuck` go on PR issue comments, never reviews or inline comments.
+`projects[].grok_bot` routes stop and terminal results. When a webhook wake's
+`target_bot` is set, only that project bot handles it; when it is `null`, Grok
+Bot handles it for the repo's project.
+`projects[].linear_ready_for_review` defaults off and controls only the
+post-APPROVE Linear Ready for Review move; Aut0 enables it. No other dispatcher
+state writes Linear, and `ship: handoff` never merges.
 
 `orch poll` opens an initialized database without creating it and holds
 `<db>.lock`, so a second poller is refused. Source failures are recorded per
 project or ticket and the long-running loop continues after the 60-second
 interval; `--once` reports a cycle-level failure with a nonzero exit.
+At startup, polling refuses an invalid `orch.yml` (including placeholders), a
+missing GitHub trust map, any configured Linear project with no Linear trust
+map, missing Grok webhook environment-variable names, a missing initialized
+database, or a lock already held by another poller. Runtime source or delivery
+failures stay fail-closed and are recorded instead of weakening those checks.
 
 ## Wait
 
@@ -143,20 +162,37 @@ failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
+While a harness runs, its bot loops `orch job heartbeat <bot> <job-id>` at
+least every `timeout_seconds / 3`; running timeouts use last activity.
 
 ## Install after merge
 
-Do not run these steps until Max gives the go. Keep the checkout at
+Do not run these steps until Max gives the go. `deploy/install.sh` creates a
+venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
+under `$HOME/.local/bin`, initializes one shared database, and writes
+`$HOME/.config/factory/profile.sh`. It does not install or start the service.
+Stop `orch-poll` before re-running `deploy/install.sh`; both install paths
+replace the venv.
+Keep the checkout at
 `$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
-Before initialization, replace the identity and Linear-project placeholders
-in that file with values Max confirms. Confirm that `LINEAR_API_KEY` is an
-existing Max-provisioned key; this repository does not create one. Then
-initialize the database:
+The script warns for another checkout or branch, refuses to replace a
+non-factory `orch` wrapper, and safely recreates the venv on every run while
+preserving the shared database. Production requirements contain PyYAML only;
+test tooling is in `requirements-dev.txt`.
+Before initialization, fill the stable Linear-user and project-ID placeholders
+with values Max confirms. Confirm that `LINEAR_API_KEY` is an
+existing Max-provisioned key; this repository does not create one. Then run:
 
 ```sh
-export ORCH_DB="$HOME/.local/state/factory/orch.db"
-bin/orch init-db
+deploy/install.sh
+. "$HOME/.config/factory/profile.sh"
+orch doctor-runtime
 ```
+
+Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh).
+`doctor-runtime` checks that PyYAML imports, `ORCH_DB` is set, and its SQLite
+database exists, opens, and has the runtime tables, and that the factory
+wrapper is the `orch` found on `PATH`.
 
 [`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
 for the long-running poller. Max creates

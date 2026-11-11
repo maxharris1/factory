@@ -15,7 +15,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig
-from lib.github_actions import GhResult
+from lib.github_actions import GhResult, GitHubReviewActions, LinearReviewActions
 from lib.grok_delivery import (
     GrokDeliveryError,
     WebhookGrokDelivery,
@@ -33,6 +33,7 @@ from lib.poll_source import (
     LivePollSource,
     PollCycleError,
     PollSourceError,
+    _linear_ready_state_id,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
@@ -122,8 +123,8 @@ def config(*, linear: bool = False) -> OrchConfig:
         ),
         linear=LinearConfig("LINEAR_KEY"),
         grok=GrokConfig("FACTORY_WEBHOOK_URL", "FACTORY_WEBHOOK_KEY"),
-        trusted_logins={"grok-login": "grok-bot"},
-        trusted_linear_users={"linear:user-1": "grok-bot"},
+        trusted_logins={"grok-login": frozenset({"grok-bot"})},
+        trusted_linear_users={"linear:user-1": frozenset({"grok-bot"})},
     )
 
 
@@ -180,6 +181,157 @@ def linear_search_page(
             }
         ),
     )
+
+
+def test_review_actions_use_each_projects_linear_ready_flag() -> None:
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(
+                Project(
+                    "aut0-code/aut0",
+                    factory_ref="dev",
+                    linear_project_id="aut0",
+                    linear_ready_for_review=True,
+                ),
+                Project(
+                    "acme/linear",
+                    factory_ref="main",
+                    linear_project_id="linear",
+                ),
+                Project("acme/github", factory_ref="main"),
+            ),
+            linear=LinearConfig("LINEAR_KEY"),
+        )
+    )
+
+    actions = source.review_actions_by_repo()
+
+    assert isinstance(actions["aut0-code/aut0"], LinearReviewActions)
+    assert actions["aut0-code/aut0"].move_ready_for_review is True
+    assert actions["aut0-code/aut0"].cache_ttl is None
+    assert actions["aut0-code/aut0"].fresh_ticket == source.fresh_ticket
+    assert isinstance(actions["acme/linear"], LinearReviewActions)
+    assert actions["acme/linear"].move_ready_for_review is False
+    assert actions["acme/linear"].cache_ttl is None
+    assert type(actions["acme/github"]) is GitHubReviewActions
+    assert actions["acme/github"].cache_ttl is None
+
+
+@pytest.mark.parametrize(
+    ("enabled", "issue_id", "state_id"),
+    [
+        (False, "issue-1", "state-1"),
+        (True, None, "state-1"),
+        (True, "issue-1", None),
+    ],
+)
+def test_move_linear_ready_fails_closed_without_complete_enabled_metadata(
+    enabled: bool,
+    issue_id: str | None,
+    state_id: str | None,
+) -> None:
+    requests: list[dict] = []
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=lambda url, headers, body, timeout: (
+            requests.append(json.loads(body))
+            or HTTPResult(200, json.dumps({"data": {"issueUpdate": {"success": True}}}))
+        ),
+    )
+    tracked = TrackedTicket(
+        repo="acme/widgets",
+        ticket_id="AUT-42",
+        factory=FactoryConfig(
+            base_branch="main",
+            tickets="linear",
+            builder_harness="claude",
+            reviewer_harness="codex",
+            rounds_low=1,
+            rounds_high=3,
+            verify="none",
+            ship="handoff",
+            skills=(),
+        ),
+        comments=(),
+        current_head="a" * 40,
+        ci={},
+        risk="high",
+        linear_issue_id=issue_id,
+        linear_ready_state_id=state_id,
+        linear_ready_for_review=enabled,
+    )
+
+    with pytest.raises(PollSourceError, match="metadata is unavailable"):
+        source._move_linear_ready(tracked)
+
+    assert requests == []
+
+
+def test_move_linear_ready_writes_only_the_exact_state_update() -> None:
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        requests.append(json.loads(body))
+        return HTTPResult(
+            200,
+            json.dumps({"data": {"issueUpdate": {"success": True}}}),
+        )
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=transport,
+    )
+    tracked = TrackedTicket(
+        repo="acme/widgets",
+        ticket_id="AUT-42",
+        factory=FactoryConfig(
+            base_branch="main",
+            tickets="linear",
+            builder_harness="claude",
+            reviewer_harness="codex",
+            rounds_low=1,
+            rounds_high=3,
+            verify="none",
+            ship="handoff",
+            skills=(),
+        ),
+        comments=(),
+        current_head="a" * 40,
+        ci={},
+        risk="high",
+        linear_issue_id="issue-1",
+        linear_ready_state_id="state-1",
+        linear_ready_for_review=True,
+    )
+
+    source._move_linear_ready(tracked)
+
+    assert len(requests) == 1
+    assert requests[0]["variables"] == {"issue": "issue-1", "state": "state-1"}
+    assert "stateId: $state" in requests[0]["query"]
+    assert "issueUpdate" in requests[0]["query"]
+
+
+def test_linear_ready_state_is_selected_only_by_exact_name() -> None:
+    issue = {
+        "team": {
+            "states": {
+                "nodes": [
+                    {"id": "wrong", "name": "ready for review"},
+                    {"id": "right", "name": "Ready for Review"},
+                ]
+            }
+        }
+    }
+
+    assert _linear_ready_state_id(issue) == "right"
+    assert _linear_ready_state_id(
+        {"team": {"states": {"nodes": [{"id": "wrong", "name": "Review"}]}}}
+    ) is None
 
 
 def linear_transport_for(issue: dict):
@@ -302,7 +454,10 @@ def test_project_error_is_recorded_in_dispatcher_database(tmp_path: Path) -> Non
     dispatcher = Dispatcher(
         database,
         queue,
-        trusted_logins={"grok-login": "grok-bot"},
+        trusted_logins={
+            "github": {"grok-login": {"grok-bot"}},
+            "linear": {},
+        },
         review_actions=Mock(),
         grok_delivery=Mock(),
     )
@@ -341,7 +496,10 @@ def test_linear_failure_does_not_stop_tracked_github_or_reconcile(
     dispatcher = Dispatcher(
         database,
         queue,
-        trusted_logins={"grok-login": "grok-bot"},
+        trusted_logins={
+            "github": {"grok-login": {"grok-bot"}},
+            "linear": {},
+        },
         review_actions=Mock(),
         grok_delivery=Mock(),
     )
@@ -669,8 +827,65 @@ def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
     assert all("--cache" not in call for call in fresh_calls)
 
 
+def test_fresh_linear_ticket_skips_ticket_cache_and_all_github_caches() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.search_items = [{"number": 12}]
+    issue = linear_issue()
+    issue["attachments"]["nodes"] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        assert request["query"].startswith("query FactoryIssue")
+        return HTTPResult(200, json.dumps({"data": {"issue": issue}}))
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=transport,
+    )
+    project = source.config.projects[0]
+    original = source._linear_ticket(project, issue)
+    before = len(gh.calls)
+    issue["comments"]["nodes"].append(
+        {
+            "id": "comment-2",
+            "body": (
+                "`orch:v1 kind=stuck from=grok-bot role=orchestrator "
+                "state=blocked`\n"
+            ),
+            "createdAt": "2026-11-11T12:02:00Z",
+            "user": {"id": "user-1"},
+        }
+    )
+
+    fresh = source.fresh_ticket(
+        TicketRef("acme/widgets", "AUT-42", "linear")
+    )
+
+    assert fresh is not None
+    assert fresh is not original
+    assert len(original.comments) + 1 == len(fresh.comments)
+    fresh_calls = gh.calls[before:]
+    assert any("search/issues" in call for call in fresh_calls)
+    assert all("--cache" not in call for call in fresh_calls)
+
+
 def test_linear_candidate_parsing_uses_handoff_query() -> None:
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.comments = [
+        {
+            "id": 77,
+            "user": {"login": "maxharris1"},
+            "body": (
+                "<!-- orch:v1 kind=ready from=claude-bot role=builder "
+                f"head={gh.head} -->\n"
+            ),
+            "created_at": "2026-11-11T12:01:00Z",
+            "html_url": "https://github.test/pr/12#issuecomment-77",
+        }
+    ]
     requests: list[dict] = []
 
     def transport(url, headers, body, timeout):
@@ -703,7 +918,11 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
     tickets = source.linear_candidates(LINEAR_HANDOFF_QUERY)
 
     assert tickets[0].ticket_id == "AUT-42"
-    assert tickets[0].comments[0].author == "linear:user-1"
+    assert [comment.author for comment in tickets[0].comments] == [
+        "linear:user-1",
+        "maxharris1",
+    ]
+    assert tickets[0].pr_number == "12"
     assert tickets[0].current_head == gh.head
     assert tickets[0].ci[gh.head].status == "success"
     assert [request["variables"] for request in requests[:2]] == [
@@ -933,9 +1152,40 @@ def test_webhook_delivery_uses_job_contract_and_does_not_log_key(caplog) -> None
             "repo": "acme/widgets",
             "source_comment_id": "7",
             "ticket_id": "12",
+            "target_bot": None,
         }
     ]
     assert "secret-webhook-key" not in caplog.text
+
+
+def test_webhook_delivery_routes_json_project_bot() -> None:
+    sent: list[dict] = []
+    delivery = WebhookGrokDelivery(
+        url_env="FACTORY_WEBHOOK_URL",
+        key_env="FACTORY_WEBHOOK_KEY",
+        environ={
+            "FACTORY_WEBHOOK_URL": "https://webhook.test",
+            "FACTORY_WEBHOOK_KEY": "key",
+        },
+        transport=lambda url, key, body, timeout: (
+            sent.append(json.loads(body))
+            or WebhookResult(200, {"X-Request-Id": "receipt"})
+        ),
+    )
+    request = JobRequest(
+        repo="aut0-code/aut0",
+        ticket_id="AUT-42",
+        action="stuck",
+        recipient="grok",
+        source_comment_id="7",
+        timeout_seconds=60,
+        detail=json.dumps({"project_bot": "offer-brief-project"}),
+    )
+    job = Job("job-1", "dedupe", request, "running", 1, 1, None, None)
+
+    delivery.deliver(job, logical_key="logical-1")
+
+    assert sent[0]["target_bot"] == "offer-brief-project"
 
 
 def test_webhook_transport_error_does_not_expose_key() -> None:
@@ -1011,7 +1261,10 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
     dispatcher = Dispatcher(
         database,
         queue,
-        trusted_logins={"grok-login": "grok-bot"},
+        trusted_logins={
+            "github": {"grok-login": {"grok-bot"}},
+            "linear": {},
+        },
         review_actions=actions,
         grok_delivery=delivery,
     )

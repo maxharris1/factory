@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ from lib.dispatcher import (
 )
 from lib.factory_md import FactoryConfig
 from lib.handoff import parse_comment
+from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
 GO = (
@@ -47,9 +49,12 @@ ANSWERS = (
     "Answers.\n"
 )
 TRUSTED_LOGINS = {
-    "grok-login": "grok-bot",
-    "claude-login": "claude-bot",
-    "codex-login": "codex-bot",
+    "github": {
+        "grok-login": {"grok-bot"},
+        "claude-login": {"claude-bot"},
+        "codex-login": {"codex-bot"},
+    },
+    "linear": {},
 }
 
 
@@ -369,6 +374,20 @@ def seed_review_job(
     )
 
 
+def test_dispatcher_rejects_legacy_flat_trust_maps(tmp_path: Path) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 0)
+
+    with pytest.raises(ValueError, match="keyed by tracker"):
+        Dispatcher(
+            path,
+            queue,
+            trusted_logins={"maxharris1": "grok-bot"},
+            review_actions=FakeReviewActions(),
+            grok_delivery=FakeGrokDelivery(),
+        )
+
+
 def test_dispatcher_refuses_separate_state_and_queue_databases(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +458,44 @@ def test_t1_reads_kind_go_and_queues_the_builder(
     assert job.request.timeout_seconds == 90 * 60
 
 
+def test_t1_job_detail_contains_tracker_pr_and_review_context(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    snapshot = replace(
+        ticket(
+            comment("go-1", GO.format(state="building"), author="grok-login"),
+            risk="high",
+        ),
+        ticket_url="https://linear.test/AUT-42",
+        git_branch_name="max/aut-42",
+        pr_number="123",
+        brief="https://linear.test/AUT-42#brief",
+    )
+
+    dispatcher.process(snapshot)
+
+    job = queue.claim("claude")
+    assert job is not None
+    detail = json.loads(job.request.detail or "{}")
+    assert detail == {
+        "action": "build",
+        "base_branch": "main",
+        "brief": "https://linear.test/AUT-42#brief",
+        "gitBranchName": "max/aut-42",
+        "head": None,
+        "linear_url": "https://linear.test/AUT-42",
+        "post_to": "PR #123 issue comments (not reviews or inline comments)",
+        "pr_number": "123",
+        "project_bot": "grok-bot",
+        "repo_skill_paths": [],
+        "reviewer_harness": "codex",
+        "risk": "high",
+        "round": None,
+        "verify_skill": "none",
+    }
+
+
 def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     dispatcher.process(
@@ -452,6 +509,180 @@ def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     )
 
     assert queue.claim("claude") is None
+    assert queue.claim("grok") is None
+
+
+def test_one_github_login_may_speak_only_for_its_declared_marker(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            "github": {
+                "maxharris1": frozenset(
+                    {"grok-bot", "claude-bot", "codex-bot"}
+                )
+            },
+            "linear": {"Max Harris": frozenset({"grok-bot"})},
+        },
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    dispatcher.process(
+        ticket(comment("go-1", GO.format(state="building"), author="maxharris1"))
+    )
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    head = "a" * 40
+    dispatcher.process(
+        ticket(
+            comment(
+                "ready-1",
+                READY.format(head=head),
+                author="maxharris1",
+            ),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    assert queue.claim("codex") is not None
+
+    forged = READY.format(head=head).replace(
+        "from=claude-bot", "from=cursor-bot"
+    )
+    dispatcher.process(
+        ticket(
+            comment("ready-2", forged, author="maxharris1"),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    rejected = queue.claim("grok")
+    assert rejected is not None
+    assert rejected.request.action == "rejected"
+
+
+def test_real_orch_trust_routes_linear_go_and_github_pr_handoffs(
+    tmp_path: Path,
+) -> None:
+    source = Path(__file__).parents[1] / "orch.yml"
+    configured = tmp_path / "orch.yml"
+    configured.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "REPLACE_WITH_LINEAR_PROJECT_ID",
+            "test-linear-project-id",
+        ),
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(configured)
+    assert findings == []
+    assert config is not None
+    aut0 = next(project for project in config.projects if project.repo == "aut0-code/aut0")
+    assert aut0.linear_ready_for_review is True
+    trusted = {
+        "github": dict(config.trusted_logins),
+        "linear": {"linear:user-1": frozenset({"grok-bot"})},
+    }
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    actions = FakeReviewActions()
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=trusted,
+        review_actions={"aut0-code/aut0": actions},
+        grok_delivery=FakeGrokDelivery(),
+    )
+    factory_config = factory(tickets="linear", ship="handoff")
+    base = replace(
+        ticket(
+            factory_config=factory_config,
+            repo="aut0-code/aut0",
+            ticket_id="AUT-42",
+        ),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    go = comment(
+        "linear-go",
+        GO.format(state="building"),
+        author="linear:user-1",
+        created_at=1,
+    )
+    dispatcher.process(replace(base, comments=(go,)))
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready")
+    head = "a" * 40
+    ready = comment(
+        "ready",
+        READY.format(head=head),
+        author="maxharris1",
+        created_at=2,
+    )
+    dispatcher.process(
+        replace(
+            base,
+            comments=(go, ready),
+            current_head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    review = queue.claim("codex")
+    assert review is not None
+    queue.finish(review.id, owner="codex", handoff_comment_id="approve")
+    approve = comment(
+        "approve",
+        VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high"),
+        author="maxharris1",
+        created_at=3,
+    )
+    dispatcher.process(
+        replace(
+            base,
+            comments=(go, ready, approve),
+            current_head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+
+    assert actions.handoffs == [head]
+    assert actions.merges == []
+    assert actions.fast_forwards == []
+
+
+def test_linear_identity_trusted_only_for_grok_cannot_post_ready(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            "github": {"maxharris1": {"claude-bot"}},
+            "linear": {"linear:user-1": {"grok-bot"}},
+        },
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    fields = {
+        "kind": "ready",
+        "from": "claude-bot",
+        "role": "builder",
+        "head": "a" * 40,
+    }
+    assert not dispatcher._trusted(
+        ticket(tickets="linear"),
+        comment("ready", READY.format(head="a" * 40), author="linear:user-1"),
+        fields,
+        "claude-bot",
+        role="builder",
+    )
 
 
 def test_plan_queues_build_once_for_the_same_builder(tmp_path: Path) -> None:
@@ -465,7 +696,13 @@ def test_plan_queues_build_once_for_the_same_builder(tmp_path: Path) -> None:
         url="https://tracker.example/plan-1",
         created_at=2,
     )
-    dispatcher.process(ticket(go))
+    tracked = replace(
+        ticket(),
+        ticket_url="https://linear.test/AUT-42",
+        pr_number="42",
+        grok_bot="offer-brief-project",
+    )
+    dispatcher.process(replace(tracked, comments=(go,)))
     plan_job = queue.claim("claude")
     assert plan_job is not None
     assert plan_job.request.action == "plan"
@@ -475,20 +712,65 @@ def test_plan_queues_build_once_for_the_same_builder(tmp_path: Path) -> None:
         handoff_comment_id=plan.id,
     )
 
-    dispatcher.process(ticket(go, plan))
-    dispatcher.process(ticket(go, plan))
+    dispatcher.process(replace(tracked, comments=(go, plan)))
+    dispatcher.process(replace(tracked, comments=(go, plan)))
 
     build = queue.claim("claude")
     assert build is not None
     assert build.request.action == "build"
     assert build.request.recipient == plan_job.request.recipient
-    assert build.request.detail == "https://tracker.example/plan-1"
+    detail = json.loads(build.request.detail or "{}")
+    assert detail["action"] == "build"
+    assert detail["instruction"] == "https://tracker.example/plan-1"
+    assert detail["linear_url"] == "https://linear.test/AUT-42"
+    assert detail["pr_number"] == "42"
+    assert detail["project_bot"] == "offer-brief-project"
     assert actions.states == ["planning", "plan-check", "building"]
     with queue.connect() as connection:
         count = connection.execute(
             "SELECT count(*) FROM jobs WHERE action = 'build'"
         ).fetchone()[0]
     assert count == 1
+
+
+def test_plan_started_build_failure_wakes_the_project_bot(
+    tmp_path: Path,
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    tracked = replace(
+        ticket(),
+        ticket_url="https://linear.test/AUT-42",
+        pr_number="42",
+        grok_bot="offer-brief-project",
+    )
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(replace(tracked, comments=(go,)))
+    plan_job = queue.claim("claude")
+    assert plan_job is not None
+    queue.finish(plan_job.id, owner="claude", handoff_comment_id=plan.id)
+    dispatcher.process(replace(tracked, comments=(go, plan)))
+
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+    retry = queue.claim("claude")
+    assert retry is not None
+    assert retry.request.attempt == 2
+    queue.finish(retry.id, owner="claude", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+
+    stuck = next(job for job in delivery.jobs if job.request.action == "stuck")
+    detail = json.loads(stuck.request.detail or "{}")
+    assert detail["project_bot"] == "offer-brief-project"
+    assert detail["detail"] == "build job failed twice"
 
 
 def test_plan_rejects_an_untrusted_builder(tmp_path: Path) -> None:
@@ -967,7 +1249,8 @@ def test_plan_gap_replans_once_then_marks_the_second_gap_stuck(
         author="claude-login",
         created_at=3,
     )
-    dispatcher.process(ticket(go, first_gap))
+    tracked = replace(ticket(), grok_bot="offer-brief-project")
+    dispatcher.process(replace(tracked, comments=(go, first_gap)))
 
     with queue.connect() as connection:
         first_state = connection.execute(
@@ -988,9 +1271,15 @@ def test_plan_gap_replans_once_then_marks_the_second_gap_stuck(
         if job.request.action == "plan"
         and job.request.source_comment_id == "plan-gap-1"
     )
-    assert replan.request.detail == "round=2/2; previous plan comment:plan-gap-1"
+    replan_detail = json.loads(replan.request.detail or "{}")
+    assert replan_detail["action"] == "plan"
+    assert replan_detail["instruction"] == (
+        "round=2/2; previous plan comment:plan-gap-1"
+    )
 
-    dispatcher.process(ticket(go, first_gap, second_gap))
+    dispatcher.process(
+        replace(tracked, comments=(go, first_gap, second_gap))
+    )
 
     with queue.connect() as connection:
         second_state = connection.execute(
@@ -1011,7 +1300,9 @@ def test_plan_gap_replans_once_then_marks_the_second_gap_stuck(
     wake = queue.claim("grok")
     assert wake is not None
     assert wake.request.action == "stuck"
-    assert "plan has gaps a second time" in (wake.request.detail or "")
+    wake_detail = json.loads(wake.request.detail or "{}")
+    assert wake_detail["project_bot"] == "offer-brief-project"
+    assert "plan has gaps a second time" in wake_detail["detail"]
 
 
 @pytest.mark.parametrize("workflow_state", ["planning", "plan-check"])
@@ -1928,7 +2219,7 @@ def test_t2_red_increments_gate_count_and_third_in_a_row_is_stuck(
             fix = queue.claim("claude")
             assert fix is not None
             assert fix.request.action == "fix"
-            assert fix.request.detail == f"log-{number}"
+            assert json.loads(fix.request.detail or "{}")["instruction"] == f"log-{number}"
         else:
             assert dispatcher.is_stuck(snapshot)
 
@@ -2225,6 +2516,67 @@ def test_t3_counts_rounds_using_ticket_risk_and_factory_cap(
     assert wake is not None
     assert (wake.request.action, wake.request.head) == ("capped", head)
     assert queue.claim("grok") is None
+
+
+def test_stop_wakes_carry_the_configured_project_bot(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    tracked = replace(ticket(), grok_bot="offer-brief-project")
+    capped = comment("capped", "not parsed", author="codex-login")
+    failed = comment("failed", "not parsed", author="codex-login")
+
+    dispatcher._wake_capped(tracked, capped)
+    dispatcher._wake_ship_failed(tracked, failed, "handoff failed")
+
+    wakes = [queue.claim("grok"), queue.claim("grok")]
+    assert all(wake is not None for wake in wakes)
+    assert {wake.request.action for wake in wakes if wake is not None} == {
+        "capped",
+        "ship-failed",
+    }
+    for wake in wakes:
+        assert wake is not None
+        detail = json.loads(str(wake.request.detail))
+        assert detail["project_bot"] == "offer-brief-project"
+
+
+def test_every_grok_enqueue_for_project_bot_ticket_has_routing_detail(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    tracked = replace(ticket(), grok_bot="offer-brief-project")
+    trusted = comment("trusted", "not parsed", author="codex-login")
+
+    dispatcher._wake_capped(tracked, trusted)
+    dispatcher._wake_ship_failed(tracked, trusted, "handoff failed")
+    dispatcher._wake_comment_problem(
+        tracked,
+        trusted,
+        "rejected",
+        "rejected-marker",
+    )
+    dispatcher._wake_done(tracked, trusted, "handed-off")
+    invalid_go = comment(
+        "invalid-go",
+        (
+            "<!-- orch:v1 kind=go from=grok-bot role=orchestrator -->\n"
+            "Go.\n"
+        ),
+        author="grok-login",
+    )
+    dispatcher.process(replace(tracked, comments=(invalid_go,)))
+
+    with queue.connect() as connection:
+        details = [
+            str(row["detail"])
+            for row in connection.execute(
+                "SELECT detail FROM jobs WHERE recipient = 'grok'"
+            )
+        ]
+    assert details
+    assert all(
+        json.loads(detail)["project_bot"] == "offer-brief-project"
+        for detail in details
+    )
 
 
 def test_t3_rejects_untrusted_reviewer_and_stale_head(tmp_path: Path) -> None:
@@ -2871,6 +3223,12 @@ def test_t4_handoff_and_after_never_merge(
     if ship == "handoff":
         assert actions.handoffs == [head]
         assert actions.approvals == []
+        done = queue.claim("grok")
+        assert done is not None
+        assert done.request.action == "done"
+        detail = json.loads(done.request.detail or "{}")
+        assert detail["project_bot"] == "grok-bot"
+        assert detail["outcome"] == "handed-off"
     else:
         assert actions.handoffs == []
         assert actions.approvals == [(head, "tracy-site")]
@@ -3288,7 +3646,9 @@ def test_t5_answers_resume_same_step_without_incrementing_round(
     assert resumed is not None
     assert resumed.request.action == "fix"
     assert resumed.request.head == head
-    assert resumed.request.detail == "https://example.test/answers-1"
+    assert json.loads(resumed.request.detail or "{}")["instruction"] == (
+        "https://example.test/answers-1"
+    )
     with queue.connect() as connection:
         row = connection.execute(
             """
@@ -3320,7 +3680,13 @@ def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
         author="claude-login",
         created_at=2,
     )
-    dispatcher.process(ticket(forged_question, question, head=head))
+    tracked = replace(
+        ticket(head=head),
+        grok_bot="offer-brief-project",
+    )
+    dispatcher.process(
+        replace(tracked, comments=(forged_question, question))
+    )
     second_question = comment(
         "questions-2",
         QUESTIONS,
@@ -3328,12 +3694,20 @@ def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
         created_at=2.5,
     )
     dispatcher.process(
-        ticket(forged_question, question, second_question, head=head)
+        replace(
+            tracked,
+            comments=(forged_question, question, second_question),
+        )
     )
 
     wake = queue.claim("grok")
     assert wake is not None
+    assert wake.request.action == "clarify"
+    assert queue.claim("grok") is None
     assert wake.request.source_comment_id == "questions-1"
+    assert json.loads(wake.request.detail or "{}")["project_bot"] == (
+        "offer-brief-project"
+    )
     with queue.connect() as connection:
         wake_count = connection.execute(
             """
@@ -3360,7 +3734,10 @@ def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
         created_at=3,
     )
     dispatcher.process(
-        ticket(forged_question, question, forged_answer, head=head)
+        replace(
+            tracked,
+            comments=(forged_question, question, forged_answer),
+        )
     )
     assert queue.claim("codex") is None
     with queue.connect() as connection:

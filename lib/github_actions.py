@@ -41,7 +41,14 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
-from lib.dispatcher import CIResult, Comment, ReviewActions, ShipError, TrackedTicket
+from lib.dispatcher import (
+    CIResult,
+    Comment,
+    ReviewActions,
+    ShipError,
+    TicketRef,
+    TrackedTicket,
+)
 from lib.handoff import STATES
 from lib.schema import AUT0_REPO
 
@@ -236,8 +243,23 @@ class GitHubReviewActions:
         return _ref_sha(_object(self._json(endpoint)), branch)
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
-        del ticket, head
-        raise GitHubAdapterError("handoff is not built in the GitHub adapter")
+        head = _sha(head, "head")
+        pull = _object(
+            self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
+        )
+        current = _sha(_object(pull.get("head")).get("sha"), "pull request head")
+        if current != head:
+            raise HeadMismatchError(f"PR head is {current}, not {head}")
+        if pull.get("merged") is True:
+            raise GitHubAdapterError("cannot hand off a merged pull request")
+        if pull.get("state") != "open":
+            raise GitHubAdapterError("cannot hand off a pull request that is not open")
+        if pull.get("draft") is True:
+            self._call(
+                "-X",
+                "POST",
+                f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}/ready_for_review",
+            )
 
     def await_approver(
         self,
@@ -372,6 +394,72 @@ class GitHubReviewActions:
         return pages
 
 
+class LinearReviewActions(GitHubReviewActions):
+    """GitHub PR actions plus the one explicitly enabled Linear ship write."""
+
+    def __init__(
+        self,
+        *,
+        move_ready_for_review: bool,
+        linear_ready: Callable[[TrackedTicket], None],
+        fresh_ticket: Callable[[TicketRef], TrackedTicket | None] | None = None,
+        runner: Runner = run_gh,
+        timeout_seconds: float = TIMEOUT_SECONDS,
+        cleared_variables: Sequence[str] = (),
+        cache_ttl: str | None = None,
+    ):
+        super().__init__(
+            runner=runner,
+            timeout_seconds=timeout_seconds,
+            cleared_variables=cleared_variables,
+            cache_ttl=cache_ttl,
+        )
+        self.move_ready_for_review = move_ready_for_review
+        self.linear_ready = linear_ready
+        self.fresh_ticket = fresh_ticket
+
+    def set_state(self, ticket: TrackedTicket, state: str) -> None:
+        del ticket, state
+
+    def merge(
+        self,
+        ticket: TrackedTicket,
+        *,
+        squash: bool,
+        match_head_commit: str,
+    ) -> None:
+        del ticket, squash, match_head_commit
+        raise GitHubAdapterError("Linear tickets can only use handoff")
+
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        del ticket, branch, head
+        raise GitHubAdapterError("Linear tickets can only use handoff")
+
+    def handoff(self, ticket: TrackedTicket, head: str) -> None:
+        if self.fresh_ticket is not None:
+            fresh = self.fresh_ticket(
+                TicketRef(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    tracker="linear",
+                )
+            )
+            if fresh is None:
+                raise GitHubAdapterError("linked Linear ticket is unavailable")
+            if fresh.pr_number != ticket.pr_number:
+                raise GitHubAdapterError("linked pull request changed before handoff")
+            ticket = fresh
+        super().handoff(ticket, head)
+        if self.move_ready_for_review:
+            self.linear_ready(ticket)
+
+
 def _is_read(args: Sequence[str]) -> bool:
     if "-X" not in args:
         return True
@@ -410,11 +498,12 @@ def _number(value: str) -> str:
 
 
 def _pr_number(ticket: TrackedTicket) -> str:
-    if ticket.factory.tickets != "github":
-        raise GitHubAdapterError(
-            f"{ticket.repo}#{ticket.ticket_id} is a {ticket.factory.tickets} ticket"
-        )
-    return _number(ticket.ticket_id)
+    number = ticket.pr_number
+    if number is None and ticket.factory.tickets == "github":
+        number = ticket.ticket_id
+    if number is None:
+        raise GitHubAdapterError(f"{ticket.repo}#{ticket.ticket_id} has no linked PR")
+    return _number(number)
 
 
 def _sha(value: object, what: str) -> str:

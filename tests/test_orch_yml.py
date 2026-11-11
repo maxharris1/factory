@@ -31,18 +31,26 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
     assert config.grok is not None
     assert config.grok.webhook_url_env == "FACTORY_WEBHOOK_URL"
     assert config.grok.webhook_key_env == "FACTORY_WEBHOOK_KEY"
-    assert config.trusted_logins == {}
+    assert config.trusted_logins == {
+        "maxharris1": frozenset(
+            {"grok-bot", "claude-bot", "codex-bot", "cursor-bot"}
+        )
+    }
     assert config.trusted_linear_users == {}
     assert [project.repo for project in config.projects] == [
         "aut0-code/aut0",
         "maxharris1/Cleffy",
         "maxharris1/tracy-harris-coaching",
     ]
-    for project in config.projects:
+    assert config.projects[0].job_timeout == 150
+    assert resolve_job_timeout(config, "aut0-code/aut0") == 150
+    for project in config.projects[1:]:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
     assert config.projects[0].factory_ref == "dev"
     assert config.projects[0].linear_project_id == "test-linear-project-id"
+    assert config.projects[0].linear_ready_for_review is True
+    assert config.projects[0].grok_bot == "offer-brief-project"
 
 
 def test_placeholder_linear_project_id_is_rejected() -> None:
@@ -63,6 +71,7 @@ def test_minimal_example_has_no_extra_required_fields() -> None:
     assert config.job_timeout is None
     assert config.projects[0].repo == "owner/name"
     assert config.projects[0].job_timeout is None
+    assert config.projects[0].linear_ready_for_review is False
     assert resolve_job_timeout(config, "owner/name") == 90
 
 
@@ -152,9 +161,9 @@ def test_trust_maps_accept_github_app_login_and_prefix_linear_id(
         """
 poll_seconds: 60
 trusted_logins:
-  factory-app[bot]: claude-bot
+  factory-app[bot]: [claude-bot, codex-bot]
 trusted_linear_users:
-  8f7b-user-id: grok-bot
+  8f7b-user-id: [grok-bot]
 projects:
   - repo: acme/widgets
     factory_ref: main
@@ -167,9 +176,11 @@ projects:
 
     assert findings == []
     assert config is not None
-    assert config.trusted_logins == {"factory-app[bot]": "claude-bot"}
+    assert config.trusted_logins == {
+        "factory-app[bot]": frozenset({"claude-bot", "codex-bot"})
+    }
     assert config.trusted_linear_users == {
-        "linear:8f7b-user-id": "grok-bot"
+        "linear:8f7b-user-id": frozenset({"grok-bot"})
     }
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -24,6 +25,9 @@ GROK_WAKE_REASONS = (
     "stuck",
     "unparsed",
     "ship-failed",
+    "rejected",
+    "stale",
+    "done",
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
@@ -58,6 +62,14 @@ class TrackedTicket:
     ci: Mapping[str, CIResult]
     risk: str
     job_timeout_minutes: int = 90
+    ticket_url: str | None = None
+    git_branch_name: str | None = None
+    pr_number: str | None = None
+    brief: str | None = None
+    grok_bot: str = "grok-bot"
+    linear_issue_id: str | None = None
+    linear_ready_state_id: str | None = None
+    linear_ready_for_review: bool = False
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -203,8 +215,8 @@ class Dispatcher:
         state_path: Path,
         queue: SQLiteJobQueue,
         *,
-        trusted_logins: Mapping[str, str],
-        review_actions: ReviewActions,
+        trusted_logins: Mapping[str, object],
+        review_actions: ReviewActions | Mapping[str, ReviewActions],
         grok_delivery: GrokDelivery,
         hooks: Sequence[Hook] = (),
     ):
@@ -212,13 +224,15 @@ class Dispatcher:
             raise QueueError("dispatcher state and queue must use one database")
         if not trusted_logins:
             raise ValueError("trusted_logins must not be empty")
-        if review_actions is None:
+        if review_actions is None or (
+            isinstance(review_actions, Mapping) and not review_actions
+        ):
             raise ValueError("review_actions must be configured")
         if grok_delivery is None:
             raise ValueError("grok_delivery must be configured")
         self.state_path = state_path
         self.queue = queue
-        self.trusted_logins = dict(trusted_logins)
+        self.trusted_logins = _normalize_trusted_logins(trusted_logins)
         self.review_actions = review_actions
         self.grok_delivery = grok_delivery
         self.hooks = tuple(hooks)
@@ -314,6 +328,10 @@ class Dispatcher:
             if hooked is not None:
                 handled, outcome = hooked
                 if handled:
+                    if outcome.startswith("rejected-"):
+                        self._wake_comment_problem(
+                            ticket, comment, "rejected", outcome
+                        )
                     self._mark_handled(ticket, comment.id, outcome)
                 continue
             if fields is None:
@@ -373,6 +391,8 @@ class Dispatcher:
                 )
                 continue
             if handled:
+                if outcome.startswith("rejected-"):
+                    self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
 
     def reconcile_jobs(self) -> None:
@@ -459,9 +479,9 @@ class Dispatcher:
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
-        if reason in ("unparsed", "ship-failed"):
+        if reason in ("unparsed", "ship-failed", "rejected", "stale"):
             once_key = source_comment_id
-        elif reason in ("blocked", "capped"):
+        elif reason in ("blocked", "capped", "done"):
             once_key = head or "-"
         else:
             once_key = "-"
@@ -510,7 +530,9 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted(comment, fields, "grok-bot", role="orchestrator"):
+        if not self._trusted(
+            ticket, comment, fields, "grok-bot", role="orchestrator"
+        ):
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
@@ -529,7 +551,13 @@ class Dispatcher:
                     source_comment_id=comment.id,
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=generation,
-                    detail="kind=go must set state=planning or state=building",
+                    detail=self._job_detail(
+                        ticket,
+                        action="clarify",
+                        instruction=(
+                            "kind=go must set state=planning or state=building"
+                        ),
+                    ),
                 ),
                 dedupe_key=(
                     f"t1-clarify:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -546,6 +574,7 @@ class Dispatcher:
                 source_comment_id=comment.id,
                 timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
+                detail=self._job_detail(ticket, action=action),
             ),
             dedupe_key=(
                 f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
@@ -579,6 +608,7 @@ class Dispatcher:
             return True, "rejected-plan-without-plan-job"
         builder_harness, generation = plan_step
         if not self._trusted(
+            ticket,
             comment,
             fields,
             f"{builder_harness}-bot",
@@ -674,7 +704,11 @@ class Dispatcher:
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
-                        detail=_comment_link(comment),
+                        detail=self._job_detail(
+                            ticket,
+                            action="build",
+                            instruction=_comment_link(comment),
+                        ),
                     ),
                     dedupe_key=(
                         f"plan-build:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -695,7 +729,14 @@ class Dispatcher:
                         source_comment_id=comment.id,
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=generation,
-                        detail=f"round=2/2; previous plan {_comment_link(comment)}",
+                        detail=self._job_detail(
+                            ticket,
+                            action="plan",
+                            instruction=(
+                                "round=2/2; previous plan "
+                                f"{_comment_link(comment)}"
+                            ),
+                        ),
                     ),
                     dedupe_key=(
                         f"plan-gap:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -724,7 +765,13 @@ class Dispatcher:
                     connection,
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
-                    detail=f"plan has gaps a second time, {_comment_link(comment)}",
+                    detail=self._project_wake_detail(
+                        ticket,
+                        (
+                            "plan has gaps a second time, "
+                            f"{_comment_link(comment)}"
+                        ),
+                    ),
                 )
             connection.execute(
                 """
@@ -767,7 +814,7 @@ class Dispatcher:
         if builder_harness is None:
             return True, "rejected-ready-without-builder-job"
         expected = f"{builder_harness}-bot"
-        if not self._trusted(comment, fields, expected, role="builder"):
+        if not self._trusted(ticket, comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
         state, _review_round = self._review_context(ticket)
         if state in ("planning", "plan-check"):
@@ -798,7 +845,10 @@ class Dispatcher:
                 source_comment_id=comment.id,
                 timeout_seconds=timeout_seconds,
                 reason="ci-red-3",
-                detail=f"CI failed three times in a row; latest head {head}",
+                detail=self._project_wake_detail(
+                    ticket,
+                    f"CI failed three times in a row; latest head {head}",
+                ),
             )
             return True, "stuck-ci-red-3"
         self.queue.enqueue(
@@ -811,7 +861,12 @@ class Dispatcher:
                 timeout_seconds=timeout_seconds,
                 generation=generation,
                 head=head,
-                detail=result.log or f"CI failed on {head}",
+                detail=self._job_detail(
+                    ticket,
+                    action="fix",
+                    head=head,
+                    instruction=result.log or f"CI failed on {head}",
+                ),
             ),
             dedupe_key=(
                 f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:"
@@ -882,6 +937,9 @@ class Dispatcher:
                 or reported_round != round_number
             ):
                 connection.commit()
+                self._wake_comment_problem(
+                    ticket, comment, "stale", "stale-revise"
+                )
                 return True, "stale-revise"
             next_state = "capped" if round_number >= cap else "fixing"
             if next_state == "fixing":
@@ -896,7 +954,12 @@ class Dispatcher:
                         timeout_seconds=ticket.job_timeout_minutes * 60,
                         generation=int(state["generation"]),
                         head=ticket.current_head,
-                        detail=_comment_link(comment),
+                        detail=self._job_detail(
+                            ticket,
+                            action="fix",
+                            head=ticket.current_head,
+                            instruction=_comment_link(comment),
+                        ),
                     ),
                     dedupe_key=(
                         f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
@@ -946,7 +1009,10 @@ class Dispatcher:
             reason="capped",
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=f"review round cap reached, {_comment_link(comment)}",
+            detail=self._project_wake_detail(
+                ticket,
+                f"review round cap reached, {_comment_link(comment)}",
+            ),
             head=ticket.current_head,
         )
 
@@ -978,12 +1044,12 @@ class Dispatcher:
             int(round_field.split("/", 1)[0]) if round_field is not None else None
         )
         review_head = self._latest_review_head(ticket)
-        if (
-            state != "review"
-            or reported_round != review_round + 1
-            or review_head is None
-            or _matching_head(approved_head, review_head) is None
-        ):
+        if state != "review" or reported_round != review_round + 1:
+            self._wake_comment_problem(
+                ticket, comment, "stale", "stale-approve"
+            )
+            return True, "stale-approve"
+        if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
@@ -1000,11 +1066,12 @@ class Dispatcher:
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
-                approved_patch = self.review_actions.stable_patch_id(
+                actions = self._review_actions(ticket)
+                approved_patch = actions.stable_patch_id(
                     ticket,
                     approved_head,
                 )
-                current_patch = self.review_actions.stable_patch_id(
+                current_patch = actions.stable_patch_id(
                     ticket,
                     current_head,
                 )
@@ -1035,21 +1102,25 @@ class Dispatcher:
             )
         assert intent_status == "pending"
         if ship == "merge":
-            if self.review_actions.is_merged(ticket, current_head):
+            actions = self._review_actions(ticket)
+            if actions.is_merged(ticket, current_head):
                 self._complete_ship_intent(ticket, comment.id, "merged")
                 self._write_state_label(ticket, "merged")
+                self._wake_done(ticket, comment, "merged")
                 return True, "merge-confirmed"
             self._ship_head(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "merged")
             self._write_state_label(ticket, "merged")
+            self._wake_done(ticket, comment, "merged")
             return True, "merged"
         if ship == "handoff":
-            self.review_actions.handoff(ticket, current_head)
+            self._review_actions(ticket).handoff(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "handed-off")
             self._write_state_label(ticket, "handed-off")
+            self._wake_done(ticket, comment, "handed-off")
             return True, "handed-off"
         approver = ship.removeprefix("after:")
-        self.review_actions.await_approver(ticket, current_head, approver)
+        self._review_actions(ticket).await_approver(ticket, current_head, approver)
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
@@ -1060,13 +1131,13 @@ class Dispatcher:
             raise ShipError(f"ship head {head!r} is not a 40-character SHA")
         mode = ship_mode(ticket.factory.ship)
         if mode == "fast-forward":
-            self.review_actions.fast_forward(
+            self._review_actions(ticket).fast_forward(
                 ticket,
                 branch=ticket.factory.base_branch,
                 head=head,
             )
         elif mode == "squash":
-            self.review_actions.merge(
+            self._review_actions(ticket).merge(
                 ticket,
                 squash=True,
                 match_head_commit=head,
@@ -1080,7 +1151,7 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted_session(comment, fields):
+        if not self._trusted_session(ticket, comment, fields):
             return True, "rejected-questions-author"
         step = self._latest_step(ticket)
         if step is None:
@@ -1143,7 +1214,10 @@ class Dispatcher:
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     generation=generation,
                     head=head,
-                    detail=_comment_link(comment),
+                    detail=self._project_wake_detail(
+                        ticket,
+                        _comment_link(comment),
+                    ),
                 ),
                 dedupe_key=(
                     f"t5-wait:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
@@ -1159,7 +1233,9 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted(comment, fields, "grok-bot", role="orchestrator"):
+        if not self._trusted(
+            ticket, comment, fields, "grok-bot", role="orchestrator"
+        ):
             return True, "rejected-answers-author"
         with self._connect() as connection:
             paused = connection.execute(
@@ -1210,7 +1286,16 @@ class Dispatcher:
                     if paused["paused_head"] is not None
                     else None
                 ),
-                detail=_comment_link(comment),
+                detail=self._job_detail(
+                    ticket,
+                    action=action,
+                    head=(
+                        str(paused["paused_head"])
+                        if paused["paused_head"] is not None
+                        else None
+                    ),
+                    instruction=_comment_link(comment),
+                ),
             ),
             dedupe_key=(
                 f"t5:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -1239,6 +1324,7 @@ class Dispatcher:
         fields: Mapping[str, str],
     ) -> bool:
         return self._trusted(
+            ticket,
             comment,
             fields,
             f"{ticket.factory.reviewer_harness}-bot",
@@ -1247,11 +1333,16 @@ class Dispatcher:
 
     def _trusted_session(
         self,
+        ticket: TrackedTicket,
         comment: Comment,
         fields: Mapping[str, str],
     ) -> bool:
+        del ticket
         sender = fields.get("from")
-        return sender is not None and self.trusted_logins.get(comment.author) == sender
+        return (
+            sender is not None
+            and sender in self._trusted_bots(comment)
+        )
 
     def _latest_step(
         self,
@@ -1299,7 +1390,13 @@ class Dispatcher:
                 timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
                 head=head,
-                detail=detail,
+                detail=self._job_detail(
+                    ticket,
+                    action="review",
+                    head=head,
+                    round_number=review_round,
+                    instruction=detail,
+                ),
             ),
             dedupe_key=(
                 f"review:{_scope(ticket.repo, ticket.ticket_id)}:"
@@ -1388,7 +1485,7 @@ class Dispatcher:
             self._write_state_label(ticket, _ship_state(policy))
             return True, f"ship-already-completed-{policy}"
         if status == "pending":
-            if policy == "merge" and self.review_actions.is_merged(
+            if policy == "merge" and self._review_actions(ticket).is_merged(
                 ticket,
                 current_head,
             ):
@@ -1529,7 +1626,7 @@ class Dispatcher:
             reason="ship-failed",
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=detail,
+            detail=self._project_wake_detail(ticket, detail),
         )
 
     def _has_completed_ship_intent(
@@ -1565,7 +1662,9 @@ class Dispatcher:
                 continue
             if fields["kind"] != "verdict":
                 continue
-            if not self._trusted(item, fields, reviewer, role="reviewer"):
+            if not self._trusted(
+                ticket, item, fields, reviewer, role="reviewer"
+            ):
                 continue
             latest = (item, fields)
         return latest
@@ -1705,15 +1804,18 @@ class Dispatcher:
                     reason="ship-failed",
                     source_comment_id=source_comment_id,
                     timeout_seconds=ticket.job_timeout_minutes * 60,
-                    detail=(
-                        f"merged, but the merged state or label write failed "
-                        f"{failures} times: {type(exc).__name__}: {exc}"
+                    detail=self._project_wake_detail(
+                        ticket,
+                        (
+                            f"merged, but the merged state or label write failed "
+                            f"{failures} times: {type(exc).__name__}: {exc}"
+                        ),
                     ),
                 )
 
     def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
         try:
-            self.review_actions.set_state(ticket, state)
+            self._review_actions(ticket).set_state(ticket, state)
         except Exception as exc:
             raise RetryableStateError(state) from exc
 
@@ -1802,7 +1904,14 @@ class Dispatcher:
             source_comment_id=job.request.source_comment_id,
             timeout_seconds=job.request.timeout_seconds,
             reason="job-failed-2",
-            detail=f"{job.request.action} job failed twice",
+            detail=json.dumps(
+                {
+                    "project_bot": _detail_project_bot(job.request.detail),
+                    "detail": f"{job.request.action} job failed twice",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
         )
         self.queue.mark_failure_handled(job.id)
 
@@ -1867,6 +1976,7 @@ class Dispatcher:
                 if fields["kind"] not in ("brief", "go"):
                     continue
                 if not self._trusted(
+                    ticket,
                     item,
                     fields,
                     "grok-bot",
@@ -1955,16 +2065,142 @@ class Dispatcher:
 
     def _trusted(
         self,
+        ticket: TrackedTicket,
         comment: Comment,
         fields: Mapping[str, str],
         expected_bot: str,
         *,
         role: str,
     ) -> bool:
+        del ticket
         return (
             fields.get("from") == expected_bot
             and fields.get("role") == role
-            and self.trusted_logins.get(comment.author) == expected_bot
+            and expected_bot in self._trusted_bots(comment)
+        )
+
+    def _trusted_bots(self, comment: Comment) -> frozenset[str]:
+        tracker = "linear" if comment.author.startswith("linear:") else "github"
+        return self.trusted_logins.get(tracker, {}).get(
+            comment.author,
+            frozenset(),
+        )
+
+    def _review_actions(self, ticket: TrackedTicket) -> ReviewActions:
+        if isinstance(self.review_actions, Mapping):
+            try:
+                return self.review_actions[ticket.repo.lower()]
+            except KeyError as exc:
+                raise ShipError(
+                    f"no ReviewActions configured for {ticket.repo}"
+                ) from exc
+        return self.review_actions
+
+    def _job_detail(
+        self,
+        ticket: TrackedTicket,
+        *,
+        action: str,
+        head: str | None = None,
+        round_number: int | None = None,
+        instruction: str | None = None,
+    ) -> str:
+        cap = (
+            ticket.factory.rounds_low
+            if ticket.risk == "low"
+            else ticket.factory.rounds_high
+        )
+        context: dict[str, object] = {
+            "linear_url": ticket.ticket_url,
+            "gitBranchName": ticket.git_branch_name,
+            "base_branch": ticket.factory.base_branch,
+            "pr_number": ticket.pr_number,
+            "brief": ticket.brief or ticket.ticket_url,
+            "risk": ticket.risk,
+            "round": f"{round_number}/{cap}" if round_number is not None else None,
+            "reviewer_harness": ticket.factory.reviewer_harness,
+            "verify_skill": ticket.factory.verify,
+            "repo_skill_paths": [
+                f".claude/skills/{skill}/SKILL.md"
+                for skill in ticket.factory.skills
+            ],
+            "post_to": (
+                f"PR #{ticket.pr_number} issue comments (not reviews or inline comments)"
+                if ticket.pr_number is not None
+                else "the linked PR issue comments (not reviews or inline comments)"
+            ),
+            "action": action,
+            "head": head,
+            "project_bot": ticket.grok_bot,
+        }
+        if instruction is not None:
+            context["instruction"] = instruction
+        return json.dumps(context, separators=(",", ":"), sort_keys=True)
+
+    def _wake_comment_problem(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reason: str,
+        outcome: str,
+    ) -> None:
+        if not self._trusted_bots(comment):
+            return
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason=reason,
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=json.dumps(
+                {
+                    "project_bot": ticket.grok_bot,
+                    "outcome": outcome,
+                    "comment": _comment_link(comment),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            head=ticket.current_head,
+        )
+
+    def _project_wake_detail(
+        self,
+        ticket: TrackedTicket,
+        detail: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "project_bot": ticket.grok_bot,
+                "detail": detail,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _wake_done(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        outcome: str,
+    ) -> None:
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="done",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=json.dumps(
+                {
+                    "project_bot": ticket.grok_bot,
+                    "outcome": outcome,
+                    "pr_number": ticket.pr_number,
+                    "post_to": ticket.ticket_url,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            head=ticket.current_head,
         )
 
     def _is_handled(self, ticket: TrackedTicket, comment_id: str) -> bool:
@@ -2089,15 +2325,22 @@ class Dispatcher:
         if state is None or not bool(state["stuck"]):
             return
         wake_job_id = state["stuck_wake_job_id"]
+        previous_detail: str | None = None
         if wake_job_id is not None:
             wake = connection.execute(
-                "SELECT state FROM jobs WHERE id = ?",
+                "SELECT state, detail FROM jobs WHERE id = ?",
                 (wake_job_id,),
             ).fetchone()
             if wake is None or str(wake["state"]) != "failed":
                 return
+            if isinstance(wake["detail"], str):
+                previous_detail = str(wake["detail"])
         generation = int(state["generation"]) + 1
-        reason = detail or str(state["stuck_reason"] or "ticket is stuck")
+        reason = (
+            detail
+            or previous_detail
+            or str(state["stuck_reason"] or "ticket is stuck")
+        )
         queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -2441,7 +2684,7 @@ class ReviewShipper:
         elsewhere also merges the PR at that head, and a merge commit even
         makes head reachable, but the branch is then not the approved SHA.
         """
-        actions = self.dispatcher.review_actions
+        actions = self.dispatcher._review_actions(ticket)
         head = request.head
         branch = ticket.factory.base_branch
         try:
@@ -2530,6 +2773,25 @@ def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
 
 
+def _normalize_trusted_logins(
+    value: Mapping[str, object],
+) -> dict[str, dict[str, frozenset[str]]]:
+    normalized: dict[str, dict[str, frozenset[str]]] = {}
+    if not all(key in ("github", "linear") for key in value):
+        raise ValueError("trusted_logins must be keyed by tracker")
+    for tracker, entries in value.items():
+        if not isinstance(entries, Mapping):
+            raise ValueError("trusted_logins tracker entries must be mappings")
+        normalized[tracker] = {}
+        for login, bots in entries.items():
+            if not isinstance(login, str) or not isinstance(
+                bots, (set, frozenset, tuple, list)
+            ):
+                raise ValueError("trusted_logins entries must be bot sets")
+            normalized[tracker][login] = frozenset(str(bot) for bot in bots)
+    return normalized
+
+
 def _grok_logical_key(job: Job) -> str:
     request = job.request
     return (
@@ -2560,6 +2822,19 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
 
 def _comment_link(comment: Comment) -> str:
     return comment.url or f"comment:{comment.id}"
+
+
+def _detail_project_bot(detail: str | None) -> str | None:
+    if detail is None:
+        return None
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    project_bot = parsed.get("project_bot")
+    return project_bot if isinstance(project_bot, str) else None
 
 
 def _is_patch_id(value: str) -> bool:

@@ -4,10 +4,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
 
 from lib import cli
+
 ROOT = Path(__file__).resolve().parents[1]
 
 VALID = {
@@ -167,3 +168,66 @@ def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert {"jobs", "tracked_tickets", "handled_comments"} <= tables
+
+
+def test_doctor_runtime_requires_orch_db(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("ORCH_DB", raising=False)
+
+    assert cli.main(["doctor-runtime"]) == 1
+    assert "ORCH_DB is not set" in capsys.readouterr().err
+
+
+def test_doctor_runtime_accepts_existing_sqlite_db(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    database = tmp_path / "orch.db"
+    orch_config = tmp_path / "orch.yml"
+    orch_config.write_text(
+        (ROOT / "orch.yml").read_text(encoding="utf-8").replace(
+            "REPLACE_WITH_LINEAR_PROJECT_ID",
+            "test-linear-project-id",
+        )
+        + "\ntrusted_linear_users:\n  test-user-id: [grok-bot]\n",
+        encoding="utf-8",
+    )
+    assert cli.main(
+        [
+            "init-db",
+            "--db",
+            str(database),
+            "--orch",
+            str(orch_config),
+        ]
+    ) == 0
+    capsys.readouterr()
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(wrapper.parent))
+    monkeypatch.setenv("ORCH_DB", str(database))
+
+    assert cli.main(["doctor-runtime"]) == 0
+    assert capsys.readouterr().out == "ok\n"
+
+
+def test_doctor_runtime_rejects_database_without_runtime_tables(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    database = tmp_path / "orch.db"
+    sqlite3.connect(database).close()
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(wrapper.parent))
+    monkeypatch.setenv("ORCH_DB", str(database))
+
+    assert cli.main(["doctor-runtime"]) == 1
+    assert "database is missing runtime tables" in capsys.readouterr().err

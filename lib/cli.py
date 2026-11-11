@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import shutil
 import signal
 import sqlite3
 import sys
@@ -17,7 +18,6 @@ from types import FrameType
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
-from lib.github_actions import GitHubReviewActions
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -45,6 +45,7 @@ commands:
   check-config     validate orch.yml and factory.md
   install-skills   install the pinned pstack skills
   doctor           canary the pinned poteto-mode skill
+  doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
@@ -104,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_install_skills, argv[1:])
     if argv[0] == "doctor":
         return _call(_doctor, argv[1:])
+    if argv[0] == "doctor-runtime":
+        return _call(_doctor_runtime, argv[1:])
     if argv[0] == "eval-report":
         return _call(_eval_report, argv[1:])
     if argv[0] == "poll":
@@ -298,10 +301,12 @@ def _runtime(
         if create
         else open_queue(path)
     )
-    trusted = dict(config.trusted_logins)
-    trusted.update(config.trusted_linear_users)
-    if create and not trusted:
-        trusted["init-db"] = "init-db"
+    trusted: dict[str, dict[str, frozenset[str]]] = {
+        "github": dict(config.trusted_logins),
+        "linear": dict(config.trusted_linear_users),
+    }
+    if create and not any(trusted.values()):
+        trusted["github"]["init-db"] = frozenset({"init-db"})
     cleared = [config.grok.webhook_url_env, config.grok.webhook_key_env]
     if config.linear is not None:
         cleared.append(config.linear.api_key_env)
@@ -310,19 +315,17 @@ def _runtime(
         key_env=config.grok.webhook_key_env,
     )
     t8 = T8Hook()
+    source = LivePollSource(config)
     dispatcher = Dispatcher(
         path,
         queue,
         trusted_logins=trusted,
-        review_actions=GitHubReviewActions(cleared_variables=cleared),
+        review_actions=source.review_actions_by_repo(),
         grok_delivery=delivery,
         hooks=(T7Hook(), t8),
     )
-    source = LivePollSource(
-        config,
-        error_sink=dispatcher.record_poll_error,
-        terminal_sink=dispatcher.record_terminal,
-    )
+    source.error_sink = dispatcher.record_poll_error
+    source.terminal_sink = dispatcher.record_terminal
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
 
@@ -477,6 +480,51 @@ def _doctor(argv: list[str]) -> int:
     if code == 0 and not args.print_canary:
         print("ok")
     return code
+
+
+def _doctor_runtime(argv: list[str]) -> int:
+    parser = _Parser(prog="orch doctor-runtime", add_help=True)
+    parser.parse_args(argv)
+    errors: list[str] = []
+    try:
+        __import__("yaml")
+    except ImportError:
+        errors.append("PyYAML is not importable")
+    expected_orch = Path.home() / ".local/bin/orch"
+    orch = shutil.which("orch")
+    if orch is None:
+        errors.append("orch is not on PATH")
+    elif Path(orch).resolve() != expected_orch.resolve():
+        errors.append(f"orch on PATH is not {expected_orch}")
+    configured = os.environ.get(DB_ENV)
+    if not configured:
+        errors.append(f"{DB_ENV} is not set")
+    else:
+        database = Path(configured)
+        if not database.is_file():
+            errors.append(f"{DB_ENV} database does not exist")
+        else:
+            try:
+                with sqlite3.connect(database) as connection:
+                    connection.execute("SELECT 1").fetchone()
+                    tables = {
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        )
+                    }
+                    if not {"jobs", "handled_comments"} <= tables:
+                        errors.append(
+                            f"{DB_ENV} database is missing runtime tables"
+                        )
+            except sqlite3.Error:
+                errors.append(f"{DB_ENV} database is not valid SQLite")
+    for error in errors:
+        print(f"orch doctor-runtime: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print("ok")
+    return 0
 
 
 def _anchor(

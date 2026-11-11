@@ -96,7 +96,9 @@ class T8Hook:
         if not ticket.factory.ship.startswith("after:"):
             return True, f"rejected-{kind}-not-after-ship"
         approver = ticket.factory.ship[len("after:") :]
-        if not dispatcher._trusted(comment, fields, approver, role="approver"):
+        if not dispatcher._trusted(
+            ticket, comment, fields, approver, role="approver"
+        ):
             return True, f"rejected-{kind}-author"
         orphan = _shipping_claim(dispatcher, ticket, comment.id)
         if orphan is not None:
@@ -305,7 +307,7 @@ def _ship_failed(
         reason="ship-failed",
         source_comment_id=comment.id,
         timeout_seconds=ticket.job_timeout_minutes * 60,
-        detail=detail,
+        detail=dispatcher._project_wake_detail(ticket, detail),
     )
     return True, "ship-failed"
 
