@@ -76,7 +76,7 @@ REQUIRED_BY_KIND = {
     "questions": frozenset(),
     "answers": frozenset(),
     "go": frozenset(),
-    "plan": frozenset(),
+    "plan": frozenset({"ac", "round"}),
     "ready": frozenset({"head"}),
     "verdict": frozenset({"verdict"}),
     "ok": frozenset({"head"}),
@@ -130,8 +130,8 @@ def parse_header_line(line: str) -> dict[str, str]:
         _check_value(key, value)
     if kind != "verdict" and "verdict" in found:
         raise HandoffError("verdict is only valid on kind=verdict")
-    if kind != "verdict" and "ac" in found:
-        raise HandoffError("ac is only valid on kind=verdict")
+    if kind not in ("plan", "verdict") and "ac" in found:
+        raise HandoffError("ac is only valid on kind=plan or kind=verdict")
     for key in sorted(REQUIRED_BY_KIND[kind]):
         if key not in found:
             raise HandoffError(f"missing required key {key!r}")

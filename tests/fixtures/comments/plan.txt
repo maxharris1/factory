@@ -1,2 +1,2 @@
-<!-- orch:v1 kind=plan from=claude-bot role=builder head=3f9c2ab -->
+<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 head=3f9c2ab ac=met -->
 plan.md maps each acceptance criterion to code and a test.

@@ -17,11 +17,16 @@ from lib.dispatcher import (
     ship_mode,
 )
 from lib.factory_md import FactoryConfig
+from lib.handoff import parse_comment
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
 GO = (
     "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
     "state={state} -->\nGo.\n"
+)
+PLAN = (
+    "<!-- orch:v1 kind=plan from=claude-bot role=builder "
+    "round={round}/2 ac={ac} -->\nPlan.\n"
 )
 BRIEF = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nBrief.\n"
 READY = (
@@ -447,6 +452,613 @@ def test_t1_fails_closed_for_a_forged_go_comment(tmp_path: Path) -> None:
     )
 
     assert queue.claim("claude") is None
+
+
+def test_plan_queues_build_once_for_the_same_builder(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        url="https://tracker.example/plan-1",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    plan_job = queue.claim("claude")
+    assert plan_job is not None
+    assert plan_job.request.action == "plan"
+    queue.finish(
+        plan_job.id,
+        owner="claude",
+        handoff_comment_id=plan.id,
+    )
+
+    dispatcher.process(ticket(go, plan))
+    dispatcher.process(ticket(go, plan))
+
+    build = queue.claim("claude")
+    assert build is not None
+    assert build.request.action == "build"
+    assert build.request.recipient == plan_job.request.recipient
+    assert build.request.detail == "https://tracker.example/plan-1"
+    assert actions.states == ["planning", "plan-check", "building"]
+    with queue.connect() as connection:
+        count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_plan_rejects_an_untrusted_builder(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    dispatcher.process(ticket(go))
+
+    dispatcher.process(
+        ticket(
+            go,
+            comment(
+                "plan-1",
+                PLAN.format(round=1, ac="met"),
+                author="someone-else",
+                created_at=2,
+            ),
+        )
+    )
+
+    with queue.connect() as connection:
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE comment_id = 'plan-1'
+            """
+        ).fetchone()[0]
+    assert build_count == 0
+    assert outcome == "rejected-plan-author"
+
+
+@pytest.mark.parametrize(
+    ("body", "author"),
+    [
+        (
+            PLAN.format(round=1, ac="met").replace(
+                "role=builder",
+                "role=reviewer",
+            ),
+            "claude-login",
+        ),
+        (
+            PLAN.format(round=1, ac="met").replace(
+                "from=claude-bot",
+                "from=codex-bot",
+            ),
+            "codex-login",
+        ),
+    ],
+)
+def test_plan_requires_the_expected_builder_identity_and_role(
+    tmp_path: Path,
+    body: str,
+    author: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    dispatcher.process(ticket(go))
+
+    dispatcher.process(
+        ticket(
+            go,
+            comment("plan-1", body, author=author, created_at=2),
+        )
+    )
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'plan-1'"
+        ).fetchone()[0]
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert outcome == "rejected-plan-author"
+    assert build_count == 0
+
+
+@pytest.mark.parametrize("ac", [None, "partial"])
+def test_plan_handler_rejects_missing_or_invalid_ac(
+    tmp_path: Path,
+    ac: str | None,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    dispatcher.process(ticket(go))
+    fields = {
+        "kind": "plan",
+        "from": "claude-bot",
+        "role": "builder",
+        "round": "1/2",
+    }
+    if ac is not None:
+        fields["ac"] = ac
+
+    handled, outcome = dispatcher._t_plan(
+        ticket(go),
+        comment("plan-1", "unused", author="claude-login"),
+        fields,
+    )
+
+    assert handled
+    assert outcome == "rejected-plan-result"
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0] == 0
+
+
+def test_plan_rejects_wrong_rounds_before_and_after_a_gap(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    wrong_first = comment(
+        "plan-wrong-first",
+        PLAN.format(round=2, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=3,
+    )
+    wrong_second = comment(
+        "plan-wrong-second",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=4,
+    )
+
+    dispatcher.process(ticket(go, wrong_first, first_gap, wrong_second))
+
+    with queue.connect() as connection:
+        outcomes = dict(
+            connection.execute(
+                """
+                SELECT comment_id, outcome FROM handled_comments
+                WHERE comment_id LIKE 'plan-%'
+                """
+            ).fetchall()
+        )
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT workflow_state, plan_gap_count FROM ticket_state"
+        ).fetchone()
+    assert outcomes["plan-wrong-first"] == "stale-plan"
+    assert outcomes["plan-gap-1"] == "queued-plan-gap"
+    assert outcomes["plan-wrong-second"] == "stale-plan"
+    assert build_count == 0
+    assert tuple(state) == ("planning", 1)
+
+
+def test_plan_is_stale_after_the_ticket_leaves_planning(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    mapped = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    stale = comment(
+        "plan-2",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=3,
+    )
+
+    dispatcher.process(ticket(go, mapped, stale))
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'plan-2'"
+        ).fetchone()[0]
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert outcome == "stale-plan"
+    assert build_count == 1
+
+
+def test_plan_requires_a_plan_job_even_when_a_build_job_exists(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+    )
+
+    dispatcher.process(ticket(plan))
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'plan-1'"
+        ).fetchone()[0]
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert outcome == "rejected-plan-without-plan-job"
+    assert build_count == 1
+
+
+def test_duplicate_plan_is_a_no_op_after_restart(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go, plan))
+    with queue.connect() as connection:
+        connection.execute(
+            "DELETE FROM handled_comments WHERE comment_id = 'plan-1'"
+        )
+
+    restarted = Dispatcher(
+        queue.path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    restarted.process(ticket(go, plan))
+
+    with queue.connect() as connection:
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-1'"
+        ).fetchone()[0]
+    assert build_count == 1
+    assert event_count == 1
+
+
+def test_plan_event_replay_restores_state_without_duplicate_build(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    actions.state_failures.add(("owner/repo", "building"))
+
+    with pytest.raises(Exception, match="building"):
+        dispatcher.process(ticket(go, plan))
+
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-1'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM handled_comments WHERE comment_id = 'plan-1'"
+        ).fetchone()[0] == 0
+    actions.state_failures.clear()
+    before = len(actions.states)
+
+    dispatcher.process(ticket(go, plan))
+
+    assert actions.states[before:] == ["plan-check", "building"]
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE comment_id = 'plan-1'
+            """
+        ).fetchone()[0] == "queued-plan-build"
+
+
+def test_plan_gap_event_replay_restores_planning_without_duplicate_replan(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    actions.state_failures.add(("owner/repo", "planning"))
+
+    with pytest.raises(Exception, match="planning"):
+        dispatcher.process(ticket(go, gap))
+
+    actions.state_failures.clear()
+    before = len(actions.states)
+    dispatcher.process(ticket(go, gap))
+
+    assert actions.states[before:] == ["plan-check", "planning"]
+    with queue.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, plan_check_comment_id
+            FROM ticket_state
+            """
+        ).fetchone()
+        plan_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'plan'"
+        ).fetchone()[0]
+        event_count = connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-gap-1'"
+        ).fetchone()[0]
+    assert tuple(state) == ("planning", 1, None)
+    assert plan_count == 2
+    assert event_count == 1
+
+
+def test_plan_stuck_event_replay_restores_stuck_without_duplicate_wake(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    second_gap = comment(
+        "plan-gap-2",
+        PLAN.format(round=2, ac="unmet"),
+        author="claude-login",
+        created_at=3,
+    )
+    dispatcher.process(ticket(go, first_gap))
+    actions.state_failures.add(("owner/repo", "stuck"))
+
+    with pytest.raises(Exception, match="stuck"):
+        dispatcher.process(ticket(go, first_gap, second_gap))
+
+    actions.state_failures.clear()
+    before = len(actions.states)
+    handled, outcome = dispatcher._t_plan(
+        ticket(go, first_gap, second_gap),
+        second_gap,
+        parse_comment(second_gap.body).as_dict(),
+    )
+
+    assert handled
+    assert outcome == "stuck-plan-gaps"
+    assert actions.states[before:] == ["plan-check", "stuck"]
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state, plan_gap_count, stuck FROM ticket_state"
+        ).fetchone()
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+        wake_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'stuck'"
+        ).fetchone()[0]
+    assert tuple(state) == ("stuck", 2, 1)
+    assert build_count == 0
+    assert wake_count == 1
+
+
+def test_plan_check_resumes_same_comment_after_state_write_failure(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    plan = comment(
+        "plan-1",
+        PLAN.format(round=1, ac="met"),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    actions.state_failures.add(("owner/repo", "plan-check"))
+
+    with pytest.raises(Exception, match="plan-check"):
+        dispatcher.process(ticket(go, plan))
+
+    with queue.connect() as connection:
+        pending = connection.execute(
+            """
+            SELECT workflow_state, plan_check_comment_id
+            FROM ticket_state
+            """
+        ).fetchone()
+        assert tuple(pending) == ("plan-check", "plan-1")
+        assert connection.execute(
+            "SELECT count(*) FROM plan_events WHERE comment_id = 'plan-1'"
+        ).fetchone()[0] == 0
+    actions.state_failures.clear()
+
+    dispatcher.process(ticket(go, plan))
+
+    with queue.connect() as connection:
+        completed = connection.execute(
+            """
+            SELECT workflow_state, plan_check_comment_id
+            FROM ticket_state
+            """
+        ).fetchone()
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert tuple(completed) == ("building", None)
+    assert build_count == 1
+
+
+def test_second_plan_round_can_map_and_queue_build(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    mapped = comment(
+        "plan-2",
+        PLAN.format(round=2, ac="met"),
+        author="claude-login",
+        created_at=3,
+    )
+
+    dispatcher.process(ticket(go, first_gap, mapped))
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state, plan_gap_count, stuck FROM ticket_state"
+        ).fetchone()
+        build_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert tuple(state) == ("building", 1, 0)
+    assert build_count == 1
+    assert actions.states == [
+        "planning",
+        "plan-check",
+        "planning",
+        "plan-check",
+        "building",
+    ]
+
+
+def test_plan_gap_replans_once_then_marks_the_second_gap_stuck(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    first_gap = comment(
+        "plan-gap-1",
+        PLAN.format(round=1, ac="unmet"),
+        author="claude-login",
+        created_at=2,
+    )
+    second_gap = comment(
+        "plan-gap-2",
+        PLAN.format(round=2, ac="unmet"),
+        author="claude-login",
+        created_at=3,
+    )
+    dispatcher.process(ticket(go, first_gap))
+
+    with queue.connect() as connection:
+        first_state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, stuck
+            FROM ticket_state
+            """
+        ).fetchone()
+        plan_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'plan'"
+        ).fetchone()[0]
+    assert tuple(first_state) == ("planning", 1, 0)
+    assert plan_count == 2
+    assert actions.states == ["planning", "plan-check", "planning"]
+    replan = next(
+        job
+        for job in queue.outstanding()
+        if job.request.action == "plan"
+        and job.request.source_comment_id == "plan-gap-1"
+    )
+    assert replan.request.detail == "round=2/2; previous plan comment:plan-gap-1"
+
+    dispatcher.process(ticket(go, first_gap, second_gap))
+
+    with queue.connect() as connection:
+        second_state = connection.execute(
+            """
+            SELECT workflow_state, plan_gap_count, stuck
+            FROM ticket_state
+            """
+        ).fetchone()
+    assert tuple(second_state) == ("stuck", 2, 1)
+    assert actions.states == [
+        "planning",
+        "plan-check",
+        "planning",
+        "plan-check",
+        "stuck",
+    ]
+    assert dispatcher.is_stuck(ticket())
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "stuck"
+    assert "plan has gaps a second time" in (wake.request.detail or "")
+
+
+@pytest.mark.parametrize("workflow_state", ["planning", "plan-check"])
+def test_ready_cannot_skip_plan_check(
+    tmp_path: Path,
+    workflow_state: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    ready = comment(
+        "ready-1",
+        READY.format(head="a" * 40),
+        author="claude-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go))
+    if workflow_state == "plan-check":
+        with queue.connect() as connection:
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'plan-check'
+                WHERE repo = 'owner/repo' AND ticket_id = '42'
+                """
+            )
+
+    dispatcher.process(
+        ticket(
+            go,
+            ready,
+            head="a" * 40,
+            ci={"a" * 40: CIResult("success")},
+        )
+    )
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'ready-1'"
+        ).fetchone()[0]
+        review_count = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'review'"
+        ).fetchone()[0]
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state"
+        ).fetchone()[0]
+    assert outcome == "rejected-ready-in-planning"
+    assert review_count == 0
+    assert state == workflow_state
 
 
 @pytest.mark.parametrize("state", [None, "review"])
