@@ -12,7 +12,9 @@ Done means Max can hand Grok Bot a ticket on any project, answer only product qu
 
 1. **pstack in every harness.** One pinned pstack source, installed natively where Claude Code, Codex and Cursor load skills. pstack (poteto-mode plus the principle skills) decides *how* work gets done. The orchestrator adds no work rules of its own.
 2. **One handoff format.** Each piece of work is one ticket plus its PR. The brief, questions, answers, plan, verdicts and "done" are comments on the PR (and on the ticket when the tracker is GitHub), with one small machine-readable header (section 5). There is no other state store. The dispatcher's local job list can be rebuilt from the tracker at any time.
-   - **Default (GitHub issues):** the GitHub issue is the ticket. Labels show the current state.
+   - **Default (GitHub):** the long-term ticket is the GitHub issue. The
+     Phase 1 production poller discovers PRs only; issue-only discovery is a
+     deferred follow-up. Labels show the current state.
    - **Aut0, and any repo whose `factory.md` says `tickets: linear`:** Linear is the ticket source of truth. Every repo change goes through a PR. The orchestrator creates **no GitHub issues or labels** in that repo. State lives on the Linear ticket and in PR comments.
 3. **One Grok Bot skill, `orchestrate-project`.** Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and reviewer, and handles everything the dispatcher can't decide. It reads each project's `factory.md` for models, review policy, ship rule, ticket source, special skills and repo context (section 7).
 4. **One dispatcher script, `orch`, a few hundred lines.** It polls the configured trackers, applies the table in section 4, and wakes an agent only when judgment is needed. Bots wait on it with a blocking `orch wait <role>` shell call. That costs no tokens, and the shell exiting wakes the bot. It accepts no inbound webhooks or new credentials; outbound Grok delivery uses the existing routine webhook. It uses the existing `gh` login (and Linear, for Aut0). The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. It does not repeat the per-repo policy; that lives in each project's `factory.md`.
@@ -83,7 +85,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
-| T1 | Issue or Linear ticket gets a `kind=go` handoff comment (`orch:go`, Grok Bot, after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
+| T1 | GitHub PR or Linear ticket gets a `kind=go` handoff comment (`orch:go`, Grok Bot, after Questions) | Queue a `build` job (or `plan` if over 3 files) for the builder from `factory.md` | Builder's owning bot |
 | T2 | `ready head=<sha>` comment, then CI finishes on that SHA | Green: queue `review` for the reviewer. Red: queue `fix` with the failing log (gate count +1; 3rd in a row → `stuck`) | Reviewer's or builder's bot |
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |

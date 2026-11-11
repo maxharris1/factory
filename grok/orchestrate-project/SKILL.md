@@ -74,9 +74,11 @@ Header shape:
 <!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=low -->
 ```
 
-Where to post: on the GitHub issue when `tickets` is `github`. On the Linear ticket when `tickets` is `linear`. Never on a new GitHub issue.
+Where to post: on the GitHub pull request when `tickets` is `github`. Phase 1
+polling does not discover issue-only GitHub tickets. On the Linear ticket when
+`tickets` is `linear`. Never on a new GitHub issue.
 
-For `tickets: github`, apply `orch:state/intake` to the issue or PR when the
+For `tickets: github`, apply `orch:state/intake` to the pull request when the
 brief is posted. That initial label is how the dispatcher discovers the
 handoff. For `tickets: linear`, never apply a GitHub label.
 

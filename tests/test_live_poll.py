@@ -182,6 +182,23 @@ def linear_search_page(
     )
 
 
+def linear_transport_for(issue: dict):
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        if request["query"].startswith("query FactoryPoll"):
+            summary = {
+                key: issue.get(key)
+                for key in ("id", "identifier", "project")
+            }
+            return linear_search_page([summary])
+        if request["query"].startswith("query FactoryIssue"):
+            return HTTPResult(200, json.dumps({"data": {"issue": issue}}))
+        raise AssertionError(request)
+
+    return transport
+
+
 def test_github_candidate_parsing_uses_gh_without_network() -> None:
     comment = {
         "id": 7,
@@ -208,10 +225,18 @@ def test_github_candidate_parsing_uses_gh_without_network() -> None:
     assert tickets[0].current_head == gh.head
     assert tickets[0].risk == "low"
     assert tickets[0].ci[gh.head].status == "success"
-    assert all(
-        call[: len(source.gh) + 1] == [*source.gh, "api"]
-        for call in gh.calls
-    )
+    expected_prefix = [
+        "env",
+        "-u", "GH_TOKEN",
+        "-u", "GITHUB_TOKEN",
+        "-u", "GH_ENTERPRISE_TOKEN",
+        "-u", "GITHUB_ENTERPRISE_TOKEN",
+        "-u", "LINEAR_KEY",
+        "-u", "FACTORY_WEBHOOK_URL",
+        "-u", "FACTORY_WEBHOOK_KEY",
+        "gh", "api",
+    ]
+    assert all(call[: len(expected_prefix)] == expected_prefix for call in gh.calls)
     for name in (
         "LINEAR_KEY",
         "FACTORY_WEBHOOK_URL",
@@ -308,6 +333,66 @@ def test_project_error_is_recorded_in_dispatcher_database(tmp_path: Path) -> Non
     )
 
 
+def test_linear_failure_does_not_stop_tracked_github_or_reconcile(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 10)
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={"grok-login": "grok-bot"},
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+            VALUES ('acme/widgets', '12', 'github', 0)
+            """
+        )
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(
+                Project(
+                    "aut0/repo",
+                    factory_ref="main",
+                    linear_project_id="linear-project",
+                ),
+                Project("acme/widgets", factory_ref="main"),
+            ),
+            linear=LinearConfig("LINEAR_KEY"),
+        ),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=lambda url, headers, body, timeout: HTTPResult(
+            200,
+            json.dumps({"errors": [{"message": "unavailable"}]}),
+        ),
+        error_sink=dispatcher.record_poll_error,
+    )
+    dispatcher.process = Mock()
+    dispatcher.reconcile_jobs = Mock()
+
+    with pytest.raises(PollCycleError):
+        dispatcher.poll_once(source)
+
+    assert dispatcher.process.call_count == 1
+    assert dispatcher.process.call_args.args[0].ticket_id == "12"
+    dispatcher.reconcile_jobs.assert_called_once_with()
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id FROM poll_errors ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in errors] == [
+        ("linear", "-"),
+        ("linear", "-"),
+    ]
+
+
 def test_github_ticket_is_fetched_once_per_cycle() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
     gh.issues = [
@@ -331,7 +416,26 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
 
     assert len(candidates) == len(tracked) == 3
     assert len(gh.calls) == 2 + 4 * 3
-    assert all("--cache" in call and "60s" in call for call in gh.calls)
+    cached = [
+        call
+        for call in gh.calls
+        if not any(
+            marker in part
+            for call_part in call
+            for marker in ("/comments?", "/check-runs?", "/status")
+            for part in (call_part,)
+        )
+    ]
+    assert all("--cache" in call and "60s" in call for call in cached)
+    assert all(
+        "--cache" not in call
+        for call in gh.calls
+        if any(
+            marker in part
+            for part in call
+            for marker in ("/comments?", "/check-runs?", "/status")
+        )
+    )
 
 
 def test_already_merged_tracked_pr_is_marked_terminal_without_detail_reads() -> None:
@@ -370,6 +474,66 @@ def test_already_merged_tracked_pr_is_marked_terminal_without_detail_reads() -> 
     assert not any("/comments" in part for call in gh.calls for part in call)
 
 
+def test_merged_pr_with_pending_ship_work_is_returned() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+
+    def runner(argv, timeout):
+        endpoint = next(
+            part
+            for part in argv
+            if part.startswith(("repos/", "search/"))
+        )
+        if endpoint == "repos/acme/widgets/pulls/12":
+            gh.calls.append(list(argv))
+            return GhResult(
+                0,
+                json.dumps({"merged": True, "head": {"sha": gh.head}}),
+                "",
+            )
+        return gh(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner)
+
+    found = source.tracked_tickets(
+        (TicketRef("acme/widgets", "12", "github", allow_merged=True),)
+    )
+
+    assert len(found) == 1
+    assert found[0].ticket_id == "12"
+    assert any("/comments" in part for call in gh.calls for part in call)
+
+
+def test_pr_merged_between_discovery_and_fetch_is_not_an_error() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    gh.issues = [
+        {
+            "number": 12,
+            "pull_request": {},
+            "labels": [{"name": "orch:state/intake"}],
+        }
+    ]
+
+    def runner(argv, timeout):
+        endpoint = next(
+            part
+            for part in argv
+            if part.startswith(("repos/", "search/"))
+        )
+        if endpoint == "repos/acme/widgets/pulls/12":
+            return GhResult(
+                0,
+                json.dumps({"merged": True, "head": {"sha": gh.head}}),
+                "",
+            )
+        return gh(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner)
+    source.begin_cycle()
+
+    assert source.github_candidates("orch:state/") == ()
+    source.end_cycle()
+
+
 def test_github_rate_limit_enters_backoff() -> None:
     calls = 0
 
@@ -378,6 +542,50 @@ def test_github_rate_limit_enters_backoff() -> None:
         del argv, timeout
         calls += 1
         return GhResult(1, "", "rate limited (HTTP 429)")
+
+    source = LivePollSource(
+        config(),
+        gh_runner=runner,
+        clock=lambda: 100.0,
+    )
+
+    assert source.github_candidates("orch:state/") == ()
+    assert source.github_candidates("orch:state/") == ()
+    assert calls == 1
+
+
+def test_permission_403_does_not_back_off_unrelated_github_reads() -> None:
+    calls = 0
+
+    def runner(argv, timeout):
+        nonlocal calls
+        del argv, timeout
+        calls += 1
+        return GhResult(1, "", "gh: HTTP 403")
+
+    source = LivePollSource(
+        config(),
+        gh_runner=runner,
+        clock=lambda: 100.0,
+    )
+
+    assert source.github_candidates("orch:state/") == ()
+    assert source.github_candidates("orch:state/") == ()
+    assert calls == 2
+
+
+def test_rate_limit_403_backs_off_github_reads() -> None:
+    calls = 0
+
+    def runner(argv, timeout):
+        nonlocal calls
+        del argv, timeout
+        calls += 1
+        return GhResult(
+            1,
+            "HTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\n\r\n",
+            "gh: HTTP 403",
+        )
 
     source = LivePollSource(
         config(),
@@ -408,16 +616,57 @@ def test_factory_read_uses_etag_across_cycles() -> None:
                 "",
             )
         assert "If-None-Match: \"factory-v1\"" in call
-        return GhResult(0, "HTTP/2.0 304 Not Modified\n\n", "")
+        return GhResult(
+            1,
+            "HTTP/2.0 304 Not Modified\r\nDate: now\r\n\r\n",
+            "gh: HTTP 304\n",
+        )
 
     source = LivePollSource(config(), gh_runner=runner)
     source.begin_cycle()
     first = source._factory(source.config.projects[0])
     source.begin_cycle()
     second = source._factory(source.config.projects[0])
+    source.begin_cycle()
+    third = source._factory(source.config.projects[0])
 
-    assert first == second
-    assert len(calls) == 2
+    assert first == second == third
+    assert len(calls) == 3
+
+
+def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="after:approver"))
+    gh.comments = [
+        {
+            "id": 1,
+            "user": {"login": "grok-login"},
+            "body": "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building -->\n",
+            "created_at": "2026-11-11T12:00:00Z",
+        }
+    ]
+    source = LivePollSource(config(), gh_runner=gh)
+    ref = TicketRef("acme/widgets", "12", "github")
+    original = source.tracked_tickets((ref,))[0]
+    before = len(gh.calls)
+    gh.comments.append(
+        {
+            "id": 2,
+            "user": {"login": "reviewer"},
+            "body": "<!-- orch:v1 kind=verdict from=reviewer role=reviewer round=1 head="
+            + gh.head
+            + " verdict=REVISE risk=high -->\n",
+            "created_at": "2026-11-11T12:01:00Z",
+        }
+    )
+
+    fresh = source.fresh_ticket(ref)
+
+    assert fresh is not None
+    assert len(original.comments) == 1
+    assert len(fresh.comments) == 2
+    fresh_calls = gh.calls[before:]
+    assert fresh_calls
+    assert all("--cache" not in call for call in fresh_calls)
 
 
 def test_linear_candidate_parsing_uses_handoff_query() -> None:
@@ -427,45 +676,21 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
     def transport(url, headers, body, timeout):
         del url, timeout
         assert headers["Authorization"] == "secret-linear-key"
-        requests.append(json.loads(body))
+        request = json.loads(body)
+        requests.append(request)
+        if request["query"].startswith("query FactoryPoll"):
+            return linear_search_page(
+                [
+                    {
+                        "id": "issue-id",
+                        "identifier": "AUT-42",
+                        "project": {"id": "project-1"},
+                    }
+                ]
+            )
         return HTTPResult(
             200,
-            json.dumps(
-                {
-                    "data": {
-                        "searchIssues": {
-                            "nodes": [
-                                {
-                                    "id": "issue-id",
-                                    "identifier": "AUT-42",
-                                    "url": "https://linear.test/AUT-42",
-                                    "project": {"id": "project-1"},
-                                    "comments": {
-                                        "nodes": [
-                                            {
-                                                "id": "comment-id",
-                                                "body": "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building risk=high -->\n",
-                                                "createdAt": "2026-11-11T12:00:00Z",
-                                                "user": {"id": "user-1"},
-                                            }
-                                        ],
-                                        "pageInfo": {"hasNextPage": False},
-                                    },
-                                    "attachments": {
-                                        "nodes": [
-                                            {
-                                                "url": "https://github.com/acme/widgets/pull/12"
-                                            }
-                                        ],
-                                        "pageInfo": {"hasNextPage": False},
-                                    },
-                                }
-                            ],
-                            "pageInfo": {"hasNextPage": False, "endCursor": None},
-                        }
-                    }
-                }
-            ),
+            json.dumps({"data": {"issue": linear_issue()}}),
         )
 
     source = LivePollSource(
@@ -481,7 +706,7 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
     assert tickets[0].comments[0].author == "linear:user-1"
     assert tickets[0].current_head == gh.head
     assert tickets[0].ci[gh.head].status == "success"
-    assert [request["variables"] for request in requests] == [
+    assert [request["variables"] for request in requests[:2]] == [
         {
             "term": term,
             "first": 50,
@@ -490,6 +715,10 @@ def test_linear_candidate_parsing_uses_handoff_query() -> None:
         }
         for term in ("orch:v1 kind=brief", "orch:v1 kind=go")
     ]
+    assert requests[2]["variables"] == {"id": "issue-id"}
+    search_query = requests[0]["query"]
+    assert "comments(" not in search_query
+    assert "attachments(" not in search_query
 
 
 def test_linear_search_paginates() -> None:
@@ -522,14 +751,21 @@ def test_linear_search_paginates() -> None:
     ],
 )
 def test_linear_search_reports_http_and_graphql_errors(result: HTTPResult) -> None:
+    errors: list[tuple[str, str, str]] = []
     source = LivePollSource(
         config(linear=True),
         environ={"LINEAR_KEY": "key"},
         linear_transport=lambda url, headers, body, timeout: result,
+        error_sink=lambda repo, ticket, error: errors.append(
+            (repo, ticket, error)
+        ),
     )
 
-    with pytest.raises(PollSourceError):
-        source.linear_candidates(LINEAR_HANDOFF_QUERY)
+    source.begin_cycle()
+    assert source.linear_candidates(LINEAR_HANDOFF_QUERY) == ()
+    with pytest.raises(PollCycleError):
+        source.end_cycle()
+    assert len(errors) == 2
 
 
 def test_linear_null_project_is_skipped() -> None:
@@ -550,9 +786,7 @@ def test_linear_null_user_is_untrusted_and_skipped() -> None:
         config(linear=True),
         environ={"LINEAR_KEY": "key"},
         gh_runner=gh,
-        linear_transport=lambda url, headers, body, timeout: linear_search_page(
-            [linear_issue(user=None)]
-        ),
+        linear_transport=linear_transport_for(linear_issue(user=None)),
     )
 
     tickets = source.linear_candidates(LINEAR_HANDOFF_QUERY)
@@ -568,9 +802,7 @@ def test_linear_comment_overflow_is_recorded_and_skipped() -> None:
     source = LivePollSource(
         config(linear=True),
         environ={"LINEAR_KEY": "key"},
-        linear_transport=lambda url, headers, body, timeout: linear_search_page(
-            [issue]
-        ),
+        linear_transport=linear_transport_for(issue),
         error_sink=lambda repo, ticket, error: errors.append(
             (repo, ticket, error)
         ),
@@ -616,16 +848,21 @@ def test_tracked_linear_ticket_uses_direct_issue_lookup() -> None:
 
 
 def test_missing_linear_key_names_env_without_exposing_values(caplog) -> None:
+    errors: list[str] = []
     source = LivePollSource(
         config(linear=True),
         environ={},
         gh_runner=lambda argv, timeout: GhResult(1, "", ""),
+        error_sink=lambda repo, ticket, error: errors.append(error),
     )
 
-    with pytest.raises(PollSourceError, match="LINEAR_KEY") as raised:
-        source.linear_candidates(LINEAR_HANDOFF_QUERY)
+    source.begin_cycle()
+    assert source.linear_candidates(LINEAR_HANDOFF_QUERY) == ()
+    with pytest.raises(PollCycleError):
+        source.end_cycle()
 
-    assert "secret-linear-key" not in str(raised.value)
+    assert all("LINEAR_KEY" in error for error in errors)
+    assert "secret-linear-key" not in " ".join(errors)
     assert "secret-linear-key" not in caplog.text
 
 
@@ -634,18 +871,21 @@ def test_linear_transport_error_does_not_expose_key() -> None:
         del url, headers, body, timeout
         raise RuntimeError("secret-linear-key")
 
+    errors: list[str] = []
     source = LivePollSource(
         config(linear=True),
         environ={"LINEAR_KEY": "secret-linear-key"},
         gh_runner=lambda argv, timeout: GhResult(1, "", ""),
         linear_transport=transport,
+        error_sink=lambda repo, ticket, error: errors.append(error),
     )
 
-    with pytest.raises(PollSourceError) as raised:
-        source.linear_candidates(LINEAR_HANDOFF_QUERY)
+    source.begin_cycle()
+    assert source.linear_candidates(LINEAR_HANDOFF_QUERY) == ()
+    with pytest.raises(PollCycleError):
+        source.end_cycle()
 
-    assert "secret-linear-key" not in str(raised.value)
-    assert raised.value.__cause__ is None
+    assert "secret-linear-key" not in " ".join(errors)
 
 
 def test_webhook_delivery_uses_job_contract_and_does_not_log_key(caplog) -> None:

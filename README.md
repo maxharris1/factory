@@ -14,7 +14,7 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
 - [`lib/dispatcher.py`](lib/dispatcher.py) applies T1 through T6 (F1-05 is
   the T3 review round, T4 ship and T5 questions loop) to
-  tickets discovered through `orch:state/` GitHub labels or the Linear handoff
+  PRs discovered through `orch:state/` GitHub labels or Linear tickets found by the handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.
 - Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), t8))` with
@@ -99,7 +99,8 @@ bin/orch poll --db "$ORCH_DB"
 `orch poll` composes `PollLoop`, `Dispatcher`, `LivePollSource`, the T7/T8
 hooks, GitHub review actions, and Grok webhook delivery. `--db` falls back to
 `$ORCH_DB`; `--once` performs one complete cycle and exits. GitHub reads use
-the existing `gh` login with token environment variables removed. Linear
+the existing `gh` login with token environment variables removed. GitHub
+discovery is PR-only in Phase 1; a label on an issue is not enough. Linear
 projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
 
 Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
@@ -113,9 +114,10 @@ config contains placeholders, not production identities. `orch poll` refuses
 to start until Max fills them. Missing secrets fail by environment-variable
 name; values are never printed or included in exceptions.
 
-Linear issues are searched with comments included; brief and go are separate
-queries rather than relying on undocumented full-text `OR` behavior. A linked
-GitHub PR supplies the current head and CI. Aut0 can therefore reach review, but the
+Linear issues are searched by ID with comments included; each hit is then
+fetched directly so the search stays below Linear's complexity limit. Brief
+and go are separate queries rather than relying on undocumented full-text
+`OR` behavior. A linked GitHub PR supplies the current head and CI. Aut0 can therefore reach review, but the
 Ready-for-Review `ship: handoff` write remains unimplemented and fails closed
 with a Grok wake on approval.
 

@@ -38,11 +38,29 @@ def write_factory(directory: Path, data: dict) -> Path:
     return path
 
 
-def test_check_config_accepts_the_repo_from_another_directory(tmp_path: Path) -> None:
+def write_orch(directory: Path) -> Path:
+    path = directory / "orch.yml"
+    path.write_text(
+        """
+poll_seconds: 60
+projects:
+  - repo: owner/name
+    factory_ref: main
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+""".lstrip(),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_check_config_rejects_repo_placeholder_from_another_directory(
+    tmp_path: Path,
+) -> None:
     result = run(["check-config"], cwd=tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "ok"
-    assert result.stderr == ""
+    assert result.returncode == 1
+    assert "linear_project_id must be a project id" in result.stderr
 
 
 def test_check_config_accepts_the_minimal_orch_example() -> None:
@@ -94,7 +112,10 @@ def test_check_config_warns_on_an_unknown_model_and_exits_zero(tmp_path: Path) -
     data = copy.deepcopy(VALID)
     data["reviewer"]["model"] = "not-a-real-model"
     path = write_factory(tmp_path, data)
-    result = run(["check-config", "--factory", str(path)])
+    orch = write_orch(tmp_path)
+    result = run(
+        ["check-config", "--orch", str(orch), "--factory", str(path)]
+    )
     assert result.returncode == 0, result.stderr
     assert "warning: unknown model name 'not-a-real-model'" in result.stderr
     assert result.stdout.strip() == "ok"
@@ -129,8 +150,9 @@ def test_poll_lock_refuses_a_second_poller(tmp_path: Path) -> None:
 
 def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:
     database = tmp_path / "state" / "orch.db"
+    orch = write_orch(tmp_path)
 
-    result = run(["init-db", "--db", str(database)])
+    result = run(["init-db", "--db", str(database), "--orch", str(orch)])
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n"

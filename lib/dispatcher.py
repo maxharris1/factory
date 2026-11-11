@@ -73,6 +73,7 @@ class TicketRef:
     repo: str
     ticket_id: str
     tracker: str
+    allow_merged: bool = False
 
 
 class PollSource(Protocol):
@@ -84,6 +85,8 @@ class PollSource(Protocol):
         self,
         tickets: tuple[TicketRef, ...],
     ) -> tuple[TrackedTicket, ...]: ...
+
+    def fresh_ticket(self, ticket: TicketRef) -> TrackedTicket | None: ...
 
 
 class ReviewActions(Protocol):
@@ -229,23 +232,30 @@ class Dispatcher:
         if begin is not None:
             begin()
         try:
-            self._discover(
-                source.github_candidates(GITHUB_STATE_LABEL_PREFIX),
-                tracker="github",
-            )
-            self._discover(
-                source.linear_candidates(LINEAR_HANDOFF_QUERY),
-                tracker="linear",
-            )
-            for ticket in source.tracked_tickets(self._tracked_refs()):
-                try:
-                    self.process(ticket)
-                except Exception as exc:
-                    self._record_poll_error(ticket, type(exc).__name__)
-            self.reconcile_jobs()
-        finally:
-            if end is not None:
-                end()
+            github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
+        except Exception as exc:
+            self.record_poll_error("github", "-", type(exc).__name__)
+            github = ()
+        self._discover(github, tracker="github")
+        try:
+            linear = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+        except Exception as exc:
+            self.record_poll_error("linear", "-", type(exc).__name__)
+            linear = ()
+        self._discover(linear, tracker="linear")
+        try:
+            tracked = source.tracked_tickets(self._tracked_refs())
+        except Exception as exc:
+            self.record_poll_error("tracked", "-", type(exc).__name__)
+            tracked = ()
+        for ticket in tracked:
+            try:
+                self.process(ticket)
+            except Exception as exc:
+                self._record_poll_error(ticket, type(exc).__name__)
+        self.reconcile_jobs()
+        if end is not None:
+            end()
 
     def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
         with self._connect() as connection:
@@ -495,6 +505,10 @@ class Dispatcher:
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
+        workflow_state = self._workflow_state(ticket.repo, ticket.ticket_id)
+        if workflow_state == "capped" and action is not None:
+            action = "fix"
+            state = "fixing"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -531,6 +545,19 @@ class Dispatcher:
         )
         self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
+
+    def _workflow_state(self, repo: str, ticket_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT workflow_state FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        if row is None or row["workflow_state"] is None:
+            return None
+        return str(row["workflow_state"])
 
     def _t2(
         self,
@@ -1658,15 +1685,19 @@ class Dispatcher:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT tracked.repo, tracked.ticket_id, tracked.tracker
+                SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
+                       CASE
+                         WHEN state.workflow_state IN ('merged', 'handed-off')
+                         THEN 1
+                         ELSE 0
+                       END AS allow_merged
                 FROM tracked_tickets AS tracked
                 LEFT JOIN ticket_state AS state
                   ON state.repo = tracked.repo
                  AND state.ticket_id = tracked.ticket_id
                 WHERE state.workflow_state IS NULL
                    OR state.workflow_state NOT IN (
-                       'refused', 'merged', 'handed-off', 'done',
-                       'stuck', 'blocked', 'capped', 'abandoned'
+                       'merged', 'handed-off', 'done', 'abandoned'
                    )
                    OR (
                        state.workflow_state IN ('merged', 'handed-off')
@@ -1701,6 +1732,7 @@ class Dispatcher:
                 repo=str(row["repo"]),
                 ticket_id=str(row["ticket_id"]),
                 tracker=str(row["tracker"]),
+                allow_merged=bool(row["allow_merged"]),
             )
             for row in rows
         )
@@ -2211,11 +2243,16 @@ class ReviewShipper:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
         if tracker is None:
             raise ShipError(f"{request.repo}#{request.ticket_id} is not tracked")
+        ref = TicketRef(request.repo, request.ticket_id, tracker)
+        fresh_reader = getattr(self.source, "fresh_ticket", None)
+        if fresh_reader is not None:
+            fresh = fresh_reader(ref)
+            found = () if fresh is None else (fresh,)
+        else:
+            found = self.source.tracked_tickets((ref,))
         found = [
             item
-            for item in self.source.tracked_tickets(
-                (TicketRef(request.repo, request.ticket_id, tracker),)
-            )
+            for item in found
             if item.repo.lower() == request.repo.lower()
             and item.ticket_id == request.ticket_id
         ]

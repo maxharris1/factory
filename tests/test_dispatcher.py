@@ -1790,6 +1790,106 @@ def job_count(queue: SQLiteJobQueue, action: str) -> int:
         )
 
 
+@pytest.mark.parametrize(
+    ("state", "tracked"),
+    [
+        ("refused", True),
+        ("stuck", True),
+        ("blocked", True),
+        ("capped", True),
+        ("done", False),
+        ("abandoned", False),
+    ],
+)
+def test_stopped_tickets_remain_tracked_until_really_final(
+    tmp_path: Path,
+    state: str,
+    tracked: bool,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, ?)
+            """,
+            (state,),
+        )
+
+    refs = dispatcher._tracked_refs()
+
+    assert bool(refs) is tracked
+
+
+def test_capped_ticket_accepts_trusted_go_as_one_more_fix(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, 'capped')
+            """
+        )
+    restart = comment(
+        "restart-after-cap",
+        GO.format(state="building"),
+        author="grok-login",
+    )
+
+    dispatcher.process(ticket(restart))
+
+    fix = queue.claim("claude")
+    assert fix is not None
+    assert fix.request.action == "fix"
+    with queue.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT workflow_state FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()[0]
+    assert state == "fixing"
+
+
+def test_merged_ticket_with_unsettled_ship_work_requests_merged_snapshot(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, 'merged')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO external_ship_intents (
+                repo, ticket_id, source_comment_id, head, status,
+                error, settled, settle_failures
+            ) VALUES (
+                'owner/repo', '42', 'ok-1', ?, 'completed',
+                NULL, 0, 0
+            )
+            """,
+            ("a" * 40,),
+        )
+
+    refs = dispatcher._tracked_refs()
+
+    assert refs == (
+        TicketRef("owner/repo", "42", "github", allow_merged=True),
+    )
+
+
 def test_p10_t3_replays_a_failed_fixing_label_write(tmp_path: Path) -> None:
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)

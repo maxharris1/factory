@@ -10,8 +10,18 @@ from lib.orch_yml import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
-    config, findings = load_orch_yml(ROOT / "orch.yml")
+def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
+    tmp_path: Path,
+) -> None:
+    configured = tmp_path / "orch.yml"
+    configured.write_text(
+        (ROOT / "orch.yml").read_text(encoding="utf-8").replace(
+            "REPLACE_WITH_LINEAR_PROJECT_ID",
+            "test-linear-project-id",
+        ),
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(configured)
     assert findings == []
     assert config is not None
     assert config.poll_seconds == POLL_SECONDS == 60
@@ -32,7 +42,17 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
     assert config.projects[0].factory_ref == "dev"
-    assert config.projects[0].linear_project_id == "REPLACE_WITH_LINEAR_PROJECT_ID"
+    assert config.projects[0].linear_project_id == "test-linear-project-id"
+
+
+def test_placeholder_linear_project_id_is_rejected() -> None:
+    config, findings = load_orch_yml(ROOT / "orch.yml")
+
+    assert config is None
+    assert any(
+        "linear_project_id must be a project id" in finding.message
+        for finding in findings
+    )
 
 
 def test_minimal_example_has_no_extra_required_fields() -> None:
