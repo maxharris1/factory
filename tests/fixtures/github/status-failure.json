@@ -1,0 +1,21 @@
+{
+  "state": "failure",
+  "statuses": [
+    {
+      "url": "https://api.github.com/repos/owner/repo/statuses/1a954628a960aaef81d7b2d4521929579f3541e6",
+      "id": 41000000001,
+      "node_id": "SC_kwDOKfac0s8AAAAJjQ",
+      "state": "failure",
+      "description": "Deployment has failed",
+      "target_url": "https://vercel.com/owner/repo/deployments",
+      "context": "Vercel",
+      "created_at": "2026-11-10T19:56:00Z",
+      "updated_at": "2026-11-10T19:56:00Z"
+    }
+  ],
+  "sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+  "total_count": 1,
+  "repository": {"id": 880000001, "full_name": "owner/repo"},
+  "commit_url": "https://api.github.com/repos/owner/repo/commits/1a954628a960aaef81d7b2d4521929579f3541e6",
+  "url": "https://api.github.com/repos/owner/repo/commits/1a954628a960aaef81d7b2d4521929579f3541e6/status"
+}

@@ -1,0 +1,10 @@
+{
+  "ref": "refs/heads/main",
+  "node_id": "REF_kwDOKfac0rJyZWZzL2hlYWRzL21haW4",
+  "url": "https://api.github.com/repos/owner/repo/git/refs/heads/main",
+  "object": {
+    "sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+    "type": "commit",
+    "url": "https://api.github.com/repos/owner/repo/git/commits/1a954628a960aaef81d7b2d4521929579f3541e6"
+  }
+}

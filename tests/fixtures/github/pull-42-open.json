@@ -1,0 +1,35 @@
+{
+  "url": "https://api.github.com/repos/owner/repo/pulls/42",
+  "id": 2190000042,
+  "node_id": "PR_kwDOKfac0s6CiTKq",
+  "html_url": "https://github.com/owner/repo/pull/42",
+  "number": 42,
+  "state": "open",
+  "locked": false,
+  "title": "Preview copy changes",
+  "user": {"login": "claude-login", "id": 1001, "type": "User"},
+  "created_at": "2026-11-10T18:00:00Z",
+  "updated_at": "2026-11-10T20:00:00Z",
+  "closed_at": null,
+  "merged_at": null,
+  "merge_commit_sha": "d0941e68da8f38151ff86a61fc59f7c5cf9fcaa2",
+  "draft": false,
+  "head": {
+    "label": "owner:feature",
+    "ref": "feature",
+    "sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+    "user": {"login": "owner", "id": 1000, "type": "User"}
+  },
+  "base": {
+    "label": "owner:main",
+    "ref": "main",
+    "sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+    "user": {"login": "owner", "id": 1000, "type": "User"}
+  },
+  "merged": false,
+  "mergeable": true,
+  "mergeable_state": "clean",
+  "merged_by": null,
+  "comments": 3,
+  "commits": 1
+}
