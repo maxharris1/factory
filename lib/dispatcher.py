@@ -92,7 +92,12 @@ class ReviewActions(Protocol):
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
-        """True only when the PR was merged with exactly this head commit."""
+        """True only when the PR was merged with exactly this head commit.
+
+        Reads GitHub's PR state at call time, never a local clone. Squash
+        and merge-commit merges also count, so this never proves where the
+        base branch points.
+        """
         ...
 
     def merge(
@@ -102,6 +107,31 @@ class ReviewActions(Protocol):
         squash: bool,
         match_head_commit: str,
     ) -> None: ...
+
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        """Move branch to exactly head, adding no commit.
+
+        Must be a fast-forward-only update of GitHub's remote ref (for
+        example PATCH git/refs/heads/<branch> with force=false), never a
+        push from a local clone. Raises when head is not a fast-forward of
+        branch's current tip (branch moved, or history diverged). Never
+        merges, squashes or force-pushes instead.
+        """
+        ...
+
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        """The full SHA of GitHub's remote ref for branch, read at call time.
+
+        Never a local clone or a cached value: a ship counts only when this
+        equals the approved head.
+        """
+        ...
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None: ...
 
@@ -210,7 +240,24 @@ class Dispatcher:
         self.reconcile_jobs()
 
     def process(self, ticket: TrackedTicket) -> None:
-        comments = sorted(ticket.comments, key=lambda item: (item.created_at, item.id))
+        comments = sorted(ticket.comments, key=_comment_order)
+        try:
+            self._process_comments(ticket, comments)
+        except BaseException as error:
+            try:
+                self._settle_external_ships(ticket)
+            except Exception as settle_error:
+                error.add_note(
+                    f"settle also raised {type(settle_error).__name__}: {settle_error}"
+                )
+            raise
+        self._settle_external_ships(ticket)
+
+    def _process_comments(
+        self,
+        ticket: TrackedTicket,
+        comments: list[Comment],
+    ) -> None:
         for comment in comments:
             if self._is_handled(ticket, comment.id):
                 continue
@@ -274,7 +321,6 @@ class Dispatcher:
                 continue
             if handled:
                 self._mark_handled(ticket, comment.id, outcome)
-        self._settle_external_ships(ticket)
 
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
@@ -731,11 +777,7 @@ class Dispatcher:
                 self._complete_ship_intent(ticket, comment.id, "merged")
                 self._write_state_label(ticket, "merged")
                 return True, "merge-confirmed"
-            self.review_actions.merge(
-                ticket,
-                squash=True,
-                match_head_commit=current_head,
-            )
+            self._ship_head(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "merged")
             self._write_state_label(ticket, "merged")
             return True, "merged"
@@ -749,6 +791,26 @@ class Dispatcher:
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _ship_head(self, ticket: TrackedTicket, head: str) -> None:
+        """Ship exactly head in the repo's ship_mode, or raise. No fallback."""
+        if not _is_full_sha(head):
+            raise ShipError(f"ship head {head!r} is not a 40-character SHA")
+        mode = ship_mode(ticket.factory.ship)
+        if mode == "fast-forward":
+            self.review_actions.fast_forward(
+                ticket,
+                branch=ticket.factory.base_branch,
+                head=head,
+            )
+        elif mode == "squash":
+            self.review_actions.merge(
+                ticket,
+                squash=True,
+                match_head_commit=head,
+            )
+        else:
+            raise ShipError(f"unknown ship mode {mode!r}")
 
     def _t5_questions(
         self,
@@ -1234,7 +1296,7 @@ class Dispatcher:
     ) -> tuple[Comment, dict[str, str]] | None:
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         latest: tuple[Comment, dict[str, str]] | None = None
-        for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
+        for item in sorted(ticket.comments, key=_comment_order):
             try:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
@@ -1966,8 +2028,12 @@ class ReviewShipper:
     ticket is re-read from source, and in those fresh comments the latest
     trusted reviewer verdict must still be that APPROVE, before the ok.
     A verdict posted between that read and the merge is not seen; that
-    gap is accepted. Then ship squash-merges exactly that head, or confirms
-    it is already merged. Its own intent is keyed on the ok comment, so
+    gap is accepted. Then ship lands exactly that head in the repo's
+    ship_mode. An after: repo fast-forwards base_branch to it, raising if
+    that is not a fast-forward, and counts as shipped only when
+    base_branch's tip is exactly that head; a squash repo squash-merges it
+    or confirms it is already merged. Its own intent is keyed on the ok
+    comment, so
     one request never merges twice. Once the completed write for that
     intent has committed, ship no longer raises: a failed merged state or
     label write is retried by Dispatcher.process, and wakes Grok after
@@ -2007,10 +2073,7 @@ class ReviewShipper:
             (item for item in ticket.comments if item.id == request.source_comment_id),
             None,
         )
-        if ok is None or (latest[0].created_at, latest[0].id) >= (
-            ok.created_at,
-            ok.id,
-        ):
+        if ok is None or _comment_order(latest[0]) >= _comment_order(ok):
             raise ShipError(
                 f"APPROVE {request.approve_comment_id} does not precede "
                 f"ok {request.source_comment_id}"
@@ -2024,17 +2087,15 @@ class ReviewShipper:
             raise ShipError(f"CI on {head} is not green")
         status, fresh = dispatcher._prepare_external_ship(request)
         if status == "pending":
-            if dispatcher.review_actions.is_merged(ticket, head):
+            if ship_mode(ticket.factory.ship) == "fast-forward":
+                self._fast_forward(request, ticket, fresh)
+            elif dispatcher.review_actions.is_merged(ticket, head):
                 pass
             elif not fresh:
                 raise ShipError(f"ship of {head} has no recorded result")
             else:
                 try:
-                    dispatcher.review_actions.merge(
-                        ticket,
-                        squash=True,
-                        match_head_commit=head,
-                    )
+                    dispatcher._ship_head(ticket, head)
                 except Exception as exc:
                     dispatcher._finish_external_ship(
                         request,
@@ -2050,6 +2111,47 @@ class ReviewShipper:
         except Exception:
             # The completed write has committed; Dispatcher.process retries.
             pass
+
+    def _fast_forward(
+        self,
+        request: ShipRequest,
+        ticket: TrackedTicket,
+        fresh: bool,
+    ) -> None:
+        """Confirm only when base_branch's tip is exactly request.head.
+
+        is_merged(head) is not enough: a squash or a merge commit made
+        elsewhere also merges the PR at that head, and a merge commit even
+        makes head reachable, but the branch is then not the approved SHA.
+        """
+        actions = self.dispatcher.review_actions
+        head = request.head
+        branch = ticket.factory.base_branch
+        try:
+            tip = actions.branch_tip(ticket, branch)
+            if tip == head:
+                return
+            if not fresh:
+                raise ShipError(f"ship of {head} has no recorded result")
+            if actions.is_merged(ticket, head):
+                raise ShipError(
+                    f"{branch} is {tip}, not {head}; the PR was merged another way"
+                )
+            self.dispatcher._ship_head(ticket, head)
+            try:
+                tip = actions.branch_tip(ticket, branch)
+            except Exception as exc:
+                tip = f"unreadable ({type(exc).__name__}: {exc})"
+            if tip != head:
+                raise ShipError(f"{branch} is {tip}, not {head}, after fast-forward")
+        except Exception as exc:
+            if fresh:
+                self.dispatcher._finish_external_ship(
+                    request,
+                    "failed",
+                    type(exc).__name__,
+                )
+            raise
 
     def _ticket(self, request: ShipRequest) -> TrackedTicket:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
@@ -2110,6 +2212,18 @@ def _matching_head(reported: str, current: str | None) -> str | None:
     if current.startswith(reported) or reported.startswith(current):
         return current
     return None
+
+
+def ship_mode(policy: str) -> str:
+    """after:<approver> repos fast-forward; every other repo squash-merges."""
+    return "fast-forward" if policy.startswith("after:") else "squash"
+
+
+def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
+    """(created_at, id) with numeric ids compared as integers, so 9 < 10."""
+    if re.fullmatch(r"[0-9]+", comment.id):
+        return comment.created_at, 0, int(comment.id)
+    return comment.created_at, 1, comment.id
 
 
 def _comment_link(comment: Comment) -> str:
