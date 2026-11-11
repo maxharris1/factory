@@ -1849,6 +1849,7 @@ def test_ff_ship_head_refuses_a_sha_that_is_not_full_lowercase(
     assert actions.branches == {"main": BASE}
     assert actions.merges == []
 
+
 def test_fu1_tied_comment_ids_order_as_integers(tmp_path: Path) -> None:
     dispatcher, _queue = setup(tmp_path)
     revise_9 = say(
@@ -1877,3 +1878,40 @@ def test_fu1_ok_with_a_tied_higher_id_follows_the_approve(tmp_path: Path) -> Non
     assert outcomes(queue)["10"] == "shipped"
     assert [request.approve_comment_id for request in shipper.requests] == ["9"]
 
+
+class RaisingHook:
+    def initialize(self, dispatcher: Dispatcher) -> None:
+        del dispatcher
+
+    def handle(
+        self,
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: object,
+    ) -> tuple[bool, str] | None:
+        del dispatcher, ticket, comment, fields
+        raise RuntimeError("comment loop failed")
+
+
+def test_n1_settle_runs_when_the_comment_loop_raises(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, hooks=(RaisingHook(),), actions=actions)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO external_ship_intents
+                (repo, ticket_id, source_comment_id, head, status)
+            VALUES ('owner/repo', '42', 'ok-1', ?, 'completed')
+            """,
+            (HEAD_A,),
+        )
+
+    with pytest.raises(RuntimeError, match="comment loop failed"):
+        dispatcher.process(ticket(say("any-1", BRIEF, "grok-login", 0)))
+
+    assert actions.states == ["merged"]
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT settled FROM external_ship_intents"
+        ).fetchone()[0] == 1

@@ -211,6 +211,16 @@ class Dispatcher:
 
     def process(self, ticket: TrackedTicket) -> None:
         comments = sorted(ticket.comments, key=_comment_order)
+        try:
+            self._process_comments(ticket, comments)
+        finally:
+            self._settle_external_ships(ticket)
+
+    def _process_comments(
+        self,
+        ticket: TrackedTicket,
+        comments: list[Comment],
+    ) -> None:
         for comment in comments:
             if self._is_handled(ticket, comment.id):
                 continue
@@ -274,7 +284,6 @@ class Dispatcher:
                 continue
             if handled:
                 self._mark_handled(ticket, comment.id, outcome)
-        self._settle_external_ships(ticket)
 
     def reconcile_jobs(self) -> None:
         now = self.queue.now()
