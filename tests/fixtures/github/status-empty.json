@@ -1,0 +1,9 @@
+{
+  "state": "pending",
+  "statuses": [],
+  "sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+  "total_count": 0,
+  "repository": {"id": 880000001, "full_name": "owner/repo"},
+  "commit_url": "https://api.github.com/repos/owner/repo/commits/1a954628a960aaef81d7b2d4521929579f3541e6",
+  "url": "https://api.github.com/repos/owner/repo/commits/1a954628a960aaef81d7b2d4521929579f3541e6/status"
+}

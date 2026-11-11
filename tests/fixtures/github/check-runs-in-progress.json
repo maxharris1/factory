@@ -1,0 +1,19 @@
+{
+  "total_count": 1,
+  "check_runs": [
+    {
+      "id": 31000000004,
+      "head_sha": "1a954628a960aaef81d7b2d4521929579f3541e6",
+      "node_id": "CR_kwDOKfac0s8AAAAHOA",
+      "external_id": "",
+      "url": "https://api.github.com/repos/owner/repo/check-runs/31000000004",
+      "html_url": "https://github.com/owner/repo/runs/31000000004",
+      "status": "in_progress",
+      "conclusion": null,
+      "started_at": "2026-11-10T19:50:00Z",
+      "completed_at": null,
+      "name": "build",
+      "app": {"slug": "github-actions"}
+    }
+  ]
+}

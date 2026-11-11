@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://api.github.com/repos/owner/repo/issues/comments/8",
+    "html_url": "https://github.com/owner/repo/pull/42#issuecomment-8",
+    "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+    "id": 8,
+    "node_id": "IC_kwDOKfac0s5AAAAI",
+    "user": {"login": "grok-login", "id": 2001, "type": "User"},
+    "created_at": "2026-11-10T18:00:00Z",
+    "updated_at": "2026-11-10T18:00:00Z",
+    "author_association": "OWNER",
+    "body": "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nBrief.\n"
+  },
+  {
+    "url": "https://api.github.com/repos/owner/repo/issues/comments/10",
+    "html_url": "https://github.com/owner/repo/pull/42#issuecomment-10",
+    "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+    "id": 10,
+    "node_id": "IC_kwDOKfac0s5AAAAK",
+    "user": {"login": "codex-login", "id": 2002, "type": "User"},
+    "created_at": "2026-11-10T20:00:00Z",
+    "updated_at": "2026-11-10T20:00:00Z",
+    "author_association": "COLLABORATOR",
+    "body": "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1 head=1a954628a960aaef81d7b2d4521929579f3541e6 verdict=APPROVE -->\nVerdict.\n"
+  }
+]

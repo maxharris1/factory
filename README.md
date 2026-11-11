@@ -37,6 +37,41 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
   never merged by the factory.
   Hooks never see `kind=go` or `kind=ready`.
 
+## GitHub adapter
+
+[`lib/github_actions.py`](lib/github_actions.py) is the real `ReviewActions`.
+`review_actions_for(factory.tickets)` returns it for `tickets: github` and
+refuses anything else, the way `ship_mode` reads `ship:`. Unit tests still
+pass `FakeReviewActions` to `Dispatcher(review_actions=...)`.
+
+Every call is `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u
+GITHUB_ENTERPRISE_TOKEN gh api ...`, built as an argv list (no shell) and run
+by `run_gh`, the one subprocess seam. gh uses only the login stored on the
+device; those four token variables are cleared on every call. The adapter never
+reads, passes or logs a token. Reads go to GitHub's REST API at call time,
+with no local clone and no cache. A GitHub `ticket_id` is the PR number.
+
+| Method | GitHub call | Contract |
+|---|---|---|
+| `is_merged` | `GET pulls/<n>` | `head.sha` must be a full SHA, open or merged. True only when `merged` and `head.sha` is exactly the head |
+| `branch_tip` | `GET git/ref/heads/<branch>` | The full 40-char lowercase SHA of the remote ref, or raise |
+| `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
+| `merge` | `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError` |
+| `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
+| `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
+| `stable_patch_id`, `handoff` | none | Not built. They raise, so T4 queues a re-review and a handoff ship fails closed |
+
+SHAs must be 40 lowercase hex, and owner, repo, branch and PR number must
+match strict patterns before any call. A non-zero gh exit, malformed JSON or a
+timeout raises `GitHubAdapterError`, which is a `ShipError`. A ship then
+fails closed: `ship-failed` and one Grok wake.
+
+Device prerequisites: `gh` is installed and logged in as Max on the factory
+device (`gh auth status`). Max provisions that login; the factory never sets
+up or reads credentials.
+
 ## Queue interface
 
 [`lib/queue.py`](lib/queue.py) is the integration boundary for waiting bots and

@@ -1,0 +1,20 @@
+[
+  {
+    "id": 7100000001,
+    "node_id": "LA_kwDOKfac0s8AAAABpQYDAQ",
+    "url": "https://api.github.com/repos/owner/repo/labels/orch:state/review",
+    "name": "orch:state/review",
+    "color": "ededed",
+    "default": false,
+    "description": null
+  },
+  {
+    "id": 7100000009,
+    "node_id": "LA_kwDOKfac0s8AAAABpQYDCQ",
+    "url": "https://api.github.com/repos/owner/repo/labels/orch:risk/high",
+    "name": "orch:risk/high",
+    "color": "ededed",
+    "default": false,
+    "description": null
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://api.github.com/repos/owner/repo/issues/comments/7",
+    "html_url": "https://github.com/owner/repo/pull/42#issuecomment-7",
+    "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+    "id": 7,
+    "node_id": "IC_kwDOKfac0s5AAAAH",
+    "user": {"login": "grok-login", "id": 2001, "type": "User"},
+    "created_at": "2026-11-10T19:00:00Z",
+    "updated_at": "2026-11-10T19:00:00Z",
+    "author_association": "OWNER",
+    "body": "First."
+  },
+  {
+    "url": "https://api.github.com/repos/owner/repo/issues/comments/10",
+    "html_url": "https://github.com/owner/repo/pull/42#issuecomment-10",
+    "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+    "id": 10,
+    "node_id": "IC_kwDOKfac0s5AAAAK",
+    "user": {"login": "codex-login", "id": 2002, "type": "User"},
+    "created_at": "2026-11-10T20:00:00Z",
+    "updated_at": "2026-11-10T20:00:00Z",
+    "author_association": "COLLABORATOR",
+    "body": "Ten."
+  }
+]
