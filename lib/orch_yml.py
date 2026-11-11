@@ -23,6 +23,7 @@ DEFAULT_JOB_TIMEOUT_MINUTES = 90
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _TOP_KEYS = {
     "poll_seconds",
@@ -31,11 +32,13 @@ _TOP_KEYS = {
     "linear",
     "grok",
     "trusted_logins",
+    "trusted_linear_users",
 }
 _PROJECT_KEYS = {
     "repo",
     "job_timeout",
-    "linear_project",
+    "factory_ref",
+    "linear_project_id",
     "grok_bot",
     "linear_ready_for_review",
 }
@@ -45,7 +48,8 @@ _PROJECT_KEYS = {
 class Project:
     repo: str
     job_timeout: int | None = None
-    linear_project: str | None = None
+    factory_ref: str | None = None
+    linear_project_id: str | None = None
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
 
@@ -68,7 +72,10 @@ class OrchConfig:
     job_timeout: int | None = None
     linear: LinearConfig | None = None
     grok: GrokConfig | None = None
-    trusted_logins: Mapping[str, Mapping[str, frozenset[str]]] = field(
+    trusted_logins: Mapping[str, frozenset[str]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    trusted_linear_users: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
@@ -115,9 +122,10 @@ def _validate(data: dict) -> tuple[OrchConfig | None, list[Finding]]:
     linear = _linear(data, findings)
     grok = _grok(data, findings)
     trusted_logins = _trusted_logins(data, findings)
+    trusted_linear_users = _trusted_linear_users(data, findings)
     if (
         projects is not None
-        and any(project.linear_project is not None for project in projects)
+        and any(project.linear_project_id is not None for project in projects)
         and linear is None
         and "linear" not in data
     ):
@@ -137,6 +145,7 @@ def _validate(data: dict) -> tuple[OrchConfig | None, list[Finding]]:
             linear=linear,
             grok=grok,
             trusted_logins=MappingProxyType(trusted_logins),
+            trusted_linear_users=MappingProxyType(trusted_linear_users),
         ),
         findings,
     )
@@ -211,27 +220,41 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
         if "job_timeout" in item and timeout is None:
             ok = False
             continue
-        linear_project = item.get("linear_project")
-        if linear_project is not None and (
-            not isinstance(linear_project, str)
-            or not linear_project.strip()
-            or len(linear_project) > 200
+        factory_ref = item.get("factory_ref")
+        if factory_ref is not None and (
+            not isinstance(factory_ref, str)
+            or not factory_ref.strip()
+            or len(factory_ref) > 255
         ):
             findings.append(
                 Finding(
                     "error",
-                    f"projects[{index}].linear_project must be a project name or id",
+                    f"projects[{index}].factory_ref must be a branch or ref",
                 )
             )
             ok = False
             continue
-        if linear_project in seen_linear:
+        linear_project_id = item.get("linear_project_id")
+        if linear_project_id is not None and (
+            not isinstance(linear_project_id, str)
+            or not linear_project_id.strip()
+            or len(linear_project_id) > 200
+        ):
             findings.append(
-                Finding("error", f"duplicate Linear project {linear_project!r}")
+                Finding(
+                    "error",
+                    f"projects[{index}].linear_project_id must be a project id",
+                )
             )
             ok = False
-        if linear_project is not None:
-            seen_linear.add(linear_project)
+            continue
+        if linear_project_id in seen_linear:
+            findings.append(
+                Finding("error", f"duplicate Linear project {linear_project_id!r}")
+            )
+            ok = False
+        if linear_project_id is not None:
+            seen_linear.add(linear_project_id)
         grok_bot = item.get("grok_bot", "grok-bot")
         if not isinstance(grok_bot, str) or _TOKEN.fullmatch(grok_bot) is None:
             findings.append(
@@ -249,11 +272,11 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             )
             ok = False
             continue
-        if linear_ready and linear_project is None:
+        if linear_ready and linear_project_id is None:
             findings.append(
                 Finding(
                     "error",
-                    f"projects[{index}].linear_ready_for_review requires linear_project",
+                    f"projects[{index}].linear_ready_for_review requires linear_project_id",
                 )
             )
             ok = False
@@ -262,7 +285,8 @@ def _projects(data: dict, findings: list[Finding]) -> tuple[Project, ...] | None
             Project(
                 repo=repo,
                 job_timeout=timeout,
-                linear_project=linear_project,
+                factory_ref=factory_ref,
+                linear_project_id=linear_project_id,
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
             )
@@ -315,45 +339,71 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
 def _trusted_logins(
     data: dict,
     findings: list[Finding],
-) -> dict[str, Mapping[str, frozenset[str]]]:
+) -> dict[str, frozenset[str]]:
     value = data.get("trusted_logins")
     if value is None:
         return {}
     if not isinstance(value, dict) or not value:
         findings.append(Finding("error", "trusted_logins must be a non-empty mapping"))
         return {}
-    result: dict[str, Mapping[str, frozenset[str]]] = {}
-    for tracker, entries in value.items():
-        if tracker not in ("github", "linear") or not isinstance(entries, dict):
+    result: dict[str, frozenset[str]] = {}
+    for login, identities in value.items():
+        if (
+            not isinstance(login, str)
+            or _LOGIN.fullmatch(login) is None
+            or not isinstance(identities, list)
+            or not identities
+            or any(
+                not isinstance(identity, str)
+                or _TOKEN.fullmatch(identity) is None
+                for identity in identities
+            )
+        ):
             findings.append(
                 Finding(
                     "error",
-                    "trusted_logins must map github/linear to login mappings",
+                    "trusted_logins entries must map login to a non-empty bot list",
                 )
             )
             continue
-        tracker_result: dict[str, frozenset[str]] = {}
-        for login, identities in entries.items():
-            if (
-                not isinstance(login, str)
-                or not login
-                or not isinstance(identities, list)
-                or not identities
-                or any(
-                    not isinstance(identity, str)
-                    or _TOKEN.fullmatch(identity) is None
-                    for identity in identities
+        result[login] = frozenset(identities)
+    return result
+
+
+def _trusted_linear_users(
+    data: dict,
+    findings: list[Finding],
+) -> dict[str, frozenset[str]]:
+    value = data.get("trusted_linear_users")
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not value:
+        findings.append(
+            Finding("error", "trusted_linear_users must be a non-empty mapping")
+        )
+        return {}
+    result: dict[str, frozenset[str]] = {}
+    for user_id, identities in value.items():
+        if (
+            not isinstance(user_id, str)
+            or not user_id.strip()
+            or not isinstance(identities, list)
+            or not identities
+            or any(
+                not isinstance(identity, str)
+                or _TOKEN.fullmatch(identity) is None
+                for identity in identities
+            )
+        ):
+            findings.append(
+                Finding(
+                    "error",
+                    "trusted_linear_users entries must map stable user id "
+                    "to a non-empty bot list",
                 )
-            ):
-                findings.append(
-                    Finding(
-                        "error",
-                        "trusted_logins entries must map login to a non-empty bot list",
-                    )
-                )
-                continue
-            tracker_result[login] = frozenset(identities)
-        result[tracker] = MappingProxyType(tracker_result)
+            )
+            continue
+        result[f"linear:{user_id}"] = frozenset(identities)
     return result
 
 

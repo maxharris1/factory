@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 
 import yaml
+import pytest
 
 from lib import cli
-
 ROOT = Path(__file__).resolve().parents[1]
 
 VALID = {
@@ -105,6 +105,26 @@ def test_poll_requires_a_database_path() -> None:
     assert result.returncode == 1
     assert "pass --db or set ORCH_DB" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_poll_refuses_a_missing_database(tmp_path: Path) -> None:
+    database = tmp_path / "missing.db"
+
+    result = run(["poll", "--db", str(database), "--once"])
+
+    assert result.returncode == 1
+    assert "does not exist; run orch init-db first" in result.stderr
+    assert not database.exists()
+
+
+def test_poll_lock_refuses_a_second_poller(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    database.write_bytes(b"database")
+
+    with cli._poll_lock(database):
+        with pytest.raises(ValueError, match="another orch poll"):
+            with cli._poll_lock(database):
+                pass
 
 
 def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:

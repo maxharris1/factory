@@ -5,45 +5,78 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from lib.dispatcher import Comment, ReviewActions, TicketRef, TrackedTicket
+from lib.dispatcher import CIResult, Comment, ReviewActions, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, parse_factory_md
-from lib.github_actions import (
-    GH,
-    GitHubReviewActions,
-    LinearReviewActions,
-    Runner,
-    run_gh,
-)
+from lib.github_actions import GitHubReviewActions, LinearReviewActions, Runner, run_gh
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 TIMEOUT_SECONDS = 60.0
-LINEAR_QUERY = """
-query FactoryPoll($term: String!, $first: Int!, $after: String) {
-  searchIssues(term: $term, first: $first, after: $after) {
+LINEAR_SEARCH_QUERY = """
+query FactoryPoll(
+  $term: String!,
+  $first: Int!,
+  $after: String,
+  $includeComments: Boolean!
+) {
+  searchIssues(
+    term: $term,
+    first: $first,
+    after: $after,
+    includeComments: $includeComments
+  ) {
     nodes {
       id
       identifier
       url
       gitBranchName: branchName
-      project { id name }
+      project { id }
       team {
         states { nodes { id name } }
       }
-      comments {
-        nodes { id body createdAt user { name } }
+      comments(first: 250) {
+        nodes { id body createdAt user { id } }
+        pageInfo { hasNextPage }
+      }
+      attachments(first: 50) {
+        nodes { url }
+        pageInfo { hasNextPage }
       }
     }
     pageInfo { hasNextPage endCursor }
+  }
+}
+""".strip()
+LINEAR_ISSUE_QUERY = """
+query FactoryIssue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    url
+    gitBranchName: branchName
+    project { id }
+    team {
+      states { nodes { id name } }
+    }
+    comments(first: 250) {
+      nodes { id body createdAt user { id } }
+      pageInfo { hasNextPage }
+    }
+    attachments(first: 50) {
+      nodes { url }
+      pageInfo { hasNextPage }
+    }
   }
 }
 """.strip()
@@ -52,9 +85,19 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
   issueUpdate(id: $issue, input: {stateId: $state}) { success }
 }
 """.strip()
+BACKOFF_SECONDS = 300.0
+_HTTP_STATUS = re.compile(r"\(HTTP ([0-9]{3})\)")
+_PR_URL = re.compile(
+    r"^https://github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/"
+    r"(?P<number>[1-9][0-9]*)/?$"
+)
 
 
 class PollSourceError(RuntimeError):
+    pass
+
+
+class PollCycleError(PollSourceError):
     pass
 
 
@@ -65,6 +108,20 @@ class HTTPResult:
 
 
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
+ErrorSink = Callable[[str, str, str], None]
+TerminalSink = Callable[[str, str, str], None]
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = build_opener(_NoRedirect)
+
+
+class _TerminalTicket(RuntimeError):
+    pass
 
 
 def post_json(
@@ -75,7 +132,7 @@ def post_json(
 ) -> HTTPResult:
     try:
         request = Request(url, data=body, method="POST", headers=dict(headers))
-        with urlopen(request, timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return HTTPResult(
                 response.status,
                 response.read().decode("utf-8"),
@@ -97,24 +154,42 @@ class LivePollSource:
         gh_runner: Runner = run_gh,
         linear_transport: LinearTransport = post_json,
         timeout_seconds: float = TIMEOUT_SECONDS,
+        error_sink: ErrorSink | None = None,
+        terminal_sink: TerminalSink | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.config = config
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
         self.timeout_seconds = timeout_seconds
+        self.error_sink = error_sink
+        self.terminal_sink = terminal_sink
+        self.clock = clock
+        self._factory_cache: dict[str, FactoryConfig] = {}
+        self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
+        self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._backoff_until = 0.0
+        self._cycle_errors = 0
+        cleared = _secret_env_names(config)
         self.github = GitHubReviewActions(
             runner=gh_runner,
             timeout_seconds=timeout_seconds,
+            cleared_variables=cleared,
+            cache_ttl="60s",
         )
+        self.gh = self.github.gh
 
     def review_actions_by_repo(self) -> dict[str, ReviewActions]:
+        cleared = _secret_env_names(self.config)
         actions: dict[str, ReviewActions] = {}
         for project in self.config.projects:
-            if project.linear_project is None:
+            if project.linear_project_id is None:
                 action: ReviewActions = GitHubReviewActions(
                     runner=self.gh_runner,
                     timeout_seconds=self.timeout_seconds,
+                    cleared_variables=cleared,
+                    cache_ttl="60s",
                 )
             else:
                 action = LinearReviewActions(
@@ -122,52 +197,96 @@ class LivePollSource:
                     linear_ready=self._move_linear_ready,
                     runner=self.gh_runner,
                     timeout_seconds=self.timeout_seconds,
+                    cleared_variables=cleared,
+                    cache_ttl="60s",
                 )
             actions[project.repo.lower()] = action
         return actions
 
+    def begin_cycle(self) -> None:
+        self._factory_cache.clear()
+        self._ticket_cache.clear()
+        self._cycle_errors = 0
+
+    def end_cycle(self) -> None:
+        if self._cycle_errors:
+            raise PollCycleError(
+                f"poll cycle recorded {self._cycle_errors} source error(s)"
+            )
+
     def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
         tickets: list[TrackedTicket] = []
         for project in self.config.projects:
-            factory = self._factory(project)
+            if project.linear_project_id is not None:
+                continue
+            try:
+                factory = self._factory(project)
+            except Exception as exc:
+                self._record(project.repo, "-", exc)
+                continue
             if factory.tickets != "github":
                 continue
-            endpoint = f"repos/{project.repo}/issues?state=all&per_page=100"
-            for item in self._gh_pages(endpoint):
-                for raw in _array(item, "GitHub issue page"):
-                    issue = _object(raw, "GitHub issue")
-                    if "pull_request" not in issue:
-                        continue
-                    if not _has_label(issue.get("labels"), label_prefix):
-                        continue
-                    tickets.append(
-                        self._github_ticket(
-                            project,
-                            factory,
-                            str(_positive_int(issue.get("number"), "issue number")),
+            endpoint = f"repos/{project.repo}/issues?state=open&per_page=100"
+            try:
+                pages = self._gh_pages(endpoint)
+            except Exception as exc:
+                self._record(project.repo, "-", exc)
+                continue
+            for item in pages:
+                try:
+                    raw_items = _array(item, "GitHub issue page")
+                except Exception as exc:
+                    self._record(project.repo, "-", exc)
+                    continue
+                for raw in raw_items:
+                    try:
+                        issue = _object(raw, "GitHub issue")
+                        if "pull_request" not in issue:
+                            continue
+                        if not _has_label(issue.get("labels"), label_prefix):
+                            continue
+                        number = str(
+                            _positive_int(issue.get("number"), "issue number")
                         )
-                    )
+                        tickets.append(
+                            self._github_ticket(project, factory, number)
+                        )
+                    except Exception as exc:
+                        ticket_id = _ticket_hint(raw)
+                        self._record(project.repo, ticket_id, exc)
         return tuple(tickets)
 
     def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
         projects = {
-            project.linear_project: project
+            project.linear_project_id: project
             for project in self.config.projects
-            if project.linear_project is not None
+            if project.linear_project_id is not None
         }
         if not projects:
             return ()
         tickets: list[TrackedTicket] = []
-        for issue in self._linear_issues(query):
-            project_data = _object(issue.get("project"), "Linear issue project")
-            project = projects.get(project_data.get("id")) or projects.get(
-                project_data.get("name")
-            )
-            if project is None:
-                continue
-            ticket = self._linear_ticket(project, issue)
-            if ticket.factory.tickets == "linear":
-                tickets.append(ticket)
+        issues: dict[str, dict[str, Any]] = {}
+        for term in _linear_terms(query):
+            for issue in self._linear_issues(term):
+                issue_id = issue.get("id")
+                if isinstance(issue_id, str):
+                    issues[issue_id] = issue
+        for issue in issues.values():
+            ticket_id = _ticket_hint(issue)
+            project: Project | None = None
+            try:
+                project_value = issue.get("project")
+                if not isinstance(project_value, dict):
+                    continue
+                project = projects.get(project_value.get("id"))
+                if project is None:
+                    continue
+                ticket = self._linear_ticket(project, issue)
+                if ticket.factory.tickets == "linear":
+                    tickets.append(ticket)
+            except Exception as exc:
+                repo = project.repo if project is not None else "linear"
+                self._record(repo, ticket_id, exc)
         return tuple(tickets)
 
     def tracked_tickets(
@@ -180,40 +299,57 @@ class LivePollSource:
             project = projects.get(ref.repo.lower())
             if project is None:
                 continue
-            if ref.tracker == "linear":
-                matches = [
-                    issue
-                    for issue in self._linear_issues(ref.ticket_id)
-                    if issue.get("identifier") == ref.ticket_id
-                    and _matches_linear_project(issue, project)
-                ]
-                if len(matches) == 1:
-                    found.append(self._linear_ticket(project, matches[0]))
-                continue
-            if ref.tracker != "github":
-                continue
-            factory = self._factory(project)
-            found.append(
-                self._github_ticket(project, factory, ref.ticket_id)
-            )
+            try:
+                if ref.tracker == "linear":
+                    issue = self._linear_issue(ref.ticket_id)
+                    if issue is None:
+                        raise PollSourceError("Linear issue was not found")
+                    if not _matches_linear_project(issue, project):
+                        raise PollSourceError(
+                            "Linear issue is not in its configured project"
+                        )
+                    found.append(self._linear_ticket(project, issue))
+                    continue
+                if ref.tracker != "github":
+                    continue
+                factory = self._factory(project)
+                found.append(
+                    self._github_ticket(project, factory, ref.ticket_id)
+                )
+            except Exception as exc:
+                if isinstance(exc, _TerminalTicket):
+                    continue
+                self._record(ref.repo, ref.ticket_id, exc)
         return tuple(found)
 
     def _linear_issues(self, query: str) -> tuple[dict[str, Any], ...]:
         issues: list[dict[str, Any]] = []
         after: str | None = None
         while True:
-            document = self._linear_graphql(
-                LINEAR_QUERY,
-                {"term": query, "first": 50, "after": after},
+            document = self._linear_request(
+                {
+                    "query": LINEAR_SEARCH_QUERY,
+                    "variables": {
+                        "term": query,
+                        "first": 50,
+                        "after": after,
+                        "includeComments": True,
+                    },
+                }
             )
             connection = _object(
                 _object(document.get("data"), "Linear data").get("searchIssues"),
                 "Linear searchIssues",
             )
-            issues.extend(
-                _object(item, "Linear issue")
-                for item in _array(connection.get("nodes"), "Linear issue nodes")
-            )
+            for item in _array(connection.get("nodes"), "Linear issue nodes"):
+                if isinstance(item, dict):
+                    issues.append(item)
+                else:
+                    self._record(
+                        "linear",
+                        "-",
+                        PollSourceError("Linear issue is not an object"),
+                    )
             page = _object(connection.get("pageInfo"), "Linear pageInfo")
             if page.get("hasNextPage") is not True:
                 break
@@ -223,15 +359,20 @@ class LivePollSource:
             after = after_value
         return tuple(issues)
 
-    def _linear_graphql(
-        self,
-        query: str,
-        variables: Mapping[str, object],
-    ) -> dict[str, Any]:
-        payload = json.dumps(
-            {"query": query, "variables": variables},
-            separators=(",", ":"),
-        ).encode("utf-8")
+    def _linear_issue(self, identifier: str) -> dict[str, Any] | None:
+        document = self._linear_request(
+            {
+                "query": LINEAR_ISSUE_QUERY,
+                "variables": {"id": identifier},
+            }
+        )
+        value = _object(document.get("data"), "Linear data").get("issue")
+        if value is None:
+            return None
+        return _object(value, "Linear issue")
+
+    def _linear_request(self, document: Mapping[str, object]) -> dict[str, Any]:
+        payload = json.dumps(document, separators=(",", ":")).encode("utf-8")
         try:
             result = self.linear_transport(
                 LINEAR_ENDPOINT,
@@ -250,10 +391,10 @@ class LivePollSource:
             ) from None
         if result.status != 200:
             raise PollSourceError(f"Linear returned HTTP {result.status}")
-        document = _json_object(result.body, "Linear")
-        if document.get("errors"):
+        parsed = _json_object(result.body, "Linear")
+        if parsed.get("errors"):
             raise PollSourceError("Linear returned a GraphQL error")
-        return document
+        return parsed
 
     def _move_linear_ready(self, ticket: TrackedTicket) -> None:
         if (
@@ -262,12 +403,14 @@ class LivePollSource:
             or ticket.linear_ready_state_id is None
         ):
             raise PollSourceError("Linear Ready for Review metadata is unavailable")
-        document = self._linear_graphql(
-            LINEAR_READY_MUTATION,
+        document = self._linear_request(
             {
-                "issue": ticket.linear_issue_id,
-                "state": ticket.linear_ready_state_id,
-            },
+                "query": LINEAR_READY_MUTATION,
+                "variables": {
+                    "issue": ticket.linear_issue_id,
+                    "state": ticket.linear_ready_state_id,
+                },
+            }
         )
         updated = _object(
             _object(document.get("data"), "Linear data").get("issueUpdate"),
@@ -286,16 +429,21 @@ class LivePollSource:
         return key
 
     def _factory(self, project: Project) -> FactoryConfig:
-        repository = _json_object(
-            self._gh_call(f"repos/{project.repo}"),
-            "GitHub repository",
-        )
-        default_branch = repository.get("default_branch")
-        if not isinstance(default_branch, str) or not default_branch:
-            raise PollSourceError(f"{project.repo} has no default branch")
-        factory = self._factory_at(project.repo, default_branch)
-        if factory.base_branch != default_branch:
-            factory = self._factory_at(project.repo, factory.base_branch)
+        identity = project.repo.lower()
+        cached = self._factory_cache.get(identity)
+        if cached is not None:
+            return cached
+        if project.factory_ref is None:
+            raise PollSourceError(
+                f"{project.repo} has no projects[].factory_ref in orch.yml"
+            )
+        factory = self._factory_at(project.repo, project.factory_ref)
+        if factory.base_branch != project.factory_ref:
+            raise PollSourceError(
+                f"{project.repo} factory.md base_branch is {factory.base_branch}, "
+                f"not configured factory_ref {project.factory_ref}"
+            )
+        self._factory_cache[identity] = factory
         return factory
 
     def _factory_at(self, repo: str, branch: str) -> FactoryConfig:
@@ -330,15 +478,20 @@ class LivePollSource:
         factory: FactoryConfig,
         number: str,
     ) -> TrackedTicket:
-        pull = _json_object(
-            self._gh_call(f"repos/{project.repo}/pulls/{number}"),
-            "GitHub pull request",
-        )
+        cache_key = ("github", project.repo.lower(), number)
+        cached = self._ticket_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        pull = self._github_pull(project.repo, number)
+        if pull.get("merged") is True:
+            if self.terminal_sink is not None:
+                self.terminal_sink(project.repo, number, "merged")
+            raise _TerminalTicket()
         head = _object(pull.get("head"), "GitHub pull request head").get("sha")
         if not isinstance(head, str):
             raise PollSourceError(f"{project.repo}#{number} has no head")
         comments = self.github.list_comments(project.repo, number)
-        return TrackedTicket(
+        ticket = TrackedTicket(
             repo=project.repo,
             ticket_id=number,
             factory=factory,
@@ -355,6 +508,14 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
         )
+        self._ticket_cache[cache_key] = ticket
+        return ticket
+
+    def _github_pull(self, repo: str, number: str) -> dict[str, Any]:
+        return _json_object(
+            self._gh_call(f"repos/{repo}/pulls/{number}"),
+            "GitHub pull request",
+        )
 
     def _linear_ticket(
         self,
@@ -364,68 +525,116 @@ class LivePollSource:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
             raise PollSourceError("Linear issue has no identifier")
+        cache_key = ("linear", project.repo.lower(), identifier)
+        cached = self._ticket_cache.get(cache_key)
+        if cached is not None:
+            return cached
         comments_data = _object(issue.get("comments"), "Linear comments")
+        comments_page = _object(
+            comments_data.get("pageInfo"),
+            "Linear comments pageInfo",
+        )
+        if comments_page.get("hasNextPage") is True:
+            raise PollSourceError("Linear issue has more than 250 comments")
         linear_comments = tuple(
-            _linear_comment(item)
+            comment
             for item in _array(comments_data.get("nodes"), "Linear comment nodes")
+            if (comment := _linear_comment(item)) is not None
         )
-        branch = _optional_string(issue.get("gitBranchName"))
-        pr = self._pull_for_branch(project.repo, branch) if branch is not None else None
-        pr_number: str | None = None
-        current_head: str | None = _latest_head(linear_comments)
-        ci = {}
-        github_comments: tuple[Comment, ...] = ()
-        if pr is not None:
-            pr_number = str(_positive_int(pr.get("number"), "pull request number"))
-            head = _object(pr.get("head"), "GitHub pull request head").get("sha")
-            if not isinstance(head, str):
-                raise PollSourceError(f"{project.repo}#{pr_number} has no head")
-            current_head = head
+        comments = linear_comments
+        head = _latest_head(linear_comments)
+        ci: dict[str, CIResult] = {}
+        pr_number = self._linked_pr_number(project.repo, identifier, issue)
+        if pr_number is not None:
+            pull = self._github_pull(project.repo, pr_number)
+            pr_head = _object(
+                pull.get("head"),
+                "GitHub pull request head",
+            ).get("sha")
+            if not isinstance(pr_head, str):
+                raise PollSourceError(
+                    f"{project.repo}#{pr_number} has no head"
+                )
+            head = pr_head
+            ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
-            ci = {head: self.github.ci_status(project.repo, head)}
-        comments = tuple(
-            sorted(
-                (*linear_comments, *github_comments),
-                key=lambda item: (item.created_at, item.id),
+            comments = tuple(
+                sorted(
+                    (*linear_comments, *github_comments),
+                    key=lambda item: (item.created_at, item.id),
+                )
             )
-        )
-        ready_state_id = _linear_ready_state_id(issue)
-        return TrackedTicket(
+        elif _has_ready(linear_comments):
+            self._record(
+                project.repo,
+                identifier,
+                PollSourceError("Linear issue has no linked GitHub PR"),
+            )
+        ticket = TrackedTicket(
             repo=project.repo,
             ticket_id=identifier,
             factory=self._factory(project),
             comments=comments,
-            current_head=current_head,
+            current_head=head,
             ci=ci,
             risk=_risk(comments),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
-            git_branch_name=branch,
+            git_branch_name=_optional_string(issue.get("gitBranchName")),
             pr_number=pr_number,
             brief=_brief(linear_comments),
             grok_bot=project.grok_bot,
             linear_issue_id=_optional_string(issue.get("id")),
-            linear_ready_state_id=ready_state_id,
+            linear_ready_state_id=_linear_ready_state_id(issue),
             linear_ready_for_review=project.linear_ready_for_review,
         )
+        self._ticket_cache[cache_key] = ticket
+        return ticket
 
-    def _pull_for_branch(
+    def _linked_pr_number(
         self,
         repo: str,
-        branch: str,
-    ) -> dict[str, Any] | None:
-        owner = repo.split("/", 1)[0]
-        endpoint = (
-            f"repos/{repo}/pulls?state=all&head={owner}:{branch}&per_page=100"
+        identifier: str,
+        issue: Mapping[str, Any],
+    ) -> str | None:
+        attachments = _object(issue.get("attachments"), "Linear attachments")
+        page = _object(
+            attachments.get("pageInfo"),
+            "Linear attachments pageInfo",
         )
-        pulls = [
-            _object(item, "GitHub pull request")
-            for page in self._gh_pages(endpoint)
-            for item in _array(page, "GitHub pull request page")
+        if page.get("hasNextPage") is True:
+            raise PollSourceError("Linear issue has more than 50 attachments")
+        numbers = {
+            match.group("number")
+            for item in _array(
+                attachments.get("nodes"),
+                "Linear attachment nodes",
+            )
+            if isinstance(item, dict)
+            and isinstance(item.get("url"), str)
+            and (match := _PR_URL.fullmatch(item["url"])) is not None
+            and match.group("repo").lower() == repo.lower()
+        }
+        if len(numbers) > 1:
+            raise PollSourceError("Linear issue links more than one GitHub PR")
+        if numbers:
+            return next(iter(numbers))
+        result = _json_object(
+            self._gh_call(
+                "-X",
+                "GET",
+                "search/issues",
+                "-f",
+                f"q={identifier} repo:{repo} is:pr is:open",
+            ),
+            "GitHub pull request search",
+        )
+        matches = [
+            str(_positive_int(item.get("number"), "pull request number"))
+            for item in _array(result.get("items"), "GitHub search items")
+            if isinstance(item, dict)
         ]
-        if len(pulls) > 1:
-            raise PollSourceError(f"{repo}:{branch} matches more than one pull request")
-        return pulls[0] if pulls else None
+        return matches[0] if len(matches) == 1 else None
 
     def _gh_pages(self, endpoint: str) -> list[object]:
         text = self._gh_call("--paginate", endpoint)
@@ -447,7 +656,18 @@ class LivePollSource:
         return pages
 
     def _gh_call(self, *args: str) -> str:
-        argv = [*GH, "api", *args]
+        now = self.clock()
+        if now < self._backoff_until:
+            raise PollSourceError("GitHub rate-limit backoff is active")
+        conditional = "--paginate" not in args
+        cache_key = tuple(args)
+        argv = [*self.gh, "api", "--cache", "60s"]
+        if conditional:
+            argv.append("--include")
+            cached = self._etag_cache.get(cache_key)
+            if cached is not None:
+                argv.extend(("-H", f"If-None-Match: {cached[0]}"))
+        argv.extend(args)
         try:
             result = self.gh_runner(argv, self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
@@ -455,8 +675,32 @@ class LivePollSource:
         except OSError as exc:
             raise PollSourceError(f"gh could not run: {type(exc).__name__}") from exc
         if result.returncode != 0:
+            status = _status_code(result.stderr)
+            if status in (403, 429):
+                self._backoff_until = now + BACKOFF_SECONDS
+            if status is not None:
+                raise PollSourceError(f"gh returned HTTP {status}")
             raise PollSourceError(f"gh exited {result.returncode}")
-        return result.stdout
+        if not conditional:
+            return result.stdout
+        status, headers, body = _included_response(result.stdout)
+        if status == 304:
+            cached = self._etag_cache.get(cache_key)
+            if cached is None:
+                raise PollSourceError("gh returned 304 without a cached response")
+            return cached[1]
+        etag = headers.get("etag")
+        if etag is not None:
+            self._etag_cache[cache_key] = (etag, body)
+        return body
+
+    def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
+        self._cycle_errors += 1
+        if _status_code(str(exc)) in (403, 429):
+            self._backoff_until = self.clock() + BACKOFF_SECONDS
+        if self.error_sink is None:
+            return
+        self.error_sink(repo, ticket_id, _safe_reason(exc))
 
 
 def _json_object(text: str, source: str) -> dict[str, Any]:
@@ -465,6 +709,25 @@ def _json_object(text: str, source: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise PollSourceError(f"{source} returned malformed JSON") from exc
     return _object(value, source)
+
+
+def _included_response(text: str) -> tuple[int, dict[str, str], str]:
+    normalized = text.replace("\r\n", "\n")
+    if not normalized.startswith("HTTP/"):
+        return 200, {}, text
+    raw_headers, separator, body = normalized.partition("\n\n")
+    if not separator:
+        raise PollSourceError("gh returned malformed response headers")
+    lines = raw_headers.splitlines()
+    status_match = re.match(r"^HTTP/\S+\s+([0-9]{3})\b", lines[0])
+    if status_match is None:
+        raise PollSourceError("gh returned malformed HTTP status")
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if colon:
+            headers[name.strip().lower()] = value.strip()
+    return int(status_match.group(1)), headers, body
 
 
 def _object(value: object, source: str) -> dict[str, Any]:
@@ -485,6 +748,53 @@ def _positive_int(value: object, field: str) -> int:
     return value
 
 
+def _ticket_hint(value: object) -> str:
+    if not isinstance(value, dict):
+        return "-"
+    for key in ("identifier", "number", "id"):
+        candidate = value.get(key)
+        if isinstance(candidate, (str, int)) and not isinstance(candidate, bool):
+            return str(candidate)
+    return "-"
+
+
+def _linear_terms(query: str) -> tuple[str, ...]:
+    terms = tuple(
+        term.strip()
+        for term in query.split(" OR ")
+        if term.strip()
+    )
+    return terms if terms else (query,)
+
+
+def _status_code(value: str) -> int | None:
+    found = _HTTP_STATUS.search(value)
+    return int(found.group(1)) if found is not None else None
+
+
+def _safe_reason(exc: Exception) -> str:
+    status = _status_code(str(exc))
+    if status is not None:
+        return f"{type(exc).__name__}:HTTP-{status}"
+    if isinstance(exc, PollSourceError):
+        return f"PollSourceError:{str(exc)}"
+    return type(exc).__name__
+
+
+def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
+    names: list[str] = []
+    if config.linear is not None:
+        names.append(config.linear.api_key_env)
+    if config.grok is not None:
+        names.extend(
+            (
+                config.grok.webhook_url_env,
+                config.grok.webhook_key_env,
+            )
+        )
+    return tuple(dict.fromkeys(names))
+
+
 def _has_label(value: object, prefix: str) -> bool:
     return any(
         isinstance(item, dict)
@@ -495,11 +805,11 @@ def _has_label(value: object, prefix: str) -> bool:
 
 
 def _matches_linear_project(issue: Mapping[str, Any], project: Project) -> bool:
-    configured = project.linear_project
+    configured = project.linear_project_id
     if configured is None:
         return False
     value = _object(issue.get("project"), "Linear issue project")
-    return configured in (value.get("id"), value.get("name"))
+    return configured == value.get("id")
 
 
 def _optional_string(value: object) -> str | None:
@@ -518,13 +828,16 @@ def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _linear_comment(value: object) -> Comment:
+def _linear_comment(value: object) -> Comment | None:
     item = _object(value, "Linear comment")
     comment_id = item.get("id")
     body = item.get("body")
     created_at = item.get("createdAt")
-    user = _object(item.get("user"), "Linear comment user")
-    author = user.get("name")
+    user = item.get("user")
+    if not isinstance(user, dict):
+        return None
+    user_id = user.get("id")
+    author = f"linear:{user_id}" if isinstance(user_id, str) else None
     required = (comment_id, body, created_at, author)
     if not all(isinstance(field, str) and field for field in required):
         raise PollSourceError("Linear comment is missing a required field")
@@ -575,3 +888,14 @@ def _latest_head(comments: Sequence[Comment]) -> str | None:
         if "head" in fields:
             head = fields["head"]
     return head
+
+
+def _has_ready(comments: Sequence[Comment]) -> bool:
+    for comment in comments:
+        try:
+            fields = parse_comment(comment.body).as_dict()
+        except HandoffError:
+            continue
+        if fields["kind"] == "ready":
+            return True
+    return False

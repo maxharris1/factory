@@ -40,8 +40,8 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 ## GitHub adapter
 
 [`lib/github_actions.py`](lib/github_actions.py) is the real `ReviewActions`.
-`review_actions_for(factory.tickets)` returns it for `tickets: github` and
-refuses anything else, the way `ship_mode` reads `ship:`. Unit tests still
+The runtime builds one adapter per configured project; Linear projects wrap
+the GitHub PR adapter with the optional Ready for Review state move. Unit tests still
 pass `FakeReviewActions` to `Dispatcher(review_actions=...)`.
 
 Every call is `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u
@@ -106,20 +106,30 @@ projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
 Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
 variable containing the Linear API key. `grok.webhook_url_env` and
 `grok.webhook_key_env` name the existing Grok routine webhook variables.
-`projects[].linear_project` maps a Linear project name or ID to its repo.
-The Linear source finds the PR by the ticket's `gitBranchName`, merges the
-ticket's comments with that PR's issue comments, and reads head/CI from the
-PR. `ready` and `verdict` belong on PR issue comments. `projects[].grok_bot`
-routes terminal results. `projects[].linear_ready_for_review` defaults off
-and controls only the post-APPROVE move to Linear Ready for Review; Aut0 turns
-it on. Other dispatcher states never write Linear, and `ship: handoff` never
-merges.
-`trusted_logins` is keyed by tracker, then maps each author login to the set
-of bot markers it may post. The dispatcher still requires the header's
-`from=` and `role=` to match the expected step. With one shared GitHub login,
-that marker is an operational label, not cryptographic identity. Missing secrets
-fail by environment-variable name; values are never printed or included in
-exceptions.
+`projects[].factory_ref` selects the trusted branch containing `factory.md`;
+`projects[].linear_project_id` maps an immutable Linear project ID to its
+repo. `trusted_logins` maps GitHub authors to sets of bot markers, while
+`trusted_linear_users` maps immutable Linear user IDs to sets separately.
+The dispatcher still requires the expected `from=` and `role=`. With one
+shared GitHub login, the marker is a routing label, not an identity or
+signature. The shipped config records the known shared GitHub login and leaves
+the stable Linear user ID for Max to confirm. `orch poll` refuses Linear
+polling until he fills it. Missing secrets fail by environment-variable
+name; values are never printed or included in exceptions.
+
+Linear issues are searched with comments included; brief and go are separate
+queries rather than relying on undocumented full-text `OR` behavior. A linked
+GitHub PR supplies the current head and CI, and its issue comments are joined
+with the Linear comments. `ready`, `verdict`, and `stuck` go on PR issue
+comments, never reviews or inline comments. `projects[].grok_bot` routes
+terminal results. `projects[].linear_ready_for_review` defaults off and
+controls only the post-APPROVE Linear Ready for Review move; Aut0 enables it.
+No other dispatcher state writes Linear, and `ship: handoff` never merges.
+
+`orch poll` opens an initialized database without creating it and holds
+`<db>.lock`, so a second poller is refused. Source failures are recorded per
+project or ticket and the long-running loop continues after the 60-second
+interval; `--once` reports a cycle-level failure with a nonzero exit.
 
 ## Wait
 
@@ -138,18 +148,21 @@ failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
-While a harness runs, its owning bot loops `orch job heartbeat <bot> <job-id>`
-at least every `timeout_seconds / 3`; running timeouts use the last heartbeat
-or other activity, not the job creation time. Handoffs for Linear-backed work
-are PR issue comments, never reviews or inline comments.
+While a harness runs, its bot loops `orch job heartbeat <bot> <job-id>` at
+least every `timeout_seconds / 3`; running timeouts use last activity.
 
 ## Install after merge
 
 Do not run these steps until Max gives the go. `deploy/install.sh` creates a
-venv, installs `requirements.txt` (including PyYAML), writes
-`$HOME/.local/bin/orch`, creates one shared database, and writes
-`$HOME/.config/factory/profile.sh`. It does not install or start the poll
-service:
+venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
+under `$HOME/.local/bin`, initializes one shared database, and writes
+`$HOME/.config/factory/profile.sh`. It does not install or start the service.
+Keep the checkout at
+`$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
+Before initialization, fill the stable Linear-user and project-ID placeholders
+with values Max confirms. Confirm that `LINEAR_API_KEY` is an
+existing Max-provisioned key; this repository does not create one. Then
+then run:
 
 ```sh
 deploy/install.sh
@@ -157,16 +170,18 @@ deploy/install.sh
 orch doctor-runtime
 ```
 
-Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh), which loads
-the same `ORCH_DB` and puts the wrapper on `PATH`. `doctor-runtime` checks that
-PyYAML imports, `ORCH_DB` is set, and its SQLite database exists and opens.
+Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh).
+`doctor-runtime` checks that PyYAML imports, `ORCH_DB` is set, and its SQLite
+database exists and opens.
 
 [`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
-for the long-running poller. After the named environment variables have been
-configured for the user service manager, copy or link the unit to
+for the long-running poller. Max creates
+`~/.config/factory/orch-poll.env` mode `0600`; it names `ORCH_DB` and the
+Linear/webhook variables named by `orch.yml`. Values are not documented or
+committed. Copy or link the unit to
 `~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
 use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
-repository installs, enables, or starts the unit.
+repository installs, enables, starts, or writes the environment file.
 
 ## Status
 

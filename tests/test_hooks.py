@@ -1929,7 +1929,7 @@ def test_ff_mode_t8_calls_ship_at_most_once_across_restart_and_repeated_ok(
 
     assert len(shipper.requests) + len(reshipper.requests) == 1
     assert outcomes(queue)["ok-1"] == "shipped"
-    assert outcomes(queue)["ok-2"] == "rejected-ok-not-waiting"
+    assert "ok-2" not in outcomes(queue)
     assert actions.fast_forwards == [("main", HEAD_A)]
     assert actions.merges == []
 
