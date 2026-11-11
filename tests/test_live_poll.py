@@ -11,6 +11,7 @@ from lib.dispatcher import (
     LINEAR_HANDOFF_QUERY,
     Comment,
     Dispatcher,
+    RetryableStateError,
     TicketRef,
     TrackedTicket,
 )
@@ -30,6 +31,11 @@ from lib.orch_yml import (
 )
 from lib.poll_source import (
     HTTPResult,
+    LINEAR_COMPLEXITY_PER_HOUR,
+    LINEAR_ISSUE_COMPLEXITY,
+    LINEAR_PROCESS_HEADROOM,
+    LINEAR_REQUESTS_PER_HOUR,
+    LINEAR_SEARCH_COMPLEXITY,
     LivePollSource,
     PollCycleError,
     PollSourceError,
@@ -962,6 +968,149 @@ def test_linear_search_paginates() -> None:
     assert [item["variables"]["after"] for item in requests] == [None, "next"]
 
 
+def test_linear_search_pagination_preserves_tracked_and_process_budget() -> None:
+    excluded = frozenset(f"AUT-{index:04d}" for index in range(1000))
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        requests.append(request)
+        if request["query"].startswith("query FactoryPoll"):
+            page = int(request["variables"]["after"] or 0)
+            start = page * 50
+            return linear_search_page(
+                [
+                    {
+                        "id": f"issue-{index:04d}",
+                        "identifier": f"AUT-{index:04d}",
+                        "project": {"id": "project-1"},
+                    }
+                    for index in range(start, start + 50)
+                ],
+                has_next=page < 19,
+                cursor=str(page + 1),
+            )
+        identifier = request["variables"]["id"]
+        return HTTPResult(
+            200,
+            json.dumps(
+                {
+                    "data": {
+                        "issue": linear_issue(identifier=identifier)
+                    }
+                }
+            ),
+        )
+
+    errors: list[str] = []
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=transport,
+        error_sink=lambda repo, ticket, error: errors.append(error),
+    )
+    source.begin_cycle()
+
+    assert source.linear_candidates(
+        LINEAR_HANDOFF_QUERY,
+        exclude=excluded,
+        reserve=5,
+    ) == ()
+    tracked = source.tracked_tickets(
+        tuple(
+            TicketRef("acme/widgets", f"AUT-{index:04d}", "linear")
+            for index in range(5)
+        )
+    )
+    source.end_cycle()
+
+    assert len(tracked) == 5
+    assert len(requests) == 39
+    assert errors == []
+
+
+def test_linear_request_hard_cap_is_retryable() -> None:
+    calls = 0
+
+    def transport(url, headers, body, timeout):
+        nonlocal calls
+        del url, headers, body, timeout
+        calls += 1
+        return HTTPResult(200, json.dumps({"data": {"issue": None}}))
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=transport,
+    )
+    source.begin_cycle()
+    limit = (
+        LINEAR_REQUESTS_PER_HOUR
+        * source.config.poll_seconds
+        // 3600
+    )
+
+    for index in range(limit):
+        assert source._linear_issue(f"AUT-{index:03d}") is None
+    with pytest.raises(RetryableStateError, match="budget"):
+        source._linear_issue("AUT-over-limit")
+
+    assert calls == limit
+
+
+def test_tracked_budget_deferral_keeps_cached_and_github_tickets() -> None:
+    errors: list[tuple[str, str, str]] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        identifier = request["variables"]["id"]
+        return HTTPResult(
+            200,
+            json.dumps(
+                {
+                    "data": {
+                        "issue": linear_issue(identifier=identifier)
+                    }
+                }
+            ),
+        )
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=transport,
+        error_sink=lambda repo, ticket, error: errors.append(
+            (repo, ticket, error)
+        ),
+    )
+    source.begin_cycle()
+    source._linear_issue_cache["AUT-cached"] = linear_issue(
+        identifier="AUT-cached"
+    )
+    refs = tuple(
+        TicketRef("acme/widgets", f"AUT-{index:03d}", "linear")
+        for index in range(41)
+    ) + (
+        TicketRef("acme/widgets", "AUT-cached", "linear"),
+        TicketRef("acme/widgets", "12", "github"),
+    )
+
+    found = source.tracked_tickets(refs)
+
+    assert len(
+        [ticket for ticket in found if ticket.ticket_id.startswith("AUT-")]
+    ) == 40
+    assert any(ticket.ticket_id == "AUT-cached" for ticket in found)
+    assert any(ticket.ticket_id == "12" for ticket in found)
+    assert [ticket for _, ticket, _ in errors] == ["AUT-039", "AUT-040"]
+    with pytest.raises(PollCycleError):
+        source.end_cycle()
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -1064,6 +1213,230 @@ def test_tracked_linear_ticket_uses_direct_issue_lookup() -> None:
     assert len(tickets) == 1
     assert requests[0]["query"].startswith("query FactoryIssue")
     assert requests[0]["variables"] == {"id": "AUT-42"}
+
+
+def test_tracked_linear_ticket_reuses_candidate_issue_in_the_same_cycle() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        requests.append(request)
+        if request["query"].startswith("query FactoryPoll"):
+            return linear_search_page(
+                [
+                    {
+                        "id": "issue-id",
+                        "identifier": "AUT-42",
+                        "project": {"id": "project-1"},
+                    }
+                ]
+            )
+        return HTTPResult(
+            200,
+            json.dumps({"data": {"issue": linear_issue()}}),
+        )
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=transport,
+    )
+    source.begin_cycle()
+
+    candidates = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+    tracked = source.tracked_tickets(
+        (TicketRef("acme/widgets", "AUT-42", "linear"),)
+    )
+
+    assert tracked == candidates
+    assert sum(
+        request["query"].startswith("query FactoryIssue")
+        for request in requests
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    "limited",
+    [
+        HTTPResult(429, "", {"Retry-After": "30"}),
+        HTTPResult(
+            200,
+            json.dumps(
+                {
+                    "errors": [
+                        {"extensions": {"code": "RATELIMITED"}}
+                    ]
+                }
+            ),
+            {"retry-after": "30"},
+        ),
+    ],
+)
+def test_linear_rate_limit_uses_retry_after_backoff(
+    limited: HTTPResult,
+) -> None:
+    now = [100.0]
+    results = [limited, linear_search_page([])]
+    calls = 0
+
+    def transport(url, headers, body, timeout):
+        nonlocal calls
+        del url, headers, body, timeout
+        calls += 1
+        return results.pop(0)
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        linear_transport=transport,
+        clock=lambda: now[0],
+    )
+
+    with pytest.raises(
+        RetryableStateError,
+        match="429|RATELIMITED",
+    ):
+        source._linear_issues("one")
+    now[0] = 129.0
+    with pytest.raises(RetryableStateError, match="backoff"):
+        source._linear_issues("one")
+    assert calls == 1
+
+    now[0] = 130.0
+    assert source._linear_issues("one") == ()
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    (
+        "matching",
+        "active",
+        "done",
+        "expected_requests_per_hour",
+        "expected_complexity_per_hour",
+    ),
+    [
+        (5, 1, 2, 300, 132_720),
+        (25, 5, 10, 1_020, 607_920),
+        (100, 20, 40, 2_340, 1_479_120),
+    ],
+)
+def test_linear_poll_cycle_stays_within_hourly_budgets(
+    tmp_path: Path,
+    matching: int,
+    active: int,
+    done: int,
+    expected_requests_per_hour: int,
+    expected_complexity_per_hour: int,
+) -> None:
+    issues = []
+    by_id = {}
+    for index in range(matching):
+        identifier = f"AUT-{index:03d}"
+        issue = linear_issue(identifier=identifier)
+        issue["id"] = f"issue-{index:03d}"
+        issue["comments"]["nodes"][0]["id"] = f"comment-{index:03d}"
+        issues.append(issue)
+        by_id[issue["id"]] = issue
+        by_id[identifier] = issue
+
+    requests: list[dict] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        requests.append(request)
+        if request["query"].startswith("query FactoryPoll"):
+            return linear_search_page(
+                [
+                    {
+                        "id": issue["id"],
+                        "identifier": issue["identifier"],
+                        "project": issue["project"],
+                    }
+                    for issue in issues
+                ]
+            )
+        identifier = request["variables"]["id"]
+        return HTTPResult(
+            200,
+            json.dumps({"data": {"issue": by_id[identifier]}}),
+        )
+
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 10)
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={
+            "github": {},
+            "linear": {"linear:user-1": {"grok-bot"}},
+        },
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+    with queue.connect() as connection:
+        for index in range(active + done):
+            identifier = f"AUT-{index:03d}"
+            connection.execute(
+                """
+                INSERT INTO tracked_tickets (
+                    repo, ticket_id, tracker, tracked_at
+                ) VALUES ('acme/widgets', ?, 'linear', 0)
+                """,
+                (identifier,),
+            )
+            connection.execute(
+                """
+                INSERT INTO ticket_state (
+                    repo, ticket_id, workflow_state,
+                    gate_count, stuck, generation
+                ) VALUES ('acme/widgets', ?, ?, 0, 0, 1)
+                """,
+                (
+                    identifier,
+                    "building" if index < active else "done",
+                ),
+            )
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
+        linear_transport=transport,
+        error_sink=dispatcher.record_poll_error,
+    )
+
+    dispatcher.poll_once(source)
+
+    new = matching - active - done
+    max_requests = (
+        LINEAR_REQUESTS_PER_HOUR
+        * source.config.poll_seconds
+        // 3600
+    )
+    expected_requests = min(
+        2 + active + new,
+        max_requests - LINEAR_PROCESS_HEADROOM,
+    )
+    searches = sum(
+        request["query"].startswith("query FactoryPoll")
+        for request in requests
+    )
+    issue_reads = len(requests) - searches
+    requests_per_hour = len(requests) * 3600 // source.config.poll_seconds
+    complexity_per_hour = (
+        searches * LINEAR_SEARCH_COMPLEXITY
+        + issue_reads * LINEAR_ISSUE_COMPLEXITY
+    ) * 3600 // source.config.poll_seconds
+
+    assert len(requests) == expected_requests
+    assert requests_per_hour == expected_requests_per_hour
+    assert complexity_per_hour == expected_complexity_per_hour
+    assert requests_per_hour <= LINEAR_REQUESTS_PER_HOUR
+    assert complexity_per_hour <= LINEAR_COMPLEXITY_PER_HOUR
 
 
 def test_missing_linear_key_names_env_without_exposing_values(caplog) -> None:
@@ -1301,8 +1674,8 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
             del label_prefix
             return (ticket,)
 
-        def linear_candidates(self, query):
-            del query
+        def linear_candidates(self, query, *, exclude, reserve):
+            del query, exclude, reserve
             return ()
 
         def tracked_tickets(self, refs):

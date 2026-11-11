@@ -10,6 +10,8 @@ import pytest
 from lib.dispatcher import (
     CIResult,
     Dispatcher,
+    RetryableShipError,
+    RetryableStateError,
     ReviewShipper,
     ShipError,
     ShipRequest,
@@ -798,6 +800,54 @@ def test_linear_handoff_refuses_changed_linked_pr_before_any_write() -> None:
     assert linear_writes == []
 
 
+def test_linear_handoff_retries_only_before_external_writes() -> None:
+    def fail(*args) -> None:
+        del args
+        raise RetryableStateError("budget")
+
+    linked = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    before_write = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: None,
+        fresh_ticket=fail,
+        runner=RecordedGh(),
+    )
+
+    with pytest.raises(RetryableShipError, match="budget"):
+        before_write.handoff(linked, HEAD)
+
+    gh = RecordedGh()
+    draft = served("pull-42-open.json")
+    gh.route(
+        PULL,
+        GhResult(
+            0,
+            draft.stdout.replace('"draft": false', '"draft": true'),
+            "",
+        ),
+    )
+    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
+    gh.route(ready, served("pull-42-open.json"))
+    after_write = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=fail,
+        fresh_ticket=lambda ref: linked,
+        runner=gh,
+    )
+
+    with pytest.raises(
+        GitHubAdapterError,
+        match="update was not confirmed",
+    ):
+        after_write.handoff(linked, HEAD)
+
+    assert gh.keys() == [PULL, ready]
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [
@@ -848,8 +898,14 @@ class GitHubFixtureSource:
         del label_prefix
         return (self._ticket(),)
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
-        del query
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        del query, exclude, reserve
         return ()
 
     def tracked_tickets(self, refs: tuple[TicketRef, ...]) -> tuple[TrackedTicket, ...]:

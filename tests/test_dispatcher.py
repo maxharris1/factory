@@ -13,6 +13,7 @@ from lib.dispatcher import (
     Comment,
     Dispatcher,
     PollLoop,
+    RetryableShipError,
     TicketRef,
     TrackedTicket,
     ship_mode,
@@ -231,8 +232,15 @@ class FakeSource:
         self.github_label = label_prefix
         return self.github
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
         self.linear_query = query
+        del exclude, reserve
         return self.linear
 
     def tracked_tickets(
@@ -3862,6 +3870,69 @@ def test_pending_non_merge_intent_holds_without_repeating_side_effect(
     assert wake is not None
     assert wake.request.action == "ship-failed"
     assert wake.request.source_comment_id == "approve-1"
+    assert queue.claim("grok") is None
+
+
+def test_handoff_retries_when_no_external_write_started(
+    tmp_path: Path,
+) -> None:
+    class RetryOnceActions(FakeReviewActions):
+        def __init__(self) -> None:
+            super().__init__()
+            self.handoff_attempts = 0
+
+        def handoff(self, ticket: TrackedTicket, head: str) -> None:
+            self.handoff_attempts += 1
+            if self.handoff_attempts == 1:
+                raise RetryableShipError("Linear poll budget is exhausted")
+            super().handoff(ticket, head)
+
+    actions = RetryOnceActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    snapshot = ticket(
+        comment(
+            "approve-1",
+            VERDICT.format(
+                round=1,
+                head=head,
+                verdict="APPROVE",
+                risk="high",
+            ),
+            author="codex-login",
+        ),
+        head=head,
+        ci={head: CIResult("success")},
+        factory_config=factory(ship="handoff"),
+    )
+
+    with pytest.raises(RetryableShipError):
+        dispatcher.process(snapshot)
+    dispatcher.process(snapshot)
+
+    assert actions.handoff_attempts == 2
+    assert actions.handoffs == [head]
+    with queue.connect() as connection:
+        intent = connection.execute(
+            """
+            SELECT status FROM ship_intents
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+              AND comment_id = 'approve-1'
+            """
+        ).fetchone()[0]
+        outcome = connection.execute(
+            """
+            SELECT outcome FROM handled_comments
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+              AND comment_id = 'approve-1'
+            """
+        ).fetchone()[0]
+    assert intent == "completed"
+    assert outcome == "handed-off"
+    wake = queue.claim("grok")
+    assert wake is not None
+    assert wake.request.action == "done"
     assert queue.claim("grok") is None
 
 

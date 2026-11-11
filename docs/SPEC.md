@@ -355,6 +355,20 @@ both the ID-only search query and direct issue query are accepted without a
 complexity error. Brief and go use separate searches; the poller does not
 depend on full-text `OR` semantics.
 
+Linear's API-key limits are shared per user: 2,500 requests/hour and
+3,000,000 complexity points/hour. For poll interval `P`, the poller caps one
+cycle at `floor(2500 × P / 3600)` requests and
+`floor(3,000,000 × P / 3600)` complexity. At `P = 60`, that is 41 requests
+and 50,000 complexity. Two one-page searches cost about 116 complexity each,
+leaving at most 39 direct issue operations at about 660 each: 2,460
+requests/hour and 1,558,320 complexity/hour. Polling leaves two of those
+operations available for a same-cycle handoff; budget exhaustion makes any
+additional handoff retry next cycle rather than fail its ship intent. Search
+pagination consumes the same budget and preserves capacity for active tracked
+tickets. Search hits already tracked, including `done` and `abandoned`, are
+not fetched, and a direct issue read is reused throughout its cycle. HTTP 429
+or GraphQL `RATELIMITED` pauses Linear requests for `Retry-After`.
+
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
 `grok_bot` routes stops and successful handoffs to the owning project bot. If

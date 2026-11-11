@@ -808,7 +808,14 @@ class FakeSource:
     def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
         return self.tickets
 
-    def linear_candidates(self, query: str) -> tuple[TrackedTicket, ...]:
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        del query, exclude, reserve
         return ()
 
     def tracked_tickets(

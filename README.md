@@ -125,7 +125,12 @@ name; values are never printed or included in exceptions.
 Linear issues are searched by ID with comments included; each hit is then
 fetched directly so the search stays below Linear's complexity limit. Brief
 and go are separate queries rather than relying on undocumented full-text
-`OR` behavior. A linked GitHub PR supplies the current head and CI, and its
+`OR` behavior. Search hits already tracked, including done and abandoned
+tickets, are skipped. Direct issue reads are reused for the rest of the cycle,
+and each cycle is capped to its share of Linear's hourly request and
+complexity limits. Linear 429 and `RATELIMITED` responses pause Linear calls
+for `Retry-After`; budget or backoff interruptions leave handoffs pending for
+the next cycle. A linked GitHub PR supplies the current head and CI, and its
 issue comments are joined with the Linear comments. `ready`, `verdict`, and
 `stuck` go on PR issue comments, never reviews or inline comments.
 `projects[].grok_bot` routes stop and terminal results. When a webhook wake's
@@ -220,7 +225,12 @@ until F2-01 adds the device pool.
 bin/orch check-config
 ```
 
-Exit 0 when `orch.yml` and the factory.md files are valid. An unknown model name is a warning on stderr. Exit 1 when a file is refused.
+The shipped `orch.yml` intentionally contains install placeholders, so this
+strict command exits 1 until Max fills in the confirmed values. CI checks that
+file with `bin/orch check-config --allow-placeholders`; the flag permits
+`REPLACE_WITH_` install values but still runs every other validation.
+`init-db` and runtime commands are always strict. An unknown model name is a
+warning on stderr.
 
 ## orchestrate-project
 
