@@ -2,9 +2,19 @@
 # Required: poll_seconds, projects[].repo.
 # Optional: job_timeout and projects[].job_timeout, in minutes.
 # When both are omitted the job timeout is 90 minutes.
-# log path and Linear access are not v1 fields.
 poll_seconds: 60
+linear:
+  api_key_env: LINEAR_API_KEY
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+# Before install, Max must add confirmed trusted_logins and
+# trusted_linear_users mappings. The poller refuses to start without them.
 projects:
   - repo: aut0-code/aut0
+    factory_ref: dev
+    linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
   - repo: maxharris1/Cleffy
+    factory_ref: dev
   - repo: maxharris1/tracy-harris-coaching
+    factory_ref: main

@@ -127,9 +127,19 @@ class GitHubReviewActions:
         runner: Runner = run_gh,
         *,
         timeout_seconds: float = TIMEOUT_SECONDS,
+        cleared_variables: Sequence[str] = (),
+        cache_ttl: str | None = None,
     ):
         self.runner = runner
         self.timeout_seconds = timeout_seconds
+        names = (*TOKEN_VARIABLES, *cleared_variables)
+        unique = tuple(dict.fromkeys(names))
+        self.gh = (
+            "env",
+            *(part for name in unique for part in ("-u", name)),
+            "gh",
+        )
+        self.cache_ttl = cache_ttl
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         if state not in STATES:
@@ -315,7 +325,10 @@ class GitHubReviewActions:
         return CIResult("success" if passed and not pending else "pending")
 
     def _call(self, *args: str) -> str:
-        argv = [*GH, "api", *args]
+        argv = [*self.gh, "api"]
+        if self.cache_ttl is not None and _is_read(args):
+            argv.extend(("--cache", self.cache_ttl))
+        argv.extend(args)
         try:
             result = self.runner(argv, self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
@@ -357,6 +370,13 @@ class GitHubReviewActions:
         if not pages:
             raise GitHubAdapterError("gh returned no JSON")
         return pages
+
+
+def _is_read(args: Sequence[str]) -> bool:
+    if "-X" not in args:
+        return True
+    index = args.index("-X")
+    return index + 1 < len(args) and args[index + 1] == "GET"
 
 
 def _repo_path(repo: str) -> str:

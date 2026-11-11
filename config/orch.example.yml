@@ -3,3 +3,4 @@
 poll_seconds: 60
 projects:
   - repo: owner/name
+    factory_ref: main

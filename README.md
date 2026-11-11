@@ -14,7 +14,7 @@ model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
 - [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T1P and T2 through T6 (F1-05 is
   the T3 review round, T4 ship and T5 questions loop) to
-  tickets discovered through `orch:state/` GitHub labels or the Linear handoff
+  PRs discovered through `orch:state/` GitHub labels or Linear tickets found by the handoff
   search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.
 - Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), t8))` with
@@ -88,6 +88,44 @@ dispatcher and queue use one SQLite database so terminal state and its wake
 commit atomically. The dispatcher queues jobs; it never executes a harness
 binary.
 
+## Poll
+
+```sh
+bin/orch init-db --db "$ORCH_DB"
+bin/orch poll --db "$ORCH_DB" --once
+bin/orch poll --db "$ORCH_DB"
+```
+
+`orch poll` composes `PollLoop`, `Dispatcher`, `LivePollSource`, the T7/T8
+hooks, GitHub review actions, and Grok webhook delivery. `--db` falls back to
+`$ORCH_DB`; `--once` performs one complete cycle and exits. GitHub reads use
+the existing `gh` login with token environment variables removed. GitHub
+discovery is PR-only in Phase 1; a label on an issue is not enough. Linear
+projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
+
+Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
+variable containing the Linear API key. `grok.webhook_url_env` and
+`grok.webhook_key_env` name the existing Grok routine webhook variables.
+`projects[].factory_ref` selects the trusted branch containing `factory.md`;
+`projects[].linear_project_id` maps an immutable Linear project ID to its
+repo. `trusted_logins` maps GitHub authors to handoff identities, while
+`trusted_linear_users` maps immutable Linear user IDs separately. The shipped
+config contains placeholders, not production identities. `orch poll` refuses
+to start until Max fills them. Missing secrets fail by environment-variable
+name; values are never printed or included in exceptions.
+
+Linear issues are searched by ID with comments included; each hit is then
+fetched directly so the search stays below Linear's complexity limit. Brief
+and go are separate queries rather than relying on undocumented full-text
+`OR` behavior. A linked GitHub PR supplies the current head and CI. Aut0 can therefore reach review, but the
+Ready-for-Review `ship: handoff` write remains unimplemented and fails closed
+with a Grok wake on approval.
+
+`orch poll` opens an initialized database without creating it and holds
+`<db>.lock`, so a second poller is refused. Source failures are recorded per
+project or ticket and the long-running loop continues after the 60-second
+interval; `--once` reports a cycle-level failure with a nonzero exit.
+
 ## Wait
 
 ```sh
@@ -105,6 +143,29 @@ failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
+
+## Install after merge
+
+Do not run these steps until Max gives the go. Keep the checkout at
+`$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
+Before initialization, replace the identity and Linear-project placeholders
+in that file with values Max confirms. Confirm that `LINEAR_API_KEY` is an
+existing Max-provisioned key; this repository does not create one. Then
+initialize the database:
+
+```sh
+export ORCH_DB="$HOME/.local/state/factory/orch.db"
+bin/orch init-db
+```
+
+[`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
+for the long-running poller. Max creates
+`~/.config/factory/orch-poll.env` mode `0600`; it names `ORCH_DB` and the
+Linear/webhook variables named by `orch.yml`. Values are not documented or
+committed. Copy or link the unit to
+`~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
+use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
+repository installs, enables, starts, or writes the environment file.
 
 ## Status
 

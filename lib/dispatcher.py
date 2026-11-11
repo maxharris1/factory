@@ -73,6 +73,7 @@ class TicketRef:
     repo: str
     ticket_id: str
     tracker: str
+    allow_merged: bool = False
 
 
 class PollSource(Protocol):
@@ -84,6 +85,8 @@ class PollSource(Protocol):
         self,
         tickets: tuple[TicketRef, ...],
     ) -> tuple[TrackedTicket, ...]: ...
+
+    def fresh_ticket(self, ticket: TicketRef) -> TrackedTicket | None: ...
 
 
 class ReviewActions(Protocol):
@@ -224,20 +227,61 @@ class Dispatcher:
             hook.initialize(self)
 
     def poll_once(self, source: PollSource) -> None:
-        self._discover(
-            source.github_candidates(GITHUB_STATE_LABEL_PREFIX),
-            tracker="github",
-        )
-        self._discover(
-            source.linear_candidates(LINEAR_HANDOFF_QUERY),
-            tracker="linear",
-        )
-        for ticket in source.tracked_tickets(self._tracked_refs()):
+        begin = getattr(source, "begin_cycle", None)
+        end = getattr(source, "end_cycle", None)
+        if begin is not None:
+            begin()
+        try:
+            github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
+        except Exception as exc:
+            self.record_poll_error("github", "-", type(exc).__name__)
+            github = ()
+        self._discover(github, tracker="github")
+        try:
+            linear = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+        except Exception as exc:
+            self.record_poll_error("linear", "-", type(exc).__name__)
+            linear = ()
+        self._discover(linear, tracker="linear")
+        try:
+            tracked = source.tracked_tickets(self._tracked_refs())
+        except Exception as exc:
+            self.record_poll_error("tracked", "-", type(exc).__name__)
+            tracked = ()
+        for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
                 self._record_poll_error(ticket, type(exc).__name__)
         self.reconcile_jobs()
+        if end is not None:
+            end()
+
+    def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO poll_errors (
+                    repo, ticket_id, error, recorded_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (repo.lower(), ticket_id, error, self.queue.now()),
+            )
+
+    def record_terminal(self, repo: str, ticket_id: str, state: str) -> None:
+        if state not in ("merged", "handed-off", "done"):
+            raise ValueError(f"{state!r} is not a completed terminal state")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ticket_state (
+                    repo, ticket_id, gate_count, stuck, workflow_state
+                ) VALUES (?, ?, 0, 0, ?)
+                ON CONFLICT(repo, ticket_id)
+                DO UPDATE SET workflow_state = excluded.workflow_state
+                """,
+                (repo.lower(), ticket_id, state),
+            )
 
     def process(self, ticket: TrackedTicket) -> None:
         comments = sorted(ticket.comments, key=_comment_order)
@@ -470,6 +514,10 @@ class Dispatcher:
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
+        workflow_state = self._workflow_state(ticket.repo, ticket.ticket_id)
+        if workflow_state == "capped" and action is not None:
+            action = "fix"
+            state = "fixing"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -506,6 +554,19 @@ class Dispatcher:
         )
         self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
+
+    def _workflow_state(self, repo: str, ticket_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT workflow_state FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        if row is None or row["workflow_state"] is None:
+            return None
+        return str(row["workflow_state"])
 
     def _t_plan(
         self,
@@ -1840,9 +1901,46 @@ class Dispatcher:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT repo, ticket_id, tracker
-                FROM tracked_tickets
-                ORDER BY repo, ticket_id
+                SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
+                       CASE
+                         WHEN state.workflow_state IN ('merged', 'handed-off')
+                         THEN 1
+                         ELSE 0
+                       END AS allow_merged
+                FROM tracked_tickets AS tracked
+                LEFT JOIN ticket_state AS state
+                  ON state.repo = tracked.repo
+                 AND state.ticket_id = tracked.ticket_id
+                WHERE state.workflow_state IS NULL
+                   OR state.workflow_state NOT IN (
+                       'merged', 'handed-off', 'done', 'abandoned'
+                   )
+                   OR (
+                       state.workflow_state IN ('merged', 'handed-off')
+                       AND EXISTS (
+                           SELECT 1
+                           FROM ship_intents AS ship
+                           LEFT JOIN handled_comments AS handled
+                             ON handled.repo = ship.repo
+                            AND handled.ticket_id = ship.ticket_id
+                            AND handled.comment_id = ship.comment_id
+                           WHERE ship.repo = tracked.repo
+                             AND ship.ticket_id = tracked.ticket_id
+                             AND ship.status = 'completed'
+                             AND handled.comment_id IS NULL
+                       )
+                   )
+                   OR (
+                       state.workflow_state = 'merged'
+                       AND EXISTS (
+                           SELECT 1
+                           FROM external_ship_intents AS external
+                           WHERE external.repo = tracked.repo
+                             AND external.ticket_id = tracked.ticket_id
+                             AND external.settled = 0
+                       )
+                   )
+                ORDER BY tracked.repo, tracked.ticket_id
                 """
             ).fetchall()
         return tuple(
@@ -1850,6 +1948,7 @@ class Dispatcher:
                 repo=str(row["repo"]),
                 ticket_id=str(row["ticket_id"]),
                 tracker=str(row["tracker"]),
+                allow_merged=bool(row["allow_merged"]),
             )
             for row in rows
         )
@@ -1896,20 +1995,7 @@ class Dispatcher:
             )
 
     def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO poll_errors (
-                    repo, ticket_id, error, recorded_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                    error,
-                    self.queue.now(),
-                ),
-            )
+        self.record_poll_error(ticket.repo, ticket.ticket_id, error)
 
     def _record_job_error(self, job: Job, error: str) -> None:
         with self._connect() as connection:
@@ -2388,11 +2474,16 @@ class ReviewShipper:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
         if tracker is None:
             raise ShipError(f"{request.repo}#{request.ticket_id} is not tracked")
+        ref = TicketRef(request.repo, request.ticket_id, tracker)
+        fresh_reader = getattr(self.source, "fresh_ticket", None)
+        if fresh_reader is not None:
+            fresh = fresh_reader(ref)
+            found = () if fresh is None else (fresh,)
+        else:
+            found = self.source.tracked_tickets((ref,))
         found = [
             item
-            for item in self.source.tracked_tickets(
-                (TicketRef(request.repo, request.ticket_id, tracker),)
-            )
+            for item in found
             if item.repo.lower() == request.repo.lower()
             and item.ticket_id == request.ticket_id
         ]
@@ -2413,12 +2504,22 @@ class PollLoop:
         self.source = source
         self.sleep = sleep
 
-    def run(self, *, max_polls: int | None = None) -> None:
+    def run(
+        self,
+        *,
+        max_polls: int | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
         if max_polls is not None and max_polls < 1:
             raise ValueError("max_polls must be positive")
         polls = 0
         while True:
-            self.dispatcher.poll_once(self.source)
+            try:
+                self.dispatcher.poll_once(self.source)
+            except Exception as exc:
+                if on_error is None:
+                    raise
+                on_error(exc)
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return

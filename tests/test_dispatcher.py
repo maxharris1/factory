@@ -2402,6 +2402,106 @@ def job_count(queue: SQLiteJobQueue, action: str) -> int:
         )
 
 
+@pytest.mark.parametrize(
+    ("state", "tracked"),
+    [
+        ("refused", True),
+        ("stuck", True),
+        ("blocked", True),
+        ("capped", True),
+        ("done", False),
+        ("abandoned", False),
+    ],
+)
+def test_stopped_tickets_remain_tracked_until_really_final(
+    tmp_path: Path,
+    state: str,
+    tracked: bool,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, ?)
+            """,
+            (state,),
+        )
+
+    refs = dispatcher._tracked_refs()
+
+    assert bool(refs) is tracked
+
+
+def test_capped_ticket_accepts_trusted_go_as_one_more_fix(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, 'capped')
+            """
+        )
+    restart = comment(
+        "restart-after-cap",
+        GO.format(state="building"),
+        author="grok-login",
+    )
+
+    dispatcher.process(ticket(restart))
+
+    fix = queue.claim("claude")
+    assert fix is not None
+    assert fix.request.action == "fix"
+    with queue.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT workflow_state FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()[0]
+    assert state == "fixing"
+
+
+def test_merged_ticket_with_unsettled_ship_work_requests_merged_snapshot(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    track(queue)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', '42', 0, 0, 'merged')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO external_ship_intents (
+                repo, ticket_id, source_comment_id, head, status,
+                error, settled, settle_failures
+            ) VALUES (
+                'owner/repo', '42', 'ok-1', ?, 'completed',
+                NULL, 0, 0
+            )
+            """,
+            ("a" * 40,),
+        )
+
+    refs = dispatcher._tracked_refs()
+
+    assert refs == (
+        TicketRef("owner/repo", "42", "github", allow_merged=True),
+    )
+
+
 def test_p10_t3_replays_a_failed_fixing_label_write(tmp_path: Path) -> None:
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
@@ -3960,6 +4060,58 @@ def test_poll_loop_polls_every_60_seconds(tmp_path: Path) -> None:
 
     assert source.calls == 3
     assert sleeps == [60, 60]
+
+
+def test_long_poll_loop_records_cycle_errors_and_continues() -> None:
+    class RaisingDispatcher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_once(self, source) -> None:
+            del source
+            self.calls += 1
+            raise RuntimeError("source failed")
+
+    dispatcher = RaisingDispatcher()
+    errors: list[str] = []
+    sleeps: list[float] = []
+
+    PollLoop(
+        dispatcher,  # type: ignore[arg-type]
+        FakeSource(),
+        sleep=sleeps.append,
+    ).run(
+        max_polls=2,
+        on_error=lambda exc: errors.append(type(exc).__name__),
+    )
+
+    assert dispatcher.calls == 2
+    assert errors == ["RuntimeError", "RuntimeError"]
+    assert sleeps == [60]
+
+
+def test_terminal_tickets_are_not_refetched(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    with queue.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+            VALUES ('owner/repo', ?, 'github', 0)
+            """,
+            [("active",), ("done",)],
+        )
+        connection.executemany(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES ('owner/repo', ?, 0, 0, ?)
+            """,
+            [("active", "building"), ("done", "done")],
+        )
+
+    assert dispatcher._tracked_refs() == (
+        TicketRef("owner/repo", "active", "github"),
+    )
 
 
 def test_dispatcher_cannot_execute_a_harness_binary(

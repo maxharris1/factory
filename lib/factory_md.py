@@ -82,7 +82,10 @@ class FactoryConfig:
 def load_factory_md(path: Path) -> tuple[FactoryConfig | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
-    text = path.read_text(encoding="utf-8")
+    return parse_factory_md(path.read_text(encoding="utf-8"))
+
+
+def parse_factory_md(text: str) -> tuple[FactoryConfig | None, list[Finding]]:
     try:
         raw, _body = split_front_matter(text)
         data = load_yaml(raw)
