@@ -16,6 +16,12 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
     assert config is not None
     assert config.poll_seconds == POLL_SECONDS == 60
     assert config.job_timeout is None
+    assert config.linear is not None
+    assert config.linear.api_key_env == "LINEAR_API_KEY"
+    assert config.grok is not None
+    assert config.grok.webhook_url_env == "FACTORY_WEBHOOK_URL"
+    assert config.grok.webhook_key_env == "FACTORY_WEBHOOK_KEY"
+    assert config.trusted_logins["grok-bot"] == "grok-bot"
     assert [project.repo for project in config.projects] == [
         "aut0-code/aut0",
         "maxharris1/Cleffy",
@@ -24,6 +30,7 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds() -> None:
     for project in config.projects:
         assert project.job_timeout is None
         assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
+    assert config.projects[0].linear_project == "Aut0"
 
 
 def test_minimal_example_has_no_extra_required_fields() -> None:
@@ -95,6 +102,23 @@ def test_unknown_field_is_not_required_and_is_refused(tmp_path: Path) -> None:
     config, findings = load_orch_yml(path)
     assert config is None
     assert any("unknown field 'log_path'" in finding.message for finding in findings)
+
+
+def test_linear_project_requires_api_key_env_name(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
+        "    linear_project: Widgets\n",
+        encoding="utf-8",
+    )
+
+    config, findings = load_orch_yml(path)
+
+    assert config is None
+    assert any(
+        "linear.api_key_env is required" in finding.message
+        for finding in findings
+    )
 
 
 def test_duplicate_repos_are_case_insensitive(tmp_path: Path) -> None:

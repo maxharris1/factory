@@ -1,4 +1,5 @@
 import copy
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -97,7 +98,28 @@ def test_check_config_warns_on_an_unknown_model_and_exits_zero(tmp_path: Path) -
     assert result.stdout.strip() == "ok"
 
 
-def test_unknown_command_is_rejected() -> None:
-    result = run(["poll"])
-    assert result.returncode == 2
-    assert "unknown command: poll" in result.stderr
+def test_poll_requires_a_database_path() -> None:
+    result = run(["poll"], cwd=ROOT)
+    assert result.returncode == 1
+    assert "pass --db or set ORCH_DB" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_init_db_creates_dispatcher_schema(tmp_path: Path) -> None:
+    database = tmp_path / "state" / "orch.db"
+
+    result = run(["init-db", "--db", str(database)])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok\n"
+    connection = sqlite3.connect(database)
+    try:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    finally:
+        connection.close()
+    assert {"jobs", "tracked_tickets", "handled_comments"} <= tables

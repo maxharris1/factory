@@ -158,6 +158,14 @@ T1–T6 are the core loop. T7–T9 are added only when a project needs them. T9 
 
 Grok jobs are pushed by the dispatcher through `GrokDelivery` during reconciliation, never through `orch wait`.
 
+`orch poll` is the production entry point. It takes `--db` or `$ORCH_DB`;
+`--once` runs exactly one cycle. The live `PollSource` reads GitHub through
+`env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u
+GITHUB_ENTERPRISE_TOKEN gh api` and reads configured Linear projects through
+the Linear GraphQL API. Grok jobs are delivered to the owning bot through its
+existing routine webhook, with the queue's stable logical key as the delivery
+deduplication key.
+
 ### 4.3 Invariants, and where they live now
 
 | Rule | Where it lives |
@@ -273,13 +281,31 @@ Decided content:
 poll_seconds: 60
 # Default job timeout. A project may set job_timeout (minutes) to override.
 # job_timeout: 90
+linear:
+  api_key_env: LINEAR_API_KEY
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+trusted_logins:
+  tracker-login: grok-bot
 projects:
   - repo: owner/name
+    # Required when this repo's tickets are in Linear.
+    # linear_project: Project name or ID
     # factory.md is read from that repo's base_branch
     # optional job_timeout: 90
 ```
 
-Phase 1 polls from the box, using `env -u GH_TOKEN gh` and existing Linear access for Aut0.
+Phase 1 polls from the box, using the existing `gh` login and the Linear key
+named by `linear.api_key_env`. The key name is configuration; the key value is
+only read from that environment variable at request time. A missing key fails
+with the variable name, never its value. `trusted_logins` maps tracker author
+logins to the `from=` identities accepted by the handoff contract.
+
+The Grok webhook fields also contain environment-variable names, not values.
+Delivery sends one JSON object containing the job fields and `logical_key`,
+with the existing routine's bearer/key headers. The dispatcher never prints
+or includes either webhook value in an exception.
 
 The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
@@ -326,7 +352,10 @@ Grok Bot reports each stop once. It does not poll Max about the same stop.
 - The factory never creates logins or credentials without Max's OK. Max provisions harness logins and registers self-hosted runners himself.
 - Never read credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. Never `cat` `.credentials*`, `.runner`, `auth.json`, or `.env`.
 - For `maxharris1/*` and `aut0-code/aut0`, run GitHub as `env -u GH_TOKEN gh`.
-- No new credentials and no webhooks in this design. The dispatcher uses the existing `gh` login and existing Linear access.
+- The dispatcher uses the existing `gh` login, configured Linear access, and
+  the existing Grok routine webhook. `orch.yml`, documentation, unit files,
+  errors, and logs contain only environment-variable names, never credential
+  values.
 - Credential-holding deploy workflows stay on hosted runners (D21). Phase 2 self-hosted CI is for non-credential checks. The plan never touches runner tokens.
 - `orch` refuses to exec `claude`, `codex`, or `cursor-agent`.
 - `factory.md` and `orch.yml` are read from the relevant base branch, not from an untrusted PR head, when deciding whether a project may run and how it ships.
@@ -382,6 +411,7 @@ factory/
   README.md
   bin/orch               # CLI: poll, wait, job, check-config, install-skills, doctor, status
   lib/                   # handoff.py, transitions.py, gh.py, usage.py
+  deploy/                # reviewed systemd user unit; never auto-installed
   skills/                # pinned pstack + skills.lock
   grok/orchestrate-project/SKILL.md
   bots/                  # short "orch jobs" sections for Claude/Codex/Cursor Bot skills

@@ -1,4 +1,4 @@
-"""orch check-config, install-skills, doctor, eval-report, wait, and job."""
+"""Factory command-line entry point."""
 
 from __future__ import annotations
 
@@ -7,16 +7,23 @@ import os
 import signal
 import sqlite3
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 
+from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib.github_actions import GitHubReviewActions
+from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.hook_t7 import T7Hook
+from lib.hook_t8 import T8Hook
 from lib.load import Finding
-from lib.orch_yml import load_orch_yml
+from lib.orch_yml import OrchConfig, load_orch_yml
+from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
-from lib.queue import QueueError
+from lib.queue import QueueError, SQLiteJobQueue
 from lib.wait import (
     WaitError,
     open_queue,
@@ -37,6 +44,8 @@ commands:
   install-skills   install the pinned pstack skills
   doctor           canary the pinned poteto-mode skill
   eval-report      weekly eval report from a local log directory
+  poll             poll configured trackers and dispatch work
+  init-db          create and initialize the dispatcher database
   wait             block until the dispatcher queues a job for a bot
   job              heartbeat or finish a job that wait returned
 
@@ -59,6 +68,13 @@ doctor [--home PATH] [--project PATH] [--cloud]
 eval-report --input PATH [--since TIME] [--until TIME]
   Print the weekly eval report for one directory of fixtures or
   collected logs. It does not contact GitHub or Linear.
+
+poll [--db PATH] [--orch PATH] [--once]
+  Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
+  --once runs one complete poll cycle. --db defaults to $ORCH_DB.
+
+init-db [--db PATH] [--orch PATH]
+  Create and initialize the database without polling or delivering work.
 
 wait <bot> [--db PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
@@ -88,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_doctor, argv[1:])
     if argv[0] == "eval-report":
         return _call(_eval_report, argv[1:])
+    if argv[0] == "poll":
+        return _call(_poll, argv[1:])
+    if argv[0] == "init-db":
+        return _call(_init_db, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -187,6 +207,92 @@ def _wait(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     return 0
+
+
+def _poll(argv: list[str]) -> int:
+    parser = _Parser(prog="orch poll", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        dispatcher, source = _runtime(args.db, args.orch)
+        PollLoop(dispatcher, source).run(max_polls=1 if args.once else None)
+    except (
+        GrokDeliveryError,
+        PollSourceError,
+        QueueError,
+        WaitError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        print(f"orch poll: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+def _init_db(argv: list[str]) -> int:
+    parser = _Parser(prog="orch init-db", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--orch", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        _runtime(args.db, args.orch)
+    except (
+        GrokDeliveryError,
+        PollSourceError,
+        QueueError,
+        WaitError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        print(f"orch init-db: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
+def _runtime(
+    db_path: Path | None,
+    orch_path: Path | None,
+) -> tuple[Dispatcher, LivePollSource]:
+    config = _runtime_config(orch_path)
+    if not config.trusted_logins:
+        raise ValueError("trusted_logins is required for polling")
+    if config.grok is None:
+        raise ValueError("grok webhook env names are required for polling")
+    path = _db_path(db_path)
+    queue = SQLiteJobQueue(path, clock=time.time)
+    source = LivePollSource(config)
+    delivery = WebhookGrokDelivery(
+        url_env=config.grok.webhook_url_env,
+        key_env=config.grok.webhook_key_env,
+    )
+    t8 = T8Hook()
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=config.trusted_logins,
+        review_actions=GitHubReviewActions(),
+        grok_delivery=delivery,
+        hooks=(T7Hook(), t8),
+    )
+    t8.shipper = ReviewShipper(dispatcher, source)
+    return dispatcher, source
+
+
+def _runtime_config(path: Path | None) -> OrchConfig:
+    config_path = path if path is not None else ROOT / "orch.yml"
+    config, findings = load_orch_yml(config_path)
+    errors = [item for item in findings if item.severity == "error"]
+    if config is None or errors:
+        detail = errors[0].message if errors else "invalid configuration"
+        raise ValueError(f"{config_path}: {detail}")
+    return config
 
 
 def _exit_on_term(_signum: int, _frame: FrameType | None) -> None:

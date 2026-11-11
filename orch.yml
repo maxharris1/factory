@@ -2,9 +2,19 @@
 # Required: poll_seconds, projects[].repo.
 # Optional: job_timeout and projects[].job_timeout, in minutes.
 # When both are omitted the job timeout is 90 minutes.
-# log path and Linear access are not v1 fields.
 poll_seconds: 60
+linear:
+  api_key_env: LINEAR_API_KEY
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+trusted_logins:
+  grok-bot: grok-bot
+  claude-bot: claude-bot
+  codex-bot: codex-bot
+  cursor-bot: cursor-bot
 projects:
   - repo: aut0-code/aut0
+    linear_project: Aut0
   - repo: maxharris1/Cleffy
   - repo: maxharris1/tracy-harris-coaching

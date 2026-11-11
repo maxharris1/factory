@@ -88,6 +88,28 @@ dispatcher and queue use one SQLite database so terminal state and its wake
 commit atomically. The dispatcher queues jobs; it never executes a harness
 binary.
 
+## Poll
+
+```sh
+bin/orch init-db --db "$ORCH_DB"
+bin/orch poll --db "$ORCH_DB" --once
+bin/orch poll --db "$ORCH_DB"
+```
+
+`orch poll` composes `PollLoop`, `Dispatcher`, `LivePollSource`, the T7/T8
+hooks, GitHub review actions, and Grok webhook delivery. `--db` falls back to
+`$ORCH_DB`; `--once` performs one complete cycle and exits. GitHub reads use
+the existing `gh` login with token environment variables removed. Linear
+projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
+
+Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
+variable containing the Linear API key. `grok.webhook_url_env` and
+`grok.webhook_key_env` name the existing Grok routine webhook variables.
+`projects[].linear_project` maps a Linear project name or ID to its repo.
+`trusted_logins` maps tracker authors to handoff identities. Missing secrets
+fail by environment-variable name; values are never printed or included in
+exceptions.
+
 ## Wait
 
 ```sh
@@ -105,6 +127,23 @@ failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
+
+## Install after merge
+
+Do not run these steps until Max gives the go. From a checkout at
+`$HOME/factory`, initialize the database:
+
+```sh
+export ORCH_DB="$HOME/.local/state/factory/orch.db"
+bin/orch init-db
+```
+
+[`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
+for the long-running poller. After the named environment variables have been
+configured for the user service manager, copy or link the unit to
+`~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
+use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
+repository installs, enables, or starts the unit.
 
 ## Status
 
