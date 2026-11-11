@@ -26,6 +26,7 @@ GROK_WAKE_REASONS = (
     "ship-failed",
 )
 CORE_KINDS = ("go", "ready")
+SETTLE_FAILURES_TO_WAKE = 3
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ class ShipRequest:
     head: str
     approver: str
     source_comment_id: str
+    approve_comment_id: str
 
 
 class Hook(Protocol):
@@ -193,7 +195,6 @@ class Dispatcher:
         self.reconcile_jobs()
 
     def process(self, ticket: TrackedTicket) -> None:
-        self._settle_external_ships(ticket)
         comments = sorted(ticket.comments, key=lambda item: (item.created_at, item.id))
         for comment in comments:
             if self._is_handled(ticket, comment.id):
@@ -258,6 +259,7 @@ class Dispatcher:
                 continue
             if handled:
                 self._mark_handled(ticket, comment.id, outcome)
+        self._settle_external_ships(ticket)
 
     def reconcile_jobs(self) -> None:
         now = self.queue.now()
@@ -1156,6 +1158,7 @@ class Dispatcher:
         self,
         repo: str,
         ticket_id: str,
+        comment_id: str,
         head: str,
         policy: str,
     ) -> bool:
@@ -1163,12 +1166,31 @@ class Dispatcher:
             row = connection.execute(
                 """
                 SELECT 1 FROM ship_intents
-                WHERE repo = ? AND ticket_id = ? AND head = ? AND policy = ?
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND head = ? AND policy = ?
                   AND status = 'completed'
                 """,
-                (repo.lower(), ticket_id, head, policy),
+                (repo.lower(), ticket_id, comment_id, head, policy),
             ).fetchone()
         return row is not None
+
+    def _latest_review_verdict(
+        self,
+        ticket: TrackedTicket,
+    ) -> tuple[Comment, dict[str, str]] | None:
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        latest: tuple[Comment, dict[str, str]] | None = None
+        for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] != "verdict":
+                continue
+            if not self._trusted(item, fields, reviewer, role="reviewer"):
+                continue
+            latest = (item, fields)
+        return latest
 
     def _tracker(self, repo: str, ticket_id: str) -> str | None:
         with self._connect() as connection:
@@ -1270,7 +1292,46 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall()
         for row in rows:
-            self._settle_external_ship(ticket, str(row["source_comment_id"]))
+            self._try_settle_external_ship(ticket, str(row["source_comment_id"]))
+
+    def _try_settle_external_ship(
+        self,
+        ticket: TrackedTicket,
+        source_comment_id: str,
+    ) -> None:
+        try:
+            self._settle_external_ship(ticket, source_comment_id)
+        except Exception as exc:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE external_ship_intents
+                    SET settle_failures = settle_failures + 1
+                    WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+                )
+                failures = int(
+                    connection.execute(
+                        """
+                        SELECT settle_failures FROM external_ship_intents
+                        WHERE repo = ? AND ticket_id = ? AND source_comment_id = ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, source_comment_id),
+                    ).fetchone()[0]
+                )
+            if failures >= SETTLE_FAILURES_TO_WAKE:
+                self.wake_grok_once(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    reason="ship-failed",
+                    source_comment_id=source_comment_id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    detail=(
+                        f"merged, but the merged state or label write failed "
+                        f"{failures} times: {type(exc).__name__}: {exc}"
+                    ),
+                )
 
     def _write_state_label(self, ticket: TrackedTicket, state: str) -> None:
         try:
@@ -1785,10 +1846,23 @@ class Dispatcher:
                     status TEXT NOT NULL,
                     error TEXT,
                     settled INTEGER NOT NULL DEFAULT 0,
+                    settle_failures INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (repo, ticket_id, source_comment_id)
                 )
                 """
             )
+            ship_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(external_ship_intents)"
+                ).fetchall()
+            }
+            for name in ("settled", "settle_failures"):
+                if name not in ship_columns:
+                    connection.execute(
+                        f"ALTER TABLE external_ship_intents ADD COLUMN {name} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS review_events (
@@ -1816,13 +1890,19 @@ class Dispatcher:
 class ReviewShipper:
     """F1-05's ship for T8's after:<approver> ok (the hook_t8 Shipper).
 
-    ship raises unless F1-05 completed an after:<approver> ship intent on
-    request.head, CI on request.head is green, and request.head is a full
-    SHA that is still the PR head. Then it squash-merges exactly that head,
-    or confirms it is already merged. Its own intent is keyed on the ok
-    comment, so one request never merges twice. The ticket is re-read
-    from source. Once the merge is recorded, ship returns even if the
-    merged state or label write fails; Dispatcher.process retries those.
+    ship raises unless F1-05 completed an after:<approver> ship intent for
+    request.approve_comment_id on request.head, CI on request.head is
+    green, and request.head is a full SHA that is still the PR head. The
+    ticket is re-read from source, and in those fresh comments the latest
+    trusted reviewer verdict must still be that APPROVE, before the ok.
+    A verdict posted between that read and the merge is not seen; that
+    gap is accepted. Then ship squash-merges exactly that head, or confirms
+    it is already merged. Its own intent is keyed on the ok comment, so
+    one request never merges twice. Once the completed write for that
+    intent has committed, ship no longer raises: a failed merged state or
+    label write is retried by Dispatcher.process, and wakes Grok after
+    SETTLE_FAILURES_TO_WAKE failures. Before that commit, any failure
+    raises.
     """
 
     def __init__(self, dispatcher: Dispatcher, source: PollSource):
@@ -1838,11 +1918,33 @@ class ReviewShipper:
         if not dispatcher._has_completed_ship_intent(
             request.repo,
             request.ticket_id,
+            request.approve_comment_id,
             head,
             policy,
         ):
             raise ShipError(f"no completed {policy} ship intent for {head}")
         ticket = self._ticket(request)
+        latest = dispatcher._latest_review_verdict(ticket)
+        if (
+            latest is None
+            or latest[0].id != request.approve_comment_id
+            or latest[1].get("verdict") != "APPROVE"
+        ):
+            raise ShipError(
+                f"latest review verdict is not APPROVE {request.approve_comment_id}"
+            )
+        ok = next(
+            (item for item in ticket.comments if item.id == request.source_comment_id),
+            None,
+        )
+        if ok is None or (latest[0].created_at, latest[0].id) >= (
+            ok.created_at,
+            ok.id,
+        ):
+            raise ShipError(
+                f"APPROVE {request.approve_comment_id} does not precede "
+                f"ok {request.source_comment_id}"
+            )
         if ticket.factory.ship != policy:
             raise ShipError(f"ticket ship policy is {ticket.factory.ship}")
         if ticket.current_head != head:
@@ -1874,9 +1976,9 @@ class ReviewShipper:
         elif status != "completed":
             raise ShipError(f"ship of {head} is {status}; not shipping again")
         try:
-            dispatcher._settle_external_ship(ticket, request.source_comment_id)
+            dispatcher._try_settle_external_ship(ticket, request.source_comment_id)
         except Exception:
-            # The merge is recorded; Dispatcher.process retries the settle.
+            # The completed write has committed; Dispatcher.process retries.
             pass
 
     def _ticket(self, request: ShipRequest) -> TrackedTicket:

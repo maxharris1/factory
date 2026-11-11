@@ -40,7 +40,6 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from lib.dispatcher import Comment, Dispatcher, ShipRequest, TrackedTicket, _scope
-from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 
 DECLINES_TO_STUCK = 3
@@ -160,6 +159,7 @@ class T8Hook:
                     head=previewed,
                     approver=approver,
                     source_comment_id=comment.id,
+                    approve_comment_id=approve_id,
                 )
             )
         except Exception as exc:
@@ -308,18 +308,7 @@ def _waiting_preview(
     ticket: TrackedTicket,
     comment: Comment,
 ) -> tuple[str, str] | None:
-    reviewer = f"{ticket.factory.reviewer_harness}-bot"
-    latest: tuple[Comment, Mapping[str, str]] | None = None
-    for item in sorted(ticket.comments, key=lambda value: (value.created_at, value.id)):
-        try:
-            fields = parse_comment(item.body).as_dict()
-        except HandoffError:
-            continue
-        if fields["kind"] != "verdict":
-            continue
-        if not dispatcher._trusted(item, fields, reviewer, role="reviewer"):
-            continue
-        latest = (item, fields)
+    latest = dispatcher._latest_review_verdict(ticket)
     if latest is None:
         return None
     verdict, fields = latest

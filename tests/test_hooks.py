@@ -385,6 +385,7 @@ def test_t8_ok_on_previewed_sha_ships_that_sha(tmp_path: Path) -> None:
             head=HEAD_A,
             approver="tracy-site",
             source_comment_id="ok-1",
+            approve_comment_id="verdict-1",
         )
     ]
     assert jobs(queue) == []
@@ -1200,6 +1201,7 @@ def ship_request(head: str = HEAD_A) -> ShipRequest:
         head=head,
         approver="tracy-site",
         source_comment_id="ok-1",
+        approve_comment_id="verdict-1",
     )
 
 
@@ -1312,11 +1314,21 @@ def test_t8_preview_needs_a_completed_after_intent_on_a_full_sha(
         assert shipper.requests == []
 
 
+NO_INTENT = "no completed after:tracy-site ship intent"
+NOT_LATEST = "latest review verdict is not APPROVE verdict-1"
+NOT_BEFORE_OK = "APPROVE verdict-1 does not precede ok ok-1"
 SHIPPER_GATES = {
-    "stale-approve": "no completed after:tracy-site ship intent",
-    "intent-not-completed": "no completed after:tracy-site ship intent",
-    "intent-policy": "no completed after:tracy-site ship intent",
-    "intent-head": "no completed after:tracy-site ship intent",
+    "stale-approve": NO_INTENT,
+    "intent-not-completed": NO_INTENT,
+    "intent-policy": NO_INTENT,
+    "intent-head": NO_INTENT,
+    "intent-approve-id": NO_INTENT,
+    "fresh-revise": NOT_LATEST,
+    "fresh-newer-approve": NOT_LATEST,
+    "fresh-approve-edited": NOT_LATEST,
+    "fresh-approve-deleted": NOT_LATEST,
+    "fresh-ok-missing": NOT_BEFORE_OK,
+    "fresh-ok-before-approve": NOT_BEFORE_OK,
     "ticket-policy": "ticket ship policy is merge",
     "head-moved": "PR head is",
     "red-ci": "is not green",
@@ -1326,6 +1338,26 @@ SHIPPER_GATES = {
     "long-sha": "not a 40-character SHA",
     "uppercase-sha": "not a 40-character SHA",
 }
+BRIEFED = say("brief-1", BRIEF, "grok-login", 0)
+APPROVED = approve("verdict-1", HEAD_A, 1)
+OK_1 = say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2)
+
+
+def accepted(
+    tmp_path: Path,
+    actions: FakeReviewActions,
+    *,
+    review: bool = True,
+) -> tuple[Dispatcher, SQLiteJobQueue, RecordingShipper, FakeSource, TrackedTicket]:
+    """Poll a snapshot without the ok, then serve a fresh read that has it."""
+    source = FakeSource(ticket(BRIEFED, APPROVED))
+    dispatcher, queue, shipper = wired(tmp_path, actions, source)
+    if review:
+        in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    fresh = ticket(BRIEFED, APPROVED, OK_1)
+    source.tickets = (fresh,)
+    return dispatcher, queue, shipper, source, fresh
 
 
 @pytest.mark.parametrize("gate", sorted(SHIPPER_GATES))
@@ -1334,39 +1366,57 @@ def test_p14_review_shipper_raises_unless_every_gate_holds(
     gate: str,
 ) -> None:
     actions = FakeReviewActions()
-    snapshot = ticket(
-        say("brief-1", BRIEF, "grok-login", 0),
-        approve("verdict-1", HEAD_A, 1),
+    _dispatcher, queue, shipper, source, fresh = accepted(
+        tmp_path, actions, review=gate != "stale-approve"
     )
-    source = FakeSource(snapshot)
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
-    if gate != "stale-approve":
-        in_review(queue, HEAD_A)
-    dispatcher.poll_once(source)
-    head = {"short-sha": SHORT_HEAD, "long-sha": HEAD_A + "a"}.get(gate, HEAD_A)
-    if gate == "uppercase-sha":
-        head = HEAD_A.upper()
-    if head != HEAD_A:
+    request = ship_request()
+    revise = say(
+        "verdict-2", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 3
+    )
+    head = {
+        "short-sha": SHORT_HEAD,
+        "long-sha": HEAD_A + "a",
+        "uppercase-sha": HEAD_A.upper(),
+    }.get(gate)
+    if head is not None:
         set_intent(queue, "head", head)
-        source.tickets = (ticket(*snapshot.comments, head=head),)
+        request = replace(request, head=head)
+        source.tickets = (ticket(*fresh.comments, head=head),)
     elif gate == "intent-not-completed":
         set_intent(queue, "status", "unconfirmed")
     elif gate == "intent-policy":
         set_intent(queue, "policy", "after:someone-else")
     elif gate == "intent-head":
         set_intent(queue, "head", HEAD_B)
+    elif gate == "intent-approve-id":
+        request = replace(request, approve_comment_id="verdict-0")
+    elif gate == "fresh-revise":
+        source.tickets = (replace(fresh, comments=fresh.comments + (revise,)),)
+    elif gate == "fresh-newer-approve":
+        newer = approve("verdict-2", HEAD_A, 3)
+        source.tickets = (replace(fresh, comments=fresh.comments + (newer,)),)
+    elif gate == "fresh-approve-edited":
+        edited = replace(revise, id="verdict-1", created_at=1)
+        source.tickets = (replace(fresh, comments=(BRIEFED, edited, OK_1)),)
+    elif gate == "fresh-approve-deleted":
+        source.tickets = (replace(fresh, comments=(BRIEFED, OK_1)),)
+    elif gate == "fresh-ok-missing":
+        source.tickets = (replace(fresh, comments=(BRIEFED, APPROVED)),)
+    elif gate == "fresh-ok-before-approve":
+        early = replace(OK_1, created_at=0.5)
+        source.tickets = (replace(fresh, comments=(BRIEFED, early, APPROVED)),)
     elif gate == "ticket-policy":
-        source.tickets = (replace(snapshot, factory=factory("merge")),)
+        source.tickets = (replace(fresh, factory=factory("merge")),)
     elif gate == "head-moved":
-        source.tickets = (ticket(*snapshot.comments, head=HEAD_B),)
+        source.tickets = (replace(fresh, current_head=HEAD_B),)
     elif gate in ("red-ci", "pending-ci"):
         status = "failure" if gate == "red-ci" else "pending"
-        source.tickets = (replace(snapshot, ci={HEAD_A: CIResult(status)}),)
+        source.tickets = (replace(fresh, ci={HEAD_A: CIResult(status)}),)
     elif gate == "missing-ci":
-        source.tickets = (replace(snapshot, ci={}),)
+        source.tickets = (replace(fresh, ci={}),)
 
     with pytest.raises(ShipError, match=SHIPPER_GATES[gate]):
-        shipper.inner.ship(ship_request(head))
+        shipper.inner.ship(request)
 
     assert actions.merges == []
     assert "state:merged" not in actions.events
@@ -1376,14 +1426,58 @@ def test_p14_review_shipper_raises_unless_every_gate_holds(
         ).fetchone()[0] == 0
 
 
-def test_review_shipper_ships_when_every_gate_holds(tmp_path: Path) -> None:
+class SnapshotThenFreshSource(FakeSource):
+    """The poll reads the snapshot; every later read is the fresh ticket."""
+
+    def __init__(self, snapshot: TrackedTicket, fresh: TrackedTicket):
+        super().__init__(snapshot)
+        self.fresh = fresh
+        self.reads = 0
+
+    def tracked_tickets(
+        self,
+        refs: tuple[TicketRef, ...],
+    ) -> tuple[TrackedTicket, ...]:
+        self.reads += 1
+        if self.reads > 1:
+            self.tickets = (self.fresh,)
+        return super().tracked_tickets(refs)
+
+
+def test_b1_revise_posted_after_the_poll_snapshot_blocks_the_merge(
+    tmp_path: Path,
+) -> None:
     actions = FakeReviewActions()
-    source = FakeSource(
-        ticket(say("brief-1", BRIEF, "grok-login", 0), approve("verdict-1", HEAD_A, 1))
+    snapshot = ticket(BRIEFED, APPROVED, OK_1)
+    revise = say(
+        "verdict-2", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 3
+    )
+    source = SnapshotThenFreshSource(
+        snapshot, replace(snapshot, comments=snapshot.comments + (revise,))
     )
     dispatcher, queue, shipper = wired(tmp_path, actions, source)
     in_review(queue, HEAD_A)
+
     dispatcher.poll_once(source)
+
+    assert [request.head for request in shipper.requests] == [HEAD_A]
+    assert outcomes(queue)["ok-1"] == "ship-failed"
+    assert actions.merges == []
+    assert "state:merged" not in actions.events
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM external_ship_intents"
+        ).fetchone()[0] == 0
+    grok = FakeBot(queue, "grok").drain()
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert "ShipError: latest review verdict is not APPROVE" in str(
+        grok[0].request.detail
+    )
+
+
+def test_review_shipper_ships_when_every_gate_holds(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    _dispatcher, queue, shipper, _source, _fresh = accepted(tmp_path, actions)
 
     shipper.inner.ship(ship_request())
 
@@ -1398,19 +1492,12 @@ def test_review_shipper_refuses_a_ticket_it_cannot_look_up(
     lookup: str,
 ) -> None:
     actions = FakeReviewActions()
-    snapshot = ticket(
-        say("brief-1", BRIEF, "grok-login", 0),
-        approve("verdict-1", HEAD_A, 1),
-    )
-    source = FakeSource(snapshot)
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
-    in_review(queue, HEAD_A)
-    dispatcher.poll_once(source)
+    _dispatcher, queue, shipper, source, fresh = accepted(tmp_path, actions)
     if lookup == "untracked":
         with queue.connect() as connection:
             connection.execute("DELETE FROM tracked_tickets")
     else:
-        source.tickets = () if lookup == "none-found" else (snapshot, snapshot)
+        source.tickets = () if lookup == "none-found" else (fresh, fresh)
 
     message = "is not tracked" if lookup == "untracked" else "was not found"
     with pytest.raises(ShipError, match=message):
@@ -1422,12 +1509,7 @@ def test_review_shipper_refuses_a_replayed_ok_with_another_head(
     tmp_path: Path,
 ) -> None:
     actions = FakeReviewActions()
-    source = FakeSource(
-        ticket(say("brief-1", BRIEF, "grok-login", 0), approve("verdict-1", HEAD_A, 1))
-    )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
-    in_review(queue, HEAD_A)
-    dispatcher.poll_once(source)
+    _dispatcher, queue, shipper, _source, _fresh = accepted(tmp_path, actions)
     with queue.connect() as connection:
         connection.execute(
             """
@@ -1542,15 +1624,7 @@ def test_review_shipper_never_merges_again_after_a_crash_inside_merge(
 ) -> None:
     actions = FakeReviewActions()
     actions.merge_error = SystemExit("simulated crash")
-    source = FakeSource(
-        ticket(
-            say("brief-1", BRIEF, "grok-login", 0),
-            approve("verdict-1", HEAD_A, 1),
-        )
-    )
-    dispatcher, queue, shipper = wired(tmp_path, actions, source)
-    in_review(queue, HEAD_A)
-    dispatcher.poll_once(source)
+    _dispatcher, queue, shipper, _source, _fresh = accepted(tmp_path, actions)
     with pytest.raises(SystemExit):
         shipper.inner.ship(ship_request())
     actions.merge_error = None
@@ -1563,3 +1637,68 @@ def test_review_shipper_never_merges_again_after_a_crash_inside_merge(
     shipper.inner.ship(ship_request())
     assert actions.merges == []
     assert workflow_state(queue) == "merged"
+
+
+def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    actions.state_failures.add("merged")
+    source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
+    dispatcher, queue, _shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+
+    dispatcher.poll_once(source)
+    assert outcomes(queue)["ok-1"] == "shipped"
+    assert jobs(queue) == []
+    forged = say("ok-forged", OK.format(head=HEAD_A), "claude-login", 3)
+    source.tickets = (ticket(BRIEFED, APPROVED, OK_1, forged),)
+    dispatcher.poll_once(source)
+    assert outcomes(queue)["ok-forged"] == "rejected-ok-author"
+    for _poll in range(3):
+        dispatcher.poll_once(source)
+
+    assert jobs(queue) == [("ship-failed", "grok")]
+    grok = FakeBot(queue, "grok").drain()
+    assert grok[0].request.source_comment_id == "ok-1"
+    assert "failed 3 times" in str(grok[0].request.detail)
+    assert actions.merges == [(True, HEAD_A)]
+    assert workflow_state(queue) == "merged"
+    assert actions.states.count("merged") == 6
+
+
+def test_m2_external_ship_intents_gains_settle_columns_idempotently(
+    tmp_path: Path,
+) -> None:
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            CREATE TABLE external_ship_intents (
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                source_comment_id TEXT NOT NULL,
+                head TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                PRIMARY KEY (repo, ticket_id, source_comment_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO external_ship_intents
+                (repo, ticket_id, source_comment_id, head, status)
+            VALUES ('owner/repo', '42', 'ok-1', ?, 'completed')
+            """,
+            (HEAD_A,),
+        )
+
+    setup(tmp_path)
+    setup(tmp_path)
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT settled, settle_failures FROM external_ship_intents"
+        ).fetchone()
+    assert tuple(row) == (0, 0)
