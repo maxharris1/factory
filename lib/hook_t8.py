@@ -39,7 +39,14 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Protocol
 
-from lib.dispatcher import Comment, Dispatcher, ShipRequest, TrackedTicket, _scope
+from lib.dispatcher import (
+    Comment,
+    Dispatcher,
+    ShipRequest,
+    TrackedTicket,
+    _comment_order,
+    _scope,
+)
 from lib.queue import JobRequest
 
 DECLINES_TO_STUCK = 3
@@ -312,7 +319,7 @@ def _waiting_preview(
     if latest is None:
         return None
     verdict, fields = latest
-    if (verdict.created_at, verdict.id) >= (comment.created_at, comment.id):
+    if _comment_order(verdict) >= _comment_order(comment):
         return None
     if fields.get("verdict") != "APPROVE":
         return None

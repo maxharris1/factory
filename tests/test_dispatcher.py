@@ -14,6 +14,7 @@ from lib.dispatcher import (
     PollLoop,
     TicketRef,
     TrackedTicket,
+    ship_mode,
 )
 from lib.factory_md import FactoryConfig
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -53,6 +54,7 @@ class FakeReviewActions:
         self.patch_id_calls: list[str] = []
         self.patch_errors: set[str] = set()
         self.merges: list[tuple[bool, str]] = []
+        self.fast_forwards: list[tuple[str, str]] = []
         self.merged_heads: set[str] = set()
         self.is_merged_calls: list[str] = []
         self.merge_error: Exception | None = None
@@ -98,6 +100,17 @@ class FakeReviewActions:
         self.merged_heads.add(match_head_commit)
         if self.crash_after_merge:
             raise SystemExit("simulated process crash")
+
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        del ticket
+        self.fast_forwards.append((branch, head))
+        self.events.append(f"fast-forward:{branch}:{head}")
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
         del ticket
@@ -1497,6 +1510,47 @@ def test_t4_records_approve_outside_current_review_as_stale(
             """
         ).fetchone()[0]
     assert outcome == "stale-approve"
+
+
+@pytest.mark.parametrize(
+    ("policy", "mode"),
+    [
+        ("merge", "squash"),
+        ("handoff", "squash"),
+        ("after:tracy-site", "fast-forward"),
+    ],
+)
+def test_ship_mode_is_chosen_per_repo_from_the_ship_policy(
+    policy: str,
+    mode: str,
+) -> None:
+    assert ship_mode(policy) == mode
+
+
+def test_non_after_repo_still_squash_merges_and_never_fast_forwards(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    approved = comment(
+        "approve-1",
+        VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high"),
+        author="codex-login",
+    )
+
+    dispatcher.process(
+        ticket(
+            approved,
+            head=head,
+            ci={head: CIResult("success")},
+            factory_config=factory(ship="merge"),
+        )
+    )
+
+    assert actions.merges == [(True, head)]
+    assert actions.fast_forwards == []
 
 
 def test_t4_requires_current_round_and_green_actual_head(tmp_path: Path) -> None:
