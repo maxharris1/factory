@@ -106,6 +106,17 @@ the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
 
+## Status
+
+```sh
+bin/orch status --db "$ORCH_DB"
+```
+
+`orch status` prints a read-only summary of queued jobs, occupied box slots,
+and paused tracker items. It opens the dispatcher database read-only and does
+not claim, release, lease, wake, or update anything. Device rows stay empty
+until F2-01 adds the device pool.
+
 ## Check config
 
 ```sh
