@@ -167,6 +167,76 @@ def test_status_command_changes_no_database_bytes_or_mtimes(tmp_path: Path) -> N
     assert directory_snapshot(tmp_path) == before
 
 
+def test_status_reads_uncheckpointed_wal_without_changing_files(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    writer = sqlite3.connect(path)
+    try:
+        assert writer.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        writer.execute(
+            """
+            INSERT INTO jobs
+            VALUES ('wal-queued', 'owner/repo', '44', 'fix', 'cursor',
+                    'queued', 40, 40)
+            """
+        )
+        writer.commit()
+        assert Path(f"{path}-wal").exists()
+        prime = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        prime.execute("SELECT COUNT(*) FROM jobs").fetchone()
+        prime.close()
+        before = directory_snapshot(tmp_path)
+        reader = SQLiteStatusReader(path)
+
+        status = build_status(reader, reader, clock=lambda: 100)
+
+        assert [row.id for row in status.queued] == ["queued", "wal-queued"]
+        assert directory_snapshot(tmp_path) == before
+    finally:
+        writer.close()
+
+
+def test_status_clean_wal_database_creates_no_sidecar_files(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    connection.close()
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
+    before = directory_snapshot(tmp_path)
+    reader = SQLiteStatusReader(path)
+
+    build_status(reader, reader, clock=lambda: 100)
+
+    assert directory_snapshot(tmp_path) == before
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()
+
+
+def test_dispatcher_stuck_flag_is_rendered_as_paused(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            UPDATE ticket_state
+            SET workflow_state = 'building', stuck = 1,
+                stuck_reason = 'ci-red-3'
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        )
+    reader = SQLiteStatusReader(path)
+
+    output = render(build_status(reader, reader, clock=lambda: 100))
+
+    assert "Paused (1)" in output
+    assert "owner/repo#42 stuck (ci-red-3) [github]" in output
+
+
 def test_read_only_proof_detects_a_mutant_tracker_write(tmp_path: Path) -> None:
     path = tmp_path / "queue.sqlite3"
     create_database(path)
@@ -226,7 +296,9 @@ def create_database(path: Path) -> None:
                 repo TEXT NOT NULL,
                 ticket_id TEXT NOT NULL,
                 workflow_state TEXT,
-                paused_action TEXT
+                paused_action TEXT,
+                stuck INTEGER NOT NULL DEFAULT 0,
+                stuck_reason TEXT
             );
             CREATE TABLE jobs (
                 id TEXT NOT NULL,
@@ -241,7 +313,7 @@ def create_database(path: Path) -> None:
             INSERT INTO tracked_tickets
             VALUES ('owner/repo', '42', 'github', 1);
             INSERT INTO ticket_state
-            VALUES ('owner/repo', '42', 'waiting-max', 'build');
+            VALUES ('owner/repo', '42', 'waiting-max', 'build', 0, NULL);
             INSERT INTO jobs
             VALUES ('queued', 'owner/repo', '42', 'build', 'claude',
                     'queued', 10, 10);

@@ -29,6 +29,8 @@ class TrackerRow:
     tracker: str
     state: str
     paused_action: str | None = None
+    stuck: bool = False
+    stuck_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,25 +77,52 @@ class DeviceRowsProvider(Protocol):
 
 
 class SQLiteStatusReader:
-    """Read the existing dispatcher database without initializing or locking it."""
+    """Read the existing dispatcher database without initializing or mutating it."""
 
     def __init__(self, path: Path):
         self.path = path
+        self._snapshot: tuple[tuple[TrackerRow, ...], tuple[JobRow, ...]] | None = None
 
     def tracker_rows(self) -> tuple[TrackerRow, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
+        return self._rows()[0]
+
+    def job_rows(self) -> tuple[JobRow, ...]:
+        return self._rows()[1]
+
+    def _rows(self) -> tuple[tuple[TrackerRow, ...], tuple[JobRow, ...]]:
+        if self._snapshot is not None:
+            return self._snapshot
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            tracker_rows = connection.execute(
                 """
                 SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                        COALESCE(state.workflow_state, 'intake') AS workflow_state,
-                       state.paused_action
+                       state.paused_action, COALESCE(state.stuck, 0) AS stuck,
+                       state.stuck_reason
                 FROM tracked_tickets AS tracked
                 LEFT JOIN ticket_state AS state
                   ON state.repo = tracked.repo
                  AND state.ticket_id = tracked.ticket_id
                 """
             ).fetchall()
-        return tuple(
+            job_rows = connection.execute(
+                """
+                SELECT id, repo, ticket_id, action, recipient, state,
+                       created_at, last_activity_at
+                FROM jobs
+                WHERE state IN ('queued', 'running')
+                """
+            ).fetchall()
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        tracker = tuple(
             TrackerRow(
                 repo=str(row["repo"]),
                 ticket_id=str(row["ticket_id"]),
@@ -104,21 +133,16 @@ class SQLiteStatusReader:
                     if row["paused_action"] is not None
                     else None
                 ),
+                stuck=bool(row["stuck"]),
+                stuck_reason=(
+                    str(row["stuck_reason"])
+                    if row["stuck_reason"] is not None
+                    else None
+                ),
             )
-            for row in rows
+            for row in tracker_rows
         )
-
-    def job_rows(self) -> tuple[JobRow, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, repo, ticket_id, action, recipient, state,
-                       created_at, last_activity_at
-                FROM jobs
-                WHERE state IN ('queued', 'running')
-                """
-            ).fetchall()
-        return tuple(
+        jobs = tuple(
             JobRow(
                 id=str(row["id"]),
                 repo=str(row["repo"]),
@@ -129,19 +153,26 @@ class SQLiteStatusReader:
                 created_at=float(row["created_at"]),
                 last_activity_at=float(row["last_activity_at"]),
             )
-            for row in rows
+            for row in job_rows
         )
+        self._snapshot = (tracker, jobs)
+        return self._snapshot
 
     def _connect(self) -> sqlite3.Connection:
         if not self.path.is_file():
             raise StatusError(f"database does not exist: {self.path}")
-        uri = self.path.resolve().as_uri() + "?mode=ro&immutable=1"
+        wal_path = Path(f"{self.path}-wal")
+        query = "?mode=ro" if wal_path.exists() else "?mode=ro&immutable=1"
+        uri = self.path.resolve().as_uri() + query
+        connection: sqlite3.Connection | None = None
         try:
             connection = sqlite3.connect(uri, uri=True)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only = ON")
             return connection
         except sqlite3.Error as exc:
+            if connection is not None:
+                connection.close()
             raise StatusError(f"cannot read database: {exc}") from exc
 
 
@@ -192,7 +223,11 @@ def build_status(
         ),
         paused=tuple(
             sorted(
-                (row for row in tracker_rows if row.state in PAUSED_STATES),
+                (
+                    row
+                    for row in tracker_rows
+                    if row.stuck or row.state in PAUSED_STATES
+                ),
                 key=lambda row: (
                     row.repo.casefold(),
                     row.ticket_id,
@@ -231,8 +266,12 @@ def render(status: Status) -> str:
     lines.extend(("", f"Paused ({len(status.paused)})"))
     for row in status.paused:
         action = f" paused={row.paused_action}" if row.paused_action else ""
+        state = row.state
+        if row.stuck:
+            reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
+            state = f"stuck{reason}"
         lines.append(
-            f"  {row.repo}#{row.ticket_id} {row.state} [{row.tracker}]{action}"
+            f"  {row.repo}#{row.ticket_id} {state} [{row.tracker}]{action}"
         )
     if not status.paused:
         lines.append("  empty")
