@@ -103,6 +103,21 @@ class ReviewActions(Protocol):
         match_head_commit: str,
     ) -> None: ...
 
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        """Move branch to exactly head, adding no commit.
+
+        Raises when head is not a fast-forward of branch's current tip
+        (branch moved, or history diverged). Never merges, squashes or
+        force-pushes instead.
+        """
+        ...
+
     def handoff(self, ticket: TrackedTicket, head: str) -> None: ...
 
     def await_approver(
@@ -677,11 +692,7 @@ class Dispatcher:
                 self._complete_ship_intent(ticket, comment.id, "merged")
                 self._write_state_label(ticket, "merged")
                 return True, "merge-confirmed"
-            self.review_actions.merge(
-                ticket,
-                squash=True,
-                match_head_commit=current_head,
-            )
+            self._ship_head(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "merged")
             self._write_state_label(ticket, "merged")
             return True, "merged"
@@ -695,6 +706,26 @@ class Dispatcher:
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _ship_head(self, ticket: TrackedTicket, head: str) -> None:
+        """Ship exactly head in the repo's ship_mode, or raise. No fallback."""
+        if not _is_full_sha(head):
+            raise ShipError(f"ship head {head!r} is not a 40-character SHA")
+        mode = ship_mode(ticket.factory.ship)
+        if mode == "fast-forward":
+            self.review_actions.fast_forward(
+                ticket,
+                branch=ticket.factory.base_branch,
+                head=head,
+            )
+        elif mode == "squash":
+            self.review_actions.merge(
+                ticket,
+                squash=True,
+                match_head_commit=head,
+            )
+        else:
+            raise ShipError(f"unknown ship mode {mode!r}")
 
     def _t5_questions(
         self,
@@ -1896,8 +1927,10 @@ class ReviewShipper:
     ticket is re-read from source, and in those fresh comments the latest
     trusted reviewer verdict must still be that APPROVE, before the ok.
     A verdict posted between that read and the merge is not seen; that
-    gap is accepted. Then ship squash-merges exactly that head, or confirms
-    it is already merged. Its own intent is keyed on the ok comment, so
+    gap is accepted. Then ship lands exactly that head in the repo's
+    ship_mode (an after: repo fast-forwards base_branch to it, and raises
+    if that is not a fast-forward), or confirms it is already merged.
+    Its own intent is keyed on the ok comment, so
     one request never merges twice. Once the completed write for that
     intent has committed, ship no longer raises: a failed merged state or
     label write is retried by Dispatcher.process, and wakes Grok after
@@ -1960,11 +1993,7 @@ class ReviewShipper:
                 raise ShipError(f"ship of {head} has no recorded result")
             else:
                 try:
-                    dispatcher.review_actions.merge(
-                        ticket,
-                        squash=True,
-                        match_head_commit=head,
-                    )
+                    dispatcher._ship_head(ticket, head)
                 except Exception as exc:
                     dispatcher._finish_external_ship(
                         request,
@@ -2032,6 +2061,11 @@ def _matching_head(reported: str, current: str | None) -> str | None:
     if current.startswith(reported) or reported.startswith(current):
         return current
     return None
+
+
+def ship_mode(policy: str) -> str:
+    """after:<approver> repos fast-forward; every other repo squash-merges."""
+    return "fast-forward" if policy.startswith("after:") else "squash"
 
 
 def _comment_link(comment: Comment) -> str:
