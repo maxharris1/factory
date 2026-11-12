@@ -4721,6 +4721,15 @@ REVIEWER_QUESTIONS = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -
         "## Questions\n### Pricing\nKeep the old table or drop it.\n",
         "**Restatement**\nIntake.\n\n**Questions**\n"
         "**Keep the old pricing table?**\n\n**Notes**\nNone.\n",
+        # Round 2 (F2.2): a sub-label or formatted heading directly under
+        # Questions is question content, whatever its style or level.
+        "**Questions:**\n### Pricing\nKeep the old table or drop it?\n",
+        "**Questions**\n**Pricing**\n- Should the brief keep the old table?\n",
+        "**Questions**\n### **Pricing?**\n",
+        "## Questions\n## Pricing ##\nKeep it?\n",
+        "**Questions**\n### Pricing ###\nKeep the old table or drop it.\n",
+        "Questions:\n## Pricing\nKeep it?\n",
+        "# Questions\n# Pricing\nKeep it?\n",
     ],
 )
 def test_t5_heading_style_questions_queue_clarify(
@@ -4742,26 +4751,112 @@ def test_t5_heading_style_questions_queue_clarify(
 
 
 @pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
     "body",
     [
         "**Questions**\nNone.\n\n**Notes**\nThe brief is long.\n",
         "## Questions\nN/A\n\n## Notes\nThe brief is long.\n",
         "## Questions\nNo questions.\n\n# Plan\nShip it.\n",
+        # Further guards for the round-2 rule: an inline marker, a bold
+        # Questions label, and a Questions heading with nothing after it.
+        "**Questions:**\nNone\n### Notes\nThe brief is long.\n",
+        "**Questions:** N/A\n### Notes\nThe brief is long.\n",
+        "## Questions\n",
+        "**Questions**\n\n",
     ],
 )
 def test_t5_empty_questions_section_then_other_section_queues_nothing(
     tmp_path: Path,
+    header: str,
+    author: str,
     body: str,
 ) -> None:
+    """Preservation guard: these pass before and after the round-2 fix."""
     dispatcher, queue = setup(tmp_path)
     head = "a" * 40
     seed_review_job(dispatcher, queue, head)
-    question = comment(
-        "questions-1", f"{BUILDER_QUESTIONS}\n{body}", author="claude-login"
-    )
+    question = comment("questions-1", f"{header}\n{body}", author=author)
 
     dispatcher.process(ticket(question, head=head))
 
     assert handled_outcome(queue, "questions-1") == "no-questions"
     assert job_count(queue, "clarify") == 0
     assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n### Notes\n",
+        "## Questions\nN/A\n### Notes\nThe brief is long.\n",
+        "# Questions\nNo questions.\n## Plan\nShip it.\n",
+        "## Questions ##\nNone.\n## Plan\nShip it.\n",
+        "## Questions\n- None.\n### Notes\nThe brief is long?\n",
+        "## Questions\n### None\n### Notes\nThe brief is long.\n",
+    ],
+)
+def test_t5_none_marker_then_any_heading_queues_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 2 (F2.1): the first thing under Questions is a none-marker, so
+    nothing that follows it (deeper headings included) counts as a question.
+    """
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+def test_t5_heading_right_after_questions_is_content_fail_closed(
+    tmp_path: Path,
+    header: str,
+    author: str,
+) -> None:
+    """Round 2: headings never close the Questions section. A same-level
+    heading right under Questions can be a question label ("## Pricing ##"),
+    so with no explicit none-marker the comment counts as questions, as
+    every trusted questions comment did on main.
+    """
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment(
+        "questions-1",
+        f"{header}\n## Questions\n\n## Plan\nShip it.\n",
+        author=author,
+    )
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"

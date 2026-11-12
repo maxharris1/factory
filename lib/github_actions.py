@@ -356,8 +356,10 @@ class GitHubReviewActions:
         try:
             result = self.runner(argv, self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
+            # The runner may use its own timeout (the poller runs writes at
+            # 60 s), so report the one the timed-out call actually had.
             raise GitHubAdapterError(
-                f"gh api timed out after {self.timeout_seconds:g}s"
+                f"gh api timed out after {exc.timeout:g}s"
             ) from exc
         except OSError as exc:
             raise GitHubAdapterError(f"gh could not run: {type(exc).__name__}") from exc
@@ -471,11 +473,35 @@ class LinearReviewActions(GitHubReviewActions):
                 ) from None
 
 
+_BODY_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
+
+
 def _is_read(args: Sequence[str]) -> bool:
-    if "-X" not in args:
-        return True
-    index = args.index("-X")
-    return index + 1 < len(args) and args[index + 1] == "GET"
+    """Whether a ``gh api`` call is provably a GET, so safe to cache or retry.
+
+    gh sends POST when any field or --input is given without a method, so
+    any body flag, any method other than GET, and any graphql call (a POST)
+    make the call a non-read. Fields under an explicit ``-X GET`` would be
+    query parameters, but no read here needs them, so they are not trusted.
+    """
+    methods: list[str] = []
+    for index, arg in enumerate(args):
+        if arg == "graphql":
+            return False
+        if arg in ("-X", "--method"):
+            methods.append(args[index + 1] if index + 1 < len(args) else "")
+        elif arg.startswith("--method="):
+            methods.append(arg.partition("=")[2])
+        elif arg.startswith("-X"):
+            methods.append(arg[2:])
+        elif any(
+            arg == flag
+            or arg.startswith(f"{flag}=")
+            or (len(flag) == 2 and arg.startswith(flag))
+            for flag in _BODY_FLAGS
+        ):
+            return False
+    return all(method.upper() == "GET" for method in methods)
 
 
 def _repo_path(repo: str) -> str:

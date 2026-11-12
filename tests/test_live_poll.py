@@ -18,7 +18,13 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig
-from lib.github_actions import GhResult, GitHubReviewActions, LinearReviewActions
+from lib.github_actions import (
+    GhResult,
+    GitHubAdapterError,
+    GitHubReviewActions,
+    LinearReviewActions,
+    _is_read,
+)
 from lib.grok_delivery import (
     GrokDeliveryError,
     WebhookGrokDelivery,
@@ -2186,12 +2192,75 @@ def test_poll_adapter_never_retries_a_mutation() -> None:
 
     source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
 
-    with pytest.raises(Exception, match="timed out"):
+    with pytest.raises(GitHubAdapterError) as raised:
         source.github._call(
             "-X", "POST", "repos/acme/widgets/issues/12/comments", "-f", "body=x"
         )
     assert calls == [TIMEOUT_SECONDS]
     assert sleeps == []
+    # Round 2 (F2.4): the message names the 60 s the write actually ran with.
+    assert str(raised.value) == f"gh api timed out after {TIMEOUT_SECONDS:g}s"
+
+
+NON_READ_CALLS = {
+    "field-implies-post": ("repos/acme/widgets/issues/12/comments", "-f", "body=x"),
+    "typed-field": ("repos/acme/widgets/issues/12/labels", "-F", "labels[]=x"),
+    "long-field": ("repos/acme/widgets/issues/12/comments", "--field", "body=x"),
+    "long-field-equals": ("repos/acme/widgets/issues/12/comments", "--field=body=x"),
+    "raw-field": ("repos/acme/widgets/issues/12/comments", "--raw-field", "body=x"),
+    "attached-field": ("repos/acme/widgets/issues/12/comments", "-fbody=x"),
+    "input": ("--input", "-", "repos/acme/widgets/issues/12/comments"),
+    "method-post": ("--method", "POST", "repos/acme/widgets/issues/12/comments"),
+    "method-equals-patch": ("--method=PATCH", "repos/acme/widgets/pulls/12"),
+    "attached-x-delete": ("-XDELETE", "repos/acme/widgets/issues/12/labels/x"),
+    "lowercase-x-put": ("-X", "put", "repos/acme/widgets/pulls/12/merge"),
+    "graphql": ("graphql", "-f", "query=query { viewer { login } }"),
+    "graphql-no-fields": ("graphql",),
+    "get-with-input": ("-X", "GET", "repos/acme/widgets/pulls", "--input", "-"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(NON_READ_CALLS))
+def test_poll_adapter_runs_every_non_read_form_once(name: str) -> None:
+    """Round 2 (F2.3): only provable reads are retried; every write form,
+    and graphql, runs once at the 60 s write timeout with no sleeps.
+    """
+    calls: list[float] = []
+    sleeps: list[float] = []
+
+    def runner(argv, timeout):
+        calls.append(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
+
+    with pytest.raises(GitHubAdapterError) as raised:
+        source.github._call(*NON_READ_CALLS[name])
+    assert calls == [TIMEOUT_SECONDS]
+    assert sleeps == []
+    assert str(raised.value) == f"gh api timed out after {TIMEOUT_SECONDS:g}s"
+
+
+@pytest.mark.parametrize("name", sorted(NON_READ_CALLS))
+def test_is_read_rejects_every_non_read_form(name: str) -> None:
+    """Round 2 (F2.3): the classifier itself, so --cache is never added to a
+    write either."""
+    assert not _is_read(NON_READ_CALLS[name])
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("repos/acme/widgets/issues/12/comments",),
+        ("repos/acme/widgets/issues/12/comments", "--paginate"),
+        ("-X", "GET", "repos/acme/widgets/commits/abc/check-runs"),
+        ("--method", "GET", "repos/acme/widgets/commits/abc/status"),
+        ("--method=get", "repos/acme/widgets/pulls/12"),
+    ],
+)
+def test_is_read_accepts_plain_gets(args: tuple[str, ...]) -> None:
+    """Preservation guard: real reads stay reads (passes before and after)."""
+    assert _is_read(args)
 
 
 def test_adapter_read_timeout_on_one_ref_leaves_a_healthy_ref_alone(

@@ -36,9 +36,6 @@ _QUESTIONS_HEADING = re.compile(
     r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
     re.IGNORECASE,
 )
-_SECTION_HEADING = re.compile(
-    r"(?P<hashes>#{1,6})\s+(?P<text>\S.*)|\*\*(?P<bold>[^*]+)\*\*:?"
-)
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 
@@ -2912,43 +2909,43 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
 
 
 def _has_questions(body: str) -> bool:
-    lines = [line.strip() for line in body.splitlines()]
-    section = lines
+    """Whether a trusted questions comment asks anything.
+
+    Fail closed: every questions comment counts unless it explicitly says
+    there are none. With a Questions heading (any style: ``## Questions``,
+    ``**Questions:**``, ``Questions: ...``), only the first content after it
+    decides, whether that is the inline remainder or the next non-blank line:
+    a none-marker ("None.", "N/A", "No questions") or no content at all means
+    no questions; anything else, headings and bold labels included, means
+    questions. Headings never close the section, because a heading right under
+    Questions can itself be a question or a label for one.
+    Without a Questions heading, any line that is not a none-marker counts.
+    """
+    lines = body.splitlines()
     for index, line in enumerate(lines):
-        heading = _QUESTIONS_HEADING.fullmatch(line)
+        heading = _QUESTIONS_HEADING.fullmatch(line.strip())
         if heading is None:
             continue
-        hashes = re.match(r"#*", line).group()
-        level = len(hashes) if hashes else None
-        section = [heading.group("rest") or ""]
-        for rest in lines[index + 1 :]:
-            if _ends_questions_section(rest, level):
-                break
-            section.append(rest)
-        break
-    items = (
-        _LIST_MARKER.sub("", line).strip().rstrip(".").strip().lower()
-        for line in section
+        for content in [heading.group("rest") or "", *lines[index + 1 :]]:
+            item = _question_item(content)
+            if item:
+                return item not in _NO_QUESTIONS
+        return False
+    return any(
+        item and item not in _NO_QUESTIONS
+        for item in map(_question_item, lines)
     )
-    return any(item and item not in _NO_QUESTIONS for item in items)
 
 
-def _ends_questions_section(line: str, level: int | None) -> bool:
-    """A heading ends the Questions section unless it is itself content.
+def _question_item(line: str) -> str:
+    """A line reduced to its words: no heading, bold or list markup.
 
-    A bold or # line that asks a question ("**Keep the table?**") or is a
-    numbered item ("### 1. Pricing") is a question, and a # heading deeper
-    than a # Questions heading is a subheading inside the section.
+    Markup-only lines ("##", "**", "---") reduce to "" and count as blank.
     """
-    heading = _SECTION_HEADING.fullmatch(line)
-    if heading is None:
-        return False
-    text = (heading.group("text") or heading.group("bold")).strip()
-    text = text.removesuffix(":").strip()
-    if text.endswith("?") or _LIST_MARKER.match(text):
-        return False
-    hashes = heading.group("hashes")
-    return not (hashes and level is not None and len(hashes) > level)
+    text = re.sub(r"^#{1,6}(?=\s|$)|\s#+$", "", line.strip())
+    text = _LIST_MARKER.sub("", text.strip("*: ")).strip("*: ")
+    text = text.rstrip(".").strip().lower()
+    return "" if re.fullmatch(r"[-*_#=\s]*", text) else text
 
 
 def _comment_link(comment: Comment) -> str:
