@@ -680,9 +680,15 @@ rows that appear since the last snapshot flash briefly, and the job page
 copies the server-drawn diagram and moves the highlight. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
-works offline on the tailnet. Values are only ever set as text
-(`createElement`/`textContent`), never parsed as HTML. Animations (header
-sweep, link pulse, heartbeat shimmer, new-row flash) stop under
+works offline on the tailnet. The look follows Omarchy (omarchy.org): the
+Tokyo Night palette, square corners, 1px elevation rings, Geist for text
+and JetBrains Mono for numbers and labels. Both fonts are vendored under
+`lib/fonts` (SIL OFL 1.1, licenses alongside) and travel inside the page
+script as bytes, registered with `FontFace`, so nothing is fetched and the
+static server's CSP is unchanged; without script the system fonts are used.
+Values are only ever set as text
+(`createElement`/`textContent`), never parsed as HTML. Animations (brand
+caret, link pulse, heartbeat shimmer, new-row flash) stop under
 `prefers-reduced-motion: reduce`, and every text colour meets WCAG AA
 (4.5:1) on every panel background (`tests/test_dashboard_mission_control.py`
 checks the palette). Paths: `--db`, else
