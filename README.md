@@ -516,7 +516,7 @@ The box cannot take inbound tailnet connections, so there is no live
 server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
-writes `status.json` and a static, self-contained `index.html` to `--out`.
+writes `status.json` and a self-contained `index.html` to `--out`.
 The database path is resolved through symlinks first, and the dashboard
 never uses `immutable=1`: SQLite takes its normal shared locks and reads
 the WAL, so a read stays consistent while the poller commits or
@@ -527,8 +527,33 @@ the directory is read-only and they don't exist yet, the snapshot fails
 with that explanation instead of reading without locks. Both files are
 written to temp files in the same directory and fsynced, then renamed into
 place; if the second rename fails, `status.json` is put back as it was, so
-the pair always comes from one snapshot. The page reloads itself every `dashboard.refresh_seconds`
-(15 to 30, default 20; `--refresh` overrides it). Paths: `--db`, else
+the pair always comes from one snapshot.
+
+**Mission control.** `index.html` is a dark heads-up display that updates
+in real time: its inline script fetches the relative `status.json` every
+1.5 seconds (`cache: 'no-store'`) and rebuilds its panels in place, with no
+reload. It shows a status row (running, queued, done, failed, stuck or
+overdue, scripted share), one lane per device from `machines.yml` (box, pc,
+mac; disabled devices dimmed and marked, placeholders flagged) with a slot
+per `slot_max` and, in each busy slot, the job's bot, ticket, action,
+elapsed time and heartbeat age against its timeout, plus a lane for running
+Grok wakes; the queue with wait times; recent handoffs (scripted,
+bot-to-bot, failed) and recent verdicts (handled `orch:v1` comments by
+outcome); poll health and Linear-budget health; handoff savings; stuck,
+overdue and paused tickets; every tracked ticket; and the redacted log
+tail. Ages tick every second between fetches, and rows that appear since
+the last snapshot flash briefly. The header shows the link state (`LIVE`,
+`STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail). Everything
+is inline: no external asset, font or CDN, so it works offline on the
+tailnet. Values are only ever set as text (`createElement`/`textContent`),
+never parsed as HTML. Animations (header sweep, link pulse, heartbeat
+shimmer, new-row flash) stop under `prefers-reduced-motion: reduce`, and
+every text colour meets WCAG AA (4.5:1) on every panel background
+(`tests/test_dashboard_mission_control.py` checks the palette). Without
+script, or when `status.json` cannot be fetched at all, the server-rendered
+tables underneath stay and the page reloads every
+`dashboard.refresh_seconds` (15 to 30, default 20; `--refresh` overrides
+it), as before. Paths: `--db`, else
 `$ORCH_DB`; `--log`, else `$ORCH_POLL_LOG`, else `poller.log` beside the
 database; `--out`, else `$ORCH_DASHBOARD_DIR`, else `dashboard/` beside the
 database; `--machines`, else the checkout's `machines.yml` when present.
@@ -546,6 +571,26 @@ review round and gate count, poll errors (last hour, last day, newest 20),
 `poll_deferrals` when that table exists, the poller's last activity (the
 newest of the log's modification time, poll error and deferral; `main`
 records no per-cycle row) and the handoff-savings counter.
+
+Fields the live page adds, all from allowlisted columns or enumerations:
+each `running` job's `device` (its `device_slots` placement, else `box`;
+`null` for a Grok wake), `elapsed_seconds` and `elapsed_from` (`placed`
+from `device_slots.placed_at`, else `queued` from `created_at`, because
+`jobs` records no claim time); `handoff_savings.recent`, the newest 12
+finished jobs with `kind` `scripted`, `bot_to_bot`, `failed` or `done` (the
+handoff comment id itself is never copied); `poller.verdicts`, the newest
+12 handled `orch:v1` comments (`handled_comments`, newest by insertion) as
+`outcome` (a dispatcher outcome such as `queued-review-fix`, anything else
+`other`) and `kind` (`routed`, `shipped`, `stale`, `rejected`, `stuck`,
+`blocked`, `waiting`, `other`), `null` without that table;
+`poller.health`, `ok` while the last poll cycle ended at most 150 s ago,
+`late` to 300 s, then `stale`, and `unknown` when the snapshot was not
+told when the last cycle ended (only live pushes pass `--last-cycle`;
+`main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
+(Linear 429 or `RATELIMITED` errors in the last hour), `exhausted` (`Linear
+poll budget is exhausted` errors), `deferring` (`Linear poll budget`
+deferrals) or `ok`, with those hourly counts and the poller's Linear share
+of the hourly budget (1250 requests, 1,500,000 complexity).
 
 **Handoff savings.** docs/SPEC.md does not define this counter; the
 dashboard brief does, and this is its database form. `scripted` counts
@@ -599,42 +644,96 @@ workflow states) and the log, and checks that none reach `status.json` or
 `index.html`. A second test turns the redactor off and checks that the
 same leak check then finds every planted free-text secret.
 
-**Push.** `orch dashboard push` snapshots and then sends `status.json` and
-`index.html` every `dashboard.push.interval_seconds` (15 to 30); `--once`
-sends one and exits 1 if that failed. A failed snapshot or send logs one
-redacted line and the loop continues. Push is off by default: with no
-`dashboard.push` section, or `transport: none`, it logs one line and exits
-0 without opening the database or writing anything. The one transport is
-`ssh`, to the pc-wsl-bots node:
+**Push.** Push is off by default: with no `dashboard.push` section, or
+`transport: none`, nothing is pushed, `orch poll` behaves exactly as
+before, and `orch dashboard push` logs one line and exits 0 without
+opening the database or writing anything. The one transport is `ssh`, to
+the pc-wsl-bots node as cursor-bot through the box's `pc-wsl-cursor-bot`
+SSH alias:
 
 ```yaml
 dashboard:
   refresh_seconds: 20
   push:
     transport: ssh
-    host: pc-wsl-bots.tail68624b.ts.net   # or an alias from ~/.ssh/config
-    remote_dir: /path/the/server/serves   # absolute, created by Max
-    method: rsync                         # or scp
-    interval_seconds: 20
+    host: pc-wsl-cursor-bot              # an SSH alias or tailnet name
+    ssh_config: /home/box/.ssh/config    # optional: passed as ssh/scp -F
+    remote_dir: factory-dashboard        # default; relative to the remote home
+    method: scp                          # or rsync (the default)
+    live: true                           # optional: push status.json on every orch.db change
+    # every_minutes: 5                   # omitted: push after every poll cycle
+    interval_seconds: 20                 # only for the `orch dashboard push` loop
 ```
 
-`rsync` (the default) runs `rsync --quiet --timeout=30 --chmod=F644 -e "ssh
--o BatchMode=yes -o ConnectTimeout=10" -- status.json index.html
-host:remote_dir/`; rsync writes each file to a temp name and renames it,
-so readers never see a partial file. `scp` has no rename of its own, so
-it uploads each file to a dot-prefixed temp name (`scp -q -B -o
-BatchMode=yes -o ConnectTimeout=10 -- status.json
-host:remote_dir/.status.json.push-tmp`, then the same for `index.html`)
-and, only after both uploads succeed, renames each into place with `ssh -o
-BatchMode=yes -o ConnectTimeout=10 -- host mv -f -- temp final`. An
-interrupted push leaves the published files whole, and the static server
-never serves the temp names. Every command is an argv list (no local
-shell) with a 60-second timeout; the remote `mv` sees only the validated
-`remote_dir` and fixed file names. The config
-holds no secrets: `host` is a bare alias or tailnet name (no `user@`, no
-options) and `remote_dir` is a plain absolute path. SSH uses the login Max
-provisions in `~/.ssh/config`; the factory never reads, names or passes a
-key. `check-config` validates the section.
+That is the confirmed target: the files land in
+`/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
+is `scp -F /home/box/.ssh/config status.json index.html
+pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
+`config/orch.example.yml` carries this section; the shipped `orch.yml` has
+it commented out, so nothing pushes until Max turns it on.
+
+*When it runs.* `orch poll`, which
+[`deploy/poller-service.sh`](deploy/poller-service.sh) runs, pushes after
+every poll cycle (60 seconds), or at most every `every_minutes` (1 to 1440)
+when that is set. After a cycle it starts `orch dashboard push --once --db
+<db> [--orch <orch.yml>]` as a separate process and does not wait for it;
+if the previous push is still running it skips that cycle and logs so. The
+child gets only `PATH`, `HOME`, `USER`, `LOGNAME`, locale and `TZ`,
+`TMPDIR`, `SSH_AUTH_SOCK` and the three `ORCH_*` path variables: none of
+`webhook.env`, no GitHub or Linear token. A failed snapshot or send is one
+redacted line in `poller.log`; it never reaches the poll loop, and a hook
+error there is logged by exception class only. A stop (SIGTERM) does not
+start a push. `orch dashboard push` without `--once` is still a standalone
+loop every `interval_seconds` (15 to 30); `--once` exits 1 if the push
+failed.
+
+*Real time (`live: true`, ssh only, default off).* `orch poll` also starts a
+watcher thread that stats `orch.db` and `orch.db-wal` every 0.25 seconds
+(no SQLite connection). Any committed change by any process (`orch wait`
+claiming a job, a heartbeat, a job finishing, the poller recording a
+verdict) and the end of every poll cycle start `orch dashboard push --once
+--status-only --last-cycle <time>`: a fresh snapshot, of which only
+`status.json` is sent, through the same temp-name upload and one `ssh ... mv`
+rename, so a reader never sees a half-written file. Pushes start at most
+once a second and never while the previous one is still running; a change
+that arrives meanwhile is pushed as soon as both allow, so the last change
+is never dropped. An empty `-wal` counts as none, so the push child's own
+read-only snapshot never looks like a change. The full pair (`index.html`
+too) still goes out on the first cycle and then after every cycle, or every
+`every_minutes`. A failed start is one redacted line at most once a
+minute. `--once` polls start no watcher, and a stop stops it before exit.
+The page needs the static server to allow `connect-src 'self'`
+([`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py)
+sends it); with an older copy of that server the browser blocks the poll
+and the page falls back to reloading.
+
+*How it publishes.* Each file is first uploaded to a dot-prefixed temp name
+in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
+ConnectTimeout=10 -- status.json
+pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
+for `index.html`; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
+"ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
+temp names). Only after both uploads succeed does one `ssh [-F ssh_config]
+-o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
+factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
+.index.html.push-tmp index.html'` rename both over the live names. An
+interrupted upload leaves the published pair as it was; the two renames run
+back to back on the remote host with no network round-trip between them, so
+a reader never sees a half-written file and the pair is mismatched for at
+most the instant between two local `rename(2)` calls. The static server
+never serves the temp names. Every command is an argv list (no local shell)
+with a 60-second timeout; the remote shell sees only the validated
+`remote_dir` and fixed file names. The config holds no secrets: `host` is a
+bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
+path, absolute or relative to the remote login's home, with no leading `-`,
+`~`, `.` or `..` part; `ssh_config` is a plain absolute path to an
+ssh_config file, and a name that looks like a key (`id_*`, `*.pem`,
+`*.key`, `*.pub`, `*.ppk`) is refused. SSH uses the login Max provisions;
+the factory never reads, names or passes a key, and never reads the
+ssh_config file itself. `check-config` validates the section. Tests use a
+fake transport and a fake spawn; nothing in this repository runs ssh, scp
+or rsync against a real host.
 
 **Static server (not deployed).**
 [`deploy/factory-dashboard-http.service`](deploy/factory-dashboard-http.service)
