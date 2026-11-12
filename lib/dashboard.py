@@ -602,7 +602,8 @@ def collect_snapshot(
             "last_activity_age_seconds": _age(now, max(activity)) if activity else None,
             "errors": db["errors"],
             "deferrals": db["deferrals"],
-            # Only when a Linear webhook listener has run on this database.
+            # Only when a Linear webhook listener or webhook-mode poller has
+            # run on this database.
             **(
                 {"linear_webhook": db["linear_webhook"]}
                 if db["linear_webhook"] is not None
@@ -1246,6 +1247,8 @@ def render_html(snapshot: dict) -> str:
                 f'{_duration(webhook["last_received_age_seconds"])} ago'
                 + (f' ({webhook["last_event"]})' if webhook["last_event"] else "")
             )
+        elif webhook["listener_age_seconds"] is None:
+            received = "never (listener has not started)"
         else:
             received = "never"
         parts.append("<h2>Linear webhook</h2>")

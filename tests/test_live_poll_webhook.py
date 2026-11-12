@@ -65,6 +65,9 @@ class FakeDirty:
             if current is not None and current.received_at == row.received_at:
                 del self.rows[row.issue_id]
 
+    def record_polling(self, now):
+        del now
+
 
 def cycle(source, refs, *, exclude=frozenset()):
     source.begin_cycle()

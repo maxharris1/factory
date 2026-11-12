@@ -2461,6 +2461,18 @@ class Dispatcher:
             (str(row["repo"]).lower(), str(row["ticket_id"])) for row in rows
         )
 
+    def unpolled_linear_tickets(self) -> frozenset[str]:
+        """Tracked Linear tickets that poll_once no longer reads.
+
+        Merged, handed off, done or abandoned with nothing left to settle
+        (_tracked_refs). Only the Linear webhook poller reads this, to ack
+        their dirty rows unread (docs/SPEC.md section 7).
+        """
+        polled = {
+            ref.ticket_id for ref in self._tracked_refs() if ref.tracker == "linear"
+        }
+        return self._tracked_linear_ids() - polled
+
     def _tracked_linear_ids(self) -> frozenset[str]:
         with self._connect() as connection:
             rows = connection.execute(

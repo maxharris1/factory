@@ -145,6 +145,8 @@ class DirtyQueue(Protocol):
 
     def ack(self, rows: Sequence[DirtyRow]) -> None: ...
 
+    def record_polling(self, now: float) -> None: ...
+
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -223,9 +225,12 @@ class LivePollSource:
         # configured none of this is read and every cycle is as before.
         self.linear_dirty: DirtyQueue | None = None
         self.active_tickets: Callable[[], frozenset[tuple[str, str]]] | None = None
+        self.unpolled_tickets: Callable[[], frozenset[str]] | None = None
         self._dirty: dict[str, DirtyRow] = {}
         self._dirty_fetched: dict[str, DirtyRow] = {}
         self._active: frozenset[tuple[str, str]] = frozenset()
+        self._unpolled: frozenset[str] = frozenset()
+        self._polling_recorded = False
         self._webhook_full_cycle = False
         self._last_reconcile: float | None = None
         self._linear_documents: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -283,6 +288,7 @@ class LivePollSource:
         self._dirty = {}
         self._dirty_fetched = {}
         self._active = frozenset()
+        self._unpolled = frozenset()
         self._webhook_full_cycle = False
         now = self.clock()
         self._linear_documents = {
@@ -291,10 +297,18 @@ class LivePollSource:
             if now - entry[0] < 2 * webhook.reconcile_seconds
         }
         try:
+            if self.linear_dirty is not None and not self._polling_recorded:
+                self.linear_dirty.record_polling(now)
+                self._polling_recorded = True
             rows = self.linear_dirty.pending() if self.linear_dirty is not None else ()
             active = (
                 self.active_tickets()
                 if self.active_tickets is not None
+                else frozenset()
+            )
+            unpolled = (
+                self.unpolled_tickets()
+                if self.unpolled_tickets is not None
                 else frozenset()
             )
         except Exception as exc:
@@ -303,6 +317,7 @@ class LivePollSource:
             return
         self._dirty = {row.issue_id: row for row in rows}
         self._active = frozenset((repo.lower(), ticket) for repo, ticket in active)
+        self._unpolled = frozenset(unpolled)
 
     def _reconcile_due(self) -> bool:
         webhook = self.config.linear_webhook
@@ -414,14 +429,22 @@ class LivePollSource:
     ) -> tuple[TrackedTicket, ...]:
         """Read each dirty untracked issue directly, oldest event first.
 
-        A tracked issue is left to tracked_tickets. An issue outside the
-        configured projects, completed or canceled (the search's own
-        filter), or deleted is dropped without an error and still acked.
+        A tracked issue is left to tracked_tickets, except one the
+        dispatcher no longer polls (merged, done, abandoned): nothing reads
+        those, with or without a webhook, so its row is acked unread. An
+        issue outside the configured projects, completed or canceled (the
+        search's own filter), or deleted is dropped without an error and
+        still acked.
         """
         tracked_reserve = min(reserve, LINEAR_TRACKED_RESERVE)
         tracked_ids = {
             entry[1].get("id")
             for identifier in exclude
+            if (entry := self._linear_documents.get(identifier)) is not None
+        }
+        unpolled_ids = {
+            entry[1].get("id")
+            for identifier in self._unpolled
             if (entry := self._linear_documents.get(identifier)) is not None
         }
         tickets: list[TrackedTicket] = []
@@ -430,6 +453,8 @@ class LivePollSource:
             key=lambda item: (item.received_at, item.issue_id),
         ):
             if row.identifier in exclude or row.issue_id in tracked_ids:
+                if row.identifier in self._unpolled or row.issue_id in unpolled_ids:
+                    self._dirty_fetched[row.issue_id] = row
                 continue
             if row.issue_id in self._linear_issue_cache or (
                 row.identifier is not None
@@ -756,19 +781,32 @@ class LivePollSource:
         requested: str,
         issue: dict[str, Any] | None,
     ) -> None:
-        """Webhook mode: keep the read for reuse and mark its dirty rows read."""
+        """Webhook mode: keep the read for reuse and mark its dirty rows read.
+
+        A null read is authoritative (deleted, or no longer visible): every
+        alias of the older cached read is dropped before its rows are acked,
+        so no later cycle can rebuild the ticket from it.
+        """
         if self.config.linear_webhook is None:
             return
         keys = {requested}
-        if issue is not None:
+        document = issue
+        if document is None:
+            stale = self._linear_documents.get(requested)
+            document = stale[1] if stale is not None else None
+        if document is not None:
             keys.update(
                 alias
-                for alias in (issue.get("id"), issue.get("identifier"))
+                for alias in (document.get("id"), document.get("identifier"))
                 if isinstance(alias, str) and alias
             )
+        if issue is not None:
             entry = (self.clock(), issue)
             for key in keys:
                 self._linear_documents[key] = entry
+        else:
+            for key in keys:
+                self._linear_documents.pop(key, None)
         for row in self._dirty.values():
             if row.issue_id in keys or row.identifier in keys:
                 self._dirty_fetched[row.issue_id] = row

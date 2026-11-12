@@ -405,10 +405,14 @@ it can see the client address (the TCP peer, or the last `X-Forwarded-For`
 hop when the peer is a local proxy) it must be one of Linear's published
 source IPs. A signed, fresh Issue event for a configured
 `linear_project_id` (or one just moved out of it), or a Comment on a tracked
-issue or carrying an `orch:v1` marker (Comment payloads do not carry the
-issue's project), upserts one row in `linear_dirty(issue_id, identifier,
-event, received_at)` in `orch.db`; every other signed event gets 200 and is
-ignored. It never runs handoff logic and never calls Linear. Log lines carry
+issue, or a Comment carrying an `orch:v1` marker on an issue a signed Issue
+event last placed in a configured project (Comment payloads do not carry the
+issue's project, and a marker is text anyone can type), upserts one row in
+`linear_dirty(issue_id, identifier, event, received_at)` in `orch.db`; every
+other signed event gets 200 and is ignored (a handoff on an issue the
+listener has not seen is found by the reconcile search). At most 8 requests
+are worked on at once (a further connection is closed unread) and each must
+arrive in full within 10 seconds in total. It never runs handoff logic and never calls Linear. Log lines carry
 the outcome, event type and issue identifier only. `secret_file` names the
 signing-secret file Max saves (mode 600; a group- or world-readable file is
 refused); only the listener reads it, once at startup, and the value is never
@@ -426,13 +430,18 @@ GitHub PR head, CI and PR comments stay current. The full brief/go search
 runs at startup and then every `reconcile_seconds` (default 900; it stays due
 until it completes without a budget or error cutoff), so a missed webhook
 costs at most one reconcile interval. A dirty row is deleted only after its
-issue was read in that cycle and only if no newer event replaced it. If the
+issue was read in that cycle and only if no newer event replaced it; a
+tracked ticket the dispatcher no longer polls (merged, handed off, done or
+abandoned) is not read with or without a webhook, so its row is deleted
+unread. A read that finds the issue gone drops the reused read too. If the
 dirty queue cannot be read, the cycle records the error and runs as a full
 cycle. With no `linear_webhook` the poller is unchanged, and the dispatcher
-creates no webhook tables (the listener creates them).
+creates no webhook tables (the listener creates them; a webhook-mode poller
+records `linear_webhook_polling`).
 `orch status` and the dashboard show the last delivery, the dirty-queue
 depth and a warning after more than an hour with no delivery while Linear
-tickets are active, once a listener has run on the database.
+tickets are active, once a listener or a webhook-mode poller has run on the
+database (a listener that never started shows as `never`).
 
 The default job timeout is 60 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET; 60 minutes since Nov 11). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) lives in `machines.yml`, not here (section 13). Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 

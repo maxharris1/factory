@@ -422,6 +422,7 @@ def _runtime(
     if config.linear_webhook is not None:
         source.linear_dirty = linear_webhook.LinearDirtyQueue(path)
         source.active_tickets = dispatcher.active_job_tickets
+        source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
 

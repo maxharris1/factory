@@ -70,7 +70,8 @@ class Status:
     devices: tuple[DeviceRow, ...]
     paused: tuple[TrackerRow, ...]
     device_jobs: Mapping[str, tuple[JobRow, ...]] = field(default_factory=dict)
-    # Only when a Linear webhook listener has run on this database (#55).
+    # Only when a Linear webhook listener or webhook-mode poller has run on
+    # this database (#55).
     webhook: WebhookHealth | None = None
 
 
@@ -363,7 +364,7 @@ def _webhook_line(health: WebhookHealth, observed_at: float) -> str:
     elif health.started_at is not None:
         received = f"never (listener started {_age(observed_at, health.started_at)} ago)"
     else:
-        received = "never"
+        received = "never (listener has not started)"
     return f"  last received {received}, dirty queue {health.dirty}"
 
 

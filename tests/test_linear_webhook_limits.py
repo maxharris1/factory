@@ -63,7 +63,11 @@ def read_reply(client: socket.socket) -> bytes:
     client.settimeout(GUARD_SECONDS)
     chunks = []
     while True:
-        chunk = client.recv(4096)
+        try:
+            chunk = client.recv(4096)
+        except ConnectionResetError:
+            # Closed with our request still unread: dropped, no reply.
+            chunk = b""
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
