@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
-from lib.github_actions import LinearReviewActions
+from lib.github_actions import GhResult, LinearReviewActions
 from lib.poll_source import (
     HTTPResult,
     LivePollSource,
@@ -296,3 +296,23 @@ def test_a_done_or_canceled_issue_is_still_left_where_it_is(
     assert intent == ("completed", None)
     assert [action for action, _ in wakes] == ["done"]
     assert "note" not in wakes[0][1]
+
+
+def test_a_re_drive_on_a_team_with_no_rfr_state_reports_it_in_the_done_wake(
+    tmp_path: Path,
+) -> None:
+    issue = linear_issue_in({"id": "b", "type": "backlog", "position": 0.0}, ready=None)
+    dispatcher, queue, gh, requests, snapshot = t4_setup(tmp_path, issue)
+    gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
+
+    dispatcher.process(snapshot)
+    assert ship_rows(queue)[0][0] == "failed"
+    dispatcher.process(snapshot)
+
+    assert requests == []
+    assert gh.keys() == [PULL, PULL, MARK_READY]
+    intent, state, wakes = ship_rows(queue)
+    assert intent == ("completed", None)
+    assert state == "handed-off"
+    assert [action for action, _ in wakes] == ["ship-failed", "done"]
+    assert wakes[1][1]["note"] == NO_READY_NOTE
