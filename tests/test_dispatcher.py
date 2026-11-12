@@ -3668,6 +3668,103 @@ def test_t5_answers_resume_same_step_without_incrementing_round(
     assert row["workflow_state"] == "fixing"
 
 
+def workflow_state(queue: SQLiteJobQueue) -> str | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT workflow_state FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()
+    return None if row is None else row["workflow_state"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Questions: None.\n",
+        "**Restatement**\nOffer Brief intake.\n\n**Questions**\nNone.\n",
+        "**Restatement**\nOffer Brief intake.\n\n**Questions**\n",
+        "",
+        "**Questions**\n- [default-able] Which font?\n  Default: house font\n",
+    ],
+)
+def test_t5_questions_none_without_waiting_max_queues_nothing(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    question = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator -->\n"
+        + body,
+        author="grok-login",
+    )
+
+    dispatcher.process(ticket(question, head="a" * 40))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert queue.claim("grok") is None
+    assert workflow_state(queue) != "waiting-max"
+    assert "waiting-max" not in actions.states
+
+
+def test_t5_builder_questions_none_queues_nothing(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+        "Questions: None.\n",
+        author="claude-login",
+    )
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "body"),
+    [
+        (
+            "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator "
+            "state=waiting-max -->",
+            "**Questions**\n- [product] Which offer tier ships first?\n",
+        ),
+        (
+            "<!-- orch:v1 kind=questions from=claude-bot role=builder -->",
+            "Questions: Should the brief keep the old pricing table?\n",
+        ),
+        (
+            "<!-- orch:v1 kind=questions from=claude-bot role=builder -->",
+            "Questions.\n",
+        ),
+    ],
+)
+def test_t5_real_questions_still_queue_clarify(
+    tmp_path: Path,
+    header: str,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    author = "grok-login" if "grok-bot" in header else "claude-login"
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
 def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
     tmp_path: Path,
 ) -> None:

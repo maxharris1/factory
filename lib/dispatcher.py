@@ -31,6 +31,13 @@ GROK_WAKE_REASONS = (
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
+_QUESTIONS_HEADING = re.compile(
+    r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
+    re.IGNORECASE,
+)
+_SECTION_HEADING = re.compile(r"#{1,6}\s+\S.*|\*\*[^*]+\*\*:?")
+_LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 
 
 @dataclass(frozen=True)
@@ -1177,6 +1184,11 @@ class Dispatcher:
     ) -> tuple[bool, str]:
         if not self._trusted_session(ticket, comment, fields):
             return True, "rejected-questions-author"
+        if fields.get("state") != "waiting-max" and (
+            fields.get("role") == "orchestrator"
+            or not _has_questions(parse_comment(comment.body).body)
+        ):
+            return True, "no-questions"
         step = self._latest_step(ticket)
         if step is None:
             action = "clarify"
@@ -2878,6 +2890,26 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
     if re.fullmatch(r"[0-9]+", comment.id):
         return comment.created_at, 0, int(comment.id)
     return comment.created_at, 1, comment.id
+
+
+def _has_questions(body: str) -> bool:
+    lines = [line.strip() for line in body.splitlines()]
+    section = lines
+    for index, line in enumerate(lines):
+        heading = _QUESTIONS_HEADING.fullmatch(line)
+        if heading is None:
+            continue
+        section = [heading.group("rest") or ""]
+        for rest in lines[index + 1 :]:
+            if _SECTION_HEADING.fullmatch(rest):
+                break
+            section.append(rest)
+        break
+    items = (
+        _LIST_MARKER.sub("", line).strip().rstrip(".").strip().lower()
+        for line in section
+    )
+    return any(item and item not in _NO_QUESTIONS for item in items)
 
 
 def _comment_link(comment: Comment) -> str:
