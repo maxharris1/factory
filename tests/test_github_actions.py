@@ -1542,3 +1542,39 @@ def test_e2e_fast_forward_422_records_no_gh_output_in_external_ship_intents(
         "gh api PATCH git/refs/heads/main exited 1 (HTTP 422)"
     )
     assert_no_gh_output(error, "Update is not a fast forward")
+
+
+# #48 G2 F2.3: a failed confirming tip read after a fast-forward records only
+# the inner safe detail in external_ship_intents.error, never gh's output.
+
+
+def test_e2e_unreadable_tip_after_fast_forward_records_no_gh_output(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh, shipper = approve_then_ok(tmp_path)
+    source = shipper.inner.source
+    marker = "STDERR-MARKER-tip-read-7f3a"
+    gh.route(
+        TIP,
+        served("ref-main-base.json"),
+        GhResult(1, f"stdout {marker}", f"gh: {marker} (HTTP 502)\n"),
+    )
+    gh.route(FF, served("ref-main-head.json"))
+
+    dispatcher.poll_once(source)
+
+    with queue.connect() as connection:
+        error = connection.execute(
+            "SELECT error FROM external_ship_intents"
+        ).fetchone()[0]
+    assert marker not in error
+    assert error == (
+        "ShipError: main is unreadable (GitHubAdapterError: "
+        "gh api GET git/ref/heads/main exited 1 (HTTP 502)), "
+        f"not {HEAD}, after fast-forward"
+    )
+    assert gh.count(FF) == 1
+    grok = FakeBot(queue, "grok").drain()
+    # Codex r1 F1.2: all() over an empty drain is vacuous, so pin the wake.
+    assert [job.request.action for job in grok] == ["ship-failed"]
+    assert all(marker not in str(job.request.detail) for job in grok)

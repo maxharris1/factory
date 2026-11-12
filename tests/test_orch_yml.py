@@ -42,6 +42,7 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
         "aut0-code/aut0",
         "maxharris1/Cleffy",
         "maxharris1/tracy-harris-coaching",
+        "maxharris1/factory",
     ]
     assert config.projects[0].job_timeout == 150
     assert resolve_job_timeout(config, "aut0-code/aut0") == 150

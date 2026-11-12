@@ -760,6 +760,7 @@ class LivePollSource:
             pr_number=number,
             brief=_brief(comments),
             grok_bot=project.grok_bot,
+            ready_starts_review=project.ready_starts_review,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -854,6 +855,7 @@ class LivePollSource:
             linear_ready_state_id=_linear_ready_state_id(issue),
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(issue),
+            ready_starts_review=project.ready_starts_review,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -1221,9 +1223,11 @@ def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
 def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
     """Where the issue stands relative to Ready for Review, or None if unknown.
 
-    before-review: unstarted, or started and not after Ready for Review in
-    the team's order. ready-for-review: in that state. moved-on: completed,
-    canceled, backlog, triage, or a started state after Ready for Review.
+    before-review: backlog, triage, unstarted, or started and not after
+    Ready for Review in the team's order. ready-for-review: in that state.
+    moved-on: completed, canceled, or a started state after Ready for
+    Review. no-ready-state: not completed or canceled, on a team that has
+    no Ready for Review state, so there is nothing to move it to.
     The handoff moves only a before-review issue and fails closed on None.
     """
     state = issue.get("state")
@@ -1233,16 +1237,18 @@ def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
     kind = state.get("type")
     if state_id is None or not isinstance(kind, str):
         return None
+    if not isinstance(issue.get("team"), dict):
+        return None
     ready = _linear_ready_state(issue)
     if ready is not None and ready.get("id") == state_id:
         return "ready-for-review"
-    if kind == "unstarted":
-        return "before-review"
-    if kind in ("completed", "canceled", "backlog", "triage"):
+    if kind in ("completed", "canceled"):
         return "moved-on"
-    if kind != "started":
+    if kind not in ("backlog", "triage", "unstarted", "started"):
         return None
-    if ready is None or ready.get("type") != "started":
+    if ready is None:
+        return "no-ready-state"
+    if kind != "started" or ready.get("type") != "started":
         return "before-review"
     here, there = state.get("position"), ready.get("position")
     if not _is_position(here) or not _is_position(there):

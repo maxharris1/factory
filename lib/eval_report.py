@@ -35,6 +35,10 @@ model-findings.txt lines:
     TIMESTAMP <owner/name> <pr> <rule> <detail>
 
 This module does not correct, reflect, run blinded evals, or maintain.
+
+TODO(#50): count bot-to-bot messages against scripted handoffs for the
+token-savings metric. Nothing logs a manual bot-to-bot handoff yet, so
+there is no input line to count.
 """
 
 from __future__ import annotations
