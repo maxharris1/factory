@@ -739,9 +739,9 @@ def test_stable_patch_id_fails_closed_and_handoff_marks_draft_ready() -> None:
         actions.stable_patch_id(pr(), HEAD)
     draft = served("pull-42-open.json")
     draft_body = draft.stdout.replace('"draft": false', '"draft": true')
-    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
+    ready = MARK_READY
     gh.route(PULL, GhResult(0, draft_body, ""))
-    gh.route(ready, served("pull-42-open.json"))
+    gh.route(ready, served("graphql-mark-ready.json"))
 
     actions.handoff(pr("handoff"), HEAD)
 
@@ -759,8 +759,8 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
     gh = RecordedGh()
     draft = served("pull-42-open.json")
     gh.route(PULL, GhResult(0, draft.stdout.replace('"draft": false', '"draft": true'), ""))
-    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
-    gh.route(ready, served("pull-42-open.json"))
+    ready = MARK_READY
+    gh.route(ready, served("graphql-mark-ready.json"))
     linear_writes: list[tuple[str, str]] = []
     fresh_reads: list[TicketRef] = []
     actions = LinearReviewActions(
@@ -845,8 +845,8 @@ def test_linear_handoff_retries_only_before_external_writes() -> None:
             "",
         ),
     )
-    ready = ("-X", "POST", f"{REPO}/pulls/42/ready_for_review")
-    gh.route(ready, served("pull-42-open.json"))
+    ready = MARK_READY
+    gh.route(ready, served("graphql-mark-ready.json"))
     after_write = LinearReviewActions(
         move_ready_for_review=True,
         linear_ready=fail,
@@ -1213,3 +1213,131 @@ def test_handoff_marks_a_draft_ready_with_the_exact_graphql_gh_argv() -> None:
         ],
     ]
     assert not any("ready_for_review" in part for call in gh.calls for part in call)
+
+
+def test_handoff_of_a_ready_pr_sends_no_mutation() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, served("pull-42-open.json"))
+
+    actions.handoff(pr("handoff"), HEAD)
+
+    assert gh.keys() == [PULL]
+
+
+def test_the_mark_ready_mutation_is_never_cached() -> None:
+    gh = RecordedGh()
+    actions = GitHubReviewActions(gh, cache_ttl="60s")
+    gh.route(("--cache", "60s", *PULL), draft_pull())
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+
+    actions.handoff(pr("handoff"), HEAD)
+
+    assert gh.keys() == [("--cache", "60s", *PULL), MARK_READY]
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (
+            GhResult(0, '{"data": null, "errors": [{"type": "NOT_FOUND", "message": "x"}]}', ""),
+            "returned errors",
+        ),
+        (
+            GhResult(
+                0,
+                served("graphql-mark-ready.json").stdout.replace(
+                    '"isDraft": false', '"isDraft": true'
+                ),
+                "",
+            ),
+            "did not confirm",
+        ),
+        (GhResult(1, '{"errors": [{"type": "FORBIDDEN"}]}', "gh: Forbidden (HTTP 403)\n"), "gh exited 1"),
+        (TIMEOUT, "timed out"),
+    ],
+    ids=["graphql-errors", "still-draft", "gh-exit-1", "timeout"],
+)
+def test_an_unconfirmed_mark_ready_has_no_confirmed_write(
+    response: GhResult | BaseException,
+    message: str,
+) -> None:
+    actions, gh = adapter()
+    gh.route(PULL, draft_pull())
+    gh.route(MARK_READY, response)
+
+    with pytest.raises(GitHubAdapterError, match=message) as raised:
+        actions.handoff(pr("handoff"), HEAD)
+
+    assert raised.value.write_confirmed is False
+    assert "http" not in raised.value.safe_detail
+    assert "{" not in raised.value.safe_detail
+
+
+def test_a_draft_without_a_node_id_fails_before_the_mutation() -> None:
+    actions, gh = adapter()
+    pull = draft_pull()
+    gh.route(PULL, GhResult(0, pull.stdout.replace(f'"node_id": "{NODE_ID}"', '"node_id": null'), ""))
+
+    with pytest.raises(GitHubAdapterError, match="node_id") as raised:
+        actions.handoff(pr("handoff"), HEAD)
+
+    assert raised.value.write_confirmed is False
+    assert gh.keys() == [PULL]
+
+
+def test_a_pr_marked_ready_at_another_head_is_a_confirmed_write() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, draft_pull())
+    moved = served("graphql-mark-ready.json").stdout.replace(HEAD, "c" * 40)
+    gh.route(MARK_READY, GhResult(0, moved, ""))
+
+    with pytest.raises(HeadMismatchError, match="marked ready") as raised:
+        actions.handoff(pr("handoff"), HEAD)
+
+    assert raised.value.write_confirmed is True
+
+
+@pytest.mark.parametrize(("draft", "confirmed"), [(True, True), (False, False)])
+def test_an_unconfirmed_linear_move_reports_whether_the_pr_write_landed(
+    draft: bool,
+    confirmed: bool,
+) -> None:
+    def fail(ticket: TrackedTicket) -> None:
+        del ticket
+        raise RetryableStateError("budget")
+
+    gh = RecordedGh()
+    gh.route(PULL, draft_pull() if draft else served("pull-42-open.json"))
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    linked = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=fail,
+        runner=gh,
+    )
+
+    with pytest.raises(GitHubAdapterError, match="not confirmed") as raised:
+        actions.handoff(linked, HEAD)
+
+    assert raised.value.write_confirmed is confirmed
+
+
+def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
+    actions, gh = adapter()
+    gh.route(
+        TIP,
+        GhResult(
+            1,
+            '{"message": "Bad credentials", "documentation_url": "https://docs.github.com/rest"}',
+            "gh: Bad credentials (HTTP 401)\n",
+        ),
+    )
+
+    with pytest.raises(GitHubAdapterError) as raised:
+        actions.branch_tip(pr(), "main")
+
+    assert raised.value.safe_detail == "gh api GET git/ref/heads/main exited 1 (HTTP 401)"

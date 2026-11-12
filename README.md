@@ -63,12 +63,18 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
-| `handoff` | `GET pulls/<n>`, then `POST pulls/<n>/ready_for_review` when draft | Confirms the linked PR is unmerged and still at the approved head; never merges or requests a reviewer |
+| `handoff` | `GET pulls/<n>`, then, when draft, `gh api -X POST graphql` with `markPullRequestReadyForReview` on the pull's `node_id` (GitHub has no REST route for this; it is what `gh pr ready` sends) | Confirms the linked PR is unmerged and still at the approved head, and that GitHub reports `isDraft: false` at that head; never merges or requests a reviewer |
 
 SHAs must be 40 lowercase hex, and owner, repo, branch and PR number must
 match strict patterns before any call. A non-zero gh exit, malformed JSON or a
 timeout raises `GitHubAdapterError`, which is a `ShipError`. A ship then
-fails closed: `ship-failed` and one Grok wake.
+fails closed: `ship-failed` and one Grok wake. `ship_intents.error` records
+the class and a safe detail, such as `GitHubAdapterError: gh api POST graphql
+exited 1 (HTTP 403) graphql errors: FORBIDDEN`. It never holds gh's output, a
+URL, a token or a body. A `handoff` that failed before any write was confirmed
+is re-driven once on a later poll, and only while the PR is still at the
+intent's head with green CI. That includes rows written before the fix, which
+recorded only the class name.
 
 Device prerequisites: `gh` is installed and logged in as Max on the factory
 device (`gh auth status`). Max provisions that login; the factory never sets
