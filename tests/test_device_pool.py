@@ -318,3 +318,153 @@ def test_shipped_inventory_never_places_on_the_disabled_pc_or_mac(
     assert len(placements) == box.slot_max
     assert {placement.device for placement in placements} == {"box"}
     assert pool.used() == {"box": box.slot_max}
+
+
+def slot_rows(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                f"SELECT job_id, device FROM {device_pool.SLOTS_TABLE} ORDER BY job_id"
+            )
+        ]
+
+
+def test_requeueing_a_pool_claimed_job_frees_its_slot_and_claim_still_works(
+    tmp_path: Path,
+) -> None:
+    """R1: queue.release (running -> queued) on a pool-claimed job used to
+    keep its device_slots row, so the next claim of that same job hit the
+    job_id PRIMARY KEY and every later claim for the harness raised."""
+    pool, queue = make_pool(tmp_path, device("box", 1, "claude"))
+    enqueue(queue, "claude", "1")
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    job, _ = claimed
+
+    requeued = queue.release(job.id, owner="claude")
+
+    assert requeued.state == "queued"
+    assert pool.placement(job.id) is None
+    assert pool.used() == {}
+    again = pool.claim("claude")
+    assert again is not None
+    assert again[0].id == job.id
+    assert again[1].device == "box"
+    assert pool.used() == {"box": 1}
+    assert slot_rows(queue) == [(job.id, "box")]
+
+
+def test_requeue_without_a_device_pool_table_still_works(tmp_path: Path) -> None:
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    enqueue(queue, "grok", "1")
+    job = queue.claim("grok")
+    assert job is not None
+
+    assert queue.release(job.id, owner="grok").state == "queued"
+
+
+def test_claim_never_raises_on_a_stale_slot_row_for_a_queued_job(
+    tmp_path: Path,
+) -> None:
+    """A queued job never holds a slot. If a slot row survives an undone
+    claim (a database written before requeue freed slots), claim drops it
+    instead of hitting the job_id PRIMARY KEY, and the stale row does not
+    count against slot_max."""
+    pool, queue = make_pool(tmp_path, device("box", 1, "claude"))
+    enqueue(queue, "claude", "1")
+    (job,) = queue.outstanding()
+    with queue.connect() as connection:
+        connection.execute(
+            f"INSERT INTO {device_pool.SLOTS_TABLE} VALUES (?, 'box', 'claude', 'claude-bot', 1)",
+            (job.id,),
+        )
+
+    claimed = pool.claim("claude")
+
+    assert claimed is not None
+    assert claimed[0].id == job.id
+    assert slot_rows(queue) == [(job.id, "box")]
+    assert pool.placement(job.id).placed_at == 100.0
+
+
+def test_claim_rolls_back_the_job_when_the_slot_insert_fails(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("box", 2, "claude"))
+    enqueue(queue, "claude", "1")
+    with queue.connect() as connection:
+        connection.execute(
+            f"""
+            CREATE TRIGGER fail_slot_insert BEFORE INSERT ON {device_pool.SLOTS_TABLE}
+            BEGIN SELECT RAISE(ABORT, 'injected slot insert failure'); END
+            """
+        )
+
+    with pytest.raises(sqlite3.DatabaseError, match="injected slot insert failure"):
+        pool.claim("claude")
+
+    assert [job.state for job in queue.outstanding()] == ["queued"]
+    assert slot_rows(queue) == []
+    assert pool.used() == {}
+    with queue.connect() as connection:
+        connection.execute("DROP TRIGGER fail_slot_insert")
+    assert pool.claim("claude") is not None
+    assert pool.used() == {"box": 1}
+
+
+def test_reopening_the_database_keeps_held_slots(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("box", 2, "claude"))
+    for key in ("1", "2", "3"):
+        enqueue(queue, "claude", key)
+    first = pool.claim("claude")
+    second = pool.claim("claude")
+    assert first is not None and second is not None
+    queue.finish(first[0].id, owner="claude", handoff_comment_id="c-1")
+
+    reopened = DevicePool(
+        SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 200.0), pool.config
+    )
+
+    assert reopened.used() == {"box": 2}
+    assert reopened.placement(first[0].id) == first[1]
+    assert reopened.placement(second[0].id) == second[1]
+    assert reopened.claim("claude") is None
+
+
+def test_a_released_slot_takes_the_next_job(tmp_path: Path) -> None:
+    now = [100.0]
+    pool, queue = make_pool(tmp_path, device("box", 1, "claude"), now=now)
+    enqueue(queue, "claude", "1")
+    enqueue(queue, "claude", "2")
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    timed_out, _ = claimed
+    now[0] = 100.0 + 5400
+    (running,) = [job for job in queue.outstanding() if job.state == "running"]
+    assert queue.mark_timed_out(running)
+    assert pool.claim("claude") is None
+
+    assert pool.release(timed_out.id, owner="claude") is True
+    reused = pool.claim("claude")
+
+    assert reused is not None
+    assert reused[0].id != timed_out.id
+    assert reused[1].device == "box"
+    assert pool.used() == {"box": 1}
+
+
+def test_pool_refuses_two_devices_on_one_tailscale_host(tmp_path: Path) -> None:
+    """A1: slots are counted per device name, so two entries for one host
+    would double its slot_max. The pool refuses such a config even when it
+    is built without load_machines_yml."""
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    a = device("pc-a", 1, "claude")
+    b = Device(
+        name="pc-b",
+        slot_max=1,
+        harnesses=MappingProxyType({"claude": "claude-bot"}),
+        tailscale_name="PC-A.example.ts.net",
+        workdir_root="/home/work",
+    )
+
+    with pytest.raises(QueueError, match="pc-a, pc-b"):
+        DevicePool(queue, MachinesConfig(devices=(a, b)))

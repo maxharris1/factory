@@ -180,29 +180,28 @@ def test_workdir_root_bot_token_rules(tmp_path: Path, value: str, message: str) 
     ), findings
 
 
-def test_shipped_box_slot_max_comes_from_the_phase1_slot_config() -> None:
-    """The box's slot_max is not a guess: it is one slot per Phase 1 owning
-    bot (lib/wait.py OWNING_BOTS, each running one blocking `orch wait` at
-    a time), as Factory recorded in docs/SPEC.md. The machines.yml comment
-    cites both by file:line, and the cited lines must still say so."""
-    from lib.wait import OWNING_BOTS
-
+def test_shipped_box_slot_max_states_its_real_basis() -> None:
+    """A2: the box keeps 3 slots because the box runs at most 3 heavy local
+    agent sessions at once. Slots are generic (3 claude jobs can take all
+    3), so "one per harness bot" is not the reason and must not be stated."""
     config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
     assert config is not None
     box = config.device("box")
     assert box is not None
-    assert box.slot_max == len(OWNING_BOTS) == 3
+    assert box.slot_max == 3
 
-    text = (ROOT / "machines.yml").read_text(encoding="utf-8")
-    citations = {
-        "docs/SPEC.md:33": "it keeps 3 slots, one per harness bot as in Phase 1",
-        "lib/wait.py:35": "OWNING_BOTS = {",
-    }
-    for citation, expected in citations.items():
-        assert citation in text, citation
-        name, line = citation.split(":")
-        cited = (ROOT / name).read_text(encoding="utf-8").splitlines()[int(line) - 1]
-        assert expected in cited, (citation, cited)
+    machines = (ROOT / "machines.yml").read_text(encoding="utf-8")
+    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for text in (machines, spec, readme):
+        assert "one per harness bot" not in text
+        assert "one slot per Phase 1 owning bot" not in text.replace("\n    # ", " ")
+    box_comment = machines.split("- name: box", 1)[1].split("slot_max: 3", 1)[0]
+    assert "3 heavy local" in box_comment
+    assert "generic" in box_comment
+    assert "OWNING_BOTS" not in box_comment
+    assert "at most 3 heavy local" in spec
+    assert "at most 3 heavy local" in readme
 
 
 def test_example_passes_strict_check() -> None:
@@ -384,3 +383,76 @@ def test_missing_file_and_non_mapping(tmp_path: Path) -> None:
     assert errors(load_machines_yml(write(tmp_path, "- box\n"))[1]) == [
         "machines.yml must be a mapping"
     ]
+
+
+@pytest.mark.parametrize(
+    "second",
+    ["pc.example.ts.net", "PC.Example.TS.net"],
+)
+def test_two_devices_may_not_share_a_tailscale_name(tmp_path: Path, second: str) -> None:
+    """A1: one physical host has one slot budget. Two entries for the same
+    Tailscale name (case-insensitive) would double it."""
+    text = (
+        "devices:\n"
+        + remote(name="pc-a", slot_max="1", harnesses="{claude: claude-bot}")
+        + remote(
+            name="pc-b",
+            tailscale_name=second,
+            slot_max="1",
+            harnesses="{claude: claude-bot}",
+        )
+    )
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is None
+    assert any(
+        "pc-a" in item and "pc-b" in item and "tailscale_name" in item
+        for item in errors(findings)
+    ), findings
+
+
+def test_a_disabled_duplicate_tailscale_name_is_also_refused(tmp_path: Path) -> None:
+    text = "devices:\n" + remote(name="pc-a") + remote(name="pc-b", enabled="false")
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert config is None
+    assert any("pc-a" in item and "pc-b" in item for item in errors(findings)), findings
+
+
+def test_distinct_tailscale_names_are_accepted(tmp_path: Path) -> None:
+    text = "devices:\n" + remote(name="pc-a") + remote(
+        name="pc-b", tailscale_name="pc-b.example.ts.net"
+    )
+
+    config, findings = load_machines_yml(write(tmp_path, text))
+
+    assert findings == []
+    assert config is not None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/home/work\\0tail",
+        "/home/work\\ttail",
+        "/home/work\\ntail",
+        "/home/work\\x7ftail",
+        "/home/work\\x1btail",
+        "/home/work\\x85tail",
+    ],
+)
+def test_workdir_root_rejects_nul_and_control_characters(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    config, findings = load_machines_yml(
+        write(tmp_path, "devices:\n" + remote(workdir_root=f'"{value}"'))
+    )
+
+    assert config is None
+    assert any(
+        item.startswith("devices[0].workdir_root ") and "control character" in item
+        for item in errors(findings)
+    ), findings

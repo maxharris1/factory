@@ -3,10 +3,11 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
-from lib.machines_yml import load_machines_yml
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.status import (
     JobRow,
     SQLiteStatusReader,
@@ -220,10 +221,106 @@ def test_status_command_counts_held_device_slots(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "Devices (3)\n" in result.stdout
+    assert "Slots — box (0 occupied)\n  idle\n" in result.stdout
     assert "  box [claude,codex,cursor] 1/3 slots\n" in result.stdout
     assert "  pc [claude,codex,cursor] 0/3 slots disabled\n" in result.stdout
     assert "  mac [none] 0/2 slots disabled placeholder\n" in result.stdout
     assert directory_snapshot(tmp_path) == before
+
+
+def test_pool_placed_job_is_shown_under_its_device_not_as_box_occupancy() -> None:
+    """A3: a running job that holds a device_slots row is reported under its
+    device only; `Slots — box` lists only Phase 1 claims with no placement."""
+    source = FakeStatusSource(
+        jobs=(
+            job(
+                "on-pc",
+                repo="o/repo",
+                ticket_id="1",
+                state="running",
+                created_at=10,
+                last_activity_at=90,
+                recipient="codex",
+            ),
+            job(
+                "phase1",
+                repo="o/repo",
+                ticket_id="2",
+                state="running",
+                created_at=10,
+                last_activity_at=80,
+            ),
+        ),
+    )
+    machines = MachinesConfig(
+        devices=(
+            Device(
+                name="box",
+                slot_max=3,
+                harnesses=MappingProxyType({"claude": "claude-bot"}),
+                local=True,
+            ),
+            Device(
+                name="pc",
+                slot_max=3,
+                harnesses=MappingProxyType({"codex": "codex-bot"}),
+                tailscale_name="pc.example.ts.net",
+                workdir_root="/home/work",
+            ),
+        )
+    )
+
+    output = render(
+        build_status(
+            source,
+            source,
+            clock=lambda: 100,
+            devices=device_rows(machines, {"pc": 1}),
+            placements={"on-pc": "pc"},
+        )
+    )
+
+    assert (
+        "Slots — box (1 occupied)\n"
+        "  o/repo#2 build -> claude running 20s\n"
+        "\n"
+        "Devices (2)\n"
+        "  box [claude] 0/3 slots\n"
+        "  pc [codex] 1/3 slots\n"
+        "    o/repo#1 build -> codex running 10s\n"
+        "\n"
+    ) in output
+
+
+def test_status_command_counts_a_pc_job_once(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE device_slots (
+                job_id TEXT PRIMARY KEY, device TEXT NOT NULL,
+                harness TEXT NOT NULL, os_user TEXT NOT NULL,
+                placed_at REAL NOT NULL
+            );
+            INSERT INTO device_slots VALUES ('running', 'pc', 'codex', 'codex-bot', 20);
+            """
+        )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Slots — box (0 occupied)\n  idle\n" in result.stdout
+    assert "  box [claude,codex,cursor] 0/3 slots\n" in result.stdout
+    assert (
+        "  pc [claude,codex,cursor] 1/3 slots disabled\n"
+        "    owner/repo#43 review -> codex running "
+    ) in result.stdout
 
 
 def test_status_command_refuses_an_invalid_machines_file(tmp_path: Path) -> None:

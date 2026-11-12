@@ -12,6 +12,10 @@ never works on a mounted Windows drive. A whole path component may be
 the token {bot}, which resolves to the harness's bot user, so one device
 can give each bot its own home (/home/{bot}/factory-work).
 
+Slots are counted per device name, so no two devices may share a
+tailscale_name (compared case-insensitively): that would give one host
+two slot budgets.
+
 A device schedules only when it is enabled (the default), has no
 REPLACE_WITH_ placeholder, and lists the harness. check-config refuses
 placeholders unless --allow-placeholders is passed, then names each one;
@@ -23,10 +27,11 @@ from __future__ import annotations
 
 import posixpath
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import yaml
 
@@ -83,6 +88,22 @@ class Device:
         if self.workdir_root is None or harness not in self.harnesses:
             return None
         return self.workdir_root.replace(BOT_TOKEN, self.harnesses[harness])
+
+
+def tailscale_key(name: str) -> str:
+    """One host, one key: Tailscale (DNS) names are case-insensitive."""
+    return name.casefold().rstrip(".")
+
+
+def shared_tailscale_names(devices: Sequence[Device]) -> list[tuple[str, ...]]:
+    """Device names grouped by a tailscale_name that more than one shares."""
+    groups: dict[str, list[str]] = {}
+    for device in devices:
+        if device.tailscale_name is not None:
+            groups.setdefault(tailscale_key(device.tailscale_name), []).append(
+                device.name
+            )
+    return [tuple(names) for names in groups.values() if len(names) > 1]
 
 
 @dataclass(frozen=True)
@@ -151,6 +172,14 @@ def _validate(
         if device.local:
             local_names.append(device.name)
         devices.append(device)
+    for names in shared_tailscale_names(devices):
+        findings.append(
+            Finding(
+                "error",
+                f"devices {', '.join(names)} share one tailscale_name; "
+                "one host has one slot_max, so list it once",
+            )
+        )
     if len(local_names) > 1:
         findings.append(
             Finding(
@@ -372,6 +401,8 @@ def _is_tailscale_name(value: object) -> bool:
 def _workdir_problem(value: object) -> str | None:
     if not isinstance(value, str) or not value.startswith("/"):
         return "must be an absolute POSIX path"
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        return "must not contain NUL or another control character"
     for part in value.split("/"):
         if BOT_TOKEN in part and part != BOT_TOKEN:
             return f"'{BOT_TOKEN}' must be a whole path component"

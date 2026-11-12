@@ -7,8 +7,8 @@ import os
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, TextIO
@@ -68,6 +68,7 @@ class Status:
     box_slots: tuple[JobRow, ...]
     devices: tuple[DeviceRow, ...]
     paused: tuple[TrackerRow, ...]
+    device_jobs: Mapping[str, tuple[JobRow, ...]] = field(default_factory=dict)
 
 
 class TrackerReader(Protocol):
@@ -84,7 +85,7 @@ class SQLiteStatusReader:
     def __init__(self, path: Path):
         self.path = path
         self._snapshot: (
-            tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, int]] | None
+            tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]] | None
         ) = None
 
     def tracker_rows(self) -> tuple[TrackerRow, ...]:
@@ -93,12 +94,19 @@ class SQLiteStatusReader:
     def job_rows(self) -> tuple[JobRow, ...]:
         return self._rows()[1]
 
-    def slot_counts(self) -> dict[str, int]:
+    def placements(self) -> dict[str, str]:
+        """Device-pool slots held, as job id -> device."""
         return self._rows()[2]
+
+    def slot_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for device in self.placements().values():
+            counts[device] = counts.get(device, 0) + 1
+        return counts
 
     def _rows(
         self,
-    ) -> tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, int]]:
+    ) -> tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]]:
         if self._snapshot is not None:
             return self._snapshot
         connection = self._connect()
@@ -128,11 +136,11 @@ class SQLiteStatusReader:
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (SLOTS_TABLE,),
             ).fetchone()
-            slot_counts = (
+            placements = (
                 {
-                    str(row[0]): int(row[1])
+                    str(row[0]): str(row[1])
                     for row in connection.execute(
-                        f"SELECT device, COUNT(*) FROM {SLOTS_TABLE} GROUP BY device"
+                        f"SELECT job_id, device FROM {SLOTS_TABLE}"
                     )
                 }
                 if has_slots
@@ -178,7 +186,7 @@ class SQLiteStatusReader:
             )
             for row in job_rows
         )
-        self._snapshot = (tracker, jobs, slot_counts)
+        self._snapshot = (tracker, jobs, placements)
         return self._snapshot
 
     def _connect(self) -> sqlite3.Connection:
@@ -234,10 +242,29 @@ def build_status(
     *,
     clock: Callable[[], float] = time.time,
     devices: Sequence[DeviceRow] = (),
+    placements: Mapping[str, str] | None = None,
 ) -> Status:
+    """`placements` maps job id -> device for held device-pool slots. A
+    running job with a placement is listed under its device; only running
+    jobs without one (Phase 1 claims) occupy `Slots — box`."""
     observed_at = clock()
     job_rows = jobs.job_rows()
     tracker_rows = tracker.tracker_rows()
+    placed = placements or {}
+    running = sorted(
+        (row for row in job_rows if row.state == "running"),
+        key=lambda row: (
+            row.recipient,
+            row.repo.casefold(),
+            row.ticket_id,
+            row.id,
+        ),
+    )
+    device_jobs: dict[str, tuple[JobRow, ...]] = {}
+    for row in running:
+        if row.id in placed:
+            name = placed[row.id]
+            device_jobs[name] = (*device_jobs.get(name, ()), row)
     return Status(
         observed_at=observed_at,
         queued=tuple(
@@ -246,18 +273,9 @@ def build_status(
                 key=lambda row: (row.created_at, row.id),
             )
         ),
-        box_slots=tuple(
-            sorted(
-                (row for row in job_rows if row.state == "running"),
-                key=lambda row: (
-                    row.recipient,
-                    row.repo.casefold(),
-                    row.ticket_id,
-                    row.id,
-                ),
-            )
-        ),
+        box_slots=tuple(row for row in running if row.id not in placed),
         devices=tuple(devices),
+        device_jobs=device_jobs,
         paused=tuple(
             sorted(
                 (
@@ -296,7 +314,12 @@ def render(status: Status) -> str:
         lines.append("  idle")
 
     lines.extend(("", f"Devices ({len(status.devices)})"))
-    lines.extend(_device_line(row) for row in status.devices)
+    for device in status.devices:
+        lines.append(_device_line(device))
+        lines.extend(
+            "  " + _job_line(row, status.observed_at, row.last_activity_at)
+            for row in status.device_jobs.get(device.device, ())
+        )
     if not status.devices:
         lines.append("  none")
 
@@ -339,6 +362,7 @@ def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout) -> int:
                 reader,
                 reader,
                 devices=device_rows(machines, reader.slot_counts()),
+                placements=reader.placements(),
             )
         )
     except (sqlite3.Error, StatusError) as exc:

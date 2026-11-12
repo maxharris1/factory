@@ -4,13 +4,15 @@
 # on remote devices, never under /mnt/; a {bot} path component resolves to
 # the harness's bot user), and enabled (default true).
 # A disabled device or one with a REPLACE_WITH_ value is never scheduled.
+# Slots are counted per device name: list each host (tailscale_name) once.
 # No device has SSH yet; nothing here implies a device is reachable.
 devices:
   # The box runs orch and every bot today (Phase 1).
   - name: box
     local: true
-    # One slot per Phase 1 owning bot, each running one blocking `orch wait`:
-    # lib/wait.py:35 (OWNING_BOTS) and docs/SPEC.md:33 (Factory decision).
+    # The box runs at most 3 heavy local agent sessions at once (Max's box
+    # rule; the retired factory's codex-local-box lane also had 3). Slots are
+    # generic, so any harness may use any of the 3 (3 claude jobs fill them).
     slot_max: 3
     harnesses:
       claude: claude-bot

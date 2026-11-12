@@ -8,10 +8,16 @@ in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
 
+A queued job never holds a slot. Requeueing a claimed job
+(SQLiteJobQueue.release) frees its slot in the same transaction, and
+claim drops any slot row left on a queued job before counting, so a
+requeued job can always be claimed again.
+
 Finishing, failing or timing out a job does not free its slot. A device
 that loses power mid-job keeps the slot held while T6 times the job out
-(never done) and, on the second failure, marks the ticket stuck. Only
-`release` frees a slot; F2-02 calls it once the worker is confirmed gone.
+(never done) and, on the second failure, marks the ticket stuck. Apart
+from a requeue, only `DevicePool.release` frees a slot; F2-02 calls it
+once the worker is confirmed gone.
 
 This module starts nothing and contacts no device.
 """
@@ -22,11 +28,9 @@ import sqlite3
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
-from lib.machines_yml import Device, MachinesConfig
-from lib.queue import Job, QueueError, SQLiteJobQueue, _job
+from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
+from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job
 from lib.schema import HARNESSES
-
-SLOTS_TABLE = "device_slots"
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,12 @@ def choose_device(
 
 class DevicePool:
     def __init__(self, queue: SQLiteJobQueue, config: MachinesConfig):
+        shared = shared_tailscale_names(config.devices)
+        if shared:
+            raise QueueError(
+                f"devices {', '.join(shared[0])} share one tailscale_name; "
+                "one host has one slot_max"
+            )
         self.queue = queue
         self.config = config
         with self.queue.connect() as connection:
@@ -82,6 +92,12 @@ class DevicePool:
         now = self.queue.now()
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"""
+                DELETE FROM {SLOTS_TABLE}
+                WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
+                """
+            )
             device = choose_device(self.config, harness, _used(connection))
             if device is None:
                 connection.commit()

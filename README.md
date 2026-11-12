@@ -105,10 +105,16 @@ a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
 so jobs on a WSL node stay off the Windows drives. A whole path component may
 be `{bot}`, which resolves to the harness's bot user
 (`Device.workdir_for(harness)`). A Tailscale name is a device name, never an
-IP address. Unknown fields are refused.
+IP address. Two devices may not share a `tailscale_name` (compared
+case-insensitively): slots are counted per device name, so a second entry
+would give one host a second `slot_max`. Release a device's held slots
+before renaming it. Unknown fields are refused, and `workdir_root` may not
+contain NUL or another control character.
 
-The shipped file lists the box (all three harnesses, 3 slots: one per owning
-bot, as in Phase 1), the PC's WSL Ubuntu node and the Mac. The PC and Mac ship
+The shipped file lists the box (all three harnesses, 3 slots, because the box
+runs at most 3 heavy local agent sessions at once; slots are generic, so they
+are not one per bot and 3 Claude jobs can take all 3), the PC's WSL Ubuntu node
+and the Mac. The PC and Mac ship
 `enabled: false` and stay disabled until F2-02 remote start lands; the Mac also
 has no bot users and no SSH yet. The PC's `workdir_root` is
 `/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
@@ -125,10 +131,14 @@ free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
 eligible free slot the job stays queued. Grok jobs never hold a slot.
+A queued job never holds a slot: requeueing a claimed job
+(`SQLiteJobQueue.release`, running back to queued) frees its slot in the same
+transaction, and `claim` drops any slot row left on a queued job before
+counting.
 
-Finishing, failing or timing out a job does not free its slot; only
-`DevicePool.release(job_id, owner=harness)` does, once the worker is confirmed
-gone (F2-02). A device that loses power mid-job keeps its slot held, its job
+Finishing, failing or timing out a job does not free its slot; apart from a
+requeue, only `DevicePool.release(job_id, owner=harness)` does, once the
+worker is confirmed gone (F2-02). A device that loses power mid-job keeps its slot held, its job
 is never `done`, T6 times it out from the last heartbeat and retries once, and
 the second failure marks the ticket `stuck`. Phase 1 `orch wait` still claims
 through the queue directly and holds no device slot; F2-02 routes claims
@@ -270,8 +280,10 @@ for a placeholder), device-pool slots held over `slot_max`, and `disabled` or
 `placeholder` when it will not be scheduled, for example
 `pc [claude,codex,cursor] 0/3 slots disabled` and
 `mac [none] 0/2 slots disabled placeholder`. A held slot on a
-device no longer listed is shown as `not-in-machines.yml`. Phase 1 claims are
-the `Slots — box` lines and hold no device-pool slot.
+device no longer listed is shown as `not-in-machines.yml`. A running job that
+holds a device-pool slot is listed under its device row only, so each job is
+counted once. Phase 1 claims are the `Slots — box` lines and hold no
+device-pool slot.
 
 ## Check config
 
