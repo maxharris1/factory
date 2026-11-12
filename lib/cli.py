@@ -119,10 +119,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         -- COMMAND [ARG ...]
   Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
   before it starts (a job that is not running is refused and nothing
-  runs), then one every --interval seconds (default 30, or a third of the
-  job's timeout_seconds if shorter; an override may be up to a third, but
-  one above orch.yml job_states.stale_minutes shows the job as stale
-  between beats). The heartbeat stops when COMMAND exits, when the job
+  runs), then one every --interval seconds (default 15, or a third of the
+  job's timeout_seconds if shorter; an override is capped at 30 seconds
+  and at a third of the timeout, so a live job never shows as stale). The heartbeat stops when COMMAND exits, when the job
   is no longer running, or when this process dies. SIGTERM and SIGHUP are
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
@@ -693,6 +692,9 @@ def _job_run(argv: list[str]) -> int:
 
     def log(message: str) -> None:
         print(f"{prog}: {message}", file=sys.stderr, flush=True)
+
+    if args.interval is not None and interval < args.interval:
+        log(f"--interval {args.interval:g} capped to {interval:g} seconds")
 
     def beat() -> object:
         return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))

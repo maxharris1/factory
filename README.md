@@ -463,10 +463,11 @@ Running timeouts use last activity.
 [`lib/job_run.py`](lib/job_run.py) owns the job heartbeat (issue #49): the bot
 starts its harness as `orch job run <bot> <job-id> [--worktree] -- <command>`.
 It sends one heartbeat first, refusing (exit 1, command not run) a job that is
-not running or (exit 2) not this bot's, then one every 30 seconds, or every
-third of the job's `timeout_seconds` when that is shorter (`--interval` may be
-at most a third of the timeout; keep it under `job_states.stale_minutes` or the
-job shows as stale between beats, see "Job states"). The heartbeat stops when
+not running or (exit 2) not this bot's, then one every 15 seconds, or every
+third of the job's `timeout_seconds` when that is shorter (an `--interval`
+override is capped at 30 seconds, half the smallest `job_states.stale_minutes`,
+and at a third of the timeout, so a live job never shows as stale; see "Job
+states"). The heartbeat stops when
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
 locked or failed writes are logged and retried at the next beat. SIGTERM and
@@ -516,7 +517,12 @@ The poller requeues a job that stays claimed for more than
 `job_states.release_claimed_minutes` (default 5): the same job row goes back
 to `queued`, so its review round and T6 attempt are reused, not charged; its
 slot is freed; and a `released-claimed` row goes into `job_events` and one
-line into the poller log. The write is guarded, so a runner that starts or
+line into the poller log. Its queue-wait clock restarts at the release (it
+keeps its place in line), so the job timeout never fails it for the time it
+waited before the claim; the dashboard's queued age counts from the release
+too. A failed Grok delivery, the other way a job goes back to `queued`, keeps
+its original clock: each poll is a real delivery attempt, and the timeout is
+what bounds one that keeps failing. The write is guarded, so a runner that starts or
 heartbeats in between keeps the job; a late `orch job run` finds the job
 queued and starts nothing. A dead job takes the existing failure path: it is
 failed (a `dead` row in `job_events`) and T6 retries it once, then marks it

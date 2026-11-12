@@ -176,11 +176,15 @@ def add_job(
     repo: str = "maxharris1/cleffy",
     ticket_id: str = "12",
     created_at: float = NOW - 600,
-    last_activity_at: float = NOW - 60,
+    last_activity_at: float | None = None,
     timeout_seconds: int = 5400,
     handoff_comment_id: str | None = None,
     detail: str | None = None,
 ) -> None:
+    if last_activity_at is None:
+        # As lib/queue.py enqueue writes it: a queued job's queue-wait clock
+        # starts when it is queued; anything else last moved a minute ago.
+        last_activity_at = created_at if state == "queued" else NOW - 60
     connection.execute(
         """
         INSERT INTO jobs (

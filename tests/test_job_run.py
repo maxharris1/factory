@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from lib import job_run
+from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.pool_helpers import pool_claim
 
@@ -35,14 +36,34 @@ class Beats:
             return len(self.times)
 
 
-def test_interval_defaults_to_30_seconds_or_a_third_of_a_short_timeout() -> None:
+def test_interval_defaults_to_15_seconds_or_a_third_of_a_short_timeout() -> None:
     # #75: a 60-minute job used to beat every 20 minutes, so a 2-minute
     # stale threshold would flag every live job.
-    assert job_run.heartbeat_interval(3600, None) == 30
-    assert job_run.heartbeat_interval(9000, None) == 30
-    assert job_run.heartbeat_interval(60, None) == 20
+    assert job_run.heartbeat_interval(3600, None) == 15
+    assert job_run.heartbeat_interval(9000, None) == 15
+    assert job_run.heartbeat_interval(30, None) == 10
     assert job_run.heartbeat_interval(60, 5) == 5
-    assert job_run.heartbeat_interval(3600, 600) == 600
+    assert job_run.heartbeat_interval(3600, 25) == 25
+
+
+# The default stale threshold (2 minutes) and the smallest orch.yml allows.
+DEFAULT_STALE = JobStateConfig().stale_seconds
+SMALLEST_STALE = 60.0
+
+
+@pytest.mark.parametrize("timeout", [60, 3600, 9000, 86400])
+@pytest.mark.parametrize("override", [None, 31, 119, 120, 600, 3600, 1e9])
+def test_default_and_large_overrides_stay_under_the_stale_threshold(
+    timeout: int, override: float | None
+) -> None:
+    # Factory request on PR #77: default 15 s; any override is capped below
+    # the stale threshold and at a third of the timeout.
+    assert DEFAULT_STALE == 120
+    interval = job_run.heartbeat_interval(timeout, override)
+    assert 0 < interval <= timeout / 3
+    assert interval < DEFAULT_STALE
+    # At least two beats inside even the smallest threshold.
+    assert interval <= SMALLEST_STALE / 2
 
 
 @pytest.mark.parametrize("timeout", [1, 2, 3])
@@ -58,10 +79,15 @@ def test_a_job_without_a_positive_timeout_has_no_default_interval(timeout: int) 
         job_run.heartbeat_interval(timeout, None)
 
 
-@pytest.mark.parametrize("override", [0, -1, 21, float("nan")])
-def test_interval_override_must_beat_within_a_third_of_the_timeout(override) -> None:
+@pytest.mark.parametrize("override", [0, -1, float("nan"), float("inf")])
+def test_interval_override_must_be_a_number_above_0(override) -> None:
     with pytest.raises(ValueError):
         job_run.heartbeat_interval(60, override)
+
+
+def test_an_override_above_a_third_of_the_timeout_is_capped_there() -> None:
+    assert job_run.heartbeat_interval(60, 21) == 20
+    assert job_run.heartbeat_interval(30, 600) == 10
 
 
 def test_heartbeats_while_the_command_runs_and_stops_when_it_exits() -> None:
@@ -445,7 +471,7 @@ def test_cli_job_run_refuses_a_job_that_is_not_running(tmp_path: Path, state: st
     assert not marker.exists()
 
 
-def test_cli_job_run_refuses_another_bots_job_and_a_slow_interval(tmp_path: Path) -> None:
+def test_cli_job_run_refuses_another_bots_job_and_a_bad_interval(tmp_path: Path) -> None:
     queue = _queue(tmp_path)
     job = _running_job(queue, timeout=60)
     database = str(tmp_path / "orch.db")
@@ -460,17 +486,31 @@ def test_cli_job_run_refuses_another_bots_job_and_a_slow_interval(tmp_path: Path
     assert "belongs to codex-bot" in stderr
     assert not marker.exists()
 
-    slow = _orch(
-        "job", "run", "codex-bot", job.id, "--db", database, "--interval", "30", "--", "true"
+    zero = _orch(
+        "job", "run", "codex-bot", job.id, "--db", database, "--interval", "0", "--", "true"
     )
-    _, stderr = slow.communicate(timeout=20)
-    assert slow.returncode == 2
+    _, stderr = zero.communicate(timeout=20)
+    assert zero.returncode == 2
     assert "--interval" in stderr
 
     bare = _orch("job", "run", "codex-bot", job.id, "--db", database)
     _, stderr = bare.communicate(timeout=20)
     assert bare.returncode == 2
     assert "command" in stderr
+
+
+def test_cli_job_run_caps_a_slow_interval_and_says_so(tmp_path: Path) -> None:
+    # Factory request on PR #77: a slow override is capped (here at a third
+    # of the 60 s timeout), not refused, and the cap is logged.
+    queue = _queue(tmp_path)
+    job = _running_job(queue, timeout=60)
+    slow = _orch(
+        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "--interval", "600", "--", "true",
+    )
+    _, stderr = slow.communicate(timeout=20)
+    assert slow.returncode == 0, stderr
+    assert "--interval 600 capped to 20 seconds" in stderr
 
 
 # --- job worktrees through the CLI --------------------------------------------

@@ -332,6 +332,93 @@ def test_the_release_is_guarded_against_a_runner_that_starts_in_between(
     assert poller.events() == []
 
 
+def _failed_and_retries(poller: Poller) -> tuple[int, int]:
+    with poller.queue.connect() as connection:
+        failed = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE state = 'failed'"
+        ).fetchone()[0]
+        retries = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE attempt > 1 OR dedupe_key LIKE 't6-retry:%'"
+        ).fetchone()[0]
+    return int(failed), int(retries)
+
+
+def test_a_released_job_restarts_its_queue_clock_and_is_not_timed_out(
+    tmp_path: Path,
+) -> None:
+    """PR #77 review F1.2: queued 55 minutes, claimed, released at 60:01.
+
+    The release must not hand the job to the timeout sweep in the same
+    poll (or a later one) for time it spent queued before the claim.
+    """
+    poller = Poller(tmp_path)
+    job_id = poller.review(timeout=3600)  # enqueued at t=0
+    poller.now[0] = CLAIMED_AT + 3300
+    poller.claim()
+
+    poller.at(3601)  # claimed 301 s: released, then the timeout sweep runs
+    row = poller.row(job_id)
+    assert row["state"] == "queued"
+    assert poller.jobs() == [(job_id, "queued", 1)]
+    assert _failed_and_retries(poller) == (0, 0)
+    assert poller.events() == [(job_id, "released-claimed")]
+
+    poller.at(3601 + 3599)  # one second short of a full timeout since release
+    assert poller.row(job_id)["state"] == "queued"
+    assert poller.jobs() == [(job_id, "queued", 1)]
+    assert _failed_and_retries(poller) == (0, 0)
+
+    # The clock restarted; it was not switched off.
+    poller.at(3601 + 3600)
+    assert poller.row(job_id)["state"] == "failed"
+
+
+def test_a_released_job_counts_its_queue_wait_from_the_release_on_the_dashboard(
+    tmp_path: Path,
+) -> None:
+    # The dashboard's stuck / overdue must agree with the poller's clock.
+    poller = Poller(tmp_path)
+    job_id = poller.review(timeout=3600)
+    poller.now[0] = CLAIMED_AT + 3300
+    poller.claim()
+    poller.at(3601)
+    assert poller.row(job_id)["state"] == "queued"
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+    snapshot = collect_snapshot(poller.path, log, now=CLAIMED_AT + 3700, alive=None)
+    queued = {row["job"]: row for row in snapshot["queued"]}
+    assert queued[job_id[:8]]["age_seconds"] == 99
+    assert snapshot["stuck"]["overdue_jobs"] == []
+
+
+def test_a_failed_grok_delivery_keeps_its_original_queue_clock(tmp_path: Path) -> None:
+    # The other requeue path, lib/queue.py release (used only when a Grok
+    # delivery fails), is not an unstarted claim: each poll is a real
+    # delivery attempt, and the timeout is what bounds a delivery that keeps
+    # failing (test_persistent_grok_failure_uses_two_full_timeout_windows_
+    # before_stuck). So it keeps the clock it was queued with, and a sweep
+    # that read the job before the claim can still fail it.
+    now = [0.0]
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: now[0])
+    queued = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="clarify:g1",
+    )
+    now[0] = 3600.0
+    assert queue.claim("grok") is not None
+    released = queue.release(queued.id, owner="grok")
+    assert released.state == "queued"
+    assert (released.created_at, released.last_activity_at) == (0.0, 0.0)
+    assert queue.mark_timed_out(released) is True
+
+
 def test_release_claimed_minutes_comes_from_orch_yml(tmp_path: Path) -> None:
     poller = Poller(
         tmp_path,

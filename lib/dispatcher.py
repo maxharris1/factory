@@ -550,10 +550,11 @@ class Dispatcher:
         self._check_job_states()
         now = self.queue.now()
         for job in self.queue.outstanding():
-            activity = (
-                job.created_at if job.state == "queued" else job.last_activity_at
-            )
-            if now - activity >= job.request.timeout_seconds:
+            # A queued job's last_activity_at is its queue-wait start: when
+            # it was queued, or when a claim that never started was released
+            # (#77 F1.2), so a release never times out a job for the wait
+            # before its claim. A running job's is its last heartbeat.
+            if now - job.last_activity_at >= job.request.timeout_seconds:
                 self.queue.mark_timed_out(job)
         for job in self.queue.unhandled_failures():
             self._t6(job)
@@ -635,20 +636,23 @@ class Dispatcher:
         One transaction, guarded: the job is still running with no
         heartbeat since the claim, and its slot is the same placement with
         no runner recorded. Its slot is freed; a late `orch job run` then
-        finds the job queued and refuses it before anything starts.
+        finds the job queued and refuses it before anything starts. Its
+        queue-wait clock (last_activity_at) restarts now, so the timeout
+        sweep never fails it for time spent before the release; created_at
+        is kept, so it keeps its place in line.
         """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 f"""
-                UPDATE jobs SET state = 'queued'
+                UPDATE jobs SET state = 'queued', last_activity_at = ?
                 WHERE id = ? AND state = 'running' AND last_activity_at = ?
                   AND EXISTS (
                     SELECT 1 FROM {SLOTS_TABLE}
                     WHERE job_id = ? AND placed_at = ? AND runner_pid IS NULL
                   )
                 """,
-                (job.id, job.last_activity_at, job.id, placed_at),
+                (now, job.id, job.last_activity_at, job.id, placed_at),
             ).rowcount
             if changed != 1:
                 connection.commit()

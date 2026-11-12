@@ -895,7 +895,9 @@ def _read_db(
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
             else:
-                age = _age(now, row["created_at"]) or 0
+                # The poller's queue-wait clock: since it was queued, or
+                # since a claim that never started was released (#77 F1.2).
+                age = _age(now, row["last_activity_at"]) or 0
                 item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))

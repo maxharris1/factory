@@ -7,8 +7,9 @@ same process that runs the command:
 * the first heartbeat is sent before the command starts, so a job that is
   not running (or not this bot's) is refused and nothing runs;
 * it then beats every `interval` seconds on a daemon thread (by default
-  every 30 seconds, or a third of the job's timeout if that is shorter, so
-  a live job never looks stale: lib/job_state.py);
+  every 15 seconds, or a third of the job's timeout if that is shorter; an
+  --interval override is capped at 30 seconds and at a third of the
+  timeout, so a live job never looks stale: lib/job_state.py);
 * it stops for good on the first QueueError (the job was finished, failed or
   timed out, e.g. by the command's own `orch job done`), and retries
   transient storage errors at the next interval;
@@ -31,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 
-from lib.job_state import HEARTBEAT_SECONDS
+from lib.job_state import HEARTBEAT_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.queue import QueueError
 
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
@@ -67,19 +68,19 @@ except OSError as exc:
 
 
 def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
-    """Every 30 seconds or a third of the job timeout, whichever is shorter,
-    or an explicit override of at most a third of the timeout."""
+    """Every 15 seconds or a third of the job timeout, whichever is shorter.
+
+    An explicit override above 0 is capped at MAX_HEARTBEAT_SECONDS (below
+    every stale threshold orch.yml allows) and at a third of the timeout.
+    """
     if not timeout_seconds > 0:
         raise ValueError(f"the job's timeout_seconds ({timeout_seconds:g}) must be positive")
-    limit = timeout_seconds / 3
+    limit = min(timeout_seconds / 3, MAX_HEARTBEAT_SECONDS)
     if override is None:
         return min(limit, HEARTBEAT_SECONDS)
-    if not math.isfinite(override) or override <= 0 or override > limit:
-        raise ValueError(
-            f"--interval must be above 0 and at most a third of the job's "
-            f"timeout_seconds ({limit:g})"
-        )
-    return override
+    if not math.isfinite(override) or override <= 0:
+        raise ValueError("--interval must be a number above 0")
+    return min(override, limit)
 
 
 class Heartbeat:

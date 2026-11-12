@@ -55,8 +55,12 @@ JOB_STATES = (CLAIMED, RUNNING, STALE, DEAD)
 DEFAULT_STALE_MINUTES = 2
 DEFAULT_RELEASE_CLAIMED_MINUTES = 5
 # `orch job run`'s default heartbeat (lib/job_run.py), well inside the
-# smallest stale threshold orch.yml allows (1 minute).
-HEARTBEAT_SECONDS = 30.0
+# default 2-minute stale threshold.
+HEARTBEAT_SECONDS = 15.0
+# The most an `orch job run --interval` override may beat: half the smallest
+# stale threshold orch.yml allows (1 minute), so even a beat that lands late
+# never shows a live job as stale, and far below the 2-minute default.
+MAX_HEARTBEAT_SECONDS = 30.0
 
 Alive = Callable[[int | None, str | None], bool]
 # True: the remote worker is confirmed gone. False: it still runs.
