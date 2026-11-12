@@ -401,11 +401,14 @@ Review state the handoff still completes and the `done` wake reports that the
 issue was not moved.
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
 `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
-`trusted_logins` author) whose head names the PR head starts tracking a
-labelled PR with no Grok `brief` or `go`, and starts the first review even
-with no build job, for a project whose PRs are built outside the queue (the
-factory repo itself). With the flag off, only a trusted Grok `brief` or `go`
-starts tracking.
+`trusted_logins` author) whose head names the PR head starts tracking an
+open PR with no Grok `brief` or `go`, and starts the first review even with
+no build job, for a project whose PRs are built outside the queue (the
+factory repo itself). Such a PR needs no `orch:state/` label to be
+discovered: an open PR with a parseable `kind=ready` comment is a candidate,
+the trust and head rules above decide, and the poller writes the label once
+it tracks the PR (issue #59). With the flag off, only a trusted Grok `brief`
+or `go` on a labelled PR starts tracking.
 
 ## 8. Review and merge rules
 

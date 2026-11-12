@@ -15,8 +15,9 @@ Phase 2 has the F2-01 device pool; remote start (F2-02) is not built.
 - `orch:v1` handoff comments ([docs/SPEC.md](docs/SPEC.md) section 5) are parsed and written by [`lib/handoff.py`](lib/handoff.py).
 - [`lib/dispatcher.py`](lib/dispatcher.py) applies T1, T1P and T2 through T6 (F1-05 is
   the T3 review round, T4 ship and T5 questions loop) to
-  PRs discovered through `orch:state/` GitHub labels or Linear tickets found by the handoff
-  search. It stores a ticket after the first `brief` or `go` from the trusted
+  PRs discovered through `orch:state/` GitHub labels (or, on a
+  `ready_starts_review` project, an open PR with a `kind=ready` comment) or
+  Linear tickets found by the handoff search. It stores a ticket after the first `brief` or `go` from the trusted
   Grok login. A `go` must name `state=planning` or `state=building`.
 - Project hooks are passed as `Dispatcher(..., hooks=(T7Hook(), t8))` with
   `t8 = T8Hook()`, then `t8.shipper = ReviewShipper(dispatcher, source)`.
@@ -232,8 +233,14 @@ review, even though no Grok `brief` or `go` was posted and no build job
 exists, for a project whose PRs are built outside the queue. Discovery
 tracks the PR on that `ready` only when its head names the PR head; T2 then
 queues the round-1 review in the same poll once CI on the head is green.
-Every other rule is unchanged: the PR still needs an `orch:state/` label to
-be discovered, an untrusted or wrong-role `ready` starts nothing, and later
+Such a project's PRs need no `orch:state/` label to be discovered (issue
+#59): nothing writes that label before tracking starts, so an open PR with a
+parseable `kind=ready` comment is a candidate and the poller writes the
+label once it tracks the PR. Every other rule is unchanged: projects without
+the flag still need the label (and pay no comment read for unlabelled PRs),
+a Grok `brief` or `go` still needs it, an untrusted or wrong-role `ready`
+starts nothing, a `ready` comment is handled once and a head is reviewed
+once per round, and later
 fixes come back through the queue. The factory repo itself
 (`maxharris1/factory`) is listed this way, GitHub-only with `ship: handoff`
 in its `factory.md`: review and fix jobs go through `orch wait`, and an

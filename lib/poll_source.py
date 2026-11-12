@@ -294,13 +294,30 @@ class LivePollSource:
                         issue = _object(raw, "GitHub issue")
                         if "pull_request" not in issue:
                             continue
-                        if not _has_label(issue.get("labels"), label_prefix):
+                        # Issue #59: a ready_starts_review project builds its
+                        # PRs outside the queue, so nothing writes the
+                        # orch:state/ label before tracking starts. Its open
+                        # PRs are candidates on a parseable ready;
+                        # Dispatcher._starts_tracking still applies the trust
+                        # and head rules. Other projects stay label-only and
+                        # pay no comment read here.
+                        labelled = _has_label(issue.get("labels"), label_prefix)
+                        if not labelled and not project.ready_starts_review:
                             continue
                         number = str(
                             _positive_int(issue.get("number"), "issue number")
                         )
+                        comments: tuple[Comment, ...] | None = None
+                        if not labelled:
+                            comments = self.github.list_comments(
+                                project.repo, number
+                            )
+                            if not _has_ready(comments):
+                                continue
                         tickets.append(
-                            self._github_ticket(project, factory, number)
+                            self._github_ticket(
+                                project, factory, number, comments=comments
+                            )
                         )
                     except Exception as exc:
                         if isinstance(exc, _TerminalTicket):
@@ -730,6 +747,7 @@ class LivePollSource:
         *,
         fresh: bool = False,
         allow_merged: bool = False,
+        comments: tuple[Comment, ...] | None = None,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
         cached = None if fresh else self._ticket_cache.get(cache_key)
@@ -743,7 +761,8 @@ class LivePollSource:
         head = _object(pull.get("head"), "GitHub pull request head").get("sha")
         if not isinstance(head, str):
             raise PollSourceError(f"{project.repo}#{number} has no head")
-        comments = self.github.list_comments(project.repo, number)
+        if comments is None:
+            comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
             repo=project.repo,
             ticket_id=number,

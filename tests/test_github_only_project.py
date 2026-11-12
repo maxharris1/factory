@@ -216,10 +216,10 @@ class OnePrSource:
         return (self.ticket,) if key in wanted else ()
 
 
-# Discovery (Codex r1 F1.1): the documented entry is an orch:state/ label
-# plus the builder's trusted ready naming the PR head (factory.md Context,
-# README "Poll", SPEC section 7). These run the live poll source against a
-# fake gh, through poll_once, so nothing is tracked by hand.
+# Discovery (Codex r1 F1.1): the documented entry is the builder's trusted
+# ready naming the PR head, with or without an orch:state/ label (issue #59;
+# factory.md Context, README "Poll", SPEC section 7). These run the live poll
+# source against a fake gh, through poll_once, so nothing is tracked by hand.
 
 PR_HEAD = "f" * 40
 DOCUMENTED_READY = (
@@ -526,24 +526,40 @@ def test_a_ready_naming_a_new_head_queues_a_new_review(tmp_path: Path) -> None:
     world.poll()
     first = world.queue.claim("codex")
     assert first is not None and first.request.head == PR_HEAD
-    world.queue.finish(first.id, owner="codex", handoff_comment_id=None)
+    world.queue.finish(first.id, owner="codex", handoff_comment_id="9002")
+    world.gh.comments.append(
+        gh_comment(
+            9002,
+            VERDICT.format(round="1/3", head=PR_HEAD, verdict="REVISE", risk="high"),
+            minute=5,
+        )
+    )
+    world.poll()
+    fix = world.queue.claim("claude")
+    assert fix is not None and fix.request.head == PR_HEAD
+    world.queue.finish(fix.id, owner="claude", handoff_comment_id="9003")
 
-    # The builder pushes again and posts a ready for the new tip.
+    # The builder pushes the fix and posts a ready for the new tip.
     world.gh.head = new_head
     world.gh.comments.append(
-        gh_comment(9002, DOCUMENTED_READY.format(head=new_head), minute=5)
+        gh_comment(9003, DOCUMENTED_READY.format(head=new_head), minute=10)
     )
     world.poll()
     world.poll()
 
     assert outcomes(world.queue) == {
         "9001": "queued-review",
-        "9002": "queued-review",
+        "9002": "queued-review-fix",
+        "9003": "queued-review",
     }
     assert world.jobs() == [
         ("review", "codex", PR_HEAD, "done"),
+        ("fix", "claude", PR_HEAD, "done"),
         ("review", "codex", new_head, "queued"),
     ]
+    second = world.queue.claim("codex")
+    assert second is not None
+    assert json.loads(str(second.request.detail))["round"] == "2/3"
 
 
 def test_a_stale_ready_does_not_track_but_a_ready_for_the_new_tip_does(
