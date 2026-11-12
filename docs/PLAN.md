@@ -73,7 +73,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 | MappedBeforeBuilding, MappingApprovedForCurrentArtifact | PlanCheck is a review of `plan.md` at a SHA. A scope-changing answer sends the ticket back to Planning (skill judgment) |
 | GateLoopsBounded, DeclinesBounded, StopsAfterTwoACUnmet, round cap | Counters on the ticket (labels on GitHub-issue repos; Linear fields or PR header comments on Aut0), enforced mechanically by the dispatcher |
 | ShipPinnedToCoveredHead, InheritedVerdictOnlyOnExactRebase | T4: merge only with `--match-head-commit` on the approved SHA. A moved head carries the approval only if `git patch-id --stable` is equal. Otherwise it gets a re-review |
-| OnlyTheHarnessBotStarts | Only owning bots run harnesses. `orch` refuses to exec a harness binary |
+| OnlyTheHarnessBotStarts | Only owning bots run harnesses. The dispatcher and `orch wait` exec no harness; `orch job run` runs only the command its owning bot passes, for a running job that bot owns, and never names a harness itself (SPEC 4.3) |
 | RerouteKeepsCrossFamily, OnlyUrgentUsesReserve, 20% reserve | Routing table in `factory.md` plus the owning bot's usage check (section 6) |
 | ContradictoryConfigNeverRuns | `orch check-config` refuses an inconsistent `factory.md` (e.g. a same-family reviewer) |
 | ExitCodesMeanOneThing (15/16/17/18) | Default labels: `orch:state/waiting-max`, `orch:state/abandoned`, `orch:state/waiting-external`, `orch:state/waiting-deploy`. Aut0: the same states on the Linear ticket and in PR `orch:` comments, with no GitHub labels |

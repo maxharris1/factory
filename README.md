@@ -261,9 +261,11 @@ failures stay fail-closed and are recorded instead of weakening those checks.
 
 ```sh
 bin/orch wait claude-bot --db "$ORCH_DB"
+bin/orch job run claude-bot <job-id> --worktree -- claude ...
 bin/orch job heartbeat claude-bot <job-id>
 bin/orch job done claude-bot <job-id> --handoff <comment-id>
 bin/orch job done claude-bot <job-id> --failed
+bin/orch gc [--older-than HOURS] [--dry-run]
 ```
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
@@ -274,21 +276,58 @@ prints one JSON line. While the poller holds a write, a claim that sees
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
 If that line cannot be printed, the job is finished as
-failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
-the shell call starts its own. `job heartbeat` and `job done` refuse a job that
+failed so T6 retries it at once. `orch` never chooses or starts a harness on
+its own: the bot that ran the shell call starts its own, through `orch job run`. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
-While a harness runs, its bot loops `orch job heartbeat <bot> <job-id>` at
-least every `timeout_seconds / 3`; running timeouts use last activity.
+Running timeouts use last activity.
+
+### Job heartbeat and worktrees
+
+[`lib/job_run.py`](lib/job_run.py) owns the job heartbeat (issue #49): the bot
+starts its harness as `orch job run <bot> <job-id> [--worktree] -- <command>`.
+It sends one heartbeat first, refusing (exit 1, command not run) a job that is
+not running or (exit 2) not this bot's, then one every third of the job's
+`timeout_seconds` (`--interval` may only be faster). The heartbeat stops when
+the command exits, when a heartbeat finds the job no longer running (for
+example after the command's own `orch job done`), or when `orch job run` dies;
+locked or failed writes are logged and retried at the next beat. SIGTERM and
+SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
+reaches the command directly, and the exit status is the command's; a signal
+that arrives before the command starts means it never runs.
+`orch job run` never finishes the job: `orch job done` stays the bot's call.
+The command gets `ORCH_JOB_ID`, `ORCH_JOB_BOT` and `ORCH_DB`. Bots do not
+hand-roll heartbeat loops; `orch job heartbeat` is a single manual beat.
+
+With `--worktree` ([`lib/worktrees.py`](lib/worktrees.py)) the command runs in a
+detached git worktree at `<root>/jobs/<job-id>` (exported as
+`ORCH_JOB_WORKTREE`), made from one shared bare clone per repo at
+`<root>/clones/<owner>/<name>.git`, at the job's `head` (fetched by SHA when it
+is on no branch) or the remote default branch. The root is `--work-root`, else
+`$ORCH_WORK_ROOT`, else `~/factory-work`; the remote is `--git-url-template`,
+else `$ORCH_GIT_URL_TEMPLATE`, else `https://github.com/{repo}.git`. When the
+command exits, done or failed, the worktree is removed and the clone pruned,
+unless it has uncommitted changes (untracked files included; ignored build
+output is not) or commits made after the commit the job started at that are on
+no remote-tracking ref, in which case it is kept and the reason logged. (The
+start commit itself, such as a PR head fetched by SHA, does not count.) `orch gc`
+applies the same rule to worktrees older than `--older-than` hours (default
+24) whose owning `orch job run` is gone, reports what it kept and why, and
+prunes each clone; `--dry-run` only reports. Both decide under the clone's
+lock, and gc removes only a worktree of the clone derived from the record's
+repo. A URL template carrying credentials (`https://user:token@...`) is
+refused; git authenticates through its credential helper.
 
 ## Install after merge
 
 Do not run these steps until Max gives the go. `deploy/install.sh` creates a
 venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
 under `$HOME/.local/bin`, initializes one shared database, and writes
-`$HOME/.config/factory/profile.sh`. It does not install or start the service.
-Stop `orch-poll` before re-running `deploy/install.sh`; both install paths
-replace the venv.
+`$HOME/.config/factory/profile.sh`. Without `--autostart` it does not install
+or start the service; with `--autostart` it also runs `deploy/poller-service.sh
+install-autostart`, which turns on autostart but does not start the poller.
+Stop `orch-poll` (or `deploy/poller-service.sh stop`) before re-running
+`deploy/install.sh`; both install paths replace the venv.
 Keep the checkout at
 `$HOME/factory` on `main`; the service reads that checkout's `orch.yml`.
 The script warns for another checkout or branch, refuses to replace a
@@ -327,8 +366,41 @@ unquoted `Bearer <key>` does not set the variable when the file is sourced.
 Values are not documented or committed. Copy or link the unit to
 `~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
 use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
-repository installs, enables, or starts the service, or writes either
+repository installs, enables, or starts the systemd unit, or writes either
 environment file.
+
+### Poller service without systemd
+
+`orch poll` holds the database's single-poller lock (`orch.db.lock`); while it
+holds it, it writes its own pid to `--pidfile`, else `$ORCH_POLL_PIDFILE`,
+else `poller.pid` beside the database, and removes that file on exit,
+including SIGTERM (exit 143). A second poller is refused and does not touch
+the pidfile; a stale one from a killed poller is replaced. Do not edit the
+pidfile by hand.
+
+On a host with no systemd user session (the box), use
+[`deploy/poller-service.sh`](deploy/poller-service.sh):
+`start` (no-op when running), `stop` (SIGTERM, then hold it stopped),
+`restart`, `status` (exit 3 when not running) and `ensure` (start unless
+running or held stopped). It runs `deploy/run-poller.sh --pidfile
+~/.local/state/factory/poller.pid` under `nohup`, appending to `poller.log`
+beside it, and treats a pidfile whose process is gone or is not `orch poll`
+(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. `start`,
+`stop`, `restart` and `ensure` serialize on `poller-service.lock` (where
+`flock` exists), and `ensure` never clears a stop.
+`deploy/install.sh --autostart` (or `poller-service.sh install-autostart`)
+turns on autostart: it writes
+`~/.config/factory/poller-autostart`, which makes the installed `profile.sh`
+run `ensure` in the background whenever a bot shell starts, and, when
+`crontab` exists, adds an `@reboot` line and a 5-minute `ensure` watchdog
+tagged `# factory-orch-poll` (replaced, never duplicated).
+`remove-autostart` undoes both. If the crontab cannot be read (anything but
+"no crontab for <user>"), both change nothing and exit 1. `ORCH_CRONTAB` names
+the crontab command (default `crontab` on `PATH`); the caller's `PATH` keeps
+precedence over the standard directories the script appends. `deploy/install.sh` without `--autostart`
+changes neither. Run `poller-service.sh stop` before re-running
+`deploy/install.sh`, then `start`. `ensure` output goes to
+`poller-service.log`.
 
 ## Status
 

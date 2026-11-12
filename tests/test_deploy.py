@@ -1,7 +1,9 @@
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,11 +33,7 @@ else:
 """
 
 
-@pytest.mark.parametrize("installer", ["uv", "venv"])
-def test_install_is_idempotent_and_preserves_the_shared_database(
-    tmp_path: Path,
-    installer: str,
-) -> None:
+def _install_environment(tmp_path: Path, installer: str) -> dict[str, str]:
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
     installer_path = fake_bin / ("uv" if installer == "uv" else "python3")
@@ -105,8 +103,19 @@ python.chmod(0o755)
             "HOME": str(tmp_path),
             "ORCH_CONFIG": str(orch_config),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
+            # Never a real crontab; autostart tests point this at a fake.
+            "ORCH_CRONTAB": str(fake_bin / "no-such-crontab"),
         }
     )
+    return environment
+
+
+@pytest.mark.parametrize("installer", ["uv", "venv"])
+def test_install_is_idempotent_and_preserves_the_shared_database(
+    tmp_path: Path,
+    installer: str,
+) -> None:
+    environment = _install_environment(tmp_path, installer)
 
     first = subprocess.run(
         ["bash", "deploy/install.sh"],
@@ -385,3 +394,132 @@ def test_orch_poll_service_is_unbuffered_and_reads_webhook_env() -> None:
     unit = (ROOT / "deploy/orch-poll.service").read_text(encoding="utf-8")
     assert "Environment=PYTHONUNBUFFERED=1" in unit
     assert "EnvironmentFile=-%h/.config/factory/webhook.env" in unit
+
+
+FAKE_CRONTAB = """#!/usr/bin/python3
+import os, sys
+from pathlib import Path
+
+table = Path(os.environ["HOME"]) / "crontab.txt"
+if sys.argv[1:] == ["-l"]:
+    if not table.exists():
+        print("no crontab for test", file=sys.stderr)
+        raise SystemExit(1)
+    sys.stdout.write(table.read_text())
+elif sys.argv[1:] == ["-"]:
+    table.write_text(sys.stdin.read())
+else:
+    raise SystemExit(f"unexpected crontab arguments {sys.argv[1:]}")
+"""
+
+
+def _install(environment: dict[str, str], *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "deploy/install.sh", *args],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_install_does_not_enable_autostart_by_default(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    crontab = tmp_path / "fake-bin" / "crontab"
+    crontab.write_text(FAKE_CRONTAB, encoding="utf-8")
+    crontab.chmod(0o755)
+    environment["ORCH_CRONTAB"] = str(crontab)
+
+    result = _install(environment)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "crontab.txt").exists()
+    assert not (tmp_path / ".config/factory/poller-autostart").exists()
+
+
+def test_install_autostart_installs_cron_and_the_profile_hook(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    crontab = tmp_path / "fake-bin" / "crontab"
+    crontab.write_text(FAKE_CRONTAB, encoding="utf-8")
+    crontab.chmod(0o755)
+    environment["ORCH_CRONTAB"] = str(crontab)
+
+    assert _install(environment, "--autostart").returncode == 0
+    result = _install(environment, "--autostart")
+
+    assert result.returncode == 0, result.stderr
+    lines = (tmp_path / "crontab.txt").read_text(encoding="utf-8").splitlines()
+    service = ROOT / "deploy" / "poller-service.sh"
+    assert [line for line in lines if "# factory-orch-poll" in line] == [
+        f"@reboot {service} ensure >>{tmp_path}/.local/state/factory/"
+        "poller-service.log 2>&1 # factory-orch-poll",
+        f"*/5 * * * * {service} ensure >>{tmp_path}/.local/state/factory/"
+        "poller-service.log 2>&1 # factory-orch-poll",
+    ]
+    assert (tmp_path / ".config/factory/poller-autostart").is_file()
+
+
+def test_install_refuses_an_unknown_option(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    result = _install(environment, "--bogus")
+    assert result.returncode == 2
+    assert "usage:" in result.stderr
+    assert not (tmp_path / ".local").exists()
+
+
+def _profile_env(tmp_path: Path) -> dict[str, str]:
+    return {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin:/bin",
+        "ORCH_POLL_START_WAIT": "10",
+        "ORCH_CRONTAB": str(tmp_path / "no-such-crontab"),
+    }
+
+
+def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    # Swap the installed wrapper for a fake long-running poller.
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.write_text(
+        "#!/usr/bin/python3\n"
+        "import os, sys, time\n"
+        "assert sys.argv[1:3] == ['poll', '--pidfile'], sys.argv\n"
+        "open(sys.argv[3], 'w').write(f'{os.getpid()}\\n')\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / ".config/factory"
+    (config / "webhook.env").write_text("", encoding="utf-8")
+    (config / "orch-poll.env").write_text("", encoding="utf-8")
+    pidfile = tmp_path / ".local/state/factory/poller.pid"
+    source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
+
+    off = subprocess.run(
+        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+        capture_output=True, timeout=30, check=False,
+    )
+    assert off.returncode == 0 and off.stdout == "ok", off.stderr
+    time.sleep(0.5)
+    assert not pidfile.exists()
+
+    (config / "poller-autostart").touch()
+    started = time.monotonic()
+    on = subprocess.run(
+        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+        capture_output=True, timeout=30, check=False,
+    )
+    assert on.returncode == 0 and on.stdout == "ok", on.stderr
+    assert time.monotonic() - started < 5  # the hook does not block the shell
+    try:
+        deadline = time.monotonic() + 15
+        while not pidfile.exists():
+            assert time.monotonic() < deadline, (
+                tmp_path / ".local/state/factory/poller-service.log"
+            ).read_text() if (tmp_path / ".local/state/factory/poller-service.log").exists() else "no log"
+            time.sleep(0.1)
+    finally:
+        time.sleep(0.2)
+        if pidfile.exists():
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)

@@ -927,19 +927,24 @@ class LivePollSource:
             raise PollSourceError("gh returned no JSON")
         return pages
 
-    def _gh_call(self, *args: str, fresh: bool = False) -> str:
+    def _gh_call(
+        self,
+        *args: str,
+        fresh: bool = False,
+        _unconditional: bool = False,
+    ) -> str:
         now = self.clock()
         if now < self._backoff_until:
             raise PollSourceError("GitHub rate-limit backoff is active")
         conditional = "--paginate" not in args and not fresh
         cache_key = tuple(args)
         argv = [*self.gh, "api"]
-        if not fresh:
+        if not fresh and not _unconditional:
             argv.extend(("--cache", "60s"))
         if conditional:
             argv.append("--include")
             cached = self._etag_cache.get(cache_key)
-            if cached is not None:
+            if cached is not None and not _unconditional:
                 argv.extend(("-H", f"If-None-Match: {cached[0]}"))
         argv.extend(args)
         result = self._run_gh_read(argv)
@@ -947,10 +952,7 @@ class LivePollSource:
         if conditional and result.stdout.startswith("HTTP/"):
             included = _included_response(result.stdout)
             if included[0] == 304:
-                cached = self._etag_cache.get(cache_key)
-                if cached is None:
-                    raise PollSourceError("gh returned 304 without a cached response")
-                return cached[1]
+                return self._not_modified(args, _unconditional)
         if result.returncode != 0:
             status = (
                 included[0]
@@ -968,14 +970,26 @@ class LivePollSource:
             included if included is not None else _included_response(result.stdout)
         )
         if status == 304:
-            cached = self._etag_cache.get(cache_key)
-            if cached is None:
-                raise PollSourceError("gh returned 304 without a cached response")
-            return cached[1]
+            return self._not_modified(args, _unconditional)
         etag = headers.get("etag")
         if etag is not None:
             self._etag_cache[cache_key] = (etag, body)
         return body
+
+    def _not_modified(self, args: tuple[str, ...], unconditional: bool) -> str:
+        """Serve a 304 from the ETag cache, or refetch once when it is empty.
+
+        After a restart the in-memory cache is empty, yet gh's own --cache
+        can replay a 304 it stored for the previous process's conditional
+        request (gh does not key its cache on If-None-Match). Refetch once
+        with neither --cache nor If-None-Match, which cannot return 304.
+        """
+        cached = self._etag_cache.get(tuple(args))
+        if cached is not None and not unconditional:
+            return cached[1]
+        if unconditional:
+            raise PollSourceError("gh returned 304 without a cached response")
+        return self._gh_call(*args, _unconditional=True)
 
     def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
         """Retry the poll adapter's GETs; never repeat a write."""
