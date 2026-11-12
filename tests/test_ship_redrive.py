@@ -954,8 +954,8 @@ OTHER = "b" * 40
     ("approved", "patch_ids", "marked", "redrive"),
     [
         (OTHER, None, 0, "spent"),
-        (OTHER, {OTHER: "p" * 40, HEAD: "q" * 40}, 0, "spent"),
-        (OTHER, {OTHER: "p" * 40, HEAD: "p" * 40}, 1, "spent"),
+        (OTHER, {OTHER: "c" * 40, HEAD: "d" * 40}, 0, "spent"),
+        (OTHER, {OTHER: "c" * 40, HEAD: "c" * 40}, 1, "spent"),
         (HEAD[:12], None, 1, "spent"),
         (HEAD, None, 1, "spent"),
     ],

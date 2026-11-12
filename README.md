@@ -215,12 +215,27 @@ issue comments are joined with the Linear comments. `ready`, `verdict`, and
 Bot handles it for the repo's project.
 `projects[].linear_ready_for_review` defaults off and controls only the
 post-APPROVE Linear Ready for Review move; Aut0 enables it. The move is made
-only when a fresh read shows the issue still before review (unstarted, or
-started and before Ready for Review in the team's order). An issue already in
-Ready for Review, or moved on by a human (Done, Canceled, Backlog, Triage, or a
-started state after Ready for Review), is left where it is; an unknown state
-fails the handoff before any write. No other dispatcher state writes Linear,
-and `ship: handoff` never merges.
+only when a fresh read shows the issue still before review (Backlog, Triage,
+unstarted, or started and before Ready for Review in the team's order), per
+Max's standing rule that the factory may move approved Aut0 tickets to Ready
+for Review. An issue already in Ready for Review, or moved on by a human (Done,
+Canceled, or a started state after Ready for Review), is left where it is; an
+unknown state fails the handoff before any write. On a team with no Ready for
+Review state the PR is still marked ready and the handoff completes; the
+`done` wake's detail carries `note: "linear-not-moved: team has no Ready for
+Review state"` so the project bot can move the issue by hand. No other
+dispatcher state writes Linear, and `ship: handoff` never merges.
+`projects[].ready_starts_review` defaults off. When it is on, a trusted
+`ready` from `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
+`trusted_logins` author) queues the first review even when no `go` queued a
+build job, for a project whose PRs are built outside the queue. Every other
+rule is unchanged: the PR still needs an `orch:state/` label to be
+discovered, the `ready` head must be the PR head with CI green, and later
+fixes come back through the queue. The factory repo itself
+(`maxharris1/factory`) is listed this way, GitHub-only with `ship: handoff`
+in its `factory.md`: review and fix jobs go through `orch wait`, and an
+APPROVE with green CI wakes Grok Bot (Factory) with `done` to merge instead
+of the poller merging.
 
 `orch poll` opens an initialized database without creating it and holds
 `<db>.lock`, so a second poller is refused. Source failures are recorded per

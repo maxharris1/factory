@@ -44,6 +44,7 @@ _PROJECT_KEYS = {
     "linear_project_id",
     "grok_bot",
     "linear_ready_for_review",
+    "ready_starts_review",
 }
 
 
@@ -55,6 +56,9 @@ class Project:
     linear_project_id: str | None = None
     grok_bot: str = "grok-bot"
     linear_ready_for_review: bool = False
+    # A trusted ready from factory.md's builder starts review even with no
+    # factory-queued build job (PRs built outside the queue). Default off.
+    ready_starts_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +325,16 @@ def _projects(
             )
             ok = False
             continue
+        ready_starts_review = item.get("ready_starts_review", False)
+        if not isinstance(ready_starts_review, bool):
+            findings.append(
+                Finding(
+                    "error",
+                    f"projects[{index}].ready_starts_review must be true or false",
+                )
+            )
+            ok = False
+            continue
         projects.append(
             Project(
                 repo=repo,
@@ -329,6 +343,7 @@ def _projects(
                 linear_project_id=linear_project_id,
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
+                ready_starts_review=ready_starts_review,
             )
         )
     if not ok:

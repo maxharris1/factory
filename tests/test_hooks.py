@@ -2216,7 +2216,9 @@ def test_r2b1_tip_re_read_after_fast_forward_fails_closed(
         expected = f"main is {CONCURRENT}, not {HEAD_A}, after fast-forward"
     else:
         actions.branch_tip_error_after_fast_forward = RuntimeError("tip read failed")
-        expected = "RuntimeError: tip read failed"
+        # #48 G2 F2.3: only the class (or an inner safe_detail), never
+        # str(exc), of the failed tip read reaches the error and the wake.
+        expected = f"main is unreadable (RuntimeError), not {HEAD_A}, after fast-forward"
     source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
     dispatcher, queue, shipper = wired(
         tmp_path,
