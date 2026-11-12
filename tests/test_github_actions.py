@@ -87,6 +87,21 @@ MERGE = (
     f"sha={HEAD}",
 )
 LABELS = ("--paginate", f"{REPO}/issues/42/labels?per_page=100")
+NODE_ID = "PR_kwDOKfac0s6CiTKq"
+MARK_READY_QUERY = (
+    "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
+    "{ pullRequest { id isDraft headRefOid } } }"
+)
+# GitHub has no REST route for draft -> ready. gh pr ready uses this mutation.
+MARK_READY = (
+    "-X",
+    "POST",
+    "graphql",
+    "-f",
+    f"query={MARK_READY_QUERY}",
+    "-f",
+    f"id={NODE_ID}",
+)
 PREVIEW = (
     "-X",
     "POST",
@@ -1167,3 +1182,34 @@ def test_ci_result_feeds_the_dispatcher_as_a_ci_result() -> None:
     result = actions.ci_status("owner/repo", HEAD)
 
     assert result == CIResult("failure", "failed: typecheck")
+
+
+def draft_pull() -> GhResult:
+    pull = served("pull-42-open.json")
+    return GhResult(0, pull.stdout.replace('"draft": false', '"draft": true'), "")
+
+
+def test_handoff_marks_a_draft_ready_with_the_exact_graphql_gh_argv() -> None:
+    """Issue #47: POST pulls/<n>/ready_for_review is not a GitHub REST route."""
+    actions, gh = adapter()
+    gh.route(PULL, draft_pull())
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+
+    actions.handoff(pr("handoff"), HEAD)
+
+    assert gh.calls == [
+        [*ENV_PREFIX, "api", *PULL],
+        [
+            *ENV_PREFIX,
+            "api",
+            "-X",
+            "POST",
+            "graphql",
+            "-f",
+            "query=mutation($id: ID!) { markPullRequestReadyForReview("
+            "input: {pullRequestId: $id}) { pullRequest { id isDraft headRefOid } } }",
+            "-f",
+            "id=PR_kwDOKfac0s6CiTKq",
+        ],
+    ]
+    assert not any("ready_for_review" in part for call in gh.calls for part in call)
