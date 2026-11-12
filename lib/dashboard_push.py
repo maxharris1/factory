@@ -7,6 +7,12 @@ gets the snapshot files and sends them somewhere. `none` (the default) is
 example the pc-wsl-bots node. It runs with BatchMode, so it never prompts,
 and it relies entirely on the SSH login Max provisioned in ~/.ssh/config.
 No key path, password or token is read, passed or configured here.
+
+Both methods publish whole files only. rsync writes each file to a temp
+name and renames it. scp uploads every file to a dot-prefixed temp name in
+the served directory, and only after all uploads succeed renames each into
+place with `ssh host mv -f -- temp final`, so an interrupted push leaves
+the published files as they were.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ NOT_CONFIGURED = (
 )
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 SEND_TIMEOUT_SECONDS = 60
+TEMP_SUFFIX = ".push-tmp"
 
 
 class PushError(RuntimeError):
@@ -73,26 +80,49 @@ class SshTransport:
         self.runner = runner
         self.timeout = timeout
 
-    def argv(self, paths: Sequence[Path]) -> list[str]:
-        destination = f"{self.host}:{self.remote_dir.rstrip('/')}/"
+    def _remote(self, name: str) -> str:
+        return f"{self.remote_dir.rstrip('/')}/{name}"
+
+    def commands(self, paths: Sequence[Path]) -> list[list[str]]:
+        """The argv lists one send runs, in order."""
         sources = [str(path) for path in paths]
         if self.method == "rsync":
             # rsync writes each file to a temp name and renames it into place.
             return [
-                "rsync",
-                "--quiet",
-                "--timeout=30",
-                "--chmod=F644",
-                "-e",
-                "ssh " + " ".join(SSH_OPTIONS),
-                "--",
-                *sources,
-                destination,
+                [
+                    "rsync",
+                    "--quiet",
+                    "--timeout=30",
+                    "--chmod=F644",
+                    "-e",
+                    "ssh " + " ".join(SSH_OPTIONS),
+                    "--",
+                    *sources,
+                    f"{self.host}:{self._remote('')}",
+                ]
             ]
-        return ["scp", "-q", "-B", *SSH_OPTIONS, "--", *sources, destination]
+        # scp has no temp-and-rename of its own: upload every file to a temp
+        # name first, then rename each into place. remote_dir is validated to
+        # a conservative character set, so the remote shell that runs `mv`
+        # sees only plain words.
+        temps = [self._remote(f".{path.name}{TEMP_SUFFIX}") for path in paths]
+        uploads = [
+            ["scp", "-q", "-B", *SSH_OPTIONS, "--", source, f"{self.host}:{temp}"]
+            for source, temp in zip(sources, temps)
+        ]
+        renames = [
+            ["ssh", *SSH_OPTIONS, "--", self.host, "mv", "-f", "--", temp,
+             self._remote(path.name)]
+            for path, temp in zip(paths, temps)
+        ]
+        return uploads + renames
 
     def send(self, paths: Sequence[Path]) -> None:
-        argv = self.argv(paths)
+        for argv in self.commands(paths):
+            self._run(argv)
+
+    def _run(self, argv: list[str]) -> None:
+        program = argv[0]
         try:
             result = self.runner(
                 argv,
@@ -105,16 +135,16 @@ class SshTransport:
             )
         except subprocess.TimeoutExpired:
             raise PushError(
-                f"{self.method} to {self.host} timed out after {self.timeout}s"
+                f"{program} to {self.host} timed out after {self.timeout}s"
             ) from None
         except FileNotFoundError:
-            raise PushError(f"{self.method} is not installed") from None
+            raise PushError(f"{program} is not installed") from None
         if result.returncode != 0:
             detail = next(
                 (line.strip() for line in (result.stderr or "").splitlines() if line.strip()),
                 "",
             )
-            message = f"{self.method} to {self.host} failed (exit {result.returncode})"
+            message = f"{program} to {self.host} failed (exit {result.returncode})"
             if detail:
                 message += f": {redact(detail)[:200]}"
             raise PushError(message)

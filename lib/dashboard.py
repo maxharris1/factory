@@ -10,9 +10,12 @@ every refresh_seconds (15 to 30).
 Secrets: only allowlisted columns are selected (never jobs.detail, heads,
 comment bodies or environment values; the environment is not read except
 for the ORCH_* path variables). Every free-text value (stuck reasons,
-poll_errors, log lines) goes through `redact`, and the finished snapshot
-is walked once more so every string in it has been through `redact`
-before it is written. Enumerated fields outside their known values are
+poll_errors, deferrals, log lines) goes through `redact`, which first
+undoes percent and JSON escaping so encoded secrets are seen, and the log
+tail also goes through `redact_key_blocks`, which removes private-key
+blocks that span lines. The finished snapshot is walked once more so every
+string in it has been through `redact` before it is written. Enumerated
+fields (including ticket workflow states) outside their known values are
 shown as "other".
 """
 
@@ -23,14 +26,17 @@ import json
 import os
 import re
 import sqlite3
+import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 import yaml
 
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
+from lib.handoff import STATES as WORKFLOW_STATES
 from lib.load import load_yaml
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES
@@ -69,9 +75,10 @@ class DashboardError(RuntimeError):
 
 _URL = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s'\"<>]+")
 _USERINFO = re.compile(r"[^\s:/@'\"]+:[^\s/@'\"]+@[A-Za-z0-9.\-]+")
+# The optional quote after a name catches JSON and repr keys ("token": ...).
 _AUTH_HEADER = re.compile(
     r"(?i)\b((?:proxy-)?authorization|x-api-key|api-key|cookie|set-cookie)"
-    r"(\s*[:=]\s*)[^\r\n]*"
+    r"([\"']?\s*[:=]\s*)[^\r\n]*"
 )
 _SCHEME_TOKEN = re.compile(r"(?i)\b(bearer|basic|token)(\s+)([A-Za-z0-9._~+/=\-]{6,})")
 _KNOWN_TOKEN = re.compile(
@@ -88,15 +95,31 @@ _KNOWN_TOKEN = re.compile(
 )
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)\b([A-Za-z0-9_\-]*"
-    r"(?:token|secret|passw(?:or)?d|api[_\-]?key|key|auth|credential|session)"
+    r"(?:token|secret|passw(?:or)?d|passphrase|pwd|api[_\-]?key|key|auth"
+    r"|credential|session|cookie|signature)"
     r"[A-Za-z0-9_\-]*)"
-    r"(\s*[:=]\s*)"
-    r"(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+    r"([\"']?\s*[:=]\s*)"
+    # A JSON string (escapes allowed, closing quote optional when cut short),
+    # a single-quoted string, or a bare value.
+    r"(\"(?:[^\"\\\n]|\\.)*\"?|'[^'\n]*'?|[^\s,;}\]]+)"
 )
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 # 32+ token characters; _opaque keeps ones that read like names, not keys.
 _OPAQUE = re.compile(r"(?<![A-Za-z0-9_\-+/=])[A-Za-z0-9_\-+/=]{32,}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# JSON string escapes that can hide a URL or a quoted key: \/ \" \' and
+# \u00XX (ASCII only, so no lone surrogate can reach the UTF-8 writer).
+_JSON_ESCAPE = re.compile(r"\\(?:u00([0-7][0-9A-Fa-f])|([/\"']))")
+DECODE_ROUNDS = 8
+# PEM/OpenSSH/PGP armor. A block without its END runs to the end of the text.
+_KEY_MARKER = r"-----\s*{0} [A-Z0-9 ]{{1,60}}-----"
+_KEY_BEGIN = re.compile(_KEY_MARKER.format("BEGIN"))
+_KEY_END = re.compile(_KEY_MARKER.format("END"))
+_KEY_BLOCK = re.compile(
+    _KEY_MARKER.format("BEGIN") + r"[\s\S]*?(?:" + _KEY_MARKER.format("END") + r"|\Z)"
+)
+_KEY_ORPHAN_END = re.compile(r"\A[\s\S]*?" + _KEY_MARKER.format("END"))
+KEY_BLOCK_MARK = "[redacted-key-block]"
 
 
 def _scheme_token(match: re.Match[str]) -> str:
@@ -117,8 +140,71 @@ def _opaque(match: re.Match[str]) -> str:
     return "[redacted]" if digits >= 2 and letters >= 2 else value
 
 
+def _decode(text: str) -> str:
+    """Undo percent-encoding and JSON string escapes until nothing changes.
+
+    Repeated, so double-encoded text (%253A) is seen too. Control
+    characters an escape produced (%0A, \u0000) are removed afterwards.
+    """
+    for _ in range(DECODE_ROUNDS):
+        decoded = _JSON_ESCAPE.sub(
+            lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2),
+            unquote(text, errors="replace"),
+        )
+        if decoded == text:
+            break
+        text = decoded
+    return _strip_control(text)
+
+
+def redact_key_blocks(lines: Sequence[str]) -> list[str]:
+    """Replace every log line inside a private-key block with a marker.
+
+    The tail is read line by line, so a block spans entries: the BEGIN line,
+    the base64 body (whose short last line no other rule would catch) and
+    the END line. When the tail starts inside a block (an END comes before
+    any BEGIN, because the BEGIN line scrolled out), the lines up to that
+    END are treated as the block's body. A block with no END hides the
+    rest of the tail.
+    """
+    inside = _starts_inside_key_block(lines)
+    result: list[str] = []
+    for line in lines:
+        if inside:
+            end = _KEY_END.search(line)
+            if end is None:
+                result.append(KEY_BLOCK_MARK)
+                continue
+            line = KEY_BLOCK_MARK + line[end.end() :]
+        opened = False
+
+        def mark(match: re.Match[str]) -> str:
+            nonlocal opened
+            opened = _KEY_END.search(match.group(0)) is None
+            return KEY_BLOCK_MARK
+
+        line = _KEY_BLOCK.sub(mark, line)
+        inside = opened
+        result.append(line)
+    return result
+
+
+def _starts_inside_key_block(lines: Sequence[str]) -> bool:
+    for line in lines:
+        begin = _KEY_BEGIN.search(line)
+        end = _KEY_END.search(line)
+        if end is not None and (begin is None or end.start() < begin.start()):
+            return True
+        if begin is not None:
+            return False
+    return False
+
+
 def redact(text: str) -> str:
-    """Remove anything shaped like a credential, URL or email address."""
+    """Remove anything shaped like a credential, key, URL or email address."""
+    text = _decode(text)
+    text = _KEY_BLOCK.sub(KEY_BLOCK_MARK, text)
+    text = _KEY_ORPHAN_END.sub(KEY_BLOCK_MARK, text)
     text = _URL.sub("[redacted-url]", text)
     text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
     text = _SCHEME_TOKEN.sub(_scheme_token, text)
@@ -164,23 +250,43 @@ def _scrub(value: object) -> object:
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:
-    """Open an existing database through a SQLite mode=ro URI."""
-    if not path.is_file():
+    """Open an existing database with a SQLite mode=ro URI and query_only.
+
+    Symlinks are resolved first, so the existence check, the URI and the
+    -wal/-shm files SQLite uses all belong to the real file. It never uses
+    immutable=1: the poller's writers come and go (the -wal is removed when
+    the last one closes), so SQLite's normal shared locks and WAL reads are
+    what keep a read consistent while a writer commits or checkpoints. Like
+    any reader of a WAL database, SQLite may create the -wal and -shm files
+    beside it. When it cannot (a read-only directory), the open fails with
+    that explanation rather than falling back to an unlocked read.
+    """
+    try:
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise DashboardError(f"database does not exist: {path}") from None
+    if not real.is_file():
         raise DashboardError(f"database does not exist: {path}")
-    wal_path = Path(f"{path}-wal")
-    # Without a -wal file no writer has it open; immutable avoids creating -shm.
-    query = "?mode=ro" if wal_path.exists() else "?mode=ro&immutable=1"
-    uri = path.resolve().as_uri() + query
+    uri = real.as_uri() + "?mode=ro"
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
+        # Opening is lazy; read the schema now so a failure surfaces here.
+        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
         return connection
     except sqlite3.Error as exc:
         if connection is not None:
             connection.close()
-        raise DashboardError(f"cannot read database: {exc}") from exc
+        message = f"cannot read database {real}: {exc}"
+        if not os.access(real.parent, os.W_OK):
+            message += (
+                f" ({real.parent} is not writable, so SQLite cannot create the"
+                " -wal/-shm files a WAL database is read through; the dashboard"
+                " does not fall back to an unlocked immutable=1 read)"
+            )
+        raise DashboardError(message) from exc
 
 
 def read_log_tail(path: Path, *, lines: int = LOG_TAIL_LINES) -> list[str]:
@@ -254,7 +360,11 @@ def collect_snapshot(
 
     log_present = log_path.is_file()
     log_mtime = log_path.stat().st_mtime if log_present else None
-    tail = [_clean(line) for line in read_log_tail(log_path)] if log_present else []
+    tail = (
+        [_clean(line) for line in redact_key_blocks(read_log_tail(log_path))]
+        if log_present
+        else []
+    )
     activity = [
         value
         for value in (log_mtime, db["newest_error_at"], db["newest_deferral_at"])
@@ -380,7 +490,7 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
         ):
             repo = _clean(row["repo"], 100)
             ticket_id = _clean(row["ticket_id"], 64)
-            state = _clean(row["workflow_state"], 40)
+            state = _enum(row["workflow_state"], WORKFLOW_STATES)
             paused_action = (
                 _enum(row["paused_action"], ACTIONS)
                 if row["paused_action"] is not None
@@ -593,32 +703,59 @@ def _machines(
 
 
 def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
-    """Write status.json, then index.html, each by temp file and rename."""
+    """Write status.json and index.html from one snapshot, as a pair.
+
+    Both are written to temp files in the same directory and fsynced, then
+    renamed into place. If the second rename fails, status.json is put back
+    as it was (or removed if there was none), so the directory never holds
+    one file from this snapshot and one from an earlier one.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    status_text = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
-    html_text = render_html(snapshot)
     status_path = out_dir / "status.json"
     index_path = out_dir / "index.html"
-    _atomic_write(status_path, status_text)
-    _atomic_write(index_path, html_text)
+    temps: list[str] = []
+    try:
+        status_temp = _write_temp(
+            status_path, json.dumps(snapshot, indent=2, sort_keys=True) + "\n", temps
+        )
+        index_temp = _write_temp(index_path, render_html(snapshot), temps)
+        previous = None
+        if status_path.is_file():
+            previous = _temp_name(status_path, temps, suffix=".prev")
+            shutil.copyfile(status_path, previous)
+        os.replace(status_temp, status_path)
+        try:
+            os.replace(index_temp, index_path)
+        except BaseException:
+            if previous is not None:
+                os.replace(previous, status_path)
+            else:
+                status_path.unlink(missing_ok=True)
+            raise
+    finally:
+        for temp in temps:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
     return status_path, index_path
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp, 0o644)
-        os.replace(temp, path)
-    except BaseException:
-        try:
-            os.unlink(temp)
-        except FileNotFoundError:
-            pass
-        raise
+def _temp_name(path: Path, temps: list[str], *, suffix: str = ".tmp") -> str:
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=suffix)
+    os.close(fd)
+    temps.append(temp)
+    return temp
+
+
+def _write_temp(path: Path, text: str, temps: list[str]) -> str:
+    temp = _temp_name(path, temps)
+    with open(temp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temp, 0o644)
+    return temp
 
 
 # --- rendering ----------------------------------------------------------------

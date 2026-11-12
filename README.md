@@ -233,8 +233,17 @@ server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
 writes `status.json` and a static, self-contained `index.html` to `--out`.
-Each file is written to a temp file in the same directory, fsynced, then
-renamed into place. The page reloads itself every `dashboard.refresh_seconds`
+The database path is resolved through symlinks first, and the dashboard
+never uses `immutable=1`: SQLite takes its normal shared locks and reads
+the WAL, so a read stays consistent while the poller commits or
+checkpoints. Like any reader of a WAL database (`sqlite3` or `orch status`
+included), SQLite may create `orch.db-wal` and `orch.db-shm` beside the
+database; they are SQLite's own files and the next writer removes them. If
+the directory is read-only and they don't exist yet, the snapshot fails
+with that explanation instead of reading without locks. Both files are
+written to temp files in the same directory and fsynced, then renamed into
+place; if the second rename fails, `status.json` is put back as it was, so
+the pair always comes from one snapshot. The page reloads itself every `dashboard.refresh_seconds`
 (15 to 30, default 20; `--refresh` overrides it). Paths: `--db`, else
 `$ORCH_DB`; `--log`, else `$ORCH_POLL_LOG`, else `poller.log` beside the
 database; `--out`, else `$ORCH_DASHBOARD_DIR`, else `dashboard/` beside the
@@ -266,23 +275,34 @@ in for bot-to-bot handoffs.
 **Redaction.** Only allowlisted columns are read: never `jobs.detail`,
 heads, comment bodies or other free-form job data. The environment is not
 read apart from the three `ORCH_*` path variables. Unknown action,
-recipient, state or tracker values show as `other`. Every free-text value
-(stuck reasons, poll errors, deferrals, log lines) goes through one
-redactor, and the finished snapshot is walked once more before writing.
-The redactor removes every URL (so webhook URLs and `user:pass@` URLs go
-whole), `Authorization`/`Cookie`/API-key headers, `Bearer` and token-like
-`token`/`basic` values, GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
-`github_pat_`), Linear (`lin_api_`, `lin_oauth_`) and other common token
-shapes, `NAME=value` and `name: value` pairs whose name looks like a
-secret (the name stays, the value goes), email addresses, and long opaque
-strings (32 or more token characters with digits, which includes full
-SHAs). Lines are capped after redaction, and a log line over 4096
-characters is dropped rather than cut. `tests/test_dashboard.py` plants a
-fake webhook URL, a credentialed URL, a Bearer token, four GitHub token
-shapes, a Linear key shape, a secret assignment and an email in the
-environment, the database and the log, and checks that none reach
-`status.json` or `index.html`. A second test turns the redactor off and
-checks that the same leak check then finds every planted free-text secret.
+recipient, job state, ticket workflow state or tracker values show as
+`other`. Every free-text value (stuck reasons, poll errors, deferrals, log
+lines) goes through one redactor, and the finished snapshot is walked once
+more before writing. The redactor first undoes percent-encoding (repeated,
+so `%253A` is seen too) and JSON string escapes (`\/`, `\"`, `\u00XX`),
+then removes private-key blocks (`-----BEGIN ... -----` to the matching
+`END`, or to the end of the text), every URL (so webhook URLs and
+`user:pass@` URLs go whole), `Authorization`/`Cookie`/API-key headers,
+`Bearer` and token-like `token`/`basic` values, GitHub (`ghp_`, `gho_`,
+`ghu_`, `ghs_`, `ghr_`, `github_pat_`), Linear (`lin_api_`, `lin_oauth_`)
+and other common token shapes, `NAME=value`, `name: value` and quoted
+JSON or repr pairs (`{"password":"..."}`, `'api_key': '...'`) whose name
+looks like a secret (the name stays, the value goes), email addresses,
+and long opaque strings (32 or more token characters with digits, which
+includes full SHAs). The log tail is also read as a whole for key blocks
+that span lines: every line from a `BEGIN` line to its `END` line is
+replaced, and when the tail starts inside a block (its `BEGIN` scrolled
+out), the lines up to the `END` are too. Lines are capped after
+redaction, and a log line over 4096 characters is dropped rather than
+cut. `tests/test_dashboard.py` plants a fake webhook URL (plain, percent-
+encoded, double-encoded and JSON-escaped), a credentialed URL (plain and
+percent-encoded), a Bearer token, four GitHub token shapes, a Linear key
+shape, secret assignments (plain, percent-encoded and as quoted JSON keys
+with varied quoting and spacing), an email and a multi-line private key in
+the environment, the database (poll errors, deferrals, stuck reasons,
+workflow states) and the log, and checks that none reach `status.json` or
+`index.html`. A second test turns the redactor off and checks that the
+same leak check then finds every planted free-text secret.
 
 **Push.** `orch dashboard push` snapshots and then sends `status.json` and
 `index.html` every `dashboard.push.interval_seconds` (15 to 30); `--once`
@@ -306,9 +326,16 @@ dashboard:
 `rsync` (the default) runs `rsync --quiet --timeout=30 --chmod=F644 -e "ssh
 -o BatchMode=yes -o ConnectTimeout=10" -- status.json index.html
 host:remote_dir/`; rsync writes each file to a temp name and renames it,
-so readers never see a partial file. `scp` runs `scp -q -B -o BatchMode=yes
--o ConnectTimeout=10 -- ... host:remote_dir/` and overwrites in place.
-Both are argv lists (no local shell) with a 60-second timeout. The config
+so readers never see a partial file. `scp` has no rename of its own, so
+it uploads each file to a dot-prefixed temp name (`scp -q -B -o
+BatchMode=yes -o ConnectTimeout=10 -- status.json
+host:remote_dir/.status.json.push-tmp`, then the same for `index.html`)
+and, only after both uploads succeed, renames each into place with `ssh -o
+BatchMode=yes -o ConnectTimeout=10 -- host mv -f -- temp final`. An
+interrupted push leaves the published files whole, and the static server
+never serves the temp names. Every command is an argv list (no local
+shell) with a 60-second timeout; the remote `mv` sees only the validated
+`remote_dir` and fixed file names. The config
 holds no secrets: `host` is a bare alias or tailnet name (no `user@`, no
 options) and `remote_dir` is a plain absolute path. SSH uses the login Max
 provisions in `~/.ssh/config`; the factory never reads, names or passes a
@@ -317,15 +344,31 @@ key. `check-config` validates the section.
 **Static server (not deployed).**
 [`deploy/factory-dashboard-http.service`](deploy/factory-dashboard-http.service)
 is an example systemd user unit for the pc-wsl-bots WSL node. It runs
-`python3 -m http.server ${DASHBOARD_PORT} --bind ${TAILNET_IP} --directory
-${DASHBOARD_DIR}`, which answers only GET and HEAD, so the pushed directory
-is served read-only. It binds only the node's tailnet IPv4 address, never
-a wildcard address, and `ExecStartPre` refuses to start unless `TAILNET_IP`
-is in `100.64.0.0/10`. If Tailscale is down the bind fails and systemd
-retries; it never falls back to another address. To install it, Max puts
-`TAILNET_IP` (from `tailscale ip -4` on that node), `DASHBOARD_DIR` and
-`DASHBOARD_PORT` in `~/.config/factory-dashboard/http.env` (no secrets),
-copies the unit to `~/.config/systemd/user/`, then runs `systemctl --user
+[`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py), a
+small standard-library server, instead of `python3 -m http.server` (which
+follows symlinks out of its directory, lists directories, and serves the
+home directory when `--directory` is empty). It answers GET and HEAD only,
+and only for `/`, `/index.html` and `/status.json`: every other path, dot-
+file, `..` or encoded slash is a 404, and no directory is ever listed. Each
+file is opened relative to the directory with `O_NOFOLLOW` and served only
+if it is a regular file with a single link, so neither a symlink nor a hard
+link to a file elsewhere is served. It binds only the node's tailnet IPv4
+address, never a wildcard address. Before starting (`ExecStartPre`, and
+again at startup) it refuses a `TAILNET_IP` outside `100.64.0.0/10`, and a
+`DASHBOARD_DIR` that is unset, empty, relative, missing, not a directory,
+`/`, `$HOME` or above `$HOME` (checked after resolving symlinks). If
+Tailscale is down the bind fails and systemd retries; it never falls back
+to another address. The unit is sandboxed: `ProtectSystem=strict`,
+`ProtectHome=read-only`, `~/.ssh`, `~/.gnupg`, `~/.config/gh`, `~/.aws` and
+`~/.netrc` inaccessible, `PrivateTmp`, `PrivateDevices`, `PrivateUsers`,
+`NoNewPrivileges`, IPv4 and Unix sockets only, and the `@system-service`
+system call filter. In a user unit that needs unprivileged user namespaces
+(WSL2 has them); without them the unit fails to start rather than running
+unsandboxed. To install it, Max puts `TAILNET_IP` (from `tailscale ip -4`
+on that node), `DASHBOARD_DIR` and `DASHBOARD_PORT` in
+`~/.config/factory-dashboard/http.env` (no secrets), copies
+`deploy/factory-dashboard-http.py` to `~/.local/lib/factory-dashboard/` and
+the unit to `~/.config/systemd/user/`, then runs `systemctl --user
 daemon-reload` and `enable --now`. WSL needs systemd enabled. Nothing in
 this repository installs, enables or starts it, or pushes anything.
 

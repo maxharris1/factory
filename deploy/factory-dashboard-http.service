@@ -1,19 +1,26 @@
-# Read-only static file server for the pushed factory dashboard.
+# Read-only static server for the pushed factory dashboard.
 #
 # For the pc-wsl-bots WSL node (pc-wsl-bots.tail68624b.ts.net), not the box.
 # Nothing in this repository installs, enables or starts it; see README
-# "Dashboard". It binds only this node's tailnet IPv4 address, never a
-# wildcard (all-interfaces) address, and ExecStartPre refuses to start
-# unless TAILNET_IP is in Tailscale's 100.64.0.0/10 range. If Tailscale is down the bind
-# fails and systemd retries; it never falls back to another address.
+# "Dashboard". It runs deploy/factory-dashboard-http.py, copied to
+# ~/.local/lib/factory-dashboard/, which serves only index.html and
+# status.json from DASHBOARD_DIR (no other path, no listing, no symlink or
+# hard link out of the directory) and binds only this node's tailnet IPv4
+# address, never a wildcard (all-interfaces) address. ExecStartPre runs the
+# same checks and refuses to start unless TAILNET_IP is in Tailscale's
+# 100.64.0.0/10 range and DASHBOARD_DIR is set, absolute, an existing
+# directory and neither / nor $HOME nor above it. If Tailscale is down the
+# bind fails and systemd retries; it never falls back to another address.
 #
 # Max creates ~/.config/factory-dashboard/http.env (no secrets in it):
 #   TAILNET_IP=<this node's `tailscale ip -4`>
 #   DASHBOARD_DIR=<the directory orch.yml dashboard.push.remote_dir names>
 #   DASHBOARD_PORT=8787
 #
-# python3 -m http.server answers only GET and HEAD, so the directory is
-# served read-only; the box's push (rsync or scp over SSH) is the only writer.
+# The sandbox below needs unprivileged user namespaces in a user unit (WSL2
+# has them). If the node's systemd cannot set it up the unit fails to start
+# rather than running without it; `systemd-analyze --user security
+# factory-dashboard-http.service` shows what applies.
 [Unit]
 Description=Factory dashboard static server (tailnet only, read-only)
 After=network-online.target
@@ -22,11 +29,31 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/factory-dashboard/http.env
-ExecStartPre=/usr/bin/python3 -c 'import ipaddress,os,re,sys; v=os.environ.get("TAILNET_IP",""); ok=re.fullmatch("[0-9.]{7,15}",v) is not None and ipaddress.IPv4Address(v) in ipaddress.ip_network("100.64.0.0/10"); sys.exit(0 if ok else "TAILNET_IP must be this node tailnet address in 100.64.0.0/10")'
-ExecStart=/usr/bin/python3 -m http.server ${DASHBOARD_PORT} --bind ${TAILNET_IP} --directory ${DASHBOARD_DIR}
-NoNewPrivileges=yes
+ExecStartPre=/usr/bin/python3 -I %h/.local/lib/factory-dashboard/factory-dashboard-http.py --check
+ExecStart=/usr/bin/python3 -I %h/.local/lib/factory-dashboard/factory-dashboard-http.py
 Restart=on-failure
 RestartSec=30
+
+# Sandboxing: the whole file system is read-only, credential directories are
+# hidden, and the process can open IPv4 sockets (plus AF_UNIX for logging).
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=-%h/.ssh -%h/.gnupg -%h/.config/gh -%h/.aws -%h/.netrc
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
 
 [Install]
 WantedBy=default.target

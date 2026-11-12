@@ -238,7 +238,7 @@ These are out until a real run shows they're needed:
 - Cleffy's deployed QA and its 1-in-10 post-merge audit (dispatcher T9). Max skipped that question; they wait until after Phase 1.
 - Byte-identical rebase proofs. These are replaced by patch-id plus re-review.
 - The live reader patch, lane coexistence and old/new cutover, since there's no old lane in a fresh repo.
-- The mission-control dashboard. `orch status` (item 18) covers it.
+- A mission-control dashboard (anything that controls the factory). `orch status` (item 18) is the read-only text summary. The requested `orch dashboard snapshot` is a read-only, redacted static view of the same data that is pushed out from the box; it controls nothing (SPEC §2, README "Dashboard").
 - Per-run `decisions.tsv` and receipts. The PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs).
 - Inbound webhooks, a new routine webhook, and any new credential or login.
