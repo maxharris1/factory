@@ -138,6 +138,12 @@ python.chmod(0o755)
         ).fetchone() == ("kept",)
     wrapper = tmp_path / ".local/bin/orch"
     assert "# factory-orch-wrapper" in wrapper.read_text(encoding="utf-8")
+    template = tmp_path / ".config/factory/webhook.env.example"
+    assert template.read_text(encoding="utf-8") == (
+        ROOT / "deploy/webhook.env.example"
+    ).read_text(encoding="utf-8")
+    assert template.stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / ".config/factory/webhook.env").exists()
 
 
 def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
@@ -156,3 +162,56 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stdout == "ok"
+
+
+def test_webhook_template_names_every_accepted_variable() -> None:
+    template = (ROOT / "deploy/webhook.env.example").read_text(encoding="utf-8")
+    orch = (ROOT / "orch.yml").read_text(encoding="utf-8")
+    for name in (
+        "FACTORY_WEBHOOK_URL",
+        "FACTORY_WEBHOOK_AUTH",
+        "FACTORY_WEBHOOK_KEY",
+    ):
+        assert f"{name}=" in template
+        assert name in orch
+
+
+def test_run_poller_exports_both_env_files_unbuffered(tmp_path: Path) -> None:
+    config = tmp_path / ".config/factory"
+    config.mkdir(parents=True)
+    (config / "webhook.env").write_text(
+        'FACTORY_WEBHOOK_URL="https://webhook.test"\n'
+        'FACTORY_WEBHOOK_AUTH="Bearer test-value"\n',
+        encoding="utf-8",
+    )
+    (config / "orch-poll.env").write_text(
+        'ORCH_DB="/tmp/orch.db"\n',
+        encoding="utf-8",
+    )
+    orch = tmp_path / ".local/bin/orch"
+    orch.parent.mkdir(parents=True)
+    orch.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s|%s|%s|%s\\n" "$*" "$PYTHONUNBUFFERED" '
+        '"${FACTORY_WEBHOOK_AUTH:+set}" "$ORCH_DB"\n',
+        encoding="utf-8",
+    )
+    orch.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", "deploy/run-poller.sh", "--once"],
+        cwd=ROOT,
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "poll --once|1|set|/tmp/orch.db\n"
+
+
+def test_orch_poll_service_is_unbuffered_and_reads_webhook_env() -> None:
+    unit = (ROOT / "deploy/orch-poll.service").read_text(encoding="utf-8")
+    assert "Environment=PYTHONUNBUFFERED=1" in unit
+    assert "EnvironmentFile=-%h/.config/factory/webhook.env" in unit
