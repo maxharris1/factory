@@ -512,6 +512,8 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "tickets",
         "poller",
         "handoff_savings",
+        "attention",
+        "statechart",
     }
     json.dumps(snapshot)
 
@@ -1266,10 +1268,11 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
 
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = write_snapshot(out, snapshot)
-    assert [target for _, target in replaced] == ["status.json", "index.html"]
+    names = ["status.json", "index.html", "activity.html", "efficiency.html", "job.html"]
+    assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
-    assert paths == (out / "status.json", out / "index.html")
-    assert sorted(path.name for path in out.iterdir()) == ["index.html", "status.json"]
+    assert paths == tuple(out / name for name in names)
+    assert sorted(path.name for path in out.iterdir()) == sorted(names)
     assert json.loads((out / "status.json").read_text(encoding="utf-8")) == snapshot
 
 
@@ -1312,6 +1315,23 @@ def test_failed_second_write_keeps_the_previous_pair(tmp_path: Path, monkeypatch
     assert (out / "status.json").read_text(encoding="utf-8") == "old status"
     assert (out / "index.html").read_text(encoding="utf-8") == "old index"
     assert sorted(path.name for path in out.iterdir()) == ["index.html", "status.json"]
+
+
+def test_failed_last_page_write_keeps_every_previous_file(tmp_path: Path, monkeypatch) -> None:
+    snapshot = snapshot_for(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    old = {"status.json": "old status", "index.html": "old index", "job.html": "old job"}
+    for name, text in old.items():
+        (out / name).write_text(text, encoding="utf-8")
+    _fail_replacing(monkeypatch, "job.html")
+    with pytest.raises(OSError, match="disk full"):
+        write_snapshot(out, snapshot)
+    # Pages published before the failure are put back, or removed when they
+    # had no previous version.
+    for name, text in old.items():
+        assert (out / name).read_text(encoding="utf-8") == text
+    assert sorted(path.name for path in out.iterdir()) == sorted(old)
 
 
 def test_failed_first_snapshot_write_leaves_no_half_pair(tmp_path: Path, monkeypatch) -> None:
@@ -1358,10 +1378,11 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
         "dashboard", "snapshot", "--db", str(db), "--log", str(log), "--out", str(out)
     )
     assert result.returncode == 0, result.stderr
-    assert sorted(path.name for path in out.iterdir()) == ["index.html", "status.json"]
+    names = ["status.json", "index.html", "activity.html", "efficiency.html", "job.html"]
+    assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["queue"]["totals"]["queued"] == 2
-    assert result.stdout.strip() == f"wrote {out / 'status.json'} {out / 'index.html'}"
+    assert result.stdout.strip() == "wrote " + " ".join(str(out / name) for name in names)
 
 
 def test_cli_snapshot_defaults_from_orch_db_env(tmp_path: Path) -> None:
