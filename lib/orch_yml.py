@@ -2,7 +2,7 @@
 
 Required: poll_seconds (the decided interval, 60) and projects[].repo.
 job_timeout is optional and measured in minutes. When the file and the
-project both omit it, the timeout is 90 minutes. Unknown fields are
+project both omit it, the timeout is 60 minutes. Unknown fields are
 refused so v1 stays closed.
 """
 
@@ -19,7 +19,7 @@ import yaml
 from lib.load import Finding, is_strict_int, load_yaml
 
 POLL_SECONDS = 60
-DEFAULT_JOB_TIMEOUT_MINUTES = 90
+DEFAULT_JOB_TIMEOUT_MINUTES = 60
 DEFAULT_WEBHOOK_AUTH_ENV = "FACTORY_WEBHOOK_AUTH"
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -83,7 +83,7 @@ class OrchConfig:
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
-    """Project override, then the file override, then 90 minutes."""
+    """Project override, then the file override, then 60 minutes."""
     wanted = repo.lower()
     project = next(
         (item for item in config.projects if item.repo.lower() == wanted),

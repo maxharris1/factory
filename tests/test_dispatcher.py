@@ -297,13 +297,14 @@ def ticket(
     *comments: Comment,
     head: str | None = None,
     ci: dict[str, CIResult] | None = None,
-    timeout: int = 90,
+    timeout: int | None = None,
     tickets: str = "github",
     factory_config: FactoryConfig | None = None,
     risk: str = "high",
     repo: str = "owner/repo",
     ticket_id: str = "42",
 ) -> TrackedTicket:
+    extra = {} if timeout is None else {"job_timeout_minutes": timeout}
     return TrackedTicket(
         repo=repo,
         ticket_id=ticket_id,
@@ -312,7 +313,7 @@ def ticket(
         current_head=head,
         ci=ci or {},
         risk=risk,
-        job_timeout_minutes=timeout,
+        **extra,
     )
 
 
@@ -463,7 +464,8 @@ def test_t1_reads_kind_go_and_queues_the_builder(
     assert job.request.action == action
     assert job.request.recipient == "claude"
     assert job.request.source_comment_id == "go-1"
-    assert job.request.timeout_seconds == 90 * 60
+    # The production default: 60 minutes of no heartbeat (Factory, Nov 11).
+    assert job.request.timeout_seconds == 60 * 60
 
 
 def test_t1_job_detail_contains_tracker_pr_and_review_context(
@@ -4430,12 +4432,13 @@ def test_t6_times_out_unclaimed_queued_job_from_created_at(
         )
     )
 
-    now[0] = 5399
+    # 60-minute default job timeout: alive at 3599 s, timed out at 3600 s.
+    now[0] = 3599
     dispatcher.reconcile_jobs()
     initial = queue.outstanding()
     assert len(initial) == 1
     failed_job_id = initial[0].id
-    now[0] = 5400
+    now[0] = 3600
     dispatcher.reconcile_jobs()
 
     outstanding = queue.outstanding()

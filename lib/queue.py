@@ -32,6 +32,9 @@ ACTIONS = (
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")
+# Device-pool placements (lib/device_pool.py). The table exists once a
+# DevicePool has opened this database; a queued job never holds a row.
+SLOTS_TABLE = "device_slots"
 
 
 class QueueError(ValueError):
@@ -253,6 +256,12 @@ class SQLiteJobQueue:
         return _job(updated)
 
     def release(self, job_id: str, *, owner: str) -> Job:
+        """Undo a claim whose work never started: running -> queued.
+
+        A requeued job holds no device slot, so a pool placement is freed
+        in the same transaction; otherwise the next pool claim of this job
+        would collide with its own slot row.
+        """
         if owner not in RECIPIENTS:
             raise QueueError(f"unknown owner {owner!r}")
         with self._connect() as connection:
@@ -264,6 +273,11 @@ class SQLiteJobQueue:
                 """,
                 (job_id, owner),
             ).rowcount
+            if changed == 1 and _has_table(connection, SLOTS_TABLE):
+                connection.execute(
+                    f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?",
+                    (job_id,),
+                )
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
@@ -450,6 +464,16 @@ class SQLiteJobQueue:
                 )
         except sqlite3.DatabaseError as exc:
             raise QueueError("database file is not valid SQLite") from exc
+
+
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        is not None
+    )
 
 
 def _validate_request(request: JobRequest) -> None:

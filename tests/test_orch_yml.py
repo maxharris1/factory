@@ -47,7 +47,7 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
     assert resolve_job_timeout(config, "aut0-code/aut0") == 150
     for project in config.projects[1:]:
         assert project.job_timeout is None
-        assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 90
+        assert resolve_job_timeout(config, project.repo) == DEFAULT_JOB_TIMEOUT_MINUTES == 60
     assert config.projects[0].factory_ref == "dev"
     assert config.projects[0].linear_project_id == "test-linear-project-id"
     assert config.projects[0].linear_ready_for_review is True
@@ -89,7 +89,7 @@ def test_minimal_example_has_no_extra_required_fields() -> None:
     assert config.projects[0].repo == "owner/name"
     assert config.projects[0].job_timeout is None
     assert config.projects[0].linear_ready_for_review is False
-    assert resolve_job_timeout(config, "owner/name") == 90
+    assert resolve_job_timeout(config, "owner/name") == 60
 
 
 def test_grok_webhook_auth_env_defaults_and_can_be_renamed(tmp_path: Path) -> None:
@@ -143,7 +143,7 @@ projects:
     assert resolve_job_timeout(config, "acme/other") == 120
 
 
-def test_project_timeout_overrides_the_90_minute_default(tmp_path: Path) -> None:
+def test_project_timeout_overrides_the_60_minute_default(tmp_path: Path) -> None:
     path = tmp_path / "orch.yml"
     path.write_text(
         """
@@ -160,7 +160,32 @@ projects:
     assert findings == []
     assert config is not None
     assert resolve_job_timeout(config, "acme/widgets") == 30
-    assert resolve_job_timeout(config, "acme/other") == 90
+    assert resolve_job_timeout(config, "acme/other") == 60
+
+
+def test_default_job_timeout_is_60_minutes_everywhere_it_is_stated() -> None:
+    """Factory decided (technical), Nov 11: a job goes stuck after 60 minutes
+    with no heartbeat or progress, not 90. Code defaults and every place the
+    default is written down must agree."""
+    from lib.dispatcher import TrackedTicket
+
+    assert DEFAULT_JOB_TIMEOUT_MINUTES == 60
+    default = TrackedTicket.__dataclass_fields__["job_timeout_minutes"].default
+    assert default == DEFAULT_JOB_TIMEOUT_MINUTES
+    stated = [
+        "orch.yml",
+        "config/orch.example.yml",
+        "README.md",
+        "docs/SPEC.md",
+        "lib/orch_yml.py",
+        "lib/dispatcher.py",
+    ]
+    for name in stated:
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "90 minutes" not in text, name
+        assert "job_timeout: 90" not in text, name
+    assert "60 minutes" in (ROOT / "orch.yml").read_text(encoding="utf-8")
+    assert "60 minutes" in (ROOT / "config/orch.example.yml").read_text(encoding="utf-8")
 
 
 def test_poll_seconds_must_be_60(tmp_path: Path) -> None:
