@@ -126,21 +126,30 @@ _BAD_GROUP = '""|0*|1|*[!0-9]*'
 # start time. `uname -s` picks the path on the device; anything that is not
 # Darwin takes the Linux path, which refuses a device without /proc itself.
 _IS_DARWIN = '[ "$(uname -s 2>/dev/null)" = Darwin ]'
-_DARWIN_BOOT = 'c=$(sysctl -n kern.bootsessionuuid 2>/dev/null) && [ -n "$c" ]'
+# A boot session id is a UUID: 8-4-4-4-12 hex digits. A case pattern for one.
+_HEX = "[0-9A-Fa-f]"
+_UUID = "-".join(_HEX * n for n in (8, 4, 4, 4, 12))
+# The boot session id in $c, only when sysctl succeeds and prints a UUID.
+_DARWIN_BOOT = (
+    "c=$(sysctl -n kern.bootsessionuuid 2>/dev/null) && "
+    f'case "$c" in {_UUID}) ;; *) false;; esac'
+)
 # A process's start time, one space between words, in a fixed locale and zone.
 _LSTART = 'x=$(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$p" 2>/dev/null); set -f; set -- $x; set +f'
-# Prints `<lines> <found> <foreign> <leader>` for group $p: how many lines ps
-# listed, whether any process is in the group, whether one belongs to another
-# user, and whether the leader (pid $p) is among them.
+# The process listing in $o, only when ps exits 0 and lists something.
+_DARWIN_LIST = 'o=$(ps -A -o pgid= -o pid= -o uid= 2>/dev/null) && [ -n "$o" ]'
 # Prints `<found> <foreign> <leader>` for group $p from the listing in $o:
 # whether any process is in the group, whether one belongs to another user,
-# and whether the leader (pid $p) is among them. $o is only used when ps
-# exited 0 and listed something; a failed or empty listing cannot tell.
-_DARWIN_LIST = 'o=$(ps -A -o pgid= -o pid= -o uid= 2>/dev/null) && [ -n "$o" ]'
+# and whether the leader (pid $p) is among them. awk exits 1, printing
+# nothing, unless it read exactly $w lines (the shell's own count of the
+# listing's fields, divided by 3), each three numbers: so a pipe that lost
+# part of the listing cannot pass for a whole one. (macOS's awk cannot take
+# the listing as a -v value: it rejects a newline there.)
 _DARWIN_GROUP = (
-    'printf \'%s\\n\' "$o" | awk -v p="$p" -v u="$u" '
-    "'$1 == p { n = 1; if ($3 != u) o = 1; if ($2 == p) k = 1 } "
-    "END { print n + 0, o + 0, k + 0 }'"
+    'printf \'%s\\n\' "$o" | awk -v p="$p" -v u="$u" -v w="$w" '
+    "'NF != 3 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ { e = 1; exit } "
+    "$1 == p { n = 1; if ($3 != u) x = 1; if ($2 == p) k = 1 } "
+    "END { if (e || NR != w) exit 1; print n + 0, x + 0, k + 0 }'"
 )
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
@@ -171,15 +180,19 @@ def _darwin_worker(
     a group holding another user's process, a group whose leader has exited
     (nothing ties the members left to this start: the number may have been
     reused while the group was empty), or a leader whose start time is not
-    the recorded one. running: the recorded group holds only this user's
-    processes and is led by the recorded leader. blind: the device cannot
-    tell (no boot session id, ps failed or listed nothing).
+    the recorded one, or a record whose boot session is not a UUID.
+    running: the recorded group holds only this user's processes and is led
+    by the recorded leader. blind: the device cannot tell (no boot session
+    id, a user id that is not a number, ps failed or listed nothing, a
+    listing line that is not three numbers, awk read less than the whole
+    listing, failed, or printed anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
     return (
         f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
         f"{_DARWIN_BOOT} || {blind}; "
         f"u=$(id -u) || {blind}; "
+        f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
         'if [ ! -e "$f" ]; then '
         'mkdir -p -- "$d" 2>/dev/null; '
         f'if (set -C; echo {_FENCE} > "$f") 2>/dev/null; then {unsure}; fi; '
@@ -190,9 +203,13 @@ def _darwin_worker(
         f'case "$p" in {_BAD_GROUP}) {unsure};; esac; '
         f'[ -n "$b" ] && [ -n "$g" ] && [ -n "$s" ] || {unsure}; '
         f'[ "$g" = "$t" ] || {unsure}; '
+        f'case "$b" in {_UUID}) ;; *) {unsure};; esac; '
         f'[ "$b" = "$c" ] || {gone}; '
         f"{_DARWIN_LIST} || {blind}; "
-        f"set -- $({_DARWIN_GROUP}); "
+        'set -f; set -- $o; set +f; w=$(($# / 3)); '
+        f"r=$({_DARWIN_GROUP}) || {blind}; "
+        "set -f; set -- $r; set +f; "
+        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
         f'[ "$1" = 1 ] || {gone}; '
         f'[ "$2" = 0 ] || {unsure}; '
         f'[ "$3" = 1 ] || {unsure}; '

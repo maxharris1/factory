@@ -111,6 +111,23 @@ class Mac:
             f'exec {shlex.quote(str(real))} "$@"\n',
         )
 
+    def awk(self, body: str) -> None:
+        """An awk that ignores its program and runs body instead."""
+        self._tool("awk", body)
+
+    def real_awk(self) -> None:
+        """Back to the awk on the rest of PATH."""
+        (self.bin / "awk").unlink()
+
+    def listing(self, line: str) -> None:
+        """A ps whose process listing is line (exit 0); `-o lstart=` is the real ps."""
+        real = shutil.which("ps")
+        self._tool(
+            "ps",
+            f'case "$*" in *lstart*) exec {shlex.quote(str(real))} "$@";; esac\n'
+            f"printf '%s\\n' {shlex.quote(line)}\n",
+        )
+
     def path(self, rest: str) -> str:
         return f"{self.bin}{os.pathsep}{rest}"
 
@@ -345,9 +362,11 @@ def test_darwin_record_naming_no_worker_of_this_start_is_gone_and_signals_nothin
      "\n",
      "007 {boot} {tag} {start}\n",
      "-5 {boot} {tag} {start}\n",
-     "12abc {boot} {tag} {start}\n"],
+     "12abc {boot} {tag} {start}\n",
+     "{pid} not-a-boot-session {tag} {start}\n",  # r2 audit: was read as an earlier boot
+     "{pid} 174C3433-704E-4945-8B27 {tag} {start}\n"],
     ids=["other-start-time", "another-tag", "linux-record", "no-start-time", "pid-only", "empty",
-         "leading-zero", "negative", "junk"],
+         "leading-zero", "negative", "junk", "bad-boot", "short-boot"],
 )
 def test_darwin_malformed_or_reused_records_are_unknown_and_never_signalled(
     tmp_path: Path, mac_ssh, record: str
@@ -771,3 +790,203 @@ def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
     queue.finish(job_id, owner="codex", handoff_comment_id="c1")
     monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
     assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+
+
+# --- Codex review round 2 ----------------------------------------------------
+# F2.1: GONE from the process listing needs the group parse (awk) to succeed
+# and print exactly three fields, each 0 or 1. Anything else cannot tell.
+
+
+@pytest.mark.parametrize(
+    "awk",
+    ["exit 1\n",
+     "exit 0\n",
+     "echo '1 0 1'; exit 1\n",
+     "echo '0 0'\n",
+     "echo '0 0 0 0'\n",
+     "echo '0 0 2'\n",
+     "echo 'x 0 0'\n",
+     "echo '00 0 0'\n"],
+    ids=["fails-silent", "succeeds-silent", "right-answer-but-fails", "two-fields", "four-fields",
+         "not-0-or-1", "not-a-number", "two-digits"],
+)
+def test_r2_f21_darwin_group_parse_that_fails_or_is_malformed_cannot_tell(
+    tmp_path: Path, mac_ssh, awk: str
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    other = stranger()  # the live worker the record names
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.RUNNING  # with the real awk
+        mac.awk(awk)
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        time.sleep(0.2)
+        assert other.poll() is None  # never signalled
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_r2_f21_darwin_awk_that_reads_only_part_of_the_listing_cannot_tell(
+    tmp_path: Path, mac_ssh
+) -> None:
+    """The pipe into awk loses all but the first line; the worker is not on it.
+    awk itself succeeds and prints a well-formed `0 0 0`."""
+    ssh, mac = mac_ssh
+    real = shutil.which("awk")
+    t = target(tmp_path)
+    other = stranger()
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.RUNNING  # with the whole listing
+        mac.awk(f'head -n 1 | exec {shlex.quote(str(real))} "$@"\n')
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        time.sleep(0.2)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_r2_f21_darwin_awk_failure_keeps_a_live_workers_slot_and_refuses_takeover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The takeover guard and the monitor both see UNKNOWN: nothing is
+    released, stopped or started while awk fails. Once awk works again, the
+    monitor stops the orphan and then releases its slot."""
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    mac = Mac(tmp_path)
+    group_file = tmp_path / "group"
+    marker = tmp_path / "second-ran"
+    group: int | None = None
+    script = (
+        "import os, time\n"
+        f"open({str(group_file)!r} + '.tmp', 'w').write(str(os.getpgid(0)))\n"
+        f"os.rename({str(group_file)!r} + '.tmp', {str(group_file)!r})\n"
+        "time.sleep(60)\n"
+    )
+    first = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", sys.executable, "-c", script,
+        env=mac_env(ssh, mac),
+    )
+    try:
+        group = int(wait_file(group_file, first))
+        first.kill()  # the runner dies; the remote worker keeps running
+        first.wait(timeout=20)
+        mac.awk("exit 1\n")
+
+        second = orch(
+            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--", "touch", str(marker),
+            env=mac_env(ssh, mac),
+        )
+        _, err = second.communicate(timeout=30)
+        assert second.returncode == 2, err
+        assert "earlier worker on pc is not confirmed gone (unknown)" in err
+        assert not marker.exists()
+        assert len(starts(ssh)) == 1
+
+        use_fake_ssh(monkeypatch, ssh)
+        monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
+        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        result = monitor.reconcile(time.time(), lambda *_: None)
+        assert result.released == () and result.stopped == ()
+        assert pool.placement(job_id) is not None
+        assert group_alive(group)
+
+        mac.real_awk()
+        assert monitor.reconcile(time.time(), lambda *_: None).stopped == (job_id,)
+        assert wait_group_gone(group)
+        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+    finally:
+        kill_quietly(group, group=True)
+        if first.poll() is None:
+            first.kill()
+
+
+# Round 2 audit: the other observations a GONE rests on must be well formed too.
+
+
+@pytest.mark.parametrize(
+    "boot",
+    ["not-a-boot-session", "174C3433-704E-4945", BOOT + "0", BOOT.replace("-", "x")],
+    ids=["junk", "truncated", "too-long", "no-dashes"],
+)
+def test_r2_darwin_boot_session_id_that_is_not_a_uuid_refuses_start_and_cannot_tell(
+    tmp_path: Path, mac_ssh, boot: str
+) -> None:
+    """sysctl exits 0 but prints no boot session id: before, a live worker's
+    record read as an earlier boot (GONE)."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    other = stranger()
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        mac.boot.write_text(boot + "\n", encoding="utf-8")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        time.sleep(0.2)
+        assert other.poll() is None
+
+        t2 = target(tmp_path, job_id="job2")
+        marker = tmp_path / "ran"
+        proc = start(t2, ["touch", str(marker)])
+        proc.wait(timeout=30)
+        assert proc.returncode == remote.START_REFUSED
+        assert not marker.exists() and not record_of(t2).exists()
+    finally:
+        other.kill()
+        other.wait()
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["garbage", "{pid}", "{pid} {pid}", "{pid} {pid} {uid} extra", "{pid} x{pid} {uid}"],
+    ids=["junk", "one-field", "two-fields", "four-fields", "not-a-number"],
+)
+def test_r2_darwin_ps_listing_that_is_not_three_numbers_a_line_cannot_tell(
+    tmp_path: Path, mac_ssh, line: str
+) -> None:
+    """ps exits 0 but its listing is not `<group> <pid> <uid>` lines."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    other = stranger()
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        mac.listing(line.format(pid=other.pid, uid=os.getuid()))
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        time.sleep(0.2)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+@pytest.mark.parametrize("uid", ["", "abc", "501 502"], ids=["empty", "junk", "two-words"])
+def test_r2_darwin_user_id_that_is_not_a_number_cannot_tell(
+    tmp_path: Path, mac_ssh, uid: str
+) -> None:
+    ssh, mac = mac_ssh
+    mac._tool("id", f"echo {shlex.quote(uid)}\n")
+    t = target(tmp_path)
+    other = stranger()
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        time.sleep(0.2)
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()

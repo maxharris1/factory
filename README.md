@@ -198,19 +198,22 @@ A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
 process's environment, so there the worker is named by its record alone, one
 file per start (`.orch-worker-<tag>.pid` in the job directory). The start
 refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
-id and the start leads its own process group, then creates the record with
+id (a UUID) and the start leads its own process group, then creates the record with
 noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
 UTC). A check that finds no record cannot tell whether the start is still on
 its way, so it creates the record itself as a fence (`fenced`) and cannot tell
 this time; the fenced start then refuses, and later checks read the fence as
 gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The check reads the record and `ps -A -o pgid=,pid=,uid=` (only when ps
-exits 0): a record from an earlier boot session or an empty group is gone; a
-group holding only the bot's own processes and led by the recorded leader is
-running; a malformed record, another tag, another user's process in the group,
+later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+every step to succeed with a well-formed result: ps exits 0, every line it
+lists is three numbers, and awk reads all of them, exits 0 and prints exactly
+three 0/1 answers. Then a record from an earlier boot session or an empty group
+is gone; a group holding only the bot's own processes and led by the recorded
+leader is running; a malformed record, another tag, another user's process in the group,
 a group whose leader has exited (nothing ties the processes left to this start),
-a leader with a different start time (the number was reused), or a failed ps
+a leader with a different start time (the number was reused), or any failed or
+malformed step (no boot session UUID, a user id that is not a number, ps, awk)
 cannot tell. The stop sends SIGTERM to the recorded group only when the check
 would say running. A process that leaves the job's group (`setsid`), or stays in
 it after its leader exits, is never signalled on macOS; the latter keeps the
