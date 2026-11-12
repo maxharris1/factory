@@ -8,7 +8,9 @@ map to its own bot user (claude -> claude-bot, and so on).
 
 Every remote device names a workdir_root, the absolute directory jobs
 run under on that device. It may not be under /mnt/, so a WSL device
-never works on a mounted Windows drive.
+never works on a mounted Windows drive. A whole path component may be
+the token {bot}, which resolves to the harness's bot user, so one device
+can give each bot its own home (/home/{bot}/factory-work).
 
 A device schedules only when it is enabled (the default), has no
 REPLACE_WITH_ placeholder, and lists the harness. check-config refuses
@@ -34,6 +36,7 @@ from lib.schema import HARNESSES
 PLACEHOLDER_PREFIX = "REPLACE_WITH_"
 BOT_USERS = MappingProxyType({harness: f"{harness}-bot" for harness in HARNESSES})
 FORBIDDEN_WORKDIR_ROOT = "/mnt"
+BOT_TOKEN = "{bot}"
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -70,6 +73,16 @@ class Device:
 
     def eligible(self, harness: str) -> bool:
         return self.schedulable and harness in self.harnesses
+
+    def workdir_for(self, harness: str) -> str | None:
+        """workdir_root with {bot} resolved to the harness's bot user.
+
+        None on the local device, when workdir_root is unset (placeholder),
+        or when the device does not list the harness.
+        """
+        if self.workdir_root is None or harness not in self.harnesses:
+            return None
+        return self.workdir_root.replace(BOT_TOKEN, self.harnesses[harness])
 
 
 @dataclass(frozen=True)
@@ -359,6 +372,11 @@ def _is_tailscale_name(value: object) -> bool:
 def _workdir_problem(value: object) -> str | None:
     if not isinstance(value, str) or not value.startswith("/"):
         return "must be an absolute POSIX path"
+    for part in value.split("/"):
+        if BOT_TOKEN in part and part != BOT_TOKEN:
+            return f"'{BOT_TOKEN}' must be a whole path component"
+        if part != BOT_TOKEN and ("{" in part or "}" in part):
+            return f"only '{BOT_TOKEN}' may appear in braces"
     if any(part in (".", "..") for part in value.split("/")):
         return "must not contain '.' or '..'"
     if posixpath.normpath(value) != value or value == "/" or value.startswith("//"):

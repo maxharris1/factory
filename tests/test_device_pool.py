@@ -8,7 +8,7 @@ import pytest
 
 from lib import device_pool
 from lib.device_pool import DevicePool, choose_device
-from lib.machines_yml import Device, MachinesConfig
+from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from tests.test_dispatcher import GO, comment, setup, ticket
 
@@ -290,3 +290,31 @@ def test_device_power_loss_keeps_slot_held_and_goes_stuck_never_done(
     assert done == 0
     assert pool.placement(job.id) == placement
     assert pool.used() == {"pc": 1}
+
+
+def test_shipped_inventory_never_places_on_the_disabled_pc_or_mac(
+    tmp_path: Path,
+) -> None:
+    """The PC and Mac stay enabled: false until F2-02. With the shipped
+    machines.yml, every claim lands on the box and, once the box is full,
+    work stays queued instead of spilling onto a remote device."""
+    root = Path(__file__).resolve().parents[1]
+    config, _ = load_machines_yml(root / "machines.yml", allow_placeholders=True)
+    assert config is not None
+    queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: 100.0)
+    pool = DevicePool(queue, config)
+    for index in range(4):
+        for harness in ("claude", "codex", "cursor"):
+            enqueue(queue, harness, f"{harness}-{index}")
+
+    placements = []
+    for harness in ("claude", "codex", "cursor", "claude", "codex", "cursor"):
+        claimed = pool.claim(harness)
+        if claimed is not None:
+            placements.append(claimed[1])
+
+    box = config.device("box")
+    assert box is not None and box.slot_max is not None
+    assert len(placements) == box.slot_max
+    assert {placement.device for placement in placements} == {"box"}
+    assert pool.used() == {"box": box.slot_max}

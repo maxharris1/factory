@@ -102,13 +102,19 @@ must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
 `cursor: cursor-bot`). The one `local: true` device is the box that runs
 `orch`; it omits `tailscale_name` and `workdir_root`. Every other device names
 a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
-so jobs on a WSL node stay off the Windows drives. A Tailscale name is a device
-name, never an IP address. Unknown fields are refused.
+so jobs on a WSL node stay off the Windows drives. A whole path component may
+be `{bot}`, which resolves to the harness's bot user
+(`Device.workdir_for(harness)`). A Tailscale name is a device name, never an
+IP address. Unknown fields are refused.
 
-The shipped file lists the box (all three harnesses, 3 slots), the PC's WSL
-Ubuntu node and the Mac. The PC and Mac ship `enabled: false`: Max enables the
-PC once SSH is OK'd, and the Mac has no bot users and no SSH yet. Their
-`workdir_root` values are `REPLACE_WITH_` placeholders. Nothing in this repo
+The shipped file lists the box (all three harnesses, 3 slots: one per owning
+bot, as in Phase 1), the PC's WSL Ubuntu node and the Mac. The PC and Mac ship
+`enabled: false` and stay disabled until F2-02 remote start lands; the Mac also
+has no bot users and no SSH yet. The PC's `workdir_root` is
+`/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
+`/mnt/c`. F2-02 will reach the PC through the box's SSH aliases
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The Mac's
+`workdir_root` is still a `REPLACE_WITH_` placeholder. Nothing in this repo
 checks or assumes that a device is reachable.
 
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
@@ -262,7 +268,8 @@ the checkout's `machines.yml`, read with placeholders accepted; an invalid
 file exits 1. Each device row shows the device, its eligible harnesses (`?`
 for a placeholder), device-pool slots held over `slot_max`, and `disabled` or
 `placeholder` when it will not be scheduled, for example
-`pc [claude,codex,cursor] 0/3 slots disabled placeholder`. A held slot on a
+`pc [claude,codex,cursor] 0/3 slots disabled` and
+`mac [none] 0/2 slots disabled placeholder`. A held slot on a
 device no longer listed is shown as `not-in-machines.yml`. Phase 1 claims are
 the `Slots — box` lines and hold no device-pool slot.
 

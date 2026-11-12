@@ -47,8 +47,6 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
     strict, strict_findings = load_machines_yml(ROOT / "machines.yml")
     assert strict is None
     assert errors(strict_findings) == [
-        "devices[1].workdir_root is an install placeholder; "
-        "Max must provide this inventory",
         "devices[2].workdir_root is an install placeholder; "
         "Max must provide this inventory",
     ]
@@ -62,7 +60,6 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
     assert errors(findings) == []
     assert warnings(findings) == [
         "device 'pc' is disabled (enabled: false); it will not be scheduled",
-        "accepted placeholder devices[1].workdir_root; device 'pc' will not be scheduled",
         "device 'mac' is disabled (enabled: false); it will not be scheduled",
         "accepted placeholder devices[2].workdir_root; device 'mac' will not be scheduled",
     ]
@@ -76,11 +73,111 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
     assert box.tailscale_name is None
     assert box.schedulable
     assert pc.tailscale_name == "pc-wsl-bots.tail68624b.ts.net"
-    assert (pc.slot_max, pc.enabled, pc.workdir_root) == (3, False, None)
+    assert (pc.slot_max, pc.enabled) == (3, False)
+    assert pc.workdir_root == "/home/{bot}/factory-work"
+    assert not pc.placeholder
     assert dict(pc.harnesses) == dict(box.harnesses)
     assert mac.tailscale_name == "maxs-macbook-pro.tail68624b.ts.net"
     assert (mac.slot_max, mac.enabled, dict(mac.harnesses)) == (2, False, {})
     assert not pc.schedulable and not mac.schedulable
+
+
+def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
+    """Factory decided (technical), Nov 11: /home/<bot>/factory-work on
+    pc-wsl-bots, never under /mnt/c."""
+    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    assert config is not None
+    pc = config.device("pc")
+    assert pc is not None
+    assert {harness: pc.workdir_for(harness) for harness in pc.harnesses} == {
+        "claude": "/home/claude-bot/factory-work",
+        "codex": "/home/codex-bot/factory-work",
+        "cursor": "/home/cursor-bot/factory-work",
+    }
+    for harness in pc.harnesses:
+        assert not pc.workdir_for(harness).startswith("/mnt")
+    box = config.device("box")
+    assert box is not None and box.workdir_for("claude") is None
+
+
+def test_shipped_pc_and_mac_stay_disabled_until_f2_02_remote_start() -> None:
+    """Factory decided (technical), Nov 11: both remote devices ship
+    enabled: false until F2-02 remote start lands, so neither is ever
+    eligible for any harness."""
+    config, findings = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    assert config is not None
+    for name in ("pc", "mac"):
+        device = config.device(name)
+        assert device is not None
+        assert device.enabled is False, name
+        assert not device.schedulable, name
+        for harness in ("claude", "codex", "cursor"):
+            assert not device.eligible(harness), (name, harness)
+        assert (
+            f"device {name!r} is disabled (enabled: false); it will not be scheduled"
+            in warnings(findings)
+        )
+    assert [d.name for d in config.devices if d.schedulable] == ["box"]
+
+
+def test_shipped_machines_yml_names_the_pc_ssh_aliases_and_nothing_secret() -> None:
+    text = (ROOT / "machines.yml").read_text(encoding="utf-8")
+    for alias in ("pc-wsl-claude-bot", "pc-wsl-codex-bot", "pc-wsl-cursor-bot"):
+        assert alias in text
+    for secret_hint in ("IdentityFile", ".ssh/", "id_ed25519", "id_rsa", "2222"):
+        assert secret_hint not in text
+
+
+def test_workdir_root_bot_token_resolves_to_each_harness_bot(tmp_path: Path) -> None:
+    config, findings = load_machines_yml(
+        write(
+            tmp_path,
+            "devices:\n"
+            + remote(
+                harnesses="{claude: claude-bot, codex: codex-bot}",
+                workdir_root="/home/{bot}/factory-work",
+            ),
+        )
+    )
+
+    assert findings == []
+    assert config is not None
+    (pc,) = config.devices
+    assert pc.workdir_root == "/home/{bot}/factory-work"
+    assert pc.workdir_for("claude") == "/home/claude-bot/factory-work"
+    assert pc.workdir_for("codex") == "/home/codex-bot/factory-work"
+    assert pc.workdir_for("cursor") is None
+
+
+def test_workdir_root_without_token_is_shared_by_every_harness(tmp_path: Path) -> None:
+    config, _ = load_machines_yml(write(tmp_path, "devices:\n" + remote()))
+    assert config is not None
+    assert config.devices[0].workdir_for("codex") == "/home/work"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("/home/{user}/w", "only '{bot}' may appear in braces"),
+        ("/home/x{bot}/w", "'{bot}' must be a whole path component"),
+        ("/home/{bot}{bot}/w", "'{bot}' must be a whole path component"),
+        ("/home/{bot/w", "only '{bot}' may appear in braces"),
+        ("/mnt/{bot}/w", "must not be under /mnt/"),
+        ("/mnt/c/Users/{bot}", "must not be under /mnt/"),
+        ("{bot}/w", "must be an absolute POSIX path"),
+        ("/home/{bot}/../w", "must not contain '.' or '..'"),
+    ],
+)
+def test_workdir_root_bot_token_rules(tmp_path: Path, value: str, message: str) -> None:
+    config, findings = load_machines_yml(
+        write(tmp_path, "devices:\n" + remote(workdir_root=f'"{value}"'))
+    )
+
+    assert config is None
+    assert any(
+        item.startswith("devices[0].workdir_root ") and message in item
+        for item in errors(findings)
+    ), findings
 
 
 def test_example_passes_strict_check() -> None:

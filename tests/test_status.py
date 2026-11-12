@@ -221,7 +221,7 @@ def test_status_command_counts_held_device_slots(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Devices (3)\n" in result.stdout
     assert "  box [claude,codex,cursor] 1/3 slots\n" in result.stdout
-    assert "  pc [claude,codex,cursor] 0/3 slots disabled placeholder\n" in result.stdout
+    assert "  pc [claude,codex,cursor] 0/3 slots disabled\n" in result.stdout
     assert "  mac [none] 0/2 slots disabled placeholder\n" in result.stdout
     assert directory_snapshot(tmp_path) == before
 
