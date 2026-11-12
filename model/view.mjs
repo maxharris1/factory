@@ -49,6 +49,7 @@ export const step = (action, from, to) => {
   if (action === "T2CiRedStuck") return "CI red three times";
   if (action === "T6JobRetry") return "job dies, retry once";
   if (action === "T6JobStuck") return "job dies twice (T6)";
+  if (action === "T6DeviceOffline") return "device offline 60 minutes";
   if (action === "T3Revise" && to.state === "fixing") return "REVISE, under the round cap";
   if (action === "T3Revise" && from.counts.acUnmet === 1 && to.counts.acUnmet === 2) {
     return "a second AC-unmet verdict";

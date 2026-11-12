@@ -244,6 +244,16 @@ T6JobStuck ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 2]
 
+\* T6, Phase 2 (F2-02). The job's device has failed every SSH check for 60
+\* minutes: stuck at once, never retried; the stuck flag wakes Grok Bot once.
+T6DeviceOffline ==
+  /\ "T6" \notin Omit
+  /\ state \in JobStates
+  /\ state' = "stuck"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.deaths = 2, !.gate = 0]
+
 \* T3. REVISE under the cap queues fix. At the cap, or a second AC-unmet verdict: capped.
 T3Revise ==
   /\ "T3" \notin Omit
@@ -400,7 +410,7 @@ Next ==
   \/ T1KindGoPlan \/ T1KindGoBuild
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck
-  \/ T6JobRetry \/ T6JobStuck
+  \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
   \/ T3Revise \/ T7Blocked
   \/ T4Approve \/ T4PatchDiffers \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
@@ -484,6 +494,7 @@ T5Decided ==
 T6Decided ==
   /\ state \in JobStates /\ counts.deaths = 0 => ENABLED T6JobRetry
   /\ state \in JobStates /\ counts.deaths = 1 => ENABLED T6JobStuck
+  /\ state \in JobStates => ENABLED T6DeviceOffline
 
 T7Decided ==
   /\ state = "intake" /\ ~configOk => ENABLED IntakeRefused
