@@ -353,14 +353,60 @@ def test_comment_on_a_tracked_issue_is_marked_dirty(
     assert dirty_rows(database) == [("issue-uuid-42", "AUT-42", "Comment.create")]
 
 
-def test_handoff_comment_on_an_untracked_issue_is_marked_dirty_for_discovery(
+HANDOFF_BODY = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nbrief"
+
+
+def _clear_dirty(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM linear_dirty")
+
+
+def test_handoff_comment_on_an_untracked_issue_in_a_configured_project_is_marked_dirty(
     app: WebhookApp,
     database: Path,
 ) -> None:
-    body = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\nbrief"
+    # A signed Issue event placed the issue in project-1, so the listener
+    # knows it is in scope even though the factory does not track it yet.
+    post(app, issue_event(action="create"))
+    _clear_dirty(database)
 
-    assert post(app, comment_event(body=body)).outcome == "accepted"
+    assert post(app, comment_event(body=HANDOFF_BODY)).outcome == "accepted"
     assert dirty_rows(database) == [("issue-uuid-42", "AUT-42", "Comment.create")]
+
+
+# F1.3: an orch:v1 marker is comment text anyone can type; it does not put
+# the issue in a configured project. Each case is authenticated and fresh.
+@pytest.mark.parametrize(
+    "before",
+    [
+        [],
+        [issue_event(project="project-2", action="create")],
+        [
+            issue_event(action="create"),
+            issue_event(project="project-2", updated_from={"projectId": "project-1"}),
+        ],
+        [issue_event(action="create"), issue_event(action="remove")],
+    ],
+    ids=["never-seen", "other-project", "moved-out", "removed"],
+)
+def test_handoff_comment_outside_the_configured_projects_is_ignored(
+    app: WebhookApp,
+    database: Path,
+    logs: list[str],
+    before: list[dict],
+) -> None:
+    for event in before:
+        post(app, event)
+    _clear_dirty(database)
+    logs.clear()
+
+    result = post(app, comment_event(body=HANDOFF_BODY))
+
+    assert (result.status, result.outcome) == (200, "ignored")
+    assert dirty_rows(database) == []
+    assert logs == [
+        "linear-webhook: ignored Comment.create AUT-42 (not a configured project)"
+    ]
 
 
 def test_plain_comment_on_an_untracked_issue_is_ignored(
@@ -431,6 +477,70 @@ def test_oversized_body_is_rejected_before_it_is_read(app: WebhookApp) -> None:
     )
 
     assert (result.status, result.outcome) == (413, "rejected")
+
+
+class NeverRead:
+    """A request body reader that fails the test if it is ever called."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def __call__(self, size: int) -> bytes:
+        self.calls.append(size)
+        raise AssertionError("the body must not be read")
+
+
+# F1.5: production hands WebhookApp a reader (rfile.read), not bytes. These
+# observe the read itself, so moving it ahead of a check fails them.
+@pytest.mark.parametrize(
+    ("headers", "client_ip", "status"),
+    [
+        ({"Content-Length": str(MAX_BODY_BYTES + 1)}, "127.0.0.1", 413),
+        ({"Content-Length": str(10 * MAX_BODY_BYTES)}, "127.0.0.1", 413),
+        ({"Content-Length": "-1"}, "127.0.0.1", 411),
+        ({}, "127.0.0.1", 411),
+        ({"Content-Length": "10"}, "203.0.113.9", 403),
+    ],
+    ids=["cap-plus-one", "far-over-cap", "negative", "missing", "bad-source"],
+)
+def test_refused_requests_never_read_the_body(
+    app: WebhookApp,
+    database: Path,
+    headers: dict,
+    client_ip: str,
+    status: int,
+) -> None:
+    reader = NeverRead()
+    headers = {"Linear-Signature": "0" * 64, **headers}
+
+    result = app.handle("POST", PATH, headers, reader, client_ip)
+
+    assert (result.status, result.outcome) == (status, "rejected")
+    assert reader.calls == []
+    assert dirty_rows(database) == []
+
+
+def test_body_within_the_cap_is_read_exactly_once_at_its_declared_length(
+    app: WebhookApp,
+    database: Path,
+) -> None:
+    body = json.dumps(issue_event()).encode()
+    calls: list[int] = []
+
+    def reader(size: int) -> bytes:
+        calls.append(size)
+        return body
+
+    result = app.handle(
+        "POST",
+        PATH,
+        {"Content-Length": str(len(body)), "Linear-Signature": sign(body)},
+        reader,
+        "127.0.0.1",
+    )
+
+    assert result.outcome == "accepted"
+    assert calls == [len(body)]
 
 
 @pytest.mark.parametrize("length", [None, "abc", "-1"])

@@ -150,3 +150,79 @@ def test_dashboard_shows_webhook_health_only_when_a_listener_ran(
     page = render_html(snapshot)
     assert "<h2>Linear webhook</h2>" in page
     assert "no Linear webhook for over 1h" in page
+
+
+def _poll_once(db: Path, *, at: float, webhook: bool) -> None:
+    """One poll cycle at `at`, in webhook mode or not; no listener runs."""
+    from lib.linear_webhook import LinearDirtyQueue
+    from tests.test_live_poll import config
+    from tests.test_live_poll_no_webhook import Clock, Linear, source_for
+    from tests.test_live_poll_webhook import webhook_config
+
+    clock = Clock()
+    clock.now = at
+    source, _gh = source_for(
+        webhook_config() if webhook else config(linear=True),
+        Linear([], hits=[]),
+        clock=clock,
+    )
+    if webhook:
+        source.linear_dirty = LinearDirtyQueue(db)
+    source.begin_cycle()
+    source.end_cycle()
+
+
+NEVER_STARTED = "  last received never (listener has not started), dirty queue 0\n"
+SILENT = "no Linear webhook for over 1h while 1 Linear ticket(s) are active"
+
+
+# F1.6: webhook polling is configured but `orch linear-webhook serve` never
+# ran on this database. seeded() tracks one active Linear ticket (AUT-7).
+def test_status_and_dashboard_warn_when_webhook_polling_has_no_listener(
+    tmp_path: Path,
+) -> None:
+    db, log = seeded(tmp_path)
+    _poll_once(db, at=NOW - 3601, webhook=True)
+
+    text = _status(db, NOW)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    page = render_html(snapshot)
+
+    assert "Linear webhook\n" + NEVER_STARTED in text
+    assert f"  warning: {SILENT}\n" in text
+    assert snapshot["poller"]["linear_webhook"] == {
+        "last_received_age_seconds": None,
+        "last_event": None,
+        "listener_age_seconds": None,
+        "dirty": 0,
+        "warning": SILENT,
+    }
+    assert "last received never (listener has not started)" in page
+    assert f"warning: {SILENT}" in page
+
+
+def test_webhook_polling_without_a_listener_is_shown_but_not_warned_within_the_hour(
+    tmp_path: Path,
+) -> None:
+    db, log = seeded(tmp_path)
+    _poll_once(db, at=NOW - 3600, webhook=True)
+    _poll_once(db, at=NOW - 60, webhook=True)  # the first webhook cycle anchors
+
+    text = _status(db, NOW)
+    snapshot = collect_snapshot(db, log, now=NOW)
+
+    assert "Linear webhook\n" + NEVER_STARTED in text
+    assert "warning" not in text
+    assert snapshot["poller"]["linear_webhook"]["warning"] is None
+
+
+def test_poller_with_no_webhook_configured_leaves_status_and_dashboard_unchanged(
+    tmp_path: Path,
+) -> None:
+    db, log = seeded(tmp_path)
+    before = _status(db, NOW)
+    _poll_once(db, at=NOW - 7200, webhook=False)
+
+    assert _status(db, NOW) == before
+    assert "Linear webhook" not in before
+    assert "linear_webhook" not in collect_snapshot(db, log, now=NOW)["poller"]

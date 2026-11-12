@@ -196,3 +196,5 @@ def test_no_webhook_dispatcher_creates_no_webhook_tables(tmp_path: Path) -> None
         }
     assert "linear_dirty" not in tables
     assert "linear_webhook_health" not in tables
+    assert "linear_webhook_polling" not in tables
+    assert "linear_project_issues" not in tables

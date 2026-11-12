@@ -7,6 +7,8 @@ configured, the poller behaves exactly as before: the pins below were
 recorded on main at 5a1fbeb and must not change.
 """
 
+import hashlib
+import hmac
 import json
 import sqlite3
 from dataclasses import replace
@@ -16,7 +18,7 @@ import pytest
 
 from lib import cli
 from lib.dispatcher import LINEAR_HANDOFF_QUERY, TicketRef
-from lib.linear_webhook import DirtyRow, LinearDirtyQueue, WebhookApp
+from lib.linear_webhook import DirtyRow, LinearDirtyQueue, WebhookApp, ensure_tables
 from lib.orch_yml import LinearWebhookConfig
 from lib.poll_source import PollCycleError
 from lib.queue import JobRequest
@@ -347,6 +349,9 @@ def test_webhook_event_to_dirty_row_to_fetch_to_tracking_through_orch_db(
         clock=lambda: 1_800_000_000.0,
         log=lambda _line: None,
     )
+    # Linear sends Issue.create for a new issue in the project before any
+    # comment on it; that is how the listener knows the issue is in scope.
+    assert _deliver(app, _issue_event("AUT-9", action="create")).outcome == "accepted"
     body = json.dumps(
         {
             "action": "create",
@@ -360,9 +365,6 @@ def test_webhook_event_to_dirty_row_to_fetch_to_tracking_through_orch_db(
             "webhookTimestamp": 1_800_000_000_000,
         }
     ).encode()
-    import hashlib
-    import hmac
-
     result = app.handle(
         "POST",
         "/linear-webhook",
@@ -441,6 +443,266 @@ def test_runtime_wires_the_dirty_queue_only_when_a_webhook_is_configured(
 
     assert getattr(plain_source, "linear_dirty", None) is None
     assert getattr(plain_source, "active_tickets", None) is None
+    assert getattr(plain_source, "unpolled_tickets", None) is None
     assert isinstance(hooked_source.linear_dirty, LinearDirtyQueue)
     assert hooked_source.linear_dirty.path == database
     assert hooked_source.active_tickets == dispatcher.active_job_tickets
+    assert hooked_source.unpolled_tickets == dispatcher.unpolled_linear_tickets
+
+
+LISTENER_NOW = 1_800_000_000.0
+
+
+def _listener(database: Path) -> WebhookApp:
+    return WebhookApp(
+        secret=b"fake-secret",
+        project_ids=frozenset({"project-1"}),
+        db_path=database,
+        clock=lambda: LISTENER_NOW,
+        log=lambda _line: None,
+    )
+
+
+def _deliver(app: WebhookApp, event: dict):
+    body = json.dumps(event).encode()
+    return app.handle(
+        "POST",
+        "/linear-webhook",
+        {
+            "Content-Length": str(len(body)),
+            "Linear-Signature": hmac.new(b"fake-secret", body, hashlib.sha256).hexdigest(),
+        },
+        body,
+        "127.0.0.1",
+    )
+
+
+def _issue_event(
+    identifier: str,
+    *,
+    project: str = "project-1",
+    action: str = "update",
+) -> dict:
+    return {
+        "action": action,
+        "type": "Issue",
+        "data": {
+            "id": f"id-{identifier}",
+            "identifier": identifier,
+            "projectId": project,
+        },
+        "webhookTimestamp": int(LISTENER_NOW * 1000),
+    }
+
+
+def _handoff_comment(identifier: str) -> dict:
+    return {
+        "action": "create",
+        "type": "Comment",
+        "data": {
+            "id": f"c-{identifier}",
+            "body": "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->",
+            "issueId": f"id-{identifier}",
+            "issue": {"id": f"id-{identifier}", "identifier": identifier},
+        },
+        "webhookTimestamp": int(LISTENER_NOW * 1000),
+    }
+
+
+def _wire(source, dispatcher, database: Path) -> None:
+    """What cli._runtime wires in webhook mode."""
+    source.linear_dirty = LinearDirtyQueue(database)
+    source.active_tickets = dispatcher.active_job_tickets
+    source.unpolled_tickets = getattr(dispatcher, "unpolled_linear_tickets", None)
+    source.error_sink = dispatcher.record_poll_error
+
+
+def _dirty_count(database: Path) -> int:
+    with sqlite3.connect(database) as connection:
+        return connection.execute("SELECT count(*) FROM linear_dirty").fetchone()[0]
+
+
+# F1.1: the dispatcher excludes every tracked Linear ticket from discovery
+# but polls only non-terminal ones, so a terminal ticket's dirty row had no
+# reader. It must drain, without reopening the ticket or queueing work.
+@pytest.mark.parametrize("delivery", ["issue-event", "uuid-only-row"])
+@pytest.mark.parametrize("state", ["done", "abandoned", "merged", "handed-off"])
+def test_dirty_row_for_a_terminal_tracked_ticket_drains_without_reopening_work(
+    tmp_path: Path,
+    state: str,
+    delivery: str,
+) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    with dispatcher.queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES (?, 'AUT-1', 'linear', 0)", (REPO,)
+        )
+        connection.execute(
+            "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+            "VALUES (?, 'AUT-1', ?)",
+            (REPO, state),
+        )
+    linear = Linear([issue("AUT-1")], hits=[])
+    clock = Clock()
+    errors: list = []
+    source, _gh = source_for(webhook_config(), linear, clock=clock, errors=errors)
+    _wire(source, dispatcher, database)
+    source.error_sink = lambda repo, ticket, error: errors.append((repo, ticket, error))
+    dispatcher.poll_once(source)  # startup reconcile; a terminal ticket is not read
+    assert linear.take() == SEARCHES
+    app = _listener(database)
+    if delivery == "issue-event":
+        assert _deliver(app, _issue_event("AUT-1")).outcome == "accepted"
+    else:  # a row that names only the issue UUID
+        with sqlite3.connect(database) as connection:
+            ensure_tables(connection)
+            connection.execute(
+                "INSERT INTO linear_dirty VALUES ('id-AUT-1', NULL, 'Comment.create', 5.0)"
+            )
+
+    reads = []
+    for _ in range(16):  # 16 minutes: crosses the 900 s reconcile
+        clock.now += 60
+        dispatcher.poll_once(source)
+        reads += linear.take()
+        assert _dirty_count(database) == 0
+
+    assert reads.count(SEARCHES[0]) == 1  # the reconcile ran
+    if delivery == "issue-event":
+        # Terminal tickets are not read with or without a webhook.
+        assert ("issue", "AUT-1") not in reads
+        assert ("issue", "id-AUT-1") not in reads
+    assert errors == []
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT workflow_state FROM ticket_state WHERE ticket_id = 'AUT-1'"
+        ).fetchone() == (state,)
+        assert connection.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT repo, ticket_id FROM tracked_tickets"
+        ).fetchall() == [(REPO, "AUT-1")]
+
+
+def test_dispatcher_reports_tracked_linear_tickets_it_no_longer_polls(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    with dispatcher.queue.connect() as connection:
+        for ticket, state in (
+            ("AUT-1", None),
+            ("AUT-2", "building"),
+            ("AUT-3", "done"),
+            ("AUT-4", "abandoned"),
+            ("AUT-5", "merged"),
+        ):
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES (?, ?, 'linear', 0)", (REPO, ticket)
+            )
+            if state is not None:
+                connection.execute(
+                    "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+                    "VALUES (?, ?, ?)",
+                    (REPO, ticket, state),
+                )
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES (?, '77', 'github', 0)", (REPO,)
+        )
+
+    assert dispatcher.unpolled_linear_tickets() == frozenset({"AUT-3", "AUT-4", "AUT-5"})
+
+
+def lenient_cycle(source, refs, *, exclude=frozenset()):
+    """cycle(), but a deleted ticket's recorded read error is expected."""
+    source.begin_cycle()
+    candidates = source.linear_candidates(
+        LINEAR_HANDOFF_QUERY,
+        exclude=exclude,
+        reserve=len(refs),
+    )
+    tracked = source.tracked_tickets(refs)
+    try:
+        source.end_cycle()
+    except PollCycleError:
+        pass
+    return candidates, tracked
+
+
+# F1.2: an authoritative null read must evict every cached alias before its
+# dirty row is acked, or a later cycle rebuilds the deleted issue.
+@pytest.mark.parametrize("identifier", ["AUT-1", None], ids=["by-identifier", "uuid-only"])
+def test_deleted_tracked_issue_is_never_rebuilt_from_an_older_read(
+    identifier: str | None,
+) -> None:
+    linear = Linear([issue("AUT-1"), issue("AUT-2")], hits=[])
+    clock = Clock()
+    errors: list = []
+    source, _gh = source_for(webhook_config(), linear, clock=clock, errors=errors)
+    dirty = FakeDirty()
+    source.linear_dirty = dirty
+    tracked = refs("AUT-1", "AUT-2")
+    exclude = frozenset({"AUT-1", "AUT-2"})
+    _, found = cycle(source, tracked, exclude=exclude)
+    assert [ticket.ticket_id for ticket in found] == ["AUT-1", "AUT-2"]
+
+    del linear.by_key["AUT-1"], linear.by_key["id-AUT-1"]  # deleted: Linear answers null
+    dirty.add("id-AUT-1", identifier, 1.0)
+    for _ in range(4):
+        clock.now += 60
+        _, found = lenient_cycle(source, tracked, exclude=exclude)
+        assert [ticket.ticket_id for ticket in found] == ["AUT-2"]
+
+    assert dirty.rows == {}
+    assert {ticket for _repo, ticket, _error in errors} == {"AUT-1"}
+
+
+def test_deleted_discovered_issue_leaves_no_cached_alias() -> None:
+    linear = Linear([issue("AUT-9")], hits=[])
+    clock = Clock()
+    source, _gh = source_for(webhook_config(), linear, clock=clock)
+    dirty = FakeDirty()
+    source.linear_dirty = dirty
+    cycle(source, ())
+    clock.now += 60
+    dirty.add("id-AUT-9", "AUT-9", 1.0)
+    candidates, _ = cycle(source, ())  # read by UUID, cached under both keys
+    assert [ticket.ticket_id for ticket in candidates] == ["AUT-9"]
+
+    del linear.by_key["AUT-9"], linear.by_key["id-AUT-9"]
+    clock.now += 60
+    dirty.add("id-AUT-9", "AUT-9", 2.0)
+    candidates, _ = cycle(source, ())
+    linear.take()
+
+    assert candidates == ()
+    assert dirty.rows == {}
+    # Now tracked (say the dispatcher picked it up), it is read, not reused.
+    clock.now += 60
+    _, found = lenient_cycle(source, refs("AUT-9"), exclude=frozenset({"AUT-9"}))
+    assert found == ()
+    assert linear.take() == [("issue", "AUT-9")]
+
+
+# F1.3 end to end: an out-of-project comment carrying the marker is ignored
+# by the listener, so the poller spends no Linear read on it.
+def test_handoff_comment_outside_the_configured_projects_costs_no_linear_read(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "orch.db"
+    dispatcher = _dispatcher(database)
+    linear = Linear([issue("AUT-9", project="project-2")], hits=[])
+    clock = Clock()
+    source, _gh = source_for(webhook_config(), linear, clock=clock)
+    _wire(source, dispatcher, database)
+    dispatcher.poll_once(source)
+    assert linear.take() == SEARCHES
+    app = _listener(database)
+
+    result = _deliver(app, _handoff_comment("AUT-9"))
+
+    assert (result.status, result.outcome) == (200, "ignored")
+    assert _dirty_count(database) == 0
+    clock.now += 60
+    dispatcher.poll_once(source)
+    assert linear.take() == []
