@@ -28,6 +28,13 @@ projects:
     factory_ref: dev
   - repo: maxharris1/tracy-harris-coaching
     factory_ref: main
+  # The factory's own PRs: GitHub only, no Linear. They are built outside
+  # the queue, so a trusted builder ready starts review (README "Poll").
+  # factory.md ships by handoff: APPROVE with green CI wakes grok-bot
+  # (Factory) to merge; the poller never merges here.
+  - repo: maxharris1/factory
+    factory_ref: main
+    ready_starts_review: true
 # Optional read-only dashboard (README "Dashboard"). Push is off unless
 # dashboard.push.transport is ssh. It holds no secrets; SSH uses the login
 # Max provisions in ~/.ssh/config.

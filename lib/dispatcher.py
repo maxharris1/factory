@@ -62,10 +62,17 @@ class CIResult:
 
 
 # Where a Linear issue stands relative to Ready for Review, read with the
-# ticket: still before review (the only phase the handoff moves), already
-# in Ready for Review, or moved on by a human (completed, canceled, backlog
-# or triage, or a started state after Ready for Review).
-LINEAR_STATE_PHASES = ("before-review", "ready-for-review", "moved-on")
+# ticket: still before review (backlog, triage, unstarted, or started before
+# Ready for Review; the only phase the handoff moves), already in Ready for
+# Review, moved on by a human (completed, canceled, or a started state after
+# Ready for Review), or on a team with no Ready for Review state at all (the
+# PR is still marked ready and the done wake reports the unmoved issue).
+LINEAR_STATE_PHASES = (
+    "before-review",
+    "ready-for-review",
+    "moved-on",
+    "no-ready-state",
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,7 @@ class TrackedTicket:
     linear_ready_state_id: str | None = None
     linear_ready_for_review: bool = False
     linear_state_phase: str | None = None
+    ready_starts_review: bool = False
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -171,7 +179,9 @@ class ReviewActions(Protocol):
         """
         ...
 
-    def handoff(self, ticket: TrackedTicket, head: str) -> None: ...
+    def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
+        """Hand the PR off. A returned note is reported in the done wake."""
+        ...
 
     def await_approver(
         self,
@@ -916,6 +926,11 @@ class Dispatcher:
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
         builder_harness = self._job_builder_harness(ticket)
+        if builder_harness is None and ticket.ready_starts_review:
+            # The project builds its PRs outside the queue (orch.yml
+            # projects[].ready_starts_review): factory.md's builder, trusted
+            # as usual below, may start review with no build job.
+            builder_harness = ticket.factory.builder_harness
         if builder_harness is None:
             return True, "rejected-ready-without-builder-job"
         expected = f"{builder_harness}-bot"
@@ -1219,10 +1234,10 @@ class Dispatcher:
             self._wake_done(ticket, comment, "merged")
             return True, "merged"
         if ship == "handoff":
-            self._review_actions(ticket).handoff(ticket, current_head)
+            note = self._review_actions(ticket).handoff(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "handed-off")
             self._write_state_label(ticket, "handed-off")
-            self._wake_done(ticket, comment, "handed-off")
+            self._wake_done(ticket, comment, "handed-off", note=note)
             return True, "handed-off"
         approver = ship.removeprefix("after:")
         self._review_actions(ticket).await_approver(ticket, current_head, approver)
@@ -1747,9 +1762,12 @@ class Dispatcher:
         live path uses (_latest_review_verdict). A newer trusted verdict, a
         REVISE or another APPROVE, spends the re-drive with no write, so of
         several eligible intents on one ticket only the latest APPROVE can
-        hand off. A ticket already merged, handed off or done, or one with
-        a completed handoff intent at the intent's head, is never handed
-        off again: its re-drives are spent with no write.
+        hand off. That APPROVE's head field must also still cover the
+        intent's head, by T4's rule (_approval_covers), so an APPROVE
+        edited in place to name another head spends the re-drive. A ticket
+        already merged, handed off or done, or one with a completed handoff
+        intent at the intent's head, is never handed off again: its
+        re-drives are spent with no write.
 
         Then it checks what else can have changed since T4: the ship policy
         is still handoff, the PR head is still the intent's head and CI on
@@ -1780,7 +1798,7 @@ class Dispatcher:
         by_id = {comment.id: comment for comment in ticket.comments}
         in_force = self._latest_review_verdict(ticket)
         approve_in_force = (
-            in_force[0].id
+            in_force
             if in_force is not None and in_force[1].get("verdict") == "APPROVE"
             else None
         )
@@ -1790,9 +1808,13 @@ class Dispatcher:
             if comment is None:
                 continue
             if (
-                comment_id != approve_in_force
+                approve_in_force is None
+                or comment_id != approve_in_force[0].id
                 or self._review_context(ticket)[0] in ("merged", "handed-off", "done")
                 or self._has_completed_handoff_at(ticket, str(row["head"]))
+                or not self._approval_covers(
+                    ticket, approve_in_force[1].get("head", ""), str(row["head"])
+                )
             ):
                 self._set_redrive(ticket, comment_id, "spent", "eligible")
                 continue
@@ -1811,7 +1833,7 @@ class Dispatcher:
             if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
                 continue
             try:
-                self._review_actions(ticket).handoff(ticket, head)
+                note = self._review_actions(ticket).handoff(ticket, head)
             except RetryableStateError:
                 self._set_redrive(ticket, comment_id, "eligible", "spent")
                 raise
@@ -1833,7 +1855,30 @@ class Dispatcher:
                 )
                 continue
             self._complete_redrive(ticket, comment_id)
-            self._wake_done(ticket, comment, "handed-off")
+            self._wake_done(ticket, comment, "handed-off", note=note)
+
+    def _approval_covers(
+        self,
+        ticket: TrackedTicket,
+        approved_head: str,
+        head: str,
+    ) -> bool:
+        """Whether an APPROVE naming approved_head covers head, by T4's rule:
+        the same commit (a 7+ character prefix either way) or the same
+        stable patch id. A patch id that cannot be read does not cover."""
+        if _matching_head(approved_head, head) is not None:
+            return True
+        try:
+            actions = self._review_actions(ticket)
+            approved_patch = actions.stable_patch_id(ticket, approved_head)
+            current_patch = actions.stable_patch_id(ticket, head)
+        except Exception:
+            return False
+        return (
+            _is_patch_id(approved_patch)
+            and _is_patch_id(current_patch)
+            and approved_patch.lower() == current_patch.lower()
+        )
 
     def _complete_redrive(self, ticket: TrackedTicket, comment_id: str) -> None:
         """failed -> completed, and hand the APPROVE back to T4.
@@ -2283,15 +2328,7 @@ class Dispatcher:
                     fields = parse_comment(item.body).as_dict()
                 except HandoffError:
                     continue
-                if fields["kind"] not in ("brief", "go"):
-                    continue
-                if not self._trusted(
-                    ticket,
-                    item,
-                    fields,
-                    "grok-bot",
-                    role="orchestrator",
-                ):
+                if not self._starts_tracking(ticket, item, fields):
                     continue
                 with self._connect() as connection:
                     connection.execute(
@@ -2316,6 +2353,39 @@ class Dispatcher:
                         (ticket.repo.lower(), ticket.ticket_id),
                     )
                 break
+
+    def _starts_tracking(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> bool:
+        """A trusted Grok brief/go, or (ready_starts_review) the builder's ready.
+
+        The ready path applies T2's own trust rule (factory.md's builder,
+        role=builder, a trusted_logins author) and needs the ready head to
+        name the PR head, so T2 can then queue the review in the same cycle.
+        """
+        if fields["kind"] in ("brief", "go"):
+            return self._trusted(
+                ticket,
+                comment,
+                fields,
+                "grok-bot",
+                role="orchestrator",
+            )
+        if fields["kind"] != "ready" or not ticket.ready_starts_review:
+            return False
+        return (
+            self._trusted(
+                ticket,
+                comment,
+                fields,
+                f"{ticket.factory.builder_harness}-bot",
+                role="builder",
+            )
+            and _matching_head(fields["head"], ticket.current_head) is not None
+        )
 
     def _tracked_refs(self) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
@@ -2504,7 +2574,17 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment: Comment,
         outcome: str,
+        *,
+        note: str | None = None,
     ) -> None:
+        detail: dict[str, object] = {
+            "project_bot": ticket.grok_bot,
+            "outcome": outcome,
+            "pr_number": ticket.pr_number,
+            "post_to": ticket.ticket_url,
+        }
+        if note is not None:
+            detail["note"] = note
         self.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -2512,12 +2592,7 @@ class Dispatcher:
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
             detail=json.dumps(
-                {
-                    "project_bot": ticket.grok_bot,
-                    "outcome": outcome,
-                    "pr_number": ticket.pr_number,
-                    "post_to": ticket.ticket_url,
-                },
+                detail,
                 separators=(",", ":"),
                 sort_keys=True,
             ),
@@ -3062,7 +3137,14 @@ class ReviewShipper:
             try:
                 tip = actions.branch_tip(ticket, branch)
             except Exception as exc:
-                tip = f"unreadable ({type(exc).__name__}: {exc})"
+                # Only the inner safe detail or the class name: str(exc) of
+                # an adapter error can hold gh's stdout or stderr.
+                inner = getattr(exc, "safe_detail", None)
+                tip = (
+                    f"unreadable ({type(exc).__name__}: {inner})"
+                    if isinstance(inner, str) and inner
+                    else f"unreadable ({type(exc).__name__})"
+                )
             if tip != head:
                 raise ShipError(f"{branch} is {tip}, not {head}, after fast-forward")
         except Exception as exc:

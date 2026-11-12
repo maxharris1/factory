@@ -106,6 +106,9 @@ _CHECK_FAILED = (
 )
 
 
+LINEAR_NO_READY_STATE_NOTE = "linear-not-moved: team has no Ready for Review state"
+
+
 class GitHubAdapterError(ShipError):
     """safe_detail defaults to the message, so a message must never hold
     gh's stdout or stderr; a wrapper passes on the inner safe_detail."""
@@ -268,8 +271,9 @@ class GitHubReviewActions:
         endpoint = f"{_repo_path(ticket.repo)}/git/ref/heads/{_branch(branch)}"
         return _ref_sha(_object(self._json(endpoint)), branch)
 
-    def handoff(self, ticket: TrackedTicket, head: str) -> None:
+    def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
         self._mark_ready(ticket, head)
+        return None
 
     def _mark_ready(self, ticket: TrackedTicket, head: str) -> bool:
         """Mark the PR ready if it is a draft. True when this call confirmed it.
@@ -529,7 +533,10 @@ class LinearReviewActions(GitHubReviewActions):
         del ticket, branch, head
         raise GitHubAdapterError("Linear tickets can only use handoff")
 
-    def handoff(self, ticket: TrackedTicket, head: str) -> None:
+    def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
+        """Mark the PR ready, then move a before-review issue to Ready for
+        Review. Returns a note for the done wake when the move was skipped
+        because the team has no Ready for Review state, else None."""
         if self.fresh_ticket is not None:
             try:
                 fresh = self.fresh_ticket(
@@ -558,9 +565,17 @@ class LinearReviewActions(GitHubReviewActions):
             error.write_confirmed = False
             raise error
         marked = self._mark_ready(ticket, head)
-        # Move only an issue still before review. One already in Ready for
-        # Review (a no-op re-drive) or moved on by a human (Done, Canceled,
-        # back to Backlog, or past Ready for Review) is left where it is.
+        # Move only an issue still before review (Backlog, Triage, Todo, or
+        # started before Ready for Review). One already in Ready for Review
+        # (a no-op re-drive) or moved on by a human (Done, Canceled, or past
+        # Ready for Review) is left where it is. A team with no Ready for
+        # Review state has nowhere to move it: the handoff still completes,
+        # and the note tells the project bot the issue was not moved.
+        if (
+            self.move_ready_for_review
+            and ticket.linear_state_phase == "no-ready-state"
+        ):
+            return LINEAR_NO_READY_STATE_NOTE
         if self.move_ready_for_review and ticket.linear_state_phase == "before-review":
             try:
                 self.linear_ready(ticket)
@@ -571,6 +586,7 @@ class LinearReviewActions(GitHubReviewActions):
                 )
                 error.write_confirmed = marked
                 raise error from None
+        return None
 
 
 def _route(args: Sequence[str]) -> str:

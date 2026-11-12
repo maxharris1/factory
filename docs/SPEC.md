@@ -324,6 +324,7 @@ projects:
     # linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
     # grok_bot: project-bot
     # linear_ready_for_review: false
+    # ready_starts_review: false
     # optional job_timeout: 60
 ```
 
@@ -392,8 +393,18 @@ it is `null`, Grok Bot handles the wake for the repo's project.
 `linear_ready_for_review` defaults to `false` and controls only the Linear
 Ready for Review move after a covered cross-family APPROVE. Aut0 enables it;
 no other Linear state transition is written. The move is made only from a
-state before Ready for Review, never from Ready for Review itself or a state a
-human moved the issue on to.
+state before Ready for Review (Backlog, Triage, unstarted, or started before
+it), never from Ready for Review itself or a state a human moved the issue on
+to (completed, canceled, or started after it). On a team with no Ready for
+Review state the handoff still completes and the `done` wake reports that the
+issue was not moved.
+`ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
+`factory.md`'s builder (`from=<builder>-bot role=builder`, by a
+`trusted_logins` author) whose head names the PR head starts tracking a
+labelled PR with no Grok `brief` or `go`, and starts the first review even
+with no build job, for a project whose PRs are built outside the queue (the
+factory repo itself). With the flag off, only a trusted Grok `brief` or `go`
+starts tracking.
 
 ## 8. Review and merge rules
 

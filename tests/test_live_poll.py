@@ -2331,6 +2331,8 @@ def test_adapter_read_timeout_on_one_ref_leaves_a_healthy_ref_alone(
 
 # Codex r1 F1.2: the handoff moves a Linear issue only from before review,
 # so the issue read carries its current state and the team's state order.
+# Lessons batch 1: Backlog and Triage are before review, and a team with no
+# Ready for Review state is named (no-ready-state), not before-review.
 
 RFR = {"id": "rfr", "name": "Ready for Review", "type": "started", "position": 3.0}
 
@@ -2361,9 +2363,9 @@ def test_linear_issue_query_reads_the_issue_state_and_the_state_order() -> None:
         (phase_issue({"id": "qa", "type": "started", "position": 4.0}), "moved-on"),
         (phase_issue({"id": "done", "type": "completed", "position": 5.0}), "moved-on"),
         (phase_issue({"id": "x", "type": "canceled", "position": 6.0}), "moved-on"),
-        (phase_issue({"id": "b", "type": "backlog", "position": 0.0}), "moved-on"),
-        (phase_issue({"id": "t", "type": "triage", "position": 0.0}), "moved-on"),
-        (phase_issue({"id": "doing", "type": "started", "position": 2.0}, ready=None), "before-review"),
+        (phase_issue({"id": "b", "type": "backlog", "position": 0.0}), "before-review"),
+        (phase_issue({"id": "t", "type": "triage", "position": 0.0}), "before-review"),
+        (phase_issue({"id": "doing", "type": "started", "position": 2.0}, ready=None), "no-ready-state"),
         (phase_issue({"id": "doing", "type": "started"}), None),
         (phase_issue({"id": "doing", "type": "mystery", "position": 2.0}), None),
         (phase_issue({"type": "started", "position": 2.0}), None),
