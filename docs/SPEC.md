@@ -33,6 +33,7 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | Nov 11, 9:09 PM | The device inventory lives in `machines.yml`, not `orch.yml`. The box is the one `local: true` device and needs no Tailscale name; it keeps 3 slots because the box runs at most 3 heavy local agent sessions at once (slots are generic, not one per bot). Two devices may not share a `tailscale_name`, so one host has one `slot_max`. Remote devices name a `workdir_root` that is not under `/mnt/`. The scheduler picks the first eligible device in file order. Apart from a requeue (a claim undone before work starts), a slot is freed only by an explicit release after the worker is gone. | Factory decided (technical) |
 | Nov 11 | A job goes stuck after 60 minutes with no heartbeat or progress, not 90: the default job timeout is 60 minutes. A project may still override it with `job_timeout` in `orch.yml`; T6 still retries once, then marks the job stuck. | Factory decided (technical) |
 | Nov 11 | The PC's `workdir_root` is `/home/<bot>/factory-work` on `pc-wsl-bots`, written `/home/{bot}/factory-work` and resolved per harness to that harness's bot user, so jobs stay off `/mnt/c`. F2-02 reaches the PC through the box's SSH aliases `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The PC and the Mac stay `enabled: false` until F2-02 remote start lands. | Factory decided (technical) |
+| Nov 12, 10:02 AM | Linear discovery moves to a Linear webhook. Max's words: "Go straight to a Linear webhook through Tailscale Funnel". This supersedes the Nov 11, 2:31 PM "accepts no inbound webhooks" for this one listener only. `orch linear-webhook serve` verifies Linear's HMAC signature and timestamp and only marks issues dirty in `orch.db`; the poller reads dirty issues each cycle and runs the full search as a reconcile every `linear_webhook.reconcile_seconds` (default 900). With no `linear_webhook` in `orch.yml` nothing changes. Tailscale Network owns the Funnel; Max creates the Linear webhook and saves its signing secret on the box (issue #55, section 7). | Max; details Factory decided (technical) |
 | Nov 12, 5:29 AM | Factory lessons batch 1, ops: the job heartbeat is orch-owned. A bot starts its harness as `orch job run <bot> <id> [--worktree] -- <command>`, which heartbeats every third of `timeout_seconds` and stops when the command exits, the job is no longer running, or `orch job run` dies (issue #49). With `--worktree`, a job checkout is a git worktree of one shared clone per repo, removed when the command exits unless it has uncommitted changes or unpushed commits; `orch gc` removes stale ones. `orch poll` writes and removes its own pidfile under its single-poller lock, and `deploy/poller-service.sh` is the no-systemd service with opt-in autostart. | Max approved the batch ("Proceed with fixes"); details Factory decided (technical) |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
@@ -50,7 +51,7 @@ The factory is four parts and nothing else:
 1. **pstack in every harness.** One pinned pstack source, installed where Claude Code, Codex and Cursor load skills. pstack (poteto-mode plus the principle skills) decides *how* work gets done. The orchestrator adds no work rules of its own.
 2. **One handoff format.** Each piece of work is one ticket plus its PR. The brief, questions, answers, plan, verdicts and "done" are comments, with one small machine-readable header. There is no other state store. The dispatcher's local job list can be rebuilt from the tracker at any time.
 3. **One Grok Bot skill, `orchestrate-project`.** Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and reviewer, and handles everything the dispatcher cannot decide. It reads each project's `factory.md`.
-4. **One dispatcher script, `orch`.** A few hundred lines. It polls the configured trackers, applies the transition table, and wakes an agent only when judgment is needed. Bots wait on a blocking `orch wait <role>` shell call, which costs no tokens. It accepts no inbound webhooks and creates no credentials. Outbound Grok delivery uses the existing routine webhook. GitHub uses the existing `gh` login, and Aut0 uses existing Linear access.
+4. **One dispatcher script, `orch`.** A few hundred lines. It polls the configured trackers, applies the transition table, and wakes an agent only when judgment is needed. Bots wait on a blocking `orch wait <role>` shell call, which costs no tokens. It creates no credentials. Its only inbound endpoint is the optional Linear webhook listener (section 7, Nov 12 decision), which only marks Linear issues dirty for the next poll. Outbound Grok delivery uses the existing routine webhook. GitHub uses the existing `gh` login, and Aut0 uses existing Linear access.
 
 The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. Per-repo policy lives in that repo's `factory.md`.
 
@@ -67,9 +68,10 @@ These stay out until a real run shows they are needed. They are not Phase 1 or P
 - A mission-control dashboard (anything that controls the factory). Phase 2 `orch status` is a read-only text summary. The requested `orch dashboard snapshot` is a read-only, redacted static view of the same data that is pushed out from the box; it controls nothing (README "Dashboard").
 - Per-run `decisions.tsv` and receipts. PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs). The weekly factory eval report in Phase 1 is a measurement of runs against the chart, not that list.
-- Inbound webhooks, any new credential or login, or creating another Grok
-  routine webhook. Outbound delivery to the existing Grok routine is part of
-  the dispatcher.
+- Inbound webhooks other than the Linear webhook listener (section 7), any
+  new credential or login, or creating another Grok routine webhook. Outbound
+  delivery to the existing Grok routine is part of the dispatcher. The Linear
+  signing secret is created by Max in Linear, not by the factory.
 - A genericity purge or protected-field base reads. The repo starts generic. `factory.md` is read from the project's base branch.
 - Arena and swarm by default. They stay available to the builder as pstack tools.
 
@@ -327,6 +329,13 @@ projects:
     # linear_ready_for_review: false
     # ready_starts_review: false
     # optional job_timeout: 60
+# Optional Linear webhook listener (issue #55). Absent means none, and the
+# poller behaves as it did before the listener existed.
+# linear_webhook:
+#   bind: 127.0.0.1:8787            # IP:port; --bind overrides
+#   path: /linear-webhook           # the one path served; default shown
+#   secret_file: ~/.config/factory/linear-webhook.secret  # mode 600
+#   reconcile_seconds: 900          # 60 to 3600; default shown
 ```
 
 Phase 1 polls from the box, using the existing `gh` login and the Linear key
@@ -385,6 +394,54 @@ reads rotate across cycles so a deferred ticket is served later. Search hits
 already tracked are not fetched directly again, and a direct issue read is
 reused throughout its cycle. HTTP 429 or GraphQL `RATELIMITED` pauses Linear
 requests for `Retry-After`; T4 and T8 pre-write deferrals retry next cycle.
+
+**Linear webhook (optional, issue #55).** `linear_webhook` turns on
+`orch linear-webhook serve`, a small stdlib HTTP server on `bind` (an IP
+literal and port). It accepts POST on `path` only, refuses a Content-Length
+over 1 MiB before reading the body, verifies `Linear-Signature` (hex
+HMAC-SHA256 of the raw body under the signing secret) with a constant-time
+compare, and refuses a `webhookTimestamp` more than 60 seconds from now. When
+it can see the client address (the TCP peer, or the last `X-Forwarded-For`
+hop when the peer is a local proxy) it must be one of Linear's published
+source IPs. A signed, fresh Issue event for a configured
+`linear_project_id` (or one just moved out of it), or a Comment on a tracked
+issue, or a Comment carrying an `orch:v1` marker on an issue a signed Issue
+event last placed in a configured project (Comment payloads do not carry the
+issue's project, and a marker is text anyone can type), upserts one row in
+`linear_dirty(issue_id, identifier, event, received_at)` in `orch.db`; every
+other signed event gets 200 and is ignored (a handoff on an issue the
+listener has not seen is found by the reconcile search). At most 8 requests
+are worked on at once (a further connection is closed unread) and each must
+arrive in full within 10 seconds in total. It never runs handoff logic and never calls Linear. Log lines carry
+the outcome, event type and issue identifier only. `secret_file` names the
+signing-secret file Max saves (mode 600; a group- or world-readable file is
+refused); only the listener reads it, once at startup, and the value is never
+logged, printed or put in an error. `check-config` validates the keys and
+does not read the file. `linear_webhook` needs at least one Linear project.
+
+With the webhook configured, each poll cycle reads the dirty rows and the
+tickets with queued or running jobs. Dirty untracked issues are read
+directly (oldest first, under the same budget) instead of searching; an
+issue outside the configured projects, completed, canceled or deleted is
+dropped quietly. A tracked ticket is reread in full only when it is dirty,
+has an active job, or its last read is `reconcile_seconds` old; otherwise its
+last read is reused and the ticket is still rebuilt each cycle, so its
+GitHub PR head, CI and PR comments stay current. The full brief/go search
+runs at startup and then every `reconcile_seconds` (default 900; it stays due
+until it completes without a budget or error cutoff), so a missed webhook
+costs at most one reconcile interval. A dirty row is deleted only after its
+issue was read in that cycle and only if no newer event replaced it; a
+tracked ticket the dispatcher no longer polls (merged, handed off, done or
+abandoned) is not read with or without a webhook, so its row is deleted
+unread. A read that finds the issue gone drops the reused read too. If the
+dirty queue cannot be read, the cycle records the error and runs as a full
+cycle. With no `linear_webhook` the poller is unchanged, and the dispatcher
+creates no webhook tables (the listener creates them; a webhook-mode poller
+records `linear_webhook_polling`).
+`orch status` and the dashboard show the last delivery, the dirty-queue
+depth and a warning after more than an hour with no delivery while Linear
+tickets are active, once a listener or a webhook-mode poller has run on the
+database (a listener that never started shows as `never`).
 
 The default job timeout is 60 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET; 60 minutes since Nov 11). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) lives in `machines.yml`, not here (section 13). Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
@@ -452,6 +509,7 @@ Grok Bot reports each stop once. It does not poll Max about the same stop.
 
 - The factory never creates logins or credentials without Max's OK. Max provisions harness logins and registers self-hosted runners himself.
 - Never read credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. Never `cat` `.credentials*`, `.runner`, `auth.json`, or `.env`.
+- The Linear webhook signing secret lives only in the file `linear_webhook.secret_file` names, which Max creates mode 600. Only `orch linear-webhook serve` reads it, and it never logs, prints, stores or echoes it in an error. The listener's public exposure is a Tailscale Funnel on its one path, owned by Tailscale Network.
 - For `maxharris1/*` and `aut0-code/aut0`, run GitHub as `env -u GH_TOKEN gh`.
 - The dispatcher uses the existing `gh` login, configured Linear access, and
   the existing Grok routine webhook. `orch.yml`, documentation, unit files,

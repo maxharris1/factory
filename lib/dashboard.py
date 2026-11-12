@@ -45,6 +45,7 @@ from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.handoff import STATES as WORKFLOW_STATES
+from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import ACTIONS, RECIPIENTS, STATES
@@ -636,6 +637,13 @@ def collect_snapshot(
             "last_activity_age_seconds": _age(now, max(activity)) if activity else None,
             "errors": db["errors"],
             "deferrals": db["deferrals"],
+            # Only when a Linear webhook listener or webhook-mode poller has
+            # run on this database.
+            **(
+                {"linear_webhook": db["linear_webhook"]}
+                if db["linear_webhook"] is not None
+                else {}
+            ),
             "health": _poll_health(
                 _age(now, last_cycle_at),
                 _age(now, max(activity)) if activity else None,
@@ -952,6 +960,19 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
+    linear_webhook = None
+    health = read_health(connection)
+    if health is not None:
+        linear_webhook = {
+            "last_received_age_seconds": _age(now, health.last_received_at),
+            "last_event": (
+                _clean(health.last_event, 64) if health.last_event is not None else None
+            ),
+            "listener_age_seconds": _age(now, health.started_at),
+            "dirty": health.dirty,
+            "warning": health.silence_warning(now),
+        }
+
     recent_handoffs: list[dict] = []
     if jobs:
         for row in connection.execute(
@@ -1069,6 +1090,7 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
         "newest_error_at": newest_error_at,
         "deferrals": deferrals,
         "newest_deferral_at": newest_deferral_at,
+        "linear_webhook": linear_webhook,
         "held": held,
         "verdicts": verdicts,
         "linear_budget": {

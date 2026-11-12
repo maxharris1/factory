@@ -2,7 +2,8 @@
 
 Four pages share one bar (navigation and the needs-attention badge):
 
-- index.html (main): factory status, lanes and slots, the queue rail;
+- index.html (main): factory status (with Linear webhook health when a
+  listener has run), lanes and slots, the queue rail;
 - job.html: every running or queued job with the ticket statechart
   (model/chart.mmd, see lib/dashboard_flow.py), its path and current state
   highlighted; job.html#job-<id> shows one job;
@@ -331,6 +332,30 @@ SCRIPT = r"""
       add(tile, el('b', null, num(k[1])));
       add(tile, el('span', null, k[0]));
     });
+  }
+
+  // Webhook health (#56): a small block appended to the Factory status
+  // panel that renderKpis has just rebuilt, so it is redrawn from
+  // status.json on every poll; absent when no listener has run. The heading
+  // is split so a page without a listener never contains the phrase
+  // (tests/test_linear_webhook_health.py).
+  function renderLinearWebhook(d) {
+    var root = byId('kpis');
+    var w = d.poller && d.poller.linear_webhook;
+    if (!root || !w) return;
+    var received;
+    if (w.last_received_age_seconds !== null && w.last_received_age_seconds !== undefined) {
+      received = dur(w.last_received_age_seconds) + ' ago' + (w.last_event ? ' (' + w.last_event + ')' : '');
+    } else if (w.listener_age_seconds === null || w.listener_age_seconds === undefined) {
+      received = 'never (listener has not started)';
+    } else {
+      received = 'never';
+    }
+    var box = add(root, el('div'));
+    box.setAttribute('id', 'linear-webhook');
+    add(box, el('h2', null, 'Linear' + ' webhook'));
+    add(box, el('p', null, 'last received ' + received + ' · dirty queue ' + w.dirty));
+    if (w.warning !== null && w.warning !== undefined) add(box, el('p', 'bad', 'warning: ' + w.warning));
   }
 
   function slotCard(r) {
@@ -715,7 +740,7 @@ SCRIPT = r"""
   }
 
   var PAGES = {
-    main: [renderKpis, renderLanes, renderQueue],
+    main: [renderKpis, renderLinearWebhook, renderLanes, renderQueue],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
     efficiency: [renderHealth, renderSavings],
     job: [renderJobs, renderJobView]
@@ -974,7 +999,36 @@ def _kpis(snapshot: dict) -> str:
         f'<div class="kpi {cls}"><b>{_num(value)}</b>{_span(None, label)}</div>'
         for label, value, cls in tiles
     )
-    return _panel("kpis", "Factory status", f'<div class="kpis">{inner}</div>')
+    return _panel(
+        "kpis", "Factory status", f'<div class="kpis">{inner}</div>' + _linear_webhook(snapshot)
+    )
+
+
+def _linear_webhook(snapshot: dict) -> str:
+    """Linear webhook health (#56), a small block inside Factory status; only
+    when a listener or webhook-mode poller has run on this database. The
+    script's renderLinearWebhook builds the same markup from status.json."""
+    webhook = snapshot["poller"].get("linear_webhook")
+    if webhook is None:
+        return ""
+    if webhook["last_received_age_seconds"] is not None:
+        received = f'{duration(webhook["last_received_age_seconds"])} ago' + (
+            f' ({webhook["last_event"]})' if webhook["last_event"] else ""
+        )
+    elif webhook["listener_age_seconds"] is None:
+        received = "never (listener has not started)"
+    else:
+        received = "never"
+    warning = (
+        f'<p class="bad">warning: {_e(webhook["warning"])}</p>'
+        if webhook["warning"] is not None
+        else ""
+    )
+    return (
+        '<div id="linear-webhook"><h2>Linear webhook</h2>'
+        f"<p>last received {_e(received)} · dirty queue {_e(webhook['dirty'])}</p>"
+        f"{warning}</div>"
+    )
 
 
 def _slot(row: dict) -> str:

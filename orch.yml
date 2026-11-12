@@ -35,6 +35,14 @@ projects:
   - repo: maxharris1/factory
     factory_ref: main
     ready_starts_review: true
+# Optional Linear webhook listener (README "Linear webhook"). Off unless
+# this section is present; the poller then behaves exactly as without it.
+# Max saves the Linear signing secret to secret_file (chmod 600).
+# linear_webhook:
+#   bind: 127.0.0.1:8787
+#   path: /linear-webhook
+#   secret_file: ~/.config/factory/linear-webhook.secret
+#   reconcile_seconds: 900
 # Optional read-only dashboard (README "Dashboard"). Push is off unless
 # dashboard.push.transport is ssh; then `orch poll` (deploy/poller-service.sh)
 # pushes after every poll cycle, or every `every_minutes`, and with
