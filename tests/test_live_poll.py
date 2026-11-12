@@ -915,6 +915,72 @@ def test_factory_read_uses_etag_across_cycles() -> None:
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_304_with_empty_etag_cache_refetches_without_conditional_or_gh_cache(
+    exit_code: int,
+) -> None:
+    # After a restart the in-memory ETag cache is empty, but gh's own
+    # --cache can replay a 304 it stored for a conditional request made by
+    # the previous process (If-None-Match is not part of gh's cache key).
+    encoded = base64.b64encode(
+        FACTORY.format(tickets="github", ship="merge").encode()
+    ).decode()
+    payload = json.dumps({"encoding": "base64", "content": encoded})
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout):
+        del timeout
+        call = list(argv)
+        calls.append(call)
+        if len(calls) == 1:
+            return GhResult(
+                exit_code,
+                "HTTP/2.0 304 Not Modified\r\nDate: now\r\n\r\n",
+                "gh: HTTP 304\n" if exit_code else "",
+            )
+        if len(calls) == 2:
+            return GhResult(
+                0,
+                f'HTTP/2.0 200 OK\nETag: "factory-v2"\n\n{payload}',
+                "",
+            )
+        assert 'If-None-Match: "factory-v2"' in call
+        return GhResult(1, "HTTP/2.0 304 Not Modified\r\n\r\n", "gh: HTTP 304\n")
+
+    source = LivePollSource(config(), gh_runner=runner)
+    source.begin_cycle()
+    first = source._factory(source.config.projects[0])
+    source.begin_cycle()
+    second = source._factory(source.config.projects[0])
+
+    assert first == second
+    assert len(calls) == 3
+    assert "--cache" in calls[0]
+    refetch = calls[1]
+    assert "--cache" not in refetch
+    assert "--include" in refetch
+    assert not any(part.startswith("If-None-Match") for part in refetch)
+    assert refetch[refetch.index("api") + 1 :] == [
+        part
+        for part in calls[0][calls[0].index("api") + 1 :]
+        if part not in ("--cache", "60s")
+    ]
+
+
+def test_304_on_the_unconditional_refetch_is_still_an_error() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout):
+        del timeout
+        calls.append(list(argv))
+        return GhResult(1, "HTTP/2.0 304 Not Modified\r\n\r\n", "gh: HTTP 304\n")
+
+    source = LivePollSource(config(), gh_runner=runner)
+    with pytest.raises(PollSourceError, match="304 without a cached response"):
+        source._gh_call("repos/acme/widgets/contents/factory.md")
+    assert len(calls) == 2
+
+
 def test_fresh_ticket_bypasses_ticket_and_gh_caches() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="after:approver"))
     gh.comments = [

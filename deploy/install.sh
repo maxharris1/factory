@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+    echo "usage: deploy/install.sh [--autostart]" >&2
+    echo "  --autostart  also run deploy/poller-service.sh install-autostart" >&2
+}
+AUTOSTART=0
+for arg in "$@"; do
+    case "$arg" in
+        --autostart) AUTOSTART=1 ;;
+        -h | --help) usage; exit 0 ;;
+        *) usage; exit 2 ;;
+    esac
+done
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${HOME}/.local/share/factory/venv"
 DB="${HOME}/.local/state/factory/orch.db"
@@ -36,7 +49,15 @@ install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/we
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 export ORCH_DB="${DB}"
 export PATH="\${HOME}/.local/bin:\${PATH}"
+# Poller autostart (deploy/poller-service.sh install-autostart): with no
+# systemd user session, each bot shell makes sure the poller is up.
+if [ -f "\${HOME}/.config/factory/poller-autostart" ] && [ -x "${ROOT}/deploy/poller-service.sh" ]; then
+    ("${ROOT}/deploy/poller-service.sh" ensure >>"$(dirname "$DB")/poller-service.log" 2>&1 &)
+fi
 EOF
 ORCH_DB="$DB" "$WRAPPER" init-db --orch "$ORCH_CONFIG"
+if [[ "$AUTOSTART" == 1 ]]; then
+    "${ROOT}/deploy/poller-service.sh" install-autostart
+fi
 echo "Source ${HOME}/.config/factory/profile.sh in every bot shell."
 echo "Then run: orch doctor-runtime"

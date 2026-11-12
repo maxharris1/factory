@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
+from lib import job_run, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
@@ -38,6 +39,7 @@ from lib.wait import (
 )
 
 DB_ENV = "ORCH_DB"
+PIDFILE_ENV = "ORCH_POLL_PIDFILE"
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,7 +55,8 @@ commands:
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
   wait             block until the dispatcher queues a job for a bot
-  job              heartbeat or finish a job that wait returned
+  job              run, heartbeat or finish a job that wait returned
+  gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
@@ -80,9 +83,12 @@ eval-report --input PATH [--since TIME] [--until TIME]
   Print the weekly eval report for one directory of fixtures or
   collected logs. It does not contact GitHub or Linear.
 
-poll [--db PATH] [--orch PATH] [--once]
+poll [--db PATH] [--orch PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
   --once runs one complete poll cycle. --db defaults to $ORCH_DB.
+  Only one poller may hold the database's lock. The holder writes its pid
+  to --pidfile, else $ORCH_POLL_PIDFILE, else poller.pid beside the
+  database, and removes it on exit, including on SIGTERM.
 
 init-db [--db PATH] [--orch PATH]
   Create and initialize the database without polling or delivering work.
@@ -93,11 +99,33 @@ wait <bot> [--db PATH]
   one JSON line, and exits 0. It never starts a harness. --db defaults
   to $ORCH_DB.
 
+job run <bot> <job-id> [--db PATH] [--interval SECONDS] [--worktree]
+        [--work-root DIR] [--git-url-template URL] -- COMMAND [ARG ...]
+  Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
+  before it starts (a job that is not running is refused and nothing
+  runs), then one every --interval seconds (default a third of the job's
+  timeout_seconds). The heartbeat stops when COMMAND exits, when the job
+  is no longer running, or when this process dies. SIGTERM and SIGHUP are
+  forwarded to COMMAND. Exits with COMMAND's status; never finishes the
+  job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  --worktree runs COMMAND in a git worktree of one shared clone per repo
+  under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work), at the
+  job's head or the default branch, exported as ORCH_JOB_WORKTREE. When
+  COMMAND exits the worktree is removed and pruned, unless it has
+  uncommitted changes or unpushed commits; then it is kept and logged.
+  The remote is --git-url-template, else $ORCH_GIT_URL_TEMPLATE, else
+  https://github.com/{repo}.git.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
   with the handoff comment ID; --failed hands it to T6. Repeating the
   same done is a no-op.
+
+gc [--work-root DIR] [--older-than HOURS] [--dry-run]
+  Report and remove job worktrees older than HOURS (default 24) whose
+  owning process is gone and that have no uncommitted changes or unpushed
+  commits; prune each shared clone. Kept worktrees are reported with the
+  reason. Exits 1 if a record could not be read or removed.
 
 dashboard snapshot [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
                    [--machines PATH] [--refresh SECONDS]
@@ -142,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_job, argv[1:])
     if argv[0] == "dashboard":
         return _call(dashboard_main, argv[1:])
+    if argv[0] == "gc":
+        return _call(_gc, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -261,6 +291,7 @@ def _poll(argv: list[str]) -> int:
     parser.add_argument("--db", type=Path)
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--pidfile", type=Path)
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -268,7 +299,8 @@ def _poll(argv: list[str]) -> int:
             reconfigure(line_buffering=True)
     try:
         path = _db_path(args.db)
-        with _poll_lock(path):
+        signal.signal(signal.SIGTERM, _exit_on_term)
+        with _poll_lock(path, _pidfile_path(args.pidfile, path)):
             dispatcher, source = _runtime(path, args.orch, create=False)
             loop = PollLoop(dispatcher, source)
             if args.once:
@@ -378,14 +410,30 @@ def _runtime(
     return dispatcher, source
 
 
+def _pidfile_path(explicit: Path | None, database: Path) -> Path:
+    if explicit is not None:
+        return explicit
+    configured = os.environ.get(PIDFILE_ENV)
+    if configured:
+        return Path(configured)
+    return database.with_name("poller.pid")
+
+
 @contextmanager
-def _poll_lock(path: Path):
+def _poll_lock(path: Path, pidfile: Path | None = None):
+    """Hold the single-poller lock; while held, own the pidfile.
+
+    The pidfile is written only after the lock is taken, so a refused second
+    poller never touches it, and a stale one left by a killed poller is
+    replaced. On exit it is removed only if it still names this process.
+    """
     if not path.is_file():
         raise ValueError(
             f"dispatcher database {path} does not exist; run orch init-db first"
         )
     lock_path = path.with_name(path.name + ".lock")
     handle = lock_path.open("a+", encoding="utf-8")
+    written = False
     try:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -393,9 +441,29 @@ def _poll_lock(path: Path):
             raise ValueError(
                 f"another orch poll owns {lock_path}"
             ) from None
+        if pidfile is not None:
+            _write_pidfile(pidfile)
+            written = True
         yield
     finally:
+        if written and pidfile is not None:
+            _remove_own_pidfile(pidfile)
         handle.close()
+
+
+def _write_pidfile(pidfile: Path) -> None:
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    temporary = pidfile.with_name(f".{pidfile.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    os.replace(temporary, pidfile)
+
+
+def _remove_own_pidfile(pidfile: Path) -> None:
+    try:
+        if pidfile.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            pidfile.unlink()
+    except OSError:
+        pass
 
 
 def _runtime_config(path: Path | None) -> OrchConfig:
@@ -423,6 +491,8 @@ def _quiet_stdout() -> None:
 
 
 def _job(argv: list[str]) -> int:
+    if argv[:1] == ["run"]:
+        return _job_run(argv[1:])
     parser = _Parser(prog="orch job", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     heartbeat = commands.add_parser("heartbeat")
@@ -464,6 +534,129 @@ def _job(argv: list[str]) -> int:
         return 1
     print(f"{job.state} {job.id}")
     return 0
+
+
+def _job_run(argv: list[str]) -> int:
+    prog = "orch job run"
+    if "--" in argv:
+        split = argv.index("--")
+        own, command = argv[:split], argv[split + 1 :]
+    else:
+        own, command = argv, []
+    parser = _Parser(prog=prog, add_help=True)
+    parser.add_argument("bot")
+    parser.add_argument("job_id")
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--interval", type=float)
+    parser.add_argument("--worktree", action="store_true")
+    parser.add_argument("--work-root", type=Path)
+    parser.add_argument("--git-url-template")
+    args = parser.parse_args(own)
+    if not command:
+        print(f"{prog}: pass the command to run after --", file=sys.stderr)
+        return 2
+    try:
+        database = _db_path(args.db).absolute()
+        queue = open_queue(database)
+        owned_job(queue, args.bot, args.job_id)
+        repo, head, timeout_seconds = _job_row(queue, args.job_id)
+    except WaitError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        interval = job_run.heartbeat_interval(timeout_seconds, args.interval)
+    except ValueError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
+    owner = recipient_for(args.bot)
+
+    def log(message: str) -> None:
+        print(f"{prog}: {message}", file=sys.stderr, flush=True)
+
+    def beat() -> object:
+        return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "ORCH_JOB_ID": args.job_id,
+            "ORCH_JOB_BOT": args.bot,
+            DB_ENV: str(database),
+        }
+    )
+    checkout: list[worktrees.JobCheckout] = []
+
+    def setup() -> Path | None:
+        if not args.worktree:
+            return None
+        made = worktrees.prepare(
+            worktrees.work_root(args.work_root),
+            args.job_id,
+            repo,
+            head,
+            url_template=worktrees.url_template(args.git_url_template),
+        )
+        checkout.append(made)
+        environment["ORCH_JOB_WORKTREE"] = str(made.path)
+        log(f"job worktree {made.path}")
+        return made.path
+
+    def teardown() -> None:
+        if checkout:
+            try:
+                worktrees.finish(checkout[0], log)
+            except (worktrees.WorktreeError, OSError) as exc:
+                log(f"could not remove job worktree {checkout[0].path}: {exc}")
+
+    try:
+        return job_run.run(
+            command,
+            beat=beat,
+            interval=interval,
+            log=log,
+            env=environment,
+            setup=setup,
+            teardown=teardown,
+        )
+    except worktrees.WorktreeError as exc:
+        log(str(exc))
+        return 1
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+
+
+def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int]:
+    try:
+        with queue.connect() as connection:
+            row = connection.execute(
+                "SELECT repo, head, timeout_seconds FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        raise WaitError(f"cannot read job {job_id}: {' '.join(str(exc).split())}") from exc
+    if row is None:
+        raise WaitError(f"unknown job {job_id!r}")
+    return str(row["repo"]), row["head"], int(row["timeout_seconds"])
+
+
+def _gc(argv: list[str]) -> int:
+    parser = _Parser(prog="orch gc", add_help=True)
+    parser.add_argument("--work-root", type=Path)
+    parser.add_argument("--older-than", type=float, default=worktrees.DEFAULT_GC_HOURS)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.older_than >= 0:
+        print("orch gc: --older-than must be 0 or more hours", file=sys.stderr)
+        return 2
+    root = worktrees.work_root(args.work_root)
+    problems = worktrees.gc(
+        root,
+        older_than_hours=args.older_than,
+        log=lambda message: print(message, flush=True),
+        dry_run=args.dry_run,
+    )
+    return 1 if problems else 0
 
 
 def _db_path(path: Path | None) -> Path:

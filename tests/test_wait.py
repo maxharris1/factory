@@ -461,6 +461,36 @@ def test_wait_and_job_never_exec_a_harness(tmp_path: Path) -> None:
     assert "os" not in wait_imports
 
 
+def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> None:
+    # `orch job run` wraps the owning bot's own command with a heartbeat; it
+    # never chooses, names or adds a harness binary itself.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "harness-ran"
+    for name in HARNESS_BINARIES:
+        script = bin_dir / name
+        script.write_text(f"#!/bin/sh\necho {name} >> {marker}\n", encoding="utf-8")
+        script.chmod(0o755)
+    path = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+    db, _ = make_db(tmp_path)
+    queue = SQLiteJobQueue(db, clock=time.time)
+    job = queue.enqueue(request(recipient="cursor"), dedupe_key="a")
+    assert queue.claim("cursor") is not None
+    result = run(["job", "run", "cursor-bot", job.id, "--", "true"], PATH=path, ORCH_DB=str(db))
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    for name in ("job_run.py", "worktrees.py", "cli.py"):
+        tree = ast.parse((ROOT / "lib" / name).read_text(encoding="utf-8"))
+        literals = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        assert not literals & set(HARNESS_BINARIES), name
+    # The poller side still execs nothing but gh.
+    assert _exec_calls(ROOT / "lib" / "dispatcher.py") == []
+
+
 def test_open_queue_is_f1_04s_sqlite_queue(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
     assert isinstance(open_queue(db), SQLiteJobQueue)
@@ -758,14 +788,18 @@ def test_three_handoff_skills_document_wait_heartbeat_and_done() -> None:
         assert "\n\n" not in paragraph
         assert "\n#" not in paragraph
         assert f"orch wait {bot}" in paragraph
-        assert f"orch job heartbeat {bot}" in paragraph
+        assert f"orch job run {bot} <id> --worktree -- {binary}" in paragraph
         assert f"orch job done {bot} <id> --handoff" in paragraph
         assert f"orch job done {bot} <id> --failed" in paragraph
         assert f"`{binary}` harness" in paragraph
         assert "no model tokens" in paragraph
-        assert "never starts a harness" in paragraph
-        assert "at least once every third of the job's `timeout_seconds`" in paragraph
+        assert "never chooses or starts a harness on its own" in paragraph
+        assert "every third of the job's `timeout_seconds`" in paragraph
+        assert "Do not hand-roll a heartbeat loop" in paragraph
+        assert "worktree" in paragraph and "uncommitted changes" in paragraph
         assert "every few minutes" not in paragraph
+        # The bot no longer runs its own `orch job heartbeat` loop.
+        assert f"runs `orch job heartbeat {bot}" not in paragraph
 
 
 def _readable(stream: object) -> bool:
