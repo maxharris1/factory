@@ -10,8 +10,8 @@ when configured, pushes it out. Paths:
          sections are used)
   --machines else the checkout's machines.yml, when present
 
-`snapshot` writes status.json and the four pages (index.html, activity.html,
-efficiency.html, job.html); `push` sends them all. `push --status-only`
+`snapshot` writes status.json and the four pages (index.html, job.html,
+activity.html, efficiency.html); `push` sends them all. `push --status-only`
 sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health.

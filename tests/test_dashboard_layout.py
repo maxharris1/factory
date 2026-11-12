@@ -42,7 +42,7 @@ from tests.test_dashboard import (
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html")  # nav order (#78)
 
 
 def _slots_table(connection: sqlite3.Connection) -> None:
@@ -167,7 +167,7 @@ def test_every_page_links_every_other_page(tmp_path: Path) -> None:
     pages = _pages(tmp_path)
     for name, html in pages.items():
         nav = _section(html, "nav")
-        for target in ("index.html", "activity.html", "efficiency.html"):
+        for target in PAGES:
             assert f'href="{target}"' in nav, (name, target)
 
 
@@ -461,6 +461,9 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         "state": "review",
         "path": ["intake", "questions", "building", "review", "fixing", "review"],
         "state_age_seconds": 2000,
+        # #78: the chart's direct successors of review, and review is not finished.
+        "next": ["blocked", "ship", "stuck", "fixing", "capped"],
+        "terminal": False,
     }
 
 

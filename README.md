@@ -676,7 +676,8 @@ place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
 
-**Pages.** Every page shares one bar: links to the pages, the link state
+**Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
+Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
 and a **needs attention** badge with a count that links to the Activity
 page (stuck tickets, overdue, stale or dead jobs, then paused tickets not
@@ -695,18 +696,29 @@ already listed as stuck, each once).
   how long ago it was claimed and `not started` instead of a timer and
   heartbeat bar. Stale and dead jobs count in stuck / overdue. A lane counts `max(held, running)` slots, so a slot still
   held in `device_slots` is never shown as idle (#63 FU-1). The queue sits
-  in a side rail beside the lanes with wait times. A slot or queue item
-  opens its job page.
+  in a side rail beside the lanes with wait times. Clicking a slot or a
+  queue item opens that job's flow (the same view as `job.html#job-<id>`)
+  in a modal; Esc, the close button or a click on the backdrop closes it,
+  and focus returns to the job. Without script (or with a modifier key)
+  the link goes to `job.html#job-<id>`.
 - **Job** (`job.html`, `job.html#job-<id>` for one job): every running or
-  queued job with a flow diagram of the ticket statechart, from the ticket
-  (start) to shipped: build, review, the revise loop (`fixing`), ready for
-  review (`handed-off`) and the ship states. The diagram is generated from
+  queued job with the path its ticket took, drawn left to right in the
+  order it went: one node per visit, so a ticket that was reviewed, revised
+  and reviewed again shows review, fixing, review (not a loop back). The
+  current step is highlighted in the accent and breathes (a slow glow,
+  2.6 s) unless the job is finished; `prefers-reduced-motion: reduce`
+  leaves a static highlight. It carries the job's round and time in that
+  state (`r2/3 · 33m 20s`). After it, grayed with dashed arrows, are the
+  chart's direct successors of the current state, and nothing else from the
+  chart. A state is finished when the chart has no way back to work from
+  it (no state reachable from it lies on a cycle: done, merged, post-merge,
+  handed-off and the stop states). The full statechart, with the path
+  highlighted, is behind a "full chart" toggle, collapsed by default. Both
+  are generated from
   [`model/chart.mmd`](model/chart.mmd), the chart the statechart check
   draws from `model/Orchestrator.tla` (CI fails if they differ), so a
-  change to the statechart changes the diagram; only the layout and a few
-  plain-word glosses are the dashboard's. The path the job's ticket took
-  and its current state are highlighted, with its round and time in that
-  state. The path is the start state, then the state each of the ticket's
+  change to the statechart changes them; only the layout and a few
+  plain-word glosses are the dashboard's. The path is the start state, then the state each of the ticket's
   jobs worked in (`build` is `building`, `review` is `review`, `fix` is
   `fixing`, ...), then the ticket's current workflow state; where two of
   those have no direct transition, a bridge of at most two steps through
@@ -727,7 +739,9 @@ job, which `:target` marks. With script, each page fetches the relative
 `status.json` every 1.5 seconds (`cache: 'no-store'`) and rebuilds its
 panels in place, with no reload; ages tick every second between fetches,
 rows that appear since the last snapshot flash briefly, and the job page
-copies the server-drawn diagram and moves the highlight. If `status.json`
+redraws each job's path (SVG nodes made with `createElementNS`, in the
+namespace of the server-drawn chart) and copies the server-drawn full chart
+with the highlight moved. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the
@@ -738,7 +752,8 @@ script as bytes, registered with `FontFace`, so nothing is fetched and the
 static server's CSP is unchanged; without script the system fonts are used.
 Values are only ever set as text
 (`createElement`/`textContent`), never parsed as HTML. Animations (brand
-caret, link pulse, heartbeat shimmer, new-row flash) stop under
+caret, link pulse, heartbeat shimmer, new-row flash, the current step's
+breathing) stop under
 `prefers-reduced-motion: reduce`, and every text colour meets WCAG AA
 (4.5:1) on every panel background (`tests/test_dashboard_mission_control.py`
 checks the palette). Paths: `--db`, else
@@ -786,7 +801,8 @@ of the hourly budget (1250 requests, 1,500,000 complexity).
 For the layout: each running and queued job's `tracker` (`github`,
 `linear` or `null`), `round` (its ticket's review round, `null` when the
 ticket is not tracked) and `flow` (`state`, the ticket's workflow state on
-the chart; `path`; `state_age_seconds`); `attention` (`count` and `items`,
+the chart; `path`; `state_age_seconds`; `next`, the chart's direct
+successors of `state`; `terminal`, whether `state` is finished); `attention` (`count` and `items`,
 each with `kind` `stuck`, `overdue` or `paused`); `statechart` (the parsed
 chart: `source` is the file name only, `start`, `states` with their colour
 `group`, `edges` with their labels, `legend`; `null` when the chart cannot
