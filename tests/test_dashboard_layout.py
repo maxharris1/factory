@@ -196,7 +196,7 @@ def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
         assert words.lower() not in _text(_no_script(html)).lower(), words
     # Status first, then the lanes, then the queue rail beside them.
     assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
-    assert 'class="rail' in _section(html, "queue")
+    assert _section(html, "queue").startswith('<section class="panel rail" id="queue"')
 
 
 def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
@@ -753,3 +753,19 @@ def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> Non
     assert sorted(path.name for path in site.iterdir()) == sorted(names)
     for name in PAGES:
         assert (site / name).read_text(encoding="utf-8") == (out / name).read_text(encoding="utf-8")
+
+
+def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE tracked_tickets")
+        connection.execute("DROP TABLE ticket_state")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "13")
+    assert (job["tracker"], job["round"], job["flow"]["state"]) == (None, None, None)
+    # Only a review job: intake -> review is three chart steps, more than a
+    # bridge, so it stays a jump.
+    assert job["flow"]["path"] == ["intake", "review"]
+    pages = render_pages(snapshot)
+    assert 'id="job-r-codex-"' in pages["job.html"]
+    assert "round —" in _text(_section(_no_script(pages["index.html"]), "lanes"))

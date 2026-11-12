@@ -1220,9 +1220,11 @@ def test_html_escapes_markup_from_the_database(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         add_poll_error(connection, "<script>alert(1)</script>")
-    html = render_html(collect_snapshot(db, log, now=NOW))
-    assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    pages = dashboard.render_pages(collect_snapshot(db, log, now=NOW))
+    for html in pages.values():
+        assert "<script>alert(1)</script>" not in html
+    # Poll errors are on the Efficiency page now.
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in pages["efficiency.html"]
 
 
 def test_unknown_enum_values_are_not_echoed(tmp_path: Path) -> None:

@@ -1,13 +1,14 @@
-"""Read-only, redacted dashboard snapshot (status.json plus index.html).
+"""Read-only, redacted dashboard snapshot (status.json plus four pages).
 
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
-It writes two files to an output directory, each atomically (temp file in
-the same directory, fsync, then rename): status.json and a self-contained
-index.html. The page is a live mission-control view: its inline script
-fetches status.json every 1 to 2 seconds and updates in place. Without
-script (or when status.json cannot be fetched) the server-rendered tables
-underneath reload every refresh_seconds (15 to 30), as before.
+It writes status.json and the self-contained pages (PAGES: index.html,
+activity.html, efficiency.html, job.html; see lib/dashboard_page.py) to an
+output directory, each atomically (temp file in the same directory, fsync,
+then rename). Each page's inline script fetches status.json every 1 to 2
+seconds and updates in place. Without script (or when status.json cannot
+be fetched) the server-rendered page reloads every refresh_seconds (15 to
+30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
 
 Secrets: only allowlisted columns are selected (never jobs.detail, heads,
 comment bodies or environment values; the environment is not read except
@@ -26,7 +27,6 @@ shown as "other".
 
 from __future__ import annotations
 
-import html
 import json
 import math
 import os
@@ -41,8 +41,9 @@ from pathlib import Path
 import yaml
 
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_page import CSS as PAGE_CSS
-from lib.dashboard_page import page_head, page_hud, page_script
+from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_page import PAGES, render_pages
+from lib.dashboard_page import duration as _duration
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS
@@ -83,6 +84,10 @@ HANDOFF_SAVINGS_DEFINITION = (
     "scripted_share = scripted / (scripted + bot_to_bot). The database does not "
     "record bot messages sent outside the factory, so grok wakes are the "
     "measurable stand-in for bot-to-bot handoffs."
+)
+SCRIPTED_SHARE_DEFINITION = (
+    "Scripted share is the part of handoffs a script routed straight to the "
+    "next bot, scripted / (scripted + grok wakes), rather than one bot waking another."
 )
 
 
@@ -558,9 +563,12 @@ def collect_snapshot(
     machines_path: Path | None = None,
     refresh_seconds: int = REFRESH_DEFAULT,
     last_cycle_at: float | None = None,
+    chart_path: Path | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
-    ended (the live push passes it); without it poll health is "unknown"."""
+    ended (the live push passes it); without it poll health is "unknown".
+    `chart_path` is the statechart chart the job page draws (default
+    model/chart.mmd); only its file name is copied out."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -573,10 +581,11 @@ def collect_snapshot(
         or not math.isfinite(last_cycle_at)
     ):
         raise DashboardError("last_cycle_at must be a Unix time")
+    chart = load_chart(chart_path)
     connection = open_readonly(db_path)
     try:
         connection.execute("BEGIN")
-        db = _read_db(connection, now)
+        db = _read_db(connection, now, chart)
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -635,8 +644,37 @@ def collect_snapshot(
             "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
+        "attention": _attention(db["stuck_tickets"], db["overdue_jobs"], db["paused"]),
+        "statechart": chart,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> dict:
+    """Everything that needs Max, each ticket or job once: stuck tickets,
+    overdue jobs, then paused tickets that are not already listed as stuck.
+    `count` is the badge on every page."""
+    items: list[dict] = []
+    for row in stuck:
+        detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
+        items.append({"kind": "stuck", "repo": row["repo"], "ticket_id": row["ticket_id"],
+                      "detail": detail})
+    for row in overdue:
+        items.append({
+            "kind": "overdue",
+            "repo": row["repo"],
+            "ticket_id": row["ticket_id"],
+            "detail": f"{row['recipient']} {row['action']} {row['state']}, "
+                      f"no heartbeat for {_duration(row['age_seconds'])}",
+        })
+    listed = {(row["repo"], row["ticket_id"]) for row in stuck}
+    for row in paused:
+        if (row["repo"], row["ticket_id"]) in listed:
+            continue
+        detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
+        items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
+                      "detail": detail})
+    return {"count": len(items), "items": items}
 
 
 def _poll_health(cycle_age: int | None, activity_age: int | None) -> dict:
@@ -685,7 +723,7 @@ def _handoff_kind(recipient: str, state: str, has_handoff: bool) -> str:
     return "done"
 
 
-def _read_db(connection: sqlite3.Connection, now: float) -> dict:
+def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = None) -> dict:
     tables = _tables(connection)
     jobs = "jobs" in tables
 
@@ -730,6 +768,8 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
     running: list[dict] = []
     queued: list[dict] = []
     overdue: list[dict] = []
+    # Each running or queued job's ticket as stored, to find its history.
+    active: list[tuple[dict, str, str]] = []
     box_running = 0
     if jobs:
         for row in connection.execute(
@@ -775,6 +815,7 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                     "elapsed_from": elapsed_from,
                 }
                 running.append(item)
+                active.append((item, str(row["repo"]), str(row["ticket_id"])))
                 # Like `orch status` (lib/status.py box_slots), a job holding a
                 # device-pool slot counts on its device, not on the box.
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
@@ -783,6 +824,7 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                 age = _age(now, row["created_at"]) or 0
                 item = {**base, "age_seconds": age}
                 queued.append(item)
+                active.append((item, str(row["repo"]), str(row["ticket_id"])))
             if age > timeout:
                 overdue.append({**base, "state": str(row["state"]), "age_seconds": age})
         running.sort(key=lambda item: -item["heartbeat_age_seconds"])
@@ -790,6 +832,8 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
     tickets: list[dict] = []
     stuck_tickets: list[dict] = []
     paused: list[dict] = []
+    # (repo casefolded, ticket id) as stored -> tracker, round, state.
+    ticket_info: dict[tuple[str, str], tuple[str, int, str]] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         for row in connection.execute(
             """
@@ -813,6 +857,11 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                 else None
             )
             stuck = bool(row["stuck"])
+            ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = (
+                _enum(row["tracker"], TRACKERS),
+                int(row["review_round"]),
+                state,
+            )
             tickets.append(
                 {
                     "repo": repo,
@@ -847,6 +896,8 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                         "paused_action": paused_action,
                     }
                 )
+    _add_job_tickets(connection, active, ticket_info, chart, now)
+
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
     stuck_tickets.sort(key=order)
@@ -1036,9 +1087,42 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                 round(scripted / denominator, 3) if denominator else None
             ),
             "definition": HANDOFF_SAVINGS_DEFINITION,
+            "scripted_share_definition": SCRIPTED_SHARE_DEFINITION,
             "recent": recent_handoffs,
         },
     }
+
+
+def _add_job_tickets(
+    connection: sqlite3.Connection,
+    active: list[tuple[dict, str, str]],
+    ticket_info: dict[tuple[str, str], tuple[str, int, str]],
+    chart: dict | None,
+    now: float,
+) -> None:
+    """Give each running or queued job its ticket's tracker, review round and
+    flow (current statechart state, the path its jobs took, time in state)."""
+    if not active:
+        return
+    # One read for every ticket with a running or queued job, oldest first.
+    wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
+    ids = sorted({ticket_id for _, ticket_id in wanted})
+    histories: dict[tuple[str, str], list[tuple[str, float]]] = {key: [] for key in wanted}
+    for row in connection.execute(
+        "SELECT repo, ticket_id, action, created_at FROM jobs "
+        f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
+        "ORDER BY created_at, rowid",
+        ids,
+    ):
+        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+        if key in histories:
+            histories[key].append((str(row["action"]), float(row["created_at"])))
+    for item, repo, ticket_id in active:
+        key = (repo.casefold(), ticket_id)
+        tracker, review_round, state = ticket_info.get(key, (None, None, None))
+        item["tracker"] = tracker
+        item["round"] = review_round
+        item["flow"] = job_flow(chart, histories[key], state, now)
 
 
 def _has_placeholder(value: object) -> bool:
@@ -1102,35 +1186,37 @@ def _machines(
 # --- writing --------------------------------------------------------------------
 
 
-def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
-    """Write status.json and index.html from one snapshot, as a pair.
+def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
+    """Write status.json and every page (PAGES) from one snapshot, as a set.
 
-    Both are written to temp files in the same directory and fsynced, then
-    renamed into place. If the second rename fails, status.json is put back
-    as it was (or removed if there was none), so the directory never holds
-    one file from this snapshot and one from an earlier one.
+    Each is written to a temp file in the same directory and fsynced, then
+    renamed into place, status.json first. If a later rename fails, every
+    file already renamed is put back as it was (or removed if there was
+    none), so the directory never mixes files from this snapshot with files
+    from an earlier one. Returns the paths, status.json first.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    status_path = out_dir / "status.json"
-    index_path = out_dir / "index.html"
+    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True) + "\n"}
+    texts.update(render_pages(snapshot))
+    targets = [out_dir / name for name in texts]
     temps: list[str] = []
     try:
-        status_temp = _write_temp(
-            status_path, json.dumps(snapshot, indent=2, sort_keys=True) + "\n", temps
-        )
-        index_temp = _write_temp(index_path, render_html(snapshot), temps)
-        previous = None
-        if status_path.is_file():
-            previous = _temp_name(status_path, temps, suffix=".prev")
-            shutil.copyfile(status_path, previous)
-        os.replace(status_temp, status_path)
+        staged = [_write_temp(path, texts[path.name], temps) for path in targets]
+        published: list[tuple[Path, str | None]] = []
         try:
-            os.replace(index_temp, index_path)
+            for path, temp in zip(targets, staged):
+                previous = None
+                if path.is_file():
+                    previous = _temp_name(path, temps, suffix=".prev")
+                    shutil.copyfile(path, previous)
+                os.replace(temp, path)
+                published.append((path, previous))
         except BaseException:
-            if previous is not None:
-                os.replace(previous, status_path)
-            else:
-                status_path.unlink(missing_ok=True)
+            for path, previous in reversed(published):
+                if previous is not None:
+                    os.replace(previous, path)
+                else:
+                    path.unlink(missing_ok=True)
             raise
     finally:
         for temp in temps:
@@ -1138,7 +1224,7 @@ def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
                 os.unlink(temp)
             except FileNotFoundError:
                 pass
-    return status_path, index_path
+    return tuple(targets)
 
 
 def _temp_name(path: Path, temps: list[str], *, suffix: str = ".tmp") -> str:
@@ -1160,254 +1246,18 @@ def _write_temp(path: Path, text: str, temps: list[str]) -> str:
 
 # --- rendering ----------------------------------------------------------------
 
-def _e(value: object) -> str:
-    if value is None:
-        return "—"
-    if isinstance(value, bool):
-        return "yes" if value else "no"
-    return html.escape(str(value), quote=True)
-
-
-def _duration(seconds: object) -> str:
-    if not isinstance(seconds, int):
-        return "—"
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m {seconds % 60}s"
-    if seconds < 86400:
-        return f"{seconds // 3600}h {seconds % 3600 // 60}m"
-    return f"{seconds // 86400}d {seconds % 86400 // 3600}h"
-
-
-def _table(headers: list[str], rows: list[list[str]], empty: str = "none") -> str:
-    if not rows:
-        return f'<p class="empty">{_e(empty)}</p>'
-    head = "".join(f"<th>{_e(item)}</th>" for item in headers)
-    body = "".join("<tr>" + "".join(rows_item) + "</tr>" for rows_item in rows)
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
-
-
-def _td(value: object, *, num: bool = False, bad: bool = False) -> str:
-    classes = " ".join(name for name, on in (("num", num), ("bad", bad)) if on)
-    attr = f' class="{classes}"' if classes else ""
-    return f"<td{attr}>{_e(value)}</td>"
-
 
 def render_html(snapshot: dict) -> str:
-    """A static page; every value is escaped and already redacted."""
-    totals = snapshot["queue"]["totals"]
-    savings = snapshot["handoff_savings"]
-    poller = snapshot["poller"]
-    slots = snapshot["slots"]
-    stuck_count = len(snapshot["stuck"]["tickets"]) + len(snapshot["stuck"]["overdue_jobs"])
-    share = savings["scripted_share"]
-    tiles = [
-        ("queued", totals["queued"]),
-        ("running", totals["running"]),
-        ("done", totals["done"]),
-        ("failed", totals["failed"]),
-        ("stuck / overdue", stuck_count),
-        ("scripted handoffs", savings["scripted"]),
-        ("bot-to-bot (grok wakes)", savings["bot_to_bot"]),
-        ("scripted share", "—" if share is None else f"{round(share * 100)}%"),
-        ("poller last activity", _duration(poller["last_activity_age_seconds"])),
-    ]
-    refresh = int(snapshot["refresh_seconds"])
-    parts = [
-        "<!doctype html>",
-        '<html lang="en"><head><meta charset="utf-8">',
-        # Without script the page reloads itself; with script it polls
-        # status.json and never reloads.
-        f'<noscript><meta http-equiv="refresh" content="{refresh}"></noscript>',
-        '<meta name="viewport" content="width=device-width,initial-scale=1">',
-        '<meta name="robots" content="noindex">',
-        '<meta name="color-scheme" content="dark">',
-        "<title>factory mission control</title>",
-        f"<style>{PAGE_CSS}</style></head>",
-        f'<body data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
-        f'data-refresh="{refresh}">',
-        page_head(str(snapshot["generated_at"])),
-        page_hud(),
-        '<section id="static">',
-        "<h1>factory status</h1>",
-        f'<p class="meta">snapshot {_e(snapshot["generated_at"])}; this static view '
-        f"reloads every {refresh}s (the live view polls status.json). "
-        "Read-only and redacted.</p>",
-        '<div class="tiles">',
-        *(f'<div class="tile"><b>{_e(value)}</b>{_e(label)}</div>' for label, value in tiles),
-        "</div>",
-        "<h2>Queue by recipient and action</h2>",
-        _table(
-            ["recipient", "action", "queued", "running", "done", "failed"],
-            [
-                [
-                    _td(row["recipient"]),
-                    _td(row["action"]),
-                    *(_td(row[state], num=True) for state in ("queued", "running", "done", "failed")),
-                ]
-                for row in snapshot["queue"]["by_recipient_action"]
-            ],
-            "no jobs",
-        ),
-        "<h2>Running jobs</h2>",
-        _table(
-            ["ticket", "action", "recipient", "last heartbeat", "timeout", "job"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["action"]),
-                    _td(row["recipient"]),
-                    _td(
-                        _duration(row["heartbeat_age_seconds"])
-                        + (" overdue" if row["overdue"] else ""),
-                        num=True,
-                        bad=row["overdue"],
-                    ),
-                    _td(_duration(row["timeout_seconds"]), num=True),
-                    _td(row["job"]),
-                ]
-                for row in snapshot["running"]
-            ],
-            "nothing running",
-        ),
-        "<h2>Queued jobs</h2>",
-        _table(
-            ["ticket", "action", "recipient", "waiting", "job"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["action"]),
-                    _td(row["recipient"]),
-                    _td(_duration(row["age_seconds"]), num=True),
-                    _td(row["job"]),
-                ]
-                for row in snapshot["queued"]
-            ],
-            "queue empty",
-        ),
-        "<h2>Slots</h2>",
-        f'<p>box: {_e(slots["box"]["running"])} running'
-        + (
-            f' of {_e(slots["box"]["slot_max"])} slots'
-            if slots["box"]["slot_max"] is not None
-            else ""
-        )
-        + f' · machines.yml {_e(slots["machines_yml"])}</p>',
-        _table(
-            ["device", "held", "slot max", "harnesses", "enabled", "placeholder"],
-            [
-                [
-                    _td(row["name"]),
-                    _td(row["held"], num=True),
-                    _td(row["slot_max"], num=True),
-                    _td(", ".join(row["harnesses"]) or "—"),
-                    _td(row["enabled"]),
-                    _td(row["placeholder"], bad=row["placeholder"]),
-                ]
-                for row in slots["devices"]
-            ],
-            "no device inventory",
-        ),
-        "<h2>Stuck</h2>",
-        _table(
-            ["ticket", "state", "reason"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["state"], bad=True),
-                    _td(row["reason"]),
-                ]
-                for row in snapshot["stuck"]["tickets"]
-            ],
-            "no stuck tickets",
-        ),
-        _table(
-            ["overdue job", "action", "recipient", "state", "age"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["action"]),
-                    _td(row["recipient"]),
-                    _td(row["state"]),
-                    _td(_duration(row["age_seconds"]), num=True, bad=True),
-                ]
-                for row in snapshot["stuck"]["overdue_jobs"]
-            ],
-            "no overdue jobs",
-        ),
-        "<h2>Paused</h2>",
-        _table(
-            ["ticket", "state", "paused action"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["state"]),
-                    _td(row["paused_action"]),
-                ]
-                for row in snapshot["paused"]
-            ],
-            "nothing paused",
-        ),
-        "<h2>Tickets</h2>",
-        _table(
-            ["ticket", "tracker", "state", "round", "gate count", "stuck"],
-            [
-                [
-                    _td(f"{row['repo']}#{row['ticket_id']}"),
-                    _td(row["tracker"]),
-                    _td(row["state"]),
-                    _td(row["round"], num=True),
-                    _td(row["gate_count"], num=True),
-                    _td(row["stuck"], bad=row["stuck"]),
-                ]
-                for row in snapshot["tickets"]
-            ],
-            "no tracked tickets",
-        ),
-        "<h2>Poller</h2>",
-        f'<p>poller.log: {"present" if poller["log"]["present"] else "absent"}'
-        + (
-            f', written {_duration(poller["log"]["age_seconds"])} before the snapshot'
-            if poller["log"]["present"]
-            else ""
-        )
-        + f' · poll errors: {_e(poller["errors"]["last_hour"])} in the last hour, '
-        f'{_e(poller["errors"]["last_day"])} in the last day</p>',
-        _table(
-            ["age", "repo", "ticket", "error"],
-            [
-                [
-                    _td(_duration(row["age_seconds"]), num=True),
-                    _td(row["repo"]),
-                    _td(row["ticket_id"]),
-                    _td(row["error"]),
-                ]
-                for row in poller["errors"]["recent"]
-            ],
-            "no poll errors",
-        ),
-    ]
-    if poller["deferrals"] is not None:
-        parts.append(
-            _table(
-                ["age", "deferral"],
-                [
-                    [_td(_duration(row["age_seconds"]), num=True), _td(row["detail"])]
-                    for row in poller["deferrals"]["recent"]
-                ],
-                "no deferrals",
-            )
-        )
-    parts.extend(
-        [
-            f"<h2>poller.log (last {LOG_TAIL_LINES} lines, redacted)</h2>",
-            "<pre>" + "\n".join(_e(line) for line in poller["log"]["tail"]) + "</pre>",
-            "<h2>Handoff savings</h2>",
-            f"<p>{_e(savings['definition'])}</p>",
-            "</section>",
-            f"<script>{page_script()}</script>",
-            "</body></html>",
-        ]
-    )
-    return "\n".join(parts) + "\n"
+    """The main page (index.html). Every value is escaped and already redacted."""
+    return render_pages(snapshot)["index.html"]
+
+
+__all__ = [
+    "PAGES",
+    "DashboardError",
+    "collect_snapshot",
+    "redact",
+    "render_html",
+    "render_pages",
+    "write_snapshot",
+]
