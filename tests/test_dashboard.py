@@ -476,10 +476,17 @@ def test_missing_database_is_refused_and_not_created(tmp_path: Path) -> None:
 
 
 def test_snapshot_does_not_modify_the_database(tmp_path: Path) -> None:
-    db, log = seeded(tmp_path)
+    # Measure from an idle database: seeded()'s own writer connections sit in
+    # reference cycles, and when the garbage collector closes the last one it
+    # checkpoints the WAL into orch.db, changing its bytes with no reader
+    # involved (this flaked in CI on f3ed897).
+    db = _idle_wal_db(tmp_path)
+    log = tmp_path / "poller.log"
     before = db.read_bytes()
     collect_snapshot(db, log, now=NOW)
+    gc.collect()
     assert db.read_bytes() == before
+    assert not Path(f"{db}-wal").exists() or Path(f"{db}-wal").stat().st_size == 0
 
 
 # --- JSON shape and counters ----------------------------------------------
