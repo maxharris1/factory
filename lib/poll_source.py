@@ -12,7 +12,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -34,6 +34,7 @@ from lib.github_actions import (
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
+from lib.linear_webhook import DirtyRow
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -137,6 +138,14 @@ DeferralSink = Callable[[str], None]
 TerminalSink = Callable[[str, str, str], None]
 
 
+class DirtyQueue(Protocol):
+    """The linear_dirty rows the webhook listener writes (lib/linear_webhook)."""
+
+    def pending(self) -> tuple[DirtyRow, ...]: ...
+
+    def ack(self, rows: Sequence[DirtyRow]) -> None: ...
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -210,6 +219,16 @@ class LivePollSource:
         self._linear_tracked_cursor: tuple[str, str] | None = None
         self._cycle_errors = 0
         self._cycle_deferrals: dict[str, int] = {}
+        # Linear webhook mode (orch.yml linear_webhook). With no webhook
+        # configured none of this is read and every cycle is as before.
+        self.linear_dirty: DirtyQueue | None = None
+        self.active_tickets: Callable[[], frozenset[tuple[str, str]]] | None = None
+        self._dirty: dict[str, DirtyRow] = {}
+        self._dirty_fetched: dict[str, DirtyRow] = {}
+        self._active: frozenset[tuple[str, str]] = frozenset()
+        self._webhook_full_cycle = False
+        self._last_reconcile: float | None = None
+        self._linear_documents: dict[str, tuple[float, dict[str, Any]]] = {}
         cleared = _secret_env_names(config)
         # list_comments and ci_status are polling reads: they get the same
         # short timeout, retries and backoff as every other gh read here.
@@ -250,8 +269,58 @@ class LivePollSource:
         self._linear_complexity = 0
         self._cycle_errors = 0
         self._cycle_deferrals = {}
+        if self.config.linear_webhook is not None:
+            self._begin_webhook_cycle()
+
+    def _begin_webhook_cycle(self) -> None:
+        """Snapshot the dirty queue and the tickets with active jobs.
+
+        If either cannot be read, record it and run this cycle the way a
+        poller with no webhook would: full search, every tracked read.
+        """
+        webhook = self.config.linear_webhook
+        assert webhook is not None
+        self._dirty = {}
+        self._dirty_fetched = {}
+        self._active = frozenset()
+        self._webhook_full_cycle = False
+        now = self.clock()
+        self._linear_documents = {
+            key: entry
+            for key, entry in self._linear_documents.items()
+            if now - entry[0] < 2 * webhook.reconcile_seconds
+        }
+        try:
+            rows = self.linear_dirty.pending() if self.linear_dirty is not None else ()
+            active = (
+                self.active_tickets()
+                if self.active_tickets is not None
+                else frozenset()
+            )
+        except Exception as exc:
+            self._record("linear-webhook", "-", exc)
+            self._webhook_full_cycle = True
+            return
+        self._dirty = {row.issue_id: row for row in rows}
+        self._active = frozenset((repo.lower(), ticket) for repo, ticket in active)
+
+    def _reconcile_due(self) -> bool:
+        webhook = self.config.linear_webhook
+        assert webhook is not None
+        return (
+            self._webhook_full_cycle
+            or self._last_reconcile is None
+            or self.clock() - self._last_reconcile >= webhook.reconcile_seconds
+        )
 
     def end_cycle(self) -> None:
+        if self._dirty_fetched and self.linear_dirty is not None:
+            fetched = tuple(self._dirty_fetched.values())
+            self._dirty_fetched = {}
+            try:
+                self.linear_dirty.ack(fetched)
+            except Exception as exc:
+                self._record("linear-webhook", "-", exc)
         if self._cycle_deferrals and self.deferral_sink is not None:
             self.deferral_sink(
                 "; ".join(
@@ -323,6 +392,79 @@ class LivePollSource:
         }
         if not projects:
             return ()
+        if self.config.linear_webhook is None:
+            return self._searched_candidates(projects, query, exclude, reserve)
+        found: tuple[TrackedTicket, ...] = ()
+        if self._reconcile_due():
+            errors = self._cycle_errors
+            deferrals = sum(self._cycle_deferrals.values())
+            found = self._searched_candidates(projects, query, exclude, reserve)
+            if (
+                self._cycle_errors == errors
+                and sum(self._cycle_deferrals.values()) == deferrals
+            ):
+                self._last_reconcile = self.clock()
+        return found + self._dirty_candidates(projects, exclude, reserve)
+
+    def _dirty_candidates(
+        self,
+        projects: Mapping[str, Project],
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        """Read each dirty untracked issue directly, oldest event first.
+
+        A tracked issue is left to tracked_tickets. An issue outside the
+        configured projects, completed or canceled (the search's own
+        filter), or deleted is dropped without an error and still acked.
+        """
+        tracked_reserve = min(reserve, LINEAR_TRACKED_RESERVE)
+        tracked_ids = {
+            entry[1].get("id")
+            for identifier in exclude
+            if (entry := self._linear_documents.get(identifier)) is not None
+        }
+        tickets: list[TrackedTicket] = []
+        for row in sorted(
+            self._dirty.values(),
+            key=lambda item: (item.received_at, item.issue_id),
+        ):
+            if row.identifier in exclude or row.issue_id in tracked_ids:
+                continue
+            if row.issue_id in self._linear_issue_cache or (
+                row.identifier is not None
+                and row.identifier in self._linear_issue_cache
+            ):
+                continue
+            if not self._linear_request_available(
+                LINEAR_ISSUE_QUERY,
+                reserve=tracked_reserve + LINEAR_PROCESS_HEADROOM,
+            ):
+                self._defer("Linear poll budget deferred discovery")
+                break
+            project: Project | None = None
+            try:
+                complete = self._linear_issue(row.issue_id)
+                if complete is None or complete.get("identifier") in exclude:
+                    continue
+                project = _linear_project(complete, projects)
+                if project is None or _linear_closed(complete):
+                    continue
+                ticket = self._linear_ticket(project, complete)
+                if ticket.factory.tickets == "linear":
+                    tickets.append(ticket)
+            except Exception as exc:
+                repo = project.repo if project is not None else "linear"
+                self._record(repo, row.identifier or row.issue_id, exc)
+        return tuple(tickets)
+
+    def _searched_candidates(
+        self,
+        projects: Mapping[str, Project],
+        query: str,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
         tickets: list[TrackedTicket] = []
         issues: dict[str, dict[str, Any]] = {}
         terms = _linear_terms(query)
@@ -423,15 +565,17 @@ class LivePollSource:
             try:
                 if ref.tracker == "linear":
                     cached = ref.ticket_id in self._linear_issue_cache
-                    if not cached and not self._linear_request_available(
-                        LINEAR_ISSUE_QUERY,
-                        reserve=LINEAR_PROCESS_HEADROOM,
-                    ):
-                        self._defer("Linear poll budget deferred tracked ticket")
-                        continue
-                    if not cached:
-                        self._linear_tracked_cursor = _linear_ref_key(ref)
-                    issue = self._linear_issue(ref.ticket_id)
+                    issue = None if cached else self._reusable_linear_issue(ref)
+                    if issue is None:
+                        if not cached and not self._linear_request_available(
+                            LINEAR_ISSUE_QUERY,
+                            reserve=LINEAR_PROCESS_HEADROOM,
+                        ):
+                            self._defer("Linear poll budget deferred tracked ticket")
+                            continue
+                        if not cached:
+                            self._linear_tracked_cursor = _linear_ref_key(ref)
+                        issue = self._linear_issue(ref.ticket_id)
                     if issue is None:
                         raise PollSourceError("Linear issue was not found")
                     if not _matches_linear_project(issue, project):
@@ -456,6 +600,34 @@ class LivePollSource:
                     continue
                 self._record(ref.repo, ref.ticket_id, exc)
         return tuple(found)
+
+    def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
+        """Webhook mode: the last direct read of a clean tracked ticket.
+
+        None (read it now) with no webhook, on a full cycle, when there is no
+        read yet or it is reconcile_seconds old, when the ticket has a queued
+        or running job, or when it is dirty. The ticket is still rebuilt
+        from that read every cycle, so its GitHub PR head, CI and PR
+        comments stay current.
+        """
+        webhook = self.config.linear_webhook
+        if webhook is None or self._webhook_full_cycle:
+            return None
+        entry = self._linear_documents.get(ref.ticket_id)
+        if entry is None:
+            return None
+        fetched_at, issue = entry
+        if self.clock() - fetched_at >= webhook.reconcile_seconds:
+            return None
+        if (ref.repo.lower(), ref.ticket_id) in self._active:
+            return None
+        issue_id = issue.get("id")
+        if any(
+            row.identifier == ref.ticket_id or row.issue_id == issue_id
+            for row in self._dirty.values()
+        ):
+            return None
+        return issue
 
     def fresh_ticket(self, ref: TicketRef) -> TrackedTicket | None:
         project = next(
@@ -568,6 +740,7 @@ class LivePollSource:
         value = _object(document.get("data"), "Linear data").get("issue")
         if value is None:
             self._linear_issue_cache[identifier] = None
+            self._note_linear_read(identifier, None)
             return None
         issue = _object(value, "Linear issue")
         self._linear_issue_cache[identifier] = issue
@@ -575,7 +748,30 @@ class LivePollSource:
             alias = issue.get(key)
             if isinstance(alias, str) and alias:
                 self._linear_issue_cache[alias] = issue
+        self._note_linear_read(identifier, issue)
         return issue
+
+    def _note_linear_read(
+        self,
+        requested: str,
+        issue: dict[str, Any] | None,
+    ) -> None:
+        """Webhook mode: keep the read for reuse and mark its dirty rows read."""
+        if self.config.linear_webhook is None:
+            return
+        keys = {requested}
+        if issue is not None:
+            keys.update(
+                alias
+                for alias in (issue.get("id"), issue.get("identifier"))
+                if isinstance(alias, str) and alias
+            )
+            entry = (self.clock(), issue)
+            for key in keys:
+                self._linear_documents[key] = entry
+        for row in self._dirty.values():
+            if row.issue_id in keys or row.identifier in keys:
+                self._dirty_fetched[row.issue_id] = row
 
     def _linear_request(self, document: Mapping[str, object]) -> dict[str, Any]:
         if self.clock() < self._linear_backoff_until:
@@ -1197,6 +1393,22 @@ def _matches_linear_project(issue: Mapping[str, Any], project: Project) -> bool:
         return False
     value = _object(issue.get("project"), "Linear issue project")
     return configured == value.get("id")
+
+
+def _linear_project(
+    issue: Mapping[str, Any],
+    projects: Mapping[str, Project],
+) -> Project | None:
+    value = issue.get("project")
+    if not isinstance(value, dict):
+        return None
+    project_id = value.get("id")
+    return projects.get(project_id) if isinstance(project_id, str) else None
+
+
+def _linear_closed(issue: Mapping[str, Any]) -> bool:
+    state = issue.get("state")
+    return isinstance(state, dict) and state.get("type") in ("completed", "canceled")
 
 
 def _optional_string(value: object) -> str | None:

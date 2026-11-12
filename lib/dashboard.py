@@ -39,6 +39,7 @@ import yaml
 
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.handoff import STATES as WORKFLOW_STATES
+from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES
@@ -601,6 +602,12 @@ def collect_snapshot(
             "last_activity_age_seconds": _age(now, max(activity)) if activity else None,
             "errors": db["errors"],
             "deferrals": db["deferrals"],
+            # Only when a Linear webhook listener has run on this database.
+            **(
+                {"linear_webhook": db["linear_webhook"]}
+                if db["linear_webhook"] is not None
+                else {}
+            ),
         },
         "handoff_savings": db["handoff_savings"],
     }
@@ -793,6 +800,19 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
+    linear_webhook = None
+    health = read_health(connection)
+    if health is not None:
+        linear_webhook = {
+            "last_received_age_seconds": _age(now, health.last_received_at),
+            "last_event": (
+                _clean(health.last_event, 64) if health.last_event is not None else None
+            ),
+            "listener_age_seconds": _age(now, health.started_at),
+            "dirty": health.dirty,
+            "warning": health.silence_warning(now),
+        }
+
     scripted = in_flight = bot_to_bot = 0
     if jobs:
         marks = ",".join("?" for _ in WAIT_RECIPIENTS)
@@ -829,6 +849,7 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
         "newest_error_at": newest_error_at,
         "deferrals": deferrals,
         "newest_deferral_at": newest_deferral_at,
+        "linear_webhook": linear_webhook,
         "held": held,
         "handoff_savings": {
             "scripted": scripted,
@@ -1218,6 +1239,21 @@ def render_html(snapshot: dict) -> str:
                 "no deferrals",
             )
         )
+    webhook = poller.get("linear_webhook")
+    if webhook is not None:
+        if webhook["last_received_age_seconds"] is not None:
+            received = (
+                f'{_duration(webhook["last_received_age_seconds"])} ago'
+                + (f' ({webhook["last_event"]})' if webhook["last_event"] else "")
+            )
+        else:
+            received = "never"
+        parts.append("<h2>Linear webhook</h2>")
+        parts.append(
+            f"<p>last received {_e(received)} · dirty queue {_e(webhook['dirty'])}</p>"
+        )
+        if webhook["warning"] is not None:
+            parts.append(f'<p class="bad">warning: {_e(webhook["warning"])}</p>')
     parts.extend(
         [
             f"<h2>poller.log (last {LOG_TAIL_LINES} lines, redacted)</h2>",

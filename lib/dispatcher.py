@@ -2443,6 +2443,24 @@ class Dispatcher:
             for row in rows
         )
 
+    def active_job_tickets(self) -> frozenset[tuple[str, str]]:
+        """(repo, ticket) pairs with a queued or running job, repo lowercased.
+
+        Only the Linear webhook poller reads this: those tickets are reread
+        in full every cycle (docs/SPEC.md section 7).
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT repo, ticket_id
+                FROM jobs
+                WHERE state IN ('queued', 'running')
+                """
+            ).fetchall()
+        return frozenset(
+            (str(row["repo"]).lower(), str(row["ticket_id"])) for row in rows
+        )
+
     def _tracked_linear_ids(self) -> frozenset[str]:
         with self._connect() as connection:
             rows = connection.execute(

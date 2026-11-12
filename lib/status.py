@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from lib.device_pool import SLOTS_TABLE
+from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,6 +70,8 @@ class Status:
     devices: tuple[DeviceRow, ...]
     paused: tuple[TrackerRow, ...]
     device_jobs: Mapping[str, tuple[JobRow, ...]] = field(default_factory=dict)
+    # Only when a Linear webhook listener has run on this database (#55).
+    webhook: WebhookHealth | None = None
 
 
 class TrackerReader(Protocol):
@@ -103,6 +106,13 @@ class SQLiteStatusReader:
         for device in self.placements().values():
             counts[device] = counts.get(device, 0) + 1
         return counts
+
+    def webhook_health(self) -> WebhookHealth | None:
+        connection = self._connect()
+        try:
+            return read_health(connection)
+        finally:
+            connection.close()
 
     def _rows(
         self,
@@ -243,6 +253,7 @@ def build_status(
     clock: Callable[[], float] = time.time,
     devices: Sequence[DeviceRow] = (),
     placements: Mapping[str, str] | None = None,
+    webhook: WebhookHealth | None = None,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device; only running
@@ -273,6 +284,7 @@ def build_status(
                 key=lambda row: (row.created_at, row.id),
             )
         ),
+        webhook=webhook,
         box_slots=tuple(row for row in running if row.id not in placed),
         devices=tuple(devices),
         device_jobs=device_jobs,
@@ -335,10 +347,32 @@ def render(status: Status) -> str:
         )
     if not status.paused:
         lines.append("  empty")
+    if status.webhook is not None:
+        lines.extend(("", "Linear webhook"))
+        lines.append(_webhook_line(status.webhook, status.observed_at))
+        warning = status.webhook.silence_warning(status.observed_at)
+        if warning is not None:
+            lines.append(f"  warning: {warning}")
     return "\n".join(lines) + "\n"
 
 
-def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout) -> int:
+def _webhook_line(health: WebhookHealth, observed_at: float) -> str:
+    if health.last_received_at is not None:
+        event = f" ({health.last_event})" if health.last_event else ""
+        received = f"{_age(observed_at, health.last_received_at)} ago{event}"
+    elif health.started_at is not None:
+        received = f"never (listener started {_age(observed_at, health.started_at)} ago)"
+    else:
+        received = "never"
+    return f"  last received {received}, dirty queue {health.dirty}"
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdout: TextIO = sys.stdout,
+    clock: Callable[[], float] = time.time,
+) -> int:
     parser = argparse.ArgumentParser(prog="orch status")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--machines", type=Path, default=ROOT / "machines.yml")
@@ -363,6 +397,8 @@ def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout) -> int:
                 reader,
                 devices=device_rows(machines, reader.slot_counts()),
                 placements=reader.placements(),
+                clock=clock,
+                webhook=reader.webhook_health(),
             )
         )
     except (sqlite3.Error, StatusError) as exc:

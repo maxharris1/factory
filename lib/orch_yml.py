@@ -8,6 +8,7 @@ refused so v1 stays closed.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,11 +23,17 @@ from lib.load import Finding, is_strict_int, load_yaml
 POLL_SECONDS = 60
 DEFAULT_JOB_TIMEOUT_MINUTES = 60
 DEFAULT_WEBHOOK_AUTH_ENV = "FACTORY_WEBHOOK_AUTH"
+DEFAULT_LINEAR_WEBHOOK_PATH = "/linear-webhook"
+DEFAULT_LINEAR_RECONCILE_SECONDS = 900
+LINEAR_RECONCILE_MIN_SECONDS = 60
+LINEAR_RECONCILE_MAX_SECONDS = 3600
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_URL_PATH = re.compile(r"^(?:/[A-Za-z0-9._~-]+)+$")
+_BIND = re.compile(r"^(?:\[(?P<v6>[0-9A-Fa-f:.]+)\]|(?P<v4>[0-9.]+)):(?P<port>[0-9]{1,5})$")
 _TOP_KEYS = {
     "poll_seconds",
     "job_timeout",
@@ -36,7 +43,9 @@ _TOP_KEYS = {
     "trusted_logins",
     "trusted_linear_users",
     "dashboard",
+    "linear_webhook",
 }
+_LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds"}
 _PROJECT_KEYS = {
     "repo",
     "job_timeout",
@@ -74,6 +83,23 @@ class GrokConfig:
 
 
 @dataclass(frozen=True)
+class LinearWebhookConfig:
+    """Inbound Linear webhook listener (issue #55). Absent means no webhook.
+
+    secret_file names the signing-secret file; check-config never reads it.
+    reconcile_seconds is how often the poller still runs the full discovery
+    search and rereads every tracked ticket, so a missed webhook costs at
+    most one interval.
+    """
+
+    host: str
+    port: int
+    secret_file: Path
+    path: str = DEFAULT_LINEAR_WEBHOOK_PATH
+    reconcile_seconds: int = DEFAULT_LINEAR_RECONCILE_SECONDS
+
+
+@dataclass(frozen=True)
 class OrchConfig:
     poll_seconds: int
     projects: tuple[Project, ...]
@@ -87,6 +113,7 @@ class OrchConfig:
         default_factory=lambda: MappingProxyType({})
     )
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    linear_webhook: LinearWebhookConfig | None = None
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -145,6 +172,18 @@ def _validate(
     trusted_logins = _trusted_logins(data, findings)
     trusted_linear_users = _trusted_linear_users(data, findings)
     dashboard = parse_dashboard(data.get("dashboard"), findings)
+    linear_webhook = _linear_webhook(data, findings)
+    if (
+        "linear_webhook" in data
+        and projects is not None
+        and not any(project.linear_project_id is not None for project in projects)
+    ):
+        findings.append(
+            Finding(
+                "error",
+                "linear_webhook requires a project with linear_project_id",
+            )
+        )
     if (
         projects is not None
         and any(project.linear_project_id is not None for project in projects)
@@ -169,6 +208,7 @@ def _validate(
             trusted_logins=MappingProxyType(trusted_logins),
             trusted_linear_users=MappingProxyType(trusted_linear_users),
             dashboard=dashboard or DashboardConfig(),
+            linear_webhook=linear_webhook,
         ),
         findings,
     )
@@ -361,6 +401,84 @@ def _linear(data: dict, findings: list[Finding]) -> LinearConfig | None:
     _unknown_keys(value, {"api_key_env"}, "linear", findings)
     name = _env_name(value.get("api_key_env"), "linear.api_key_env", findings)
     return LinearConfig(name) if name is not None else None
+
+
+def parse_bind(value: object) -> tuple[str, int] | None:
+    """`127.0.0.1:8787` or `[::1]:8787`: an IP literal and a port 1-65535."""
+    if not isinstance(value, str):
+        return None
+    match = _BIND.fullmatch(value)
+    if match is None:
+        return None
+    host = match.group("v6") or match.group("v4")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if (address.version == 6) != (match.group("v6") is not None):
+        return None
+    port = int(match.group("port"))
+    if not 1 <= port <= 65535:
+        return None
+    return str(address), port
+
+
+def _linear_webhook(
+    data: dict,
+    findings: list[Finding],
+) -> LinearWebhookConfig | None:
+    if "linear_webhook" not in data:
+        return None
+    value = data["linear_webhook"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "linear_webhook must be a mapping"))
+        return None
+    start = len(findings)
+    _unknown_keys(value, _LINEAR_WEBHOOK_KEYS, "linear_webhook", findings)
+    bind = parse_bind(value.get("bind"))
+    if bind is None:
+        findings.append(
+            Finding("error", "linear_webhook.bind must be host:port")
+        )
+    secret = value.get("secret_file")
+    secret_file: Path | None = None
+    if isinstance(secret, str) and secret.strip():
+        candidate = Path(secret).expanduser()
+        if candidate.is_absolute():
+            secret_file = candidate
+    if secret_file is None:
+        findings.append(
+            Finding("error", "linear_webhook.secret_file must be an absolute path")
+        )
+    path = value.get("path", DEFAULT_LINEAR_WEBHOOK_PATH)
+    if not isinstance(path, str) or _URL_PATH.fullmatch(path) is None:
+        findings.append(
+            Finding("error", "linear_webhook.path must be an absolute URL path")
+        )
+    reconcile = value.get("reconcile_seconds", DEFAULT_LINEAR_RECONCILE_SECONDS)
+    if (
+        not is_strict_int(reconcile)
+        or not LINEAR_RECONCILE_MIN_SECONDS
+        <= reconcile
+        <= LINEAR_RECONCILE_MAX_SECONDS
+    ):
+        findings.append(
+            Finding(
+                "error",
+                "linear_webhook.reconcile_seconds must be an integer "
+                f"from {LINEAR_RECONCILE_MIN_SECONDS} to "
+                f"{LINEAR_RECONCILE_MAX_SECONDS}",
+            )
+        )
+    if len(findings) > start or bind is None or secret_file is None:
+        return None
+    return LinearWebhookConfig(
+        host=bind[0],
+        port=bind[1],
+        secret_file=secret_file,
+        path=str(path),
+        reconcile_seconds=int(reconcile),
+    )
 
 
 def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
