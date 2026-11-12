@@ -167,3 +167,57 @@ def test_only_get_and_head_are_answered(site: Path, get, method: str) -> None:
     status, _, _ = get("/status.json", method=method)
     assert status in (405, 501)
     assert (site / "status.json").read_text(encoding="utf-8") == STATUS
+
+
+def _fetch(port: int, path: str) -> tuple[int, bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
+def test_root_stays_pinned_when_an_ancestor_is_swapped_for_a_symlink(tmp_path: Path) -> None:
+    """The directory is opened once at startup and every file is opened
+    relative to that handle, so renaming an ancestor and putting a symlink
+    in its place after startup does not change what is served (r2 F2.3)."""
+    parent = tmp_path / "parent"
+    site = parent / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(INDEX, encoding="utf-8")
+    (site / "status.json").write_text(STATUS, encoding="utf-8")
+    decoy = tmp_path / "decoy" / "site"
+    decoy.mkdir(parents=True)
+    (decoy / "index.html").write_text(PRIVATE, encoding="utf-8")
+    (decoy / "status.json").write_text(PRIVATE, encoding="utf-8")
+
+    server = server_module.make_server("127.0.0.1", 0, site)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        assert _fetch(port, "/status.json") == (200, STATUS.encode())
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(tmp_path / "decoy", target_is_directory=True)
+        for path in ("/status.json", "/"):
+            status, body = _fetch(port, path)
+            assert PRIVATE.encode() not in body, path
+            assert status == 200, path
+        assert _fetch(port, "/status.json") == (200, STATUS.encode())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_server_refuses_a_root_that_is_a_symlink(tmp_path: Path) -> None:
+    # The root is opened (O_NOFOLLOW) once, when the server is made, so a
+    # bad root fails at startup instead of 404ing every request.
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(OSError):
+        server_module.make_server("127.0.0.1", 0, link)

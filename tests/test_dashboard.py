@@ -85,6 +85,40 @@ ENCODED_SAMPLES = {
     ),
 }
 KEY_BLOCK_LINES = [f"loaded {KEY_BEGIN}", KEY_BODY, KEY_LAST, f"{KEY_END} done"]
+# Review r2 (F2.1): an encoded separator (space, semicolon, quote) inside a
+# secret value. Decoding first used to cut the value at the decoded
+# separator, so the tail after it leaked. Each tail is short and digit-poor,
+# so no other rule catches it. Every row leaks at 4c8910e.
+TINY = "Tiny" + "Secret7"
+SPLIT_SAMPLES = {
+    "percent space in a bare value": (TINY + "a", "password=abc%20" + TINY + "a"),
+    "percent semicolon in a bare value": (TINY + "b", "token=abc%3B" + TINY + "b"),
+    "percent quote in a quoted value": (TINY + "c", 'password="prefix%22' + TINY + 'c"'),
+    "escaped quote in a JSON value": (TINY + "d", '{"password":"ab\\"' + TINY + 'd"}'),
+    "percent space in a URL query": (TINY + "e", "https://h/x?password=a%20" + TINY + "e"),
+    "encoded key, percent space": (TINY + "f", "password%3Dabc%20" + TINY + "f"),
+    "double-encoded space": (TINY + "h", "password=abc%2520" + TINY + "h"),
+    "escaped JSON inside JSON, escaped quote": (
+        TINY + "k",
+        '{\\"password\\":\\"ab\\\\\\"' + TINY + 'k\\"}',
+    ),
+}
+# Preservation guards: the same class, but already fully hidden at 4c8910e
+# (the decoded value is a whole quoted string, or a header to end of line).
+SPLIT_GUARDS = {
+    "encoded key, quoted value with a space": (
+        TINY + "g",
+        "password%3D%22abc " + TINY + "g%22",
+    ),
+    "encoded auth header": (TINY + "j", "Authorization%3A%20Bearer%20abc%20" + TINY + "j"),
+}
+# Review r2 (F2.2): a key block whose markers are percent- or
+# JSON-escaped, logged across lines, with a short body line.
+PCT_KEY_BEGIN = "-----BEGIN%20" + "PRIVATE%20KEY-----"
+PCT_KEY_END = "-----END%20" + "PRIVATE%20KEY-----"
+ESC_KEY_BEGIN = "-----BEGIN\\u0020" + "PRIVATE\\u0020KEY-----"
+ESC_KEY_END = "-----END\\u0020" + "PRIVATE\\u0020KEY-----"
+PCT_KEY_BODY = "ZW5j" + "b2Rl"
 
 FREE_TEXT_SECRETS = {
     "webhook url": WEBHOOK_URL,
@@ -102,6 +136,9 @@ FREE_TEXT_SECRETS = {
     **{name: secret for name, (secret, _) in ENCODED_SAMPLES.items()},
     "private key body": KEY_BODY,
     "private key last line": KEY_LAST,
+    **{name: secret for name, (secret, _) in SPLIT_SAMPLES.items()},
+    **{name: secret for name, (secret, _) in SPLIT_GUARDS.items()},
+    "encoded private key body": PCT_KEY_BODY,
 }
 # Never selected (env), never on the allowlist (jobs.detail), or an
 # enumerated field whose unknown values show as "other" (workflow_state).
@@ -627,7 +664,9 @@ devices:
     )
     slots = collect_snapshot(db, log, now=NOW, machines_path=machines)["slots"]
     assert slots["machines_yml"] == "present"
-    assert slots["box"] == {"running": 2, "slot_max": 3}
+    # r-codex-review holds a device-pool slot, so only the unplaced running
+    # job counts as a box job (F2.4).
+    assert slots["box"] == {"running": 1, "slot_max": 3}
     assert slots["devices"] == [
         {
             "name": "box",
@@ -655,6 +694,75 @@ def test_invalid_machines_yml_degrades(tmp_path: Path) -> None:
     slots = snapshot_for(tmp_path, machines_path=machines)["slots"]
     assert slots["machines_yml"] == "invalid"
     assert slots["devices"] == []
+
+
+def _place(db: Path, job_id: str, device: str) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS device_slots (job_id TEXT PRIMARY KEY, "
+            "device TEXT, harness TEXT, os_user TEXT, placed_at REAL)"
+        )
+        connection.execute(
+            "INSERT INTO device_slots VALUES (?, ?, 'codex', 'codex-bot', ?)",
+            (job_id, device, NOW),
+        )
+
+
+def test_box_running_counts_only_jobs_not_placed_on_a_device(tmp_path: Path) -> None:
+    # Like `orch status` (lib/status.py box_slots): a running job that holds
+    # a device-pool slot is counted on its device, not on the box.
+    db, log = seeded(tmp_path)
+    _place(db, "r-codex-review", "pc")
+    slots = collect_snapshot(db, log, now=NOW)["slots"]
+    assert slots["box"]["running"] == 1
+
+
+def test_a_slot_left_on_a_finished_job_does_not_change_the_box_count(tmp_path: Path) -> None:
+    # Preservation guard: only running jobs are counted, placed or not.
+    db, log = seeded(tmp_path)
+    _place(db, "d-claude-build-1", "pc")
+    slots = collect_snapshot(db, log, now=NOW)["slots"]
+    assert slots["box"]["running"] == 2
+
+
+def test_collect_snapshot_reads_every_table_in_one_transaction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A writer that commits between two of the snapshot's queries is not seen.
+
+    The writer commits right after the first query (the table list), so
+    without collect_snapshot's BEGIN the job, queue, error and savings
+    queries would each see the new rows.
+    """
+    db = _idle_wal_db(tmp_path)
+    writer = sqlite3.connect(db)
+    real_tables = dashboard._tables
+    commits: list[str] = []
+
+    def tables_then_a_concurrent_commit(connection: sqlite3.Connection) -> set[str]:
+        names = real_tables(connection)
+        add_job(writer, "late-running", state="running", recipient="claude", ticket_id="77")
+        add_poll_error(writer, "late error", recorded_at=NOW - 1)
+        writer.commit()
+        commits.append("late")
+        return names
+
+    monkeypatch.setattr(dashboard, "_tables", tables_then_a_concurrent_commit)
+    try:
+        snapshot = collect_snapshot(db, tmp_path / "poller.log", now=NOW)
+    finally:
+        writer.close()
+    assert commits == ["late"]
+    with sqlite3.connect(db) as check:
+        (running,) = check.execute(
+            "SELECT count(*) FROM jobs WHERE state = 'running'"
+        ).fetchone()
+    assert running == 3
+    assert snapshot["queue"]["totals"]["running"] == 2
+    assert len(snapshot["running"]) == 2
+    assert snapshot["handoff_savings"]["scripted_in_flight"] == 2
+    assert snapshot["poller"]["errors"]["last_hour"] == 1
+    assert "late error" not in [item["error"] for item in snapshot["poller"]["errors"]["recent"]]
 
 
 # --- refresh ----------------------------------------------------------------
@@ -706,21 +814,44 @@ def test_snapshot_caps_lines_after_redaction(tmp_path: Path) -> None:
 # --- redaction ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name,secret", sorted(FREE_TEXT_SECRETS.items()))
-def test_redact_removes_each_secret_shape(name: str, secret: str) -> None:
-    samples = [
-        f"error posting to {WEBHOOK_URL}",
-        f"fetch {CRED_URL} failed",
-        f"Authorization: Bearer {BEARER_TOKEN}",
-        f"gh failed token={GH_CLASSIC}",
-        f"oauth {GH_OAUTH} server {GH_SERVER}",
-        f"pat {GH_PAT}",
-        f"linear {LINEAR_KEY}",
-        f"mail from {EMAIL}",
-        f"FACTORY_WEBHOOK_KEY={KEY_VALUE}",
-    ]
-    for sample in samples:
-        assert secret not in redact(sample), name
+# One sample per shape, so no row passes because its secret was never in
+# the input (the r2 weak-test note). The JSON, encoded, split and key-block
+# shapes have their own tests below.
+SHAPE_SAMPLES = {
+    "webhook url": (WEBHOOK_URL, f"error posting to {WEBHOOK_URL}"),
+    "webhook path secret": (WEBHOOK_SECRET, f"error posting to {WEBHOOK_URL}"),
+    "url password": (CRED_PASSWORD, f"fetch {CRED_URL} failed"),
+    "bearer token": (BEARER_TOKEN, f"Authorization: Bearer {BEARER_TOKEN}"),
+    "bearer token, no header": (BEARER_TOKEN, f"sent Bearer {BEARER_TOKEN} upstream"),
+    "gh classic token": (GH_CLASSIC, f"gh failed token={GH_CLASSIC}"),
+    "gh classic token, bare": (GH_CLASSIC, f"gh rejected {GH_CLASSIC}"),
+    "gh oauth token": (GH_OAUTH, f"oauth {GH_OAUTH} server {GH_SERVER}"),
+    "gh server token": (GH_SERVER, f"oauth {GH_OAUTH} server {GH_SERVER}"),
+    "gh fine-grained pat": (GH_PAT, f"pat {GH_PAT}"),
+    "linear key": (LINEAR_KEY, f"linear {LINEAR_KEY}"),
+    "email": (EMAIL, f"mail from {EMAIL}"),
+    "key=value secret": (KEY_VALUE, f"FACTORY_WEBHOOK_KEY={KEY_VALUE}"),
+}
+
+
+def test_every_base_secret_shape_has_a_sample() -> None:
+    base = {
+        name
+        for name in FREE_TEXT_SECRETS
+        if name not in JSON_SAMPLES
+        and name not in ENCODED_SAMPLES
+        and name not in SPLIT_SAMPLES
+        and name not in SPLIT_GUARDS
+        and "private key" not in name
+    }
+    assert base <= set(SHAPE_SAMPLES)
+
+
+@pytest.mark.parametrize("name", sorted(SHAPE_SAMPLES))
+def test_redact_removes_each_secret_shape(name: str) -> None:
+    secret, sample = SHAPE_SAMPLES[name]
+    assert secret in sample, name
+    assert secret not in redact(sample), name
 
 
 @pytest.mark.parametrize(
@@ -757,6 +888,95 @@ def test_redact_keeps_json_key_names() -> None:
 def test_redact_removes_encoded_urls_and_credentials(name: str) -> None:
     secret, sample = ENCODED_SAMPLES[name]
     assert secret not in redact(sample), name
+
+
+@pytest.mark.parametrize("name", sorted(SPLIT_SAMPLES))
+def test_redact_never_cuts_a_secret_value_at_an_encoded_separator(name: str) -> None:
+    secret, sample = SPLIT_SAMPLES[name]
+    assert secret in sample, name
+    text = redact(sample)
+    assert TINY not in text, (name, text)
+    assert "Secret7" not in text, (name, text)
+
+
+@pytest.mark.parametrize("name", sorted(SPLIT_GUARDS))
+def test_redact_keeps_hiding_values_split_by_a_decoded_separator(name: str) -> None:
+    # Preservation guard (passes at 4c8910e too).
+    secret, sample = SPLIT_GUARDS[name]
+    assert secret in sample, name
+    text = redact(sample)
+    assert "Tiny" not in text and "Secret7" not in text, (name, text)
+
+
+def test_redact_hides_the_whole_value_and_keeps_the_key_name() -> None:
+    assert redact(SPLIT_SAMPLES["percent space in a bare value"][1]) == "password=[redacted]"
+    assert redact(SPLIT_SAMPLES["percent semicolon in a bare value"][1]) == "token=[redacted]"
+    assert redact(SPLIT_SAMPLES["escaped quote in a JSON value"][1]) == '{"password":[redacted]}'
+    # The key is only visible once decoded: the encoded key stays, the
+    # whole raw value after it goes.
+    assert redact(SPLIT_SAMPLES["encoded key, percent space"][1]) == "password%3D[redacted]"
+
+
+SPLIT_PREFIXES = [
+    "password=abc",
+    "token=abc",
+    "api_key: abc",
+    '{"password":"abc',
+    "{'secret': 'abc",
+    "https://h/x?password=a",
+    "password%3Dabc",
+    "client_secret%3D%22abc",
+    '{\\"token\\":\\"abc',
+]
+SPLIT_SEPARATORS = [
+    "%20",
+    "%3B",
+    "%3b",
+    "%22",
+    "%27",
+    "%2C",
+    "%7D",
+    "%5D",
+    "%0A",
+    "%09",
+    "%2520",
+    "%25253B",
+    "+%20",
+    "\\u0020",
+    "\\u003b",
+    "\\u0022",
+    '\\"',
+    "\\'",
+    "\\/%20",
+]
+
+
+def test_no_encoded_separator_cuts_any_secret_value_short() -> None:
+    """Decoding may widen what is redacted, never narrow it (F2.1 as a class)."""
+    leaks = []
+    for prefix in SPLIT_PREFIXES:
+        for separator in SPLIT_SEPARATORS:
+            sample = f"poll failed: {prefix}{separator}{TINY} (retry 3)"
+            text = redact(sample)
+            if "Tiny" in text or "Secret7" in text:
+                leaks.append((sample, text))
+    assert leaks == []
+
+
+def test_redact_keeps_encoded_ordinary_text_as_written() -> None:
+    # The decoded form is only used to find secrets; what is shown is the
+    # original text with the secrets cut out.
+    assert redact("fetch path%2Fto%2Ffile ok") == "fetch path%2Fto%2Ffile ok"
+    assert redact("password%3Dabc%20" + TINY + " then ok") == "password%3D[redacted] then ok"
+
+
+def test_redact_is_stable_when_run_twice() -> None:
+    samples = [sample for _, sample in [*SPLIT_SAMPLES.values(), *SPLIT_GUARDS.values()]]
+    samples += [sample for _, sample in ENCODED_SAMPLES.values()]
+    samples += [sample for _, sample in JSON_SAMPLES.values()]
+    for sample in samples:
+        once = redact(sample)
+        assert redact(once) == once, sample
 
 
 def test_redact_removes_a_private_key_block_in_one_string() -> None:
@@ -806,10 +1026,48 @@ def test_snapshot_log_tail_redacts_a_key_block_across_lines(tmp_path: Path) -> N
     assert tail == ["[redacted-key-block]"] * 3 + ["ok"]
 
 
+def test_percent_encoded_key_block_spanning_log_lines_is_removed() -> None:
+    lines = ["before", f"loaded {PCT_KEY_BEGIN}", PCT_KEY_BODY, f"{PCT_KEY_END} done", "after"]
+    assert dashboard.redact_key_blocks(lines) == [
+        "before",
+        "loaded [redacted-key-block]",
+        "[redacted-key-block]",
+        "[redacted-key-block] done",
+        "after",
+    ]
+
+
+def test_json_escaped_key_block_spanning_log_lines_is_removed() -> None:
+    lines = [ESC_KEY_BEGIN, PCT_KEY_BODY, ESC_KEY_END, "after"]
+    assert dashboard.redact_key_blocks(lines) == ["[redacted-key-block]"] * 3 + ["after"]
+
+
+def test_encoded_key_block_whose_begin_scrolled_out_is_removed() -> None:
+    lines = [PCT_KEY_BODY, f"{PCT_KEY_END} tail", "after"]
+    assert dashboard.redact_key_blocks(lines) == [
+        "[redacted-key-block]",
+        "[redacted-key-block] tail",
+        "after",
+    ]
+
+
+def test_snapshot_log_tail_redacts_an_encoded_key_block_across_lines(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    log.write_text(
+        "\n".join([PCT_KEY_BEGIN, PCT_KEY_BODY, PCT_KEY_END, "ok"]) + "\n", encoding="utf-8"
+    )
+    tail = collect_snapshot(db, log, now=NOW)["poller"]["log"]["tail"]
+    assert PCT_KEY_BODY not in json.dumps(tail)
+    assert tail == ["[redacted-key-block]"] * 3 + ["ok"]
+
+
 # --- the leak test ----------------------------------------------------------
 
 
 def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    # Show every planted row, so none drops out of the recent-N windows.
+    monkeypatch.setattr(dashboard, "RECENT_ERRORS", 200)
+    monkeypatch.setattr(dashboard, "RECENT_DEFERRALS", 200)
     for name, value in {
         "FACTORY_WEBHOOK_URL": WEBHOOK_URL,
         "FACTORY_WEBHOOK_KEY": ENV_ONLY,
@@ -844,7 +1102,15 @@ def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
         connection.execute(
             "CREATE TABLE poll_deferrals (id INTEGER PRIMARY KEY, detail TEXT, recorded_at REAL)"
         )
-        samples = [sample for _, sample in [*JSON_SAMPLES.values(), *ENCODED_SAMPLES.values()]]
+        samples = [
+            sample
+            for _, sample in [
+                *JSON_SAMPLES.values(),
+                *ENCODED_SAMPLES.values(),
+                *SPLIT_SAMPLES.values(),
+                *SPLIT_GUARDS.values(),
+            ]
+        ]
         for index, sample in enumerate(samples):
             add_poll_error(connection, f"linear:HTTPError body {sample}", recorded_at=NOW - index)
             connection.execute(
@@ -860,11 +1126,27 @@ def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
             stuck=1,
             stuck_reason=f"stuck: {JSON_SAMPLES['json token'][1]} {PCT_WEBHOOK_URL}",
         )
+        for index, (_, sample) in enumerate([*SPLIT_SAMPLES.values(), *SPLIT_GUARDS.values()]):
+            add_ticket(
+                connection,
+                "maxharris1/cleffy",
+                str(200 + index),
+                state="stuck",
+                stuck=1,
+                stuck_reason=f"stuck: {sample}",
+            )
     with log.open("a", encoding="utf-8") as handle:
         for line in KEY_BLOCK_LINES:
             handle.write(line + "\n")
-        for _, sample in [*JSON_SAMPLES.values(), *ENCODED_SAMPLES.values()]:
+        for _, sample in [
+            *JSON_SAMPLES.values(),
+            *ENCODED_SAMPLES.values(),
+            *SPLIT_SAMPLES.values(),
+            *SPLIT_GUARDS.values(),
+        ]:
             handle.write(f"orch poll: {sample}\n")
+        for line in [PCT_KEY_BEGIN, PCT_KEY_BODY, PCT_KEY_END]:
+            handle.write(line + "\n")
         handle.write(f"orch poll: delivery to {WEBHOOK_URL} failed\n")
         handle.write(f"curl -H 'Authorization: Bearer {BEARER_TOKEN}'\n")
         handle.write(f"gh auth: {GH_SERVER} {GH_PAT}\n")
@@ -894,6 +1176,7 @@ def test_no_planted_secret_reaches_status_json_or_index_html(
     db, log = _plant_secrets(tmp_path, monkeypatch)
     text = _written(tmp_path, db, log)
     assert _leaks(text, {**FREE_TEXT_SECRETS, **OFF_ALLOWLIST_SECRETS}) == set()
+    assert "Tiny" not in text and "Secret7" not in text
     assert "[redacted" in text
 
 
