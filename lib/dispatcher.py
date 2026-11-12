@@ -61,6 +61,13 @@ class CIResult:
             raise ValueError(f"unknown CI status {self.status!r}")
 
 
+# Where a Linear issue stands relative to Ready for Review, read with the
+# ticket: still before review (the only phase the handoff moves), already
+# in Ready for Review, or moved on by a human (completed, canceled, backlog
+# or triage, or a started state after Ready for Review).
+LINEAR_STATE_PHASES = ("before-review", "ready-for-review", "moved-on")
+
+
 @dataclass(frozen=True)
 class TrackedTicket:
     repo: str
@@ -79,6 +86,7 @@ class TrackedTicket:
     linear_issue_id: str | None = None
     linear_ready_state_id: str | None = None
     linear_ready_for_review: bool = False
+    linear_state_phase: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -193,7 +201,58 @@ class RetryableShipError(RetryableStateError):
 
 
 class ShipError(RuntimeError):
-    pass
+    """A ship that did not complete.
+
+    write_confirmed is True unless the raiser knows that no external write
+    it sent was confirmed before it failed. Only a handoff failure with
+    write_confirmed False is eligible for the one handoff re-drive.
+    safe_detail, when set, is the only text recorded in ship_intents.error.
+    """
+
+    write_confirmed: bool = True
+    safe_detail: str | None = None
+
+
+SHIP_ERROR_LIMIT = 240
+_SECRET_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S*")
+_SECRET_HOST_PATH = re.compile(
+    r"\b(?:[A-Za-z0-9-]+\.)+(?:com|io|net|org|dev|app)(?:[:/]\S*)?",
+    re.IGNORECASE,
+)
+_SECRET_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}"
+    r"|lin_(?:api|oauth)_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}"
+    r"|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*)"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:bearer|basic|token|authorization|password|passwd|secret"
+    r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
+)
+_SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+
+
+def safe_ship_error(exc: BaseException) -> str:
+    """The exception class plus a detail with no URL, token or body.
+
+    A ShipError's safe_detail is used when present; otherwise the message.
+    Either way, URLs, host paths, token shapes, credential assignments and
+    everything from the first {, [ or < on are cut, and the text is capped.
+    """
+    name = type(exc).__name__
+    detail = getattr(exc, "safe_detail", None)
+    if not isinstance(detail, str):
+        detail = str(exc)
+    detail = _SECRET_BODY.sub(" <body omitted>", detail)
+    detail = _SECRET_URL.sub("<url>", detail)
+    detail = _SECRET_HOST_PATH.sub("<host>", detail)
+    detail = _SECRET_TOKEN.sub("<secret>", detail)
+    detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
+    detail = "".join(char if char.isprintable() else " " for char in detail)
+    detail = " ".join(detail.split())
+    text = f"{name}: {detail}" if detail else name
+    if len(text) > SHIP_ERROR_LIMIT:
+        text = text[: SHIP_ERROR_LIMIT - 3].rstrip() + "..."
+    return text
 
 
 @dataclass(frozen=True)
@@ -334,6 +393,7 @@ class Dispatcher:
     def process(self, ticket: TrackedTicket) -> None:
         comments = sorted(ticket.comments, key=_comment_order)
         try:
+            self._redrive_handoffs(ticket)
             self._process_comments(ticket, comments)
         except BaseException as error:
             try:
@@ -414,15 +474,20 @@ class Dispatcher:
                     raise
                 if kind not in ("verdict", "questions", "answers"):
                     raise
+                error = safe_ship_error(exc)
                 if self._mark_ship_intent_failed(
                     ticket,
                     comment.id,
-                    type(exc).__name__,
+                    error,
+                    redrive=(
+                        isinstance(exc, ShipError)
+                        and exc.write_confirmed is False
+                    ),
                 ):
                     self._wake_ship_failed(
                         ticket,
                         comment,
-                        f"ship raised {type(exc).__name__}: {exc}",
+                        f"ship raised {error}",
                     )
                 self._mark_handled(
                     ticket,
@@ -1647,15 +1712,190 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment_id: str,
         error: str,
+        *,
+        redrive: bool = False,
+    ) -> bool:
+        """pending -> failed. A handoff that failed before any confirmed
+        write is marked redrive='eligible' for one re-drive."""
+        with self._connect() as connection:
+            changed = connection.execute(
+                """
+                UPDATE ship_intents
+                SET status = 'failed', error = ?,
+                    redrive = CASE
+                        WHEN ? AND policy = 'handoff' THEN 'eligible'
+                        ELSE NULL
+                    END
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND status = 'pending'
+                """,
+                (
+                    error,
+                    1 if redrive else 0,
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment_id,
+                ),
+            ).rowcount
+        return changed == 1
+
+    def _redrive_handoffs(self, ticket: TrackedTicket) -> None:
+        """Re-drive, once, a handoff that failed before any confirmed write.
+
+        The intent's comment must still be the APPROVE in force: the latest
+        trusted reviewer verdict on the ticket, picked by the same rule the
+        live path uses (_latest_review_verdict). A newer trusted verdict, a
+        REVISE or another APPROVE, spends the re-drive with no write, so of
+        several eligible intents on one ticket only the latest APPROVE can
+        hand off. A ticket already merged, handed off or done, or one with
+        a completed handoff intent at the intent's head, is never handed
+        off again: its re-drives are spent with no write.
+
+        Then it checks what else can have changed since T4: the ship policy
+        is still handoff, the PR head is still the intent's head and CI on
+        it is still green. A moved head or red CI spends the re-drive with
+        no write. Pending CI or an unread head waits for a later poll.
+
+        The re-drive is claimed (eligible -> spent) before the adapter
+        runs, so a crash mid-handoff never repeats it. A retryable error
+        hands the claim back. Any other error keeps the intent failed and
+        records its safe detail; the ship-failed wake is once per comment,
+        so Grok keeps the wake from the first failure. Success completes
+        the intent, wakes done and lets T4 replay the state label.
+        """
+        if ticket.factory.ship != "handoff":
+            return
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT comment_id, head FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND policy = 'handoff'
+                  AND status = 'failed' AND redrive = 'eligible'
+                ORDER BY comment_id
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        if not rows:
+            return
+        by_id = {comment.id: comment for comment in ticket.comments}
+        in_force = self._latest_review_verdict(ticket)
+        approve_in_force = (
+            in_force[0].id
+            if in_force is not None and in_force[1].get("verdict") == "APPROVE"
+            else None
+        )
+        for row in rows:
+            comment_id = str(row["comment_id"])
+            comment = by_id.get(comment_id)
+            if comment is None:
+                continue
+            if (
+                comment_id != approve_in_force
+                or self._review_context(ticket)[0] in ("merged", "handed-off", "done")
+                or self._has_completed_handoff_at(ticket, str(row["head"]))
+            ):
+                self._set_redrive(ticket, comment_id, "spent", "eligible")
+                continue
+            head = ticket.current_head
+            if head is None:
+                continue
+            if head != row["head"]:
+                self._set_redrive(ticket, comment_id, "spent", "eligible")
+                continue
+            ci = ticket.ci.get(head)
+            if ci is None or ci.status == "pending":
+                continue
+            if ci.status != "success":
+                self._set_redrive(ticket, comment_id, "spent", "eligible")
+                continue
+            if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
+                continue
+            try:
+                self._review_actions(ticket).handoff(ticket, head)
+            except RetryableStateError:
+                self._set_redrive(ticket, comment_id, "eligible", "spent")
+                raise
+            except Exception as exc:
+                error = safe_ship_error(exc)
+                with self._connect() as connection:
+                    connection.execute(
+                        """
+                        UPDATE ship_intents SET error = ?
+                        WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                          AND status = 'failed'
+                        """,
+                        (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
+                    )
+                self._wake_ship_failed(
+                    ticket,
+                    comment,
+                    f"handoff re-drive raised {error}",
+                )
+                continue
+            self._complete_redrive(ticket, comment_id)
+            self._wake_done(ticket, comment, "handed-off")
+
+    def _complete_redrive(self, ticket: TrackedTicket, comment_id: str) -> None:
+        """failed -> completed, and hand the APPROVE back to T4.
+
+        T4 then finds the completed intent and replays its label write, as
+        it does after any completed ship, retrying it on a later poll if the
+        write fails. One transaction, so a crash leaves neither half.
+        """
+        scope = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE ship_intents SET status = 'completed', error = NULL
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND status = 'failed'
+                """,
+                (*scope, comment_id),
+            )
+            connection.execute(
+                """
+                UPDATE ticket_state SET workflow_state = 'handed-off'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                scope,
+            )
+            connection.execute(
+                """
+                DELETE FROM handled_comments
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (*scope, comment_id),
+            )
+            connection.commit()
+
+    def _has_completed_handoff_at(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND policy = 'handoff'
+                  AND head = ? AND status = 'completed'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        return row is not None
+
+    def _set_redrive(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+        value: str,
+        expected: str,
     ) -> bool:
         with self._connect() as connection:
             changed = connection.execute(
                 """
-                UPDATE ship_intents SET status = 'failed', error = ?
+                UPDATE ship_intents SET redrive = ?
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
-                  AND status = 'pending'
+                  AND status = 'failed' AND redrive = ?
                 """,
-                (error, ticket.repo.lower(), ticket.ticket_id, comment_id),
+                (value, ticket.repo.lower(), ticket.ticket_id, comment_id, expected),
             ).rowcount
         return changed == 1
 
@@ -2495,6 +2735,34 @@ class Dispatcher:
     def _connect(self) -> sqlite3.Connection:
         return self.queue.connect()
 
+    def _migrate_ship_intent_redrive(self) -> None:
+        """Add ship_intents.redrive. Once, mark legacy handoff failures eligible.
+
+        Before issue #47 every handoff failure was recorded by class name
+        only. None had a confirmed write: draft -> ready went to a REST
+        route GitHub does not have, so it never succeeded, and an
+        unconfirmed Linear move confirmed nothing. Those rows get the one
+        re-drive. The column add and the backfill share one transaction.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(ship_intents)"
+                ).fetchall()
+            }
+            if "redrive" not in columns:
+                connection.execute("ALTER TABLE ship_intents ADD COLUMN redrive TEXT")
+                connection.execute(
+                    """
+                    UPDATE ship_intents SET redrive = 'eligible'
+                    WHERE policy = 'handoff' AND status = 'failed'
+                      AND error IN ('GitHubAdapterError', 'HeadMismatchError')
+                    """
+                )
+            connection.commit()
+
     def _initialize(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -2594,6 +2862,7 @@ class Dispatcher:
                     policy TEXT NOT NULL,
                     status TEXT NOT NULL,
                     error TEXT,
+                    redrive TEXT,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """
@@ -2625,6 +2894,8 @@ class Dispatcher:
                         f"ALTER TABLE external_ship_intents ADD COLUMN {name} "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
+        self._migrate_ship_intent_redrive()
+        with self._connect() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS plan_events (
@@ -2750,7 +3021,7 @@ class ReviewShipper:
                     dispatcher._finish_external_ship(
                         request,
                         "failed",
-                        type(exc).__name__,
+                        safe_ship_error(exc),
                     )
                     raise
             dispatcher._finish_external_ship(request, "completed", None)
@@ -2799,7 +3070,7 @@ class ReviewShipper:
                 self.dispatcher._finish_external_ship(
                     request,
                     "failed",
-                    type(exc).__name__,
+                    safe_ship_error(exc),
                 )
             raise
 

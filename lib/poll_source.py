@@ -73,8 +73,9 @@ query FactoryIssue($id: String!) {
     url
     gitBranchName: branchName
     project { id }
+    state { id type position }
     team {
-      states { nodes { id name } }
+      states { nodes { id name type position } }
     }
     comments(first: 250) {
       nodes { id body createdAt user { id } }
@@ -100,7 +101,7 @@ LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
-LINEAR_ISSUE_COMPLEXITY = 660
+LINEAR_ISSUE_COMPLEXITY = 672  # +12 for the issue state and state order (#47)
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
@@ -852,6 +853,7 @@ class LivePollSource:
             linear_issue_id=_optional_string(issue.get("id")),
             linear_ready_state_id=_linear_ready_state_id(issue),
             linear_ready_for_review=project.linear_ready_for_review,
+            linear_state_phase=_linear_state_phase(issue),
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -1185,7 +1187,7 @@ def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
+def _linear_ready_state(issue: Mapping[str, Any]) -> dict[str, Any] | None:
     team = issue.get("team")
     if team is None:
         return None
@@ -1193,8 +1195,49 @@ def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
     for raw in _array(states.get("nodes"), "Linear state nodes"):
         state = _object(raw, "Linear state")
         if state.get("name") == "Ready for Review":
-            return _optional_string(state.get("id"))
+            return state
     return None
+
+
+def _linear_ready_state_id(issue: Mapping[str, Any]) -> str | None:
+    state = _linear_ready_state(issue)
+    return _optional_string(state.get("id")) if state is not None else None
+
+
+def _linear_state_phase(issue: Mapping[str, Any]) -> str | None:
+    """Where the issue stands relative to Ready for Review, or None if unknown.
+
+    before-review: unstarted, or started and not after Ready for Review in
+    the team's order. ready-for-review: in that state. moved-on: completed,
+    canceled, backlog, triage, or a started state after Ready for Review.
+    The handoff moves only a before-review issue and fails closed on None.
+    """
+    state = issue.get("state")
+    if not isinstance(state, dict):
+        return None
+    state_id = _optional_string(state.get("id"))
+    kind = state.get("type")
+    if state_id is None or not isinstance(kind, str):
+        return None
+    ready = _linear_ready_state(issue)
+    if ready is not None and ready.get("id") == state_id:
+        return "ready-for-review"
+    if kind == "unstarted":
+        return "before-review"
+    if kind in ("completed", "canceled", "backlog", "triage"):
+        return "moved-on"
+    if kind != "started":
+        return None
+    if ready is None or ready.get("type") != "started":
+        return "before-review"
+    here, there = state.get("position"), ready.get("position")
+    if not _is_position(here) or not _is_position(there):
+        return None
+    return "moved-on" if here > there else "before-review"
+
+
+def _is_position(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _linear_comment(value: object) -> Comment | None:

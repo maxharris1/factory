@@ -391,7 +391,9 @@ the webhook's `target_bot` is set, only that project bot handles the wake. If
 it is `null`, Grok Bot handles the wake for the repo's project.
 `linear_ready_for_review` defaults to `false` and controls only the Linear
 Ready for Review move after a covered cross-family APPROVE. Aut0 enables it;
-no other Linear state transition is written.
+no other Linear state transition is written. The move is made only from a
+state before Ready for Review, never from Ready for Review itself or a state a
+human moved the issue on to.
 
 ## 8. Review and merge rules
 
