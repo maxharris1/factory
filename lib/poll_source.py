@@ -10,7 +10,7 @@ import subprocess
 import time
 from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -298,8 +298,9 @@ class LivePollSource:
                         # PRs outside the queue, so nothing writes the
                         # orch:state/ label before tracking starts. Its open
                         # PRs are candidates on a parseable ready;
-                        # Dispatcher._starts_tracking still applies the trust
-                        # and head rules. Other projects stay label-only and
+                        # Dispatcher._starts_tracking then admits them only
+                        # on a trusted builder ready naming the PR head
+                        # (admitted_by_ready: a Grok brief/go does not count). Other projects stay label-only and
                         # pay no comment read here.
                         labelled = _has_label(issue.get("labels"), label_prefix)
                         if not labelled and not project.ready_starts_review:
@@ -314,11 +315,14 @@ class LivePollSource:
                             )
                             if not _has_ready(comments):
                                 continue
-                        tickets.append(
-                            self._github_ticket(
-                                project, factory, number, comments=comments
-                            )
+                        ticket = self._github_ticket(
+                            project, factory, number, comments=comments
                         )
+                        if not labelled:
+                            # Not cached: the flag describes this
+                            # discovery, not the PR snapshot.
+                            ticket = replace(ticket, admitted_by_ready=True)
+                        tickets.append(ticket)
                     except Exception as exc:
                         if isinstance(exc, _TerminalTicket):
                             continue

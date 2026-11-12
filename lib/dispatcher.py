@@ -96,6 +96,10 @@ class TrackedTicket:
     linear_ready_for_review: bool = False
     linear_state_phase: str | None = None
     ready_starts_review: bool = False
+    # Issue #59: the PR had no orch:state/ label and was a candidate only
+    # because it carries a parseable ready. Only a trusted builder ready
+    # naming the PR head may then start tracking (Codex PR #64 r1 F1.1).
+    admitted_by_ready: bool = False
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -2366,8 +2370,13 @@ class Dispatcher:
         The ready path applies T2's own trust rule (factory.md's builder,
         role=builder, a trusted_logins author) and needs the ready head to
         name the PR head, so T2 can then queue the review in the same cycle.
+        An unlabelled PR admitted through the issue #59 ready exception
+        starts tracking only that way: its Grok brief or go still needs the
+        orch:state/ label.
         """
         if fields["kind"] in ("brief", "go"):
+            if ticket.admitted_by_ready:
+                return False
             return self._trusted(
                 ticket,
                 comment,

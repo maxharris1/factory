@@ -407,7 +407,8 @@ no build job, for a project whose PRs are built outside the queue (the
 factory repo itself). Such a PR needs no `orch:state/` label to be
 discovered: an open PR with a parseable `kind=ready` comment is a candidate,
 the trust and head rules above decide, and the poller writes the label once
-it tracks the PR (issue #59). With the flag off, only a trusted Grok `brief`
+it tracks the PR (issue #59). Only that trusted `ready` admits an unlabelled
+PR: a Grok `brief` or `go` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`
 or `go` on a labelled PR starts tracking.
 
 ## 8. Review and merge rules
