@@ -1,0 +1,30 @@
+---
+title: "Fixture loop"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Ask
+    lg1: Build
+    lg2: Review
+    lg3: Ship
+  }
+  class lg0 blue
+  class lg1 orange
+  class lg2 yellow
+  class lg3 teal
+  s0: intake
+  s1: building
+  s2: review
+  s3: fixing
+  s4: handed-off
+  [*] --> s0
+  s0 --> s1: kind=go, queue build
+  s1 --> s2: ready, CI green
+  s2 --> s3: REVISE, under the round cap
+  s3 --> s2: ready, CI green
+  s2 --> s4: ship = handoff
+  class s0 blue
+  class s1 orange
+  class s2 yellow
+  class s3 orange
+  class s4 teal

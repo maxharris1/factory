@@ -9,14 +9,14 @@ with BatchMode, so it never prompts, and it relies entirely on the SSH login
 Max provisioned: optionally `-F <ssh_config>` names his ssh_config file. No
 key path, password or token is read, passed or configured here.
 
-Both methods publish the pair as one step. Every file is first uploaded to
+Both methods publish the files (status.json and the pages) as one step. Every file is first uploaded to
 a dot-prefixed temp name in the served directory; only after all uploads
 succeed does one `ssh host 'cd -- dir && mv -f -- .a.push-tmp a && mv -f --
-.b.push-tmp b'` rename them over the live names, back to back on the remote
-host. An interrupted upload leaves the published pair as it was, and no
-network round-trip separates the two renames, so a reader never sees a
-half-written file or (outside the instant between two local renames) a
-mismatched pair.
+.b.push-tmp b && ...'` rename them over the live names, back to back on the
+remote host. An interrupted upload leaves the published set as it was, and
+no network round-trip separates the renames, so a reader never sees a
+half-written file or (outside the instants between local renames) a
+mismatched set.
 
 `PollPusher` is how `orch poll` (deploy/poller-service.sh) pushes: after a
 poll cycle, at most every `every_minutes`, it starts `orch dashboard push
@@ -29,10 +29,10 @@ watcher thread stats orch.db and its WAL every WATCH_SECONDS; any committed
 change (a job claimed, a heartbeat, a job finished, a verdict recorded, by
 the poller or by any other process) and the end of every poll cycle start
 `orch dashboard push --once --status-only`: status.json alone, uploaded and
-renamed exactly like the pair. Pushes start at most once every
+renamed exactly like the full set. Pushes start at most once every
 LIVE_MIN_SECONDS, never while the previous one runs, and a change that
 arrives meanwhile is pushed as soon as both allow, so the last change is
-never dropped. The full pair (index.html too) still goes out at the
+never dropped. The full set (the pages too) still goes out at the
 `PollPusher` cadence.
 """
 
@@ -66,7 +66,7 @@ NOT_CONFIGURED = (
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
 SEND_TIMEOUT_SECONDS = 60
 TEMP_SUFFIX = ".push-tmp"
-# Names of the files sent (status.json, index.html): plain, no leading '-'.
+# Names of the files sent (status.json and the pages): plain, no leading '-'.
 FILE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -401,7 +401,7 @@ class LivePusher(PollPusher):
 
     `__call__` (the poll loop's after_poll) marks the end of a cycle: a
     change, and the time `--last-cycle` reports for poll health; the full
-    pair is due on the first cycle and then every `every_seconds`. `tick()`
+    set is due on the first cycle and then every `every_seconds`. `tick()`
     (the watcher, every WATCH_SECONDS) compares the database fingerprint and
     starts whatever push is pending when the rate limit and the previous
     child allow. Neither ever raises; failures are one redacted log line at

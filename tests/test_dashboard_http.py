@@ -2,8 +2,8 @@
 
 Each test serves a scratch directory on loopback through `make_server`
 (the tailnet-only bind is enforced by `load_config`, tested in
-tests/test_deploy.py) and checks that only the two snapshot files are
-served, never anything outside the directory, never a listing.
+tests/test_deploy.py) and checks that only the snapshot files (status.json and the four pages)
+are served, never anything outside the directory, never a listing.
 """
 
 import http.client
@@ -68,6 +68,18 @@ def test_serves_index_at_root_and_by_name(get) -> None:
         assert status == 200, path
         assert body.decode() == INDEX
         assert headers["content-type"] == "text/html; charset=utf-8"
+
+
+@pytest.mark.parametrize("name", ["activity.html", "efficiency.html", "job.html"])
+def test_serves_the_other_pages(site: Path, get, name: str) -> None:
+    status, _, _ = get(f"/{name}")
+    assert status == 404  # not written yet
+    (site / name).write_text(f"<!doctype html><title>{name}</title>", encoding="utf-8")
+    status, headers, body = get(f"/{name}")
+    assert status == 200
+    assert body.decode() == f"<!doctype html><title>{name}</title>"
+    assert headers["content-type"] == "text/html; charset=utf-8"
+    assert get(f"/{name}/x")[0] == 404
 
 
 def test_serves_status_json(get) -> None:

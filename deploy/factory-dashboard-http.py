@@ -15,8 +15,9 @@ empty. This server:
 - serves DASHBOARD_DIR, which must be set, absolute, an existing directory,
   and neither / nor $HOME nor any directory that contains $HOME (it is
   resolved through symlinks before those checks);
-- answers GET and HEAD only, and only for /, /index.html and /status.json
-  (the two files `orch dashboard push` writes). Every other path, including
+- answers GET and HEAD only, and only for /, /status.json and the four
+  pages (/index.html, /activity.html, /efficiency.html, /job.html), the
+  files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
 - opens the directory once at startup (O_NOFOLLOW) and keeps that
@@ -45,18 +46,23 @@ from urllib.parse import urlsplit
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
 MAX_BYTES = 8 * 1024 * 1024
-ROUTES = {"/": "index.html", "/index.html": "index.html", "/status.json": "status.json"}
+PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+ROUTES = {
+    "/": "index.html",
+    "/status.json": "status.json",
+    **{f"/{name}": name for name in PAGES},
+}
 CONTENT_TYPES = {
-    "index.html": "text/html; charset=utf-8",
     "status.json": "application/json",
+    **{name: "text/html; charset=utf-8" for name in PAGES},
 }
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    # The snapshot page is self-contained: inline style and script only. Its
-    # script fetches this server's own status.json (connect-src 'self') to
+    # The snapshot pages are self-contained: inline style and script only.
+    # Their script fetches this server's own status.json (connect-src 'self') to
     # update in place; nothing else is ever loaded.
     "Content-Security-Policy": (
         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "

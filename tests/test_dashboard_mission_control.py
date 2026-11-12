@@ -5,9 +5,7 @@ reduced motion respected, WCAG AA contrast, read-only and redacted).
 
 import json
 import re
-import shutil
 import sqlite3
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -302,14 +300,22 @@ def test_page_polls_status_json_every_one_to_two_seconds(tmp_path: Path) -> None
 def test_page_keeps_a_no_script_fallback(tmp_path: Path) -> None:
     html = _html(tmp_path)
     assert '<noscript><meta http-equiv="refresh" content="20"></noscript>' in html
-    # The server-rendered tables are still there, under the live view.
-    assert 'id="static"' in html and "Running jobs" in html
+    # The panels are rendered server-side, so the page reads without script
+    # (tests/test_dashboard_layout.py checks every page).
+    assert '<main id="hud">' in html and "cleffy#13" in html
 
 
-def test_page_has_every_mission_control_panel(tmp_path: Path) -> None:
-    html = _html(tmp_path)
-    for panel in ("lanes", "queue", "handoffs", "verdicts", "health", "savings", "attention"):
-        assert f'id="{panel}"' in html, panel
+def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
+    pages = dashboard.render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
+    where = {
+        "index.html": ("kpis", "lanes", "queue"),
+        "activity.html": ("attention", "handoffs", "verdicts", "tickets", "log"),
+        "efficiency.html": ("health", "savings"),
+        "job.html": ("jobs", "jobview"),
+    }
+    for name, panels in where.items():
+        for panel in panels:
+            assert f'id="{panel}"' in pages[name], (name, panel)
 
 
 def test_page_has_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
@@ -359,105 +365,5 @@ def test_server_csp_lets_the_page_poll_its_own_status_json() -> None:
     assert "default-src 'none'" in source
 
 
-# --- the page script, run against a tiny DOM -------------------------------------------
-
-NODE_HARNESS = r"""
-const fs = require('fs');
-const [script, statusText] = [fs.readFileSync(process.argv[2], 'utf8'), fs.readFileSync(process.argv[3], 'utf8')];
-class Node {
-  constructor(tag) { this.tagName = tag; this.children = []; this._text = ''; this.attrs = {};
-    this.className = ''; this.hidden = false; this.title = ''; this.style = {setProperty: (k, v) => { this.style[k] = v; }};
-    const self = this;
-    this.classList = {add: (...c) => { self.className = (self.className + ' ' + c.join(' ')).trim(); },
-      remove: (...c) => { self.className = self.className.split(' ').filter(x => !c.includes(x)).join(' '); },
-      toggle: (c, on) => { if (on === undefined) on = !self.className.split(' ').includes(c);
-        if (on) self.classList.add(c); else self.classList.remove(c); return on; },
-      contains: (c) => self.className.split(' ').includes(c)}; }
-  appendChild(child) { this.children.push(child); return child; }
-  replaceChildren(...kids) { this.children = kids; this._text = ''; }
-  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
-  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
-  set textContent(v) { this._text = String(v); this.children = []; }
-  get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
-  dump(depth) { const pad = ' '.repeat(depth || 0);
-    return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') +
-      (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
-}
-const ids = {};
-const body = new Node('body');
-body.attrs['data-generated'] = '1800000000.000';
-body.attrs['data-refresh'] = '20';
-for (const id of ['hud', 'static', 'link', 'link-text', 'age', 'clock', 'kpis', 'lanes', 'queue',
-                  'handoffs', 'verdicts', 'health', 'savings', 'attention', 'tickets', 'log']) {
-  const n = new Node('div'); n.attrs.id = id; ids[id] = n; body.appendChild(n);
-}
-ids.hud.hidden = true;
-global.window = global;
-global.document = {body, hidden: false, getElementById: (id) => ids[id] || null,
-  createElement: (tag) => new Node(tag), addEventListener: () => {}};
-global.matchMedia = () => ({matches: false});
-global.location = {reload: () => { console.log('RELOAD'); }};
-let fetches = 0;
-global.fetch = (url, opts) => { fetches += 1;
-  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);
-  return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(JSON.parse(statusText))}); };
-const realNow = Date.now; Date.now = () => 1800000003000;
-eval(script);
-setTimeout(() => {
-  process.stdout.write(JSON.stringify({fetches, hudHidden: ids.hud.hidden, staticHidden: ids.static.hidden,
-    text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
-    dump: ids.lanes.dump(0) + ids.queue.dump(0)}));
-  process.exit(0);
-}, 200);
-"""
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_page_script_renders_a_live_snapshot(tmp_path: Path) -> None:
-    db, log = seeded(tmp_path)
-    with sqlite3.connect(db) as connection:
-        _slots_table(connection)
-        connection.execute(
-            "INSERT INTO device_slots VALUES ('r-codex-review', 'pc', 'codex', 'codex-bot', ?)",
-            (NOW - 300,),
-        )
-        _handled(connection, ("maxharris1/cleffy", "13", "c2", "queued-review-fix"))
-        _finish(connection, "d-codex-review-1", NOW - 100)
-    machines = tmp_path / "machines.yml"
-    machines.write_text(
-        "devices:\n"
-        "  - {name: box, local: true, slot_max: 3, harnesses: [claude, codex, cursor]}\n"
-        "  - {name: pc, slot_max: 2, harnesses: [codex]}\n"
-        "  - {name: mac, enabled: false, slot_max: 2, harnesses: [claude]}\n",
-        encoding="utf-8",
-    )
-    snapshot = collect_snapshot(db, log, now=NOW, machines_path=machines, last_cycle_at=NOW - 4)
-    html = render_html(snapshot)
-    (tmp_path / "page.js").write_text(_script(html), encoding="utf-8")
-    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
-    (tmp_path / "harness.js").write_text(NODE_HARNESS, encoding="utf-8")
-    result = subprocess.run(
-        ["node", str(tmp_path / "harness.js"), str(tmp_path / "page.js"),
-         str(tmp_path / "status.json")],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout)
-    assert out["fetches"] >= 1
-    assert out["hudHidden"] is False and out["staticHidden"] is True
-    text = out["text"]
-    assert "LIVE" in text["link-text"]
-    lanes = text["lanes"]
-    for needle in ("box", "pc", "mac", "DISABLED", "codex", "cleffy#13", "cursor", "cleffy#14",
-                   "OVERDUE", "idle"):
-        assert needle in lanes, (needle, out["dump"])
-    assert ".device.disabled" in out["dump"]
-    assert "grok" in text["queue"] and "cleffy#12" in text["queue"]
-    assert "queued-review-fix" in text["verdicts"]
-    assert "scripted" in text["handoffs"]
-    assert "OK" in text["health"] and "LINEAR" in text["health"].upper()
-    assert "50%" in text["savings"]
-    assert "AUT-7" in text["attention"]
+# The page script is run against a tiny DOM, page by page, in
+# tests/test_dashboard_layout.py.

@@ -1,0 +1,771 @@
+"""Dashboard layout: a lanes-first main page, plus job, activity and
+efficiency pages.
+
+- Main page (index.html): factory status on top, lanes and slots as the
+  centerpiece with each slot's job (ticket or PR, bot, step, round, elapsed),
+  the queue in a side rail, and a "needs attention" badge that links to the
+  Activity page. No poll/Linear budget, handoffs, verdicts, tickets, log or
+  savings.
+- Job page (job.html): a flow diagram drawn from model/chart.mmd (the
+  statechart's checked-in chart), with the job's path and current state
+  highlighted, its round and its time in that state.
+- Activity page (activity.html): handoffs, verdicts, tickets, log, needs
+  attention.
+- Efficiency page (efficiency.html): poll and Linear budget, handoff savings
+  and a one-line definition of scripted share.
+- #63 FU-1: a lane counts max(held, running) slots.
+Every page renders its content server-side, so it reads without script.
+"""
+
+import json
+import re
+import shutil
+import sqlite3
+import subprocess
+from pathlib import Path
+
+import pytest
+
+import lib.dashboard as dashboard
+import lib.dashboard_flow as flow
+from lib.dashboard import collect_snapshot, render_pages, write_snapshot, write_snapshot_pages
+from tests.test_dashboard import (
+    FREE_TEXT_SECRETS,
+    GH_CLASSIC,
+    NOW,
+    WEBHOOK_URL,
+    add_job,
+    add_ticket,
+    seeded,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+CHART = ROOT / "model" / "chart.mmd"
+MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
+PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+
+
+def _slots_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS device_slots (job_id TEXT PRIMARY KEY, "
+        "device TEXT, harness TEXT, os_user TEXT, placed_at REAL)"
+    )
+
+
+def _machines(tmp_path: Path) -> Path:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        "devices:\n"
+        "  - {name: box, local: true, slot_max: 3, harnesses: [claude, codex, cursor]}\n"
+        "  - {name: pc, slot_max: 2, harnesses: [codex]}\n"
+        "  - {name: mac, enabled: false, slot_max: 2, harnesses: [claude]}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _history(connection: sqlite3.Connection) -> None:
+    """Ticket 40: built, reviewed, revised once, now in its second review."""
+    add_ticket(connection, "maxharris1/cleffy", "40", state="review", review_round=1)
+    for job_id, action, recipient, state, created in (
+        ("h-build", "build", "claude", "done", NOW - 5000),
+        ("h-review1", "review", "codex", "done", NOW - 4000),
+        ("h-fix", "fix", "claude", "done", NOW - 3000),
+        ("h-review2", "review", "codex", "running", NOW - 2000),
+    ):
+        add_job(
+            connection,
+            job_id,
+            action=action,
+            recipient=recipient,
+            state=state,
+            ticket_id="40",
+            created_at=created,
+            last_activity_at=NOW - 30,
+        )
+
+
+def _snapshot(tmp_path: Path, **kwargs) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _history(connection)
+    return collect_snapshot(db, log, now=NOW, **kwargs)
+
+
+def _pages(tmp_path: Path, **kwargs) -> dict[str, str]:
+    return render_pages(_snapshot(tmp_path, **kwargs))
+
+
+def _no_script(html: str) -> str:
+    return re.sub(r"<script>.*?</script>", "", html, flags=re.S)
+
+
+def _section(html: str, ident: str) -> str:
+    """The server-rendered markup of the element with this id."""
+    match = re.search(rf'<(section|article|div|aside|nav|main|a)\b[^>]*\bid="{re.escape(ident)}"', html)
+    assert match, ident
+    tag = match.group(1)
+    depth = 0
+    for item in re.finditer(rf"<(/?){tag}\b[^>]*>", html[match.start() :]):
+        depth += -1 if item.group(1) else 1
+        if depth == 0:
+            return html[match.start() : match.start() + item.end()]
+    raise AssertionError(f"unclosed {ident}")
+
+
+def _text(markup: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
+
+
+def _chart_source(path: Path) -> tuple[set[str], set[tuple[str, str]]]:
+    """States and transitions read straight from a chart file, independently
+    of lib.dashboard_flow."""
+    text = path.read_text(encoding="utf-8")
+    names = dict(re.findall(r"^  (s\d+): (.+)$", text, flags=re.M))
+    edges = {
+        (names[a], names[b])
+        for a, b in re.findall(r"^  (s\d+) --> (s\d+)", text, flags=re.M)
+    }
+    return set(names.values()), edges
+
+
+def _diagram(markup: str) -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
+    """{state: classes} and {(from, to): classes} from the first flow svg."""
+    svg = re.search(r'<svg class="flow".*?</svg>', markup, flags=re.S)
+    assert svg, "no flow diagram"
+    nodes = {
+        state: set(classes.split())
+        for classes, state in re.findall(
+            r'<g class="([^"]*)" data-state="([^"]+)"', svg.group(0)
+        )
+    }
+    edges = {
+        (a, b): set(classes.split())
+        for classes, a, b in re.findall(
+            r'<g class="([^"]*)" data-from="([^"]+)" data-to="([^"]+)"', svg.group(0)
+        )
+    }
+    return nodes, edges
+
+
+# --- the pages and how they are written ----------------------------------------------
+
+
+def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    paths = write_snapshot_pages(out, _snapshot(tmp_path))
+    assert dashboard.PAGES == PAGES
+    assert paths == (out / "status.json", *(out / name for name in PAGES))
+    assert sorted(path.name for path in out.iterdir()) == sorted(("status.json", *PAGES))
+
+
+def test_every_page_links_every_other_page(tmp_path: Path) -> None:
+    pages = _pages(tmp_path)
+    for name, html in pages.items():
+        nav = _section(html, "nav")
+        for target in ("index.html", "activity.html", "efficiency.html"):
+            assert f'href="{target}"' in nav, (name, target)
+
+
+def test_static_server_serves_every_page() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "factory_dashboard_http_layout", ROOT / "deploy" / "factory-dashboard-http.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in PAGES:
+        assert module.ROUTES[f"/{name}"] == name
+        assert module.CONTENT_TYPES[name] == "text/html; charset=utf-8"
+    assert module.ROUTES["/"] == "index.html"
+
+
+# --- main page --------------------------------------------------------------------------
+
+
+def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
+    html = _pages(tmp_path)["index.html"]
+    for panel in ("kpis", "lanes", "queue"):
+        assert f'id="{panel}"' in html, panel
+    # Moved to the Activity and Efficiency pages.
+    for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
+        assert f'id="{panel}"' not in html, panel
+    for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
+                  "Handoff savings", "poller.log", "scripted share"):
+        assert words.lower() not in _text(_no_script(html)).lower(), words
+    # Status first, then the lanes, then the queue rail beside them.
+    assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
+    assert _section(html, "queue").startswith('<section class="panel rail" id="queue"')
+
+
+def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
+    html = _no_script(_pages(tmp_path)["index.html"])
+    lanes = _section(html, "lanes")
+    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
+    assert card, lanes
+    text = _text(card.group(0))
+    assert "PR" in text and "cleffy#40" in text  # a GitHub ticket is a PR
+    assert "codex" in text  # bot
+    assert "review" in text  # step
+    assert "round 1" in text
+    assert "T+ 33m 20s" in text  # elapsed since it was queued
+
+
+def test_a_linear_slot_shows_its_ticket_not_a_pr(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "lin-build", state="running", repo="aut0-code/aut0",
+                ticket_id="AUT-7", created_at=NOW - 30)
+    html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["index.html"])
+    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
+    assert card
+    text = _text(card.group(0))
+    assert "AUT-7" in text and "ticket" in text and "PR" not in text.split()
+
+
+def test_queue_items_open_their_job_page(tmp_path: Path) -> None:
+    html = _no_script(_pages(tmp_path)["index.html"])
+    queue = _section(html, "queue")
+    assert 'href="job.html#job-q-claude"' in queue
+    assert 'href="job.html#job-g-grok-c"' in queue
+    assert "cleffy#12" in _text(queue)
+
+
+def test_attention_items_are_listed_once_each(tmp_path: Path) -> None:
+    attention = collect_snapshot(*seeded(tmp_path), now=NOW)["attention"]
+    # AUT-7 is stuck (and so also paused); it is one item, not two.
+    assert [(row["kind"], row["ticket_id"]) for row in attention["items"]] == [
+        ("stuck", "AUT-7"),
+        ("overdue", "14"),
+        ("paused", "5"),
+    ]
+    assert attention["count"] == 3
+
+
+def test_needs_attention_badge_counts_and_links_to_activity(tmp_path: Path) -> None:
+    pages = _pages(tmp_path)
+    for name, html in pages.items():
+        badge = _section(_no_script(html), "attention-badge")
+        assert 'href="activity.html#attention"' in badge, name
+        assert re.search(r'<b id="attention-count">3</b>', badge), (name, badge)
+        assert "needs attention" in _text(badge)
+
+
+def test_badge_count_is_zero_and_calm_when_all_clear(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DELETE FROM ticket_state")
+        connection.execute("UPDATE jobs SET last_activity_at = ?", (NOW - 5,))
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert snapshot["attention"] == {"count": 0, "items": []}
+    badge = _section(render_pages(snapshot)["index.html"], "attention-badge")
+    assert '<b id="attention-count">0</b>' in badge
+    assert "badge clear" in badge
+
+
+# --- #63 FU-1: a lane counts max(held, running) ----------------------------------------
+
+
+def _held_more_than_running(tmp_path: Path) -> dict:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _slots_table(connection)
+        # r-codex-review runs on pc; a second slot is still held there by a
+        # job that already finished (its slot not yet released).
+        connection.execute(
+            "INSERT INTO device_slots VALUES ('r-codex-review', 'pc', 'codex', 'codex-bot', ?)",
+            (NOW - 300,),
+        )
+        connection.execute(
+            "INSERT INTO device_slots VALUES ('d-codex-review-1', 'pc', 'codex', 'codex-bot', ?)",
+            (NOW - 900,),
+        )
+    return collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+
+
+def test_lane_uses_held_slots_when_more_than_running(tmp_path: Path) -> None:
+    snapshot = _held_more_than_running(tmp_path)
+    pc = next(row for row in snapshot["slots"]["devices"] if row["name"] == "pc")
+    assert pc["held"] == 2
+    lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    card = re.search(r'<section class="device[^"]*" data-device="pc">.*?</section>', lanes, re.S)
+    assert card, lanes
+    text = _text(card.group(0))
+    assert "2 / 2 slots" in text
+    assert "idle" not in text  # the held slot is not shown as free
+    assert "held" in text
+
+
+def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    snapshot = collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
+    lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
+    card = re.search(r'<section class="device[^"]*" data-device="box">.*?</section>', lanes, re.S)
+    text = _text(card.group(0))
+    # Two running box jobs, no device_slots rows: 2 used, 1 idle.
+    assert "2 / 3 slots" in text
+    assert text.count("idle") == 1
+
+
+# --- activity page -------------------------------------------------------------------------
+
+
+def test_activity_page_has_handoffs_verdicts_tickets_log_and_attention(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) "
+            "VALUES ('maxharris1/cleffy', '13', 'c2', 'queued-review-fix')"
+        )
+        connection.execute("UPDATE jobs SET finished_at = ? WHERE id = 'd-codex-review-1'", (NOW - 100,))
+    html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["activity.html"])
+    for panel in ("attention", "handoffs", "verdicts", "tickets", "log"):
+        assert f'id="{panel}"' in html, panel
+    assert "queued-review-fix" in _text(_section(html, "verdicts"))
+    assert "scripted" in _text(_section(html, "handoffs"))
+    tickets = _text(_section(html, "tickets"))
+    assert "AUT-7" in tickets and "waiting-max" in tickets
+    assert "cycle line 79" in _text(_section(html, "log"))
+    attention = _text(_section(html, "attention"))
+    assert "AUT-7" in attention and "job-timeout" in attention
+    assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
+    for panel in ("lanes", "queue", "health", "savings"):
+        assert f'id="{panel}"' not in html, panel
+
+
+# --- efficiency page --------------------------------------------------------------------------
+
+
+def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: Path) -> None:
+    html = _no_script(_pages(tmp_path, last_cycle_at=NOW - 4)["efficiency.html"])
+    for panel in ("health", "savings"):
+        assert f'id="{panel}"' in html, panel
+    health = _text(_section(html, "health"))
+    assert "OK" in health and "1,250 req/h" in health
+    savings = _section(html, "savings")
+    line = re.search(r'<p class="definition" id="share-definition">(.*?)</p>', savings, re.S)
+    assert line, savings
+    definition = _text(line.group(1))
+    assert definition == dashboard.SCRIPTED_SHARE_DEFINITION
+    assert "\n" not in dashboard.SCRIPTED_SHARE_DEFINITION
+    assert definition.lower().startswith("scripted share")
+    assert len(definition) <= 200
+    assert "50%" in _text(savings)
+    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log"):
+        assert f'id="{panel}"' not in html, panel
+
+
+# --- the statechart and the job path ------------------------------------------------------
+
+
+def test_parse_chart_reads_states_edges_and_legend() -> None:
+    chart = flow.load_chart(MINI)
+    assert chart is not None
+    assert chart["start"] == "intake"
+    assert chart["states"] == [
+        {"name": "intake", "group": "blue"},
+        {"name": "building", "group": "orange"},
+        {"name": "review", "group": "yellow"},
+        {"name": "fixing", "group": "orange"},
+        {"name": "handed-off", "group": "teal"},
+    ]
+    assert [(e["from"], e["to"]) for e in chart["edges"]] == [
+        ("intake", "building"),
+        ("building", "review"),
+        ("review", "fixing"),
+        ("fixing", "review"),
+        ("review", "handed-off"),
+    ]
+    assert chart["edges"][0]["label"] == "kind=go, queue build"
+    assert chart["legend"] == [
+        {"name": "Ask", "group": "blue"},
+        {"name": "Build", "group": "orange"},
+        {"name": "Review", "group": "yellow"},
+        {"name": "Ship", "group": "teal"},
+    ]
+
+
+def test_missing_or_broken_chart_degrades(tmp_path: Path) -> None:
+    assert flow.load_chart(tmp_path / "missing.mmd") is None
+    bad = tmp_path / "bad.mmd"
+    bad.write_text("not a chart\n", encoding="utf-8")
+    assert flow.load_chart(bad) is None
+    snapshot = _snapshot(tmp_path, chart_path=bad)
+    assert snapshot["statechart"] is None
+    job = _no_script(render_pages(snapshot)["job.html"])
+    assert "statechart unavailable" in job
+
+
+def test_job_page_diagram_is_the_real_statechart(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    assert snapshot["statechart"]["source"] == "chart.mmd"
+    html = render_pages(snapshot)["job.html"]
+    nodes, edges = _diagram(_section(html, "flow-template"))
+    states, transitions = _chart_source(CHART)
+    assert set(nodes) == states
+    assert set(edges) == transitions
+    assert len(states) == 19  # section 4.1
+
+
+def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> None:
+    first = render_pages(_snapshot(tmp_path / "a", chart_path=MINI))["job.html"]
+    nodes, edges = _diagram(_section(first, "flow-template"))
+    assert set(nodes) == {"intake", "building", "review", "fixing", "handed-off"}
+    assert ("review", "handed-off") in edges
+    assert ("fixing", "waiting-max") not in edges
+
+    changed = tmp_path / "changed.mmd"
+    text = MINI.read_text(encoding="utf-8")
+    text = text.replace("  s4: handed-off\n", "  s4: handed-off\n  s5: waiting-max\n")
+    text = text.replace("  s2 --> s4: ship = handoff\n", "  s3 --> s5: a product question\n")
+    changed.write_text(text, encoding="utf-8")
+    second = render_pages(_snapshot(tmp_path / "b", chart_path=changed))["job.html"]
+    nodes, edges = _diagram(_section(second, "flow-template"))
+    assert set(nodes) == {"intake", "building", "review", "fixing", "handed-off", "waiting-max"}
+    assert ("review", "handed-off") not in edges
+    assert ("fixing", "waiting-max") in edges
+    assert _chart_source(changed) == (set(nodes), set(edges))
+
+
+def test_job_path_follows_its_history_through_the_chart() -> None:
+    chart = flow.load_chart(CHART)
+    # intake has no edge to building: the chart's one-step bridge (questions)
+    # is filled in; every later step is a real transition.
+    assert flow.chart_path(
+        chart, ["intake", "building", "review", "fixing", "review"]
+    ) == ["intake", "questions", "building", "review", "fixing", "review"]
+    # Repeats collapse; unknown states are skipped.
+    assert flow.chart_path(chart, ["intake", "questions", "questions", "other", "planning"]) == [
+        "intake", "questions", "planning",
+    ]
+    # No short bridge: the jump is kept but has no edge.
+    assert flow.chart_path(chart, ["intake", "merged"]) == ["intake", "merged"]
+    assert flow.path_edges(chart, ["intake", "merged"]) == []
+    assert flow.path_edges(chart, ["intake", "questions", "building"]) == [
+        ("intake", "questions"),
+        ("questions", "building"),
+    ]
+
+
+def test_running_job_carries_its_flow(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
+    assert job["round"] == 1
+    assert job["tracker"] == "github"
+    assert job["flow"] == {
+        "state": "review",
+        "path": ["intake", "questions", "building", "review", "fixing", "review"],
+        "state_age_seconds": 2000,
+    }
+
+
+def test_job_page_highlights_the_path_and_current_state(tmp_path: Path) -> None:
+    html = _no_script(_pages(tmp_path)["job.html"])
+    article = _section(html, "job-h-review")
+    nodes, edges = _diagram(article)
+    visited = {state for state, classes in nodes.items() if "visited" in classes}
+    current = {state for state, classes in nodes.items() if "current" in classes}
+    taken = {edge for edge, classes in edges.items() if "taken" in classes}
+    assert visited == {"intake", "questions", "building", "review", "fixing"}
+    assert current == {"review"}
+    assert taken == {
+        ("intake", "questions"),
+        ("questions", "building"),
+        ("building", "review"),
+        ("review", "fixing"),
+        ("fixing", "review"),
+    }
+    text = _text(article)
+    assert "round 1" in text
+    assert "33m 20s in review" in text
+    assert "intake → questions → building → review → fixing → review" in text
+    assert "codex" in text and "cleffy#40" in text
+
+
+def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    html = _no_script(render_pages(snapshot)["job.html"])
+    for row in snapshot["running"] + snapshot["queued"]:
+        assert f'id="job-{row["job"]}"' in html, row["job"]
+        assert f'href="#job-{row["job"]}"' in _section(html, "jobs")
+
+
+def test_a_job_with_no_ticket_state_still_gets_a_diagram(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "orphan-build", state="queued", ticket_id="99")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["queued"] if row["ticket_id"] == "99")
+    assert job["round"] is None
+    assert job["flow"]["state"] is None
+    assert job["flow"]["path"] == ["intake", "questions", "building"]
+    nodes, _ = _diagram(_section(render_pages(snapshot)["job.html"], "job-orphan-b"))
+    assert not any("current" in classes for classes in nodes.values())
+
+
+# --- no-JS rendering ---------------------------------------------------------------------
+
+
+def test_every_page_reads_without_script(tmp_path: Path) -> None:
+    pages = _pages(tmp_path)
+    for name, html in pages.items():
+        assert '<noscript><meta http-equiv="refresh" content="20"></noscript>' in html, name
+        bare = _no_script(html)
+        main = _section(bare, "hud")
+        assert not re.match(r"<main[^>]*\bhidden\b", main), name
+        # Every panel is filled server-side, not left for the script.
+        for panel in re.findall(r'<section class="panel[^"]*" id="([a-z-]+)"', main):
+            assert "<h2>" in _section(bare, panel), (name, panel)
+    lanes = _text(_section(_no_script(pages["index.html"]), "lanes"))
+    assert "cleffy#13" in lanes and "cleffy#14" in lanes
+    job = _no_script(pages["job.html"])
+    # Without script the job page shows every job; a slot link scrolls to its
+    # own and :target marks it.
+    assert ":target" in re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    assert '<div id="flow-template" hidden>' in job
+
+
+def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
+    for name, html in _pages(tmp_path).items():
+        for needle in ("<link", "src=", "http://", "https://", "@import", "url(", "//cdn"):
+            assert needle not in html, (name, needle)
+        (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+            assert sink not in script, (name, sink)
+        assert re.findall(r"fetch\(([^,)]+)", script) == ["STATUS_URL"], name
+
+
+def test_no_secret_reaches_any_page(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "secret-run", state="running", repo=f"repo {WEBHOOK_URL}",
+                ticket_id=GH_CLASSIC)
+        add_ticket(connection, f"repo {WEBHOOK_URL}", GH_CLASSIC, state="review",
+                   stuck=1, stuck_reason=f"token={GH_CLASSIC} {WEBHOOK_URL}")
+    out = tmp_path / "out"
+    write_snapshot(out, collect_snapshot(db, log, now=NOW))
+    text = "".join(path.read_text(encoding="utf-8") for path in out.iterdir())
+    for name, secret in FREE_TEXT_SECRETS.items():
+        assert secret not in text, name
+    assert str(ROOT) not in text  # no local paths either
+
+
+# --- the page script, against a tiny DOM -------------------------------------------------
+
+HARNESS = r"""
+const fs = require('fs');
+const [script, statusText, page, hash, idsText] = [2, 3, 4, 5, 6].map(i => {
+  const v = process.argv[i]; return i <= 3 ? fs.readFileSync(v, 'utf8') : v; });
+const status = JSON.parse(statusText);
+const ids = {};
+class Node {
+  constructor(tag) { this.tagName = tag; this.children = []; this._text = ''; this.attrs = {};
+    this.className = ''; this.hidden = false; this.title = ''; this.style = {setProperty: (k, v) => { this.style[k] = v; }};
+    const self = this;
+    this.classList = {add: (...c) => { self.className = (self.className + ' ' + c.join(' ')).trim(); },
+      remove: (...c) => { self.className = self.className.split(' ').filter(x => !c.includes(x)).join(' '); },
+      toggle: (c, on) => { if (on === undefined) on = !self.className.split(' ').includes(c);
+        if (on) self.classList.add(c); else self.classList.remove(c); return on; },
+      contains: (c) => self.className.split(' ').includes(c)}; }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren(...kids) { this.children = kids; this._text = ''; }
+  setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
+    this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
+  getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
+  removeAttribute(k) { delete this.attrs[k]; }
+  addEventListener() {}
+  cloneNode(deep) { const n = new Node(this.tagName); n.className = this.className;
+    n.attrs = Object.assign({}, this.attrs); n._text = this._text;
+    if (deep) n.children = this.children.map(c => c.cloneNode(true)); return n; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
+  dump(depth) { const pad = ' '.repeat(depth || 0);
+    const attrs = ['href', 'data-device', 'data-state', 'data-from', 'data-to']
+      .filter(k => k in this.attrs).map(k => '[' + k + '=' + this.attrs[k] + ']').join('');
+    return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') + attrs +
+      (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
+}
+const body = new Node('body');
+body.attrs['data-generated'] = '1800000000.000';
+body.attrs['data-refresh'] = '20';
+body.attrs['data-page'] = page;
+for (const id of JSON.parse(idsText)) {
+  const n = new Node('div'); n.attrs.id = id; ids[id] = n; body.appendChild(n);
+}
+if (ids['flow-template'] && status.statechart) {
+  // What job.html's server-rendered template holds: one g per state and edge.
+  const svg = new Node('svg'); svg.className = 'flow';
+  status.statechart.edges.forEach(e => { const g = new Node('g'); g.className = 'edge';
+    g.attrs['data-from'] = e.from; g.attrs['data-to'] = e.to; g.appendChild(new Node('path')); svg.appendChild(g); });
+  status.statechart.states.forEach(s => { const g = new Node('g'); g.className = 'node';
+    g.attrs['data-state'] = s.name; g.appendChild(new Node('rect')); svg.appendChild(g); });
+  ids['flow-template'].appendChild(svg);
+}
+global.window = global;
+global.addEventListener = () => {};
+global.document = {body, hidden: false, getElementById: (id) => ids[id] || null,
+  createElement: (tag) => new Node(tag), addEventListener: () => {}};
+global.location = {hash, reload: () => { console.log('RELOAD'); }};
+let fetches = 0;
+global.fetch = (url, opts) => { fetches += 1;
+  if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);
+  return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(status)}); };
+Date.now = () => 1800000003000;
+eval(script);
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({fetches,
+    text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
+    dump: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.dump(0)]))}));
+  process.exit(0);
+}, 200);
+"""
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+
+def _run_page(tmp_path: Path, snapshot: dict, page: str, ids: list[str], hash_: str = "") -> dict:
+    name = {"main": "index.html"}.get(page, f"{page}.html")
+    html = render_pages(snapshot)[name]
+    (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
+    assert f'data-page="{page}"' in html
+    (tmp_path / "page.js").write_text(script, encoding="utf-8")
+    (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "harness.js").write_text(HARNESS, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"),
+         str(tmp_path / "status.json"), page, hash_, json.dumps(ids)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["fetches"] >= 1
+    return out
+
+
+BAR = ["link", "link-text", "age", "clock", "attention-badge", "attention-count"]
+
+
+@needs_node
+def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
+    snapshot = _held_more_than_running(tmp_path)
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "queue"])
+    assert "LIVE" in out["text"]["link-text"]
+    assert out["text"]["attention-count"] == "3"
+    lanes = out["dump"]["lanes"]
+    assert "a.slot.job[href=job.html#job-r-codex-]" in lanes
+    for needle in ("cleffy#13", "codex", "review", "round 2", "T+ ", "OVERDUE", "DISABLED"):
+        assert needle in out["text"]["lanes"], (needle, lanes)
+    # #63 FU-1: pc holds 2 slots with 1 job running; the lane is full.
+    pc = lanes[lanes.index("[data-device=pc]") :]
+    pc = pc[: pc.index("[data-device=", 1)] if "[data-device=" in pc[1:] else pc
+    assert '"2 / 2 slots"' in pc and '"held"' in pc and '"idle"' not in pc
+    assert "a.queue-item[href=job.html#job-q-claude]" in out["dump"]["queue"]
+    assert "cleffy#12" in out["text"]["queue"]
+
+
+@needs_node
+def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path, last_cycle_at=NOW - 4)
+    activity = _run_page(tmp_path, snapshot, "activity",
+                         BAR + ["hud", "attention", "handoffs", "verdicts", "tickets", "log"])
+    text = activity["text"]
+    assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
+    assert text["attention"].count("AUT-7") == 1
+    assert "AUT-7" in text["tickets"]
+    assert "cycle line 79" in text["log"]
+    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings"])
+    text = efficiency["text"]
+    assert "OK" in text["health"]
+    assert dashboard.SCRIPTED_SHARE_DEFINITION in text["savings"]
+    assert "50%" in text["savings"]
+
+
+@needs_node
+def test_script_highlights_the_selected_jobs_path(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
+                    hash_="#job-h-review")
+    view = out["dump"]["jobview"]
+    assert "cleffy#40" in out["text"]["jobview"]
+    assert "round 1" in out["text"]["jobview"]
+    assert "33m 2" in out["text"]["jobview"]  # time in state, ticking from 33m 20s
+    visited = set(re.findall(r"g\.node\.visited(?:\.current)?\[data-state=([^\]]+)\]", view))
+    current = set(re.findall(r"g\.node\.visited\.current\[data-state=([^\]]+)\]", view))
+    taken = set(re.findall(r"g\.edge\.taken\[data-from=([^\]]+)\]\[data-to=([^\]]+)\]", view))
+    assert visited == {"intake", "questions", "building", "review", "fixing"}
+    assert current == {"review"}
+    assert taken == {("intake", "questions"), ("questions", "building"), ("building", "review"),
+                     ("review", "fixing"), ("fixing", "review")}
+    # Only the selected job is shown.
+    assert "cleffy#13" not in out["text"]["jobview"]
+    assert "#job-r-codex-" in out["dump"]["jobs"]
+
+
+@needs_node
+def test_script_says_when_the_selected_job_is_gone(tmp_path: Path) -> None:
+    out = _run_page(tmp_path, _snapshot(tmp_path), "job",
+                    BAR + ["hud", "jobs", "jobview", "flow-template"], hash_="#job-finished")
+    assert "no longer running or queued" in out["text"]["jobview"]
+
+
+# --- the full push carries every page ------------------------------------------------------
+
+
+def test_cli_full_push_publishes_every_page_in_one_rename(tmp_path: Path) -> None:
+    import os
+    import sys
+
+    from tests.test_dashboard_live import _fake_bin
+
+    db, log = seeded(tmp_path)
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\nprojects:\n  - repo: maxharris1/factory\n"
+        "dashboard:\n  push:\n    transport: ssh\n    host: pc-wsl-cursor-bot\n"
+        "    remote_dir: factory-dashboard\n    method: scp\n    live: true\n",
+        encoding="utf-8",
+    )
+    remote_home = tmp_path / "remote-home"
+    site = remote_home / "factory-dashboard"
+    site.mkdir(parents=True)
+    remote_log = tmp_path / "remote.log"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ORCH_")}
+    env.update(
+        PATH=f"{_fake_bin(tmp_path)}{os.pathsep}{env.get('PATH', '')}",
+        FAKE_REMOTE_HOME=str(remote_home),
+        FAKE_REMOTE_LOG=str(remote_log),
+    )
+    out = tmp_path / "local-site"
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "dashboard", "push", "--once",
+         "--db", str(db), "--orch", str(orch), "--out", str(out), "--log", str(log)],
+        capture_output=True, text=True, env=env, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [eval(line) for line in remote_log.read_text().splitlines()]  # noqa: S307
+    names = ("status.json", *PAGES)
+    assert [call[0] for call in calls] == ["scp"] * len(names) + ["ssh"]
+    assert calls[-1][-1] == "cd -- factory-dashboard && " + " && ".join(
+        f"mv -f -- .{name}.push-tmp {name}" for name in names
+    )
+    assert sorted(path.name for path in site.iterdir()) == sorted(names)
+    for name in PAGES:
+        assert (site / name).read_text(encoding="utf-8") == (out / name).read_text(encoding="utf-8")
+
+
+def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE tracked_tickets")
+        connection.execute("DROP TABLE ticket_state")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "13")
+    assert (job["tracker"], job["round"], job["flow"]["state"]) == (None, None, None)
+    # Only a review job: intake -> review is three chart steps, more than a
+    # bridge, so it stays a jump.
+    assert job["flow"]["path"] == ["intake", "review"]
+    pages = render_pages(snapshot)
+    assert 'id="job-r-codex-"' in pages["job.html"]
+    assert "round —" in _text(_section(_no_script(pages["index.html"]), "lanes"))

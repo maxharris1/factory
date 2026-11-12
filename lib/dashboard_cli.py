@@ -9,7 +9,9 @@ when configured, pushes it out. Paths:
   --orch else the checkout's orch.yml (only its dashboard section is used)
   --machines else the checkout's machines.yml, when present
 
-`push --status-only` sends status.json alone (the live pushes `orch poll`
+`snapshot` writes status.json and the four pages (index.html, activity.html,
+efficiency.html, job.html); `push` sends them all. `push --status-only`
+sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health.
 """
@@ -26,7 +28,7 @@ from pathlib import Path
 from lib.dashboard import (
     DashboardError,
     collect_snapshot,
-    write_snapshot,
+    write_snapshot_pages,
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_push import NoopTransport, run_push, transport_for
@@ -45,7 +47,7 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="orch dashboard", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
-    snapshot = commands.add_parser("snapshot", help="write status.json and index.html")
+    snapshot = commands.add_parser("snapshot", help="write status.json and the pages")
     push = commands.add_parser("push", help="snapshot and push when configured")
     for sub in (snapshot, push):
         sub.add_argument("--db", type=Path)
@@ -105,11 +107,11 @@ def main(argv: list[str]) -> int:
     if not _paths_ok(args, prog):
         return 2
     try:
-        status, index = _snapshot(args, config, args.refresh)
+        paths = _snapshot(args, config, args.refresh)
     except (DashboardError, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
-    print(f"wrote {status} {index}")
+    print("wrote " + " ".join(str(path) for path in paths))
     return 0
 
 
@@ -139,7 +141,8 @@ def _snapshot(
     refresh: int | None,
     *,
     last_cycle_at: float | None = None,
-) -> tuple[Path, Path]:
+) -> tuple[Path, ...]:
+    """status.json first, then every page."""
     db = args.db if args.db is not None else Path(os.environ["ORCH_DB"])
     log = args.log or _env_path("ORCH_POLL_LOG") or db.parent / "poller.log"
     out = args.out or _env_path("ORCH_DASHBOARD_DIR") or db.parent / "dashboard"
@@ -152,7 +155,7 @@ def _snapshot(
         refresh_seconds=refresh if refresh is not None else config.refresh_seconds,
         last_cycle_at=last_cycle_at,
     )
-    return write_snapshot(out, snapshot)
+    return write_snapshot_pages(out, snapshot)
 
 
 def _env_path(name: str) -> Path | None:

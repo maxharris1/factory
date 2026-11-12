@@ -615,7 +615,8 @@ The box cannot take inbound tailnet connections, so there is no live
 server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
-writes `status.json` and a self-contained `index.html` to `--out`.
+writes `status.json` and four self-contained pages (`index.html`,
+`job.html`, `activity.html`, `efficiency.html`) to `--out`.
 The database path is resolved through symlinks first, and the dashboard
 never uses `immutable=1`: SQLite takes its normal shared locks and reads
 the WAL, so a read stays consistent while the poller commits or
@@ -623,38 +624,69 @@ checkpoints. Like any reader of a WAL database (`sqlite3` or `orch status`
 included), SQLite may create `orch.db-wal` and `orch.db-shm` beside the
 database; they are SQLite's own files and the next writer removes them. If
 the directory is read-only and they don't exist yet, the snapshot fails
-with that explanation instead of reading without locks. Both files are
-written to temp files in the same directory and fsynced, then renamed into
-place; if the second rename fails, `status.json` is put back as it was, so
-the pair always comes from one snapshot.
+with that explanation instead of reading without locks. Every file is
+written to a temp file in the same directory and fsynced, then renamed into
+place, `status.json` first; if a later rename fails, every file already
+renamed is put back as it was (or removed if it had no earlier version), so
+the set always comes from one snapshot.
 
-**Mission control.** `index.html` is a dark heads-up display that updates
-in real time: its inline script fetches the relative `status.json` every
-1.5 seconds (`cache: 'no-store'`) and rebuilds its panels in place, with no
-reload. It shows a status row (running, queued, done, failed, stuck or
-overdue, scripted share), one lane per device from `machines.yml` (box, pc,
-mac; disabled devices dimmed and marked, placeholders flagged) with a slot
-per `slot_max` and, in each busy slot, the job's bot, ticket, action,
-elapsed time and heartbeat age against its timeout, plus a lane for running
-Grok wakes; the queue with wait times; recent handoffs (scripted,
-bot-to-bot, failed) and recent verdicts (handled `orch:v1` comments by
-outcome); poll health and Linear-budget health; handoff savings; stuck,
-overdue and paused tickets; every tracked ticket; and the redacted log
-tail. Ages tick every second between fetches, and rows that appear since
-the last snapshot flash briefly. The header shows the link state (`LIVE`,
-`STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail). Everything
-is inline: no external asset, font or CDN, so it works offline on the
-tailnet. Values are only ever set as text (`createElement`/`textContent`),
-never parsed as HTML. Animations (header sweep, link pulse, heartbeat
-shimmer, new-row flash) stop under `prefers-reduced-motion: reduce`, and
-every text colour meets WCAG AA (4.5:1) on every panel background
-(`tests/test_dashboard_mission_control.py` checks the palette). Without
-script, or when `status.json` cannot be fetched at all, the server-rendered
-tables underneath stay and the page reloads every
-`dashboard.refresh_seconds` (15 to 30, default 20; `--refresh` overrides
-it), as before. Paths: `--db`, else
+**Pages.** Every page shares one bar: links to the pages, the link state
+(`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
+and a **needs attention** badge with a count that links to the Activity
+page (stuck tickets, overdue jobs, then paused tickets not already listed
+as stuck, each once).
+
+- **Main** (`index.html`): factory status on top (running, queued, done,
+  failed, stuck or overdue), then the lanes and slots as the centerpiece:
+  one lane per device from `machines.yml` (box, pc, mac; disabled devices
+  dimmed and marked, placeholders flagged) with a slot per `slot_max`, and
+  a lane for running Grok wakes. Each busy slot shows its job: the ticket
+  (a GitHub ticket is shown as a PR, a Linear ticket by its id), bot, step
+  (the job's action), review round, elapsed time and heartbeat age against
+  its timeout. A lane counts `max(held, running)` slots, so a slot still
+  held in `device_slots` is never shown as idle (#63 FU-1). The queue sits
+  in a side rail beside the lanes with wait times. A slot or queue item
+  opens its job page.
+- **Job** (`job.html`, `job.html#job-<id>` for one job): every running or
+  queued job with a flow diagram of the ticket statechart, from the ticket
+  (start) to shipped: build, review, the revise loop (`fixing`), ready for
+  review (`handed-off`) and the ship states. The diagram is generated from
+  [`model/chart.mmd`](model/chart.mmd), the chart the statechart check
+  draws from `model/Orchestrator.tla` (CI fails if they differ), so a
+  change to the statechart changes the diagram; only the layout and a few
+  plain-word glosses are the dashboard's. The path the job's ticket took
+  and its current state are highlighted, with its round and time in that
+  state. The path is the start state, then the state each of the ticket's
+  jobs worked in (`build` is `building`, `review` is `review`, `fix` is
+  `fixing`, ...), then the ticket's current workflow state; where two of
+  those have no direct transition, a bridge of at most two steps through
+  the chart is filled in (intake to building goes through questions, which
+  has no job of its own), and longer gaps are left as a jump with no edge.
+  The database records no transition times, so time in state counts from
+  when the first job of the current run of that state was queued.
+- **Activity** (`activity.html`): needs attention, recent handoffs
+  (scripted, bot-to-bot, failed), recent verdicts (handled `orch:v1`
+  comments by outcome), every tracked ticket and the redacted log tail.
+- **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
+  and handoff savings with a one-line definition of scripted share.
+
+Each page is rendered in full on the box, so it reads without script; it
+then reloads every `dashboard.refresh_seconds` (15 to 30, default 20;
+`--refresh` overrides it), and on the job page a slot link scrolls to its
+job, which `:target` marks. With script, each page fetches the relative
+`status.json` every 1.5 seconds (`cache: 'no-store'`) and rebuilds its
+panels in place, with no reload; ages tick every second between fetches,
+rows that appear since the last snapshot flash briefly, and the job page
+copies the server-drawn diagram and moves the highlight. If `status.json`
+cannot be fetched at all, the server-rendered page stays and reloads as
+without script. Everything is inline: no external asset, font or CDN, so it
+works offline on the tailnet. Values are only ever set as text
+(`createElement`/`textContent`), never parsed as HTML. Animations (header
+sweep, link pulse, heartbeat shimmer, new-row flash) stop under
+`prefers-reduced-motion: reduce`, and every text colour meets WCAG AA
+(4.5:1) on every panel background (`tests/test_dashboard_mission_control.py`
+checks the palette). Paths: `--db`, else
 `$ORCH_DB`; `--log`, else `$ORCH_POLL_LOG`, else `poller.log` beside the
-database; `--out`, else `$ORCH_DASHBOARD_DIR`, else `dashboard/` beside the
 database; `--machines`, else the checkout's `machines.yml` when present.
 
 The snapshot shows the queue (queued, running, done and failed jobs by
@@ -694,6 +726,16 @@ told when the last cycle ended (only live pushes pass `--last-cycle`;
 poll budget is exhausted` errors), `deferring` (`Linear poll budget`
 deferrals) or `ok`, with those hourly counts and the poller's Linear share
 of the hourly budget (1250 requests, 1,500,000 complexity).
+
+For the layout: each running and queued job's `tracker` (`github`,
+`linear` or `null`), `round` (its ticket's review round, `null` when the
+ticket is not tracked) and `flow` (`state`, the ticket's workflow state on
+the chart; `path`; `state_age_seconds`); `attention` (`count` and `items`,
+each with `kind` `stuck`, `overdue` or `paused`); `statechart` (the parsed
+chart: `source` is the file name only, `start`, `states` with their colour
+`group`, `edges` with their labels, `legend`; `null` when the chart cannot
+be read, and the job page then says the statechart is unavailable); and
+`handoff_savings.scripted_share_definition`.
 
 **Handoff savings.** docs/SPEC.md does not define this counter; the
 dashboard brief does, and this is its database form. `scripted` counts
@@ -744,7 +786,7 @@ shape, secret assignments (plain, percent-encoded and as quoted JSON keys
 with varied quoting and spacing), an email and a multi-line private key in
 the environment, the database (poll errors, deferrals, stuck reasons,
 workflow states) and the log, and checks that none reach `status.json` or
-`index.html`. A second test turns the redactor off and checks that the
+`index.html`; `tests/test_dashboard_layout.py` checks every page. A second test turns the redactor off and checks that the
 same leak check then finds every planted free-text secret.
 
 **Push.** Push is off by default: with no `dashboard.push` section, or
@@ -770,8 +812,8 @@ dashboard:
 
 That is the confirmed target: the files land in
 `/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
-is `scp -F /home/box/.ssh/config status.json index.html
-pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+is `scp -F /home/box/.ssh/config status.json index.html activity.html
+efficiency.html job.html pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
 them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
 `config/orch.example.yml` carries this section; the shipped `orch.yml` has
 it commented out, so nothing pushes until Max turns it on.
@@ -802,7 +844,7 @@ rename, so a reader never sees a half-written file. Pushes start at most
 once a second and never while the previous one is still running; a change
 that arrives meanwhile is pushed as soon as both allow, so the last change
 is never dropped. An empty `-wal` counts as none, so the push child's own
-read-only snapshot never looks like a change. The full pair (`index.html`
+read-only snapshot never looks like a change. The full set (the four pages
 too) still goes out on the first cycle and then after every cycle, or every
 `every_minutes`. A failed start is one redacted line at most once a
 minute. `--once` polls start no watcher, and a stop stops it before exit.
@@ -815,16 +857,16 @@ and the page falls back to reloading.
 in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
 ConnectTimeout=10 -- status.json
 pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
-for `index.html`; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
+for each page; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
 "ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
-temp names). Only after both uploads succeed does one `ssh [-F ssh_config]
+temp names). Only after every upload succeeds does one `ssh [-F ssh_config]
 -o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
 factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
-.index.html.push-tmp index.html'` rename both over the live names. An
-interrupted upload leaves the published pair as it was; the two renames run
-back to back on the remote host with no network round-trip between them, so
-a reader never sees a half-written file and the pair is mismatched for at
-most the instant between two local `rename(2)` calls. The static server
+.index.html.push-tmp index.html && ...'` rename them all over the live
+names. An interrupted upload leaves the published set as it was; the
+renames run back to back on the remote host with no network round-trip
+between them, so a reader never sees a half-written file and the set is
+mismatched for at most the instants between local `rename(2)` calls. The static server
 never serves the temp names. Every command is an argv list (no local shell)
 with a 60-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
@@ -845,7 +887,9 @@ is an example systemd user unit for the pc-wsl-bots WSL node. It runs
 small standard-library server, instead of `python3 -m http.server` (which
 follows symlinks out of its directory, lists directories, and serves the
 home directory when `--directory` is empty). It answers GET and HEAD only,
-and only for `/`, `/index.html` and `/status.json`: every other path, dot-
+and only for `/`, `/status.json` and the four pages (`/index.html`,
+`/job.html`, `/activity.html`, `/efficiency.html`; an older copy of the
+server answers 404 for the last three until it is replaced): every other path, dot-
 file, `..` or encoded slash is a 404, and no directory is ever listed. Each
 file is opened, with `O_NOFOLLOW`, relative to a descriptor for the
 directory that the server opens once at startup (so swapping the directory
