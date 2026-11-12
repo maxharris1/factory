@@ -709,3 +709,26 @@ def test_handoff_comment_outside_the_configured_projects_costs_no_linear_read(
     clock.now += 60
     dispatcher.poll_once(source)
     assert linear.take() == []
+
+
+# Sweep of F1.1: a ticket still tracked under a repo no longer in orch.yml
+# is excluded from discovery and skipped by tracked_tickets, so its dirty
+# row (a Comment on a tracked issue is admitted by identifier) had no reader.
+def test_dirty_row_for_a_ticket_tracked_under_a_removed_repo_drains() -> None:
+    linear = Linear([issue("AUT-1")], hits=[])
+    clock = Clock()
+    source, _gh = source_for(webhook_config(), linear, clock=clock)
+    dirty = FakeDirty()
+    source.linear_dirty = dirty
+    retired = (TicketRef("acme/retired", "AUT-1", "linear"),)
+    cycle(source, retired, exclude=frozenset({"AUT-1"}))
+    assert linear.take() == SEARCHES
+    dirty.add("id-AUT-1", "AUT-1", 1.0)
+
+    for _ in range(2):
+        clock.now += 60
+        _, found = cycle(source, retired, exclude=frozenset({"AUT-1"}))
+        assert found == ()
+
+    assert dirty.rows == {}
+    assert linear.take() == []

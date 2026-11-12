@@ -556,6 +556,23 @@ def test_missing_or_invalid_content_length_is_rejected(
     assert app.handle("POST", PATH, headers, body, "127.0.0.1").status == 411
 
 
+# Sweep of F1.5: "HMAC before JSON parsing" is an ordering claim too. An
+# unsigned body that is not JSON must fail the signature (401), not the
+# parse (400), so parsing ahead of the check fails this.
+@pytest.mark.parametrize("raw", [b"not json", b"{", b"\xff\xfe"], ids=["text", "truncated", "binary"])
+def test_unsigned_body_fails_the_signature_before_any_parse(
+    app: WebhookApp,
+    database: Path,
+    logs: list[str],
+    raw: bytes,
+) -> None:
+    result = post(app, None, raw=raw, signature="0" * 64)
+
+    assert (result.status, result.reason) == (401, "signature")
+    assert logs == ["linear-webhook: rejected signature"]
+    assert dirty_rows(database) == []
+
+
 def test_signed_body_that_is_not_json_is_rejected(app: WebhookApp) -> None:
     raw = b"not json"
 
