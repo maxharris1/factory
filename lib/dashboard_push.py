@@ -23,13 +23,26 @@ poll cycle, at most every `every_minutes`, it starts `orch dashboard push
 --once` as a separate process with a scrubbed environment and does not wait
 for it. A push failure is that child's redacted log line; it never reaches
 the poll loop.
+
+`LivePusher` (`dashboard.push.live: true`) adds real-time pushes on top. A
+watcher thread stats orch.db and its WAL every WATCH_SECONDS; any committed
+change (a job claimed, a heartbeat, a job finished, a verdict recorded, by
+the poller or by any other process) and the end of every poll cycle start
+`orch dashboard push --once --status-only`: status.json alone, uploaded and
+renamed exactly like the pair. Pushes start at most once every
+LIVE_MIN_SECONDS, never while the previous one runs, and a change that
+arrives meanwhile is pushed as soon as both allow, so the last change is
+never dropped. The full pair (index.html too) still goes out at the
+`PollPusher` cadence.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -312,9 +325,14 @@ def poll_pusher_for(
     environ: Mapping[str, str],
     spawn: Spawn = subprocess.Popen,
     clock: Callable[[], float] = time.monotonic,
+    wall: Callable[[], float] = time.time,
+    fingerprint: "Fingerprint | None" = None,
     log: Callable[[str], None],
 ) -> PollPusher | None:
-    """The poll loop's push hook, or None when dashboard.push is not set."""
+    """The poll loop's push hook, or None when dashboard.push is not set.
+
+    With `live: true` it is a `LivePusher`; `orch poll` starts its watcher.
+    """
     if config.transport == "none":
         return None
     argv = [
@@ -331,4 +349,186 @@ def poll_pusher_for(
     env = {name: environ[name] for name in CHILD_ENV if name in environ}
     env["PYTHONUNBUFFERED"] = "1"
     every = (config.every_minutes or 0) * 60
+    if config.live:
+        return LivePusher(
+            argv,
+            env,
+            every,
+            db=db,
+            spawn=spawn,
+            clock=clock,
+            wall=wall,
+            fingerprint=fingerprint if fingerprint is not None else db_fingerprint,
+            log=log,
+        )
     return PollPusher(argv, env, every, spawn=spawn, clock=clock, log=log)
+
+
+# --- real-time pushes -------------------------------------------------------------
+
+LIVE_MIN_SECONDS = 1.0
+WATCH_SECONDS = 0.25
+LIVE_ERROR_LOG_SECONDS = 60.0
+
+Fingerprint = Callable[[Path], object]
+
+
+def _stat_key(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def db_fingerprint(path: Path) -> tuple:
+    """What changes when anyone commits to the SQLite database at `path`.
+
+    A WAL-mode commit appends to orch.db-wal (its size or mtime changes); a
+    checkpoint or a rollback-journal commit rewrites orch.db. A read-only
+    reader writes neither: it may create an empty -wal, so an empty WAL
+    counts the same as none, and the push child's own snapshot never looks
+    like a change. Only stat() is used; no SQLite connection is opened.
+    """
+    wal = _stat_key(Path(f"{path}-wal"))
+    if wal is not None and wal[1] == 0:
+        wal = None
+    return (_stat_key(path), wal)
+
+
+class LivePusher(PollPusher):
+    """`PollPusher` plus a status.json push on every database change.
+
+    `__call__` (the poll loop's after_poll) marks the end of a cycle: a
+    change, and the time `--last-cycle` reports for poll health; the full
+    pair is due on the first cycle and then every `every_seconds`. `tick()`
+    (the watcher, every WATCH_SECONDS) compares the database fingerprint and
+    starts whatever push is pending when the rate limit and the previous
+    child allow. Neither ever raises; failures are one redacted log line at
+    most every LIVE_ERROR_LOG_SECONDS.
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        env: Mapping[str, str],
+        every_seconds: int,
+        *,
+        db: Path,
+        spawn: Spawn = subprocess.Popen,
+        clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
+        fingerprint: Fingerprint = db_fingerprint,
+        log: Callable[[str], None],
+        min_interval: float = LIVE_MIN_SECONDS,
+    ):
+        super().__init__(argv, env, every_seconds, spawn=spawn, clock=clock, log=log)
+        self.db = db
+        self.wall = wall
+        self.fingerprint = fingerprint
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._pending_status = False
+        self._pending_full = False
+        self._last_full: float | None = None
+        self._last_cycle: float | None = None
+        self._last_error_log: float | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        try:
+            self._seen: object = self.fingerprint(self.db)
+        except Exception:  # the first tick logs it
+            self._seen = None
+
+    # The poll loop's hook: the end of a cycle.
+    def __call__(self) -> None:
+        with self._lock:
+            try:
+                self._last_cycle = self.wall()
+                self._pending_status = True
+                now = self.clock()
+                if self._last_full is None or now - self._last_full >= self.every_seconds:
+                    self._pending_full = True
+                self._pump()
+            except Exception as exc:  # a push never breaks polling
+                self._error(exc)
+
+    def tick(self) -> None:
+        with self._lock:
+            try:
+                current = self.fingerprint(self.db)
+                if current != self._seen:
+                    self._seen = current
+                    self._pending_status = True
+                self._pump()
+            except Exception as exc:  # a push never breaks polling
+                self._error(exc)
+
+    def _pump(self) -> None:
+        if not (self._pending_status or self._pending_full):
+            return
+        if self._child is not None and self._child.poll() is None:
+            return
+        self._child = None
+        now = self.clock()
+        if self._last is not None and now - self._last < self.min_interval:
+            return
+        full = self._pending_full
+        argv = list(self.argv)
+        if not full:
+            argv.append("--status-only")
+        if self._last_cycle is not None:
+            argv += ["--last-cycle", f"{self._last_cycle:.3f}"]
+        # Cleared before the spawn: a failed start is retried on the next
+        # change or cycle, not every tick.
+        self._pending_status = False
+        self._pending_full = False
+        self._last = now
+        if full:
+            self._last_full = now
+        self._child = self.spawn(
+            argv,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            close_fds=True,
+            shell=False,
+        )
+
+    def _error(self, exc: BaseException) -> None:
+        now = self.clock()
+        if (
+            self._last_error_log is not None
+            and now - self._last_error_log < LIVE_ERROR_LOG_SECONDS
+        ):
+            return
+        self._last_error_log = now
+        text = " ".join(str(exc).split()) or type(exc).__name__
+        self.log(f"dashboard push: {redact(text)}")
+
+    # The watcher thread.
+    @property
+    def watching(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, *, interval: float = WATCH_SECONDS) -> None:
+        if self.watching:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._watch,
+            args=(interval,),
+            name="dashboard-live-watch",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        self._thread = None
+
+    def _watch(self, interval: float) -> None:
+        while not self._stop.wait(interval):
+            self.tick()

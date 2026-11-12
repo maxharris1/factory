@@ -8,11 +8,16 @@ when configured, pushes it out. Paths:
   --out  else $ORCH_DASHBOARD_DIR, else dashboard/ next to the database
   --orch else the checkout's orch.yml (only its dashboard section is used)
   --machines else the checkout's machines.yml, when present
+
+`push --status-only` sends status.json alone (the live pushes `orch poll`
+starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
+last cycle ended, reported as poll health.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -50,7 +55,19 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--machines", type=Path)
     snapshot.add_argument("--refresh", type=int)
     push.add_argument("--once", action="store_true")
+    push.add_argument("--status-only", action="store_true")
+    push.add_argument("--last-cycle", type=_epoch)
     return parser
+
+
+def _epoch(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a Unix time in seconds") from None
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be a Unix time in seconds")
+    return number
 
 
 def main(argv: list[str]) -> int:
@@ -70,9 +87,15 @@ def main(argv: list[str]) -> int:
         # Unconfigured push never resolves paths, opens the database or writes.
         if not isinstance(transport, NoopTransport) and not _paths_ok(args, prog):
             return 2
+
+        def snapshot() -> tuple[Path, ...]:
+            paths = _snapshot(args, config, None, last_cycle_at=args.last_cycle)
+            # Live pushes send status.json alone; the page polls it.
+            return paths[:1] if args.status_only else paths
+
         return run_push(
             transport=transport,
-            snapshot=lambda: _snapshot(args, config, None),
+            snapshot=snapshot,
             interval=config.push.interval_seconds,
             once=args.once,
             sleep=time.sleep,
@@ -114,6 +137,8 @@ def _snapshot(
     args: argparse.Namespace,
     config: DashboardConfig,
     refresh: int | None,
+    *,
+    last_cycle_at: float | None = None,
 ) -> tuple[Path, Path]:
     db = args.db if args.db is not None else Path(os.environ["ORCH_DB"])
     log = args.log or _env_path("ORCH_POLL_LOG") or db.parent / "poller.log"
@@ -125,6 +150,7 @@ def _snapshot(
         now=time.time(),
         machines_path=machines,
         refresh_seconds=refresh if refresh is not None else config.refresh_seconds,
+        last_cycle_at=last_cycle_at,
     )
     return write_snapshot(out, snapshot)
 

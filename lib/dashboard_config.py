@@ -12,6 +12,9 @@ dashboard:
     every_minutes: 5                   # ssh only, optional: `orch poll` pushes
                                        #   at most every N minutes (1 to 1440);
                                        #   omitted, it pushes after every cycle
+    live: true                         # ssh only, optional (default false):
+                                       #   also push status.json whenever
+                                       #   orch.db changes, about once a second
     interval_seconds: 20               # `orch dashboard push` loop, 15 to 30
 
 The section holds no secrets. The ssh transport relies on the SSH login
@@ -54,8 +57,9 @@ _PUSH_KEYS = {
     "method",
     "every_minutes",
     "interval_seconds",
+    "live",
 }
-_SSH_ONLY = ("host", "ssh_config", "remote_dir", "method", "every_minutes")
+_SSH_ONLY = ("host", "ssh_config", "remote_dir", "method", "every_minutes", "live")
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,8 @@ class PushConfig:
     ssh_config: str | None = None
     # None: `orch poll` pushes after every cycle.
     every_minutes: int | None = None
+    # True: `orch poll` also pushes status.json whenever orch.db changes.
+    live: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +186,11 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
     ssh_config = value.get("ssh_config")
     every_minutes = value.get("every_minutes")
     method = value.get("method", "rsync")
+    live = value.get("live", False)
+    if not isinstance(live, bool):
+        findings.append(
+            Finding("error", "dashboard.push.live must be true or false")
+        )
     if host is None:
         findings.append(Finding("error", "dashboard.push.host is required for ssh"))
     elif isinstance(host, str) and PLACEHOLDER in host:
@@ -253,6 +264,7 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
         interval_seconds=interval if in_range(interval) else REFRESH_DEFAULT,
         ssh_config=ssh_config if isinstance(ssh_config, str) else None,
         every_minutes=every_minutes if valid_every_minutes(every_minutes) else None,
+        live=live is True,
     )
 
 
