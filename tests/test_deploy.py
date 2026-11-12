@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,62 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stdout == "ok"
+
+
+DASHBOARD_UNIT = ROOT / "deploy" / "factory-dashboard-http.service"
+
+
+def _unit_values(key: str) -> list[str]:
+    return [
+        line.split("=", 1)[1]
+        for line in DASHBOARD_UNIT.read_text(encoding="utf-8").splitlines()
+        if line.startswith(f"{key}=")
+    ]
+
+
+def test_dashboard_server_unit_binds_only_the_tailnet_address() -> None:
+    text = DASHBOARD_UNIT.read_text(encoding="utf-8")
+    (exec_start,) = _unit_values("ExecStart")
+    assert "-m http.server" in exec_start
+    assert "--bind ${TAILNET_IP}" in exec_start
+    assert "--directory ${DASHBOARD_DIR}" in exec_start
+    for forbidden in ("0.0.0.0", "--bind ::", "[::]", "--bind 127.", "--bind localhost"):
+        assert forbidden not in text
+    # A unit with no TAILNET_IP, or a non-tailnet one, refuses to start.
+    (guard,) = _unit_values("ExecStartPre")
+    assert "100.64.0.0/10" in guard
+    assert _unit_values("EnvironmentFile") == ["%h/.config/factory-dashboard/http.env"]
+
+
+@pytest.mark.parametrize(
+    "address,ok",
+    [
+        ("100.101.102.103", True),
+        ("100.64.0.1", True),
+        ("0.0.0.0", False),
+        ("127.0.0.1", False),
+        ("192.168.1.20", False),
+        ("8.8.8.8", False),
+        ("::", False),
+        ("", False),
+    ],
+)
+def test_dashboard_server_guard_accepts_only_tailnet_ipv4(address: str, ok: bool) -> None:
+    (guard,) = _unit_values("ExecStartPre")
+    assert guard.startswith("/usr/bin/python3 -c ")
+    code = guard[len("/usr/bin/python3 -c ") :].strip("'")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={"TAILNET_IP": address},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is ok, result.stderr
+
+
+def test_dashboard_server_unit_is_documented_not_installed() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "deploy/factory-dashboard-http.service" in readme
+    install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    assert "factory-dashboard" not in install
