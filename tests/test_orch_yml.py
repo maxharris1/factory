@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from lib.orch_yml import (
     DEFAULT_JOB_TIMEOUT_MINUTES,
     POLL_SECONDS,
@@ -304,3 +306,169 @@ def test_job_timeout_must_be_a_positive_integer(tmp_path: Path) -> None:
     config, findings = load_orch_yml(path)
     assert config is None
     assert any("job_timeout must be a positive integer" in finding.message for finding in findings)
+
+
+WEBHOOK_BASE = """
+poll_seconds: 60
+linear:
+  api_key_env: LINEAR_KEY
+projects:
+  - repo: acme/widgets
+    factory_ref: main
+    linear_project_id: project-1
+""".lstrip()
+
+
+def _webhook_config(tmp_path: Path, section: str):
+    path = tmp_path / "orch.yml"
+    path.write_text(WEBHOOK_BASE + section, encoding="utf-8")
+    return load_orch_yml(path)
+
+
+def test_no_linear_webhook_is_configured_by_default() -> None:
+    for name in ("orch.yml", "config/orch.example.yml"):
+        config, _findings = load_orch_yml(ROOT / name, allow_placeholders=True)
+        assert config is not None
+        assert config.linear_webhook is None
+
+
+def test_linear_webhook_section_parses_bind_secret_path_and_defaults(
+    tmp_path: Path,
+) -> None:
+    config, findings = _webhook_config(
+        tmp_path,
+        "linear_webhook:\n"
+        "  bind: 127.0.0.1:8787\n"
+        "  secret_file: /home/box/.config/factory/linear-webhook.secret\n",
+    )
+
+    assert findings == []
+    assert config is not None and config.linear_webhook is not None
+    webhook = config.linear_webhook
+    assert (webhook.host, webhook.port) == ("127.0.0.1", 8787)
+    assert webhook.secret_file == Path(
+        "/home/box/.config/factory/linear-webhook.secret"
+    )
+    assert webhook.path == "/linear-webhook"
+    assert webhook.reconcile_seconds == 900
+
+
+def test_linear_webhook_accepts_overrides_and_expands_home(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config, findings = _webhook_config(
+        tmp_path,
+        "linear_webhook:\n"
+        "  bind: '[::1]:9000'\n"
+        "  path: /hooks/linear\n"
+        "  secret_file: ~/.config/factory/linear-webhook.secret\n"
+        "  reconcile_seconds: 600\n",
+    )
+
+    assert findings == []
+    assert config is not None and config.linear_webhook is not None
+    webhook = config.linear_webhook
+    assert (webhook.host, webhook.port) == ("::1", 9000)
+    assert webhook.path == "/hooks/linear"
+    assert webhook.secret_file == tmp_path / ".config/factory/linear-webhook.secret"
+    assert webhook.reconcile_seconds == 600
+
+
+def test_linear_webhook_check_does_not_read_the_secret_file(tmp_path: Path) -> None:
+    config, findings = _webhook_config(
+        tmp_path,
+        "linear_webhook:\n"
+        "  bind: 127.0.0.1:8787\n"
+        f"  secret_file: {tmp_path / 'absent.secret'}\n",
+    )
+
+    assert findings == []
+    assert config is not None
+
+
+@pytest.mark.parametrize(
+    ("section", "message"),
+    [
+        ("linear_webhook: yes\n", "linear_webhook must be a mapping"),
+        (
+            "linear_webhook:\n  secret_file: /s\n",
+            "linear_webhook.bind must be host:port",
+        ),
+        (
+            "linear_webhook:\n  bind: 8787\n  secret_file: /s\n",
+            "linear_webhook.bind must be host:port",
+        ),
+        (
+            "linear_webhook:\n  bind: example.com:8787\n  secret_file: /s\n",
+            "linear_webhook.bind must be host:port",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:70000\n  secret_file: /s\n",
+            "linear_webhook.bind must be host:port",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:0\n  secret_file: /s\n",
+            "linear_webhook.bind must be host:port",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n",
+            "linear_webhook.secret_file must be an absolute path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: relative.secret\n",
+            "linear_webhook.secret_file must be an absolute path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  path: no-slash\n",
+            "linear_webhook.path must be an absolute URL path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  path: /a?b\n",
+            "linear_webhook.path must be an absolute URL path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  reconcile_seconds: 30\n",
+            "linear_webhook.reconcile_seconds must be an integer from 60 to 3600",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  reconcile_seconds: true\n",
+            "linear_webhook.reconcile_seconds must be an integer from 60 to 3600",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  secret: inline\n",
+            "unknown field 'linear_webhook.secret'",
+        ),
+    ],
+)
+def test_linear_webhook_section_is_validated(
+    tmp_path: Path,
+    section: str,
+    message: str,
+) -> None:
+    config, findings = _webhook_config(tmp_path, section)
+
+    assert config is None
+    assert message in [finding.message for finding in findings]
+
+
+def test_linear_webhook_requires_a_linear_project(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        "poll_seconds: 60\nprojects:\n  - repo: acme/widgets\n"
+        "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n",
+        encoding="utf-8",
+    )
+
+    config, findings = load_orch_yml(path)
+
+    assert config is None
+    assert "linear_webhook requires a project with linear_project_id" in [
+        finding.message for finding in findings
+    ]

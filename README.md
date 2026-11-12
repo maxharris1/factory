@@ -256,6 +256,92 @@ missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
 database, or a lock already held by another poller. Runtime source or delivery
 failures stay fail-closed and are recorded instead of weakening those checks.
+With `linear_webhook` in `orch.yml`, Linear discovery is driven by dirty
+issues instead of a search every cycle (next section); without it, every
+cycle is exactly as described above.
+
+## Linear webhook
+
+```sh
+bin/orch linear-webhook serve --db "$ORCH_DB"
+bin/orch linear-webhook serve --db "$ORCH_DB" --bind 127.0.0.1:8787
+```
+
+Optional, off unless `orch.yml` has a `linear_webhook` section (issue #55;
+Max, Nov 12, 10:02 AM ET: "Go straight to a Linear webhook through Tailscale
+Funnel"):
+
+```yaml
+linear_webhook:
+  bind: 127.0.0.1:8787            # IP literal and port; --bind overrides
+  path: /linear-webhook           # default
+  secret_file: ~/.config/factory/linear-webhook.secret
+  reconcile_seconds: 900          # 60 to 3600, default 900
+```
+
+`orch linear-webhook serve` is a small stdlib HTTP server. It opens the
+existing dispatcher database (never creates it; run `init-db` first),
+creates its own `linear_dirty`, `linear_webhook_health` and
+`linear_project_issues` tables, and for
+each request:
+
+- serves POST on `path` only (404 elsewhere, 405 for other methods);
+- when it can see the client address (the TCP peer, or the last
+  `X-Forwarded-For` hop when the peer is loopback, as behind Tailscale
+  Funnel) requires one of Linear's published source IPs, else 403;
+- works on at most 8 requests at once (a further connection is closed
+  unread) and drops a request that has not arrived in full within 10
+  seconds in total, however slowly it trickles in;
+- requires a Content-Length of at most 1 MiB, checked before the body is
+  read (411, 413);
+- verifies `Linear-Signature`, the hex HMAC-SHA256 of the raw body under the
+  signing secret, with `hmac.compare_digest` (401 when missing or wrong);
+- refuses a `webhookTimestamp` (inside the signed body) more than 60 seconds
+  from now (401);
+- for an Issue in a configured `linear_project_id` (or just moved out of
+  one), or a Comment on a tracked issue, or a Comment carrying an `orch:v1`
+  marker on an issue a signed Issue event last placed in a configured
+  project, upserts one `linear_dirty(issue_id, identifier, event,
+  received_at)` row and returns 200. Comment payloads do not name the
+  issue's project and a marker alone proves nothing, so the listener keeps
+  `linear_project_issues` from Issue events; a handoff on an issue it has
+  not seen is found by the reconcile search. The poller still checks the
+  project after its direct read. Every other signed event gets 200
+  and is ignored. A database error returns 500 so Linear retries.
+
+It never runs handoff logic and never calls Linear. Log lines are
+`linear-webhook: accepted Issue.update AUT-123`-style: outcome, event type
+and identifier, never bodies (PHI), headers or signatures.
+
+The signing secret is read once, at startup, from `secret_file`. A file
+readable by group or others, empty, or unreadable is refused with an error
+that names the path only. The value is never logged, printed, stored or put
+in an error. `check-config` validates the keys and never reads the file.
+Max creates the webhook in Linear (Issue and Comment resource types, scoped
+to the Aut0 team) with the Funnel URL, and saves its signing secret to
+`~/.config/factory/linear-webhook.secret` with `chmod 600`. Tailscale Network
+owns the Funnel that exposes only the listener path. This repository
+installs no service for the listener and changes no network configuration.
+
+With the webhook configured, `orch poll` reads the dirty rows and the
+tickets with queued or running jobs each cycle. Dirty untracked issues are
+read directly, oldest first, under the same Linear budget; one outside the
+configured projects, completed, canceled or deleted is dropped quietly.
+A tracked ticket is reread in full only when it is dirty, has an active job,
+or its last read is `reconcile_seconds` old; otherwise its last read is
+reused and the ticket is still rebuilt, so the GitHub PR head, CI and PR
+comments stay current. The full brief/go search runs at startup and then
+every `reconcile_seconds`, and stays due until it completes without a budget
+or error cutoff, so a missed webhook costs at most one reconcile interval.
+A dirty row is deleted only after its issue was read in that cycle and only
+if no newer event arrived meanwhile; an unread row (budget deferral, error)
+waits for the next cycle. A tracked ticket the dispatcher no longer polls
+(merged, handed off, done or abandoned) is not read with or without a
+webhook, so its row is deleted unread. A read that finds the issue gone
+also drops its reused read, so the ticket is never rebuilt from it. If the dirty queue cannot be read, the cycle
+records a `linear-webhook` poll error and runs as a full cycle. With no
+`linear_webhook`, the poller never reads the dirty queue or the job list
+for this, and the dispatcher creates no webhook tables.
 
 ## Wait
 
@@ -421,6 +507,12 @@ device no longer listed is shown as `not-in-machines.yml`. A running job that
 holds a device-pool slot is listed under its device row only, so each job is
 counted once. Phase 1 claims are the `Slots — box` lines and hold no
 device-pool slot.
+Once a Linear webhook listener or a webhook-mode poller has run on the
+database (the poller records `linear_webhook_polling`), a `Linear webhook`
+section shows the last delivery (or `never` and the listener's age, or
+`never (listener has not started)`) and the
+dirty-queue depth, plus a warning after more than an hour with no delivery
+while any tracked Linear ticket is not merged, handed off, done or abandoned.
 
 ## Dashboard
 
@@ -485,7 +577,11 @@ present, device rows (enabled, placeholder, harnesses, slots held from
 device rows), stuck tickets and overdue jobs (a heartbeat or queue wait
 past the job's timeout), paused tickets, every tracked ticket's state,
 review round and gate count, poll errors (last hour, last day, newest 20),
-`poll_deferrals` when that table exists, the poller's last activity (the
+`poll_deferrals` when that table exists, Linear webhook health
+(`poller.linear_webhook`: last delivery, dirty-queue depth and the one-hour
+silence warning, as in `orch status`) when a listener or webhook-mode
+poller has run on the
+database, the poller's last activity (the
 newest of the log's modification time, poll error and deferral; `main`
 records no per-cycle row) and the handoff-savings counter.
 
