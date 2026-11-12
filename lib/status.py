@@ -1,4 +1,9 @@
-"""Read-only status summary for the tracker and local job list."""
+"""Read-only status summary for the tracker and local job list.
+
+A running job is shown with its lib/job_state.py state (claimed, running,
+stale or dead) instead of the queue's plain `running` (#75), so a job a bot
+claimed and never started, or whose heartbeat stopped, reads as such.
+"""
 
 from __future__ import annotations
 
@@ -8,14 +13,17 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, TextIO
 
-from lib.device_pool import SLOTS_TABLE
+from lib.device_pool import SLOTS_TABLE, Placement
+from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
+from lib.orch_yml import load_orch_yml
+from lib.worktrees import pid_alive
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,6 +57,8 @@ class JobRow:
     state: str
     created_at: float
     last_activity_at: float
+    # lib/job_state.py's state, set by build_status for a running job.
+    job_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +101,7 @@ class SQLiteStatusReader:
         self._snapshot: (
             tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]] | None
         ) = None
+        self._slots: dict[str, Placement] = {}
 
     def tracker_rows(self) -> tuple[TrackerRow, ...]:
         return self._rows()[0]
@@ -101,6 +112,11 @@ class SQLiteStatusReader:
     def placements(self) -> dict[str, str]:
         """Device-pool slots held, as job id -> device."""
         return self._rows()[2]
+
+    def slots(self) -> dict[str, Placement]:
+        """Device-pool slots held, as job id -> the full placement."""
+        self._rows()
+        return self._slots
 
     def slot_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -157,6 +173,7 @@ class SQLiteStatusReader:
                 if has_slots
                 else {}
             )
+            self._slots = read_placements(connection) if has_slots else {}
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -255,12 +272,33 @@ def build_status(
     devices: Sequence[DeviceRow] = (),
     placements: Mapping[str, str] | None = None,
     webhook: WebhookHealth | None = None,
+    slots: Mapping[str, Placement] | None = None,
+    job_states: JobStateConfig | None = None,
+    alive: Alive | None = None,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device; only running
-    jobs without one (Phase 1 claims) occupy `Slots — box`."""
+    jobs without one (Phase 1 claims) occupy `Slots — box`. Each running
+    job gets its job_state from `slots` (the full placements), the stale
+    threshold in `job_states`, and `alive` (a local pid check, or None)."""
     observed_at = clock()
-    job_rows = jobs.job_rows()
+    config = job_states if job_states is not None else JobStateConfig()
+    held = slots or {}
+    job_rows = tuple(
+        replace(
+            row,
+            job_state=derive(
+                last_activity_at=row.last_activity_at,
+                now=observed_at,
+                placement=held.get(row.id),
+                stale_seconds=config.stale_seconds,
+                liveness=liveness(held.get(row.id), alive),
+            ),
+        )
+        if row.state == "running"
+        else row
+        for row in jobs.job_rows()
+    )
     tracker_rows = tracker.tracker_rows()
     placed = placements or {}
     running = sorted(
@@ -377,6 +415,7 @@ def main(
     parser = argparse.ArgumentParser(prog="orch status")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--machines", type=Path, default=ROOT / "machines.yml")
+    parser.add_argument("--orch", type=Path)
     args = parser.parse_args(argv)
     path = args.db
     if path is None:
@@ -390,6 +429,26 @@ def main(
         detail = errors[0].message if errors else "invalid machines.yml"
         print(f"orch status: {args.machines}: {detail}", file=sys.stderr)
         return 1
+    # job_states.stale_minutes: an explicit --orch must be valid; the
+    # checkout's orch.yml is optional, and if it cannot be read the default
+    # threshold is used with a warning, so status keeps working.
+    orch_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+    job_states = JobStateConfig()
+    if args.orch is not None or orch_path.is_file():
+        orch, orch_findings = load_orch_yml(orch_path, allow_placeholders=True)
+        if orch is not None:
+            job_states = orch.job_states
+        else:
+            errors = [item for item in orch_findings if item.severity == "error"]
+            detail = errors[0].message if errors else "invalid orch.yml"
+            if args.orch is not None:
+                print(f"orch status: {orch_path}: {detail}", file=sys.stderr)
+                return 1
+            print(
+                f"orch status: warning: {orch_path}: {detail}; "
+                "using the default job_states",
+                file=sys.stderr,
+            )
     reader = SQLiteStatusReader(path)
     try:
         report = render(
@@ -400,6 +459,9 @@ def main(
                 placements=reader.placements(),
                 clock=clock,
                 webhook=reader.webhook_health(),
+                slots=reader.slots(),
+                job_states=job_states,
+                alive=pid_alive,
             )
         )
     except (sqlite3.Error, StatusError) as exc:
@@ -412,7 +474,7 @@ def main(
 def _job_line(row: JobRow, observed_at: float, since: float) -> str:
     return (
         f"  {row.repo}#{row.ticket_id} {row.action} -> {row.recipient} "
-        f"{row.state} {_age(observed_at, since)}"
+        f"{row.job_state or row.state} {_age(observed_at, since)}"
     )
 
 

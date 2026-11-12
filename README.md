@@ -463,8 +463,11 @@ Running timeouts use last activity.
 [`lib/job_run.py`](lib/job_run.py) owns the job heartbeat (issue #49): the bot
 starts its harness as `orch job run <bot> <job-id> [--worktree] -- <command>`.
 It sends one heartbeat first, refusing (exit 1, command not run) a job that is
-not running or (exit 2) not this bot's, then one every third of the job's
-`timeout_seconds` (`--interval` may only be faster). The heartbeat stops when
+not running or (exit 2) not this bot's, then one every 15 seconds, or every
+third of the job's `timeout_seconds` when that is shorter (an `--interval`
+override is capped at 30 seconds, half the smallest `job_states.stale_minutes`,
+and at a third of the timeout, so a live job never shows as stale; see "Job
+states"). The heartbeat stops when
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
 locked or failed writes are logged and retried at the next beat. SIGTERM and
@@ -493,6 +496,45 @@ prunes each clone; `--dry-run` only reports. Both decide under the clone's
 lock, and gc removes only a worktree of the clone derived from the record's
 repo. A URL template carrying credentials (`https://user:token@...`) is
 refused; git authenticates through its credential helper.
+
+### Job states
+
+A running job is in one of four states, derived in one place,
+[`lib/job_state.py`](lib/job_state.py), which the poller, the dashboard and
+`orch status` all use (issue #75):
+
+- **claimed**: it holds a device slot, no `orch job run` has recorded itself
+  on the slot (no `runner_pid`), and nothing has heartbeated since the claim.
+  The bot claimed it and never started it.
+- **running**: its heartbeat is fresh.
+- **stale**: no heartbeat for more than `job_states.stale_minutes` (default 2).
+- **dead**: its recorded runner is gone, and so is its worker: the command's
+  pid on the box, or, for a remote job, the device answers that no process
+  carries the start's worker tag (`check_worker`). A worker that may still
+  run is stale, not dead.
+
+The poller requeues a job that stays claimed for more than
+`job_states.release_claimed_minutes` (default 5): the same job row goes back
+to `queued`, so its review round and T6 attempt are reused, not charged; its
+slot is freed; and a `released-claimed` row goes into `job_events` and one
+line into the poller log. Its queue-wait clock restarts at the release (it
+keeps its place in line), so the job timeout never fails it for the time it
+waited before the claim; the dashboard's queued age counts from the release
+too. A failed Grok delivery, the other way a job goes back to `queued`, keeps
+its original clock: each poll is a real delivery attempt, and the timeout is
+what bounds one that keeps failing. The write is guarded, so a runner that starts or
+heartbeats in between keeps the job; a late `orch job run` finds the job
+queued and starts nothing. A dead job takes the existing failure path: it is
+failed (a `dead` row in `job_events`) and T6 retries it once, then marks it
+stuck. A stale job is only shown; the job timeout still handles it. A job
+that heartbeated after its claim with no runner recorded (`orch job
+heartbeat` by hand) is never `claimed`, so it is never requeued.
+
+```yaml
+job_states:                 # optional; whole minutes, defaults shown
+  stale_minutes: 2
+  release_claimed_minutes: 5
+```
 
 ## Install after merge
 
@@ -595,7 +637,11 @@ for a placeholder), device-pool slots held over `slot_max`, and `disabled` or
 `mac [none] 0/2 slots disabled placeholder`. A held slot on a
 device no longer listed is shown as `not-in-machines.yml`. A running job that
 holds a device-pool slot is listed under its device row only, so each job is
-counted once. A running job that holds no slot (claimed before F2-02, or
+counted once. A running job shows its state (`claimed`, `running`, `stale` or
+`dead`, see "Job states") instead of `running`; `--orch` (default the
+checkout's `orch.yml` when present) supplies `job_states.stale_minutes`.
+`orch status` never checks a remote worker over SSH, so a remote job whose
+runner died shows as `stale` until the poller confirms it dead. A running job that holds no slot (claimed before F2-02, or
 whose worker already ended) is a `Slots — box` line.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
@@ -633,8 +679,8 @@ the set always comes from one snapshot.
 **Pages.** Every page shares one bar: links to the pages, the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
 and a **needs attention** badge with a count that links to the Activity
-page (stuck tickets, overdue jobs, then paused tickets not already listed
-as stuck, each once).
+page (stuck tickets, overdue, stale or dead jobs, then paused tickets not
+already listed as stuck, each once).
 
 - **Main** (`index.html`): factory status on top (running, queued, done,
   failed, stuck or overdue), then the lanes and slots as the centerpiece:
@@ -642,8 +688,12 @@ as stuck, each once).
   dimmed and marked, placeholders flagged) with a slot per `slot_max`, and
   a lane for running Grok wakes. Each busy slot shows its job: the ticket
   (a GitHub ticket is shown as a PR, a Linear ticket by its id), bot, step
-  (the job's action), review round, elapsed time and heartbeat age against
-  its timeout. A lane counts `max(held, running)` slots, so a slot still
+  (the job's action), its state (`claimed, not started`, `running`,
+  `stale heartbeat` or `runner dead`, see "Job states"), the job's review
+  round from its own detail (`round 1/1`; `—` for a job with no round),
+  elapsed time and heartbeat age against its timeout. A claimed job shows
+  how long ago it was claimed and `not started` instead of a timer and
+  heartbeat bar. Stale and dead jobs count in stuck / overdue. A lane counts `max(held, running)` slots, so a slot still
   held in `device_slots` is never shown as idle (#63 FU-1). The queue sits
   in a side rail beside the lanes with wait times. A slot or queue item
   opens its job page.
@@ -754,8 +804,10 @@ by hand. `scripted_share` is `scripted / (scripted + bot_to_bot)`. Bot
 messages outside the factory are not in the database, so Grok wakes stand
 in for bot-to-bot handoffs.
 
-**Redaction.** Only allowlisted columns are read: never `jobs.detail`,
-heads, comment bodies or other free-form job data. The environment is not
+**Redaction.** Only allowlisted columns are read: never heads, comment
+bodies or other free-form job data. `jobs.detail` is read only for its
+`round` field, which is kept only when it is digits/digits (`2/3`); nothing
+else of it reaches the snapshot. The environment is not
 read apart from the three `ORCH_*` path variables. Unknown action,
 recipient, job state, ticket workflow state or tracker values show as
 `other`. Every free-text value (stuck reasons, poll errors, deferrals, log

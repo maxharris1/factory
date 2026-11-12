@@ -23,3 +23,9 @@ dashboard:
     remote_dir: factory-dashboard
     method: scp
     # live: true
+# Optional job states (README "Job states"), whole minutes, defaults shown:
+# a running job with no heartbeat for stale_minutes is stale; one claimed
+# and never started for release_claimed_minutes is requeued (no round charged).
+# job_states:
+#   stale_minutes: 2
+#   release_claimed_minutes: 5

@@ -10,10 +10,12 @@ seconds and updates in place. Without script (or when status.json cannot
 be fetched) the server-rendered page reloads every refresh_seconds (15 to
 30). The job page's diagram is model/chart.mmd (lib/dashboard_flow.py).
 
-Secrets: only allowlisted columns are selected (never jobs.detail, heads,
-comment bodies or environment values; the environment is not read except
-for the ORCH_* path variables). Every free-text value (stuck reasons,
-poll_errors, deferrals, log lines) goes through `redact`. It runs its rules
+Secrets: only allowlisted columns are selected (never heads, comment
+bodies or environment values; the environment is not read except for the
+ORCH_* path variables). jobs.detail is read only to take its `round`
+field, kept only when it is digits/digits; nothing else of it is copied.
+Every free-text value (stuck reasons, poll_errors, deferrals, log lines)
+goes through `redact`. It runs its rules
 on the text as written and again on a decoded copy (percent and JSON
 escapes undone, so encoded secrets are seen); what the decoded pass finds is
 cut out of the original text with the rest of its token, so decoding only
@@ -45,11 +47,22 @@ from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.handoff import STATES as WORKFLOW_STATES
+from lib.job_state import (
+    DEAD,
+    JOB_STATES,
+    STALE,
+    Alive,
+    JobStateConfig,
+    derive,
+    liveness,
+    read_placements,
+)
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES
+from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
 LOG_TAIL_LINES = 50
@@ -69,6 +82,7 @@ HEALTH_OK_SECONDS = 2 * POLL_SECONDS + 30
 HEALTH_LATE_SECONDS = 5 * POLL_SECONDS
 # A handled orch:v1 comment's outcome as the dispatcher writes it.
 _OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+_ROUND = re.compile(r"[0-9]{1,3}/[0-9]{1,3}")
 MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
@@ -565,11 +579,15 @@ def collect_snapshot(
     refresh_seconds: int = REFRESH_DEFAULT,
     last_cycle_at: float | None = None,
     chart_path: Path | None = None,
+    job_states: JobStateConfig | None = None,
+    alive: Alive | None = pid_alive,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
     `chart_path` is the statechart chart the job page draws (default
-    model/chart.mmd); only its file name is copied out."""
+    model/chart.mmd); only its file name is copied out. `job_states` is
+    orch.yml's job_states (the stale threshold); `alive` checks a recorded
+    runner pid on this host (lib/job_state.py), never over SSH."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -586,7 +604,13 @@ def collect_snapshot(
     connection = open_readonly(db_path)
     try:
         connection.execute("BEGIN")
-        db = _read_db(connection, now, chart)
+        db = _read_db(
+            connection,
+            now,
+            chart,
+            job_states if job_states is not None else JobStateConfig(),
+            alive,
+        )
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -668,11 +692,18 @@ def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> di
         items.append({"kind": "stuck", "repo": row["repo"], "ticket_id": row["ticket_id"],
                       "detail": detail})
     for row in overdue:
+        job_state = row.get("job_state")
+        if job_state == DEAD:
+            kind, what = "dead", "runner gone"
+        elif row.get("timed_out", True):
+            kind, what = "overdue", row["state"]
+        else:
+            kind, what = "stale", row["state"]
         items.append({
-            "kind": "overdue",
+            "kind": kind,
             "repo": row["repo"],
             "ticket_id": row["ticket_id"],
-            "detail": f"{row['recipient']} {row['action']} {row['state']}, "
+            "detail": f"{row['recipient']} {row['action']} {what}, "
                       f"no heartbeat for {_duration(row['age_seconds'])}",
         })
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
@@ -731,7 +762,27 @@ def _handoff_kind(recipient: str, state: str, has_handoff: bool) -> str:
     return "done"
 
 
-def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = None) -> dict:
+def _detail_round(detail: object) -> str | None:
+    """A job's review round ("2/3") from its detail JSON, or None."""
+    if not isinstance(detail, str):
+        return None
+    try:
+        value = json.loads(detail)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    found = value.get("round")
+    return found if isinstance(found, str) and _ROUND.fullmatch(found) else None
+
+
+def _read_db(
+    connection: sqlite3.Connection,
+    now: float,
+    chart: dict | None = None,
+    job_states: JobStateConfig = JobStateConfig(),
+    alive: Alive | None = pid_alive,
+) -> dict:
     tables = _tables(connection)
     jobs = "jobs" in tables
 
@@ -773,6 +824,7 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
                 float(row["placed_at"]) if row["placed_at"] is not None else None,
             )
 
+    slots = read_placements(connection) if "device_slots" in tables else {}
     running: list[dict] = []
     queued: list[dict] = []
     overdue: list[dict] = []
@@ -783,7 +835,7 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
         for row in connection.execute(
             """
             SELECT id, repo, ticket_id, action, recipient, state,
-                   timeout_seconds, created_at, last_activity_at
+                   timeout_seconds, created_at, last_activity_at, detail
             FROM jobs WHERE state IN ('queued', 'running')
             ORDER BY created_at, id
             """
@@ -796,6 +848,7 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
                 "recipient": _enum(row["recipient"], RECIPIENTS),
             }
             timeout = int(row["timeout_seconds"])
+            job_state: str | None = None
             if row["state"] == "running":
                 age = _age(now, row["last_activity_at"]) or 0
                 # The lane: a device-pool placement, else a box slot (grok
@@ -813,8 +866,21 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
                 if started is None:
                     started = row["created_at"]
                     elapsed_from = "queued"
+                slot = slots.get(str(row["id"]))
+                job_state = _enum(
+                    derive(
+                        last_activity_at=float(row["last_activity_at"]),
+                        now=now,
+                        placement=slot,
+                        stale_seconds=job_states.stale_seconds,
+                        liveness=liveness(slot, alive),
+                    ),
+                    JOB_STATES,
+                )
                 item = {
                     **base,
+                    "job_state": job_state,
+                    "round": _detail_round(row["detail"]),
                     "heartbeat_age_seconds": age,
                     "timeout_seconds": timeout,
                     "overdue": age > timeout,
@@ -829,12 +895,22 @@ def _read_db(connection: sqlite3.Connection, now: float, chart: dict | None = No
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
             else:
-                age = _age(now, row["created_at"]) or 0
-                item = {**base, "age_seconds": age}
+                # The poller's queue-wait clock: since it was queued, or
+                # since a claim that never started was released (#77 F1.2).
+                age = _age(now, row["last_activity_at"]) or 0
+                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
-            if age > timeout:
-                overdue.append({**base, "state": str(row["state"]), "age_seconds": age})
+            # Stuck / overdue: past the timeout, or (#75) a running job whose
+            # heartbeat went stale or whose runner is dead.
+            if age > timeout or job_state in (STALE, DEAD):
+                overdue.append({
+                    **base,
+                    "state": _enum(row["state"], STATES),
+                    "job_state": job_state,
+                    "timed_out": age > timeout,
+                    "age_seconds": age,
+                })
         running.sort(key=lambda item: -item["heartbeat_age_seconds"])
 
     tickets: list[dict] = []
@@ -1122,8 +1198,10 @@ def _add_job_tickets(
     chart: dict | None,
     now: float,
 ) -> None:
-    """Give each running or queued job its ticket's tracker, review round and
-    flow (current statechart state, the path its jobs took, time in state)."""
+    """Give each running or queued job its ticket's tracker and flow (current
+    statechart state, the path its jobs took, time in state). The job's
+    round comes from its own detail (#75), not the ticket's completed
+    review count."""
     if not active:
         return
     # One read for every ticket with a running or queued job, oldest first.
@@ -1141,9 +1219,8 @@ def _add_job_tickets(
             histories[key].append((str(row["action"]), float(row["created_at"])))
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
-        tracker, review_round, state = ticket_info.get(key, (None, None, None))
+        tracker, _review_round, state = ticket_info.get(key, (None, None, None))
         item["tracker"] = tracker
-        item["round"] = review_round
         item["flow"] = job_flow(chart, histories[key], state, now)
 
 

@@ -261,6 +261,12 @@ class SQLiteJobQueue:
         A requeued job holds no device slot, so a pool placement is freed
         in the same transaction; otherwise the next pool claim of this job
         would collide with its own slot row.
+
+        The job keeps the queue-wait clock it was queued with
+        (last_activity_at = created_at). The only caller is a failed Grok
+        delivery, a real attempt each poll, and the timeout is what bounds a
+        delivery that keeps failing. The poller's release of a claim that
+        never started restarts the clock instead (Dispatcher._release_claimed).
         """
         if owner not in RECIPIENTS:
             raise QueueError(f"unknown owner {owner!r}")
@@ -268,7 +274,7 @@ class SQLiteJobQueue:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 """
-                UPDATE jobs SET state = 'queued'
+                UPDATE jobs SET state = 'queued', last_activity_at = created_at
                 WHERE id = ? AND state = 'running' AND recipient = ?
                 """,
                 (job_id, owner),
@@ -384,9 +390,12 @@ class SQLiteJobQueue:
 
     def mark_timed_out(self, job: Job) -> bool:
         now = self.now()
+        # Guarded on the clock the sweep read: a queued job's last_activity_at
+        # is its queue-wait start and changes when a claim is released, so a
+        # sweep that read the job before a claim and release fails nothing.
         if job.state == "queued":
-            predicate = "state = 'queued' AND created_at = ?"
-            expected = job.created_at
+            predicate = "state = 'queued' AND last_activity_at = ?"
+            expected = job.last_activity_at
         elif job.state == "running":
             predicate = "state = 'running' AND last_activity_at = ?"
             expected = job.last_activity_at

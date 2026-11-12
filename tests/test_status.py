@@ -321,7 +321,7 @@ def test_status_command_counts_a_pc_job_once(tmp_path: Path) -> None:
     assert "  box [claude,codex,cursor] 0/3 slots\n" in result.stdout
     assert (
         "  pc [claude,codex,cursor] 1/3 slots disabled\n"
-        "    owner/repo#43 review -> codex running "
+        "    owner/repo#43 review -> codex stale "  # no heartbeat for years (#75)
     ) in result.stdout
 
 
