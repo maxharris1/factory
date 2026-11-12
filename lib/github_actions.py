@@ -23,11 +23,20 @@ clone and no cache.
   only with at least one successful check run or a success commit
   status, and nothing failing or pending.
 - set_state: the orch:state/<state> label. Linear and Aut0 get no labels.
-- stable_patch_id and handoff are not built here and raise, so T4
-  queues a re-review and a handoff ship fails closed.
+- handoff: GET pulls/<n>, then, only for a draft, the GraphQL mutation
+  markPullRequestReadyForReview on the pull's node_id (`gh api -X POST
+  graphql`). GitHub has no REST route for draft -> ready (issue #47);
+  this is the mutation `gh pr ready` sends. -X POST keeps it out of gh's
+  --cache, which also caches POSTs to graphql. A failure before the
+  mutation's response confirms isDraft=false sets write_confirmed=False.
+  The Linear adapter then moves the issue to Ready for Review only when
+  the fresh read shows it still before review; an unknown state fails
+  before any write.
+- stable_patch_id is not built here and raises, so T4 queues a re-review.
 
 A GitHub ticket_id is the PR number. Every error is a GitHubAdapterError,
-which is a ShipError.
+which is a ShipError. Its safe_detail never holds gh's stdout or stderr,
+so no response body, URL or token reaches ship_intents.error.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatcher import (
+    LINEAR_STATE_PHASES,
     CIResult,
     Comment,
     ReviewActions,
@@ -77,6 +87,13 @@ _ISO_8601 = re.compile(
     r"(?:Z|[+-][0-9]{2}:[0-9]{2})"
 )
 _HTTP_STATUS = re.compile(r"\(HTTP ([0-9]{3})\)")
+_GRAPHQL_ERROR_TYPE = re.compile(r'"type"\s*:\s*"([A-Z][A-Z_]{0,39})"')
+_NODE_ID = re.compile(r"[A-Za-z0-9_=+/-]{4,128}")
+_ROUTE_PART = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+MARK_READY_QUERY = (
+    "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) "
+    "{ pullRequest { id isDraft headRefOid } } }"
+)
 
 _CHECK_NOT_RUN = ("neutral", "skipped")
 _CHECK_FAILED = (
@@ -90,7 +107,12 @@ _CHECK_FAILED = (
 
 
 class GitHubAdapterError(ShipError):
-    pass
+    """safe_detail defaults to the message, so a message must never hold
+    gh's stdout or stderr; a wrapper passes on the inner safe_detail."""
+
+    def __init__(self, message: str, *, safe_detail: str | None = None):
+        super().__init__(message)
+        self.safe_detail = message if safe_detail is None else safe_detail
 
 
 class NotFastForwardError(GitHubAdapterError):
@@ -204,7 +226,9 @@ class GitHubReviewActions:
             )
         except GitHubAdapterError as exc:
             if _status(exc) == 409:
-                raise HeadMismatchError(f"PR head is not {head}: {exc}") from exc
+                raise HeadMismatchError(
+                    f"PR head is not {head}: {exc.safe_detail}"
+                ) from exc
             raise
         if result.get("merged") is not True:
             raise GitHubAdapterError(f"squash merge of {head} was not confirmed")
@@ -233,7 +257,7 @@ class GitHubReviewActions:
         except GitHubAdapterError as exc:
             if _status(exc) == 422 and "fast forward" in str(exc).lower():
                 raise NotFastForwardError(
-                    f"{head} is not a fast-forward of {branch}: {exc}"
+                    f"{head} is not a fast-forward of {branch}: {exc.safe_detail}"
                 ) from exc
             raise
         moved = _ref_sha(ref, branch)
@@ -245,23 +269,68 @@ class GitHubReviewActions:
         return _ref_sha(_object(self._json(endpoint)), branch)
 
     def handoff(self, ticket: TrackedTicket, head: str) -> None:
-        head = _sha(head, "head")
-        pull = _object(
-            self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
-        )
-        current = _sha(_object(pull.get("head")).get("sha"), "pull request head")
-        if current != head:
-            raise HeadMismatchError(f"PR head is {current}, not {head}")
-        if pull.get("merged") is True:
-            raise GitHubAdapterError("cannot hand off a merged pull request")
-        if pull.get("state") != "open":
-            raise GitHubAdapterError("cannot hand off a pull request that is not open")
-        if pull.get("draft") is True:
-            self._call(
-                "-X",
-                "POST",
-                f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}/ready_for_review",
+        self._mark_ready(ticket, head)
+
+    def _mark_ready(self, ticket: TrackedTicket, head: str) -> bool:
+        """Mark the PR ready if it is a draft. True when this call confirmed it.
+
+        Every error raised before GitHub's response confirms isDraft=false
+        has write_confirmed=False: nothing this call sent is known to have
+        landed, and a retry re-reads the pull first.
+        """
+        try:
+            head = _sha(head, "head")
+            pull = _object(
+                self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
             )
+            current = _sha(_object(pull.get("head")).get("sha"), "pull request head")
+            if current != head:
+                raise HeadMismatchError(f"PR head is {current}, not {head}")
+            if pull.get("merged") is True:
+                raise GitHubAdapterError("cannot hand off a merged pull request")
+            if pull.get("state") != "open":
+                raise GitHubAdapterError(
+                    "cannot hand off a pull request that is not open"
+                )
+            if pull.get("draft") is not True:
+                return False
+            node_id = pull.get("node_id")
+            if not isinstance(node_id, str) or _NODE_ID.fullmatch(node_id) is None:
+                raise GitHubAdapterError("pull request has no valid node_id")
+            response = _object(
+                self._json(
+                    "-X",
+                    "POST",
+                    "graphql",
+                    "-f",
+                    f"query={MARK_READY_QUERY}",
+                    "-f",
+                    f"id={node_id}",
+                )
+            )
+            if response.get("errors"):
+                raise GitHubAdapterError(
+                    "markPullRequestReadyForReview returned errors",
+                    safe_detail=(
+                        "markPullRequestReadyForReview returned errors "
+                        + _graphql_detail(json.dumps(response))
+                    ).rstrip(),
+                )
+            ready = _object(
+                _object(
+                    _object(response.get("data")).get("markPullRequestReadyForReview")
+                ).get("pullRequest")
+            )
+            if ready.get("isDraft") is not False:
+                raise GitHubAdapterError("GitHub did not confirm the PR is ready")
+        except GitHubAdapterError as exc:
+            exc.write_confirmed = False
+            raise
+        if ready.get("headRefOid") != head:
+            raise HeadMismatchError(
+                f"PR was marked ready at {ready.get('headRefOid')!r}, not {head}"
+            )
+        return True
 
     def await_approver(
         self,
@@ -359,14 +428,26 @@ class GitHubReviewActions:
             # The runner may use its own timeout (the poller runs writes at
             # 60 s), so report the one the timed-out call actually had.
             raise GitHubAdapterError(
-                f"gh api timed out after {exc.timeout:g}s"
+                f"gh api timed out after {exc.timeout:g}s",
+                safe_detail=f"gh api {_route(args)} timed out after {exc.timeout:g}s",
             ) from exc
         except OSError as exc:
-            raise GitHubAdapterError(f"gh could not run: {type(exc).__name__}") from exc
+            raise GitHubAdapterError(
+                f"gh could not run: {type(exc).__name__}",
+                safe_detail=f"gh api {_route(args)} could not run: {type(exc).__name__}",
+            ) from exc
         if result.returncode != 0:
             detail = " ".join(f"{result.stderr} {result.stdout}".split())[:500]
+            safe = f"gh api {_route(args)} exited {result.returncode}"
+            status = _HTTP_STATUS.search(result.stderr)
+            if status is not None:
+                safe += f" (HTTP {status.group(1)})"
+            graphql = _graphql_detail(result.stdout)
+            if graphql:
+                safe += f" {graphql}"
             raise GitHubAdapterError(
-                f"gh exited {result.returncode}: {detail or 'no output'}"
+                f"gh exited {result.returncode}: {detail or 'no output'}",
+                safe_detail=safe,
             )
         return result.stdout
 
@@ -375,7 +456,10 @@ class GitHubReviewActions:
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            raise GitHubAdapterError(f"gh returned malformed JSON: {exc}") from exc
+            raise GitHubAdapterError(
+                f"gh returned malformed JSON: {exc}",
+                safe_detail=f"gh api {_route(args)} returned malformed JSON",
+            ) from exc
 
     def _pages(self, endpoint: str) -> list[object]:
         """gh api --paginate prints one JSON document per page, back to back."""
@@ -458,19 +542,68 @@ class LinearReviewActions(GitHubReviewActions):
             except RetryableStateError as exc:
                 raise RetryableShipError(str(exc)) from None
             if fresh is None:
-                raise GitHubAdapterError("linked Linear ticket is unavailable")
+                error = GitHubAdapterError("linked Linear ticket is unavailable")
+                error.write_confirmed = False
+                raise error
             if fresh.pr_number != ticket.pr_number:
-                raise GitHubAdapterError("linked pull request changed before handoff")
+                error = GitHubAdapterError("linked pull request changed before handoff")
+                error.write_confirmed = False
+                raise error
             ticket = fresh
-        super().handoff(ticket, head)
-        if self.move_ready_for_review:
+        if (
+            self.move_ready_for_review
+            and ticket.linear_state_phase not in LINEAR_STATE_PHASES
+        ):
+            error = GitHubAdapterError("Linear issue state is unavailable")
+            error.write_confirmed = False
+            raise error
+        marked = self._mark_ready(ticket, head)
+        # Move only an issue still before review. One already in Ready for
+        # Review (a no-op re-drive) or moved on by a human (Done, Canceled,
+        # back to Backlog, or past Ready for Review) is left where it is.
+        if self.move_ready_for_review and ticket.linear_state_phase == "before-review":
             try:
                 self.linear_ready(ticket)
             except RetryableStateError as exc:
-                raise GitHubAdapterError(
+                error = GitHubAdapterError(
                     "Linear handoff update was not confirmed: "
                     f"{type(exc).__name__}"
-                ) from None
+                )
+                error.write_confirmed = marked
+                raise error from None
+
+
+def _route(args: Sequence[str]) -> str:
+    """METHOD and API route for an error detail: no host, query or values."""
+    method = "GET"
+    if "-X" in args:
+        index = args.index("-X")
+        if index + 1 < len(args):
+            method = args[index + 1]
+    endpoint = next(
+        (
+            arg
+            for index, arg in enumerate(args)
+            if not arg.startswith("-")
+            and (index == 0 or args[index - 1] not in ("-X", "-f", "-F", "--cache"))
+        ),
+        "",
+    )
+    parts = endpoint.split("?", 1)[0].split("/")
+    if parts[:1] == ["repos"] and len(parts) >= 3:
+        parts = parts[3:]
+    route = "/".join(
+        part if _ROUTE_PART.fullmatch(part) else "<value>" for part in parts
+    )
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        method = "<method>"
+    return f"{method} {route or '<route>'}"
+
+
+def _graphql_detail(text: str) -> str:
+    """GraphQL error types only, such as NOT_FOUND. Never messages."""
+    types = sorted(set(_GRAPHQL_ERROR_TYPE.findall(text)))[:3]
+    return f"graphql errors: {','.join(types)}" if types else ""
 
 
 _BODY_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
