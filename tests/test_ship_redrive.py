@@ -921,3 +921,80 @@ def test_a_spent_legacy_row_stays_spent_after_a_second_init(tmp_path: Path) -> N
     second.process(aut0_2286())
     assert gh.calls == []
     assert moved == []
+
+
+# #48 G2 F2.1: the re-drive re-checks the in-force APPROVE's head field.
+# The trigger is a trusted APPROVE edited in place to name another head.
+
+
+class PatchIdGitHubActions(UnlabeledGitHubActions):
+    def __init__(self, gh: RecordedGh, patch_ids: dict[str, str] | None):
+        super().__init__(gh)
+        self.patch_ids = patch_ids
+
+    def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
+        if self.patch_ids is None:
+            return super().stable_patch_id(ticket, head)
+        return self.patch_ids[head]
+
+
+def approve_naming(head: str) -> TrackedTicket:
+    edited = comment(
+        "approve-1",
+        VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high"),
+        author="codex-login",
+    )
+    return replace(approve_snapshot(), comments=(edited,))
+
+
+OTHER = "b" * 40
+
+
+@pytest.mark.parametrize(
+    ("approved", "patch_ids", "marked", "redrive"),
+    [
+        (OTHER, None, 0, "spent"),
+        (OTHER, {OTHER: "p" * 40, HEAD: "q" * 40}, 0, "spent"),
+        (OTHER, {OTHER: "p" * 40, HEAD: "p" * 40}, 1, "spent"),
+        (HEAD[:12], None, 1, "spent"),
+        (HEAD, None, 1, "spent"),
+    ],
+    ids=[
+        "other-head-no-patch-id",
+        "other-head-other-patch",
+        "other-head-same-patch",
+        "short-prefix",
+        "exact-head",
+    ],
+)
+def test_re_drive_needs_the_in_force_approve_head_to_cover_the_intent_head(
+    tmp_path: Path,
+    approved: str,
+    patch_ids: dict[str, str] | None,
+    marked: int,
+    redrive: str,
+) -> None:
+    gh = RecordedGh()
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=PatchIdGitHubActions(gh, patch_ids),
+        grok_delivery=FakeGrokDelivery(),
+    )
+    seed_review_job(dispatcher, queue, HEAD)
+    gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    dispatcher.process(approve_snapshot())
+    assert intent(queue)["redrive"] == "eligible"
+
+    dispatcher.process(approve_naming(approved))
+
+    assert gh.count(MARK_READY) == marked
+    row = intent(queue)
+    assert row["redrive"] == redrive
+    assert row["status"] == ("completed" if marked else "failed")
+    done = "done" in [action for action, _ in grok_wakes(queue)]
+    assert done is bool(marked)
