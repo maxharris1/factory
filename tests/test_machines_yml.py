@@ -36,6 +36,7 @@ def remote(**fields: str) -> str:
         "slot_max": "2",
         "harnesses": "{codex: codex-bot}",
         "workdir_root": "/home/work",
+        "ssh_alias": "pc-{bot}",
         **fields,
     }
     lines = [f"  - name: {values.pop('name')}"]
@@ -48,6 +49,8 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
     assert strict is None
     assert errors(strict_findings) == [
         "devices[2].workdir_root is an install placeholder; "
+        "Max must provide this inventory",
+        "devices[2].ssh_alias is an install placeholder; "
         "Max must provide this inventory",
     ]
 
@@ -62,6 +65,7 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
         "device 'pc' is disabled (enabled: false); it will not be scheduled",
         "device 'mac' is disabled (enabled: false); it will not be scheduled",
         "accepted placeholder devices[2].workdir_root; device 'mac' will not be scheduled",
+        "accepted placeholder devices[2].ssh_alias; device 'mac' will not be scheduled",
     ]
     box, pc, mac = config.devices
     assert (box.name, box.local, box.enabled, box.slot_max) == ("box", True, True, 3)
@@ -75,6 +79,7 @@ def test_shipped_machines_yml_has_box_pc_and_mac_with_placeholders_reported() ->
     assert pc.tailscale_name == "pc-wsl-bots.tail68624b.ts.net"
     assert (pc.slot_max, pc.enabled) == (3, False)
     assert pc.workdir_root == "/home/{bot}/factory-work"
+    assert pc.ssh_alias == "pc-wsl-{bot}"
     assert not pc.placeholder
     assert dict(pc.harnesses) == dict(box.harnesses)
     assert mac.tailscale_name == "maxs-macbook-pro.tail68624b.ts.net"
@@ -101,9 +106,9 @@ def test_shipped_pc_workdir_is_each_bots_home_off_the_windows_drive() -> None:
 
 
 def test_shipped_pc_and_mac_stay_disabled_until_f2_02_remote_start() -> None:
-    """Factory decided (technical), Nov 11: both remote devices ship
-    enabled: false until F2-02 remote start lands, so neither is ever
-    eligible for any harness."""
+    """Factory decided (technical), Nov 11, kept by F2-02 (Nov 12): both
+    remote devices ship enabled: false until Max turns them on, so neither
+    is ever eligible for any harness."""
     config, findings = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
     assert config is not None
     for name in ("pc", "mac"):

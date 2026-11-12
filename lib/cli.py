@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
-from lib import job_run, worktrees
+from lib import job_run, placed_run, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
@@ -24,11 +24,14 @@ from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
-from lib.machines_yml import load_machines_yml
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
+from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import QueueError, SQLiteJobQueue
+from lib.remote import SshTransport
 from lib.wait import (
     WaitError,
     open_queue,
@@ -83,9 +86,14 @@ eval-report --input PATH [--since TIME] [--until TIME]
   Print the weekly eval report for one directory of fixtures or
   collected logs. It does not contact GitHub or Linear.
 
-poll [--db PATH] [--orch PATH] [--once] [--pidfile PATH]
+poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
   --once runs one complete poll cycle. --db defaults to $ORCH_DB.
+  Each poll also releases device slots whose worker is confirmed gone and,
+  for a remote device holding a slot, runs one SSH check; a device that
+  fails every check for 60 minutes marks its running jobs stuck (F2-02).
+  --machines defaults to the checkout's machines.yml; without that file
+  no device is checked.
   Only one poller may hold the database's lock. The holder writes its pid
   to --pidfile, else $ORCH_POLL_PIDFILE, else poller.pid beside the
   database, and removes it on exit, including on SIGTERM.
@@ -93,14 +101,17 @@ poll [--db PATH] [--orch PATH] [--once] [--pidfile PATH]
 init-db [--db PATH] [--orch PATH]
   Create and initialize the database without polling or delivering work.
 
-wait <bot> [--db PATH]
+wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
-  dispatcher database has a queued job for that bot, claims it, prints
-  one JSON line, and exits 0. It never starts a harness. --db defaults
-  to $ORCH_DB.
+  dispatcher database has a queued job for that bot and a device in
+  machines.yml (--machines, default the checkout's) has a free slot for
+  its harness, claims both, prints one JSON line (with "device" and
+  "remote"; a remote job also has "workdir"), and exits 0. It never
+  starts a harness. --db defaults to $ORCH_DB.
 
-job run <bot> <job-id> [--db PATH] [--interval SECONDS] [--worktree]
-        [--work-root DIR] [--git-url-template URL] -- COMMAND [ARG ...]
+job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
+        [--worktree] [--work-root DIR] [--git-url-template URL]
+        -- COMMAND [ARG ...]
   Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
   before it starts (a job that is not running is refused and nothing
   runs), then one every --interval seconds (default a third of the job's
@@ -109,6 +120,13 @@ job run <bot> <job-id> [--db PATH] [--interval SECONDS] [--worktree]
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
   status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  The job must hold the device slot orch wait claimed for this bot. On a
+  remote device COMMAND runs there as the bot's user over the device's
+  ssh_alias (ssh -l <bot> -- <alias>), in <workdir_root>/jobs/<job-id>,
+  with ORCH_JOB_ID, ORCH_JOB_BOT, ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR;
+  --worktree is refused there. When COMMAND ends the slot is released once
+  the worker is confirmed gone (a remote worker still running is sent
+  SIGTERM first); otherwise it stays held for the poller to confirm.
   --worktree runs COMMAND in a git worktree of one shared clone per repo
   under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work), at the
   job's head or the default branch, exported as ORCH_JOB_WORKTREE. When
@@ -268,16 +286,20 @@ def _wait(argv: list[str]) -> int:
     parser = _Parser(prog="orch wait", add_help=True)
     parser.add_argument("bot")
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--machines", type=Path)
     args = parser.parse_args(argv)
     try:
         recipient = recipient_for(args.bot)
         queue = open_queue(_db_path(args.db))
-    except WaitError as exc:
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        pool = _device_pool(queue, machines)
+    except (WaitError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        wait_for_job(queue, recipient, sys.stdout)
+        wait_for_job(queue, recipient, sys.stdout, pool=pool)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -291,6 +313,7 @@ def _poll(argv: list[str]) -> int:
     parser = _Parser(prog="orch poll", add_help=True)
     parser.add_argument("--db", type=Path)
     parser.add_argument("--orch", type=Path)
+    parser.add_argument("--machines", type=Path)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--pidfile", type=Path)
     args = parser.parse_args(argv)
@@ -302,7 +325,12 @@ def _poll(argv: list[str]) -> int:
         path = _db_path(args.db)
         signal.signal(signal.SIGTERM, _exit_on_term)
         with _poll_lock(path, _pidfile_path(args.pidfile, path)):
-            dispatcher, source = _runtime(path, args.orch, create=False)
+            dispatcher, source = _runtime(
+                path,
+                args.orch,
+                create=False,
+                machines_path=args.machines,
+            )
             loop = PollLoop(dispatcher, source)
             if args.once:
                 loop.run(max_polls=1)
@@ -359,6 +387,7 @@ def _runtime(
     orch_path: Path | None,
     *,
     create: bool,
+    machines_path: Path | None = None,
 ) -> tuple[Dispatcher, LivePollSource]:
     config = _runtime_config(orch_path)
     if not create and not config.trusted_logins:
@@ -396,6 +425,15 @@ def _runtime(
     )
     t8 = T8Hook()
     source = LivePollSource(config)
+    devices = None
+    if not create:
+        machines = _machines_config(machines_path, required=False)
+        if machines is not None:
+            devices = DeviceMonitor(
+                _device_pool(queue, machines),
+                machines,
+                SshTransport(),
+            )
     dispatcher = Dispatcher(
         path,
         queue,
@@ -403,12 +441,37 @@ def _runtime(
         review_actions=source.review_actions_by_repo(),
         grok_delivery=delivery,
         hooks=(T7Hook(), t8),
+        devices=devices,
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
     source.terminal_sink = dispatcher.record_terminal
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | None:
+    """machines.yml for scheduling: placeholders allowed (never scheduled).
+
+    With no --machines the checkout's machines.yml is used. A missing file
+    is an error only when required; an invalid one always is.
+    """
+    machines_path = path if path is not None else ROOT / "machines.yml"
+    if not machines_path.is_file() and not required and path is None:
+        return None
+    config, findings = load_machines_yml(machines_path, allow_placeholders=True)
+    errors = [item for item in findings if item.severity == "error"]
+    if config is None or errors:
+        detail = errors[0].message if errors else "invalid machines.yml"
+        raise ValueError(f"{machines_path}: {detail}")
+    return config
+
+
+def _device_pool(queue: SQLiteJobQueue, machines: MachinesConfig) -> DevicePool:
+    try:
+        return retry_locked(lambda: DevicePool(queue, machines))
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        raise WaitError(f"cannot open the device pool: {' '.join(str(exc).split())}") from exc
 
 
 def _pidfile_path(explicit: Path | None, database: Path) -> Path:
@@ -548,6 +611,7 @@ def _job_run(argv: list[str]) -> int:
     parser.add_argument("bot")
     parser.add_argument("job_id")
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--machines", type=Path)
     parser.add_argument("--interval", type=float)
     parser.add_argument("--worktree", action="store_true")
     parser.add_argument("--work-root", type=Path)
@@ -577,6 +641,31 @@ def _job_run(argv: list[str]) -> int:
     def beat() -> object:
         return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
 
+    try:
+        beat()  # a job that is not running is refused first (exit 1), as before F2-02
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    try:
+        machines = _machines_config(args.machines, required=True)
+        assert machines is not None
+        placed = placed_run.prepare(
+            _device_pool(queue, machines),
+            machines,
+            job_id=args.job_id,
+            bot=args.bot,
+            owner=owner,
+            worktree=args.worktree,
+            log=log,
+            transport=SshTransport(),
+        )
+    except (placed_run.PlacementError, WaitError, ValueError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+
     environment = dict(os.environ)
     environment.update(
         {
@@ -586,8 +675,14 @@ def _job_run(argv: list[str]) -> int:
         }
     )
     checkout: list[worktrees.JobCheckout] = []
+    remote_env = {
+        "ORCH_JOB_ID": args.job_id,
+        "ORCH_JOB_BOT": args.bot,
+        "ORCH_JOB_DEVICE": placed.device.name,
+    }
 
     def setup() -> Path | None:
+        placed.before_start()
         if not args.worktree:
             return None
         made = worktrees.prepare(
@@ -611,13 +706,14 @@ def _job_run(argv: list[str]) -> int:
 
     try:
         return job_run.run(
-            command,
+            placed.argv(command, remote_env),
             beat=beat,
             interval=interval,
             log=log,
             env=environment,
             setup=setup,
             teardown=teardown,
+            started=placed.started,
         )
     except worktrees.WorktreeError as exc:
         log(str(exc))
@@ -625,6 +721,11 @@ def _job_run(argv: list[str]) -> int:
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
+    finally:
+        try:
+            placed.finish()
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            log(f"could not release the device slot: {' '.join(str(exc).split())}")
 
 
 def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int]:

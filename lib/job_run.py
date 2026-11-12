@@ -88,6 +88,7 @@ def run(
     env: Mapping[str, str] | None = None,
     setup: Callable[[], Path | None] | None = None,
     teardown: Callable[[], None] | None = None,
+    started: Callable[[int], None] | None = None,
 ) -> int:
     """Beat once, run argv with a heartbeat, and return its exit status.
 
@@ -105,7 +106,8 @@ def run(
     alone and inherited, as for any command). A signal that arrives before
     the command starts is not dropped: during setup it means the command
     never runs (exit 128 + the signal); during the spawn it is sent to the
-    command once it exists.
+    command once it exists. `started` gets the command's pid once it exists
+    (the device pool records it as the job's worker).
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
@@ -142,6 +144,11 @@ def run(
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
             return 127
+        if started is not None:
+            try:
+                started(child.pid)
+            except Exception as exc:  # recording is best effort; never orphan the command
+                log(f"could not record worker pid {child.pid}: {_one_line(exc)}")
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)

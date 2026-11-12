@@ -673,6 +673,7 @@ devices:
     slot_max: 3
     harnesses: {claude: claude-bot}
     workdir_root: REPLACE_WITH_PC_WORKDIR_ROOT
+    ssh_alias: pc-wsl-{bot}
 """,
         encoding="utf-8",
     )

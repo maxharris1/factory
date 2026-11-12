@@ -437,6 +437,21 @@ def _live_owner(data: dict) -> int | None:
     return pid
 
 
+def process_start(pid: int) -> str | None:
+    """A pid's start time, recorded beside it so a reused pid is not mistaken."""
+    return _process_start(pid)
+
+
+def pid_alive(pid: int | None, start: str | None) -> bool:
+    """True while pid runs and, when start was recorded, is the same process."""
+    if pid is None:
+        return False
+    data: dict = {"pid": pid}
+    if start is not None:
+        data["pid_start"] = start
+    return _live_owner(data) is not None
+
+
 def _process_start(pid: int) -> str | None:
     """Field 22 of /proc/<pid>/stat, so a reused pid is not mistaken for the owner."""
     try:

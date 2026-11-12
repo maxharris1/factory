@@ -28,7 +28,7 @@ class Loop:
         print("polling", flush=True)
         time.sleep(60)
 
-cli._runtime = lambda path, orch, create: (object(), object())
+cli._runtime = lambda path, orch, create, **_: (object(), object())
 cli.PollLoop = Loop
 raise SystemExit(cli.main(sys.argv[1:]))
 """
