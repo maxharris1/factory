@@ -29,6 +29,9 @@ clone and no cache.
   this is the mutation `gh pr ready` sends. -X POST keeps it out of gh's
   --cache, which also caches POSTs to graphql. A failure before the
   mutation's response confirms isDraft=false sets write_confirmed=False.
+  The Linear adapter then moves the issue to Ready for Review only when
+  the fresh read shows it still before review; an unknown state fails
+  before any write.
 - stable_patch_id is not built here and raises, so T4 queues a re-review.
 
 A GitHub ticket_id is the PR number. Every error is a GitHubAdapterError,
@@ -48,6 +51,7 @@ from typing import Any
 from urllib.parse import quote
 
 from lib.dispatcher import (
+    LINEAR_STATE_PHASES,
     CIResult,
     Comment,
     ReviewActions,
@@ -103,6 +107,9 @@ _CHECK_FAILED = (
 
 
 class GitHubAdapterError(ShipError):
+    """safe_detail defaults to the message, so a message must never hold
+    gh's stdout or stderr; a wrapper passes on the inner safe_detail."""
+
     def __init__(self, message: str, *, safe_detail: str | None = None):
         super().__init__(message)
         self.safe_detail = message if safe_detail is None else safe_detail
@@ -219,7 +226,9 @@ class GitHubReviewActions:
             )
         except GitHubAdapterError as exc:
             if _status(exc) == 409:
-                raise HeadMismatchError(f"PR head is not {head}: {exc}") from exc
+                raise HeadMismatchError(
+                    f"PR head is not {head}: {exc.safe_detail}"
+                ) from exc
             raise
         if result.get("merged") is not True:
             raise GitHubAdapterError(f"squash merge of {head} was not confirmed")
@@ -248,7 +257,7 @@ class GitHubReviewActions:
         except GitHubAdapterError as exc:
             if _status(exc) == 422 and "fast forward" in str(exc).lower():
                 raise NotFastForwardError(
-                    f"{head} is not a fast-forward of {branch}: {exc}"
+                    f"{head} is not a fast-forward of {branch}: {exc.safe_detail}"
                 ) from exc
             raise
         moved = _ref_sha(ref, branch)
@@ -541,8 +550,18 @@ class LinearReviewActions(GitHubReviewActions):
                 error.write_confirmed = False
                 raise error
             ticket = fresh
+        if (
+            self.move_ready_for_review
+            and ticket.linear_state_phase not in LINEAR_STATE_PHASES
+        ):
+            error = GitHubAdapterError("Linear issue state is unavailable")
+            error.write_confirmed = False
+            raise error
         marked = self._mark_ready(ticket, head)
-        if self.move_ready_for_review:
+        # Move only an issue still before review. One already in Ready for
+        # Review (a no-op re-drive) or moved on by a human (Done, Canceled,
+        # back to Backlog, or past Ready for Review) is left where it is.
+        if self.move_ready_for_review and ticket.linear_state_phase == "before-review":
             try:
                 self.linear_ready(ticket)
             except RetryableStateError as exc:

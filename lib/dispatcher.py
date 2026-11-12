@@ -61,6 +61,13 @@ class CIResult:
             raise ValueError(f"unknown CI status {self.status!r}")
 
 
+# Where a Linear issue stands relative to Ready for Review, read with the
+# ticket: still before review (the only phase the handoff moves), already
+# in Ready for Review, or moved on by a human (completed, canceled, backlog
+# or triage, or a started state after Ready for Review).
+LINEAR_STATE_PHASES = ("before-review", "ready-for-review", "moved-on")
+
+
 @dataclass(frozen=True)
 class TrackedTicket:
     repo: str
@@ -1735,8 +1742,16 @@ class Dispatcher:
     def _redrive_handoffs(self, ticket: TrackedTicket) -> None:
         """Re-drive, once, a handoff that failed before any confirmed write.
 
-        The intent was written only after T4 checked the APPROVE, so the
-        re-drive checks just what can have changed since: the ship policy
+        The intent's comment must still be the APPROVE in force: the latest
+        trusted reviewer verdict on the ticket, picked by the same rule the
+        live path uses (_latest_review_verdict). A newer trusted verdict, a
+        REVISE or another APPROVE, spends the re-drive with no write, so of
+        several eligible intents on one ticket only the latest APPROVE can
+        hand off. A ticket already merged, handed off or done, or one with
+        a completed handoff intent at the intent's head, is never handed
+        off again: its re-drives are spent with no write.
+
+        Then it checks what else can have changed since T4: the ship policy
         is still handoff, the PR head is still the intent's head and CI on
         it is still green. A moved head or red CI spends the re-drive with
         no write. Pending CI or an unread head waits for a later poll.
@@ -1763,11 +1778,26 @@ class Dispatcher:
         if not rows:
             return
         by_id = {comment.id: comment for comment in ticket.comments}
+        in_force = self._latest_review_verdict(ticket)
+        approve_in_force = (
+            in_force[0].id
+            if in_force is not None and in_force[1].get("verdict") == "APPROVE"
+            else None
+        )
         for row in rows:
             comment_id = str(row["comment_id"])
             comment = by_id.get(comment_id)
+            if comment is None:
+                continue
+            if (
+                comment_id != approve_in_force
+                or self._review_context(ticket)[0] in ("merged", "handed-off", "done")
+                or self._has_completed_handoff_at(ticket, str(row["head"]))
+            ):
+                self._set_redrive(ticket, comment_id, "spent", "eligible")
+                continue
             head = ticket.current_head
-            if comment is None or head is None:
+            if head is None:
                 continue
             if head != row["head"]:
                 self._set_redrive(ticket, comment_id, "spent", "eligible")
@@ -1838,6 +1868,18 @@ class Dispatcher:
                 (*scope, comment_id),
             )
             connection.commit()
+
+    def _has_completed_handoff_at(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND policy = 'handoff'
+                  AND head = ? AND status = 'completed'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        return row is not None
 
     def _set_redrive(
         self,
