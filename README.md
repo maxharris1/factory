@@ -6,7 +6,8 @@ The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
 F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
-Phase 2 has the F2-01 device pool; remote start (F2-02) is not built.
+Phase 2 has the F2-01 device pool and F2-02 remote start; the PC and Mac
+still ship `enabled: false` until Max turns them on.
 
 ## Contracts
 
@@ -106,15 +107,21 @@ binary.
 ([docs/SPEC.md](docs/SPEC.md) section 13);
 [`config/machines.example.yml`](config/machines.example.yml) is the minimal
 file. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
-`workdir_root` and `enabled` (default `true`). `harnesses` maps each eligible
+`workdir_root`, `ssh_alias` and `enabled` (default `true`). `harnesses` maps each eligible
 harness to the bot OS user whose login Max provisioned there, and that user
 must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
 `cursor: cursor-bot`). The one `local: true` device is the box that runs
-`orch`; it omits `tailscale_name` and `workdir_root`. Every other device names
+`orch`; it omits `tailscale_name`, `workdir_root` and `ssh_alias`. Every other device names
 a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
 so jobs on a WSL node stay off the Windows drives. A whole path component may
 be `{bot}`, which resolves to the harness's bot user
-(`Device.workdir_for(harness)`). A Tailscale name is a device name, never an
+(`Device.workdir_for(harness)`). Every remote device also names an
+`ssh_alias` (F2-02): the Host alias in the box user's own SSH client config,
+which must contain `{bot}` so each bot logs in through its own alias
+(`Device.ssh_alias_for(harness)`; the PC's `pc-wsl-{bot}` gives
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`). It is a bare
+alias: no `user@`, no leading `-`, no space or shell character, never a key
+path; the host name and key stay in that SSH config. A Tailscale name is a device name, never an
 IP address. Two devices may not share a `tailscale_name` (compared
 case-insensitively): slots are counted per device name, so a second entry
 would give one host a second `slot_max`. Release a device's held slots
@@ -125,13 +132,13 @@ The shipped file lists the box (all three harnesses, 3 slots, because the box
 runs at most 3 heavy local agent sessions at once; slots are generic, so they
 are not one per bot and 3 Claude jobs can take all 3), the PC's WSL Ubuntu node
 and the Mac. The PC and Mac ship
-`enabled: false` and stay disabled until F2-02 remote start lands; the Mac also
+`enabled: false` and stay disabled until Max turns them on; the Mac also
 has no bot users and no SSH yet. The PC's `workdir_root` is
 `/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
-`/mnt/c`. F2-02 will reach the PC through the box's SSH aliases
+`/mnt/c`, and its `ssh_alias` is `pc-wsl-{bot}`, the box's existing aliases
 `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The Mac's
-`workdir_root` is still a `REPLACE_WITH_` placeholder. Nothing in this repo
-checks or assumes that a device is reachable.
+`workdir_root` and `ssh_alias` are still `REPLACE_WITH_` placeholders. Nothing
+assumes a device is reachable: the poller checks it (below).
 
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
 moves the oldest queued job for that harness to running and holds a slot on
@@ -148,11 +155,63 @@ counting.
 
 Finishing, failing or timing out a job does not free its slot; apart from a
 requeue, only `DevicePool.release(job_id, owner=harness)` does, once the
-worker is confirmed gone (F2-02). A device that loses power mid-job keeps its slot held, its job
-is never `done`, T6 times it out from the last heartbeat and retries once, and
-the second failure marks the ticket `stuck`. Phase 1 `orch wait` still claims
-through the queue directly and holds no device slot; F2-02 routes claims
-through the pool. The pool starts nothing and opens no SSH connection.
+worker is confirmed gone (F2-02, below). `orch wait` claims through the pool.
+The pool itself starts nothing and opens no SSH connection.
+
+### Remote start (F2-02)
+
+`orch job run` ([`lib/placed_run.py`](lib/placed_run.py)) runs a job where the
+pool placed it. It refuses (exit 2, nothing started, the slot kept) a job that
+holds no slot (released, or claimed before F2-02), whose slot is for another
+bot user, whose device `machines.yml` no longer lists, or that another live
+`orch job run` already runs; it records itself on the slot as the runner. On the
+box the command runs as before, and its pid is recorded as the worker. On a
+remote device the command runs there over that bot's alias
+([`lib/remote.py`](lib/remote.py)):
+
+```
+ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=60 \
+    -o ServerAliveCountMax=5 -l <bot user> -- <ssh_alias> <start script>
+```
+
+`-l` always names the job's bot user, so a mistyped alias cannot log in as
+another bot; no key, `-i` or config path is ever passed. The start script makes
+`<workdir_root>/jobs/<job-id>`, writes the worker's process group (sshd starts
+the command in its own session) to `.orch-worker.pid` there, runs the command
+with `ORCH_JOB_ID`, `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR`
+(not `ORCH_DB`: the database stays on the box, and the bot runs `orch job done`
+there), removes the pid file, and exits with the command's status. The heartbeat
+stays local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
+`--worktree` is box-only and refused for a remote job (exit 2): the harness
+checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+
+When the command ends, done, failed or killed, the slot is released only once
+the worker is confirmed gone. On the box the command has exited (and no worker
+an earlier, dead runner of the job left behind still runs). On a remote device
+one SSH check runs `kill -0 -<group>`: no pid file or no process left means
+gone; a worker still running (ssh was killed or dropped) is sent SIGTERM and
+checked again for up to 10 seconds. A check only reports gone after `kill -0`
+has worked on its own shell, so a shell whose `kill` misbehaves never frees a
+slot. An unreachable device, or a worker that will not stop, keeps the slot and
+is logged.
+
+The poller finishes the job ([`lib/device_monitor.py`](lib/device_monitor.py),
+run each poll before T6). For a slot whose job is no longer running and whose
+runner is gone, it releases a box slot once the recorded command pid is gone,
+releases a remote slot no worker was started for, and otherwise asks the device:
+gone releases the slot, a worker still running there is sent SIGTERM (no runner
+supervises it) and checked on a later poll, unreachable keeps the slot. It also
+runs one SSH check per remote device that holds a slot. The first failed check
+after a good one starts that device's offline clock, a good one stops it, and a
+device holding no slot is forgotten. Once a device has failed every check for
+60 minutes, each job still running on it is failed with its failure already
+handled (so T6 does not retry it), its ticket is marked `stuck` with reason
+`device-offline`, and Grok Bot is woken once through the stuck flag. The job is
+never `done`, and its slot stays held until the device confirms the worker gone.
+A failing check is recorded as a `devices` poll error and never stops the poll.
+Tests use a fake `ssh` ([`tests/fake_ssh.py`](tests/fake_ssh.py)); a
+suite-wide guard puts a refusing `ssh` first on `PATH`, so no test reaches a
+host.
 
 ## Poll
 
@@ -167,7 +226,10 @@ hooks, GitHub review actions, and Grok webhook delivery. `--db` falls back to
 `$ORCH_DB`; `--once` performs one complete cycle and exits. GitHub reads use
 the existing `gh` login with token environment variables removed. GitHub
 discovery is PR-only in Phase 1; a label on an issue is not enough. Linear
-projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
+projects use GraphQL search with `LINEAR_HANDOFF_QUERY`. Each poll also runs
+the F2-02 device checks (slot release and the 60-minute offline check, see
+"Remote start") from `--machines`, default the checkout's `machines.yml`;
+without that file no device is checked, and an invalid one is refused.
 
 Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
 variable containing the Linear API key. `grok.webhook_url_env`,
@@ -270,13 +332,16 @@ bin/orch gc [--older-than HOURS] [--dry-run]
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
-`codex`, `cursor`). It checks for a job once a second, claims the oldest, and
-prints one JSON line. While the poller holds a write, a claim that sees
+`codex`, `cursor`). It checks for a job once a second, claims the oldest
+through the device pool (`--machines`, default the checkout's `machines.yml`,
+placeholders accepted and never scheduled), and prints one JSON line with the
+job's `device` and `remote` and, on a remote device, its `workdir`. With no free
+slot on an eligible device the job stays queued and the waiter keeps waiting. While the poller holds a write, a claim that sees
 `database is locked` (after a 5-second SQLite busy timeout) keeps waiting with
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
 If that line cannot be printed, the job is finished as
-failed so T6 retries it at once. `orch` never chooses or starts a harness on
+failed so T6 retries it at once, and its slot is released (no bot got it). `orch` never chooses or starts a harness on
 its own: the bot that ran the shell call starts its own, through `orch job run`. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
@@ -419,8 +484,8 @@ for a placeholder), device-pool slots held over `slot_max`, and `disabled` or
 `mac [none] 0/2 slots disabled placeholder`. A held slot on a
 device no longer listed is shown as `not-in-machines.yml`. A running job that
 holds a device-pool slot is listed under its device row only, so each job is
-counted once. Phase 1 claims are the `Slots — box` lines and hold no
-device-pool slot.
+counted once. A running job that holds no slot (claimed before F2-02, or
+whose worker already ended) is a `Slots — box` line.
 
 ## Dashboard
 
