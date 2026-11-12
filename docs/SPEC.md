@@ -29,6 +29,8 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | earlier today, still in force | Product questions go to Max, one at a time, in his own words for approvals that need them. Technical questions are decided by the orchestrator. | Standing rule |
 | earlier today, still in force | Every ticket gets a clarifying-questions step before building (D31). | Approved invariant, kept |
 | Nov 11, 2:31 PM | The dispatcher may send outbound deliveries to the existing Grok routine webhook. It does not accept inbound webhooks or create credentials. | Factory decided (technical) |
+| Nov 11, 9:09 PM | F2-01 inventory: the PC is the WSL Ubuntu node `pc-wsl-bots.tail68624b.ts.net` (not the Windows host), 3 slots, Claude, Codex and Cursor under `claude-bot`, `codex-bot` and `cursor-bot`, shipped `enabled: false` until Max OKs SSH; jobs stay off `/mnt/c`. The Mac is `maxs-macbook-pro.tail68624b.ts.net`, 2 slots, `enabled: false`; its bot users do not exist and SSH is off. No device has SSH yet. A device that drops mid-job keeps its slot and goes stuck through the heartbeat timeout, never done. | Max |
+| Nov 11, 9:09 PM | The device inventory lives in `machines.yml`, not `orch.yml`. The box is the one `local: true` device and needs no Tailscale name; it keeps 3 slots, one per harness bot as in Phase 1. Remote devices name a `workdir_root` that is not under `/mnt/`. The scheduler picks the first eligible device in file order. A slot is freed only by an explicit release after the worker is gone. | Factory decided (technical) |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
 
@@ -378,7 +380,7 @@ already tracked are not fetched directly again, and a direct issue read is
 reused throughout its cycle. HTTP 429 or GraphQL `RATELIMITED` pauses Linear
 requests for `Retry-After`; T4 and T8 pre-write deferrals retry next cycle.
 
-The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) also lives here, or in `machines.yml` as listed under Phase 2. Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
+The default job timeout is 90 minutes of no heartbeat or progress. A project may override it with `job_timeout` in this file (Factory decided (technical), 10:19 AM ET). Phase 2 device inventory (Tailscale names, slot maximums, harness eligibility) lives in `machines.yml`, not here (section 13). Runner labels do not: they go in each repo's `factory.md` as `ci_runner:` (Factory decided (technical), 10:19 AM ET). Log path and Linear access details may be added as placeholders in the F1-01 skeleton; do not invent new required fields.
 
 `grok_bot` routes stops and successful handoffs to the owning project bot. If
 the webhook's `target_bot` is set, only that project bot handles the wake. If
@@ -423,7 +425,7 @@ The builder brief says "run as poteto-mode". The builder follows the playbook th
 | `verdict=REVISE` at the cap, or a second AC-unmet verdict | `Capped`. Grok Bot tells Max once. Max's own words can OK one more round. |
 | `verdict=BLOCKED`, anything unparsed, or config refused later | Wake Grok Bot once. Grok Bot tells Max once, with evidence and a recommended next step. |
 | External `decline` | One fix pass per decline. Third decline: `Stuck`. |
-| Device offline 60 minutes (Phase 2 only) | `Stuck`. |
+| Device offline 60 minutes (Phase 2 only) | `Stuck`. Until F2-02 adds an offline check, a device that drops mid-job is caught by T6: no heartbeat for the job timeout, one retry, then `Stuck`. Its slot stays held and the job is never `done`. |
 | Post-merge check fails (deferred) | File a blocking follow-up on the project's tracker, then `Done`. |
 
 Grok Bot reports each stop once. It does not poll Max about the same stop.
@@ -469,6 +471,7 @@ Live acceptance is three real tickets, one each on three projects Max picks, run
 Start only after Phase 1 works.
 
 - **Device pool.** `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness eligible only where Max has provisioned its login under that bot's user (`claude-bot`, `codex-bot`, `cursor-bot`).
+  Each device has `name`, `tailscale_name`, `slot_max`, `harnesses` (each eligible harness mapped to its own bot user), `workdir_root` and `enabled` (default `true`). The one `local: true` device is the box that runs `orch`; it omits `tailscale_name` and `workdir_root`. Every remote device names an absolute `workdir_root` that is not under `/mnt/`, so a WSL node never works on a Windows drive. A device schedules only when it is enabled, has no `REPLACE_WITH_` value, and lists the harness. `orch check-config` refuses a placeholder unless `--allow-placeholders` is passed, then names it, and always names a disabled device. Scheduling holds one slot per job on the first eligible device in file order with a free slot, in the same transaction that claims the job, so two claims cannot take the same last slot; any free slot takes any harness. A job's slot is not freed when it finishes, fails or times out, only by an explicit release once the worker is gone. Nothing assumes a device is reachable. `orch status` lists each device's harnesses, slots held over `slot_max`, and whether it is disabled or a placeholder.
 - **Remote start.** Each owning bot starts its harness on a device over Tailscale SSH as its own user. A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
 - **Self-hosted CI.** Runner labels live in each repo's `factory.md` as `ci_runner:`. The device inventory lives in `orch.yml` (or `machines.yml`). Plus a registration checklist for Max. Max registers the runners himself. Credential-holding deploy workflows stay hosted.
 - **`orch status`.** A read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
@@ -497,6 +500,8 @@ factory/
   grok/orchestrate-project/SKILL.md
   bots/                  # short "orch jobs" sections for Claude/Codex/Cursor Bot skills
   config/orch.example.yml
+  config/machines.example.yml
+  machines.yml           # Phase 2 device pool (F2-01)
   model/                 # TLA+ model + Mermaid statechart of the orchestrator loop
   docs/SPEC.md           # this file
   docs/PLAN.md           # shorter plan
@@ -513,7 +518,7 @@ Do not invent answers. Ask Max when the work needs one. The only items still ope
 
 1. **Which three tickets** run as live acceptance (F1-10)? Max said he will pick them when the build is ready.
 2. **When to schedule T9** (Cleffy's deployed QA and post-merge audit) after Phase 1.
-3. **Phase 2 inventory:** Tailscale names, slot maximums per device, and which harness logins Max has provisioned where.
+3. **Phase 2 inventory:** the PC and Mac `workdir_root` paths, and which harness logins exist on the Mac. Max gave the Tailscale names, slot maximums and PC logins on November 11 (Decisions table).
 
 ## 17. To-do checklist
 
@@ -633,8 +638,9 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 #### F2-01 — Device pool
 
 - **Description:** `machines.yml` with the box, PC and Mac (Tailscale names), slot maximums, and harness eligibility only where Max has provisioned the login under that bot's user.
-- **Acceptance criteria:** A harness is never scheduled on a device that is not listed as eligible for it. Slot counts are not exceeded. Missing inventory is not invented; it is asked of Max.
+- **Acceptance criteria:** A harness is never scheduled on a device that is not listed as eligible for it. Slot counts are not exceeded. Missing inventory is not invented; it is asked of Max. Concurrent claims cannot take the same last slot. A disabled or placeholder device never schedules and `check-config` names it. A device that drops mid-job keeps its slot and goes `stuck` through T6, never `done`. `orch status` shows device rows.
 - **Depends on:** Phase 1 complete (F1-10), and Max's inventory.
+- **Built:** `machines.yml`, `lib/machines_yml.py`, `lib/device_pool.py`. No SSH, remote start, or harness execution; Phase 1 `orch wait` does not yet claim through the pool (F2-02).
 - **Size:** M.
 
 #### F2-02 — Remote start
