@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -316,3 +317,150 @@ def test_work_root_prefers_explicit_then_env_then_home(
     monkeypatch.setenv("ORCH_WORK_ROOT", str(tmp_path / "env"))
     assert worktrees.work_root(None) == tmp_path / "env"
     assert worktrees.work_root(tmp_path / "x") == tmp_path / "x"
+
+
+def _forge_old_orphan_record(root: Path, n: int, *, clone: Path, start: str) -> Path:
+    record = root / "jobs" / f"{job_id(n)}.json"
+    record.write_text(
+        json.dumps(
+            {
+                "job_id": job_id(n),
+                "repo": "acme/widgets",
+                "clone": str(clone),
+                "created_at": time.time() - 48 * 3600,
+                "pid": 2**22 + 12345,
+                "start": start,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return record
+
+
+def test_gc_never_removes_a_worktree_of_a_clone_the_record_names(
+    tmp_path: Path, origin: dict
+) -> None:
+    # Regression (#52 F1.2): gc trusted the record's `clone` field, so a
+    # forged record could make it force-remove a registered worktree of any
+    # repo that sat at <root>/jobs/<id>.
+    root = tmp_path / "work"
+    (root / "jobs").mkdir(parents=True)
+    foreign = tmp_path / "foreign"
+    git("clone", "-q", str(origin["bare"]), str(foreign))
+    path = root / "jobs" / job_id(1)
+    git("-C", str(foreign), "worktree", "add", "-q", "--detach", str(path))
+    _forge_old_orphan_record(root, 1, clone=foreign / ".git", start=origin["main"])
+    messages: list[str] = []
+
+    assert worktrees.gc(root, older_than_hours=24, log=messages.append) == 1
+
+    assert path.is_dir()
+    assert str(path) in git("-C", str(foreign), "worktree", "list")
+    assert any("not a worktree of" in line for line in messages), messages
+
+
+def test_gc_refuses_a_symlinked_jobs_directory(tmp_path: Path, origin: dict) -> None:
+    real = tmp_path / "real"
+    checkout = prepare(real, origin, 1, origin["main"])
+    _age(real, 1, 30)
+    _orphan_pid(real, 1)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "jobs").symlink_to(real / "jobs")
+    messages: list[str] = []
+
+    assert worktrees.gc(other, older_than_hours=24, log=messages.append) == 1
+
+    assert checkout.path.is_dir()
+    assert any("symlink" in line for line in messages), messages
+
+
+def test_gc_rechecks_owner_and_work_under_the_clone_lock(
+    tmp_path: Path, origin: dict, monkeypatch
+) -> None:
+    # Regression (#52 F1.3): gc checked the owner and keep_reason, then took
+    # the clone lock and force-removed. A job re-run that reused and dirtied
+    # the worktree in between lost its checkout.
+    root = tmp_path / "work"
+    checkout = prepare(root, origin, 1, origin["main"])
+    _age(root, 1, 30)
+    _orphan_pid(root, 1)
+    real_lock = worktrees._clone_lock
+    fired: list[bool] = []
+
+    @contextmanager
+    def reuse_first(clone: Path):
+        if not fired:
+            fired.append(True)
+            # A new `orch job run` (this live process) takes the job over.
+            prepare(root, origin, 1, origin["main"], pid=os.getpid())
+            (checkout.path / "wip.txt").write_text("new work\n", encoding="utf-8")
+        with real_lock(clone):
+            yield
+
+    monkeypatch.setattr(worktrees, "_clone_lock", reuse_first)
+    messages: list[str] = []
+    assert worktrees.gc(root, older_than_hours=24, log=messages.append) == 0
+
+    assert fired
+    assert (checkout.path / "wip.txt").read_text() == "new work\n"
+    assert any(line.startswith(f"kept job worktree {checkout.path}") for line in messages)
+
+
+def test_finish_keeps_a_worktree_another_live_run_has_taken_over(
+    tmp_path: Path, origin: dict
+) -> None:
+    root = tmp_path / "work"
+    checkout = prepare(root, origin, 1, origin["main"])
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        prepare(root, origin, 1, origin["main"], pid=other.pid)
+        messages: list[str] = []
+        assert worktrees.finish(checkout, messages.append) is False
+        assert checkout.path.is_dir()
+        assert messages == [f"kept job worktree {checkout.path}: in use by pid {other.pid}"]
+    finally:
+        other.kill()
+        other.wait()
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "https://x:SENTINEL@example.invalid/{repo}.git",
+        "https://SENTINEL@example.invalid/{repo}.git",
+        "ssh://git:SENTINEL@example.invalid/{repo}.git",
+    ],
+)
+def test_a_url_template_with_credentials_is_refused_before_git_sees_it(
+    tmp_path: Path, monkeypatch, template: str
+) -> None:
+    # Regression (#52 F1.6): the formatted URL went into git argv and
+    # remote.origin.url, so a token in the template leaked to ps and config.
+    seen: list[list[str]] = []
+
+    def fake_run(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "0" * 40 + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(WorktreeError) as caught:
+        worktrees.prepare(
+            tmp_path / "work", job_id(1), "acme/widgets", None, url_template=template
+        )
+    assert "SENTINEL" not in str(caught.value)
+    assert "credential" in str(caught.value)
+    assert not any("SENTINEL" in arg for argv in seen for arg in argv)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "https://github.com/{repo}.git",
+        "ssh://git@github.com/{repo}.git",
+        "git@github.com:{repo}.git",
+        "file:///srv/git/{repo}.git",
+    ],
+)
+def test_url_templates_without_secrets_are_accepted(template: str) -> None:
+    worktrees.check_remote_url(template.format(repo="acme/widgets"))

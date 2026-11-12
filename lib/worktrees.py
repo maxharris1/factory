@@ -8,10 +8,15 @@ and each job gets a detached worktree at `<root>/jobs/<job-id>`, with a
 When the job ends, `finish` removes the worktree and prunes the clone unless
 the worktree has uncommitted changes or commits on no remote-tracking ref;
 it then keeps the worktree and logs why. `gc` applies the same rule to
-records older than N hours whose owning process is gone.
+records older than N hours whose owning process is gone. Both decide under
+the clone lock, right before removing, so a job re-run that takes the
+worktree over in between keeps it. gc removes only a worktree of the clone
+derived from the record's repo, never one the record merely names.
 
 Nothing here is project-specific: the remote URL comes from a `{repo}`
-template (default GitHub HTTPS), and git authenticates the usual way.
+template (default GitHub HTTPS), and git authenticates the usual way. A
+template carrying credentials is refused, so no secret reaches git's argv or
+the clone's config.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -68,6 +74,31 @@ def url_template(explicit: str | None) -> str:
     return explicit or os.environ.get(URL_TEMPLATE_ENV) or DEFAULT_URL_TEMPLATE
 
 
+_SSH_SCHEMES = ("ssh", "git+ssh", "ssh+git")
+
+
+def check_remote_url(url: str) -> None:
+    """Refuse a remote URL that carries credentials. Never echoes the URL.
+
+    A password is never allowed. A user name is allowed only for SSH
+    (`ssh://git@host/...` or `git@host:...`), where it is not a secret; over
+    HTTPS the user slot is where tokens go. Use a git credential helper.
+    """
+    if "://" in url:
+        scheme = url.split("://", 1)[0].lower()
+        authority = urllib.parse.urlsplit(url).netloc
+        user_allowed = scheme in _SSH_SCHEMES
+    else:
+        authority = url.split("/", 1)[0]  # scp-like [user@]host:path, or a path
+        user_allowed = True
+    userinfo, at, _host = authority.rpartition("@")
+    if at and (":" in userinfo or not user_allowed):
+        raise WorktreeError(
+            "the git URL template carries credentials before '@'; "
+            "remove them and let a git credential helper authenticate"
+        )
+
+
 def prepare(
     root: Path,
     job_id: str,
@@ -78,13 +109,12 @@ def prepare(
     pid: int | None = None,
 ) -> JobCheckout:
     """Create (or reuse) the job's worktree at head, else the default branch."""
-    owner, name = _split_repo(repo)
     if not _JOB_ID.match(job_id):
         raise WorktreeError(f"unsafe job id {job_id!r}")
     if head is not None and not _SHA.match(head):
         raise WorktreeError(f"head {head!r} is not a commit SHA")
     root = root.absolute()
-    clone = root / "clones" / owner / f"{name}.git"
+    clone = _clone_path(root, repo)
     jobs = root / "jobs"
     checkout = JobCheckout(
         job_id=job_id,
@@ -94,6 +124,7 @@ def prepare(
         record=jobs / f"{job_id}.json",
     )
     url = url_template.format(repo=repo)
+    check_remote_url(url)
     jobs.mkdir(parents=True, exist_ok=True)
     with _clone_lock(clone):
         _ensure_clone(clone, url)
@@ -116,12 +147,25 @@ def prepare(
 
 
 def finish(checkout: JobCheckout, log: Log) -> bool:
-    """Remove a finished job's worktree unless it holds work. True if removed."""
-    reason = keep_reason(checkout.path, checkout.start)
+    """Remove a finished job's worktree unless it holds work. True if removed.
+
+    Decided under the clone lock: if another live `orch job run` has taken
+    the worktree over (its record names another live owner), it is kept.
+    """
+    with _clone_lock(checkout.clone):
+        reason = None
+        data = _read_record(checkout.record)
+        if data is not None:
+            owner = _live_owner(data)
+            if owner is not None and owner != os.getpid():
+                reason = f"in use by pid {owner}"
+        if reason is None:
+            reason = keep_reason(checkout.path, checkout.start)
+        if reason is None:
+            _remove_locked(checkout)
     if reason is not None:
         log(f"kept job worktree {checkout.path}: {reason}")
         return False
-    _remove(checkout)
     log(f"removed job worktree {checkout.path}")
     return True
 
@@ -161,9 +205,17 @@ def gc(
 ) -> int:
     """Remove job worktrees older than N hours with no work and no live owner.
 
-    Returns the number of records that could not be read or removed.
+    Returns the number of records that could not be read or removed. The
+    clone is always `<root>/clones/<owner>/<name>.git` for the record's repo
+    (the record's own `clone` field is ignored), a worktree is removed only
+    if it belongs to that clone, and a symlinked `jobs` directory or job
+    path is refused.
     """
-    jobs = root.absolute() / "jobs"
+    root = root.absolute()
+    jobs = root / "jobs"
+    if jobs.is_symlink():
+        log(f"skipped {jobs}: a symlink, not a job directory")
+        return 1
     if not jobs.is_dir():
         return 0
     current = time.time() if now is None else now
@@ -171,21 +223,12 @@ def gc(
     problems = 0
     clones: set[Path] = set()
     for record in sorted(jobs.glob("*.json")):
-        try:
-            data = json.loads(record.read_text(encoding="utf-8"))
-            checkout = JobCheckout(
-                job_id=str(data["job_id"]),
-                repo=str(data["repo"]),
-                path=jobs / str(data["job_id"]),
-                clone=Path(str(data["clone"])),
-                record=record,
-                start=_valid_start(data.get("start")),
-            )
-            created = float(data["created_at"])
-        except (OSError, ValueError, KeyError, TypeError):
+        loaded = _load_record(root, record)
+        if loaded is None:
             log(f"skipped unreadable job record {record}")
             problems += 1
             continue
+        checkout, data, created = loaded
         if record.stem != checkout.job_id:
             log(f"skipped mismatched job record {record}")
             problems += 1
@@ -194,23 +237,30 @@ def gc(
         age = current - created
         if age < cutoff:
             continue
-        owner = _live_owner(data)
-        if owner is not None:
-            log(f"kept job worktree {checkout.path}: in use by pid {owner}")
-            continue
-        reason = keep_reason(checkout.path, checkout.start)
-        if reason is not None:
-            log(f"kept job worktree {checkout.path}: {reason}")
-            continue
         detail = f"({checkout.repo}, {int(age // 3600)}h old)"
         if dry_run:
-            log(f"would remove job worktree {checkout.path} {detail}")
+            reason = _gc_keep_reason(checkout, data)
+            if reason is not None:
+                log(f"kept job worktree {checkout.path}: {reason}")
+            else:
+                log(f"would remove job worktree {checkout.path} {detail}")
             continue
         try:
-            _remove(checkout)
+            with _clone_lock(checkout.clone):
+                # Decide under the lock, from the record as it is now: a
+                # job re-run may have taken the worktree over since the scan.
+                fresh = _load_record(root, record)
+                if fresh is None or fresh[0] != checkout:
+                    continue  # finished or replaced meanwhile; next gc decides
+                reason = _gc_keep_reason(checkout, fresh[1])
+                if reason is None:
+                    _remove_locked(checkout)
         except (WorktreeError, OSError) as exc:
             log(f"could not remove job worktree {checkout.path}: {_one_line(exc)}")
             problems += 1
+            continue
+        if reason is not None:
+            log(f"kept job worktree {checkout.path}: {reason}")
             continue
         log(f"removed job worktree {checkout.path} {detail}")
     if not dry_run:
@@ -224,15 +274,68 @@ def gc(
     return problems
 
 
-def _remove(checkout: JobCheckout) -> None:
-    with _clone_lock(checkout.clone):
-        if checkout.path.exists():
-            # keep_reason found nothing to keep; --force only lets git also
-            # drop ignored build output, which `worktree remove` refuses.
-            _git(checkout.clone, "worktree", "remove", "--force", str(checkout.path))
-        if checkout.clone.is_dir():
-            _git(checkout.clone, "worktree", "prune")
-        checkout.record.unlink(missing_ok=True)
+def _gc_keep_reason(checkout: JobCheckout, data: dict) -> str | None:
+    owner = _live_owner(data)
+    if owner is not None:
+        return f"in use by pid {owner}"
+    return keep_reason(checkout.path, checkout.start)
+
+
+def _load_record(root: Path, record: Path) -> tuple[JobCheckout, dict, float] | None:
+    data = _read_record(record)
+    if data is None:
+        return None
+    try:
+        job_id = str(data["job_id"])
+        repo = str(data["repo"])
+        checkout = JobCheckout(
+            job_id=job_id,
+            repo=repo,
+            path=root / "jobs" / job_id,
+            clone=_clone_path(root, repo),
+            record=record,
+            start=_valid_start(data.get("start")),
+        )
+        created = float(data["created_at"])
+    except (ValueError, KeyError, TypeError, WorktreeError):
+        return None
+    return checkout, data, created
+
+
+def _read_record(record: Path) -> dict | None:
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _remove_locked(checkout: JobCheckout) -> None:
+    """Remove the worktree; the caller holds the clone lock."""
+    if checkout.path.is_symlink():
+        raise WorktreeError(f"{checkout.path} is a symlink, not a job worktree")
+    if checkout.path.exists():
+        _require_worktree_of(checkout.path, checkout.clone)
+        # keep_reason found nothing to keep; --force only lets git also
+        # drop ignored build output, which `worktree remove` refuses.
+        _git(checkout.clone, "worktree", "remove", "--force", str(checkout.path))
+    if checkout.clone.is_dir():
+        _git(checkout.clone, "worktree", "prune")
+    checkout.record.unlink(missing_ok=True)
+
+
+def _require_worktree_of(path: Path, clone: Path) -> None:
+    try:
+        common = _git(path, "rev-parse", "--git-common-dir").strip()
+    except WorktreeError:
+        common = ""
+    if not common or (path / common).resolve() != clone.resolve():
+        raise WorktreeError(f"{path} is not a worktree of {clone}")
+
+
+def _clone_path(root: Path, repo: str) -> Path:
+    owner, name = _split_repo(repo)
+    return root / "clones" / owner / f"{name}.git"
 
 
 def _split_repo(repo: str) -> tuple[str, str]:
@@ -382,6 +485,7 @@ __all__ = [
     "DEFAULT_GC_HOURS",
     "JobCheckout",
     "WorktreeError",
+    "check_remote_url",
     "finish",
     "gc",
     "keep_reason",
