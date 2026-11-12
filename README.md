@@ -274,7 +274,9 @@ not running or (exit 2) not this bot's, then one every third of the job's
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
 locked or failed writes are logged and retried at the next beat. SIGTERM and
-SIGHUP are forwarded to the command, and the exit status is the command's.
+SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
+reaches the command directly, and the exit status is the command's; a signal
+that arrives before the command starts means it never runs.
 `orch job run` never finishes the job: `orch job done` stays the bot's call.
 The command gets `ORCH_JOB_ID`, `ORCH_JOB_BOT` and `ORCH_DB`. Bots do not
 hand-roll heartbeat loops; `orch job heartbeat` is a single manual beat.

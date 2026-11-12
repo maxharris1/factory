@@ -106,8 +106,9 @@ job run <bot> <job-id> [--db PATH] [--interval SECONDS] [--worktree]
   runs), then one every --interval seconds (default a third of the job's
   timeout_seconds). The heartbeat stops when COMMAND exits, when the job
   is no longer running, or when this process dies. SIGTERM and SIGHUP are
-  forwarded to COMMAND. Exits with COMMAND's status; never finishes the
-  job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
+  A signal before COMMAND starts means it never runs. Exits with COMMAND's
+  status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
   --worktree runs COMMAND in a git worktree of one shared clone per repo
   under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work), at the
   job's head or the default branch, exported as ORCH_JOB_WORKTREE. When

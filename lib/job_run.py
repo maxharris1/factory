@@ -29,7 +29,6 @@ from types import FrameType
 
 from lib.queue import QueueError
 
-MIN_INTERVAL_SECONDS = 1.0
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 
@@ -38,10 +37,12 @@ Log = Callable[[str], None]
 
 
 def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
-    """A third of the job timeout (at least 1s), or a faster explicit override."""
+    """A third of the job timeout, or a faster explicit override."""
+    if not timeout_seconds > 0:
+        raise ValueError(f"the job's timeout_seconds ({timeout_seconds:g}) must be positive")
     limit = timeout_seconds / 3
     if override is None:
-        return max(MIN_INTERVAL_SECONDS, limit)
+        return limit
     if not math.isfinite(override) or override <= 0 or override > limit:
         raise ValueError(
             f"--interval must be above 0 and at most a third of the job's "
@@ -95,29 +96,43 @@ def run(
     started returns 127. `setup` runs under the heartbeat before the command
     (its path, if any, becomes the working directory); `teardown` runs after
     the heartbeat stops, whenever setup succeeded.
+
+    Signals: SIGTERM and SIGHUP are forwarded to the command. SIGINT is not:
+    the command shares this process group, so a Ctrl-C or group SIGINT
+    reaches it directly, and this process waits for it to exit. The handlers
+    are Python handlers, never SIG_IGN, so the command starts with default
+    dispositions (a disposition the caller already set to SIG_IGN is left
+    alone and inherited, as for any command). A signal that arrives before
+    the command starts is not dropped: during setup it means the command
+    never runs (exit 128 + the signal); during the spawn it is sent to the
+    command once it exists.
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
     child: subprocess.Popen[bytes] | None = None
+    pending: list[int] = []
     previous: dict[int, object] = {}
 
-    def forward(signum: int, _frame: FrameType | None) -> None:
-        if child is not None and child.poll() is None:
+    def on_signal(signum: int, _frame: FrameType | None) -> None:
+        if child is None:
+            pending.append(signum)
+        elif signum != signal.SIGINT and child.poll() is None:
             child.send_signal(signum)
 
     heartbeat.start()
     prepared = False
     try:
+        for signum in (*FORWARDED_SIGNALS, signal.SIGINT):
+            if signal.getsignal(signum) is not signal.SIG_IGN:
+                previous[signum] = signal.signal(signum, on_signal)
         if setup is not None:
             workdir = setup()
             if workdir is not None:
                 cwd = workdir
         prepared = True
-        for signum in FORWARDED_SIGNALS:
-            previous[signum] = signal.signal(signum, forward)
-        # The command shares this terminal's process group, so a terminal
-        # Ctrl-C reaches it directly; this process waits for it to exit.
-        previous[signal.SIGINT] = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if pending:
+            log(f"not starting {argv[0]}: got signal {pending[0]}")
+            return 128 + pending[0]
         try:
             child = subprocess.Popen(
                 list(argv),
@@ -127,6 +142,9 @@ def run(
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
             return 127
+        for signum in pending:  # arrived while the command was being spawned
+            if child.poll() is None:
+                child.send_signal(signum)
         code = child.wait()
     finally:
         heartbeat.stop()

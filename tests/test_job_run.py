@@ -37,8 +37,20 @@ class Beats:
 def test_interval_defaults_to_a_third_of_the_job_timeout() -> None:
     assert job_run.heartbeat_interval(3600, None) == 1200
     assert job_run.heartbeat_interval(60, None) == 20
-    assert job_run.heartbeat_interval(2, None) == job_run.MIN_INTERVAL_SECONDS
     assert job_run.heartbeat_interval(60, 5) == 5
+
+
+@pytest.mark.parametrize("timeout", [1, 2, 3])
+def test_default_interval_is_never_above_a_third_of_a_short_timeout(timeout: int) -> None:
+    # Regression (#52 F1.8): a 1s floor beat a 1s or 2s job slower than
+    # timeout/3, so T6 could time it out between beats.
+    assert job_run.heartbeat_interval(timeout, None) <= timeout / 3
+
+
+@pytest.mark.parametrize("timeout", [0, -5])
+def test_a_job_without_a_positive_timeout_has_no_default_interval(timeout: int) -> None:
+    with pytest.raises(ValueError):
+        job_run.heartbeat_interval(timeout, None)
 
 
 @pytest.mark.parametrize("override", [0, -1, 21, float("nan")])
@@ -289,6 +301,121 @@ def test_cli_job_run_forwards_sigterm_and_heartbeat_dies_with_it(tmp_path: Path)
     assert _last_activity(queue, job.id) == after
 
 
+def test_cli_job_run_stops_on_a_group_sigint_with_its_command(tmp_path: Path) -> None:
+    # Regression (#52 F1.7): SIGINT was set to SIG_IGN before the command was
+    # spawned, and an ignored signal survives exec, so Ctrl-C (a SIGINT to
+    # the foreground process group) stopped neither the wrapper nor the
+    # command, and the heartbeat kept beating.
+    queue = _queue(tmp_path)
+    job = _running_job(queue)
+    ready = tmp_path / "ready"
+    script = (
+        "import pathlib, time; "
+        f"pathlib.Path({str(ready)!r}).touch(); "
+        "time.sleep(30)"
+    )
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "--interval", "0.1", "--", sys.executable, "-c", script,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while not ready.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGINT)
+        _, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+    assert proc.returncode == 128 + signal.SIGINT, stderr
+    after = _last_activity(queue, job.id)
+    time.sleep(0.4)
+    assert _last_activity(queue, job.id) == after
+
+
+def test_the_command_starts_with_default_sigint_handling() -> None:
+    probe = (
+        "import signal, sys; "
+        "sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.default_int_handler else 9)"
+    )
+    code = job_run.run([sys.executable, "-c", probe], beat=lambda: None, interval=1, log=lambda _m: None)
+    assert code == 0
+
+
+def test_an_ignored_sigint_stays_ignored_for_the_command() -> None:
+    # A caller that ignores SIGINT (e.g. a background job of a script) passes
+    # that on, as it would to any command it runs.
+    probe = (
+        "import signal, sys; "
+        "sys.exit(0 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 9)"
+    )
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        code = job_run.run([sys.executable, "-c", probe], beat=lambda: None, interval=1, log=lambda _m: None)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert code == 0
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_during_setup_is_not_dropped_and_the_command_never_runs(
+    tmp_path: Path, signum: int
+) -> None:
+    # Regression (#52 F1.7): a TERM/HUP that arrived before the command was
+    # spawned was dropped, and the command then ran anyway.
+    marker = tmp_path / "ran"
+    torn_down: list[bool] = []
+
+    def setup() -> None:
+        os.kill(os.getpid(), signum)
+        return None
+
+    previous = signal.signal(signum, lambda *_a: None)  # keep pytest alive on the old code
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", f"open({str(marker)!r}, 'w')"],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+            setup=setup,
+            teardown=lambda: torn_down.append(True),
+        )
+    finally:
+        signal.signal(signum, previous)
+    assert code == 128 + signum
+    assert not marker.exists()
+    assert torn_down == [True]
+
+
+def test_a_signal_while_the_command_is_spawning_is_forwarded(monkeypatch) -> None:
+    # Regression (#52 F1.7): a TERM between the spawn and `child` being set
+    # was dropped, leaving the command running.
+    real_popen = subprocess.Popen
+
+    def spawn_then_signal(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", spawn_then_signal)
+    previous = signal.getsignal(signal.SIGTERM)
+    started = time.monotonic()
+    try:
+        code = job_run.run(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            beat=lambda: None,
+            interval=1,
+            log=lambda _m: None,
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert code == 128 + signal.SIGTERM
+    assert time.monotonic() - started < 4
+
+
 @pytest.mark.parametrize("state", ["queued", "done"])
 def test_cli_job_run_refuses_a_job_that_is_not_running(tmp_path: Path, state: str) -> None:
     queue = _queue(tmp_path)
@@ -320,10 +447,15 @@ def test_cli_job_run_refuses_another_bots_job_and_a_slow_interval(tmp_path: Path
     job = _running_job(queue, timeout=60)
     database = str(tmp_path / "orch.db")
 
-    other = _orch("job", "run", "claude-bot", job.id, "--db", database, "--", "true")
+    marker = tmp_path / "ran"
+    other = _orch(
+        "job", "run", "claude-bot", job.id, "--db", database,
+        "--", sys.executable, "-c", f"open({str(marker)!r}, 'w')",
+    )
     _, stderr = other.communicate(timeout=20)
     assert other.returncode == 2
     assert "belongs to codex-bot" in stderr
+    assert not marker.exists()
 
     slow = _orch(
         "job", "run", "codex-bot", job.id, "--db", database, "--interval", "30", "--", "true"
