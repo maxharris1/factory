@@ -23,6 +23,7 @@ from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
+from lib.machines_yml import load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
@@ -43,7 +44,7 @@ USAGE = """\
 usage: orch <command> [options]
 
 commands:
-  check-config     validate orch.yml and factory.md
+  check-config     validate orch.yml, machines.yml and factory.md
   install-skills   install the pinned pstack skills
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
@@ -54,9 +55,12 @@ commands:
   job              heartbeat or finish a job that wait returned
   dashboard        write (and optionally push) the read-only status snapshot
 
-check-config [--orch PATH] [--factory PATH ...] [--allow-placeholders]
-  With no paths, checks orch.yml and the example factory.md files.
+check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
+             [--allow-placeholders]
+  With no paths, checks orch.yml, machines.yml and the example factory.md
+  files. When --orch is given, machines.yml is checked only with --machines.
   --allow-placeholders permits and reports REPLACE_WITH_ install values only.
+  A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
 install-skills [--home PATH] [--project PATH] [--cloud]
@@ -176,6 +180,17 @@ def _check_config(argv: list[str]) -> int:
             allow_placeholders=args.allow_placeholders,
         )[1],
     )
+    machines_path = args.machines
+    if machines_path is None and args.orch is None:
+        machines_path = ROOT / "machines.yml"
+    if machines_path is not None:
+        failed = _report(
+            machines_path,
+            load_machines_yml(
+                machines_path,
+                allow_placeholders=args.allow_placeholders,
+            )[1],
+        ) or failed
     for path in factory_paths:
         failed = _report(path, load_factory_md(path)[1]) or failed
     if failed:
@@ -452,6 +467,7 @@ def _db_path(path: Path | None) -> Path:
 def _parser() -> _Parser:
     parser = _Parser(prog="orch check-config", add_help=True)
     parser.add_argument("--orch", type=Path)
+    parser.add_argument("--machines", type=Path)
     parser.add_argument("--factory", type=Path, action="append")
     parser.add_argument("--allow-placeholders", action="store_true")
     return parser

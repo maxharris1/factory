@@ -13,6 +13,7 @@ from typing import Protocol
 
 from lib.factory_md import FactoryConfig
 from lib.handoff import HandoffError, parse_comment
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
 POLL_SECONDS = 60
@@ -61,7 +62,7 @@ class TrackedTicket:
     current_head: str | None
     ci: Mapping[str, CIResult]
     risk: str
-    job_timeout_minutes: int = 90
+    job_timeout_minutes: int = DEFAULT_JOB_TIMEOUT_MINUTES
     ticket_url: str | None = None
     git_branch_name: str | None = None
     pr_number: str | None = None
