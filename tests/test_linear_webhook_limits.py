@@ -78,11 +78,11 @@ def test_connections_beyond_the_worker_limit_are_closed_without_a_worker(
 ) -> None:
     server = linear_webhook.make_server(app, "127.0.0.1", 0, max_workers=2)
     started = threading.Semaphore(0)
-    workers: list[int] = []
+    workers: list[threading.Thread] = []
     finish_request = server.finish_request
 
     def counted(request, client_address):
-        workers.append(1)
+        workers.append(threading.current_thread())
         started.release()
         finish_request(request, client_address)
 
@@ -105,7 +105,11 @@ def test_connections_beyond_the_worker_limit_are_closed_without_a_worker(
         assert read_reply(pairs[0][1]).startswith(b"HTTP/1.0 404")
         pairs[1][1].sendall(b"GET /elsewhere HTTP/1.0\r\n\r\n")
         assert read_reply(pairs[1][1]).startswith(b"HTTP/1.0 404")
-        server.server_close()  # joins the finished workers, freeing both slots
+        # A worker frees its slot as it exits. server_close() would not wait:
+        # socketserver does not track daemon worker threads.
+        for worker in workers:
+            worker.join(GUARD_SECONDS)
+            assert not worker.is_alive()
         server.process_request(pairs[3][0], ("127.0.0.1", 40002))
         assert started.acquire(timeout=GUARD_SECONDS)
         pairs[3][1].sendall(signed_request())
