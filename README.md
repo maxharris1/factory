@@ -195,19 +195,27 @@ local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 checks the repo out in `$ORCH_JOB_WORKDIR` itself.
 
 A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
-process's environment, so there the worker is named by its record alone. The
-start refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot
-session id and the start leads its own process group, then records
+process's environment, so there the worker is named by its record alone, one
+file per start (`.orch-worker-<tag>.pid` in the job directory). The start
+refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
+id and the start leads its own process group, then creates the record with
+noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
-UTC). The check reads that record and `ps -A -o pgid=,pid=,uid=`: no record, a
-record from an earlier boot session or for another tag, or an empty group is
-gone; a group still holding only the bot's own processes, led by the recorded
-leader or by none (its leader exited and left children), is running; a
-malformed record, another user's process in the group, or a leader with a
-different start time (the number was reused) cannot tell. The stop sends
-SIGTERM to the recorded group only when the check would say running. A process
-that leaves the job's group (`setsid`) is not seen on macOS. Every script runs
-under POSIX `sh` whatever the login shell (the Mac bots use zsh).
+UTC). A check that finds no record cannot tell whether the start is still on
+its way, so it creates the record itself as a fence (`fenced`) and cannot tell
+this time; the fenced start then refuses, and later checks read the fence as
+gone. A start that never ran (unreachable, refused) so frees its slot one check
+later. The check reads the record and `ps -A -o pgid=,pid=,uid=` (only when ps
+exits 0): a record from an earlier boot session or an empty group is gone; a
+group holding only the bot's own processes and led by the recorded leader is
+running; a malformed record, another tag, another user's process in the group,
+a group whose leader has exited (nothing ties the processes left to this start),
+a leader with a different start time (the number was reused), or a failed ps
+cannot tell. The stop sends SIGTERM to the recorded group only when the check
+would say running. A process that leaves the job's group (`setsid`), or stays in
+it after its leader exits, is never signalled on macOS; the latter keeps the
+slot until it ends. Every script runs under POSIX `sh` whatever the login shell
+(the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker

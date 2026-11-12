@@ -850,7 +850,11 @@ def job_dir(tmp_path: Path, bot: str, job_id: str) -> Path:
 
 
 def starts(ssh: Ssh) -> list[dict]:
-    return [call for call in ssh.calls() if "mkdir -p" in (call["script"] or "")]
+    """The start calls (a check or stop on a Mac may make the job directory too)."""
+    return [
+        call for call in ssh.calls()
+        if (call["script"] or "").startswith(f"exec env {remote.TAG_ENV}=")
+    ]
 
 
 # A remote command that leaves a child in its process group and exits. The

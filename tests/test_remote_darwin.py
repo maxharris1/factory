@@ -77,6 +77,40 @@ class Mac:
         """A ps that lists nothing (and fails), as a broken device would."""
         self._tool("ps", "exit 1\n")
 
+    def refuse_starts(self) -> None:
+        """No boot session id for a start (it carries ORCH_WORKER_TAG): it refuses, 125."""
+        self._tool(
+            "sysctl",
+            '[ -z "$ORCH_WORKER_TAG" ] || exit 1\n'
+            '[ "$*" = "-n kern.bootsessionuuid" ] || exit 1\n'
+            f"exec cat {shlex.quote(str(self.boot))}\n",
+        )
+
+    def partial_ps(self) -> None:
+        """A ps that lists one unrelated process of this user, then fails."""
+        self._tool("ps", f'echo "  999999 999999 {os.getuid()}"\nexit 1\n')
+
+    def ps_listing(self, group: str, leader_start: str) -> None:
+        """A ps whose only process leads group `group` as this user, started at leader_start."""
+        self._tool(
+            "ps",
+            f'case "$*" in *lstart*) echo {shlex.quote(leader_start)};; '
+            f'*) echo "  {group} {group} {os.getuid()}";; esac\n',
+        )
+
+    def pause_starts(self, gate: Path, paused: Path) -> None:
+        """The first start (the only caller carrying ORCH_WORKER_TAG) to run ps
+        waits, before it can write its record, until gate is removed. A check
+        never waits: sshd gives it no tag."""
+        real = shutil.which("ps")
+        self._tool(
+            "ps",
+            f'if [ -n "$ORCH_WORKER_TAG" ] && [ -e {shlex.quote(str(gate))} ] '
+            f"&& mkdir {shlex.quote(str(paused))} 2>/dev/null; then "
+            f"while [ -e {shlex.quote(str(gate))} ]; do sleep 0.05; done; fi\n"
+            f'exec {shlex.quote(str(real))} "$@"\n',
+        )
+
     def path(self, rest: str) -> str:
         return f"{self.bin}{os.pathsep}{rest}"
 
@@ -127,7 +161,7 @@ def start(t: remote.RemoteTarget, command: list[str]) -> subprocess.Popen:
 
 
 def record_of(t: remote.RemoteTarget) -> Path:
-    return Path(t.job_dir) / remote.PID_FILE
+    return Path(t.job_dir) / remote.darwin_record(t.require_tag())
 
 
 def write_record(t: remote.RemoteTarget, line: str) -> None:
@@ -190,7 +224,7 @@ def test_check_runs_from_a_zsh_login_shell(tmp_path: Path) -> None:
         env={"PATH": mac.path(os.environ["PATH"]), "HOME": str(tmp_path)},
         start_new_session=True, timeout=30,
     )
-    assert result.returncode == 0  # no record: gone
+    assert result.returncode == 3  # no record: fenced, cannot tell yet
 
 
 def test_a_device_that_is_not_darwin_keeps_the_linux_path(tmp_path: Path) -> None:
@@ -208,7 +242,7 @@ def test_a_device_that_is_not_darwin_keeps_the_linux_path(tmp_path: Path) -> Non
     )
     assert result.returncode == 0, result.stderr
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").split()
-    fields = record_of(t).read_text(encoding="utf-8").split()
+    fields = (Path(t.job_dir) / remote.PID_FILE).read_text(encoding="utf-8").split()
     assert len(fields) == 2 and fields[1:] == boot_id  # the Linux `<group> <boot id>` record
 
 
@@ -222,7 +256,6 @@ def test_darwin_tagged_worker_is_running_until_its_group_is_sent_sigterm(
     t = target(tmp_path)
     report = tmp_path / "worker.json"
     transport = remote.SshTransport()
-    assert remote.check_worker(transport, t) == remote.GONE  # nothing started yet
     proc = start(t, [sys.executable, "-c", REPORTER, str(report)])
     seen: dict = {}
     try:
@@ -235,7 +268,10 @@ def test_darwin_tagged_worker_is_running_until_its_group_is_sent_sigterm(
         assert fields[3].strip() == lstart(seen["pid"])
 
         assert remote.check_worker(transport, t) == remote.RUNNING
-        assert remote.check_worker(transport, target(tmp_path, tag="f" * 32)) == remote.GONE
+        other = target(tmp_path, tag="f" * 32)  # another start's tag: its own record
+        assert remote.check_worker(transport, other) == remote.UNKNOWN  # none yet: fenced
+        assert remote.check_worker(transport, other) == remote.GONE
+        assert remote.check_worker(transport, t) == remote.RUNNING
         assert remote.stop_worker(transport, t) is True
         assert wait_gone(seen["pid"])
         proc.wait(timeout=20)
@@ -247,9 +283,11 @@ def test_darwin_tagged_worker_is_running_until_its_group_is_sent_sigterm(
             proc.kill()
 
 
-def test_darwin_child_left_in_the_group_after_the_leader_exits_runs_until_stopped(
+def test_darwin_child_left_in_the_group_after_the_leader_exits_is_unknown_until_it_ends(
     tmp_path: Path, mac_ssh
 ) -> None:
+    """Nothing ties a leaderless group to the start (F1.2): the slot is kept,
+    nothing is signalled, and the check says gone once the group is empty."""
     ssh, mac = mac_ssh
     t = target(tmp_path)
     child_pid = tmp_path / "child.pid"
@@ -263,8 +301,11 @@ def test_darwin_child_left_in_the_group_after_the_leader_exits_runs_until_stoppe
         leader = int(record_of(t).read_text(encoding="utf-8").split()[0])
         assert os.getpgid(child) == leader and gone(leader)  # leaderless group
 
-        assert remote.check_worker(transport, t) == remote.RUNNING
-        assert remote.stop_worker(transport, t) is True
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is True  # answered, signalled nothing
+        time.sleep(0.2)
+        assert not gone(child)
+        kill_quietly(child)
         assert wait_gone(child)
         assert remote.check_worker(transport, t) == remote.GONE
     finally:
@@ -273,21 +314,17 @@ def test_darwin_child_left_in_the_group_after_the_leader_exits_runs_until_stoppe
 
 @pytest.mark.parametrize(
     "record",
-    [None, "{pid} 00000000-0000-0000-0000-000000000000 {tag} {start}\n",
-     "{pid} {boot} {other} {start}\n"],
-    ids=["no-record", "earlier-boot", "another-start"],
+    ["{pid} 00000000-0000-0000-0000-000000000000 {tag} {start}\n", "fenced\n"],
+    ids=["earlier-boot", "fenced"],
 )
 def test_darwin_record_naming_no_worker_of_this_start_is_gone_and_signals_nothing(
-    tmp_path: Path, mac_ssh, record: str | None
+    tmp_path: Path, mac_ssh, record: str
 ) -> None:
     ssh, mac = mac_ssh
     t = target(tmp_path)
     other = stranger()
     try:
-        if record is not None:
-            write_record(t, record.format(
-                pid=other.pid, boot=BOOT, tag=TAG, other="f" * 32, start=lstart(other.pid)
-            ))
+        write_record(t, record.format(pid=other.pid, boot=BOOT, tag=TAG, start=lstart(other.pid)))
         transport = remote.SshTransport()
         assert remote.check_worker(transport, t) == remote.GONE
         assert remote.stop_worker(transport, t) is True
@@ -301,6 +338,7 @@ def test_darwin_record_naming_no_worker_of_this_start_is_gone_and_signals_nothin
 @pytest.mark.parametrize(
     "record",
     ["{pid} {boot} {tag} Mon Jan 1 00:00:00 2001\n",  # the number was reused
+     "{pid} {boot} {other} {start}\n",  # names another start's tag
      "{pid} {boot}\n",  # a Linux record
      "{pid} {boot} {tag}\n",  # no start time
      "{pid}\n",
@@ -308,7 +346,7 @@ def test_darwin_record_naming_no_worker_of_this_start_is_gone_and_signals_nothin
      "007 {boot} {tag} {start}\n",
      "-5 {boot} {tag} {start}\n",
      "12abc {boot} {tag} {start}\n"],
-    ids=["other-start-time", "linux-record", "no-start-time", "pid-only", "empty",
+    ids=["other-start-time", "another-tag", "linux-record", "no-start-time", "pid-only", "empty",
          "leading-zero", "negative", "junk"],
 )
 def test_darwin_malformed_or_reused_records_are_unknown_and_never_signalled(
@@ -318,7 +356,9 @@ def test_darwin_malformed_or_reused_records_are_unknown_and_never_signalled(
     t = target(tmp_path)
     other = stranger()
     try:
-        write_record(t, record.format(pid=other.pid, boot=BOOT, tag=TAG, start=lstart(other.pid)))
+        write_record(t, record.format(
+            pid=other.pid, boot=BOOT, tag=TAG, other="f" * 32, start=lstart(other.pid)
+        ))
         transport = remote.SshTransport()
         assert remote.check_worker(transport, t) == remote.UNKNOWN
         assert remote.stop_worker(transport, t) is True  # answered, stopped nothing
@@ -327,15 +367,6 @@ def test_darwin_malformed_or_reused_records_are_unknown_and_never_signalled(
     finally:
         other.kill()
         other.wait()
-
-
-@pytest.mark.parametrize("pgid", ["0", "1"])
-def test_darwin_records_of_group_0_or_1_are_unknown(tmp_path: Path, mac_ssh, pgid: str) -> None:
-    """Check only: a stop built from these must never be run here (it would hit every process)."""
-    ssh, mac = mac_ssh
-    t = target(tmp_path)
-    write_record(t, f"{pgid} {BOOT} {TAG} Mon Jan 1 00:00:00 2001\n")
-    assert remote.check_worker(remote.SshTransport(), t) == remote.UNKNOWN
 
 
 def test_darwin_record_matching_a_live_group_and_its_leader_is_running(
@@ -466,16 +497,18 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
     )
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == 3, err
-    record = (job_dir(tmp_path, "codex-bot", job_id) / remote.PID_FILE).read_text(encoding="utf-8")
     calls = ssh.calls()
     tag = calls[0]["script"].split()[2].removeprefix("ORCH_WORKER_TAG=")
+    record = (job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(tag)).read_text(
+        encoding="utf-8"
+    )
     assert record.split()[1:3] == [BOOT, tag]
     assert len(calls) == 2  # the start, then the check that the worker is gone
     assert pool.placement(job_id) is None
 
 
-def test_darwin_remote_child_left_in_the_group_is_stopped_before_the_slot_is_released(
-    tmp_path: Path,
+def test_darwin_remote_child_left_in_the_group_keeps_the_slot_until_it_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     mac = Mac(tmp_path)
@@ -491,9 +524,19 @@ def test_darwin_remote_child_left_in_the_group_is_stopped_before_the_slot_is_rel
         _, err = proc.communicate(timeout=60)
         child = int(wait_file(child_pid))
         assert proc.returncode == 0, err
-        assert "stopping it" in err, err
+        assert "not confirmed gone (unknown)" in err, err
+        assert "stopping it" not in err, err
+        assert not gone(child)  # never signalled
+        assert pool.placement(job_id) is not None
+
+        # Once the leftover child ends, the poller confirms the group empty.
+        kill_quietly(child)
         assert wait_gone(child)
-        assert pool.placement(job_id) is None
+        use_fake_ssh(monkeypatch, ssh)
+        monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
+        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
     finally:
         kill_quietly(child)
 
@@ -547,3 +590,184 @@ def test_darwin_remote_takeover_is_refused_while_the_dead_runners_worker_lives(
         kill_quietly(group, group=True)
         if first.poll() is None:
             first.kill()
+
+
+# --- Codex review round 1 ----------------------------------------------------
+# F1.1: a missing record is not evidence that no start is pending.
+
+
+def wait_path(path: Path, seconds: float = 20.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.05)
+
+
+def test_r1_f11_darwin_check_while_a_start_is_paused_before_its_record_is_never_gone(
+    tmp_path: Path, mac_ssh
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    gate, paused, marker = tmp_path / "gate", tmp_path / "paused", tmp_path / "ran"
+    gate.touch()
+    mac.pause_starts(gate, paused)
+    proc = start(t, ["touch", str(marker)])
+    try:
+        wait_path(paused)
+        transport = remote.SshTransport()
+        # No record yet, and the start may still write one: never gone.
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is True  # answered, signalled nothing
+        assert proc.poll() is None
+        gate.unlink()
+        proc.wait(timeout=30)
+        # The check fenced the start: it can never record itself or run its command.
+        assert proc.returncode == remote.START_REFUSED, proc.stderr.read()
+        assert not marker.exists()
+        assert remote.check_worker(transport, t) == remote.GONE
+    finally:
+        gate.unlink(missing_ok=True)
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_r1_f11_darwin_takeover_while_the_dead_runners_start_is_paused_starts_no_second_worker(
+    tmp_path: Path,
+) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    mac = Mac(tmp_path)
+    gate, paused = tmp_path / "gate", tmp_path / "paused"
+    first_ran, second_ran, third_ran = (tmp_path / n for n in ("first", "second", "third"))
+    gate.touch()
+    mac.pause_starts(gate, paused)
+
+    def run(marker: Path) -> subprocess.Popen:
+        return orch(
+            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--", "touch", str(marker),
+            env=mac_env(ssh, mac),
+        )
+
+    first = run(first_ran)
+    try:
+        wait_path(paused)
+        first.kill()  # the runner dies while its start has not written a record
+        first.wait(timeout=20)
+
+        second = run(second_ran)
+        _, err = second.communicate(timeout=30)
+        assert second.returncode == 2, err
+        assert "earlier worker on pc is not confirmed gone (unknown)" in err
+        assert len(starts(ssh)) == 1
+
+        gate.unlink()  # the orphaned start resumes, finds the fence and refuses
+        assert wait_gone(starts(ssh)[0]["pid"])
+        assert not first_ran.exists()
+
+        third = run(third_ran)
+        _, err = third.communicate(timeout=30)
+        assert third.returncode == 0, err
+        assert third_ran.exists() and not first_ran.exists() and not second_ran.exists()
+        assert len(starts(ssh)) == 2
+        assert pool.placement(job_id) is None
+    finally:
+        gate.unlink(missing_ok=True)
+        if first.poll() is None:
+            first.kill()
+
+
+# F1.2: a leaderless group carries no evidence that it is this start's.
+
+
+def test_r1_f12_darwin_reused_leaderless_group_is_unknown_and_never_signalled(
+    tmp_path: Path, mac_ssh
+) -> None:
+    """The record names group P; P emptied and the number now names another
+    group of this user whose leader has exited and left a child."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    child_pid = tmp_path / "child.pid"
+    leader = subprocess.Popen(
+        leave_child_command(child_pid, stubborn=False), start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    child: int | None = None
+    try:
+        leader.wait(timeout=30)
+        child = int(wait_file(child_pid))
+        assert os.getpgid(child) == leader.pid  # a live group with no leader
+        write_record(t, f"{leader.pid} {BOOT} {TAG} Mon Jan 1 00:00:00 2001\n")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is True  # answered, signalled nothing
+        time.sleep(0.2)
+        assert not gone(child)
+    finally:
+        kill_quietly(child)
+
+
+# F1.3: GONE from the process listing needs ps to have succeeded.
+
+
+def test_r1_f13_darwin_ps_that_fails_after_listing_part_cannot_tell(
+    tmp_path: Path, mac_ssh
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    other = stranger()  # the live worker ps failed to list
+    try:
+        write_record(t, f"{other.pid} {BOOT} {TAG} {lstart(other.pid)}\n")
+        mac.partial_ps()
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t) is False  # exit 3: could not tell
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+# The group 0/1 refusal on its own: everything else in the record matches.
+
+
+@pytest.mark.parametrize("pgid", ["0", "1"])
+def test_r1_darwin_record_of_group_0_or_1_is_unknown_even_when_all_else_matches(
+    tmp_path: Path, mac_ssh, pgid: str
+) -> None:
+    """Check only: a stop built from these must never be run here (it would hit every process)."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    when = "Mon Jan 1 00:00:00 2001"
+    mac.ps_listing(pgid, when)
+    write_record(t, f"{pgid} {BOOT} {TAG} {when}\n")
+    assert remote.check_worker(remote.SshTransport(), t) == remote.UNKNOWN
+
+
+def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start that wrote no record (here refused, 125) keeps its slot for one
+    check: that check fences the tag, and the next one says gone."""
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    mac = Mac(tmp_path)
+    mac.refuse_starts()
+    marker = tmp_path / "ran"
+    proc = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", "touch", str(marker),
+        env=mac_env(ssh, mac),
+    )
+    _, err = proc.communicate(timeout=30)
+    assert proc.returncode == remote.START_REFUSED, err
+    assert not marker.exists()
+    assert "not confirmed gone (unknown)" in err, err
+    placement = pool.placement(job_id)
+    assert placement is not None and placement.worker_tag is not None
+    fence = job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(placement.worker_tag)
+    assert fence.read_text(encoding="utf-8").split() == ["fenced"]
+
+    use_fake_ssh(monkeypatch, ssh)
+    monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
+    queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+    monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+    assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)

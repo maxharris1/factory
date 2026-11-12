@@ -41,23 +41,34 @@ check and stop run as `exec sh -c '<script>'`, so they are POSIX sh whatever
 the bot's login shell is (bash on Linux, zsh on macOS).
 
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
-another process's environment) the same contract holds through the record:
+another process's environment) the same contract holds through the record,
+one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
 
 * start: refuse (125) unless `sysctl -n kern.bootsessionuuid` gives the boot
   session id and the start leads its own process group (`ps -o pgid=`);
-  record `<process group> <boot session> <tag> <leader start time>` (the
-  leader's `ps -o lstart=` in the C locale and UTC) and exec as above;
-* check: 0 with no record, a record from an earlier boot session or written
-  by another start (another tag), or no process left in the recorded group
-  (`ps -A -o pgid=,pid=,uid=`); 1 while the group holds only this user's
-  processes and its leader is the recorded one or has exited (a group number
-  is never reused while the group has members, so a leaderless group is the
-  job's children); 3 for a malformed record, a group holding another user's
-  process, or a leader whose start time differs (the number was reused), and
-  3 when there is no boot session id or ps lists nothing;
+  create the record with noclobber (O_EXCL) holding
+  `<process group> <boot session> <tag> <leader start time>` (the leader's
+  `ps -o lstart=` in the C locale and UTC), refusing if it already exists,
+  and exec as above;
+* check: with no record the start may still be on its way, so the check
+  creates the record itself as the fence `fenced` (O_EXCL as well: the start
+  or the check creates it, never both) and exits 3; the fenced start can
+  never record itself and refuses, so a later check reads the fence as 0.
+  0 too for a record from an earlier boot session or no process left in the
+  recorded group, read from a `ps -A -o pgid=,pid=,uid=` that exited 0; 1
+  while the group holds only this user's processes and is led by the
+  recorded leader (same start time); 3 for a malformed record or one naming
+  another tag, a group holding another user's process, a group whose leader
+  has exited (nothing ties the processes left to this start: the number may
+  have been reused while the group was empty), a leader whose start time
+  differs (the number was reused), a fence that could not be written, and
+  when there is no boot session id or ps fails or lists nothing;
 * stop: SIGTERM to the recorded group exactly when the check would exit 1;
-  nothing else is signalled. A process that left the job's group (setsid) is
-  invisible here: macOS gives no way to find it by its tag.
+  nothing else is signalled (with no record it writes the fence as well).
+  A process that left the job's group (setsid), or that stays in it after
+  the leader exits, is never signalled here: macOS gives no way to find it
+  by its tag. A group left without its leader keeps the slot until it is
+  empty.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
 password prompt), a connect timeout and server keepalives. Tests replace
@@ -121,39 +132,71 @@ _LSTART = 'x=$(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$p" 2>/dev/null); set -f; set 
 # Prints `<lines> <found> <foreign> <leader>` for group $p: how many lines ps
 # listed, whether any process is in the group, whether one belongs to another
 # user, and whether the leader (pid $p) is among them.
+# Prints `<found> <foreign> <leader>` for group $p from the listing in $o:
+# whether any process is in the group, whether one belongs to another user,
+# and whether the leader (pid $p) is among them. $o is only used when ps
+# exited 0 and listed something; a failed or empty listing cannot tell.
+_DARWIN_LIST = 'o=$(ps -A -o pgid= -o pid= -o uid= 2>/dev/null) && [ -n "$o" ]'
 _DARWIN_GROUP = (
-    'ps -A -o pgid= -o pid= -o uid= 2>/dev/null | awk -v p="$p" -v u="$u" '
+    'printf \'%s\\n\' "$o" | awk -v p="$p" -v u="$u" '
     "'$1 == p { n = 1; if ($3 != u) o = 1; if ($2 == p) k = 1 } "
-    "END { print NR, n + 0, o + 0, k + 0 }'"
+    "END { print n + 0, o + 0, k + 0 }'"
 )
+# What a check or stop writes as the record of a start that has written none:
+# the start's own record write (noclobber, so O_EXCL) then fails, and it
+# refuses (125) without running anything.
+_FENCE = "fenced"
 
 
-def _darwin_worker(*, gone: str, unsure: str, running: str, blind: str) -> str:
-    """Darwin: decide whether the record in $f names a live worker of tag $t.
+def darwin_record(tag: str) -> str:
+    """The Darwin record's file name in the job directory: one per start."""
+    return f".orch-worker-{tag}.pid"
 
-    gone: no record, a record from an earlier boot session or for another
-    start, or no process left in the recorded group. unsure: a malformed
-    record, a group holding another user's process, or a leader whose start
-    time is not the recorded one (the number was reused). running: the
-    recorded group still holds only this user's processes and either its
-    leader is the recorded one or the leader has exited (a group number is
-    never reused while the group has members). blind: the device cannot
-    tell (no boot session id, ps listed nothing).
+
+def _darwin_worker(
+    target: RemoteTarget, *, gone: str, unsure: str, running: str, blind: str
+) -> str:
+    """Darwin: decide whether the record of tag $t names a live worker.
+
+    A start for tag $t creates its record `$d/.orch-worker-$t.pid` with
+    noclobber (O_EXCL) before it runs anything. With no record the start may
+    still be on its way, so the check writes the fence record in its place
+    (also O_EXCL: exactly one of the two creates the file) and is unsure this
+    time; the start then cannot record itself and refuses.
+
+    gone: the fence (that start can never run), a record from an earlier
+    boot session, or no process left in the recorded group, all read from a
+    ps that exited 0. unsure: no record yet (fence just written), a fence
+    that could not be written, a malformed record or one naming another tag,
+    a group holding another user's process, a group whose leader has exited
+    (nothing ties the members left to this start: the number may have been
+    reused while the group was empty), or a leader whose start time is not
+    the recorded one. running: the recorded group holds only this user's
+    processes and is led by the recorded leader. blind: the device cannot
+    tell (no boot session id, ps failed or listed nothing).
     """
+    directory = shlex.quote(target.job_dir)
     return (
+        f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
         f"{_DARWIN_BOOT} || {blind}; "
         f"u=$(id -u) || {blind}; "
-        f'[ -e "$f" ] || {gone}; '
+        'if [ ! -e "$f" ]; then '
+        'mkdir -p -- "$d" 2>/dev/null; '
+        f'if (set -C; echo {_FENCE} > "$f") 2>/dev/null; then {unsure}; fi; '
+        f'[ -e "$f" ] || {unsure}; '
+        "fi; "
         f'{{ read -r p b g s < "$f"; }} 2>/dev/null || {unsure}; '
+        f'if [ "$p" = {_FENCE} ]; then {gone}; fi; '
         f'case "$p" in {_BAD_GROUP}) {unsure};; esac; '
         f'[ -n "$b" ] && [ -n "$g" ] && [ -n "$s" ] || {unsure}; '
+        f'[ "$g" = "$t" ] || {unsure}; '
         f'[ "$b" = "$c" ] || {gone}; '
-        f'[ "$g" = "$t" ] || {gone}; '
-        f"r=$({_DARWIN_GROUP}); set -- $r; "
-        f'[ "${{1:-0}}" -gt 0 ] || {blind}; '
-        f'[ "$2" = 1 ] || {gone}; '
-        f'[ "$3" = 0 ] || {unsure}; '
-        f'if [ "$4" = 1 ]; then {_LSTART}; [ "$*" = "$s" ] || {unsure}; fi; '
+        f"{_DARWIN_LIST} || {blind}; "
+        f"set -- $({_DARWIN_GROUP}); "
+        f'[ "$1" = 1 ] || {gone}; '
+        f'[ "$2" = 0 ] || {unsure}; '
+        f'[ "$3" = 1 ] || {unsure}; '
+        f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
         f"{running}"
     )
 
@@ -236,13 +279,15 @@ def start_script(
     argv = " ".join(shlex.quote(part) for part in command)
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
+    darwin_file = shlex.quote(darwin_record(tag))
     darwin = (
         f"{_DARWIN_BOOT} || exit {START_REFUSED}; "
         "set -- $(ps -o pgid= -p $$ 2>/dev/null); "
         f'[ "$1" = "$$" ] || exit {START_REFUSED}; '
         f'p=$$; {_LSTART}; s="$*"; [ -n "$s" ] || exit {START_REFUSED}; '
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
-        f'echo "$$ $c {tag} $s" > {pid_file} || exit {START_REFUSED}; '
+        f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
+        f"|| exit {START_REFUSED}; "
         f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {argv}'
     )
     inner = (
@@ -262,7 +307,9 @@ def check_script(target: RemoteTarget) -> str:
     """Exit 1 while the job's worker runs, 0 once it is gone, 3 when unsure."""
     tag = target.require_tag()
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
-    darwin = _darwin_worker(gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3")
+    darwin = _darwin_worker(
+        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3"
+    )
     return _sh(
         f"t={tag}; f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
@@ -289,6 +336,7 @@ def stop_script(target: RemoteTarget) -> str:
     tag = target.require_tag()
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
+        target,
         gone="exit 0",
         unsure="exit 0",
         running='{ kill -TERM -"$p" 2>/dev/null; exit 0; }',
