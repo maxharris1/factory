@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
-from lib import job_run, placed_run, worktrees
+from lib import job_run, linear_webhook, placed_run, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -28,7 +28,7 @@ from lib.load import Finding
 from lib.device_monitor import DeviceMonitor
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
-from lib.orch_yml import OrchConfig, load_orch_yml
+from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import QueueError, SQLiteJobQueue
@@ -62,6 +62,7 @@ commands:
   job              run, heartbeat or finish a job that wait returned
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
+  linear-webhook   serve the Linear webhook listener that marks issues dirty
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -166,6 +167,15 @@ dashboard push [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
   `orch poll` runs each cycle). Files go to temp names, then one ssh
   renames both into place. With no transport configured it logs one
   line and exits 0 without reading or writing.
+
+linear-webhook serve [--db PATH] [--orch PATH] [--bind HOST:PORT]
+  Serve orch.yml's linear_webhook: POST on linear_webhook.path only, a
+  Linear-Signature HMAC-SHA256 checked against the secret in
+  linear_webhook.secret_file (mode 600, never printed), a webhookTimestamp
+  within 60 seconds, a 1 MiB body cap and Linear's source IPs when visible.
+  A signed Issue or Comment for a configured Linear project upserts one
+  linear_dirty row in the existing database; nothing else is done. --bind
+  overrides linear_webhook.bind. Exits 2 when no webhook is configured.
 """
 
 
@@ -197,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(dashboard_main, argv[1:])
     if argv[0] == "gc":
         return _call(_gc, argv[1:])
+    if argv[0] == "linear-webhook":
+        return _call(_linear_webhook, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -482,6 +494,10 @@ def _runtime(
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
     source.terminal_sink = dispatcher.record_terminal
+    if config.linear_webhook is not None:
+        source.linear_dirty = linear_webhook.LinearDirtyQueue(path)
+        source.active_tickets = dispatcher.active_job_tickets
+        source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
 
@@ -776,6 +792,77 @@ def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int]:
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
     return str(row["repo"]), row["head"], int(row["timeout_seconds"])
+
+
+def _linear_webhook(argv: list[str]) -> int:
+    parser = _Parser(prog="orch linear-webhook", add_help=True)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    serve = commands.add_parser("serve")
+    serve.add_argument("--db", type=Path)
+    serve.add_argument("--orch", type=Path)
+    serve.add_argument("--bind")
+    args = parser.parse_args(argv)
+    try:
+        config = _runtime_config(args.orch)
+    except ValueError as exc:
+        print(f"orch linear-webhook: {exc}", file=sys.stderr)
+        return 1
+    webhook = config.linear_webhook
+    if webhook is None:
+        print(
+            "orch linear-webhook: linear_webhook is not configured in orch.yml",
+            file=sys.stderr,
+        )
+        return 2
+    bind = parse_bind(args.bind) if args.bind is not None else (
+        webhook.host,
+        webhook.port,
+    )
+    if bind is None:
+        print("orch linear-webhook: --bind must be host:port", file=sys.stderr)
+        return 2
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+    try:
+        path = _db_path(args.db)
+        if not path.is_file():
+            raise ValueError(
+                f"dispatcher database {path} does not exist; run orch init-db first"
+            )
+        app = linear_webhook.WebhookApp(
+            secret=linear_webhook.read_secret(webhook.secret_file),
+            project_ids=frozenset(
+                project.linear_project_id
+                for project in config.projects
+                if project.linear_project_id is not None
+            ),
+            db_path=path,
+            path=webhook.path,
+            log=lambda line: print(line, flush=True),
+        )
+        server = linear_webhook.make_server(app, *bind)
+    except (
+        linear_webhook.WebhookSecretError,
+        WaitError,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        print(f"orch linear-webhook: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    host, port = server.server_address[:2]
+    shown = f"[{host}]" if ":" in str(host) else str(host)
+    print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
+    signal.signal(signal.SIGTERM, _exit_on_term)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        server.server_close()
+    return 0
 
 
 def _gc(argv: list[str]) -> int:
