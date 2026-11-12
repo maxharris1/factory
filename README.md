@@ -364,7 +364,9 @@ install-autostart`) turns on autostart: it writes
 run `ensure` in the background whenever a bot shell starts, and, when
 `crontab` exists, adds an `@reboot` line and a 5-minute `ensure` watchdog
 tagged `# factory-orch-poll` (replaced, never duplicated).
-`remove-autostart` undoes both. `deploy/install.sh` without `--autostart`
+`remove-autostart` undoes both. `ORCH_CRONTAB` names the crontab command
+(default `crontab` on `PATH`); the caller's `PATH` keeps precedence over the
+standard directories the script appends. `deploy/install.sh` without `--autostart`
 changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.

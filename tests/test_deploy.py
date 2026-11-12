@@ -103,6 +103,8 @@ python.chmod(0o755)
             "HOME": str(tmp_path),
             "ORCH_CONFIG": str(orch_config),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
+            # Never a real crontab; autostart tests point this at a fake.
+            "ORCH_CRONTAB": str(fake_bin / "no-such-crontab"),
         }
     )
     return environment
@@ -426,6 +428,7 @@ def test_install_does_not_enable_autostart_by_default(tmp_path: Path) -> None:
     crontab = tmp_path / "fake-bin" / "crontab"
     crontab.write_text(FAKE_CRONTAB, encoding="utf-8")
     crontab.chmod(0o755)
+    environment["ORCH_CRONTAB"] = str(crontab)
 
     result = _install(environment)
 
@@ -439,6 +442,7 @@ def test_install_autostart_installs_cron_and_the_profile_hook(tmp_path: Path) ->
     crontab = tmp_path / "fake-bin" / "crontab"
     crontab.write_text(FAKE_CRONTAB, encoding="utf-8")
     crontab.chmod(0o755)
+    environment["ORCH_CRONTAB"] = str(crontab)
 
     assert _install(environment, "--autostart").returncode == 0
     result = _install(environment, "--autostart")
@@ -468,6 +472,7 @@ def _profile_env(tmp_path: Path) -> dict[str, str]:
         "HOME": str(tmp_path),
         "PATH": "/usr/bin:/bin",
         "ORCH_POLL_START_WAIT": "10",
+        "ORCH_CRONTAB": str(tmp_path / "no-such-crontab"),
     }
 
 

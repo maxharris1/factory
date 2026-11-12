@@ -18,6 +18,7 @@
 # background whenever a bot shell starts. When `crontab` exists it also
 # installs an @reboot line and a 5-minute `ensure` watchdog, tagged
 # "# factory-orch-poll" and replaced, never duplicated, on every run.
+# ORCH_CRONTAB names the crontab command (default: crontab on PATH).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,8 +34,10 @@ RUNNER="${HERE}/run-poller.sh"
 MARKER="# factory-orch-poll"
 START_WAIT="${ORCH_POLL_START_WAIT:-15}"
 STOP_WAIT="${ORCH_POLL_STOP_WAIT:-60}"
+CRONTAB="${ORCH_CRONTAB:-crontab}"
 # cron and fresh shells have a minimal PATH; the poller needs orch and gh.
-export PATH="${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:${PATH}}"
+# The caller's PATH keeps precedence; the standard directories only follow it.
+export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 
 say() { printf '%s poller-service: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -129,7 +132,7 @@ plain_path() {
 
 crontab_without_marker() {
     local current
-    current="$(crontab -l 2>/dev/null || true)"
+    current="$("$CRONTAB" -l 2>/dev/null || true)"
     [[ -n "$current" ]] || return 0
     grep -vF -- "$MARKER" <<<"$current" || true
 }
@@ -138,7 +141,7 @@ install_autostart() {
     mkdir -p "$CONFIG" "$STATE"
     : >"$AUTOSTART"
     echo "poller autostart on: bot shells run '${SELF} ensure' (${AUTOSTART})"
-    if ! command -v crontab >/dev/null 2>&1; then
+    if ! command -v "$CRONTAB" >/dev/null 2>&1; then
         echo "crontab not found; autostart uses the bot-shell profile hook only"
         return 0
     fi
@@ -149,15 +152,15 @@ install_autostart() {
         crontab_without_marker
         printf '@reboot %s\n' "$job"
         printf '*/5 * * * * %s\n' "$job"
-    } | crontab -
+    } | "$CRONTAB" -
     echo "installed crontab @reboot and 5-minute ensure lines"
 }
 
 remove_autostart() {
     rm -f "$AUTOSTART"
     echo "poller autostart off"
-    if command -v crontab >/dev/null 2>&1; then
-        crontab_without_marker | crontab -
+    if command -v "$CRONTAB" >/dev/null 2>&1; then
+        crontab_without_marker | "$CRONTAB" -
         echo "removed crontab lines tagged ${MARKER}"
     fi
 }

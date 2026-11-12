@@ -220,11 +220,14 @@ def _kill_poller(home: Path) -> None:
 
 
 def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
+    # Tests never reach a real crontab: ORCH_CRONTAB is always a fake or
+    # a path that does not exist.
     env = {
         "HOME": str(home),
         "PATH": "/usr/bin:/bin",
         "ORCH_POLL_START_WAIT": "10",
         "ORCH_POLL_STOP_WAIT": "10",
+        "ORCH_CRONTAB": str(home / "no-such-crontab"),
         **extra,
     }
     if cron is not None:
@@ -233,7 +236,7 @@ def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
         crontab = fake_bin / "crontab"
         crontab.write_text(FAKE_CRONTAB, encoding="utf-8")
         crontab.chmod(0o755)
-        env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+        env["ORCH_CRONTAB"] = str(crontab)
         env["FAKE_CRONTAB_FILE"] = str(cron)
     return subprocess.run(
         ["bash", str(SERVICE), *args],
@@ -358,3 +361,18 @@ def test_service_rejects_an_unknown_command(home: Path) -> None:
     result = _service(home, "bogus")
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+def test_service_keeps_the_callers_path_ahead_of_system_directories(
+    home: Path, tmp_path: Path
+) -> None:
+    # Regression: the script used to put /usr/bin before the caller's PATH,
+    # so a caller's own tools (e.g. a crontab or gh) were shadowed.
+    first = tmp_path / "first-bin"
+    first.mkdir()
+    fake_date = first / "date"
+    fake_date.write_text("#!/bin/sh\necho FAKE-DATE\n", encoding="utf-8")
+    fake_date.chmod(0o755)
+    result = _service(home, "stop", PATH=f"{first}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "FAKE-DATE poller-service: orch poll is not running\n"
