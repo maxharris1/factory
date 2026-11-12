@@ -219,31 +219,108 @@ def test_rsync_command_construction(tmp_path: Path) -> None:
     assert kwargs["stdin"] is subprocess.DEVNULL
 
 
-def test_scp_command_construction(tmp_path: Path) -> None:
+def test_scp_uploads_to_temp_names_then_renames_remotely(tmp_path: Path) -> None:
     runner = Recorder()
     paths = files(tmp_path)
     SshTransport("pc-wsl-bots", "/srv/factory-dashboard", method="scp", runner=runner).send(paths)
-    ((argv, _),) = runner.calls
-    assert argv == [
-        "scp",
-        "-q",
-        "-B",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "--",
-        str(paths[0]),
-        str(paths[1]),
-        "pc-wsl-bots:/srv/factory-dashboard/",
+    options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    assert [argv for argv, _ in runner.calls] == [
+        ["scp", "-q", "-B", *options, "--", str(paths[0]),
+         "pc-wsl-bots:/srv/factory-dashboard/.status.json.push-tmp"],
+        ["scp", "-q", "-B", *options, "--", str(paths[1]),
+         "pc-wsl-bots:/srv/factory-dashboard/.index.html.push-tmp"],
+        ["ssh", *options, "--", "pc-wsl-bots", "mv", "-f", "--",
+         "/srv/factory-dashboard/.status.json.push-tmp", "/srv/factory-dashboard/status.json"],
+        ["ssh", *options, "--", "pc-wsl-bots", "mv", "-f", "--",
+         "/srv/factory-dashboard/.index.html.push-tmp", "/srv/factory-dashboard/index.html"],
     ]
+    for _, kwargs in runner.calls:
+        assert kwargs["shell"] is False
+        assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+class FakeRemote:
+    """Runs scp and `ssh host mv` argv against a local directory standing in for
+    the served directory on the remote host. `fail_scp_of` names a local file
+    whose upload writes only a prefix of it, then exits 1 (a dropped link)."""
+
+    def __init__(self, root: Path, remote_dir: str, fail_scp_of: str | None = None):
+        self.root = root
+        self.remote_dir = remote_dir.rstrip("/")
+        self.fail_scp_of = fail_scp_of
+
+    def local(self, remote_path: str) -> Path:
+        assert remote_path.startswith(self.remote_dir + "/")
+        return self.root / remote_path[len(self.remote_dir) + 1 :]
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        if argv[0] == "scp":
+            separator = argv.index("--")
+            *sources, destination = argv[separator + 1 :]
+            remote = destination.split(":", 1)[1]
+            for source in sources:
+                target = self.local(remote)
+                if remote.endswith("/"):
+                    target = target / Path(source).name
+                data = Path(source).read_bytes()
+                if Path(source).name == self.fail_scp_of:
+                    target.write_bytes(data[: len(data) // 2])
+                    return subprocess.CompletedProcess(argv, 1, "", "lost connection")
+                target.write_bytes(data)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[0] == "ssh":
+            separator = argv.index("--")
+            command = argv[separator + 2 :]
+            assert command[:3] == ["mv", "-f", "--"], command
+            os.replace(self.local(command[3]), self.local(command[4]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected command {argv}")
+
+
+def _published(tmp_path: Path) -> Path:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "status.json").write_text('{"old": true}', encoding="utf-8")
+    (remote / "index.html").write_text("<!doctype html><p>old page</p>", encoding="utf-8")
+    return remote
+
+
+def _new_files(tmp_path: Path) -> list[Path]:
+    local = tmp_path / "local"
+    local.mkdir()
+    status = local / "status.json"
+    index = local / "index.html"
+    status.write_text('{"new": true, "pad": "' + "s" * 400 + '"}', encoding="utf-8")
+    index.write_text("<!doctype html><p>new page</p>" + "i" * 400, encoding="utf-8")
+    return [status, index]
+
+
+def test_interrupted_scp_leaves_the_published_files_whole(tmp_path: Path) -> None:
+    remote = _published(tmp_path)
+    runner = FakeRemote(remote, "/srv/d", fail_scp_of="index.html")
+    with pytest.raises(PushError, match="exit 1"):
+        SshTransport(TARGET, "/srv/d", method="scp", runner=runner).send(_new_files(tmp_path))
+    assert (remote / "status.json").read_text(encoding="utf-8") == '{"old": true}'
+    assert (remote / "index.html").read_text(encoding="utf-8") == (
+        "<!doctype html><p>old page</p>"
+    )
+
+
+def test_scp_publishes_complete_files(tmp_path: Path) -> None:
+    remote = _published(tmp_path)
+    paths = _new_files(tmp_path)
+    SshTransport(TARGET, "/srv/d", method="scp", runner=FakeRemote(remote, "/srv/d")).send(paths)
+    for path in paths:
+        assert (remote / path.name).read_bytes() == path.read_bytes()
+    assert sorted(path.name for path in remote.iterdir()) == ["index.html", "status.json"]
 
 
 def test_ssh_transport_never_names_keys_or_credentials(tmp_path: Path) -> None:
     for method in ("rsync", "scp"):
         runner = Recorder()
         SshTransport(TARGET, "/srv/d", method=method, runner=runner).send(files(tmp_path))
-        argv = " ".join(runner.calls[0][0])
+        argv = " ".join(" ".join(call) for call, _ in runner.calls)
         for needle in ("-i ", "IdentityFile", ".ssh", "id_", "Password", "StrictHostKeyChecking=no"):
             assert needle not in argv
 

@@ -160,6 +160,8 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
 
 
 DASHBOARD_UNIT = ROOT / "deploy" / "factory-dashboard-http.service"
+DASHBOARD_SERVER = ROOT / "deploy" / "factory-dashboard-http.py"
+SERVER_ON_NODE = "%h/.local/lib/factory-dashboard/factory-dashboard-http.py"
 
 
 def _unit_values(key: str) -> list[str]:
@@ -172,16 +174,66 @@ def _unit_values(key: str) -> list[str]:
 
 def test_dashboard_server_unit_binds_only_the_tailnet_address() -> None:
     text = DASHBOARD_UNIT.read_text(encoding="utf-8")
-    (exec_start,) = _unit_values("ExecStart")
-    assert "-m http.server" in exec_start
-    assert "--bind ${TAILNET_IP}" in exec_start
-    assert "--directory ${DASHBOARD_DIR}" in exec_start
+    # Preservation guard: no wildcard, loopback or other bind in the unit.
     for forbidden in ("0.0.0.0", "--bind ::", "[::]", "--bind 127.", "--bind localhost"):
         assert forbidden not in text
-    # A unit with no TAILNET_IP, or a non-tailnet one, refuses to start.
-    (guard,) = _unit_values("ExecStartPre")
-    assert "100.64.0.0/10" in guard
     assert _unit_values("EnvironmentFile") == ["%h/.config/factory-dashboard/http.env"]
+
+
+def test_dashboard_server_unit_runs_the_repo_handler_not_http_server() -> None:
+    (exec_start,) = _unit_values("ExecStart")
+    (guard,) = _unit_values("ExecStartPre")
+    assert exec_start == f"/usr/bin/python3 -I {SERVER_ON_NODE}"
+    assert guard == f"/usr/bin/python3 -I {SERVER_ON_NODE} --check"
+    text = DASHBOARD_UNIT.read_text(encoding="utf-8")
+    assert "http.server" not in "".join(_unit_values("ExecStart") + _unit_values("ExecStartPre"))
+    # No ${VAR} expansion on the command line: an unset DASHBOARD_DIR can
+    # never turn into an empty --directory argument.
+    assert "${" not in exec_start and "$" not in guard
+    assert "--directory" not in text
+    assert DASHBOARD_SERVER.is_file()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("NoNewPrivileges", "yes"),
+        ("ProtectSystem", "strict"),
+        ("ProtectHome", "read-only"),
+        ("PrivateTmp", "yes"),
+        ("PrivateDevices", "yes"),
+        ("PrivateUsers", "yes"),
+        ("ProtectKernelTunables", "yes"),
+        ("ProtectKernelModules", "yes"),
+        ("ProtectControlGroups", "yes"),
+        ("RestrictAddressFamilies", "AF_INET AF_UNIX"),
+        ("RestrictNamespaces", "yes"),
+        ("RestrictRealtime", "yes"),
+        ("RestrictSUIDSGID", "yes"),
+        ("LockPersonality", "yes"),
+        ("SystemCallArchitectures", "native"),
+        ("SystemCallFilter", "@system-service"),
+        ("UMask", "0077"),
+    ],
+)
+def test_dashboard_server_unit_is_sandboxed(key: str, value: str) -> None:
+    assert _unit_values(key) == [value]
+
+
+def test_dashboard_server_unit_hides_credential_directories() -> None:
+    (paths,) = _unit_values("InaccessiblePaths")
+    for name in (".ssh", ".gnupg", ".config/gh", ".aws", ".netrc"):
+        assert f"-%h/{name}" in paths.split()
+
+
+def _check(env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-I", str(DASHBOARD_SERVER), "--check"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 @pytest.mark.parametrize(
@@ -193,26 +245,84 @@ def test_dashboard_server_unit_binds_only_the_tailnet_address() -> None:
         ("127.0.0.1", False),
         ("192.168.1.20", False),
         ("8.8.8.8", False),
+        ("100.128.0.1", False),
+        ("100.101.102.103 ", False),
         ("::", False),
         ("", False),
     ],
 )
-def test_dashboard_server_guard_accepts_only_tailnet_ipv4(address: str, ok: bool) -> None:
-    (guard,) = _unit_values("ExecStartPre")
-    assert guard.startswith("/usr/bin/python3 -c ")
-    code = guard[len("/usr/bin/python3 -c ") :].strip("'")
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env={"TAILNET_IP": address},
-        capture_output=True,
-        text=True,
-        check=False,
+def test_dashboard_server_guard_accepts_only_tailnet_ipv4(
+    tmp_path: Path, address: str, ok: bool
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    env = {"TAILNET_IP": address, "DASHBOARD_DIR": str(site), "HOME": str(tmp_path / "home")}
+    result = _check(env)
+    assert (result.returncode == 0) is ok, result.stderr
+    if not ok:
+        assert "TAILNET_IP" in result.stderr
+
+
+def test_dashboard_server_guard_refuses_unset_tailnet_ip(tmp_path: Path) -> None:
+    result = _check({"DASHBOARD_DIR": str(tmp_path), "HOME": str(tmp_path / "home")})
+    assert result.returncode != 0
+    assert "TAILNET_IP" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unset", "empty", "relative", "root", "home", "home-slash", "home-link", "home-parent",
+     "missing", "file"],
+)
+def test_dashboard_server_guard_refuses_unsafe_directories(tmp_path: Path, case: str) -> None:
+    home = tmp_path / "home" / "max"
+    home.mkdir(parents=True)
+    (tmp_path / "plain-file").write_text("x", encoding="utf-8")
+    (tmp_path / "link-to-home").symlink_to(home)
+    values = {
+        "empty": "",
+        "relative": "site",
+        "root": "/",
+        "home": str(home),
+        "home-slash": str(home) + "/",
+        "home-link": str(tmp_path / "link-to-home"),
+        "home-parent": str(tmp_path / "home"),
+        "missing": str(tmp_path / "nope"),
+        "file": str(tmp_path / "plain-file"),
+    }
+    env = {"TAILNET_IP": "100.101.102.103", "HOME": str(home)}
+    if case != "unset":
+        env["DASHBOARD_DIR"] = values[case]
+    result = _check(env)
+    assert result.returncode != 0, case
+    assert "DASHBOARD_DIR" in result.stderr
+
+
+def test_dashboard_server_guard_accepts_a_site_directory_under_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    site = home / "factory-dashboard"
+    site.mkdir(parents=True)
+    result = _check(
+        {"TAILNET_IP": "100.101.102.103", "DASHBOARD_DIR": str(site), "HOME": str(home)}
     )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"ok: would serve {site} on 100.101.102.103:8787"
+
+
+@pytest.mark.parametrize("port,ok", [("8787", True), ("1024", True), ("80", False),
+                                     ("65536", False), ("x", False), ("", False)])
+def test_dashboard_server_guard_checks_the_port(tmp_path: Path, port: str, ok: bool) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    env = {"TAILNET_IP": "100.101.102.103", "DASHBOARD_DIR": str(site),
+           "HOME": str(tmp_path / "home"), "DASHBOARD_PORT": port}
+    result = _check(env)
     assert (result.returncode == 0) is ok, result.stderr
 
 
 def test_dashboard_server_unit_is_documented_not_installed() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "deploy/factory-dashboard-http.service" in readme
+    assert "deploy/factory-dashboard-http.py" in readme
     install = (ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
     assert "factory-dashboard" not in install

@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sqlite3
@@ -39,6 +40,51 @@ EMAIL = "max.secret" + "@" + "example.com"
 KEY_VALUE = "kv-" + "9f8e7d6c5b4a" * 2
 ENV_ONLY = "env" + "-only-" + "Tq3Wm8Zr" * 3
 DETAIL_ONLY = "gh" + "p_" + "D3t4i1O9n1y" * 4
+# Review r1 (F1.1) shapes: quoted JSON keys, percent- and JSON-escaped URLs
+# and credentials, and private-key blocks. Each value is short or digit-poor
+# enough that only the matching rule, not the opaque-string rule, removes it.
+JSON_PASSWORD = "hunter" + "2"
+JSON_TOKEN = "Tk7" + "-short-v4l"
+JSON_API_KEY = "ak" + "-tiny-9q"
+JSON_SECRET = "sec" + "-Esc4ped"
+JSON_AUTH = "xyzzy" + "-Auth-77"
+PCT_WEBHOOK_SECRET = "Pq7Lm2Xc" * 3
+PCT_WEBHOOK_URL = (
+    "https%3A%2F%2Fhooks.slack.com%2Fservices%2FT0%2FB0%2F" + PCT_WEBHOOK_SECRET
+)
+PCT2_WEBHOOK_SECRET = "Wd4Rf6Ty" * 3
+PCT2_WEBHOOK_URL = (
+    "https%253A%252F%252Fhooks.example.invalid%252Fhook%252F" + PCT2_WEBHOOK_SECRET
+)
+ESC_WEBHOOK_SECRET = "Gh5Jk8Ls" * 3
+ESC_WEBHOOK_URL = "https:\\/\\/hooks.example.invalid\\/services\\/" + ESC_WEBHOOK_SECRET
+PCT_PASSWORD = "pct" + "-Pw-41"
+PCT_USERINFO_PASSWORD = "pct" + "-Ui-73"
+KEY_BEGIN = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"
+KEY_END = "-----END " + "OPENSSH PRIVATE KEY-----"
+KEY_BODY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2"
+KEY_LAST = "d3h5" + "eg=="
+KEY_TAIL_ONLY = "c2Vj" + "cmV0"
+WORKFLOW_STATE_SECRET = "ws" + "-Leak-55"
+
+JSON_SAMPLES = {
+    "json password": (JSON_PASSWORD, '{"password":"' + JSON_PASSWORD + '"}'),
+    "json token": (JSON_TOKEN, '{ "token" : "' + JSON_TOKEN + '", "n": 1 }'),
+    "json api_key": (JSON_API_KEY, "{'api_key': '" + JSON_API_KEY + "'}"),
+    "json secret": (JSON_SECRET, '{\\"client_secret\\":\\"' + JSON_SECRET + '\\"}'),
+    "json authorization": (JSON_AUTH, '{"Authorization":"' + JSON_AUTH + '"}'),
+}
+ENCODED_SAMPLES = {
+    "percent webhook": (PCT_WEBHOOK_SECRET, "post to " + PCT_WEBHOOK_URL + " failed"),
+    "double percent webhook": (PCT2_WEBHOOK_SECRET, "url=" + PCT2_WEBHOOK_URL),
+    "json-escaped webhook": (ESC_WEBHOOK_SECRET, '{"url":"' + ESC_WEBHOOK_URL + '"}'),
+    "percent password": (PCT_PASSWORD, "body password%3D" + PCT_PASSWORD + "%26x%3D1"),
+    "percent userinfo": (
+        PCT_USERINFO_PASSWORD,
+        "proxy grok%3A" + PCT_USERINFO_PASSWORD + "%40proxy.example.invalid refused",
+    ),
+}
+KEY_BLOCK_LINES = [f"loaded {KEY_BEGIN}", KEY_BODY, KEY_LAST, f"{KEY_END} done"]
 
 FREE_TEXT_SECRETS = {
     "webhook url": WEBHOOK_URL,
@@ -52,11 +98,17 @@ FREE_TEXT_SECRETS = {
     "linear key": LINEAR_KEY,
     "email": EMAIL,
     "key=value secret": KEY_VALUE,
+    **{name: secret for name, (secret, _) in JSON_SAMPLES.items()},
+    **{name: secret for name, (secret, _) in ENCODED_SAMPLES.items()},
+    "private key body": KEY_BODY,
+    "private key last line": KEY_LAST,
 }
-# Never selected (env) or never on the allowlist (jobs.detail).
+# Never selected (env), never on the allowlist (jobs.detail), or an
+# enumerated field whose unknown values show as "other" (workflow_state).
 OFF_ALLOWLIST_SECRETS = {
     "env value": ENV_ONLY,
     "job detail": DETAIL_ONLY,
+    "workflow_state value": WORKFLOW_STATE_SECRET,
 }
 
 
@@ -270,6 +322,113 @@ def test_open_readonly_uses_sqlite_ro_uri(tmp_path: Path, monkeypatch) -> None:
     target, kwargs = seen[0]
     assert target.startswith("file:") and "mode=ro" in target
     assert kwargs.get("uri") is True
+
+
+def _idle_wal_db(tmp_path: Path) -> Path:
+    """A WAL database with every connection closed, so no -wal file is left."""
+    db, _ = seeded(tmp_path)
+    gc.collect()  # the queue and dispatcher hold connections in reference cycles
+    connection = sqlite3.connect(db)
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    connection.close()
+    assert not Path(f"{db}-wal").exists()
+    return db
+
+
+def test_open_readonly_never_uses_immutable(tmp_path: Path, monkeypatch) -> None:
+    db = _idle_wal_db(tmp_path)
+    seen: list[str] = []
+    real_connect = sqlite3.connect
+
+    def spy(target, *args, **kwargs):
+        seen.append(str(target))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(dashboard.sqlite3, "connect", spy)
+    open_readonly(db).close()
+    assert seen == [db.resolve().as_uri() + "?mode=ro"]
+
+
+def test_readonly_reader_sees_commits_from_a_live_wal_writer(tmp_path: Path) -> None:
+    db = _idle_wal_db(tmp_path)
+    reader = open_readonly(db)
+    writer = sqlite3.connect(db)
+    try:
+        add_poll_error(writer, "written after the reader opened")
+        writer.commit()
+        assert Path(f"{db}-wal").stat().st_size > 0
+        (count,) = reader.execute(
+            "SELECT count(*) FROM poll_errors WHERE error = 'written after the reader opened'"
+        ).fetchone()
+        assert count == 1
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_readonly_read_is_a_consistent_snapshot_under_a_checkpointing_writer(
+    tmp_path: Path,
+) -> None:
+    db = _idle_wal_db(tmp_path)
+    reader = open_readonly(db)
+    writer = sqlite3.connect(db)
+    try:
+        reader.execute("BEGIN")
+        (jobs,) = reader.execute("SELECT count(*) FROM jobs").fetchone()
+        for index in range(200):
+            add_poll_error(writer, f"concurrent {index} " + "x" * 200)
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        # The reader's transaction still sees the database as it was at BEGIN.
+        (errors,) = reader.execute("SELECT count(*) FROM poll_errors").fetchone()
+        assert (jobs, errors) == (8, 2)
+        reader.execute("COMMIT")
+        (errors,) = reader.execute("SELECT count(*) FROM poll_errors").fetchone()
+        assert errors == 202
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_symlinked_database_is_resolved_before_any_check(tmp_path: Path) -> None:
+    real_dir = tmp_path / "state"
+    real_dir.mkdir()
+    db = _idle_wal_db(real_dir)
+    link_dir = tmp_path / "links"
+    link_dir.mkdir()
+    link = link_dir / "orch.db"
+    link.symlink_to(db)
+    writer = sqlite3.connect(db)
+    try:
+        add_poll_error(writer, "live wal row")
+        writer.commit()
+        # The -wal sits beside the target, not beside the link.
+        assert Path(f"{db}-wal").exists() and not Path(f"{link}-wal").exists()
+        reader = open_readonly(link)
+        try:
+            (count,) = reader.execute(
+                "SELECT count(*) FROM poll_errors WHERE error = 'live wal row'"
+            ).fetchone()
+        finally:
+            reader.close()
+        assert count == 1
+    finally:
+        writer.close()
+    assert not any(path.name.startswith("orch.db-") for path in link_dir.iterdir())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_wal_database_in_a_read_only_directory_fails_clearly(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    db = _idle_wal_db(state)
+    state.chmod(0o555)
+    try:
+        with pytest.raises(DashboardError, match="-shm") as caught:
+            open_readonly(db)
+        assert "immutable" in str(caught.value)
+    finally:
+        state.chmod(0o755)
 
 
 def test_missing_database_is_refused_and_not_created(tmp_path: Path) -> None:
@@ -571,6 +730,8 @@ def test_redact_removes_each_secret_shape(name: str, secret: str) -> None:
         "maxharris1/tracy-harris-coaching#5 waiting-max",
         "Linear poll budget deferred discovery",
         "basic checks passed; token budget ok",
+        "poll 100% done in 3s",
+        '{"repo": "maxharris1/cleffy", "state": "review"}',
     ],
 )
 def test_redact_keeps_ordinary_text(text: str) -> None:
@@ -580,6 +741,69 @@ def test_redact_keeps_ordinary_text(text: str) -> None:
 def test_redact_names_but_never_values_of_env_style_assignments() -> None:
     assert redact("LINEAR_API_KEY=abc123def456") == "LINEAR_API_KEY=[redacted]"
     assert redact("password: hunter2hunter2") == "password: [redacted]"
+
+
+@pytest.mark.parametrize("name", sorted(JSON_SAMPLES))
+def test_redact_removes_quoted_json_secret_values(name: str) -> None:
+    secret, sample = JSON_SAMPLES[name]
+    assert secret not in redact(sample), name
+
+
+def test_redact_keeps_json_key_names() -> None:
+    assert redact('{"password":"' + JSON_PASSWORD + '"}') == '{"password":[redacted]}'
+
+
+@pytest.mark.parametrize("name", sorted(ENCODED_SAMPLES))
+def test_redact_removes_encoded_urls_and_credentials(name: str) -> None:
+    secret, sample = ENCODED_SAMPLES[name]
+    assert secret not in redact(sample), name
+
+
+def test_redact_removes_a_private_key_block_in_one_string() -> None:
+    text = redact("\n".join(KEY_BLOCK_LINES))
+    for part in (KEY_BODY, KEY_LAST):
+        assert part not in text
+    assert text.startswith("loaded [redacted-key-block]")
+    assert text.endswith(" done")
+
+
+def test_redact_removes_a_json_escaped_private_key_block() -> None:
+    text = redact('{"key":"' + "\\n".join(KEY_BLOCK_LINES[0:1] + [KEY_LAST]) + '"}')
+    assert KEY_LAST not in text
+
+
+def test_key_block_spanning_log_lines_is_removed_line_by_line() -> None:
+    lines = ["before", *KEY_BLOCK_LINES, "after"]
+    assert dashboard.redact_key_blocks(lines) == [
+        "before",
+        "loaded [redacted-key-block]",
+        "[redacted-key-block]",
+        "[redacted-key-block]",
+        "[redacted-key-block] done",
+        "after",
+    ]
+
+
+def test_key_block_whose_begin_scrolled_out_of_the_tail_is_removed() -> None:
+    lines = [KEY_LAST, KEY_TAIL_ONLY, KEY_END, "after"]
+    assert dashboard.redact_key_blocks(lines) == [
+        "[redacted-key-block]",
+        "[redacted-key-block]",
+        "[redacted-key-block]",
+        "after",
+    ]
+
+
+def test_unterminated_key_block_hides_the_rest_of_the_tail() -> None:
+    lines = ["before", KEY_BEGIN, KEY_BODY, KEY_LAST]
+    assert dashboard.redact_key_blocks(lines) == ["before"] + ["[redacted-key-block]"] * 3
+
+
+def test_snapshot_log_tail_redacts_a_key_block_across_lines(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    log.write_text("\n".join([KEY_LAST, KEY_TAIL_ONLY, KEY_END, "ok"]) + "\n", encoding="utf-8")
+    tail = collect_snapshot(db, log, now=NOW)["poller"]["log"]["tail"]
+    assert tail == ["[redacted-key-block]"] * 3 + ["ok"]
 
 
 # --- the leak test ----------------------------------------------------------
@@ -616,7 +840,31 @@ def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
             detail=f"CI log with {DETAIL_ONLY} and {ENV_ONLY}",
             ticket_id="99",
         )
+        # F1.1: quoted JSON, encoded URLs and credentials, key blocks.
+        connection.execute(
+            "CREATE TABLE poll_deferrals (id INTEGER PRIMARY KEY, detail TEXT, recorded_at REAL)"
+        )
+        samples = [sample for _, sample in [*JSON_SAMPLES.values(), *ENCODED_SAMPLES.values()]]
+        for index, sample in enumerate(samples):
+            add_poll_error(connection, f"linear:HTTPError body {sample}", recorded_at=NOW - index)
+            connection.execute(
+                "INSERT INTO poll_deferrals (detail, recorded_at) VALUES (?, ?)",
+                (f"deferred: {sample}", NOW - index),
+            )
+        add_poll_error(connection, "ssh: " + "\n".join(KEY_BLOCK_LINES))
+        add_ticket(
+            connection,
+            "maxharris1/cleffy",
+            "98",
+            state='{"password":"' + WORKFLOW_STATE_SECRET + '"}',
+            stuck=1,
+            stuck_reason=f"stuck: {JSON_SAMPLES['json token'][1]} {PCT_WEBHOOK_URL}",
+        )
     with log.open("a", encoding="utf-8") as handle:
+        for line in KEY_BLOCK_LINES:
+            handle.write(line + "\n")
+        for _, sample in [*JSON_SAMPLES.values(), *ENCODED_SAMPLES.values()]:
+            handle.write(f"orch poll: {sample}\n")
         handle.write(f"orch poll: delivery to {WEBHOOK_URL} failed\n")
         handle.write(f"curl -H 'Authorization: Bearer {BEARER_TOKEN}'\n")
         handle.write(f"gh auth: {GH_SERVER} {GH_PAT}\n")
@@ -654,6 +902,7 @@ def test_leak_check_goes_red_when_redaction_is_disabled(
 ) -> None:
     db, log = _plant_secrets(tmp_path, monkeypatch)
     monkeypatch.setattr(dashboard, "redact", lambda text: text)
+    monkeypatch.setattr(dashboard, "redact_key_blocks", lambda lines: list(lines))
     text = _written(tmp_path, db, log)
     # With the redactor off, every free-text secret leaks; the allowlist
     # still keeps env values and jobs.detail out.
@@ -678,6 +927,19 @@ def test_unknown_enum_values_are_not_echoed(tmp_path: Path) -> None:
     text = json.dumps(snapshot)
     assert "exfil-action" not in text and "mallory" not in text
     assert any(row["action"] == "other" for row in snapshot["queued"])
+
+
+def test_unknown_workflow_state_shows_as_other(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "77", state="exfil-state")
+        add_ticket(connection, "maxharris1/cleffy", "78", state="plan-check")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    states = {row["ticket_id"]: row["state"] for row in snapshot["tickets"]}
+    assert states["77"] == "other"
+    assert states["78"] == "plan-check"
+    assert states["5"] == "waiting-max"
+    assert "exfil-state" not in json.dumps(snapshot)
 
 
 # --- atomic write -----------------------------------------------------------
@@ -721,6 +983,40 @@ def test_failed_write_keeps_the_previous_file(tmp_path: Path, monkeypatch) -> No
         write_snapshot(out, snapshot)
     assert (out / "status.json").read_text(encoding="utf-8") == "previous"
     assert sorted(path.name for path in out.iterdir()) == ["status.json"]
+
+
+def _fail_replacing(monkeypatch, name: str) -> None:
+    real_replace = os.replace
+
+    def replace(source, target):
+        if Path(target).name == name:
+            raise OSError("disk full")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(dashboard.os, "replace", replace)
+
+
+def test_failed_second_write_keeps_the_previous_pair(tmp_path: Path, monkeypatch) -> None:
+    snapshot = snapshot_for(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "status.json").write_text("old status", encoding="utf-8")
+    (out / "index.html").write_text("old index", encoding="utf-8")
+    _fail_replacing(monkeypatch, "index.html")
+    with pytest.raises(OSError, match="disk full"):
+        write_snapshot(out, snapshot)
+    assert (out / "status.json").read_text(encoding="utf-8") == "old status"
+    assert (out / "index.html").read_text(encoding="utf-8") == "old index"
+    assert sorted(path.name for path in out.iterdir()) == ["index.html", "status.json"]
+
+
+def test_failed_first_snapshot_write_leaves_no_half_pair(tmp_path: Path, monkeypatch) -> None:
+    snapshot = snapshot_for(tmp_path)
+    out = tmp_path / "out"
+    _fail_replacing(monkeypatch, "index.html")
+    with pytest.raises(OSError, match="disk full"):
+        write_snapshot(out, snapshot)
+    assert sorted(path.name for path in out.iterdir()) == []
 
 
 def test_html_is_self_contained(tmp_path: Path) -> None:
