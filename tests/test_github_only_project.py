@@ -15,15 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatcher import CIResult, TrackedTicket
+from lib.dispatcher import CIResult, Dispatcher, TicketRef, TrackedTicket
 from lib.factory_md import load_factory_md
 from lib.github_actions import GitHubReviewActions
-from lib.orch_yml import Project, load_orch_yml
+from lib.orch_yml import OrchConfig, Project, load_orch_yml
 from lib.poll_source import LivePollSource
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
+    BRIEF,
     READY,
     VERDICT,
+    FakeGrokDelivery,
     FakeReviewActions,
     comment,
     factory,
@@ -173,6 +175,209 @@ def outcomes(queue: SQLiteJobQueue) -> dict[str, str]:
     return {str(row["comment_id"]): str(row["outcome"]) for row in rows}
 
 
+def tracked_rows(queue: SQLiteJobQueue) -> list[tuple[str, str, str]]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT repo, ticket_id, tracker FROM tracked_tickets ORDER BY ticket_id"
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+class OnePrSource:
+    """A PollSource serving one labelled open PR, as github_candidates would."""
+
+    def __init__(self) -> None:
+        self.ticket: TrackedTicket | None = None
+
+    def poll(self, dispatcher: Dispatcher, ticket: TrackedTicket) -> None:
+        self.ticket = ticket
+        dispatcher.poll_once(self)
+
+    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+        del label_prefix
+        return () if self.ticket is None else (self.ticket,)
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        del query, exclude, reserve
+        return ()
+
+    def tracked_tickets(self, refs: tuple[TicketRef, ...]) -> tuple[TrackedTicket, ...]:
+        if self.ticket is None:
+            return ()
+        wanted = {(ref.repo.lower(), ref.ticket_id) for ref in refs}
+        key = (self.ticket.repo.lower(), self.ticket.ticket_id)
+        return (self.ticket,) if key in wanted else ()
+
+
+# Discovery (Codex r1 F1.1): the documented entry is an orch:state/ label
+# plus the builder's trusted ready naming the PR head (factory.md Context,
+# README "Poll", SPEC section 7). These run the live poll source against a
+# fake gh, through poll_once, so nothing is tracked by hand.
+
+PR_HEAD = "f" * 40
+DOCUMENTED_READY = (
+    "<!-- orch:v1 kind=ready from=claude-bot role=builder head={head} -->\n"
+    "Ready for review.\n"
+)
+
+
+def factory_pr_poll(
+    tmp_path: Path,
+    body: str,
+    *,
+    author: str = "maxharris1",
+    enabled: bool = True,
+    labels: tuple[str, ...] = ("orch:state/intake",),
+) -> tuple[SQLiteJobQueue, FakeReviewActions]:
+    gh = FakeGh((ROOT / "factory.md").read_text(encoding="utf-8"))
+    gh.head = PR_HEAD
+    gh.issues = [
+        {
+            "number": 51,
+            "pull_request": {},
+            "labels": [{"name": name} for name in labels],
+        }
+    ]
+    gh.comments = [
+        {
+            "id": 9001,
+            "user": {"login": author},
+            "body": body,
+            "created_at": "2026-11-12T10:00:00Z",
+            "html_url": "https://github.test/maxharris1/factory/pull/51#c9001",
+        }
+    ]
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(
+                Project(
+                    FACTORY_REPO,
+                    factory_ref="main",
+                    ready_starts_review=enabled,
+                ),
+            ),
+        ),
+        gh_runner=gh,
+        sleep=lambda seconds: None,
+    )
+    path = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    actions = FakeReviewActions()
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            "github": {
+                # The shipped orch.yml: one login for all of Max's bots.
+                "maxharris1": {"grok-bot", "claude-bot", "codex-bot", "cursor-bot"},
+            },
+            "linear": {},
+        },
+        review_actions=actions,
+        grok_delivery=FakeGrokDelivery(),
+    )
+    dispatcher.poll_once(source)
+    return queue, actions
+
+
+def test_a_labelled_factory_pr_with_only_a_builder_ready_is_tracked_and_reviewed(
+    tmp_path: Path,
+) -> None:
+    queue, actions = factory_pr_poll(tmp_path, DOCUMENTED_READY.format(head=PR_HEAD))
+
+    assert tracked_rows(queue) == [(FACTORY_REPO, "51", "github")]
+    assert outcomes(queue) == {"9001": "queued-review"}
+    assert actions.states == ["review"]
+    review = queue.claim("codex")
+    assert review is not None
+    assert (review.request.repo, review.request.ticket_id) == (FACTORY_REPO, "51")
+    assert (review.request.action, review.request.head) == ("review", PR_HEAD)
+    assert json.loads(str(review.request.detail))["round"] == "1/3"
+    assert queue.claim("claude") is None
+
+
+def test_a_short_ready_head_that_prefixes_the_pr_head_is_tracked(
+    tmp_path: Path,
+) -> None:
+    queue, _actions = factory_pr_poll(tmp_path, DOCUMENTED_READY.format(head=PR_HEAD[:12]))
+
+    assert tracked_rows(queue) == [(FACTORY_REPO, "51", "github")]
+    review = queue.claim("codex")
+    assert review is not None and review.request.head == PR_HEAD
+
+
+@pytest.mark.parametrize(
+    ("body", "author", "enabled"),
+    [
+        (DOCUMENTED_READY.format(head=PR_HEAD), "maxharris1", False),
+        (DOCUMENTED_READY.format(head=PR_HEAD), "mallory", True),
+        (
+            DOCUMENTED_READY.format(head=PR_HEAD).replace("claude-bot", "codex-bot"),
+            "maxharris1",
+            True,
+        ),
+        (
+            DOCUMENTED_READY.format(head=PR_HEAD).replace("role=builder", "role=reviewer"),
+            "maxharris1",
+            True,
+        ),
+        (DOCUMENTED_READY.format(head="e" * 40), "maxharris1", True),
+        (DOCUMENTED_READY.format(head=PR_HEAD[:6]), "maxharris1", True),
+    ],
+    ids=[
+        "flag-off",
+        "untrusted-author",
+        "not-the-factory-md-builder",
+        "wrong-role",
+        "other-head",
+        "head-too-short",
+    ],
+)
+def test_a_ready_that_fails_any_intake_rule_does_not_start_tracking(
+    tmp_path: Path,
+    body: str,
+    author: str,
+    enabled: bool,
+) -> None:
+    queue, actions = factory_pr_poll(tmp_path, body, author=author, enabled=enabled)
+
+    assert tracked_rows(queue) == []
+    assert outcomes(queue) == {}
+    assert actions.states == []
+    assert queue.claim("codex") is None
+
+
+def test_without_an_orch_state_label_a_ready_pr_is_not_discovered(
+    tmp_path: Path,
+) -> None:
+    """Preservation guard: discovery stays label-based."""
+    queue, _actions = factory_pr_poll(
+        tmp_path,
+        DOCUMENTED_READY.format(head=PR_HEAD),
+        labels=("bug",),
+    )
+
+    assert tracked_rows(queue) == []
+    assert queue.claim("codex") is None
+
+
+def test_with_the_flag_off_a_trusted_grok_brief_still_starts_tracking(
+    tmp_path: Path,
+) -> None:
+    """Preservation guard: the brief/go entry is unchanged."""
+    queue, _actions = factory_pr_poll(tmp_path, BRIEF, enabled=False)
+
+    assert tracked_rows(queue) == [(FACTORY_REPO, "51", "github")]
+    assert queue.claim("codex") is None
+
+
 def test_a_trusted_builder_ready_starts_review_when_the_project_opts_in(
     tmp_path: Path,
 ) -> None:
@@ -232,11 +437,14 @@ def test_the_flag_still_needs_the_factory_md_builder_and_a_trusted_login(
 def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
     tmp_path: Path,
 ) -> None:
+    """Driven through poll_once, so discovery tracks the PR from the ready."""
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
+    source = OnePrSource()
     ready_1 = comment("ready-1", READY.format(head=HEAD_1), author="claude-login", created_at=1)
 
-    dispatcher.process(ready_ticket(ready_1))
+    source.poll(dispatcher, ready_ticket(ready_1))
+    assert tracked_rows(queue) == [("owner/repo", "42", "github")]
     review_1 = queue.claim("codex")
     assert review_1 is not None and review_1.request.action == "review"
     queue.finish(review_1.id, owner="codex", handoff_comment_id="revise-1")
@@ -247,14 +455,14 @@ def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
         author="codex-login",
         created_at=2,
     )
-    dispatcher.process(ready_ticket(ready_1, revise))
+    source.poll(dispatcher, ready_ticket(ready_1, revise))
     fix = queue.claim("claude")
     assert fix is not None
     assert (fix.request.action, fix.request.head) == ("fix", HEAD_1)
     queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
 
     ready_2 = comment("ready-2", READY.format(head=HEAD_2), author="claude-login", created_at=3)
-    dispatcher.process(ready_ticket(ready_1, revise, ready_2, head=HEAD_2))
+    source.poll(dispatcher, ready_ticket(ready_1, revise, ready_2, head=HEAD_2))
     review_2 = queue.claim("codex")
     assert review_2 is not None
     assert (review_2.request.action, review_2.request.head) == ("review", HEAD_2)
@@ -267,7 +475,7 @@ def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
         author="codex-login",
         created_at=4,
     )
-    dispatcher.process(ready_ticket(ready_1, revise, ready_2, approve, head=HEAD_2))
+    source.poll(dispatcher, ready_ticket(ready_1, revise, ready_2, approve, head=HEAD_2))
 
     assert outcomes(queue)["approve-2"] == "handed-off"
     assert actions.handoffs == [HEAD_2]

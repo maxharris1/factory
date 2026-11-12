@@ -1575,4 +1575,6 @@ def test_e2e_unreadable_tip_after_fast_forward_records_no_gh_output(
     )
     assert gh.count(FF) == 1
     grok = FakeBot(queue, "grok").drain()
+    # Codex r1 F1.2: all() over an empty drain is vacuous, so pin the wake.
+    assert [job.request.action for job in grok] == ["ship-failed"]
     assert all(marker not in str(job.request.detail) for job in grok)
