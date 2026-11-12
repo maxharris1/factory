@@ -403,6 +403,7 @@ from pathlib import Path
 table = Path(os.environ["HOME"]) / "crontab.txt"
 if sys.argv[1:] == ["-l"]:
     if not table.exists():
+        print("no crontab for test", file=sys.stderr)
         raise SystemExit(1)
     sys.stdout.write(table.read_text())
 elif sys.argv[1:] == ["-"]:

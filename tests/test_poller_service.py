@@ -178,6 +178,9 @@ from pathlib import Path
 
 table = Path(os.environ["FAKE_CRONTAB_FILE"])
 if sys.argv[1:] == ["-l"]:
+    if os.environ.get("FAKE_CRONTAB_LIST_ERROR"):
+        print(os.environ["FAKE_CRONTAB_LIST_ERROR"], file=sys.stderr)
+        raise SystemExit(1)
     if not table.exists():
         print("no crontab for test", file=sys.stderr)
         raise SystemExit(1)
@@ -376,3 +379,120 @@ def test_service_keeps_the_callers_path_ahead_of_system_directories(
     result = _service(home, "stop", PATH=f"{first}:/usr/bin:/bin")
     assert result.returncode == 0, result.stderr
     assert result.stdout == "FAKE-DATE poller-service: orch poll is not running\n"
+
+
+@pytest.mark.parametrize("command", ["install-autostart", "remove-autostart"])
+def test_a_failing_crontab_read_leaves_the_crontab_and_autostart_alone(
+    home: Path, tmp_path: Path, command: str
+) -> None:
+    # Regression (#52 F1.1): `crontab -l 2>/dev/null || true` turned any read
+    # failure into an empty table, so install replaced the whole crontab with
+    # the factory lines and remove installed an empty one. Only "no crontab
+    # for <user>" means empty.
+    table = tmp_path / "crontab.txt"
+    service_log = home / ".local/state/factory/poller-service.log"
+    job = f"{SERVICE} ensure >>{service_log} 2>&1 # factory-orch-poll"
+    original = (
+        'MAILTO=""\n0 3 * * * /usr/bin/true # unrelated\n'
+        f"@reboot {job}\n*/5 * * * * {job}\n"
+    )
+    table.write_text(original)
+    flag = home / ".config/factory/poller-autostart"
+    if command == "remove-autostart":
+        flag.write_text("")
+    result = _service(
+        home,
+        command,
+        cron=table,
+        FAKE_CRONTAB_LIST_ERROR="crontab: cannot open /var/spool/cron/test: Permission denied",
+    )
+    assert result.returncode != 0
+    assert "Permission denied" in result.stderr
+    assert table.read_text() == original
+    assert flag.exists() == (command == "remove-autostart")
+
+
+def test_stop_holds_against_an_ensure_already_past_its_checks(
+    home: Path, tmp_path: Path
+) -> None:
+    # Regression (#52 F1.4): ensure went through start, which deleted the
+    # stop marker, so a stop landing while ensure was between its checks and
+    # the launch was undone. stop and ensure now serialize on a service lock,
+    # and ensure never clears the marker.
+    import fcntl
+    import shutil
+
+    if shutil.which("flock") is None:
+        pytest.skip("flock(1) is not installed")
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True)
+    lock = (state / "poller-service.lock").open("a+")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)  # a `stop` holding the lock
+    env = {
+        "HOME": str(home),
+        "PATH": "/usr/bin:/bin",
+        "ORCH_POLL_START_WAIT": "10",
+        "ORCH_CRONTAB": str(home / "no-such-crontab"),
+    }
+    ensure = subprocess.Popen(
+        ["bash", str(SERVICE), "ensure"], env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        time.sleep(1.0)
+        assert ensure.poll() is None, "ensure did not wait for the service lock"
+        (state / "poller.stopped").write_text("")  # the stop completes
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+        out, err = ensure.communicate(timeout=30)
+    finally:
+        if ensure.poll() is None:
+            ensure.kill()
+            ensure.communicate()
+    assert ensure.returncode == 0, err
+    assert (state / "poller.stopped").exists()
+    assert not _pidfile(home).exists()
+    log = state / "poller.log"
+    assert not log.exists() or "polling as" not in log.read_text()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["orch poll"], ["/x/bin/orch", "poll"]],
+    ids=["one-argument", "later-arguments"],
+)
+@pytest.mark.parametrize("proc_dir", ["real", "absent"])
+def test_a_live_process_merely_mentioning_orch_poll_is_not_the_poller(
+    home: Path, tmp_path: Path, extra: list[str], proc_dir: str
+) -> None:
+    # Regression (#52 F1.5): any cmdline containing "orch poll" counted, and
+    # with no /proc any live pid counted, so stop could SIGTERM a stranger.
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", *extra]
+    )
+    try:
+        pidfile = _pidfile(home)
+        pidfile.parent.mkdir(parents=True)
+        pidfile.write_text(f"{stranger.pid}\n")
+        extra_env = {}
+        if proc_dir == "absent":
+            extra_env["ORCH_PROC_DIR"] = str(tmp_path / "no-proc")
+        status = _service(home, "status", **extra_env)
+        assert status.returncode == 3, status.stdout
+        stopped = _service(home, "stop", **extra_env)
+        assert stopped.returncode == 0, stopped.stderr
+        assert "is not running" in stopped.stdout
+        assert stranger.poll() is None
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_without_proc_the_poller_is_recognized_by_ps(home: Path, tmp_path: Path) -> None:
+    no_proc = {"ORCH_PROC_DIR": str(tmp_path / "no-proc")}
+    started = _service(home, "start", **no_proc)
+    assert started.returncode == 0, started.stderr
+    pid = int(_pidfile(home).read_text())
+    assert _service(home, "status", **no_proc).stdout == f"running (pid {pid})\n"
+    assert _service(home, "stop", **no_proc).returncode == 0
+    assert not _alive(pid)
