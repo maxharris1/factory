@@ -281,3 +281,98 @@ def test_doctor_runtime_rejects_database_without_runtime_tables(
 
     assert cli.main(["doctor-runtime"]) == 1
     assert "database is missing runtime tables" in capsys.readouterr().err
+
+
+def test_check_config_accepts_the_minimal_machines_example() -> None:
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            str(ROOT / "config" / "orch.example.yml"),
+            "--machines",
+            str(ROOT / "config" / "machines.example.yml"),
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+    assert result.stderr == ""
+
+
+def test_check_config_refuses_shipped_machines_placeholders_without_flag() -> None:
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            str(ROOT / "config" / "orch.example.yml"),
+            "--machines",
+            "machines.yml",
+        ]
+    )
+
+    assert result.returncode == 1
+    assert (
+        "machines.yml: devices[2].workdir_root is an install placeholder"
+    ) in result.stderr
+    assert "devices[1].workdir_root" not in result.stderr
+    assert "machines.yml: warning: device 'pc' is disabled" in result.stderr
+
+
+def test_check_config_reports_machines_placeholders_and_disabled_devices() -> None:
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            "orch.yml",
+            "--machines",
+            "machines.yml",
+            "--allow-placeholders",
+        ]
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+    assert "accepted placeholder devices[1]" not in result.stderr
+    for line in (
+        "machines.yml: warning: accepted placeholder devices[2].workdir_root; "
+        "device 'mac' will not be scheduled",
+        "machines.yml: warning: device 'pc' is disabled (enabled: false); "
+        "it will not be scheduled",
+        "machines.yml: warning: device 'mac' is disabled (enabled: false); "
+        "it will not be scheduled",
+    ):
+        assert line in result.stderr
+
+
+def test_bare_check_config_covers_the_shipped_machines_yml() -> None:
+    result = run(["check-config", "--allow-placeholders"])
+
+    assert result.returncode == 0, result.stderr
+    assert "machines.yml: warning: device 'mac' is disabled" in result.stderr
+
+
+def test_check_config_refuses_a_machines_schema_error(tmp_path: Path) -> None:
+    path = tmp_path / "machines.yml"
+    path.write_text(
+        "devices:\n"
+        "  - name: pc\n"
+        "    tailscale_name: pc.example.ts.net\n"
+        "    slot_max: 2\n"
+        "    harnesses: {claude: codex-bot}\n"
+        "    workdir_root: /mnt/c/work\n",
+        encoding="utf-8",
+    )
+
+    result = run(
+        [
+            "check-config",
+            "--orch",
+            str(ROOT / "config" / "orch.example.yml"),
+            "--machines",
+            str(path),
+            "--allow-placeholders",
+        ]
+    )
+
+    assert result.returncode == 1
+    assert "devices[0].workdir_root must not be under /mnt/" in result.stderr
+    assert "devices[0].harnesses.claude must be 'claude-bot'" in result.stderr

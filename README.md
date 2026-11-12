@@ -6,6 +6,7 @@ The specification is [docs/SPEC.md](docs/SPEC.md). This repo has the F1-01,
 F1-03, F1-04, F1-05 and F1-09 contracts, the F1-06 blocking wait, the F1-02 pstack pin, the F1-07
 `orchestrate-project` skill, the F1-08 usage reserve, the F1-13 orchestrator
 model, and the F1-14 weekly eval report. Other Phase 1 items are not built.
+Phase 2 has the F2-01 device pool; remote start (F2-02) is not built.
 
 ## Contracts
 
@@ -88,6 +89,60 @@ one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
 dispatcher and queue use one SQLite database so terminal state and its wake
 commit atomically. The dispatcher queues jobs; it never executes a harness
 binary.
+
+## Device pool
+
+[`machines.yml`](machines.yml) is the F2-01 device inventory
+([docs/SPEC.md](docs/SPEC.md) section 13);
+[`config/machines.example.yml`](config/machines.example.yml) is the minimal
+file. Each device has a `name`, a `tailscale_name`, `slot_max`, `harnesses`,
+`workdir_root` and `enabled` (default `true`). `harnesses` maps each eligible
+harness to the bot OS user whose login Max provisioned there, and that user
+must be the harness's own bot (`claude: claude-bot`, `codex: codex-bot`,
+`cursor: cursor-bot`). The one `local: true` device is the box that runs
+`orch`; it omits `tailscale_name` and `workdir_root`. Every other device names
+a `workdir_root`, an absolute normalized path that may not be under `/mnt/`,
+so jobs on a WSL node stay off the Windows drives. A whole path component may
+be `{bot}`, which resolves to the harness's bot user
+(`Device.workdir_for(harness)`). A Tailscale name is a device name, never an
+IP address. Two devices may not share a `tailscale_name` (compared
+case-insensitively): slots are counted per device name, so a second entry
+would give one host a second `slot_max`. Release a device's held slots
+before renaming it. Unknown fields are refused, and `workdir_root` may not
+contain NUL or another control character.
+
+The shipped file lists the box (all three harnesses, 3 slots, because the box
+runs at most 3 heavy local agent sessions at once; slots are generic, so they
+are not one per bot and 3 Claude jobs can take all 3), the PC's WSL Ubuntu node
+and the Mac. The PC and Mac ship
+`enabled: false` and stay disabled until F2-02 remote start lands; the Mac also
+has no bot users and no SSH yet. The PC's `workdir_root` is
+`/home/{bot}/factory-work` (for example `/home/codex-bot/factory-work`), off
+`/mnt/c`. F2-02 will reach the PC through the box's SSH aliases
+`pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The Mac's
+`workdir_root` is still a `REPLACE_WITH_` placeholder. Nothing in this repo
+checks or assumes that a device is reachable.
+
+[`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
+moves the oldest queued job for that harness to running and holds a slot on
+the first device, in `machines.yml` order, that is enabled, has no
+placeholder, lists the harness, and has a free slot. Slots are generic: any
+free slot on an eligible device takes any harness. The job update and the
+`device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
+dispatcher database, so two claims cannot take the same last slot. With no
+eligible free slot the job stays queued. Grok jobs never hold a slot.
+A queued job never holds a slot: requeueing a claimed job
+(`SQLiteJobQueue.release`, running back to queued) frees its slot in the same
+transaction, and `claim` drops any slot row left on a queued job before
+counting.
+
+Finishing, failing or timing out a job does not free its slot; apart from a
+requeue, only `DevicePool.release(job_id, owner=harness)` does, once the
+worker is confirmed gone (F2-02). A device that loses power mid-job keeps its slot held, its job
+is never `done`, T6 times it out from the last heartbeat and retries once, and
+the second failure marks the ticket `stuck`. Phase 1 `orch wait` still claims
+through the queue directly and holds no device slot; F2-02 routes claims
+through the pool. The pool starts nothing and opens no SSH connection.
 
 ## Poll
 
@@ -217,14 +272,24 @@ bin/orch status --db "$ORCH_DB"
 ```
 
 `orch status` prints a read-only summary of queued jobs, occupied box slots,
-and paused tracker items. It opens the dispatcher database read-only and does
-not claim, release, lease, wake, or update anything. Device rows stay empty
-until F2-01 adds the device pool.
+devices, and paused tracker items. It opens the dispatcher database read-only and does
+not claim, release, lease, wake, or update anything. `--machines` defaults to
+the checkout's `machines.yml`, read with placeholders accepted; an invalid
+file exits 1. Each device row shows the device, its eligible harnesses (`?`
+for a placeholder), device-pool slots held over `slot_max`, and `disabled` or
+`placeholder` when it will not be scheduled, for example
+`pc [claude,codex,cursor] 0/3 slots disabled` and
+`mac [none] 0/2 slots disabled placeholder`. A held slot on a
+device no longer listed is shown as `not-in-machines.yml`. A running job that
+holds a device-pool slot is listed under its device row only, so each job is
+counted once. Phase 1 claims are the `Slots — box` lines and hold no
+device-pool slot.
 
 ## Check config
 
 ```sh
 bin/orch check-config
+bin/orch check-config --orch orch.yml --machines machines.yml --allow-placeholders
 ```
 
 The shipped `orch.yml` intentionally contains install placeholders, so this
@@ -234,6 +299,11 @@ file with `bin/orch check-config --allow-placeholders`; the flag permits
 and still runs every other validation.
 `init-db` and runtime commands are always strict. An unknown model name is a
 warning on stderr.
+With no `--orch`, `check-config` also checks the shipped `machines.yml`; with
+`--orch`, it checks a machines file only when `--machines` names one. A
+`REPLACE_WITH_` device value follows the same `--allow-placeholders` rule and
+the warning says that device will not be scheduled. A disabled device is
+always named on stderr and does not fail the check.
 
 ## orchestrate-project
 

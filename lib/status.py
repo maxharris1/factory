@@ -7,11 +7,16 @@ import os
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, TextIO
+
+from lib.device_pool import SLOTS_TABLE
+from lib.machines_yml import MachinesConfig, load_machines_yml
+
+ROOT = Path(__file__).resolve().parent.parent
 
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "stuck", "blocked", "capped"}
@@ -48,11 +53,12 @@ class JobRow:
 @dataclass(frozen=True)
 class DeviceRow:
     device: str
-    recipient: str
-    repo: str
-    ticket_id: str
-    action: str
-    started_at: float
+    harnesses: tuple[str, ...] | None
+    used: int
+    slot_max: int | None
+    enabled: bool = True
+    placeholder: bool = False
+    listed: bool = True
 
 
 @dataclass(frozen=True)
@@ -60,8 +66,9 @@ class Status:
     observed_at: float
     queued: tuple[JobRow, ...]
     box_slots: tuple[JobRow, ...]
-    device_slots: tuple[DeviceRow, ...]
+    devices: tuple[DeviceRow, ...]
     paused: tuple[TrackerRow, ...]
+    device_jobs: Mapping[str, tuple[JobRow, ...]] = field(default_factory=dict)
 
 
 class TrackerReader(Protocol):
@@ -72,16 +79,14 @@ class JobReader(Protocol):
     def job_rows(self) -> tuple[JobRow, ...]: ...
 
 
-class DeviceRowsProvider(Protocol):
-    def __call__(self) -> Sequence[DeviceRow]: ...
-
-
 class SQLiteStatusReader:
     """Read the existing dispatcher database without initializing or mutating it."""
 
     def __init__(self, path: Path):
         self.path = path
-        self._snapshot: tuple[tuple[TrackerRow, ...], tuple[JobRow, ...]] | None = None
+        self._snapshot: (
+            tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]] | None
+        ) = None
 
     def tracker_rows(self) -> tuple[TrackerRow, ...]:
         return self._rows()[0]
@@ -89,7 +94,19 @@ class SQLiteStatusReader:
     def job_rows(self) -> tuple[JobRow, ...]:
         return self._rows()[1]
 
-    def _rows(self) -> tuple[tuple[TrackerRow, ...], tuple[JobRow, ...]]:
+    def placements(self) -> dict[str, str]:
+        """Device-pool slots held, as job id -> device."""
+        return self._rows()[2]
+
+    def slot_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for device in self.placements().values():
+            counts[device] = counts.get(device, 0) + 1
+        return counts
+
+    def _rows(
+        self,
+    ) -> tuple[tuple[TrackerRow, ...], tuple[JobRow, ...], dict[str, str]]:
         if self._snapshot is not None:
             return self._snapshot
         connection = self._connect()
@@ -115,6 +132,20 @@ class SQLiteStatusReader:
                 WHERE state IN ('queued', 'running')
                 """
             ).fetchall()
+            has_slots = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (SLOTS_TABLE,),
+            ).fetchone()
+            placements = (
+                {
+                    str(row[0]): str(row[1])
+                    for row in connection.execute(
+                        f"SELECT job_id, device FROM {SLOTS_TABLE}"
+                    )
+                }
+                if has_slots
+                else {}
+            )
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -155,7 +186,7 @@ class SQLiteStatusReader:
             )
             for row in job_rows
         )
-        self._snapshot = (tracker, jobs)
+        self._snapshot = (tracker, jobs, placements)
         return self._snapshot
 
     def _connect(self) -> sqlite3.Connection:
@@ -176,9 +207,33 @@ class SQLiteStatusReader:
             raise StatusError(f"cannot read database: {exc}") from exc
 
 
-def device_rows() -> tuple[DeviceRow, ...]:
-    """F2-01 will replace this empty provider with device inventory rows."""
-    return ()
+def device_rows(
+    config: MachinesConfig,
+    used: dict[str, int],
+) -> tuple[DeviceRow, ...]:
+    """machines.yml order, then held slots on devices no longer listed."""
+    rows = [
+        DeviceRow(
+            device=device.name,
+            harnesses=(
+                None
+                if "harnesses" in device.placeholders
+                else tuple(device.harnesses)
+            ),
+            used=used.get(device.name, 0),
+            slot_max=device.slot_max,
+            enabled=device.enabled,
+            placeholder=device.placeholder,
+        )
+        for device in config.devices
+    ]
+    listed = {device.name for device in config.devices}
+    rows.extend(
+        DeviceRow(device=name, harnesses=None, used=count, slot_max=None, listed=False)
+        for name, count in sorted(used.items())
+        if name not in listed
+    )
+    return tuple(rows)
 
 
 def build_status(
@@ -186,11 +241,30 @@ def build_status(
     jobs: JobReader,
     *,
     clock: Callable[[], float] = time.time,
-    device_rows_provider: DeviceRowsProvider = device_rows,
+    devices: Sequence[DeviceRow] = (),
+    placements: Mapping[str, str] | None = None,
 ) -> Status:
+    """`placements` maps job id -> device for held device-pool slots. A
+    running job with a placement is listed under its device; only running
+    jobs without one (Phase 1 claims) occupy `Slots — box`."""
     observed_at = clock()
     job_rows = jobs.job_rows()
     tracker_rows = tracker.tracker_rows()
+    placed = placements or {}
+    running = sorted(
+        (row for row in job_rows if row.state == "running"),
+        key=lambda row: (
+            row.recipient,
+            row.repo.casefold(),
+            row.ticket_id,
+            row.id,
+        ),
+    )
+    device_jobs: dict[str, tuple[JobRow, ...]] = {}
+    for row in running:
+        if row.id in placed:
+            name = placed[row.id]
+            device_jobs[name] = (*device_jobs.get(name, ()), row)
     return Status(
         observed_at=observed_at,
         queued=tuple(
@@ -199,28 +273,9 @@ def build_status(
                 key=lambda row: (row.created_at, row.id),
             )
         ),
-        box_slots=tuple(
-            sorted(
-                (row for row in job_rows if row.state == "running"),
-                key=lambda row: (
-                    row.recipient,
-                    row.repo.casefold(),
-                    row.ticket_id,
-                    row.id,
-                ),
-            )
-        ),
-        device_slots=tuple(
-            sorted(
-                device_rows_provider(),
-                key=lambda row: (
-                    row.device.casefold(),
-                    row.recipient,
-                    row.repo.casefold(),
-                    row.ticket_id,
-                ),
-            )
-        ),
+        box_slots=tuple(row for row in running if row.id not in placed),
+        devices=tuple(devices),
+        device_jobs=device_jobs,
         paused=tuple(
             sorted(
                 (
@@ -257,11 +312,16 @@ def render(status: Status) -> str:
     )
     if not status.box_slots:
         lines.append("  idle")
-    for row in status.device_slots:
-        lines.append(
-            f"  {row.device} {row.recipient} {row.repo}#{row.ticket_id} "
-            f"{row.action} {_age(status.observed_at, row.started_at)}"
+
+    lines.extend(("", f"Devices ({len(status.devices)})"))
+    for device in status.devices:
+        lines.append(_device_line(device))
+        lines.extend(
+            "  " + _job_line(row, status.observed_at, row.last_activity_at)
+            for row in status.device_jobs.get(device.device, ())
         )
+    if not status.devices:
+        lines.append("  none")
 
     lines.extend(("", f"Paused ({len(status.paused)})"))
     for row in status.paused:
@@ -281,6 +341,7 @@ def render(status: Status) -> str:
 def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout) -> int:
     parser = argparse.ArgumentParser(prog="orch status")
     parser.add_argument("--db", type=Path)
+    parser.add_argument("--machines", type=Path, default=ROOT / "machines.yml")
     args = parser.parse_args(argv)
     path = args.db
     if path is None:
@@ -288,9 +349,22 @@ def main(argv: list[str] | None = None, *, stdout: TextIO = sys.stdout) -> int:
         if not value:
             parser.error("pass --db or set ORCH_DB to the dispatcher database")
         path = Path(value)
+    machines, findings = load_machines_yml(args.machines, allow_placeholders=True)
+    if machines is None:
+        errors = [item for item in findings if item.severity == "error"]
+        detail = errors[0].message if errors else "invalid machines.yml"
+        print(f"orch status: {args.machines}: {detail}", file=sys.stderr)
+        return 1
     reader = SQLiteStatusReader(path)
     try:
-        report = render(build_status(reader, reader))
+        report = render(
+            build_status(
+                reader,
+                reader,
+                devices=device_rows(machines, reader.slot_counts()),
+                placements=reader.placements(),
+            )
+        )
     except (sqlite3.Error, StatusError) as exc:
         print(f"orch status: {exc}", file=sys.stderr)
         return 1
@@ -303,6 +377,23 @@ def _job_line(row: JobRow, observed_at: float, since: float) -> str:
         f"  {row.repo}#{row.ticket_id} {row.action} -> {row.recipient} "
         f"{row.state} {_age(observed_at, since)}"
     )
+
+
+def _device_line(row: DeviceRow) -> str:
+    if row.harnesses is None:
+        harnesses = "?"
+    else:
+        harnesses = ",".join(row.harnesses) or "none"
+    slot_max = "?" if row.slot_max is None else str(row.slot_max)
+    flags = []
+    if not row.listed:
+        flags.append("not-in-machines.yml")
+    if not row.enabled:
+        flags.append("disabled")
+    if row.placeholder:
+        flags.append("placeholder")
+    suffix = "".join(f" {flag}" for flag in flags)
+    return f"  {row.device} [{harnesses}] {row.used}/{slot_max} slots{suffix}"
 
 
 def _age(observed_at: float, since: float) -> str:

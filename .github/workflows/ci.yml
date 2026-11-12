@@ -21,6 +21,10 @@ jobs:
         run: python bin/orch check-config --orch orch.yml --allow-placeholders
       - name: Validate placeholder-free example config
         run: python bin/orch check-config --orch config/orch.example.yml
+      - name: Validate shipped machines.yml including install placeholders
+        run: python bin/orch check-config --orch orch.yml --machines machines.yml --allow-placeholders
+      - name: Validate placeholder-free example machines.yml
+        run: python bin/orch check-config --orch config/orch.example.yml --machines config/machines.example.yml
       - run: python bin/orch eval-report --input tests/fixtures/eval/week
 
   statechart:
