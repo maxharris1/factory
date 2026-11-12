@@ -5,18 +5,23 @@ out holds one slot on one device. `orch job run` then:
 
 * refuses (exit 2, nothing started, slot kept) a job that holds no slot,
   whose slot is for another bot user, whose device is no longer in
-  machines.yml, or that another live `orch job run` already runs;
+  machines.yml, that another live `orch job run` already runs, or whose
+  earlier worker (left by a runner that died) is not confirmed gone: a
+  live recorded pid on the box, or a remote check that does not answer
+  gone. A worker's identity is never overwritten while it may still run;
 * records itself on the slot as the job's runner;
 * on the box (the `local: true` device), runs the command as before and
-  records its pid as the worker;
+  records its pid as the worker before the command may start
+  (lib/job_run.py holds it at a gate until then);
 * on a remote device, runs the command there over the box's SSH alias for
   this bot (`ssh -l <bot> -- <alias> <start script>`, lib/remote.py) in
-  `<workdir_root>/jobs/<job-id>`. `--worktree` is refused for a remote
-  job: worktrees are made on the box only;
+  `<workdir_root>/jobs/<job-id>`, under a fresh worker tag recorded on the
+  slot first. `--worktree` is refused for a remote job: worktrees are made
+  on the box only;
 * when the command ends (done, failed or killed), releases the slot only
   once the worker is confirmed gone: a local command has exited; a remote
-  device answers that the worker's process group is gone, after a SIGTERM
-  if it was left running. Otherwise the slot stays held and the
+  device answers that no process carries the start's worker tag and none
+  is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
   dispatcher's DeviceMonitor confirms it on a later poll.
 """
 
@@ -37,6 +42,7 @@ from lib.remote import (
     RemoteTarget,
     Transport,
     check_worker,
+    new_tag,
     ssh_argv,
     start_script,
     stop_worker,
@@ -79,9 +85,10 @@ class PlacedRun:
     def before_start(self) -> None:
         """Record a remote start before ssh is spawned (a crash then still checks)."""
         if self.target is not None:
+            target = self.target
             retry_locked(
                 lambda: self.pool.attach_worker(
-                    self.placement.job_id, owner=self.owner, remote=True
+                    self.placement.job_id, owner=self.owner, remote=True, tag=target.tag
                 )
             )
             self.log(
@@ -94,11 +101,13 @@ class PlacedRun:
             return  # the local pid is ssh; the worker is on the device
         start = process_start(pid)
         self._worker.append((pid, start))
-        self.pool.attach_worker(
-            self.placement.job_id,
-            owner=self.owner,
-            pid=pid,
-            start=start,
+        retry_locked(
+            lambda: self.pool.attach_worker(
+                self.placement.job_id,
+                owner=self.owner,
+                pid=pid,
+                start=start,
+            )
         )
 
     def finish(self) -> bool:
@@ -176,7 +185,7 @@ def prepare(
                 f"job {job_id} is placed on remote device {device.name}; "
                 "--worktree is box-only, run it without --worktree"
             )
-        target = remote_target(device, placement.harness, job_id)
+        target = remote_target(device, placement.harness, job_id, new_tag())
         if target is None:
             raise PlacementError(
                 f"device {device.name} has no usable ssh_alias or workdir_root "
@@ -197,6 +206,7 @@ def prepare(
         )
     except QueueError as exc:
         raise PlacementError(str(exc)) from exc
+    _earlier_worker_gone(placement, device, transport, alive)
     return PlacedRun(
         pool=pool,
         placement=placement,
@@ -209,3 +219,36 @@ def prepare(
     )
 
 
+def _earlier_worker_gone(
+    placement: Placement,
+    device: Device,
+    transport: Transport,
+    alive: Callable[[int | None, str | None], bool],
+) -> None:
+    """Refuse to start while a worker an earlier, dead runner left may still run.
+
+    Its identity (pid or worker tag) is on the slot; starting another
+    worker would overwrite it, and the slot could then be released while
+    the earlier one still runs.
+    """
+    job_id = placement.job_id
+    if device.local:
+        if alive(placement.worker_pid, placement.worker_start):
+            raise PlacementError(
+                f"job {job_id}'s earlier worker pid {placement.worker_pid} still runs; "
+                "slot kept, nothing started"
+            )
+        return
+    if not placement.remote_started:
+        return
+    earlier = remote_target(device, placement.harness, job_id, placement.worker_tag)
+    status = (
+        check_worker(transport, earlier)
+        if earlier is not None and placement.worker_tag is not None
+        else "unknown"
+    )
+    if status != GONE:
+        raise PlacementError(
+            f"job {job_id}'s earlier worker on {device.name} is not confirmed gone "
+            f"({status}); slot kept, nothing started"
+        )

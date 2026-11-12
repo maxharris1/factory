@@ -21,8 +21,10 @@ dispatcher's `DeviceMonitor` for a finished job whose runner died.
 
 F2-02 records on the slot row who runs the job: `runner_pid` and
 `runner_start` (the box's `orch job run`), `worker_pid` and
-`worker_start` (its local command), and `remote_started` (a remote start
-was attempted, so the device must confirm the worker gone). The
+`worker_start` (its local command), `remote_started` (a remote start
+was attempted, so the device must confirm the worker gone) and
+`worker_tag` (the random tag every process of that remote start carries,
+lib/remote.py, so a check never trusts a stored process number). The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the 60-minute offline check.
 
@@ -37,6 +39,7 @@ from dataclasses import dataclass
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job
+from lib.remote import new_tag
 from lib.schema import HARNESSES
 
 HEALTH_TABLE = "device_health"
@@ -47,6 +50,7 @@ _SLOT_COLUMNS = (
     ("worker_pid", "INTEGER"),
     ("worker_start", "TEXT"),
     ("remote_started", "INTEGER NOT NULL DEFAULT 0"),
+    ("worker_tag", "TEXT"),
 )
 
 
@@ -62,6 +66,7 @@ class Placement:
     worker_pid: int | None = None
     worker_start: str | None = None
     remote_started: bool = False
+    worker_tag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -292,14 +297,20 @@ class DevicePool:
         pid: int | None = None,
         start: str | None = None,
         remote: bool = False,
-    ) -> None:
+        tag: str | None = None,
+    ) -> str | None:
         """Record the worker: a local command's pid, or that a remote start began.
 
-        A remote start is recorded before ssh is spawned, so a runner that
-        dies mid-spawn still leaves the device to confirm the worker gone.
+        A remote start is recorded, with its worker tag (a fresh one unless
+        given), before ssh is spawned, so a runner that dies mid-spawn still
+        leaves the device to confirm the worker gone. Returns the tag.
         """
         if remote:
-            self._update_slot(job_id, owner, "remote_started = 1", ())
+            worker_tag = tag if tag is not None else new_tag()
+            self._update_slot(
+                job_id, owner, "remote_started = 1, worker_tag = ?", (worker_tag,)
+            )
+            return worker_tag
         else:
             self._update_slot(
                 job_id,
@@ -307,6 +318,7 @@ class DevicePool:
                 "worker_pid = ?, worker_start = ?",
                 (pid, start),
             )
+            return None
 
     def held(self) -> tuple[HeldSlot, ...]:
         """Every held slot with its job's state, oldest placement first."""
@@ -434,6 +446,7 @@ def _placement(row: sqlite3.Row) -> Placement:
         worker_pid=_int(row["worker_pid"]),
         worker_start=_text(row["worker_start"]),
         remote_started=bool(row["remote_started"]),
+        worker_tag=_text(row["worker_tag"]),
     )
 
 

@@ -12,15 +12,18 @@ whose job is no longer running (done, failed or timed out) and whose
   that died before its command, or a remote start never attempted) is
   released;
 * on the box, the slot is released once the recorded command pid is gone;
-* on a remote device, the device is asked over SSH. Gone releases the
-  slot. A worker still running there with no runner on the box is an
-  orphan: it is sent SIGTERM and the slot is kept until a later poll
-  finds it gone. An unreachable device keeps the slot.
+* on a remote device, the device is asked over SSH, by the start's worker
+  tag (lib/remote.py). Gone releases the slot. A worker still running
+  there with no runner on the box is an orphan: it is sent SIGTERM and the
+  slot is kept until a later poll finds it gone. An unreachable device, a
+  check that cannot tell, or a remote start with no recorded tag keeps
+  the slot.
 
-Offline. Each remote device holding a slot is probed once per poll with
-the same SSH check. The first failed probe after a good one starts the
-device's offline clock; a good probe stops it, and a device that holds no
-slot is forgotten. Once a device has failed every probe for
+Offline. Each remote device still holding a slot is probed every poll:
+the worker checks above count, and a device that needed none (its jobs
+run, or their runners still live) gets one plain SSH round trip. The
+first failed probe after a good one starts the device's offline clock; a
+good probe stops it, and a device that holds no slot is forgotten. Once a device has failed every probe for
 OFFLINE_SECONDS (60 minutes), each job still running on it is failed and
 its ticket marked stuck, which wakes Grok Bot once (the ticket's stuck
 flag). Its slot stays held: the worker is not confirmed gone.
@@ -41,6 +44,7 @@ from lib.remote import (
     RemoteTarget,
     Transport,
     check_worker,
+    probe_device,
     stop_worker,
 )
 from lib.worktrees import pid_alive
@@ -59,7 +63,12 @@ class MonitorResult:
     offline: tuple[str, ...] = ()
 
 
-def remote_target(device: Device, placement_harness: str, job_id: str) -> RemoteTarget | None:
+def remote_target(
+    device: Device,
+    placement_harness: str,
+    job_id: str,
+    tag: str | None = None,
+) -> RemoteTarget | None:
     """The job's SSH target on a remote device, or None if config cannot name one."""
     if device.local:
         return None
@@ -74,6 +83,7 @@ def remote_target(device: Device, placement_harness: str, job_id: str) -> Remote
             user=device.harnesses[placement_harness],
             workdir_root=workdir,
             job_id=job_id,
+            tag=tag,
         )
     except RemoteError:
         return None
@@ -134,28 +144,36 @@ class DeviceMonitor:
         offline: list[str],
     ) -> None:
         answered: bool | None = None
+        probe: RemoteTarget | None = None
+        held = 0
         for slot in slots:
             placement = slot.placement
+            target = remote_target(
+                device, placement.harness, placement.job_id, placement.worker_tag
+            )
             finished = slot.job_state != "running"
-            if finished and self.alive(placement.runner_pid, placement.runner_start):
-                continue  # the runner releases its own slot when it ends
-            if finished and not placement.remote_started:
+            if finished and not placement.remote_started and not self.alive(
+                placement.runner_pid, placement.runner_start
+            ):
                 self._release(slot, released)  # no worker was ever started
                 continue
-            if not finished and answered is not None:
-                continue  # one probe per device is enough for running jobs
-            target = remote_target(device, placement.harness, placement.job_id)
-            if target is None:
-                continue
+            held += 1
+            if probe is None and target is not None:
+                probe = target
+            if not finished or self.alive(placement.runner_pid, placement.runner_start):
+                continue  # running, or its runner releases the slot when it ends
+            if target is None or placement.worker_tag is None:
+                continue  # the worker cannot be named: keep the slot
             status = check_worker(self.transport, target)
             reached = status != UNREACHABLE
             answered = reached if answered is None else (answered or reached)
-            if not finished:
-                continue
             if status == GONE:
                 self._release(slot, released)
+                held -= 1
             elif status == RUNNING and stop_worker(self.transport, target):
                 stopped.append(placement.job_id)
+        if answered is None and held and probe is not None:
+            answered = probe_device(self.transport, probe)
         if answered is None:
             return
         failing_since = self.pool.record_contact(device.name, ok=answered, at=now)

@@ -387,7 +387,10 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
         assert (call["user"], call["alias"]) == (bot, f"fakepc-{bot}")
         assert "BatchMode=yes" in call["options"]
     assert sys.executable in calls[0]["script"]
-    assert "kill -0" in calls[1]["script"]
+    tag = calls[0]["script"].split()[2].removeprefix("ORCH_WORKER_TAG=")
+    assert len(tag) == 32  # the start runs under a fresh worker tag ...
+    assert f"t={tag};" in calls[1]["script"]  # ... and the check looks for that tag
+    assert [call["words"] for call in calls] == [1, 1]  # one remote command string each
     assert pool.placement(job_id) is None  # released: the worker is gone
     assert state(queue, job_id) == "running"  # job run never finishes the job
 

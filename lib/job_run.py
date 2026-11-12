@@ -19,9 +19,11 @@ same process that runs the command:
 from __future__ import annotations
 
 import math
+import os
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -34,6 +36,31 @@ TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 
 Beat = Callable[[], object]
 Log = Callable[[str], None]
+
+# With `started`, the command is spawned behind this gate: it waits for
+# "go" on the pipe whose read end is fd argv[1], then execs the command
+# (same pid). "go" is written only after `started` has recorded the pid, so
+# a runner that dies, or cannot record it, closes the pipe first and the
+# command never runs. Before the exec it puts back the signal dispositions
+# Python changed at its own start-up, as Popen does for a direct command.
+_GATE = """\
+import os, signal, sys
+if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+fd = int(sys.argv[1])
+go = os.read(fd, 3) == b"go\\n"
+os.close(fd)
+if not go:
+    sys.exit(125)
+for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_DFL)
+try:
+    os.execvp(sys.argv[2], sys.argv[2:])
+except OSError as exc:
+    print(f"orch job run: cannot start {sys.argv[2]}: {exc}", file=sys.stderr)
+    sys.exit(127)
+"""
 
 
 def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
@@ -106,8 +133,11 @@ def run(
     alone and inherited, as for any command). A signal that arrives before
     the command starts is not dropped: during setup it means the command
     never runs (exit 128 + the signal); during the spawn it is sent to the
-    command once it exists. `started` gets the command's pid once it exists
-    (the device pool records it as the job's worker).
+    command once it exists. `started` gets the command's pid before the
+    command may run (the device pool records it as the job's worker): the
+    process waits at a gate until `started` returns, so a command never runs
+    unrecorded. If `started` raises, the gate is closed, the command never
+    runs, and 127 is returned.
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
@@ -135,20 +165,46 @@ def run(
         if pending:
             log(f"not starting {argv[0]}: got signal {pending[0]}")
             return 128 + pending[0]
+        spawn = list(argv)
+        read_end = write_end = -1
+        if started is not None:
+            read_end, write_end = os.pipe()
+            spawn = [sys.executable, "-I", "-S", "-c", _GATE, str(read_end), *spawn]
         try:
             child = subprocess.Popen(
-                list(argv),
+                spawn,
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
+                pass_fds=(read_end,) if started is not None else (),
             )
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
             return 127
+        finally:
+            if started is not None:
+                os.close(read_end)
+                if child is None:
+                    os.close(write_end)
         if started is not None:
             try:
                 started(child.pid)
-            except Exception as exc:  # recording is best effort; never orphan the command
-                log(f"could not record worker pid {child.pid}: {_one_line(exc)}")
+            except Exception as exc:
+                os.close(write_end)  # the gate reads EOF: the command never runs
+                log(
+                    f"not starting {argv[0]}: could not record worker pid "
+                    f"{child.pid}: {_one_line(exc)}"
+                )
+                child.wait()
+                return 127
+            except BaseException:
+                os.close(write_end)
+                raise
+            try:
+                os.write(write_end, b"go\n")
+            except BrokenPipeError:
+                pass  # the gate already died (a forwarded signal); its status says so
+            finally:
+                os.close(write_end)
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)

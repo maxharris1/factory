@@ -164,7 +164,10 @@ The pool itself starts nothing and opens no SSH connection.
 pool placed it. It refuses (exit 2, nothing started, the slot kept) a job that
 holds no slot (released, or claimed before F2-02), whose slot is for another
 bot user, whose device `machines.yml` no longer lists, or that another live
-`orch job run` already runs; it records itself on the slot as the runner. On the
+`orch job run` already runs; it records itself on the slot as the runner. When
+deploying F2-02, a job already running with no slot is not migrated: its next
+`orch job run` exits 2, so fail it with `orch job done --failed` (T6 retries it
+through the pool), and `orch wait` and `orch job run` need `machines.yml`. On the
 box the command runs as before, and its pid is recorded as the worker. On a
 remote device the command runs there over that bot's alias
 ([`lib/remote.py`](lib/remote.py)):
@@ -175,40 +178,55 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=60 \
 ```
 
 `-l` always names the job's bot user, so a mistyped alias cannot log in as
-another bot; no key, `-i` or config path is ever passed. The start script makes
-`<workdir_root>/jobs/<job-id>`, writes the worker's process group (sshd starts
-the command in its own session) to `.orch-worker.pid` there, runs the command
-with `ORCH_JOB_ID`, `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR`
-(not `ORCH_DB`: the database stays on the box, and the bot runs `orch job done`
-there), removes the pid file, and exits with the command's status. The heartbeat
-stays local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
+another bot; no key, `-i` or config path is ever passed. Each remote start gets
+a fresh random worker tag, recorded on the slot before ssh starts, and the
+start script runs under `exec env ORCH_WORKER_TAG=<tag>`, so the command and
+every process it starts carry the tag; the tag, not a process number, names
+the job's worker. The script refuses (exit 125, nothing run) a device without
+Linux `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
+the worker's process group and boot id (sshd starts the command in its own
+session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
+`ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
+database stays on the box, and the bot runs `orch job done` there); ssh exits
+with the command's status. The record is never removed. The heartbeat stays
+local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 `--worktree` is box-only and refused for a remote job (exit 2): the harness
 checks the repo out in `$ORCH_JOB_WORKDIR` itself.
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
-an earlier, dead runner of the job left behind still runs). On a remote device
-one SSH check runs `kill -0 -<group>`: no pid file or no process left means
-gone; a worker still running (ssh was killed or dropped) is sent SIGTERM and
-checked again for up to 10 seconds. A check only reports gone after `kill -0`
-has worked on its own shell, so a shell whose `kill` misbehaves never frees a
-slot. An unreachable device, or a worker that will not stop, keeps the slot and
-is logged.
+an earlier, dead runner of the job left behind still runs); the command is held
+at a gate until its pid is recorded on the slot, so a runner that dies or
+cannot record it never leaves an unrecorded command running. On a remote
+device one SSH check looks for the tag: any process of the bot user carrying it
+(a child the command left behind included) means running; otherwise a process
+still in the recorded group from this boot means it cannot tell; otherwise the
+worker is gone. A worker still running is sent SIGTERM (every tagged process
+and each group holding one; a stored number alone is never signalled) and
+checked again for up to 10 seconds. An unreachable device, a check that cannot
+tell, or a worker that will not stop keeps the slot and is logged. A new
+`orch job run` for a job whose runner died is refused (exit 2, nothing started)
+while that runner's worker is not confirmed gone, so its identity is never
+overwritten.
 
 The poller finishes the job ([`lib/device_monitor.py`](lib/device_monitor.py),
 run each poll before T6). For a slot whose job is no longer running and whose
 runner is gone, it releases a box slot once the recorded command pid is gone,
 releases a remote slot no worker was started for, and otherwise asks the device:
 gone releases the slot, a worker still running there is sent SIGTERM (no runner
-supervises it) and checked on a later poll, unreachable keeps the slot. It also
-runs one SSH check per remote device that holds a slot. The first failed check
+supervises it) and checked on a later poll, unreachable keeps the slot. Every
+remote device still holding a slot gets at least one SSH contact each poll: the
+worker checks count, and a device that needed none (its jobs still run, or their
+runners still live) gets a plain round trip. The first failed check
 after a good one starts that device's offline clock, a good one stops it, and a
 device holding no slot is forgotten. Once a device has failed every check for
 60 minutes, each job still running on it is failed with its failure already
 handled (so T6 does not retry it), its ticket is marked `stuck` with reason
 `device-offline`, and Grok Bot is woken once through the stuck flag. The job is
 never `done`, and its slot stays held until the device confirms the worker gone.
-A failing check is recorded as a `devices` poll error and never stops the poll.
+An unreachable device counts against its offline clock; an error raised while
+checking (the database, say) is recorded as a `devices` poll error and never
+stops the poll.
 Tests use a fake `ssh` ([`tests/fake_ssh.py`](tests/fake_ssh.py)); a
 suite-wide guard puts a refusing `ssh` first on `PATH`, so no test reaches a
 host.

@@ -1,8 +1,8 @@
 """A fake `ssh` for tests. It never contacts a host.
 
 It accepts the argv lib/remote.py builds (`-o OPTION`..., `-l USER`, `--`,
-ALIAS, SCRIPT), appends one JSON line per call to $FAKE_SSH_LOG, and then
-plays the device:
+ALIAS, COMMAND...), joins COMMAND with spaces into one string as ssh does,
+appends one JSON line per call to $FAKE_SSH_LOG, and then plays the device:
 
 * the alias must be a file in $FAKE_SSH_HOSTS whose content is the user
   that alias logs in as; a missing alias or a different `-l` user exits
@@ -40,17 +40,17 @@ def main(argv: list[str]) -> int:
             return 255
     rest = argv[index:]
     alias = rest[0] if rest else None
-    script = rest[1] if len(rest) > 1 else None
+    script = " ".join(rest[1:]) if len(rest) > 1 else None
     with open(os.environ["FAKE_SSH_LOG"], "a", encoding="utf-8") as log:
         log.write(
             json.dumps(
                 {"options": options, "user": user, "alias": alias, "script": script,
-                 "extra": rest[2:], "pid": os.getpid()}
+                 "words": len(rest) - 1, "pid": os.getpid()}
             )
             + "\n"
         )
     hosts = os.environ.get("FAKE_SSH_HOSTS", "")
-    if alias is None or script is None or rest[2:]:
+    if alias is None or script is None:
         return 255
     known = os.path.join(hosts, alias)
     if not hosts or not os.path.isfile(known):

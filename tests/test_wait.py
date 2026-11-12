@@ -557,7 +557,16 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     code = cli_main(["job", "run", "cursor-bot", job.id, "--db", str(db), *extra, "--", *command])
     monkeypatch.setattr(subprocess, "Popen", real_popen)
 
-    assert [argv for argv in started if argv[0] != "git"] == [command]
+    # The command is spawned behind lib/job_run.py's fixed gate (Codex r1
+    # F1.4: it waits until its pid is recorded, then execs the argv as is).
+    from lib import job_run
+
+    def ungated(argv: list[str]) -> list[str]:
+        gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
+        assert argv[:5] == gate and argv[5].isdigit(), argv
+        return argv[6:]
+
+    assert [ungated(argv) for argv in started if argv[0] != "git"] == [command]
     assert code == 0
     git_calls = [argv for argv in started if argv[0] == "git"]
     assert bool(git_calls) == worktree
