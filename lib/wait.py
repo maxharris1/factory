@@ -24,12 +24,15 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, TypeVar
 
 from lib.queue import Job, JobQueue, QueueError, SQLiteJobQueue
 
 POLL_SECONDS = 1.0
-BUSY_TIMEOUT_SECONDS = 30.0
+BUSY_TIMEOUT_SECONDS = 5.0
+LOCK_BACKOFF_SECONDS = 0.25
+LOCK_BACKOFF_MAX_SECONDS = 5.0
+LOCK_ATTEMPTS = 8
 GUARDED_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM})
 
 OWNING_BOTS = {
@@ -62,6 +65,8 @@ JOB_COLUMNS = frozenset(
 )
 
 STORAGE_ERRORS = (QueueError, sqlite3.Error, OSError)
+
+T = TypeVar("T")
 
 
 class WaitError(Exception):
@@ -112,12 +117,22 @@ def wait_for_job(
     *,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Job:
-    """Claim the next job for recipient, print it, and return it."""
+    """Claim the next job for recipient, print it, and return it.
+
+    A locked database means the poller is writing; keep waiting with backoff.
+    """
+    locked = 0
     while True:
         signal.pthread_sigmask(signal.SIG_BLOCK, GUARDED_SIGNALS)
         leaving = True
         try:
-            job = _claim(queue, recipient)
+            try:
+                job = _claim(queue, recipient)
+            except _Locked:
+                job = None
+                locked += 1
+            else:
+                locked = 0
             if job is not None:
                 deliver(queue, job, out)
                 return job
@@ -127,7 +142,46 @@ def wait_for_job(
                 for signum in GUARDED_SIGNALS:
                     signal.signal(signum, signal.SIG_IGN)
             signal.pthread_sigmask(signal.SIG_UNBLOCK, GUARDED_SIGNALS)
-        sleep(POLL_SECONDS)
+        sleep(_lock_backoff(locked) if locked else POLL_SECONDS)
+
+
+def retry_locked(
+    operation: Callable[[], T],
+    *,
+    sleep: Callable[[float], None] | None = None,
+) -> T:
+    """Run a queue write, retrying a locked database up to LOCK_ATTEMPTS times."""
+    pause = sleep if sleep is not None else time.sleep
+    attempt = 1
+    while True:
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if not is_locked(exc) or attempt >= LOCK_ATTEMPTS:
+                raise
+        pause(_lock_backoff(attempt))
+        attempt += 1
+
+
+def is_locked(exc: BaseException) -> bool:
+    """SQLITE_BUSY or SQLITE_LOCKED, the transient errors of a held write."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    text = str(exc).lower()
+    return "database is locked" in text or "database is busy" in text
+
+
+def _lock_backoff(attempt: int) -> float:
+    """Doubling from LOCK_BACKOFF_SECONDS, capped; never computes past the cap."""
+    delay = LOCK_BACKOFF_SECONDS
+    for _ in range(max(0, attempt - 1)):
+        if delay >= LOCK_BACKOFF_MAX_SECONDS:
+            break
+        delay *= 2
+    return min(LOCK_BACKOFF_MAX_SECONDS, delay)
 
 
 def deliver(queue: JobQueue, job: Job, out: TextIO) -> None:
@@ -172,10 +226,16 @@ def owned_job(queue: SQLiteJobQueue, bot: str, job_id: str) -> None:
         raise WaitError(f"job {job_id} belongs to {row['recipient']}-bot, not {bot}")
 
 
+class _Locked(Exception):
+    pass
+
+
 def _claim(queue: JobQueue, recipient: str) -> Job | None:
     try:
         return queue.claim(recipient)
     except (*STORAGE_ERRORS, TypeError, ValueError) as exc:
+        if is_locked(exc):
+            raise _Locked from exc
         raise WaitError(f"claim failed: {_one_line(exc)}") from exc
 
 

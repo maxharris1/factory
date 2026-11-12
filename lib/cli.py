@@ -33,6 +33,7 @@ from lib.wait import (
     open_queue,
     owned_job,
     recipient_for,
+    retry_locked,
     wait_for_job,
 )
 
@@ -261,6 +262,10 @@ def _poll(argv: list[str]) -> int:
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
     try:
         path = _db_path(args.db)
         with _poll_lock(path):
@@ -354,6 +359,7 @@ def _runtime(
     delivery = WebhookGrokDelivery(
         url_env=config.grok.webhook_url_env,
         key_env=config.grok.webhook_key_env,
+        auth_env=config.grok.webhook_auth_env,
     )
     t8 = T8Hook()
     source = LivePollSource(config)
@@ -366,6 +372,7 @@ def _runtime(
         hooks=(T7Hook(), t8),
     )
     source.error_sink = dispatcher.record_poll_error
+    source.deferral_sink = dispatcher.record_poll_deferral
     source.terminal_sink = dispatcher.record_terminal
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
@@ -437,16 +444,20 @@ def _job(argv: list[str]) -> int:
         return 2
     try:
         if args.command == "heartbeat":
-            queue.heartbeat(args.job_id, owner=recipient_for(args.bot))
+            retry_locked(
+                lambda: queue.heartbeat(args.job_id, owner=recipient_for(args.bot))
+            )
             print(f"heartbeat {args.job_id}")
             return 0
         if args.handoff == "":
             print(f"{prog}: --handoff must not be empty", file=sys.stderr)
             return 2
-        job = queue.finish(
-            args.job_id,
-            owner=recipient_for(args.bot),
-            handoff_comment_id=args.handoff,
+        job = retry_locked(
+            lambda: queue.finish(
+                args.job_id,
+                owner=recipient_for(args.bot),
+                handoff_comment_id=args.handoff,
+            )
         )
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)

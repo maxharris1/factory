@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from lib.factory_md import FactoryConfig
+from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
@@ -32,6 +33,13 @@ GROK_WAKE_REASONS = (
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
+_QUESTIONS_HEADING = re.compile(
+    r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
+    re.IGNORECASE,
+)
+_LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_FENCE_OPEN = re.compile(r" {0,3}(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
+_NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 
 
 @dataclass(frozen=True)
@@ -301,6 +309,13 @@ class Dispatcher:
                 (repo.lower(), ticket_id, error, self.queue.now()),
             )
 
+    def record_poll_deferral(self, detail: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO poll_deferrals (detail, recorded_at) VALUES (?, ?)",
+                (detail, self.queue.now()),
+            )
+
     def record_terminal(self, repo: str, ticket_id: str, state: str) -> None:
         if state not in ("merged", "handed-off", "done"):
             raise ValueError(f"{state!r} is not a completed terminal state")
@@ -455,10 +470,10 @@ class Dispatcher:
                     handoff_comment_id=receipt,
                 )
             except Exception as exc:
-                self._record_job_error(
-                    job,
-                    f"grok-delivery:{type(exc).__name__}",
-                )
+                reason = type(exc).__name__
+                if isinstance(exc, GrokDeliveryError):
+                    reason = f"{reason}:{exc.detail}"
+                self._record_job_error(job, f"grok-delivery:{reason}")
                 try:
                     self.queue.release(
                         job.id,
@@ -1178,6 +1193,11 @@ class Dispatcher:
     ) -> tuple[bool, str]:
         if not self._trusted_session(ticket, comment, fields):
             return True, "rejected-questions-author"
+        if fields.get("state") != "waiting-max" and (
+            fields.get("role") == "orchestrator"
+            or not _has_questions(parse_comment(comment.body).body)
+        ):
+            return True, "no-questions"
         step = self._latest_step(ticket)
         if step is None:
             action = "clarify"
@@ -2638,6 +2658,15 @@ class Dispatcher:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS poll_deferrals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    detail TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
+                )
+                """
+            )
 
 
 class ReviewShipper:
@@ -2879,6 +2908,95 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
     if re.fullmatch(r"[0-9]+", comment.id):
         return comment.created_at, 0, int(comment.id)
     return comment.created_at, 1, comment.id
+
+
+def _has_questions(body: str) -> bool:
+    """Whether a trusted questions comment asks anything.
+
+    Fail closed: every questions comment counts unless it explicitly says
+    there are none. Fenced code blocks (``` or ~~~, closed) are example text:
+    a Questions heading inside one is ignored. Every Questions heading outside
+    fences (any style: ``## Questions``, ``**Questions:**``, ``Questions: ...``)
+    opens a section, and the comment has questions if any section does. In a
+    section only the first content after the heading decides, whether that
+    is the inline remainder or the next non-blank line: a none-marker
+    ("None.", "N/A", "No questions") or no content at all means none; anything
+    else, headings, bold labels and fenced blocks included, means questions.
+    Headings never close a section, because a heading right under Questions
+    can itself be a question or a label for one.
+    Without a Questions heading, any line that is not a none-marker counts.
+    """
+    lines = body.splitlines()
+    unfenced = _collapse_fences(lines)
+    sections = [
+        (heading.group("rest") or "", unfenced[index + 1 :])
+        for index, line in enumerate(unfenced)
+        if line is not None
+        and (heading := _QUESTIONS_HEADING.fullmatch(line.strip())) is not None
+    ]
+    if sections:
+        return any(_section_asks(rest, after) for rest, after in sections)
+    return any(
+        item and item not in _NO_QUESTIONS
+        for item in map(_question_item, lines)
+    )
+
+
+def _section_asks(rest: str, after: list[str | None]) -> bool:
+    """Whether a Questions section's first content is not a none-marker.
+
+    A fenced block (None) is never a none-marker, so it counts as asking.
+    """
+    for content in [rest, *after]:
+        if content is None:
+            return True
+        item = _question_item(content)
+        if item:
+            return item not in _NO_QUESTIONS
+    return False
+
+
+def _collapse_fences(lines: list[str]) -> list[str | None]:
+    """The lines with each closed fenced code block replaced by one None.
+
+    An opening fence with no closing fence is left as ordinary text, so an
+    unclosed fence never hides anything (fail closed).
+    """
+    collapsed: list[str | None] = []
+    index = 0
+    while index < len(lines):
+        opening = _FENCE_OPEN.match(lines[index])
+        if opening is not None:
+            fence = opening.group("fence")
+            closing = re.compile(
+                rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*"
+            )
+            end = next(
+                (
+                    later
+                    for later in range(index + 1, len(lines))
+                    if closing.fullmatch(lines[later])
+                ),
+                None,
+            )
+            if end is not None:
+                collapsed.append(None)
+                index = end + 1
+                continue
+        collapsed.append(lines[index])
+        index += 1
+    return collapsed
+
+
+def _question_item(line: str) -> str:
+    """A line reduced to its words: no heading, bold or list markup.
+
+    Markup-only lines ("##", "**", "---") reduce to "" and count as blank.
+    """
+    text = re.sub(r"^#{1,6}(?=\s|$)|\s#+$", "", line.strip())
+    text = _LIST_MARKER.sub("", text.strip("*: ")).strip("*: ")
+    text = text.rstrip(".").strip().lower()
+    return "" if re.fullmatch(r"[-*_#=\s]*", text) else text
 
 
 def _comment_link(comment: Comment) -> str:
