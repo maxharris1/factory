@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -3195,7 +3196,14 @@ class PollLoop:
         *,
         max_polls: int | None = None,
         on_error: Callable[[Exception], None] | None = None,
+        after_poll: Callable[[], None] | None = None,
     ) -> None:
+        """Poll forever (or `max_polls` times), sleeping between cycles.
+
+        `after_poll` (the dashboard push, when configured) runs after every
+        cycle, including one whose error went to `on_error`. It must not block; if it raises, one line
+        naming only the exception class goes to stderr and polling goes on.
+        """
         if max_polls is not None and max_polls < 1:
             raise ValueError("max_polls must be positive")
         polls = 0
@@ -3206,10 +3214,21 @@ class PollLoop:
                 if on_error is None:
                     raise
                 on_error(exc)
+            # Not in a `finally`: a stop (SIGTERM, Ctrl-C) or a fatal --once
+            # error must not start a push on the way out.
+            if after_poll is not None:
+                _after_poll(after_poll)
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return
             self.sleep(POLL_SECONDS)
+
+
+def _after_poll(hook: Callable[[], None]) -> None:
+    try:
+        hook()
+    except Exception as exc:  # a dashboard push never breaks polling
+        print(f"dashboard push: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def _scope(repo: str, ticket_id: str) -> str:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib.factory_md import EXAMPLE_PATHS, load_factory_md, parse_factory_md
 from lib.schema import AUT0_REPO, HARNESSES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -465,3 +465,29 @@ def test_duplicate_key_is_refused(tmp_path: Path) -> None:
 
 def test_aut0_repo_constant() -> None:
     assert AUT0_REPO == "aut0-code/aut0"
+
+
+def test_f2_03_runner_checklist_holds_no_token_and_names_the_wiring() -> None:
+    """F2-03: the checklist is Max's; it carries no token and keeps deploys hosted."""
+    path = Path(__file__).resolve().parents[1] / "docs" / "F2-03-RUNNER-CHECKLIST.md"
+    text = path.read_text(encoding="utf-8")
+    # GitHub runner registration/removal tokens are ~29 upper-case
+    # alphanumerics; PATs and app tokens have known prefixes.
+    assert re.search(r"\b[A-Z0-9]{25,}\b", text) is None
+    assert re.search(r"\b(gh[pousr]_|github_pat_)", text) is None
+    assert re.search(r"--token\b", text) is None
+    for needle in (
+        "ci_runner: factory-pc-wsl",
+        "runs-on: [self-hosted, factory-pc-wsl]",
+        "factory-mac",
+        "Credential-holding deploy workflows stay on hosted runners",
+        "Max only",
+    ):
+        assert needle in text, needle
+    config, findings = parse_factory_md(
+        "---\nbase_branch: main\ntickets: github\nbuilder:\n  harness: claude\n"
+        "reviewer:\n  harness: codex\nreview:\n  rounds:\n    low: 1\n    high: 3\n"
+        "  verify: none\nship: handoff\nskills: []\nci_runner: factory-pc-wsl\n---\n"
+    )
+    assert [item for item in findings if item.severity == "error"] == []
+    assert config is not None and config.ci_runner == "factory-pc-wsl"

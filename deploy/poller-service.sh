@@ -12,6 +12,14 @@
 #
 # `orch poll` owns the pidfile and the single-poller lock itself; this script
 # only reads the pidfile. Output goes to poller.log beside the pidfile.
+#
+# Dashboard push: when orch.yml sets dashboard.push (README "Dashboard"), the
+# poller this script runs also starts `orch dashboard push --once` after each
+# poll cycle, or every dashboard.push.every_minutes. Each push is a separate
+# process with only PATH, HOME, locale, SSH_AUTH_SOCK and the ORCH_* paths in
+# its environment (none of webhook.env), and the poll loop never waits on it:
+# a failed push is one redacted line in poller.log and polling goes on.
+# Without dashboard.push nothing is pushed and nothing changes here.
 # start, stop, restart and ensure take poller-service.lock (flock(1), where
 # installed), so a stop cannot interleave with an ensure about to launch.
 #
