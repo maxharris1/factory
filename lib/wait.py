@@ -175,7 +175,13 @@ def is_locked(exc: BaseException) -> bool:
 
 
 def _lock_backoff(attempt: int) -> float:
-    return min(LOCK_BACKOFF_MAX_SECONDS, LOCK_BACKOFF_SECONDS * 2 ** (attempt - 1))
+    """Doubling from LOCK_BACKOFF_SECONDS, capped; never computes past the cap."""
+    delay = LOCK_BACKOFF_SECONDS
+    for _ in range(max(0, attempt - 1)):
+        if delay >= LOCK_BACKOFF_MAX_SECONDS:
+            break
+        delay *= 2
+    return min(LOCK_BACKOFF_MAX_SECONDS, delay)
 
 
 def deliver(queue: JobQueue, job: Job, out: TextIO) -> None:

@@ -966,3 +966,38 @@ def test_heartbeat_and_done_give_up_after_bounded_lock_retries(
     assert "database is locked" in capsys.readouterr().err
     assert len(sleeps) == LOCK_ATTEMPTS - 1
     assert state_of(db, job.id)["state"] == "running"
+
+
+@pytest.mark.parametrize("attempt", [1, 6, 1025, 1026, 10_000])
+def test_lock_backoff_never_exceeds_the_cap(attempt: int) -> None:
+    backoff = wait_module._lock_backoff(attempt)
+
+    assert 0 < backoff <= LOCK_BACKOFF_MAX_SECONDS
+    if attempt >= 6:
+        assert backoff == LOCK_BACKOFF_MAX_SECONDS
+
+
+def test_wait_survives_more_locked_claims_than_float_backoff_can_hold(
+    tmp_path: Path,
+    restore_signals: None,
+) -> None:
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request(), dedupe_key="a")
+    waiter = open_queue(db)
+    claim = waiter.claim
+    locked_claims = [1100]
+
+    def flaky_claim(recipient: str):
+        if locked_claims[0]:
+            locked_claims[0] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return claim(recipient)
+
+    waiter.claim = flaky_claim
+    sleeps: list[float] = []
+
+    job = wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append)
+
+    assert job is not None
+    assert len(sleeps) == 1100
+    assert max(sleeps) == LOCK_BACKOFF_MAX_SECONDS

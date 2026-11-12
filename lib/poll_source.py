@@ -30,6 +30,7 @@ from lib.github_actions import (
     GitHubReviewActions,
     LinearReviewActions,
     Runner,
+    _is_read,
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
@@ -209,9 +210,11 @@ class LivePollSource:
         self._cycle_errors = 0
         self._cycle_deferrals: dict[str, int] = {}
         cleared = _secret_env_names(config)
+        # list_comments and ci_status are polling reads: they get the same
+        # short timeout, retries and backoff as every other gh read here.
         self.github = GitHubReviewActions(
-            runner=gh_runner,
-            timeout_seconds=timeout_seconds,
+            runner=self._adapter_runner,
+            timeout_seconds=gh_call_timeout_seconds,
             cleared_variables=cleared,
         )
         self.gh = self.github.gh
@@ -969,6 +972,13 @@ class LivePollSource:
         if etag is not None:
             self._etag_cache[cache_key] = (etag, body)
         return body
+
+    def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
+        """Retry the poll adapter's GETs; never repeat a write."""
+        call = list(argv)
+        if _is_read(call[call.index("api") + 1 :]):
+            return self._run_gh_read(call)
+        return self.gh_runner(call, self.timeout_seconds)
 
     def _run_gh_read(self, argv: list[str]) -> GhResult:
         """Every _gh_call is a GET, so a timed-out call is safe to repeat."""

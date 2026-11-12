@@ -4697,3 +4697,71 @@ def test_dispatcher_cannot_execute_a_harness_binary(
         )
         assert "subprocess" not in imported
         assert "os" not in imported
+
+
+BUILDER_QUESTIONS = "<!-- orch:v1 kind=questions from=claude-bot role=builder -->"
+REVIEWER_QUESTIONS = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Questions**\n**Should the brief retain the old pricing table?**\n",
+        "**Questions**\n**Should the brief retain the old pricing table?**:\n",
+        "## Questions\n### 1. Pricing?\n",
+        "**Questions**\n### 1. Pricing?\n",
+        "**Questions**\n### 1. Pricing\nKeep the old table or drop it.\n",
+        "## Questions\n### Pricing\nKeep the old table or drop it.\n",
+        "**Restatement**\nIntake.\n\n**Questions**\n"
+        "**Keep the old pricing table?**\n\n**Notes**\nNone.\n",
+    ],
+)
+def test_t5_heading_style_questions_queue_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Questions**\nNone.\n\n**Notes**\nThe brief is long.\n",
+        "## Questions\nN/A\n\n## Notes\nThe brief is long.\n",
+        "## Questions\nNo questions.\n\n# Plan\nShip it.\n",
+    ],
+)
+def test_t5_empty_questions_section_then_other_section_queues_nothing(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment(
+        "questions-1", f"{BUILDER_QUESTIONS}\n{body}", author="claude-login"
+    )
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"

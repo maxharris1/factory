@@ -36,7 +36,9 @@ _QUESTIONS_HEADING = re.compile(
     r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
     re.IGNORECASE,
 )
-_SECTION_HEADING = re.compile(r"#{1,6}\s+\S.*|\*\*[^*]+\*\*:?")
+_SECTION_HEADING = re.compile(
+    r"(?P<hashes>#{1,6})\s+(?P<text>\S.*)|\*\*(?P<bold>[^*]+)\*\*:?"
+)
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 
@@ -2916,9 +2918,11 @@ def _has_questions(body: str) -> bool:
         heading = _QUESTIONS_HEADING.fullmatch(line)
         if heading is None:
             continue
+        hashes = re.match(r"#*", line).group()
+        level = len(hashes) if hashes else None
         section = [heading.group("rest") or ""]
         for rest in lines[index + 1 :]:
-            if _SECTION_HEADING.fullmatch(rest):
+            if _ends_questions_section(rest, level):
                 break
             section.append(rest)
         break
@@ -2927,6 +2931,24 @@ def _has_questions(body: str) -> bool:
         for line in section
     )
     return any(item and item not in _NO_QUESTIONS for item in items)
+
+
+def _ends_questions_section(line: str, level: int | None) -> bool:
+    """A heading ends the Questions section unless it is itself content.
+
+    A bold or # line that asks a question ("**Keep the table?**") or is a
+    numbered item ("### 1. Pricing") is a question, and a # heading deeper
+    than a # Questions heading is a subheading inside the section.
+    """
+    heading = _SECTION_HEADING.fullmatch(line)
+    if heading is None:
+        return False
+    text = (heading.group("text") or heading.group("bold")).strip()
+    text = text.removesuffix(":").strip()
+    if text.endswith("?") or _LIST_MARKER.match(text):
+        return False
+    hashes = heading.group("hashes")
+    return not (hashes and level is not None and len(hashes) > level)
 
 
 def _comment_link(comment: Comment) -> str:

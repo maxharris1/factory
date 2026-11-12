@@ -156,8 +156,9 @@ state writes Linear, and `ship: handoff` never merges.
 `<db>.lock`, so a second poller is refused. Source failures are recorded per
 project or ticket and the long-running loop continues after the 60-second
 interval; `--once` reports a cycle-level failure with a nonzero exit.
-Each `gh api` read has a 20-second timeout and is tried three times with
-2- and 4-second backoff; a ref that still times out records a retryable
+Each polling `gh api` read, including PR comments, check runs and commit
+status, has a 20-second timeout and is tried three times with 2- and 4-second
+backoff (writes are never retried); a ref that still times out records a retryable
 `gh api timed out after 3 attempts` error and the cycle moves on.
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated

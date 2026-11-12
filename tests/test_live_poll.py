@@ -2105,3 +2105,154 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
         ).fetchone()[0]
     assert jobs == 1
     assert handled == 1
+
+
+ADAPTER_READS = {
+    "comments": "/issues/12/comments?per_page=100",
+    "check-runs": "/check-runs?per_page=100",
+    "combined-status": "/status",
+}
+
+
+def _flaky_read_runner(gh: FakeGh, suffix: str, failures: int):
+    timeouts: list[tuple[str, float]] = []
+    remaining = [failures]
+
+    def runner(argv, timeout):
+        endpoint = next(part for part in argv if part.startswith("repos/"))
+        timeouts.append((endpoint, timeout))
+        if endpoint.endswith(suffix) and remaining[0]:
+            remaining[0] -= 1
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return gh(argv, timeout)
+
+    return runner, timeouts
+
+
+@pytest.mark.parametrize("read", sorted(ADAPTER_READS))
+def test_github_ref_adapter_reads_retry_with_short_timeout_and_backoff(
+    read: str,
+) -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    runner, timeouts = _flaky_read_runner(gh, ADAPTER_READS[read], 2)
+    sleeps: list[float] = []
+    source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
+    factory = source._factory(config().projects[0])
+
+    ticket = source._github_ticket(config().projects[0], factory, "12")
+
+    assert ticket.ci[gh.head].status == "success"
+    assert sleeps == [GH_RETRY_BACKOFF_SECONDS, GH_RETRY_BACKOFF_SECONDS * 2]
+    assert {timeout for _, timeout in timeouts} == {GH_CALL_TIMEOUT_SECONDS}
+    assert (
+        sum(endpoint.endswith(ADAPTER_READS[read]) for endpoint, _ in timeouts)
+        == GH_CALL_ATTEMPTS
+    )
+
+
+@pytest.mark.parametrize("read", sorted(ADAPTER_READS))
+def test_linear_linked_pr_adapter_reads_retry_with_short_timeout_and_backoff(
+    read: str,
+) -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    runner, timeouts = _flaky_read_runner(gh, ADAPTER_READS[read], 2)
+    sleeps: list[float] = []
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=runner,
+        sleep=sleeps.append,
+    )
+
+    ticket = source._linear_ticket(config(linear=True).projects[0], linear_issue())
+
+    assert ticket.pr_number == "12"
+    assert ticket.ci[gh.head].status == "success"
+    assert sleeps == [GH_RETRY_BACKOFF_SECONDS, GH_RETRY_BACKOFF_SECONDS * 2]
+    assert {timeout for _, timeout in timeouts} == {GH_CALL_TIMEOUT_SECONDS}
+    assert (
+        sum(endpoint.endswith(ADAPTER_READS[read]) for endpoint, _ in timeouts)
+        == GH_CALL_ATTEMPTS
+    )
+
+
+def test_poll_adapter_never_retries_a_mutation() -> None:
+    calls: list[float] = []
+    sleeps: list[float] = []
+
+    def runner(argv, timeout):
+        calls.append(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
+
+    with pytest.raises(Exception, match="timed out"):
+        source.github._call(
+            "-X", "POST", "repos/acme/widgets/issues/12/comments", "-f", "body=x"
+        )
+    assert calls == [TIMEOUT_SECONDS]
+    assert sleeps == []
+
+
+def test_adapter_read_timeout_on_one_ref_leaves_a_healthy_ref_alone(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 10)
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={"github": {"grok-login": {"grok-bot"}}, "linear": {}},
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+    with queue.connect() as connection:
+        for number in ("12", "13"):
+            connection.execute(
+                """
+                INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+                VALUES ('acme/widgets', ?, 'github', 0)
+                """,
+                (number,),
+            )
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    sleeps: list[float] = []
+    timeouts: list[float] = []
+
+    def runner(argv, timeout):
+        timeouts.append(timeout)
+        if any(part.endswith("/issues/12/comments?per_page=100") for part in argv):
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return gh(argv, timeout)
+
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(Project("acme/widgets", factory_ref="main"),),
+        ),
+        gh_runner=runner,
+        error_sink=dispatcher.record_poll_error,
+        sleep=sleeps.append,
+    )
+    dispatcher.process = Mock()
+    dispatcher.reconcile_jobs = Mock()
+
+    with pytest.raises(PollCycleError):
+        dispatcher.poll_once(source)
+
+    assert [call.args[0].ticket_id for call in dispatcher.process.call_args_list] == [
+        "13"
+    ]
+    assert sleeps == [GH_RETRY_BACKOFF_SECONDS, GH_RETRY_BACKOFF_SECONDS * 2]
+    assert set(timeouts) == {GH_CALL_TIMEOUT_SECONDS}
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT repo, ticket_id, error FROM poll_errors"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (
+            "acme/widgets",
+            "12",
+            f"PollSourceError:gh api timed out after {GH_CALL_ATTEMPTS} attempts",
+        )
+    ]
