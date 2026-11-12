@@ -584,15 +584,22 @@ def test_poller_section_reports_log_and_recent_errors(tmp_path: Path) -> None:
         "age_seconds": 30,
     }
     assert poller["last_activity_age_seconds"] == 10
+    # The dispatcher's schema creates poll_deferrals; empty means none yet.
+    assert poller["deferrals"] == {"recent": []}
+
+
+def test_poller_deferrals_absent_on_a_db_without_the_table(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE poll_deferrals")
+    poller = collect_snapshot(db, log, now=NOW)["poller"]
     assert poller["deferrals"] is None
+    assert poller["last_activity_age_seconds"] == 10
 
 
 def test_poller_reads_deferrals_table_when_present(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
-        connection.execute(
-            "CREATE TABLE poll_deferrals (id INTEGER PRIMARY KEY, detail TEXT, recorded_at REAL)"
-        )
         connection.execute(
             "INSERT INTO poll_deferrals (detail, recorded_at) VALUES (?, ?)",
             ("Linear poll budget deferred discovery", NOW - 5),
@@ -1115,9 +1122,6 @@ def _plant_secrets(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
             ticket_id="99",
         )
         # F1.1: quoted JSON, encoded URLs and credentials, key blocks.
-        connection.execute(
-            "CREATE TABLE poll_deferrals (id INTEGER PRIMARY KEY, detail TEXT, recorded_at REAL)"
-        )
         samples = [
             sample
             for _, sample in [
