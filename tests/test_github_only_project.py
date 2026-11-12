@@ -24,6 +24,7 @@ from lib.poll_source import LivePollSource
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
     BRIEF,
+    GO,
     READY,
     VERDICT,
     FakeGrokDelivery,
@@ -583,6 +584,88 @@ def test_a_stale_ready_does_not_track_but_a_ready_for_the_new_tip_does(
         "9002": "queued-review",
     }
     assert world.jobs() == [("review", "codex", new_head, "queued")]
+
+
+# Codex PR #64 r1 F1.1: an unlabelled PR is admitted only through the #59
+# ready exception, so only a trusted builder ready naming the PR head may
+# start tracking it. A Grok brief or go on the same PR still needs the label
+# (README "Poll"), so pairing it with an untrusted, stale or wrong-role ready
+# must start nothing: no tracking row, no job, no label.
+
+TRUSTED_GO = GO.format(state="building")
+
+
+@pytest.mark.parametrize("go_first", [True, False], ids=["go-first", "ready-first"])
+@pytest.mark.parametrize(
+    ("ready_body", "ready_author"),
+    [
+        (DOCUMENTED_READY.format(head=PR_HEAD), "mallory"),
+        (DOCUMENTED_READY.format(head="e" * 40), "maxharris1"),
+        (
+            DOCUMENTED_READY.format(head=PR_HEAD).replace(
+                "role=builder", "role=reviewer"
+            ),
+            "maxharris1",
+        ),
+        (
+            DOCUMENTED_READY.format(head=PR_HEAD).replace("claude-bot", "codex-bot"),
+            "maxharris1",
+        ),
+    ],
+    ids=["untrusted-ready", "stale-head-ready", "wrong-role-ready", "wrong-builder-ready"],
+)
+def test_an_unlabelled_pr_with_a_grok_go_and_a_failing_ready_starts_nothing(
+    tmp_path: Path,
+    ready_body: str,
+    ready_author: str,
+    go_first: bool,
+) -> None:
+    world = FactoryPrWorld(tmp_path, labels=())
+    go = gh_comment(9001, TRUSTED_GO, minute=0 if go_first else 5)
+    ready = gh_comment(9002, ready_body, author=ready_author, minute=5 if go_first else 0)
+    world.gh.comments = [go, ready] if go_first else [ready, go]
+
+    world.poll()
+    world.poll()
+
+    assert tracked_rows(world.queue) == []
+    assert outcomes(world.queue) == {}
+    assert world.actions.states == []
+    assert world.jobs() == []
+
+
+def test_an_unlabelled_pr_with_only_a_trusted_matching_ready_is_still_tracked(
+    tmp_path: Path,
+) -> None:
+    """Positive guard for F1.1: the trusted builder ready naming the PR head
+    still admits an unlabelled PR and queues only the round-1 review."""
+    world = FactoryPrWorld(tmp_path, labels=())
+    world.gh.comments = [gh_comment(9002, DOCUMENTED_READY.format(head=PR_HEAD))]
+
+    world.poll()
+
+    assert tracked_rows(world.queue) == [(FACTORY_REPO, "51", "github")]
+    assert outcomes(world.queue) == {"9002": "queued-review"}
+    assert world.actions.states == ["review"]
+    assert world.jobs() == [("review", "codex", PR_HEAD, "queued")]
+
+
+def test_a_labelled_pr_with_a_grok_go_is_still_tracked_on_the_go(
+    tmp_path: Path,
+) -> None:
+    """Preservation guard for F1.1: the labelled entry is unchanged, so a
+    trusted Grok go on a labelled PR still starts tracking and the build."""
+    world = FactoryPrWorld(tmp_path)
+    world.gh.comments = [
+        gh_comment(9001, TRUSTED_GO),
+        gh_comment(9002, DOCUMENTED_READY.format(head=PR_HEAD), author="mallory", minute=5),
+    ]
+
+    world.poll()
+
+    assert tracked_rows(world.queue) == [(FACTORY_REPO, "51", "github")]
+    assert outcomes(world.queue)["9001"] == "queued-build"
+    assert ("build", "claude", None, "queued") in world.jobs()
 
 
 def test_review_and_fix_work_from_an_unlabelled_pr_hold_a_slot_on_the_dashboard(
