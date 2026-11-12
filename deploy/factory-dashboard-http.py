@@ -55,10 +55,12 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    # The snapshot page is self-contained: inline style and script only.
+    # The snapshot page is self-contained: inline style and script only. Its
+    # script fetches this server's own status.json (connect-src 'self') to
+    # update in place; nothing else is ever loaded.
     "Content-Security-Policy": (
         "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     ),
 }
 

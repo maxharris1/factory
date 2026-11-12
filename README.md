@@ -433,7 +433,7 @@ The box cannot take inbound tailnet connections, so there is no live
 server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
-writes `status.json` and a static, self-contained `index.html` to `--out`.
+writes `status.json` and a self-contained `index.html` to `--out`.
 The database path is resolved through symlinks first, and the dashboard
 never uses `immutable=1`: SQLite takes its normal shared locks and reads
 the WAL, so a read stays consistent while the poller commits or
@@ -444,8 +444,33 @@ the directory is read-only and they don't exist yet, the snapshot fails
 with that explanation instead of reading without locks. Both files are
 written to temp files in the same directory and fsynced, then renamed into
 place; if the second rename fails, `status.json` is put back as it was, so
-the pair always comes from one snapshot. The page reloads itself every `dashboard.refresh_seconds`
-(15 to 30, default 20; `--refresh` overrides it). Paths: `--db`, else
+the pair always comes from one snapshot.
+
+**Mission control.** `index.html` is a dark heads-up display that updates
+in real time: its inline script fetches the relative `status.json` every
+1.5 seconds (`cache: 'no-store'`) and rebuilds its panels in place, with no
+reload. It shows a status row (running, queued, done, failed, stuck or
+overdue, scripted share), one lane per device from `machines.yml` (box, pc,
+mac; disabled devices dimmed and marked, placeholders flagged) with a slot
+per `slot_max` and, in each busy slot, the job's bot, ticket, action,
+elapsed time and heartbeat age against its timeout, plus a lane for running
+Grok wakes; the queue with wait times; recent handoffs (scripted,
+bot-to-bot, failed) and recent verdicts (handled `orch:v1` comments by
+outcome); poll health and Linear-budget health; handoff savings; stuck,
+overdue and paused tickets; every tracked ticket; and the redacted log
+tail. Ages tick every second between fetches, and rows that appear since
+the last snapshot flash briefly. The header shows the link state (`LIVE`,
+`STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail). Everything
+is inline: no external asset, font or CDN, so it works offline on the
+tailnet. Values are only ever set as text (`createElement`/`textContent`),
+never parsed as HTML. Animations (header sweep, link pulse, heartbeat
+shimmer, new-row flash) stop under `prefers-reduced-motion: reduce`, and
+every text colour meets WCAG AA (4.5:1) on every panel background
+(`tests/test_dashboard_mission_control.py` checks the palette). Without
+script, or when `status.json` cannot be fetched at all, the server-rendered
+tables underneath stay and the page reloads every
+`dashboard.refresh_seconds` (15 to 30, default 20; `--refresh` overrides
+it), as before. Paths: `--db`, else
 `$ORCH_DB`; `--log`, else `$ORCH_POLL_LOG`, else `poller.log` beside the
 database; `--out`, else `$ORCH_DASHBOARD_DIR`, else `dashboard/` beside the
 database; `--machines`, else the checkout's `machines.yml` when present.
@@ -463,6 +488,26 @@ review round and gate count, poll errors (last hour, last day, newest 20),
 `poll_deferrals` when that table exists, the poller's last activity (the
 newest of the log's modification time, poll error and deferral; `main`
 records no per-cycle row) and the handoff-savings counter.
+
+Fields the live page adds, all from allowlisted columns or enumerations:
+each `running` job's `device` (its `device_slots` placement, else `box`;
+`null` for a Grok wake), `elapsed_seconds` and `elapsed_from` (`placed`
+from `device_slots.placed_at`, else `queued` from `created_at`, because
+`jobs` records no claim time); `handoff_savings.recent`, the newest 12
+finished jobs with `kind` `scripted`, `bot_to_bot`, `failed` or `done` (the
+handoff comment id itself is never copied); `poller.verdicts`, the newest
+12 handled `orch:v1` comments (`handled_comments`, newest by insertion) as
+`outcome` (a dispatcher outcome such as `queued-review-fix`, anything else
+`other`) and `kind` (`routed`, `shipped`, `stale`, `rejected`, `stuck`,
+`blocked`, `waiting`, `other`), `null` without that table;
+`poller.health`, `ok` while the last poll cycle ended at most 150 s ago,
+`late` to 300 s, then `stale`, and `unknown` when the snapshot was not
+told when the last cycle ended (only live pushes pass `--last-cycle`;
+`main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
+(Linear 429 or `RATELIMITED` errors in the last hour), `exhausted` (`Linear
+poll budget is exhausted` errors), `deferring` (`Linear poll budget`
+deferrals) or `ok`, with those hourly counts and the poller's Linear share
+of the hourly budget (1250 requests, 1,500,000 complexity).
 
 **Handoff savings.** docs/SPEC.md does not define this counter; the
 dashboard brief does, and this is its database form. `scripted` counts
@@ -532,6 +577,7 @@ dashboard:
     ssh_config: /home/box/.ssh/config    # optional: passed as ssh/scp -F
     remote_dir: factory-dashboard        # default; relative to the remote home
     method: scp                          # or rsync (the default)
+    live: true                           # optional: push status.json on every orch.db change
     # every_minutes: 5                   # omitted: push after every poll cycle
     interval_seconds: 20                 # only for the `orch dashboard push` loop
 ```
@@ -558,6 +604,26 @@ error there is logged by exception class only. A stop (SIGTERM) does not
 start a push. `orch dashboard push` without `--once` is still a standalone
 loop every `interval_seconds` (15 to 30); `--once` exits 1 if the push
 failed.
+
+*Real time (`live: true`, ssh only, default off).* `orch poll` also starts a
+watcher thread that stats `orch.db` and `orch.db-wal` every 0.25 seconds
+(no SQLite connection). Any committed change by any process (`orch wait`
+claiming a job, a heartbeat, a job finishing, the poller recording a
+verdict) and the end of every poll cycle start `orch dashboard push --once
+--status-only --last-cycle <time>`: a fresh snapshot, of which only
+`status.json` is sent, through the same temp-name upload and one `ssh ... mv`
+rename, so a reader never sees a half-written file. Pushes start at most
+once a second and never while the previous one is still running; a change
+that arrives meanwhile is pushed as soon as both allow, so the last change
+is never dropped. An empty `-wal` counts as none, so the push child's own
+read-only snapshot never looks like a change. The full pair (`index.html`
+too) still goes out on the first cycle and then after every cycle, or every
+`every_minutes`. A failed start is one redacted line at most once a
+minute. `--once` polls start no watcher, and a stop stops it before exit.
+The page needs the static server to allow `connect-src 'self'`
+([`deploy/factory-dashboard-http.py`](deploy/factory-dashboard-http.py)
+sends it); with an older copy of that server the browser blocks the poll
+and the page falls back to reloading.
 
 *How it publishes.* Each file is first uploaded to a dot-prefixed temp name
 in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o

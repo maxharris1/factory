@@ -13,8 +13,10 @@ Nothing here runs a real ssh or scp: the spawn and clocks are fakes, and the
 one end-to-end CLI test puts fake `scp` and `ssh` programs first on PATH.
 """
 
+import gc
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -175,10 +177,9 @@ def test_live_is_only_for_ssh() -> None:
 
 
 def test_shipped_and_example_configs_document_live_push() -> None:
-    assert "#     live: true" in (ROOT / "orch.yml").read_text(encoding="utf-8")
-    assert "#     live: true" in (ROOT / "config" / "orch.example.yml").read_text(
-        encoding="utf-8"
-    )
+    # Documented, commented out: nothing pushes until Max turns it on.
+    for path in (ROOT / "orch.yml", ROOT / "config" / "orch.example.yml"):
+        assert re.search(r"(?m)^#\s+live: true|^\s+# live: true", path.read_text(encoding="utf-8")), path
 
 
 # --- the hook ---------------------------------------------------------------------
@@ -468,7 +469,11 @@ def test_reading_a_snapshot_does_not_change_the_fingerprint(tmp_path: Path) -> N
         ),
         dedupe_key="k1",
     )
+    # The queue leaves its connections to the garbage collector; closing the
+    # last one checkpoints the WAL (a real writer-side change). Settle that
+    # first, so only the reader is under test.
     del queue
+    gc.collect()
     before = db_fingerprint(db)
     for _ in range(3):
         collect_snapshot(db, tmp_path / "poller.log", now=1_800_000_100.0)
