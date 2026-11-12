@@ -38,6 +38,7 @@ _QUESTIONS_HEADING = re.compile(
     re.IGNORECASE,
 )
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_FENCE_OPEN = re.compile(r" {0,3}(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
 _NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
 
 
@@ -2913,29 +2914,78 @@ def _has_questions(body: str) -> bool:
     """Whether a trusted questions comment asks anything.
 
     Fail closed: every questions comment counts unless it explicitly says
-    there are none. With a Questions heading (any style: ``## Questions``,
-    ``**Questions:**``, ``Questions: ...``), only the first content after it
-    decides, whether that is the inline remainder or the next non-blank line:
-    a none-marker ("None.", "N/A", "No questions") or no content at all means
-    no questions; anything else, headings and bold labels included, means
-    questions. Headings never close the section, because a heading right under
-    Questions can itself be a question or a label for one.
+    there are none. Fenced code blocks (``` or ~~~, closed) are example text:
+    a Questions heading inside one is ignored. Every Questions heading outside
+    fences (any style: ``## Questions``, ``**Questions:**``, ``Questions: ...``)
+    opens a section, and the comment has questions if any section does. In a
+    section only the first content after the heading decides, whether that
+    is the inline remainder or the next non-blank line: a none-marker
+    ("None.", "N/A", "No questions") or no content at all means none; anything
+    else, headings, bold labels and fenced blocks included, means questions.
+    Headings never close a section, because a heading right under Questions
+    can itself be a question or a label for one.
     Without a Questions heading, any line that is not a none-marker counts.
     """
     lines = body.splitlines()
-    for index, line in enumerate(lines):
-        heading = _QUESTIONS_HEADING.fullmatch(line.strip())
-        if heading is None:
-            continue
-        for content in [heading.group("rest") or "", *lines[index + 1 :]]:
-            item = _question_item(content)
-            if item:
-                return item not in _NO_QUESTIONS
-        return False
+    unfenced = _collapse_fences(lines)
+    sections = [
+        (heading.group("rest") or "", unfenced[index + 1 :])
+        for index, line in enumerate(unfenced)
+        if line is not None
+        and (heading := _QUESTIONS_HEADING.fullmatch(line.strip())) is not None
+    ]
+    if sections:
+        return any(_section_asks(rest, after) for rest, after in sections)
     return any(
         item and item not in _NO_QUESTIONS
         for item in map(_question_item, lines)
     )
+
+
+def _section_asks(rest: str, after: list[str | None]) -> bool:
+    """Whether a Questions section's first content is not a none-marker.
+
+    A fenced block (None) is never a none-marker, so it counts as asking.
+    """
+    for content in [rest, *after]:
+        if content is None:
+            return True
+        item = _question_item(content)
+        if item:
+            return item not in _NO_QUESTIONS
+    return False
+
+
+def _collapse_fences(lines: list[str]) -> list[str | None]:
+    """The lines with each closed fenced code block replaced by one None.
+
+    An opening fence with no closing fence is left as ordinary text, so an
+    unclosed fence never hides anything (fail closed).
+    """
+    collapsed: list[str | None] = []
+    index = 0
+    while index < len(lines):
+        opening = _FENCE_OPEN.match(lines[index])
+        if opening is not None:
+            fence = opening.group("fence")
+            closing = re.compile(
+                rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*"
+            )
+            end = next(
+                (
+                    later
+                    for later in range(index + 1, len(lines))
+                    if closing.fullmatch(lines[later])
+                ),
+                None,
+            )
+            if end is not None:
+                collapsed.append(None)
+                index = end + 1
+                continue
+        collapsed.append(lines[index])
+        index += 1
+    return collapsed
 
 
 def _question_item(line: str) -> str:

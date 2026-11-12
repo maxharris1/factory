@@ -4863,3 +4863,162 @@ def test_t5_heading_right_after_questions_is_content_fail_closed(
     assert handled_outcome(queue, "questions-1") == "waiting-max"
     assert job_count(queue, "clarify") == 1
     assert workflow_state(queue) == "waiting-max"
+
+
+T5_TRUSTED_ROLES = pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+
+
+def _process_t5_questions(tmp_path: Path, header: str, author: str, body: str):
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+    dispatcher.process(ticket(question, head=head))
+    return queue
+
+
+def _assert_t5_waiting_max(queue) -> None:
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
+def _assert_t5_no_questions(queue) -> None:
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n\n## Questions\n"
+        "Should we retain the pricing table?\n",
+        "## Questions\nNone.\n\n## Questions for Max\n1. Keep the old table?\n",
+        "## Questions\nNone.\n\n**Questions:**\n- Keep the old table?\n",
+        "**Questions:** N/A\n\n### Questions\n- Keep the old table?\n",
+    ],
+)
+def test_t5_later_questions_section_with_content_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): every Questions heading counts. A none-marker under
+    the first one must not hide a real question under a later one.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Example of the previous report:\n```markdown\n## Questions\nNone.\n"
+        "```\n\n## Questions\nShould we retain the pricing table?\n",
+        "```\n## Questions\nNone.\n```\n## Questions\n"
+        "Should we retain the pricing table?\n",
+        "~~~\n## Questions\nN/A\n~~~\n## Questions\n1. Keep the old table?\n",
+        "````md\n**Questions:** None\n```\nnested\n```\n````\n"
+        "**Questions:**\n- Keep the old table?\n",
+        # A Questions heading only inside a fence is not a heading, so the
+        # no-heading rule applies: any line that is not a none-marker counts.
+        "Notes:\n```\n## Questions\nNone.\n```\nShould we keep the old table?\n",
+        # An unclosed fence is not skipped (fail closed).
+        "## Questions\nNone.\n```\n## Questions\nShould we keep the old table?\n",
+    ],
+)
+def test_t5_fenced_none_questions_example_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): a Questions heading inside fenced code (``` or ~~~)
+    is example text. Its "None." must not hide the real Questions section.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```markdown\n## Questions\nShould we keep it?\n```\n\n"
+        "## Questions\nNone.\n",
+        "~~~\n**Questions:**\n- Keep the old table?\n~~~\n**Questions:** N/A\n",
+    ],
+)
+def test_t5_fenced_questions_example_then_none_queues_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): a Questions heading inside fenced code is ignored, so
+    the real Questions section outside the fence decides.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_no_questions(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n\n## Questions\nN/A\n",
+        "**Questions:** None\n\n## Notes\nShort.\n\n## Questions\n"
+        "No questions.\n",
+        "## Questions\nNone.\n\n```\n## Questions\nShould we keep it?\n```\n",
+        "## Questions\nN/A\n\nExample:\n~~~\nQuestions: keep the table?\n~~~\n",
+    ],
+)
+def test_t5_all_none_questions_sections_queue_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Preservation guard (round 3): pass before and after the F3.1 fix.
+    Every Questions section outside fences says none, so there are no
+    questions, even with a fenced Questions example that asks something.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_no_questions(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\n```\nNone.\n```\n",
+        "## Questions\n\n~~~\nShould we keep the old table?\n~~~\n",
+    ],
+)
+def test_t5_fenced_block_first_under_questions_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Preservation guard (round 3): pass before and after the F3.1 fix.
+    A fenced block is never a none-marker: as the first content under a
+    Questions heading it counts as questions (fail closed).
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)
