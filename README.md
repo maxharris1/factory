@@ -612,42 +612,75 @@ workflow states) and the log, and checks that none reach `status.json` or
 `index.html`. A second test turns the redactor off and checks that the
 same leak check then finds every planted free-text secret.
 
-**Push.** `orch dashboard push` snapshots and then sends `status.json` and
-`index.html` every `dashboard.push.interval_seconds` (15 to 30); `--once`
-sends one and exits 1 if that failed. A failed snapshot or send logs one
-redacted line and the loop continues. Push is off by default: with no
-`dashboard.push` section, or `transport: none`, it logs one line and exits
-0 without opening the database or writing anything. The one transport is
-`ssh`, to the pc-wsl-bots node:
+**Push.** Push is off by default: with no `dashboard.push` section, or
+`transport: none`, nothing is pushed, `orch poll` behaves exactly as
+before, and `orch dashboard push` logs one line and exits 0 without
+opening the database or writing anything. The one transport is `ssh`, to
+the pc-wsl-bots node as cursor-bot through the box's `pc-wsl-cursor-bot`
+SSH alias:
 
 ```yaml
 dashboard:
   refresh_seconds: 20
   push:
     transport: ssh
-    host: pc-wsl-bots.tail68624b.ts.net   # or an alias from ~/.ssh/config
-    remote_dir: /path/the/server/serves   # absolute, created by Max
-    method: rsync                         # or scp
-    interval_seconds: 20
+    host: pc-wsl-cursor-bot              # an SSH alias or tailnet name
+    ssh_config: /home/box/.ssh/config    # optional: passed as ssh/scp -F
+    remote_dir: factory-dashboard        # default; relative to the remote home
+    method: scp                          # or rsync (the default)
+    # every_minutes: 5                   # omitted: push after every poll cycle
+    interval_seconds: 20                 # only for the `orch dashboard push` loop
 ```
 
-`rsync` (the default) runs `rsync --quiet --timeout=30 --chmod=F644 -e "ssh
--o BatchMode=yes -o ConnectTimeout=10" -- status.json index.html
-host:remote_dir/`; rsync writes each file to a temp name and renames it,
-so readers never see a partial file. `scp` has no rename of its own, so
-it uploads each file to a dot-prefixed temp name (`scp -q -B -o
-BatchMode=yes -o ConnectTimeout=10 -- status.json
-host:remote_dir/.status.json.push-tmp`, then the same for `index.html`)
-and, only after both uploads succeed, renames each into place with `ssh -o
-BatchMode=yes -o ConnectTimeout=10 -- host mv -f -- temp final`. An
-interrupted push leaves the published files whole, and the static server
-never serves the temp names. Every command is an argv list (no local
-shell) with a 60-second timeout; the remote `mv` sees only the validated
-`remote_dir` and fixed file names. The config
-holds no secrets: `host` is a bare alias or tailnet name (no `user@`, no
-options) and `remote_dir` is a plain absolute path. SSH uses the login Max
-provisions in `~/.ssh/config`; the factory never reads, names or passes a
-key. `check-config` validates the section.
+That is the confirmed target: the files land in
+`/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
+is `scp -F /home/box/.ssh/config status.json index.html
+pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
+`config/orch.example.yml` carries this section; the shipped `orch.yml` has
+it commented out, so nothing pushes until Max turns it on.
+
+*When it runs.* `orch poll`, which
+[`deploy/poller-service.sh`](deploy/poller-service.sh) runs, pushes after
+every poll cycle (60 seconds), or at most every `every_minutes` (1 to 1440)
+when that is set. After a cycle it starts `orch dashboard push --once --db
+<db> [--orch <orch.yml>]` as a separate process and does not wait for it;
+if the previous push is still running it skips that cycle and logs so. The
+child gets only `PATH`, `HOME`, `USER`, `LOGNAME`, locale and `TZ`,
+`TMPDIR`, `SSH_AUTH_SOCK` and the three `ORCH_*` path variables: none of
+`webhook.env`, no GitHub or Linear token. A failed snapshot or send is one
+redacted line in `poller.log`; it never reaches the poll loop, and a hook
+error there is logged by exception class only. A stop (SIGTERM) does not
+start a push. `orch dashboard push` without `--once` is still a standalone
+loop every `interval_seconds` (15 to 30); `--once` exits 1 if the push
+failed.
+
+*How it publishes.* Each file is first uploaded to a dot-prefixed temp name
+in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
+ConnectTimeout=10 -- status.json
+pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
+for `index.html`; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
+"ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
+temp names). Only after both uploads succeed does one `ssh [-F ssh_config]
+-o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
+factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
+.index.html.push-tmp index.html'` rename both over the live names. An
+interrupted upload leaves the published pair as it was; the two renames run
+back to back on the remote host with no network round-trip between them, so
+a reader never sees a half-written file and the pair is mismatched for at
+most the instant between two local `rename(2)` calls. The static server
+never serves the temp names. Every command is an argv list (no local shell)
+with a 60-second timeout; the remote shell sees only the validated
+`remote_dir` and fixed file names. The config holds no secrets: `host` is a
+bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
+path, absolute or relative to the remote login's home, with no leading `-`,
+`~`, `.` or `..` part; `ssh_config` is a plain absolute path to an
+ssh_config file, and a name that looks like a key (`id_*`, `*.pem`,
+`*.key`, `*.pub`, `*.ppk`) is refused. SSH uses the login Max provisions;
+the factory never reads, names or passes a key, and never reads the
+ssh_config file itself. `check-config` validates the section. Tests use a
+fake transport and a fake spawn; nothing in this repository runs ssh, scp
+or rsync against a real host.
 
 **Static server (not deployed).**
 [`deploy/factory-dashboard-http.service`](deploy/factory-dashboard-http.service)

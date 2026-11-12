@@ -4,3 +4,19 @@ poll_seconds: 60
 projects:
   - repo: owner/name
     factory_ref: main
+# Optional read-only dashboard push (README "Dashboard"); omit `dashboard`
+# to push nothing. `orch poll` pushes status.json and index.html to the
+# pc-wsl-bots node as cursor-bot after every poll cycle (add every_minutes: N
+# to push less often). The same upload by hand, from the box:
+#   scp -F /home/box/.ssh/config status.json index.html pc-wsl-cursor-bot:factory-dashboard/
+# i.e. /home/cursor-bot/factory-dashboard, served tailnet-only at
+# http://pc-wsl-bots.tail68624b.ts.net:8090/. No secrets: SSH uses the login
+# Max provisioned behind that alias.
+dashboard:
+  refresh_seconds: 20
+  push:
+    transport: ssh
+    host: pc-wsl-cursor-bot
+    ssh_config: /home/box/.ssh/config
+    remote_dir: factory-dashboard
+    method: scp

@@ -1,16 +1,22 @@
 """The optional `dashboard` section of orch.yml.
 
 dashboard:
-  refresh_seconds: 20        # index.html auto-refresh, 15 to 30
+  refresh_seconds: 20                  # index.html auto-refresh, 15 to 30
   push:
-    transport: none          # none (default) or ssh
-    host: pc-wsl-bots        # ssh only: an SSH alias or tailnet name
-    remote_dir: /srv/dash    # ssh only: absolute directory on that host
-    method: rsync            # ssh only: rsync (default) or scp
-    interval_seconds: 20     # 15 to 30
+    transport: none                    # none (default) or ssh
+    host: pc-wsl-cursor-bot            # ssh only: an SSH alias or tailnet name
+    ssh_config: /home/box/.ssh/config  # ssh only, optional: passed as ssh -F
+    remote_dir: factory-dashboard      # ssh only: relative to the remote
+                                       #   login's home (the default), or absolute
+    method: scp                        # ssh only: rsync (default) or scp
+    every_minutes: 5                   # ssh only, optional: `orch poll` pushes
+                                       #   at most every N minutes (1 to 1440);
+                                       #   omitted, it pushes after every cycle
+    interval_seconds: 20               # `orch dashboard push` loop, 15 to 30
 
 The section holds no secrets. The ssh transport relies on the SSH login
-Max provisioned (~/.ssh/config); nothing here names a key or password.
+Max provisioned; `ssh_config` names his ssh_config file, never a key, and
+nothing here names a key or password.
 """
 
 from __future__ import annotations
@@ -28,13 +34,28 @@ METHODS = ("rsync", "scp")
 
 # An SSH alias or DNS name only: no user@, no port, no leading dash.
 HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9-]{1,63})*$")
-# Absolute, conservative characters only, so no remote shell can misread it.
-REMOTE_DIR = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# Absolute, or relative to the remote login's home; conservative characters
+# only and no leading '-', so no remote shell or option parser can misread it.
+REMOTE_DIR = re.compile(r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$")
+# The local ssh_config file handed to ssh/scp as -F: absolute, plain.
+SSH_CONFIG = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# A file name that looks like a private or public key, not an ssh_config.
+KEY_NAME = re.compile(r"^(id_.*|.*\.(pem|key|pub|ppk))$", re.IGNORECASE)
 PLACEHOLDER = "REPLACE_WITH_"
+DEFAULT_REMOTE_DIR = "factory-dashboard"
+EVERY_MINUTES_MAX = 1440
 
 _DASHBOARD_KEYS = {"refresh_seconds", "push"}
-_PUSH_KEYS = {"transport", "host", "remote_dir", "method", "interval_seconds"}
-_SSH_ONLY = ("host", "remote_dir", "method")
+_PUSH_KEYS = {
+    "transport",
+    "host",
+    "ssh_config",
+    "remote_dir",
+    "method",
+    "every_minutes",
+    "interval_seconds",
+}
+_SSH_ONLY = ("host", "ssh_config", "remote_dir", "method", "every_minutes")
 
 
 @dataclass(frozen=True)
@@ -44,6 +65,9 @@ class PushConfig:
     remote_dir: str | None = None
     method: str = "rsync"
     interval_seconds: int = REFRESH_DEFAULT
+    ssh_config: str | None = None
+    # None: `orch poll` pushes after every cycle.
+    every_minutes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,11 +88,30 @@ def valid_host(value: object) -> bool:
     )
 
 
-def valid_remote_dir(value: object) -> bool:
-    if not isinstance(value, str) or REMOTE_DIR.fullmatch(value) is None:
-        return False
+def _plain_parts(value: str) -> bool:
     parts = [part for part in value.split("/") if part]
     return bool(parts) and all(part not in (".", "..") for part in parts)
+
+
+def valid_remote_dir(value: object) -> bool:
+    """Absolute, or relative to the remote login's home directory."""
+    if not isinstance(value, str) or REMOTE_DIR.fullmatch(value) is None:
+        return False
+    return _plain_parts(value)
+
+
+def valid_ssh_config(value: object) -> bool:
+    if not isinstance(value, str) or SSH_CONFIG.fullmatch(value) is None:
+        return False
+    return _plain_parts(value)
+
+
+def looks_like_key(value: str) -> bool:
+    return KEY_NAME.fullmatch(value.rstrip("/").rsplit("/", 1)[-1]) is not None
+
+
+def valid_every_minutes(value: object) -> bool:
+    return is_strict_int(value) and 1 <= value <= EVERY_MINUTES_MAX
 
 
 def parse_dashboard(
@@ -133,7 +176,9 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
         return PushConfig(interval_seconds=interval if in_range(interval) else REFRESH_DEFAULT)
 
     host = value.get("host")
-    remote_dir = value.get("remote_dir")
+    remote_dir = value.get("remote_dir", DEFAULT_REMOTE_DIR)
+    ssh_config = value.get("ssh_config")
+    every_minutes = value.get("every_minutes")
     method = value.get("method", "rsync")
     if host is None:
         findings.append(Finding("error", "dashboard.push.host is required for ssh"))
@@ -148,11 +193,7 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
                 "dashboard.push.host must be an SSH host alias or tailnet name",
             )
         )
-    if remote_dir is None:
-        findings.append(
-            Finding("error", "dashboard.push.remote_dir is required for ssh")
-        )
-    elif isinstance(remote_dir, str) and PLACEHOLDER in remote_dir:
+    if isinstance(remote_dir, str) and PLACEHOLDER in remote_dir:
         findings.append(
             Finding(
                 "error",
@@ -163,8 +204,41 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
         findings.append(
             Finding(
                 "error",
-                "dashboard.push.remote_dir must be an absolute path "
-                "of letters, digits, '.', '_', '-' and '/'",
+                "dashboard.push.remote_dir must be a plain path (absolute, or "
+                "relative to the remote home) of letters, digits, '.', '_', "
+                "'-' and '/', not starting with '-' and without '.' or '..' parts",
+            )
+        )
+    if ssh_config is not None:
+        if isinstance(ssh_config, str) and PLACEHOLDER in ssh_config:
+            findings.append(
+                Finding(
+                    "error",
+                    "dashboard.push.ssh_config is a REPLACE_WITH_ placeholder",
+                )
+            )
+        elif not valid_ssh_config(ssh_config):
+            findings.append(
+                Finding(
+                    "error",
+                    "dashboard.push.ssh_config must be an absolute path "
+                    "of letters, digits, '.', '_', '-' and '/'",
+                )
+            )
+        elif looks_like_key(ssh_config):
+            findings.append(
+                Finding(
+                    "error",
+                    "dashboard.push.ssh_config must name an ssh_config file, "
+                    "not a key",
+                )
+            )
+    if every_minutes is not None and not valid_every_minutes(every_minutes):
+        findings.append(
+            Finding(
+                "error",
+                "dashboard.push.every_minutes must be an integer from 1 to "
+                f"{EVERY_MINUTES_MAX}",
             )
         )
     if method not in METHODS:
@@ -177,6 +251,8 @@ def _push(value: object, findings: list[Finding]) -> PushConfig | None:
         remote_dir=remote_dir if isinstance(remote_dir, str) else None,
         method=method if method in METHODS else "rsync",
         interval_seconds=interval if in_range(interval) else REFRESH_DEFAULT,
+        ssh_config=ssh_config if isinstance(ssh_config, str) else None,
+        every_minutes=every_minutes if valid_every_minutes(every_minutes) else None,
     )
 
 

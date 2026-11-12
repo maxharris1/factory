@@ -87,6 +87,76 @@ def test_explicit_none_transport_is_valid() -> None:
     assert config == DashboardConfig()
 
 
+DEPLOY_PUSH = """\
+dashboard:
+  push:
+    transport: ssh
+    host: pc-wsl-cursor-bot
+    ssh_config: /home/box/.ssh/config
+    remote_dir: factory-dashboard
+    method: scp
+    every_minutes: 5
+"""
+
+
+def test_pc_wsl_bots_deploy_push_section_parses(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(BASE_ORCH + DEPLOY_PUSH, encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert errors(findings) == []
+    assert config is not None
+    assert config.dashboard.push == PushConfig(
+        transport="ssh",
+        host="pc-wsl-cursor-bot",
+        ssh_config="/home/box/.ssh/config",
+        remote_dir="factory-dashboard",
+        method="scp",
+        every_minutes=5,
+    )
+
+
+def test_ssh_push_defaults_to_factory_dashboard_in_the_remote_home_each_cycle() -> None:
+    config, findings = parse({"push": {"transport": "ssh", "host": "pc-wsl-cursor-bot"}})
+    assert errors(findings) == []
+    assert config is not None
+    assert config.push.remote_dir == "factory-dashboard"
+    assert config.push.ssh_config is None
+    assert config.push.every_minutes is None
+
+
+def test_shipped_orch_yml_documents_the_push_but_leaves_it_off() -> None:
+    path = ROOT / "orch.yml"
+    text = path.read_text(encoding="utf-8")
+    for needle in (
+        "#     host: pc-wsl-cursor-bot",
+        "#     ssh_config: /home/box/.ssh/config",
+        "#     remote_dir: factory-dashboard",
+        "#     method: scp",
+        "http://pc-wsl-bots.tail68624b.ts.net:8090/",
+    ):
+        assert needle in text, needle
+    config, findings = load_orch_yml(path, allow_placeholders=True)
+    assert errors(findings) == []
+    assert config is not None
+    assert config.dashboard.push == PushConfig()
+
+
+def test_example_orch_yml_pushes_to_pc_wsl_bots() -> None:
+    path = ROOT / "config" / "orch.example.yml"
+    config, findings = load_orch_yml(path)
+    assert errors(findings) == []
+    assert config is not None
+    assert config.dashboard.push == PushConfig(
+        transport="ssh",
+        host="pc-wsl-cursor-bot",
+        ssh_config="/home/box/.ssh/config",
+        remote_dir="factory-dashboard",
+        method="scp",
+        every_minutes=None,
+    )
+    assert "http://pc-wsl-bots.tail68624b.ts.net:8090/" in path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     "value,message",
     [
@@ -97,10 +167,6 @@ def test_explicit_none_transport_is_valid() -> None:
         ({"push": {"transport": "http"}}, "dashboard.push.transport must be none or ssh"),
         ({"push": {"transport": "ssh"}}, "dashboard.push.host is required for ssh"),
         (
-            {"push": {"transport": "ssh", "host": TARGET}},
-            "dashboard.push.remote_dir is required for ssh",
-        ),
-        (
             {"push": {"transport": "ssh", "host": "-oProxyCommand=sh", "remote_dir": "/srv/d"}},
             "dashboard.push.host must be an SSH host alias or tailnet name",
         ),
@@ -109,20 +175,76 @@ def test_explicit_none_transport_is_valid() -> None:
             "dashboard.push.host must be an SSH host alias or tailnet name",
         ),
         (
-            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "relative/dir"}},
-            "dashboard.push.remote_dir must be an absolute path",
+            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "/srv/../etc"}},
+            "dashboard.push.remote_dir must be a plain path",
         ),
         (
-            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "/srv/../etc"}},
-            "dashboard.push.remote_dir must be an absolute path",
+            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "a/../../etc"}},
+            "dashboard.push.remote_dir must be a plain path",
         ),
         (
             {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "/srv/d;rm -rf ~"}},
-            "dashboard.push.remote_dir must be an absolute path",
+            "dashboard.push.remote_dir must be a plain path",
         ),
         (
             {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "/"}},
-            "dashboard.push.remote_dir must be an absolute path",
+            "dashboard.push.remote_dir must be a plain path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "-rf"}},
+            "dashboard.push.remote_dir must be a plain path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "~/factory-dashboard"}},
+            "dashboard.push.remote_dir must be a plain path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "ssh/config"}},
+            "dashboard.push.ssh_config must be an absolute path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "/home/box/../root/.ssh/config"}},
+            "dashboard.push.ssh_config must be an absolute path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "/home/box/.ssh/config x"}},
+            "dashboard.push.ssh_config must be an absolute path",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "/home/box/.ssh/id_ed25519"}},
+            "dashboard.push.ssh_config must name an ssh_config file, not a key",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "/home/box/.ssh/deploy.pem"}},
+            "dashboard.push.ssh_config must name an ssh_config file, not a key",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "ssh_config": "/home/REPLACE_WITH_USER/.ssh/config"}},
+            "dashboard.push.ssh_config is a REPLACE_WITH_ placeholder",
+        ),
+        (
+            {"push": {"transport": "none", "ssh_config": "/home/box/.ssh/config"}},
+            "dashboard.push.ssh_config is only for transport ssh",
+        ),
+        (
+            {"push": {"transport": "none", "every_minutes": 5}},
+            "dashboard.push.every_minutes is only for transport ssh",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "every_minutes": 0}},
+            "dashboard.push.every_minutes must be an integer from 1 to 1440",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "every_minutes": 1441}},
+            "dashboard.push.every_minutes must be an integer from 1 to 1440",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "every_minutes": True}},
+            "dashboard.push.every_minutes must be an integer from 1 to 1440",
+        ),
+        (
+            {"push": {"transport": "ssh", "host": TARGET, "every_minutes": "5"}},
+            "dashboard.push.every_minutes must be an integer from 1 to 1440",
         ),
         (
             {"push": {"transport": "ssh", "host": TARGET, "remote_dir": "/srv/REPLACE_WITH_DIR"}},
@@ -195,95 +317,168 @@ def test_transport_for_unconfigured_is_the_noop() -> None:
     assert isinstance(transport_for(PushConfig()), NoopTransport)
 
 
-def test_rsync_command_construction(tmp_path: Path) -> None:
+OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+CONFIG_OPTIONS = ["-F", "/home/box/.ssh/config", *OPTIONS]
+RENAME_BOTH = (
+    "cd -- {dir} && mv -f -- .status.json.push-tmp status.json"
+    " && mv -f -- .index.html.push-tmp index.html"
+)
+
+
+def test_rsync_uploads_to_temp_names_then_renames_both_in_one_ssh(tmp_path: Path) -> None:
     runner = Recorder()
     paths = files(tmp_path)
     transport = SshTransport(TARGET, "/srv/factory-dashboard", runner=runner)
     transport.send(paths)
-    ((argv, kwargs),) = runner.calls
-    assert argv == [
-        "rsync",
-        "--quiet",
-        "--timeout=30",
-        "--chmod=F644",
-        "-e",
-        "ssh -o BatchMode=yes -o ConnectTimeout=10",
-        "--",
-        str(paths[0]),
-        str(paths[1]),
-        f"{TARGET}:/srv/factory-dashboard/",
+    rsync = ["rsync", "--quiet", "--timeout=30", "--chmod=F644", "-e",
+             "ssh -o BatchMode=yes -o ConnectTimeout=10", "--"]
+    assert [argv for argv, _ in runner.calls] == [
+        [*rsync, str(paths[0]), f"{TARGET}:/srv/factory-dashboard/.status.json.push-tmp"],
+        [*rsync, str(paths[1]), f"{TARGET}:/srv/factory-dashboard/.index.html.push-tmp"],
+        ["ssh", *OPTIONS, "--", TARGET, RENAME_BOTH.format(dir="/srv/factory-dashboard")],
     ]
-    assert kwargs["shell"] is False
-    assert kwargs["timeout"] == 60
-    assert kwargs["check"] is False
-    assert kwargs["stdin"] is subprocess.DEVNULL
+    for _, kwargs in runner.calls:
+        assert kwargs["shell"] is False
+        assert kwargs["timeout"] == 60
+        assert kwargs["check"] is False
+        assert kwargs["stdin"] is subprocess.DEVNULL
 
 
-def test_scp_uploads_to_temp_names_then_renames_remotely(tmp_path: Path) -> None:
+def test_scp_uploads_to_temp_names_then_renames_both_in_one_ssh(tmp_path: Path) -> None:
     runner = Recorder()
     paths = files(tmp_path)
     SshTransport("pc-wsl-bots", "/srv/factory-dashboard", method="scp", runner=runner).send(paths)
-    options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
     assert [argv for argv, _ in runner.calls] == [
-        ["scp", "-q", "-B", *options, "--", str(paths[0]),
+        ["scp", "-q", "-B", *OPTIONS, "--", str(paths[0]),
          "pc-wsl-bots:/srv/factory-dashboard/.status.json.push-tmp"],
-        ["scp", "-q", "-B", *options, "--", str(paths[1]),
+        ["scp", "-q", "-B", *OPTIONS, "--", str(paths[1]),
          "pc-wsl-bots:/srv/factory-dashboard/.index.html.push-tmp"],
-        ["ssh", *options, "--", "pc-wsl-bots", "mv", "-f", "--",
-         "/srv/factory-dashboard/.status.json.push-tmp", "/srv/factory-dashboard/status.json"],
-        ["ssh", *options, "--", "pc-wsl-bots", "mv", "-f", "--",
-         "/srv/factory-dashboard/.index.html.push-tmp", "/srv/factory-dashboard/index.html"],
+        ["ssh", *OPTIONS, "--", "pc-wsl-bots",
+         RENAME_BOTH.format(dir="/srv/factory-dashboard")],
     ]
     for _, kwargs in runner.calls:
         assert kwargs["shell"] is False
         assert kwargs["stdin"] is subprocess.DEVNULL
 
 
-class FakeRemote:
-    """Runs scp and `ssh host mv` argv against a local directory standing in for
-    the served directory on the remote host. `fail_scp_of` names a local file
-    whose upload writes only a prefix of it, then exits 1 (a dropped link)."""
+def test_pc_wsl_cursor_bot_push_uses_the_ssh_config_and_the_home_relative_dir(
+    tmp_path: Path,
+) -> None:
+    """The documented target: `scp -F /home/box/.ssh/config <files>
+    pc-wsl-cursor-bot:factory-dashboard/`, i.e. /home/cursor-bot/factory-dashboard."""
+    runner = Recorder()
+    paths = files(tmp_path)
+    transport = transport_for(
+        PushConfig(
+            transport="ssh",
+            host="pc-wsl-cursor-bot",
+            ssh_config="/home/box/.ssh/config",
+            remote_dir="factory-dashboard",
+            method="scp",
+        ),
+        runner=runner,
+    )
+    transport.send(paths)
+    assert [argv for argv, _ in runner.calls] == [
+        ["scp", "-q", "-B", *CONFIG_OPTIONS, "--", str(paths[0]),
+         "pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp"],
+        ["scp", "-q", "-B", *CONFIG_OPTIONS, "--", str(paths[1]),
+         "pc-wsl-cursor-bot:factory-dashboard/.index.html.push-tmp"],
+        ["ssh", *CONFIG_OPTIONS, "--", "pc-wsl-cursor-bot",
+         RENAME_BOTH.format(dir="factory-dashboard")],
+    ]
 
-    def __init__(self, root: Path, remote_dir: str, fail_scp_of: str | None = None):
-        self.root = root
-        self.remote_dir = remote_dir.rstrip("/")
+
+def test_rsync_passes_the_ssh_config_to_its_ssh(tmp_path: Path) -> None:
+    runner = Recorder()
+    SshTransport(
+        "pc-wsl-cursor-bot",
+        "factory-dashboard",
+        ssh_config="/home/box/.ssh/config",
+        runner=runner,
+    ).send(files(tmp_path))
+    first = runner.calls[0][0]
+    assert first[first.index("-e") + 1] == (
+        "ssh -F /home/box/.ssh/config -o BatchMode=yes -o ConnectTimeout=10"
+    )
+    assert runner.calls[-1][0][:3] == ["ssh", "-F", "/home/box/.ssh/config"]
+
+
+class FakeRemote:
+    """Runs scp, rsync and the one `ssh host 'cd -- dir && mv ...'` against a
+    local directory standing in for the remote login's home. After every
+    command it records what a reader of the served directory would see.
+    `fail_scp_of` names a local file whose upload writes only a prefix of it,
+    then exits 1 (a dropped link); `fail_rename` makes the ssh step exit 1."""
+
+    def __init__(
+        self,
+        home: Path,
+        served: str,
+        fail_scp_of: str | None = None,
+        fail_rename: bool = False,
+    ):
+        self.home = home
+        self.served = served
         self.fail_scp_of = fail_scp_of
+        self.fail_rename = fail_rename
+        self.seen: list[tuple[str, str]] = []
+        self.programs: list[str] = []
 
     def local(self, remote_path: str) -> Path:
-        assert remote_path.startswith(self.remote_dir + "/")
-        return self.root / remote_path[len(self.remote_dir) + 1 :]
+        return self.home / remote_path.lstrip("/")
+
+    def observe(self) -> None:
+        site = self.local(self.served)
+        self.seen.append(
+            (
+                (site / "status.json").read_text(encoding="utf-8"),
+                (site / "index.html").read_text(encoding="utf-8"),
+            )
+        )
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
-        if argv[0] == "scp":
+        self.programs.append(argv[0])
+        result = self._run(argv)
+        self.observe()
+        return result
+
+    def _run(self, argv: list[str]) -> subprocess.CompletedProcess:
+        if argv[0] in ("scp", "rsync"):
             separator = argv.index("--")
-            *sources, destination = argv[separator + 1 :]
-            remote = destination.split(":", 1)[1]
-            for source in sources:
-                target = self.local(remote)
-                if remote.endswith("/"):
-                    target = target / Path(source).name
-                data = Path(source).read_bytes()
-                if Path(source).name == self.fail_scp_of:
-                    target.write_bytes(data[: len(data) // 2])
-                    return subprocess.CompletedProcess(argv, 1, "", "lost connection")
-                target.write_bytes(data)
+            source, destination = argv[separator + 1 :]
+            target = self.local(destination.split(":", 1)[1])
+            data = Path(source).read_bytes()
+            if Path(source).name == self.fail_scp_of:
+                target.write_bytes(data[: len(data) // 2])
+                return subprocess.CompletedProcess(argv, 1, "", "lost connection")
+            target.write_bytes(data)
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "ssh":
             separator = argv.index("--")
-            command = argv[separator + 2 :]
-            assert command[:3] == ["mv", "-f", "--"], command
-            os.replace(self.local(command[3]), self.local(command[4]))
+            (command,) = argv[separator + 2 :]
+            steps = command.split(" && ")
+            cd = steps[0].split()
+            assert cd[:2] == ["cd", "--"], command
+            here = self.local(cd[2])
+            if self.fail_rename:
+                return subprocess.CompletedProcess(argv, 1, "", "mv: cannot move")
+            for step in steps[1:]:
+                words = step.split()
+                assert words[:3] == ["mv", "-f", "--"], command
+                os.replace(here / words[3], here / words[4])
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected command {argv}")
 
 
-def _published(tmp_path: Path) -> Path:
-    remote = tmp_path / "remote"
-    remote.mkdir()
-    (remote / "status.json").write_text('{"old": true}', encoding="utf-8")
-    (remote / "index.html").write_text("<!doctype html><p>old page</p>", encoding="utf-8")
-    return remote
+def _published(tmp_path: Path, served: str = "srv/d") -> Path:
+    home = tmp_path / "remote-home"
+    site = home / served
+    site.mkdir(parents=True)
+    (site / "status.json").write_text('{"old": true}', encoding="utf-8")
+    (site / "index.html").write_text("<!doctype html><p>old page</p>", encoding="utf-8")
+    return home
 
 
 def _new_files(tmp_path: Path) -> list[Path]:
@@ -296,24 +491,47 @@ def _new_files(tmp_path: Path) -> list[Path]:
     return [status, index]
 
 
-def test_interrupted_scp_leaves_the_published_files_whole(tmp_path: Path) -> None:
-    remote = _published(tmp_path)
-    runner = FakeRemote(remote, "/srv/d", fail_scp_of="index.html")
+OLD_PAIR = ('{"old": true}', "<!doctype html><p>old page</p>")
+
+
+@pytest.mark.parametrize("method", ["scp", "rsync"])
+def test_interrupted_upload_leaves_the_published_pair_whole(tmp_path: Path, method: str) -> None:
+    home = _published(tmp_path)
+    runner = FakeRemote(home, "/srv/d", fail_scp_of="index.html")
     with pytest.raises(PushError, match="exit 1"):
+        SshTransport(TARGET, "/srv/d", method=method, runner=runner).send(_new_files(tmp_path))
+    assert runner.programs == [method, method]
+    assert set(runner.seen) == {OLD_PAIR}
+
+
+def test_failed_rename_is_a_push_error(tmp_path: Path) -> None:
+    home = _published(tmp_path)
+    runner = FakeRemote(home, "/srv/d", fail_rename=True)
+    with pytest.raises(PushError, match="ssh to .* failed \\(exit 1\\)"):
         SshTransport(TARGET, "/srv/d", method="scp", runner=runner).send(_new_files(tmp_path))
-    assert (remote / "status.json").read_text(encoding="utf-8") == '{"old": true}'
-    assert (remote / "index.html").read_text(encoding="utf-8") == (
-        "<!doctype html><p>old page</p>"
-    )
+    assert set(runner.seen) == {OLD_PAIR}
 
 
-def test_scp_publishes_complete_files(tmp_path: Path) -> None:
-    remote = _published(tmp_path)
+@pytest.mark.parametrize("method", ["scp", "rsync"])
+@pytest.mark.parametrize("served", ["/srv/d", "factory-dashboard"])
+def test_push_publishes_complete_files_and_never_a_mismatched_pair(
+    tmp_path: Path, method: str, served: str
+) -> None:
+    home = _published(tmp_path, served.lstrip("/"))
     paths = _new_files(tmp_path)
-    SshTransport(TARGET, "/srv/d", method="scp", runner=FakeRemote(remote, "/srv/d")).send(paths)
+    runner = FakeRemote(home, served)
+    SshTransport(TARGET, served, method=method, runner=runner).send(paths)
+    site = home / served.lstrip("/")
     for path in paths:
-        assert (remote / path.name).read_bytes() == path.read_bytes()
-    assert sorted(path.name for path in remote.iterdir()) == ["index.html", "status.json"]
+        assert (site / path.name).read_bytes() == path.read_bytes()
+    assert sorted(path.name for path in site.iterdir()) == ["index.html", "status.json"]
+    new_pair = tuple(path.read_text(encoding="utf-8") for path in paths)
+    # Uploads first, then exactly one rename step: a reader sees the old pair
+    # until the rename, then the new pair, never one of each.
+    mismatched = [pair for pair in runner.seen if pair not in (OLD_PAIR, new_pair)]
+    assert mismatched == []
+    assert runner.seen == [OLD_PAIR, OLD_PAIR, new_pair]
+    assert runner.programs == [method, method, "ssh"]
 
 
 def test_ssh_transport_never_names_keys_or_credentials(tmp_path: Path) -> None:
@@ -321,6 +539,22 @@ def test_ssh_transport_never_names_keys_or_credentials(tmp_path: Path) -> None:
         runner = Recorder()
         SshTransport(TARGET, "/srv/d", method=method, runner=runner).send(files(tmp_path))
         argv = " ".join(" ".join(call) for call, _ in runner.calls)
+        for needle in ("-i ", "IdentityFile", ".ssh", "id_", "Password", "StrictHostKeyChecking=no"):
+            assert needle not in argv
+
+
+def test_ssh_config_is_the_only_path_under_dot_ssh_passed(tmp_path: Path) -> None:
+    for method in ("rsync", "scp"):
+        runner = Recorder()
+        SshTransport(
+            "pc-wsl-cursor-bot",
+            "factory-dashboard",
+            method=method,
+            ssh_config="/home/box/.ssh/config",
+            runner=runner,
+        ).send(files(tmp_path))
+        argv = " ".join(" ".join(call) for call, _ in runner.calls)
+        argv = argv.replace("-F /home/box/.ssh/config", "-F CONFIG")
         for needle in ("-i ", "IdentityFile", ".ssh", "id_", "Password", "StrictHostKeyChecking=no"):
             assert needle not in argv
 
@@ -347,6 +581,17 @@ def test_ssh_transport_refuses_unvalidated_values(tmp_path: Path) -> None:
         SshTransport("-oProxyCommand=sh", "/srv/d")
     with pytest.raises(ValueError):
         SshTransport(TARGET, "/srv/$(id)")
+    with pytest.raises(ValueError):
+        SshTransport(TARGET, "-rf")
+    with pytest.raises(ValueError):
+        SshTransport(TARGET, "factory-dashboard", ssh_config="relative/config")
+    with pytest.raises(ValueError):
+        SshTransport(TARGET, "factory-dashboard", ssh_config="/home/box/.ssh/id_rsa")
+    transport = SshTransport(TARGET, "factory-dashboard", runner=Recorder())
+    bad = tmp_path / "-rf;x"
+    bad.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError):
+        transport.commands([bad])
 
 
 def test_transport_for_ssh_config(tmp_path: Path) -> None:

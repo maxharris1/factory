@@ -17,6 +17,7 @@ from types import FrameType
 
 from lib import job_run, linear_webhook, worktrees
 from lib.dashboard_cli import main as dashboard_main
+from lib.dashboard_push import PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
@@ -89,7 +90,10 @@ poll [--db PATH] [--orch PATH] [--once] [--pidfile PATH]
   --once runs one complete poll cycle. --db defaults to $ORCH_DB.
   Only one poller may hold the database's lock. The holder writes its pid
   to --pidfile, else $ORCH_POLL_PIDFILE, else poller.pid beside the
-  database, and removes it on exit, including on SIGTERM.
+  database, and removes it on exit, including on SIGTERM. When orch.yml
+  sets dashboard.push, each cycle (or every dashboard.push.every_minutes)
+  starts `orch dashboard push --once` in the background; a push failure
+  is one log line and never stops polling.
 
 init-db [--db PATH] [--orch PATH]
   Create and initialize the database without polling or delivering work.
@@ -141,8 +145,10 @@ dashboard snapshot [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
 dashboard push [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
                [--machines PATH] [--once]
   Snapshot, then send it with orch.yml's dashboard.push transport every
-  dashboard.push.interval_seconds (15 to 30). With no transport
-  configured it logs one line and exits 0 without reading or writing.
+  dashboard.push.interval_seconds (15 to 30); --once sends one (what
+  `orch poll` runs each cycle). Files go to temp names, then one ssh
+  renames both into place. With no transport configured it logs one
+  line and exits 0 without reading or writing.
 
 linear-webhook serve [--db PATH] [--orch PATH] [--bind HOST:PORT]
   Serve orch.yml's linear_webhook: POST on linear_webhook.path only, a
@@ -315,16 +321,18 @@ def _poll(argv: list[str]) -> int:
         signal.signal(signal.SIGTERM, _exit_on_term)
         with _poll_lock(path, _pidfile_path(args.pidfile, path)):
             dispatcher, source = _runtime(path, args.orch, create=False)
+            after_poll = _dashboard_pusher(path, args.orch)
             loop = PollLoop(dispatcher, source)
             if args.once:
-                loop.run(max_polls=1)
+                loop.run(max_polls=1, after_poll=after_poll)
             else:
                 loop.run(
                     on_error=lambda exc: dispatcher.record_poll_error(
                         "poll",
                         "-",
                         type(exc).__name__,
-                    )
+                    ),
+                    after_poll=after_poll,
                 )
     except (
         GrokDeliveryError,
@@ -341,6 +349,25 @@ def _poll(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     return 0
+
+
+def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:
+    """The poll loop's dashboard push hook, or None when push is not set.
+
+    `_runtime` has already validated the file strictly; this reads only its
+    dashboard section. Placeholders elsewhere do not matter here.
+    """
+    config_path = orch_path if orch_path is not None else ROOT / "orch.yml"
+    config, findings = load_orch_yml(config_path, allow_placeholders=True)
+    if config is None or any(item.severity == "error" for item in findings):
+        return None
+    return poll_pusher_for(
+        config.dashboard.push,
+        db=db_path,
+        orch=orch_path,
+        environ=os.environ,
+        log=lambda line: print(line, file=sys.stderr, flush=True),
+    )
 
 
 def _init_db(argv: list[str]) -> int:
