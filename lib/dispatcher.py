@@ -79,6 +79,7 @@ class TrackedTicket:
     linear_issue_id: str | None = None
     linear_ready_state_id: str | None = None
     linear_ready_for_review: bool = False
+    linear_state_phase: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:

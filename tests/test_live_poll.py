@@ -44,6 +44,7 @@ from lib.poll_source import (
     HTTPResult,
     LINEAR_COMPLEXITY_PER_HOUR,
     LINEAR_ISSUE_COMPLEXITY,
+    LINEAR_ISSUE_QUERY,
     LINEAR_PROCESS_HEADROOM,
     LINEAR_REQUESTS_PER_HOUR,
     LINEAR_SEARCH_MAX_PAGES,
@@ -55,6 +56,7 @@ from lib.poll_source import (
     PollSourceError,
     TIMEOUT_SECONDS,
     _linear_ready_state_id,
+    _linear_state_phase,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
 
@@ -1463,10 +1465,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 132_720),
-        (25, 5, 10, 1_020, 607_920),
-        (100, 20, 40, 1_080, 582_240),
-        (500, 20, 460, 1_080, 647_520),
+        (5, 1, 2, 300, 134_880),
+        (25, 5, 10, 1_020, 618_720),
+        (100, 20, 40, 1_080, 592_320),
+        (500, 20, 460, 1_080, 659_040),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(
@@ -2325,3 +2327,88 @@ def test_adapter_read_timeout_on_one_ref_leaves_a_healthy_ref_alone(
             f"PollSourceError:gh api timed out after {GH_CALL_ATTEMPTS} attempts",
         )
     ]
+
+
+# Codex r1 F1.2: the handoff moves a Linear issue only from before review,
+# so the issue read carries its current state and the team's state order.
+
+RFR = {"id": "rfr", "name": "Ready for Review", "type": "started", "position": 3.0}
+
+
+def phase_issue(state: object, *, ready: dict | None = RFR) -> dict:
+    nodes = [
+        {"id": "todo", "name": "Todo", "type": "unstarted", "position": 1.0},
+        {"id": "doing", "name": "In Progress", "type": "started", "position": 2.0},
+        {"id": "qa", "name": "In QA", "type": "started", "position": 4.0},
+        {"id": "done", "name": "Done", "type": "completed", "position": 5.0},
+    ]
+    if ready is not None:
+        nodes.append(ready)
+    return {"state": state, "team": {"states": {"nodes": nodes}}}
+
+
+def test_linear_issue_query_reads_the_issue_state_and_the_state_order() -> None:
+    assert "    state { id type position }\n" in LINEAR_ISSUE_QUERY
+    assert "states { nodes { id name type position } }" in LINEAR_ISSUE_QUERY
+
+
+@pytest.mark.parametrize(
+    ("issue", "phase"),
+    [
+        (phase_issue({"id": "doing", "type": "started", "position": 2.0}), "before-review"),
+        (phase_issue({"id": "todo", "type": "unstarted", "position": 1.0}), "before-review"),
+        (phase_issue({"id": "rfr", "type": "started", "position": 3.0}), "ready-for-review"),
+        (phase_issue({"id": "qa", "type": "started", "position": 4.0}), "moved-on"),
+        (phase_issue({"id": "done", "type": "completed", "position": 5.0}), "moved-on"),
+        (phase_issue({"id": "x", "type": "canceled", "position": 6.0}), "moved-on"),
+        (phase_issue({"id": "b", "type": "backlog", "position": 0.0}), "moved-on"),
+        (phase_issue({"id": "t", "type": "triage", "position": 0.0}), "moved-on"),
+        (phase_issue({"id": "doing", "type": "started", "position": 2.0}, ready=None), "before-review"),
+        (phase_issue({"id": "doing", "type": "started"}), None),
+        (phase_issue({"id": "doing", "type": "mystery", "position": 2.0}), None),
+        (phase_issue({"type": "started", "position": 2.0}), None),
+        (phase_issue(None), None),
+        ({}, None),
+    ],
+    ids=[
+        "in-progress",
+        "todo",
+        "ready-for-review",
+        "started-after-rfr",
+        "done",
+        "canceled",
+        "backlog",
+        "triage",
+        "no-rfr-state",
+        "no-position",
+        "unknown-type",
+        "no-id",
+        "no-state",
+        "empty-issue",
+    ],
+)
+def test_linear_state_phase_places_the_issue_relative_to_ready_for_review(
+    issue: dict,
+    phase: str | None,
+) -> None:
+    assert _linear_state_phase(issue) == phase
+
+
+def test_linear_ticket_carries_the_issue_state_phase() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.search_items = [{"number": 12}]
+    issue = {
+        **linear_issue(),
+        **phase_issue({"id": "done", "type": "completed", "position": 5.0}),
+    }
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=linear_transport_for(issue),
+    )
+
+    ticket = source._linear_ticket(source.config.projects[0], issue)
+
+    assert ticket.linear_state_phase == "moved-on"
+    assert ticket.linear_ready_state_id == "rfr"

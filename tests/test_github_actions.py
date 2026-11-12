@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import subprocess
 from collections.abc import Sequence
@@ -306,7 +307,8 @@ def test_fast_forward_422_not_a_fast_forward_raises_and_never_falls_back() -> No
         actions.fast_forward(pr(), branch="main", head=HEAD)
 
     assert isinstance(raised.value, ShipError)
-    assert "Update is not a fast forward" in str(raised.value)
+    assert "(HTTP 422)" in str(raised.value)
+    assert "Update is not a fast forward" not in str(raised.value)
     assert gh.keys() == [FF]
 
 
@@ -775,6 +777,7 @@ def test_linear_handoff_only_marks_pr_ready_and_optionally_moves_rfr(
         pr("handoff", tickets="linear", ticket_id="AUT-42"),
         pr_number="42",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
 
     actions.set_state(linked, "building")
@@ -797,6 +800,7 @@ def test_linear_handoff_refuses_changed_linked_pr_before_any_write() -> None:
         pr("handoff", tickets="linear", ticket_id="AUT-42"),
         pr_number="42",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
     actions = LinearReviewActions(
         move_ready_for_review=True,
@@ -824,6 +828,7 @@ def test_linear_handoff_retries_only_before_external_writes() -> None:
         pr("handoff", tickets="linear", ticket_id="AUT-42"),
         pr_number="42",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
     before_write = LinearReviewActions(
         move_ready_for_review=True,
@@ -1313,6 +1318,7 @@ def test_an_unconfirmed_linear_move_reports_whether_the_pr_write_landed(
         pr("handoff", tickets="linear", ticket_id="AUT-42"),
         pr_number="42",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
     actions = LinearReviewActions(
         move_ready_for_review=True,
@@ -1341,3 +1347,198 @@ def test_gh_failure_safe_detail_keeps_status_but_no_output() -> None:
         actions.branch_tip(pr(), "main")
 
     assert raised.value.safe_detail == "gh api GET git/ref/heads/main exited 1 (HTTP 401)"
+
+
+# Codex r1 F1.2: the Linear move is made only from the issue's pre-review
+# state, read fresh at handoff time.
+
+
+@pytest.mark.parametrize(
+    ("phase", "draft", "writes"),
+    [
+        ("before-review", True, ["AUT-42"]),
+        ("before-review", False, ["AUT-42"]),
+        ("ready-for-review", True, []),
+        ("ready-for-review", False, []),
+        ("moved-on", True, []),
+        ("moved-on", False, []),
+    ],
+    ids=[
+        "before-review-draft",
+        "before-review-ready-pr",
+        "already-rfr-draft",
+        "already-rfr-no-op",
+        "moved-on-draft",
+        "moved-on-ready-pr",
+    ],
+)
+def test_linear_handoff_moves_only_an_issue_still_before_review(
+    phase: str,
+    draft: bool,
+    writes: list[str],
+) -> None:
+    gh = RecordedGh()
+    gh.route(PULL, draft_pull() if draft else served("pull-42-open.json"))
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    linear_writes: list[str] = []
+    snapshot = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+        linear_state_phase="before-review",
+    )
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        fresh_ticket=lambda ref: replace(snapshot, linear_state_phase=phase),
+        runner=gh,
+    )
+
+    actions.handoff(snapshot, HEAD)
+
+    assert linear_writes == writes
+    assert gh.keys() == ([PULL, MARK_READY] if draft else [PULL])
+
+
+@pytest.mark.parametrize("draft", [True, False])
+def test_linear_handoff_with_an_unknown_issue_state_fails_closed_before_any_write(
+    draft: bool,
+) -> None:
+    gh = RecordedGh()
+    gh.route(PULL, draft_pull() if draft else served("pull-42-open.json"))
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    linear_writes: list[str] = []
+    linked = replace(
+        pr("handoff", tickets="linear", ticket_id="AUT-42"),
+        pr_number="42",
+        linear_ready_for_review=True,
+    )
+    actions = LinearReviewActions(
+        move_ready_for_review=True,
+        linear_ready=lambda ticket: linear_writes.append(ticket.ticket_id),
+        fresh_ticket=lambda ref: linked,
+        runner=gh,
+    )
+
+    with pytest.raises(GitHubAdapterError, match="Linear issue state is unavailable") as raised:
+        actions.handoff(linked, HEAD)
+
+    assert raised.value.write_confirmed is False
+    assert gh.calls == []
+    assert linear_writes == []
+
+
+# Codex r1 F1.3: the merge 409 and fast-forward 422 wrappers carry only the
+# inner safe detail, never gh's stderr or stdout.
+
+LEAKED_TOKEN = "ghp_" + "Q" * 36
+
+
+def leaky_http_error(name: str, status: int) -> GhResult:
+    body = (FIXTURES / name).read_text()
+    message = body.split('"message": "', 1)[1].split('"', 1)[0]
+    stdout = body.rstrip().removesuffix("}") + f', "token": "{LEAKED_TOKEN}"}}'
+    stderr = (
+        f"gh: {message} (HTTP {status})\n"
+        f"https://api.github.com/repos/owner/repo?access_token={LEAKED_TOKEN}\n"
+    )
+    return GhResult(1, stdout, stderr)
+
+
+def assert_no_gh_output(text: str, message: str) -> None:
+    for forbidden in (
+        message,
+        LEAKED_TOKEN,
+        "ghp_",
+        "http",
+        "docs.github.com",
+        "api.github.com",
+        "documentation_url",
+        "{",
+    ):
+        assert forbidden not in text, (forbidden, text)
+
+
+@pytest.mark.parametrize(
+    ("ship", "response", "error", "safe", "message"),
+    [
+        (
+            "merge",
+            leaky_http_error("merge-head-modified-409.json", 409),
+            HeadMismatchError,
+            f"PR head is not {HEAD}: gh api PUT pulls/42/merge exited 1 (HTTP 409)",
+            "Head branch was modified",
+        ),
+        (
+            "fast-forward",
+            leaky_http_error("ref-not-fast-forward-422.json", 422),
+            NotFastForwardError,
+            f"{HEAD} is not a fast-forward of main: "
+            "gh api PATCH git/refs/heads/main exited 1 (HTTP 422)",
+            "Update is not a fast forward",
+        ),
+    ],
+    ids=["merge-409", "fast-forward-422"],
+)
+def test_merge_and_fast_forward_wrappers_keep_gh_output_out_of_the_error(
+    ship: str,
+    response: GhResult,
+    error: type[GitHubAdapterError],
+    safe: str,
+    message: str,
+) -> None:
+    actions, gh = adapter()
+    gh.route(MERGE if ship == "merge" else FF, response)
+
+    with pytest.raises(error) as raised:
+        if ship == "merge":
+            actions.merge(pr("merge"), squash=True, match_head_commit=HEAD)
+        else:
+            actions.fast_forward(pr("merge"), branch="main", head=HEAD)
+
+    assert raised.value.safe_detail == safe
+    assert_no_gh_output(raised.value.safe_detail, message)
+    assert_no_gh_output(str(raised.value), message)
+
+
+def test_e2e_merge_409_records_no_gh_output_in_ship_intents(tmp_path: Path) -> None:
+    dispatcher, queue, gh, source, _shipper = github_dispatcher(tmp_path, "merge")
+    gh.route(COMMENTS, served("e2e-comments-approve.json"))
+    gh.route(PULL, served("pull-42-open.json"))
+    gh.route(MERGE, leaky_http_error("merge-head-modified-409.json", 409))
+
+    dispatcher.poll_once(source)
+
+    with queue.connect() as connection:
+        error = connection.execute("SELECT error FROM ship_intents").fetchone()[0]
+    assert error == (
+        f"HeadMismatchError: PR head is not {HEAD}: "
+        "gh api PUT pulls/42/merge exited 1 (HTTP 409)"
+    )
+    assert_no_gh_output(error, "Head branch was modified")
+    grok = FakeBot(queue, "grok").drain()
+    detail = json.loads(str(grok[0].request.detail))["detail"]
+    assert detail == f"ship raised {error}"
+    assert_no_gh_output(detail, "Head branch was modified")
+
+
+def test_e2e_fast_forward_422_records_no_gh_output_in_external_ship_intents(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh, shipper = approve_then_ok(tmp_path)
+    source = shipper.inner.source
+    gh.route(TIP, served("ref-main-base.json"))
+    gh.route(FF, leaky_http_error("ref-not-fast-forward-422.json", 422))
+
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    with queue.connect() as connection:
+        error = connection.execute(
+            "SELECT error FROM external_ship_intents"
+        ).fetchone()[0]
+    assert error == (
+        f"NotFastForwardError: {HEAD} is not a fast-forward of main: "
+        "gh api PATCH git/refs/heads/main exited 1 (HTTP 422)"
+    )
+    assert_no_gh_output(error, "Update is not a fast forward")

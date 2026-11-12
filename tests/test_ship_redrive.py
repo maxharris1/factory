@@ -304,6 +304,7 @@ def linear_snapshot() -> TrackedTicket:
         factory=replace(factory(ship="handoff"), tickets="linear"),
         pr_number="42",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
 
 
@@ -417,18 +418,24 @@ CREATE TABLE handled_comments (
 """
 
 
-def legacy_db(path: Path) -> None:
+LEGACY_ROWS = (
+    (AUT0, "AUT-2286", "6813518921", HEAD, "handoff", "failed", "GitHubAdapterError"),
+    (AUT0, "AUT-1", "1", HEAD, "handoff", "failed", "RuntimeError"),
+    (AUT0, "AUT-2", "2", HEAD, "merge", "failed", "GitHubAdapterError"),
+    (AUT0, "AUT-3", "3", HEAD, "handoff", "completed", None),
+)
+
+
+def legacy_db(
+    path: Path,
+    rows: tuple[tuple[object, ...], ...] = LEGACY_ROWS,
+) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(LEGACY_SHIP_INTENTS)
         connection.execute(LEGACY_HANDLED)
         connection.executemany(
             "INSERT INTO ship_intents VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [
-                (AUT0, "AUT-2286", "6813518921", HEAD, "handoff", "failed", "GitHubAdapterError"),
-                (AUT0, "AUT-1", "1", HEAD, "handoff", "failed", "RuntimeError"),
-                (AUT0, "AUT-2", "2", HEAD, "merge", "failed", "GitHubAdapterError"),
-                (AUT0, "AUT-3", "3", HEAD, "handoff", "completed", None),
-            ],
+            rows,
         )
         connection.execute(
             "INSERT INTO handled_comments VALUES (?, ?, ?, ?)",
@@ -453,6 +460,7 @@ def aut0_2286() -> TrackedTicket:
         risk="high",
         pr_number="1360",
         linear_ready_for_review=True,
+        linear_state_phase="before-review",
     )
 
 
@@ -598,3 +606,318 @@ def test_label_write_after_a_re_drive_is_retried_without_another_handoff(
     assert actions.states.count("handed-off") == 2
     assert gh.count(MARK_READY) == 1
     assert [action for action, _ in grok_wakes(queue)] == ["ship-failed", "done"]
+
+
+# Codex r1 F1.1 and F1.2: re-drive only the trusted APPROVE still in force,
+# and hand a ticket off at most once per head.
+
+
+def aut0_approve(comment_id: str, created_at: float) -> object:
+    return comment(
+        comment_id,
+        VERDICT.format(round=1, head=HEAD, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=created_at,
+    )
+
+
+def aut0_ticket(*comments: object, phase: str | None = "before-review") -> TrackedTicket:
+    return replace(aut0_2286(), comments=comments, linear_state_phase=phase)
+
+
+def aut0_dispatcher(
+    tmp_path: Path,
+    rows: tuple[tuple[object, ...], ...] = LEGACY_ROWS,
+    *,
+    handled: tuple[str, ...] = (),
+    pulls: tuple[GhResult, ...] | None = None,
+    phase: str | None = "before-review",
+    workflow_state: str = "waiting-max",
+) -> tuple[Dispatcher, SQLiteJobQueue, RecordedGh, list[str]]:
+    """An old-schema DB, upgraded by Dispatcher init, with the Linear adapter."""
+    path = tmp_path / "orch.db"
+    legacy_db(path, rows)
+    with sqlite3.connect(path) as connection:
+        connection.executemany(
+            "INSERT OR IGNORE INTO handled_comments VALUES (?, 'AUT-2286', ?, ?)",
+            [(AUT0, comment_id, "failed-verdict-GitHubAdapterError") for comment_id in handled],
+        )
+    gh = RecordedGh()
+    gh.route(AUT0_PULL, *(pulls if pulls is not None else (draft_pull(),)))
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    moved: list[str] = []
+
+    def fresh(ref):
+        del ref
+        return replace(aut0_2286(), linear_state_phase=phase)
+
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions={
+            AUT0: LinearReviewActions(
+                move_ready_for_review=True,
+                linear_ready=lambda ticket: moved.append(ticket.ticket_id),
+                fresh_ticket=fresh,
+                runner=gh,
+            )
+        },
+        grok_delivery=FakeGrokDelivery(),
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (repo, ticket_id, workflow_state)
+            VALUES (?, 'AUT-2286', ?)
+            """,
+            (AUT0, workflow_state),
+        )
+    return dispatcher, queue, gh, moved
+
+
+def aut0_intent(queue: SQLiteJobQueue, comment_id: str, repo: str = AUT0) -> tuple:
+    with queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT status, error, redrive FROM ship_intents
+            WHERE repo = ? AND comment_id = ?
+            """,
+            (repo, comment_id),
+        ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def aut0_state(queue: SQLiteJobQueue) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE ticket_id = 'AUT-2286'"
+            ).fetchone()[0]
+        )
+
+
+def test_re_drive_refuses_an_approval_superseded_by_a_newer_verdict(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh = github_setup(tmp_path)
+    gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
+    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    snapshot = approve_snapshot()
+    dispatcher.process(snapshot)
+    assert intent(queue)["redrive"] == "eligible"
+    revise = comment(
+        "revise-2",
+        VERDICT.format(round=2, head=HEAD, verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=5,
+    )
+
+    dispatcher.process(replace(snapshot, comments=(*snapshot.comments, revise)))
+
+    assert gh.count(MARK_READY) == 0
+    assert gh.keys() == [PULL]
+    assert (intent(queue)["status"], intent(queue)["redrive"]) == ("failed", "spent")
+    assert "done" not in [action for action, _ in grok_wakes(queue)]
+
+
+def test_legacy_re_drive_refuses_an_approval_superseded_by_a_newer_verdict(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, gh, moved = aut0_dispatcher(tmp_path)
+    revise = comment(
+        "6813519500",
+        VERDICT.format(round=2, head=HEAD, verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=5,
+    )
+
+    dispatcher.process(aut0_ticket(aut0_approve("6813518921", 1), revise))
+
+    assert gh.calls == []
+    assert moved == []
+    assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
+    assert aut0_state(queue) != "handed-off"
+    assert "done" not in [action for action, _ in grok_wakes(queue)]
+
+
+def test_an_untrusted_newer_verdict_does_not_supersede_the_approval(
+    tmp_path: Path,
+) -> None:
+    """Preservation guard: only a trusted verdict can be the one in force."""
+    dispatcher, queue, gh, moved = aut0_dispatcher(tmp_path)
+    forged = comment(
+        "6813519500",
+        VERDICT.format(round=2, head=HEAD, verdict="REVISE", risk="high"),
+        author="mallory",
+        created_at=5,
+    )
+
+    dispatcher.process(aut0_ticket(aut0_approve("6813518921", 1), forged))
+
+    assert gh.keys() == [AUT0_PULL, MARK_READY]
+    assert moved == ["AUT-2286"]
+    assert aut0_intent(queue, "6813518921") == ("completed", None, "spent")
+
+
+def test_two_eligible_intents_on_one_ticket_hand_off_once(tmp_path: Path) -> None:
+    rows = (
+        (AUT0, "AUT-2286", "6813518921", HEAD, "handoff", "failed", "GitHubAdapterError"),
+        (AUT0, "AUT-2286", "6813518999", HEAD, "handoff", "failed", "GitHubAdapterError"),
+    )
+    dispatcher, queue, gh, moved = aut0_dispatcher(
+        tmp_path,
+        rows,
+        handled=("6813518999",),
+        pulls=(draft_pull(), served("pull-42-open.json")),
+    )
+    snapshot = aut0_ticket(
+        aut0_approve("6813518921", 1),
+        aut0_approve("6813518999", 2),
+    )
+
+    dispatcher.process(snapshot)
+
+    assert moved == ["AUT-2286"]
+    assert gh.count(MARK_READY) == 1
+    assert [action for action, _ in grok_wakes(queue)] == ["done"]
+    assert aut0_intent(queue, "6813518999") == ("completed", None, "spent")
+    assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
+
+    calls = len(gh.calls)
+    dispatcher.process(snapshot)
+    assert len(gh.calls) == calls
+    assert moved == ["AUT-2286"]
+
+
+def test_no_second_handoff_when_the_ticket_already_completed_one_at_that_head(
+    tmp_path: Path,
+) -> None:
+    rows = (
+        (AUT0, "AUT-2286", "6813518921", HEAD, "handoff", "completed", None),
+        (AUT0, "AUT-2286", "6813518999", HEAD, "handoff", "failed", "GitHubAdapterError"),
+    )
+    dispatcher, queue, gh, moved = aut0_dispatcher(
+        tmp_path,
+        rows,
+        handled=("6813518999",),
+    )
+
+    dispatcher.process(
+        aut0_ticket(aut0_approve("6813518921", 1), aut0_approve("6813518999", 2))
+    )
+
+    assert gh.calls == []
+    assert moved == []
+    assert aut0_intent(queue, "6813518999") == ("failed", "GitHubAdapterError", "spent")
+    assert "done" not in [action for action, _ in grok_wakes(queue)]
+
+
+@pytest.mark.parametrize("state", ["handed-off", "merged", "done"])
+def test_no_re_drive_once_the_ticket_is_terminal(tmp_path: Path, state: str) -> None:
+    dispatcher, queue, gh, moved = aut0_dispatcher(tmp_path, workflow_state=state)
+
+    dispatcher.process(aut0_2286())
+
+    assert gh.calls == []
+    assert moved == []
+    assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
+    assert aut0_state(queue) == state
+
+
+@pytest.mark.parametrize(
+    ("phase", "pull", "keys"),
+    [
+        ("moved-on", "draft", [AUT0_PULL, MARK_READY]),
+        ("moved-on", "ready", [AUT0_PULL]),
+        ("ready-for-review", "ready", [AUT0_PULL]),
+    ],
+    ids=["human-moved-on-draft-pr", "human-moved-on-ready-pr", "no-op-re-drive"],
+)
+def test_re_drive_never_moves_a_linear_issue_that_already_left_its_pre_review_state(
+    tmp_path: Path,
+    phase: str,
+    pull: str,
+    keys: list[tuple[str, ...]],
+) -> None:
+    dispatcher, queue, gh, moved = aut0_dispatcher(
+        tmp_path,
+        pulls=(draft_pull() if pull == "draft" else served("pull-42-open.json"),),
+        phase=phase,
+    )
+
+    dispatcher.process(aut0_2286())
+
+    assert gh.keys() == keys
+    assert moved == []
+    assert aut0_intent(queue, "6813518921") == ("completed", None, "spent")
+
+
+# Codex r1 F1.4: migration edge cases. These are preservation guards for the
+# r0 backfill; each names the mutation it catches.
+
+
+def test_migration_marks_exact_legacy_handoff_errors_in_every_repo_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """Guards: error IN (...) widened to LIKE/prefix/case-insensitive, or the
+    backfill dropping HeadMismatchError; the re-drive leaking across repos."""
+    near_misses = (
+        "GitHubAdapterError: x",
+        "githubadaptererror",
+        " GitHubAdapterError",
+        "HeadMismatchError ",
+        "GitHubAdapterErrorX",
+        "NotFastForwardError",
+        "RetryableShipError",
+        "",
+        None,
+    )
+    rows = (
+        (AUT0, "AUT-2286", "6813518921", HEAD, "handoff", "failed", "GitHubAdapterError"),
+        (AUT0, "AUT-10", "10", HEAD, "handoff", "failed", "HeadMismatchError"),
+        ("acme/other", "AUT-2286", "6813518921", HEAD, "handoff", "failed", "GitHubAdapterError"),
+        *(
+            (AUT0, f"AUT-{100 + index}", str(100 + index), HEAD, "handoff", "failed", error)
+            for index, error in enumerate(near_misses)
+        ),
+    )
+    dispatcher, queue, gh, moved = aut0_dispatcher(tmp_path, rows)
+
+    assert aut0_intent(queue, "10")[2] == "eligible"
+    assert aut0_intent(queue, "6813518921", "acme/other")[2] == "eligible"
+    for index in range(len(near_misses)):
+        assert aut0_intent(queue, str(100 + index))[2] is None, near_misses[index]
+
+    dispatcher.process(aut0_2286())
+
+    assert moved == ["AUT-2286"]
+    assert aut0_intent(queue, "6813518921") == ("completed", None, "spent")
+    assert aut0_intent(queue, "6813518921", "acme/other") == (
+        "failed",
+        "GitHubAdapterError",
+        "eligible",
+    )
+
+
+def test_a_spent_legacy_row_stays_spent_after_a_second_init(tmp_path: Path) -> None:
+    """Guard: the backfill running on every init instead of only with the
+    column add would flip this spent row back to eligible."""
+    dispatcher, queue, gh, moved = aut0_dispatcher(tmp_path)
+    dispatcher.process(replace(aut0_2286(), current_head="b" * 40))
+    assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
+
+    second = Dispatcher(
+        tmp_path / "orch.db",
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=dispatcher.review_actions,
+        grok_delivery=FakeGrokDelivery(),
+    )
+
+    assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
+    second.process(aut0_2286())
+    assert gh.calls == []
+    assert moved == []
