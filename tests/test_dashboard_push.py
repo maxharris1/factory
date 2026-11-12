@@ -149,7 +149,7 @@ def test_explicit_none_transport_is_valid() -> None:
 def test_invalid_dashboard_config_is_refused(value: object, message: str) -> None:
     config, findings = parse(value)
     assert config is None
-    assert message in errors(findings)
+    assert any(message in error for error in errors(findings)), errors(findings)
 
 
 def test_check_config_reports_dashboard_errors(tmp_path: Path) -> None:
@@ -191,8 +191,8 @@ def test_noop_transport_does_nothing(tmp_path: Path) -> None:
     NoopTransport().send(files(tmp_path))
 
 
-def test_transport_for_unconfigured_is_none() -> None:
-    assert transport_for(PushConfig()) is None
+def test_transport_for_unconfigured_is_the_noop() -> None:
+    assert isinstance(transport_for(PushConfig()), NoopTransport)
 
 
 def test_rsync_command_construction(tmp_path: Path) -> None:
@@ -312,7 +312,7 @@ def test_unconfigured_push_is_a_noop_that_logs_one_line(tmp_path: Path) -> None:
     snapshot, calls = snapshotter(tmp_path)
     sleeps: list[float] = []
     code = run_push(
-        transport=None,
+        transport=NoopTransport(),
         snapshot=snapshot,
         interval=20,
         once=False,
@@ -425,7 +425,9 @@ def test_snapshot_failure_is_logged_redacted_and_not_sent(tmp_path: Path) -> Non
 
 
 def run_orch(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    full_env = {key: value for key, value in os.environ.items() if key != "ORCH_DB"}
+    full_env = {
+        key: value for key, value in os.environ.items() if not key.startswith("ORCH_")
+    }
     full_env.update(env or {})
     return subprocess.run(
         [sys.executable, str(ROOT / "bin" / "orch"), *args],

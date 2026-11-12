@@ -1,0 +1,32 @@
+# Read-only static file server for the pushed factory dashboard.
+#
+# For the pc-wsl-bots WSL node (pc-wsl-bots.tail68624b.ts.net), not the box.
+# Nothing in this repository installs, enables or starts it; see README
+# "Dashboard". It binds only this node's tailnet IPv4 address, never a
+# wildcard (all-interfaces) address, and ExecStartPre refuses to start
+# unless TAILNET_IP is in Tailscale's 100.64.0.0/10 range. If Tailscale is down the bind
+# fails and systemd retries; it never falls back to another address.
+#
+# Max creates ~/.config/factory-dashboard/http.env (no secrets in it):
+#   TAILNET_IP=<this node's `tailscale ip -4`>
+#   DASHBOARD_DIR=<the directory orch.yml dashboard.push.remote_dir names>
+#   DASHBOARD_PORT=8787
+#
+# python3 -m http.server answers only GET and HEAD, so the directory is
+# served read-only; the box's push (rsync or scp over SSH) is the only writer.
+[Unit]
+Description=Factory dashboard static server (tailnet only, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/factory-dashboard/http.env
+ExecStartPre=/usr/bin/python3 -c 'import ipaddress,os,re,sys; v=os.environ.get("TAILNET_IP",""); ok=re.fullmatch("[0-9.]{7,15}",v) is not None and ipaddress.IPv4Address(v) in ipaddress.ip_network("100.64.0.0/10"); sys.exit(0 if ok else "TAILNET_IP must be this node tailnet address in 100.64.0.0/10")'
+ExecStart=/usr/bin/python3 -m http.server ${DASHBOARD_PORT} --bind ${TAILNET_IP} --directory ${DASHBOARD_DIR}
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

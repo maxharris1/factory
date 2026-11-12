@@ -523,13 +523,25 @@ def test_log_tail_reads_only_the_end(tmp_path: Path) -> None:
     assert read_log_tail(log, lines=5) == ["last one"]
 
 
-def test_log_tail_strips_control_characters_and_caps_length(tmp_path: Path) -> None:
+def test_log_tail_strips_control_characters(tmp_path: Path) -> None:
     log = tmp_path / "poller.log"
-    log.write_bytes(b"\x1b[31mred\x1b[0m \x00ok " + b"y" * 1000 + b"\n")
-    (line,) = read_log_tail(log, lines=5)
-    assert "\x1b" not in line and "\x00" not in line
-    assert line.startswith("[31mred[0m ok")
+    log.write_bytes(b"\x1b[31mred\x1b[0m \x00ok\tdone\n")
+    assert read_log_tail(log, lines=5) == ["[31mred[0m ok done"]
+
+
+def test_log_tail_omits_oversized_lines_instead_of_cutting_them(tmp_path: Path) -> None:
+    log = tmp_path / "poller.log"
+    log.write_bytes(b"z" * (dashboard.RAW_LINE_LIMIT + 1) + b"\nshort\n")
+    assert read_log_tail(log, lines=5) == ["[long line omitted]", "short"]
+
+
+def test_snapshot_caps_lines_after_redaction(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    token = "gh" + "p_" + "A1b2C3d4E5" * 4
+    log.write_text("y" * (dashboard.LINE_LIMIT - 10) + " " + token + "\n", encoding="utf-8")
+    (line,) = collect_snapshot(db, log, now=NOW)["poller"]["log"]["tail"]
     assert len(line) <= dashboard.LINE_LIMIT
+    assert token[:8] not in line
 
 
 # --- redaction ----------------------------------------------------------------
@@ -552,8 +564,16 @@ def test_redact_removes_each_secret_shape(name: str, secret: str) -> None:
         assert secret not in redact(sample), name
 
 
-def test_redact_keeps_ordinary_text() -> None:
-    text = "poll:PollCycleError maxharris1/cleffy#12 build -> claude 45s"
+@pytest.mark.parametrize(
+    "text",
+    [
+        "poll:PollCycleError maxharris1/cleffy#12 build -> claude 45s",
+        "maxharris1/tracy-harris-coaching#5 waiting-max",
+        "Linear poll budget deferred discovery",
+        "basic checks passed; token budget ok",
+    ],
+)
+def test_redact_keeps_ordinary_text(text: str) -> None:
     assert redact(text) == text
 
 
@@ -714,7 +734,9 @@ def test_html_is_self_contained(tmp_path: Path) -> None:
 
 
 def run_orch(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    full_env = {key: value for key, value in os.environ.items() if key != "ORCH_DB"}
+    full_env = {
+        key: value for key, value in os.environ.items() if not key.startswith("ORCH_")
+    }
     full_env.update(env or {})
     return subprocess.run(
         [sys.executable, str(ROOT / "bin" / "orch"), *args],

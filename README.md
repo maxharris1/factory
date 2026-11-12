@@ -221,6 +221,114 @@ and paused tracker items. It opens the dispatcher database read-only and does
 not claim, release, lease, wake, or update anything. Device rows stay empty
 until F2-01 adds the device pool.
 
+## Dashboard
+
+```sh
+bin/orch dashboard snapshot --db "$ORCH_DB" --out "$HOME/.local/state/factory/dashboard"
+bin/orch dashboard push --db "$ORCH_DB"
+```
+
+The box cannot take inbound tailnet connections, so there is no live
+server on it. `orch dashboard snapshot` opens the dispatcher database
+read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
+refused, never created), reads the last 50 lines of `poller.log`, and
+writes `status.json` and a static, self-contained `index.html` to `--out`.
+Each file is written to a temp file in the same directory, fsynced, then
+renamed into place. The page reloads itself every `dashboard.refresh_seconds`
+(15 to 30, default 20; `--refresh` overrides it). Paths: `--db`, else
+`$ORCH_DB`; `--log`, else `$ORCH_POLL_LOG`, else `poller.log` beside the
+database; `--out`, else `$ORCH_DASHBOARD_DIR`, else `dashboard/` beside the
+database; `--machines`, else the checkout's `machines.yml` when present.
+
+The snapshot shows the queue (queued, running, done and failed jobs by
+recipient and action), running jobs with the age of their last heartbeat,
+queued jobs with their wait, box slots and, when `machines.yml` (F2-01) is
+present, device rows (enabled, placeholder, harnesses, slots held from
+`device_slots` when that table exists; absent or invalid files show no
+device rows), stuck tickets and overdue jobs (a heartbeat or queue wait
+past the job's timeout), paused tickets, every tracked ticket's state,
+review round and gate count, poll errors (last hour, last day, newest 20),
+`poll_deferrals` when that table exists, the poller's last activity (the
+newest of the log's modification time, poll error and deferral; `main`
+records no per-cycle row) and the handoff-savings counter.
+
+**Handoff savings.** docs/SPEC.md does not define this counter; the
+dashboard brief does, and this is its database form. `scripted` counts
+jobs for `claude`, `codex` or `cursor` that `orch wait` claimed and the bot
+finished with an `orch:v1` handoff comment (`state = 'done'` with a
+`handoff_comment_id`): handoffs routed from an `orch:v1` comment to a bot
+by script. `scripted_in_flight` counts such jobs still running.
+`bot_to_bot` counts jobs routed to `grok`: each wakes Grok Bot to hand off
+by hand. `scripted_share` is `scripted / (scripted + bot_to_bot)`. Bot
+messages outside the factory are not in the database, so Grok wakes stand
+in for bot-to-bot handoffs.
+
+**Redaction.** Only allowlisted columns are read: never `jobs.detail`,
+heads, comment bodies or other free-form job data. The environment is not
+read apart from the three `ORCH_*` path variables. Unknown action,
+recipient, state or tracker values show as `other`. Every free-text value
+(stuck reasons, poll errors, deferrals, log lines) goes through one
+redactor, and the finished snapshot is walked once more before writing.
+The redactor removes every URL (so webhook URLs and `user:pass@` URLs go
+whole), `Authorization`/`Cookie`/API-key headers, `Bearer` and token-like
+`token`/`basic` values, GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+`github_pat_`), Linear (`lin_api_`, `lin_oauth_`) and other common token
+shapes, `NAME=value` and `name: value` pairs whose name looks like a
+secret (the name stays, the value goes), email addresses, and long opaque
+strings (32 or more token characters with digits, which includes full
+SHAs). Lines are capped after redaction, and a log line over 4096
+characters is dropped rather than cut. `tests/test_dashboard.py` plants a
+fake webhook URL, a credentialed URL, a Bearer token, four GitHub token
+shapes, a Linear key shape, a secret assignment and an email in the
+environment, the database and the log, and checks that none reach
+`status.json` or `index.html`. A second test turns the redactor off and
+checks that the same leak check then finds every planted free-text secret.
+
+**Push.** `orch dashboard push` snapshots and then sends `status.json` and
+`index.html` every `dashboard.push.interval_seconds` (15 to 30); `--once`
+sends one and exits 1 if that failed. A failed snapshot or send logs one
+redacted line and the loop continues. Push is off by default: with no
+`dashboard.push` section, or `transport: none`, it logs one line and exits
+0 without opening the database or writing anything. The one transport is
+`ssh`, to the pc-wsl-bots node:
+
+```yaml
+dashboard:
+  refresh_seconds: 20
+  push:
+    transport: ssh
+    host: pc-wsl-bots.tail68624b.ts.net   # or an alias from ~/.ssh/config
+    remote_dir: /path/the/server/serves   # absolute, created by Max
+    method: rsync                         # or scp
+    interval_seconds: 20
+```
+
+`rsync` (the default) runs `rsync --quiet --timeout=30 --chmod=F644 -e "ssh
+-o BatchMode=yes -o ConnectTimeout=10" -- status.json index.html
+host:remote_dir/`; rsync writes each file to a temp name and renames it,
+so readers never see a partial file. `scp` runs `scp -q -B -o BatchMode=yes
+-o ConnectTimeout=10 -- ... host:remote_dir/` and overwrites in place.
+Both are argv lists (no local shell) with a 60-second timeout. The config
+holds no secrets: `host` is a bare alias or tailnet name (no `user@`, no
+options) and `remote_dir` is a plain absolute path. SSH uses the login Max
+provisions in `~/.ssh/config`; the factory never reads, names or passes a
+key. `check-config` validates the section.
+
+**Static server (not deployed).**
+[`deploy/factory-dashboard-http.service`](deploy/factory-dashboard-http.service)
+is an example systemd user unit for the pc-wsl-bots WSL node. It runs
+`python3 -m http.server ${DASHBOARD_PORT} --bind ${TAILNET_IP} --directory
+${DASHBOARD_DIR}`, which answers only GET and HEAD, so the pushed directory
+is served read-only. It binds only the node's tailnet IPv4 address, never
+a wildcard address, and `ExecStartPre` refuses to start unless `TAILNET_IP`
+is in `100.64.0.0/10`. If Tailscale is down the bind fails and systemd
+retries; it never falls back to another address. To install it, Max puts
+`TAILNET_IP` (from `tailscale ip -4` on that node), `DASHBOARD_DIR` and
+`DASHBOARD_PORT` in `~/.config/factory-dashboard/http.env` (no secrets),
+copies the unit to `~/.config/systemd/user/`, then runs `systemctl --user
+daemon-reload` and `enable --now`. WSL needs systemd enabled. Nothing in
+this repository installs, enables or starts it, or pushes anything.
+
 ## Check config
 
 ```sh

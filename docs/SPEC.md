@@ -59,7 +59,7 @@ These stay out until a real run shows they are needed. They are not Phase 1 or P
 - Cleffy's deployed QA and its 1-in-10 post-merge audit (dispatcher T9). Deferred past Phase 1.
 - Byte-identical rebase proofs. Replaced by `git patch-id --stable` plus re-review when the patch differs.
 - A live reader patch, lane coexistence, or old/new cutover. There is no old lane in this repo.
-- A mission-control dashboard. Phase 2 `orch status` is a read-only text summary.
+- A mission-control dashboard (anything that controls the factory). Phase 2 `orch status` is a read-only text summary. The requested `orch dashboard snapshot` is a read-only, redacted static view of the same data that is pushed out from the box; it controls nothing (README "Dashboard").
 - Per-run `decisions.tsv` and receipts. PR comments are the trail.
 - Self-improvement routines (weekly correct, reflect, blinded evals, daily maintain jobs). The weekly factory eval report in Phase 1 is a measurement of runs against the chart, not that list.
 - Inbound webhooks, any new credential or login, or creating another Grok

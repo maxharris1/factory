@@ -16,6 +16,7 @@ from typing import Mapping
 
 import yaml
 
+from lib.dashboard_config import DashboardConfig, parse_dashboard
 from lib.load import Finding, is_strict_int, load_yaml
 
 POLL_SECONDS = 60
@@ -33,6 +34,7 @@ _TOP_KEYS = {
     "grok",
     "trusted_logins",
     "trusted_linear_users",
+    "dashboard",
 }
 _PROJECT_KEYS = {
     "repo",
@@ -78,6 +80,7 @@ class OrchConfig:
     trusted_linear_users: Mapping[str, frozenset[str]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -135,6 +138,7 @@ def _validate(
     grok = _grok(data, findings)
     trusted_logins = _trusted_logins(data, findings)
     trusted_linear_users = _trusted_linear_users(data, findings)
+    dashboard = parse_dashboard(data.get("dashboard"), findings)
     if (
         projects is not None
         and any(project.linear_project_id is not None for project in projects)
@@ -158,6 +162,7 @@ def _validate(
             grok=grok,
             trusted_logins=MappingProxyType(trusted_logins),
             trusted_linear_users=MappingProxyType(trusted_linear_users),
+            dashboard=dashboard or DashboardConfig(),
         ),
         findings,
     )
