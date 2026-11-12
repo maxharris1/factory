@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
+from lib.dashboard_cli import main as dashboard_main
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
@@ -53,6 +54,7 @@ commands:
   init-db          create and initialize the dispatcher database
   wait             block until the dispatcher queues a job for a bot
   job              heartbeat or finish a job that wait returned
+  dashboard        write (and optionally push) the read-only status snapshot
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -96,6 +98,21 @@ job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
   with the handoff comment ID; --failed hands it to T6. Repeating the
   same done is a no-op.
+
+dashboard snapshot [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
+                   [--machines PATH] [--refresh SECONDS]
+  Open the database read-only (SQLite mode=ro), read the tail of
+  poller.log, and atomically write a redacted status.json and a static
+  index.html to --out. --db defaults to $ORCH_DB; --log to $ORCH_POLL_LOG
+  or poller.log beside the database; --out to $ORCH_DASHBOARD_DIR or
+  dashboard/ beside the database. --refresh (15 to 30) overrides
+  dashboard.refresh_seconds. There is no live server.
+
+dashboard push [--db PATH] [--log PATH] [--out DIR] [--orch PATH]
+               [--machines PATH] [--once]
+  Snapshot, then send it with orch.yml's dashboard.push transport every
+  dashboard.push.interval_seconds (15 to 30). With no transport
+  configured it logs one line and exits 0 without reading or writing.
 """
 
 
@@ -123,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_wait, argv[1:])
     if argv[0] == "job":
         return _call(_job, argv[1:])
+    if argv[0] == "dashboard":
+        return _call(dashboard_main, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2

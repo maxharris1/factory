@@ -28,3 +28,14 @@ projects:
     factory_ref: dev
   - repo: maxharris1/tracy-harris-coaching
     factory_ref: main
+# Optional read-only dashboard (README "Dashboard"). Push is off unless
+# dashboard.push.transport is ssh. It holds no secrets; SSH uses the login
+# Max provisions in ~/.ssh/config.
+# dashboard:
+#   refresh_seconds: 20
+#   push:
+#     transport: ssh
+#     host: pc-wsl-bots.tail68624b.ts.net
+#     remote_dir: /path/the/server/serves
+#     method: rsync
+#     interval_seconds: 20
