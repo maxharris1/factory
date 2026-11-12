@@ -16,7 +16,7 @@ from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
-from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
+from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 POLL_SECONDS = 60
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -298,6 +298,16 @@ class Hook(Protocol):
     ) -> tuple[bool, str] | None: ...
 
 
+class DeviceChecks(Protocol):
+    """F2-02's DeviceMonitor: release gone workers' slots, find offline devices."""
+
+    def reconcile(
+        self,
+        now: float,
+        on_offline: Callable[[str, str, float], None],
+    ) -> object: ...
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -308,6 +318,7 @@ class Dispatcher:
         review_actions: ReviewActions | Mapping[str, ReviewActions],
         grok_delivery: GrokDelivery,
         hooks: Sequence[Hook] = (),
+        devices: DeviceChecks | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -325,6 +336,7 @@ class Dispatcher:
         self.review_actions = review_actions
         self.grok_delivery = grok_delivery
         self.hooks = tuple(hooks)
+        self.devices = devices
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -514,6 +526,7 @@ class Dispatcher:
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
         self._deliver_grok_jobs(deferred_grok_jobs)
+        self._check_devices()
         now = self.queue.now()
         for job in self.queue.outstanding():
             activity = (
@@ -525,6 +538,73 @@ class Dispatcher:
             self._t6(job)
         self._ensure_all_stuck_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
+
+    def _check_devices(self) -> None:
+        """F2-02: free gone workers' slots; a device offline 60 minutes is stuck.
+
+        Runs before T6 looks at timeouts, so a job on a device that has been
+        offline for the full hour goes stuck at once instead of being retried.
+        A failure here is recorded and never stops the poll.
+        """
+        if self.devices is None:
+            return
+        try:
+            self.devices.reconcile(self.queue.now(), self._device_offline)
+        except Exception as exc:
+            self.record_poll_error("devices", "-", type(exc).__name__)
+
+    def _device_offline(self, job_id: str, device: str, seconds: float) -> None:
+        """Fail a job running on an offline device and mark its ticket stuck.
+
+        One transaction: the job leaves running (failure already handled, so
+        T6 never retries it) and the ticket's stuck flag wakes Grok Bot once.
+        The job is never done, and its slot stays held.
+        """
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None or str(row["state"]) != "running":
+                connection.commit()
+                return
+            job = _job(row)
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state = 'failed', finished_at = ?, last_activity_at = ?,
+                    failure_handled = 1
+                WHERE id = ? AND state = 'running'
+                """,
+                (now, now, job_id),
+            )
+            self._set_stuck_in_transaction(
+                connection,
+                repo=job.request.repo,
+                ticket_id=job.request.ticket_id,
+                source_comment_id=job.request.source_comment_id,
+                timeout_seconds=job.request.timeout_seconds,
+                reason="device-offline",
+            )
+            self._ensure_stuck_wake_in_transaction(
+                connection,
+                repo=job.request.repo,
+                ticket_id=job.request.ticket_id,
+                detail=json.dumps(
+                    {
+                        "project_bot": _detail_project_bot(job.request.detail),
+                        "detail": (
+                            f"device {device} offline {int(seconds // 60)} minutes "
+                            f"during the {job.request.action} job"
+                        ),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+            connection.commit()
 
     def _deliver_grok_jobs(self, deferred: set[str]) -> None:
         while (
@@ -2283,26 +2363,13 @@ class Dispatcher:
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, stuck_reason,
-                    stuck_source_comment_id, timeout_seconds, generation
-                ) VALUES (?, ?, 0, 1, ?, ?, ?, 1)
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET
-                    stuck = 1,
-                    stuck_reason = excluded.stuck_reason,
-                    stuck_source_comment_id = excluded.stuck_source_comment_id,
-                    timeout_seconds = excluded.timeout_seconds
-                """,
-                (
-                    repo.lower(),
-                    ticket_id,
-                    reason,
-                    source_comment_id,
-                    timeout_seconds,
-                ),
+            self._set_stuck_in_transaction(
+                connection,
+                repo=repo,
+                ticket_id=ticket_id,
+                source_comment_id=source_comment_id,
+                timeout_seconds=timeout_seconds,
+                reason=reason,
             )
             self._ensure_stuck_wake_in_transaction(
                 connection,
@@ -2311,6 +2378,38 @@ class Dispatcher:
                 detail=detail,
             )
             connection.commit()
+
+    def _set_stuck_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        repo: str,
+        ticket_id: str,
+        source_comment_id: str,
+        timeout_seconds: int,
+        reason: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds, generation
+            ) VALUES (?, ?, 0, 1, ?, ?, ?, 1)
+            ON CONFLICT(repo, ticket_id)
+            DO UPDATE SET
+                stuck = 1,
+                stuck_reason = excluded.stuck_reason,
+                stuck_source_comment_id = excluded.stuck_source_comment_id,
+                timeout_seconds = excluded.timeout_seconds
+            """,
+            (
+                repo.lower(),
+                ticket_id,
+                reason,
+                source_comment_id,
+                timeout_seconds,
+            ),
+        )
 
     def _discover(
         self,

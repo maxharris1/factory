@@ -25,9 +25,9 @@ stateDiagram-v2
   s6: abandoned
   s7: plan-check
   s8: review
-  s9: blocked
-  s10: ship
-  s11: stuck
+  s9: stuck
+  s10: blocked
+  s11: ship
   s12: fixing
   s13: handed-off
   s14: merged
@@ -43,35 +43,35 @@ stateDiagram-v2
   s1 --> s5: a product question
   s3 --> s5: a product question
   s3 --> s8: ready, CI green
+  s3 --> s9: device offline 60 minutes or job dies twice (T6) or CI red three times
   s4 --> s7: trusted builder posts kind=plan
+  s4 --> s9: device offline 60 minutes or job dies twice (T6)
   s5 --> s1: Max answers
   s5 --> s6: Max drops it
   s5 --> s3: answer, same step resumes
   s7 --> s3: every acceptance criterion mapped
   s7 --> s4: an acceptance criterion is unmapped
-  s8 --> s9: BLOCKED
-  s8 --> s10: APPROVE on the current head
+  s8 --> s10: BLOCKED
+  s8 --> s11: APPROVE on the current head
+  s8 --> s9: device offline 60 minutes or job dies twice (T6)
   s8 --> s12: REVISE, under the round cap
-  s3 --> s11: job dies twice (T6) or CI red three times
-  s4 --> s11: job dies twice (T6)
-  s10 --> s8: head changed and the patch differs
-  s10 --> s13: ship = handoff
-  s10 --> s14: ship = merge
-  s10 --> s15: ship = after an approver
-  s8 --> s11: job dies twice (T6)
+  s11 --> s8: head changed and the patch differs
+  s11 --> s13: ship = handoff
+  s11 --> s14: ship = merge
+  s11 --> s15: ship = after an approver
   s12 --> s5: a product question
   s12 --> s8: ready, CI green
+  s12 --> s9: device offline 60 minutes or job dies twice (T6) or CI red three times
   s5 --> s12: answer, same step resumes
   s14 --> s16: merged
   s14 --> s17: project has a post-merge check
   s15 --> s14: OK names the previewed SHA
   s15 --> s12: declined
-  s7 --> s11: gaps a second time
-  s12 --> s11: job dies twice (T6) or CI red three times
+  s7 --> s9: gaps a second time
   s17 --> s16: post-merge fails, follow-up filed or post-merge passes
   s8 --> s18: REVISE at the cap
   s18 --> s12: Max okays one more round
-  s15 --> s11: 3rd decline
+  s15 --> s9: 3rd decline
   s3 --> s3: CI red, fix
   class s0 blue
   class s1 blue
@@ -83,8 +83,8 @@ stateDiagram-v2
   class s7 purple
   class s8 yellow
   class s9 tan
-  class s10 teal
-  class s11 tan
+  class s10 tan
+  class s11 teal
   class s12 orange
   class s13 teal
   class s14 teal

@@ -77,7 +77,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 | RerouteKeepsCrossFamily, OnlyUrgentUsesReserve, 20% reserve | Routing table in `factory.md` plus the owning bot's usage check (section 6) |
 | ContradictoryConfigNeverRuns | `orch check-config` refuses an inconsistent `factory.md` (e.g. a same-family reviewer) |
 | ExitCodesMeanOneThing (15/16/17/18) | Default labels: `orch:state/waiting-max`, `orch:state/abandoned`, `orch:state/waiting-external`, `orch:state/waiting-deploy`. Aut0: the same states on the Linear ticket and in PR `orch:` comments, with no GitHub labels |
-| Slots, PC offline 60 min, LivePatch, lane cutover, MissionControl | Phase 2 (slots), or dropped (section 11) |
+| Slots, PC offline 60 min, LivePatch, lane cutover, MissionControl | Phase 2 (slots in F2-01; device offline 60 min is `T6DeviceOffline` in F2-02), or dropped (section 11) |
 
 ## 4. Dispatcher transition table
 
@@ -225,7 +225,7 @@ One source: `skills/` in this repo, holding a pinned pstack (0.15.36 today) plus
 **Phase 2: more compute and self-hosted CI (after Phase 1 works)**
 
 15. Device pool: `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness counted as eligible only where Max has provisioned its login under that bot's user.
-16. Remote start: each owning bot starts its harness on a device over Tailscale SSH as its own user (claude-bot, codex-bot, cursor-bot). A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
+16. Remote start: each owning bot starts its harness on a device over Tailscale SSH as its own user (claude-bot, codex-bot, cursor-bot). A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`. Built in F2-02 over the box's per-bot SSH aliases (`ssh_alias: pc-wsl-{bot}` in `machines.yml`); see [docs/SPEC.md](SPEC.md) F2-02.
 17. Self-hosted CI: runner labels in each repo's `factory.md` as `ci_runner:`; device inventory in `orch.yml` or `machines.yml`; plus a registration checklist for Max. Max registers the runners himself, and the plan never touches runner tokens. Credential-holding deploy workflows stay hosted (D21).
 18. `orch status`: a read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
 

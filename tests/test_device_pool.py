@@ -376,7 +376,9 @@ def test_claim_never_raises_on_a_stale_slot_row_for_a_queued_job(
     (job,) = queue.outstanding()
     with queue.connect() as connection:
         connection.execute(
-            f"INSERT INTO {device_pool.SLOTS_TABLE} VALUES (?, 'box', 'claude', 'claude-bot', 1)",
+            f"INSERT INTO {device_pool.SLOTS_TABLE} "
+            "(job_id, device, harness, os_user, placed_at) "
+            "VALUES (?, 'box', 'claude', 'claude-bot', 1)",
             (job.id,),
         )
 

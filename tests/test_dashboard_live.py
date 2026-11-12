@@ -517,7 +517,7 @@ def _run_poll(tmp_path: Path, monkeypatch, *flags: str) -> tuple[dict, list[str]
 
     monkeypatch.delenv("ORCH_DB", raising=False)
     monkeypatch.setattr(cli.signal, "signal", lambda *_args: None)
-    monkeypatch.setattr(cli, "_runtime", lambda path, orch, create: (object(), object()))
+    monkeypatch.setattr(cli, "_runtime", lambda path, orch, create, **_: (object(), object()))
     monkeypatch.setattr(cli, "PollLoop", Loop)
     monkeypatch.setattr(LivePusher, "start", lambda self, **_: events.append("start"))
     monkeypatch.setattr(LivePusher, "stop", lambda self: events.append("stop"))

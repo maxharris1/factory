@@ -272,7 +272,7 @@ def _run_poll(tmp_path: Path, monkeypatch, orch_text: str) -> dict:
     monkeypatch.delenv("ORCH_DB", raising=False)
     # `orch poll` installs a SIGTERM handler; keep pytest's own.
     monkeypatch.setattr(cli.signal, "signal", lambda *_args: None)
-    monkeypatch.setattr(cli, "_runtime", lambda path, orch, create: (object(), object()))
+    monkeypatch.setattr(cli, "_runtime", lambda path, orch, create, **_: (object(), object()))
     monkeypatch.setattr(cli, "PollLoop", Loop)
     code = cli.main(["poll", "--db", str(database), "--orch", str(orch), "--once",
                      "--pidfile", str(tmp_path / "poller.pid")])

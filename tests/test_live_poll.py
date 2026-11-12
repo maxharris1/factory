@@ -2074,7 +2074,7 @@ def test_poll_once_runs_one_cycle(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         cli,
         "_runtime",
-        lambda db, orch, create: (dispatcher, fake_source),
+        lambda db, orch, create, **_: (dispatcher, fake_source),
     )
 
     result = cli.main(["poll", "--db", str(database), "--once"])
@@ -2095,7 +2095,7 @@ def test_poll_line_buffers_stdout_and_stderr(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(
         cli,
         "_runtime",
-        lambda db, orch, create: (Mock(), object()),
+        lambda db, orch, create, **_: (Mock(), object()),
     )
 
     assert cli.main(["poll", "--db", str(database), "--once"]) == 0
@@ -2166,7 +2166,7 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
     monkeypatch.setattr(
         cli,
         "_runtime",
-        lambda db, orch, create: (dispatcher, source),
+        lambda db, orch, create, **_: (dispatcher, source),
     )
 
     assert cli.main(["poll", "--db", str(database), "--once"]) == 0
