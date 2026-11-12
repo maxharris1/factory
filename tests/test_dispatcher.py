@@ -3670,6 +3670,103 @@ def test_t5_answers_resume_same_step_without_incrementing_round(
     assert row["workflow_state"] == "fixing"
 
 
+def workflow_state(queue: SQLiteJobQueue) -> str | None:
+    with queue.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT workflow_state FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()
+    return None if row is None else row["workflow_state"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Questions: None.\n",
+        "**Restatement**\nOffer Brief intake.\n\n**Questions**\nNone.\n",
+        "**Restatement**\nOffer Brief intake.\n\n**Questions**\n",
+        "",
+        "**Questions**\n- [default-able] Which font?\n  Default: house font\n",
+    ],
+)
+def test_t5_questions_none_without_waiting_max_queues_nothing(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    question = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator -->\n"
+        + body,
+        author="grok-login",
+    )
+
+    dispatcher.process(ticket(question, head="a" * 40))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert queue.claim("grok") is None
+    assert workflow_state(queue) != "waiting-max"
+    assert "waiting-max" not in actions.states
+
+
+def test_t5_builder_questions_none_queues_nothing(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n"
+        "Questions: None.\n",
+        author="claude-login",
+    )
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "body"),
+    [
+        (
+            "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator "
+            "state=waiting-max -->",
+            "**Questions**\n- [product] Which offer tier ships first?\n",
+        ),
+        (
+            "<!-- orch:v1 kind=questions from=claude-bot role=builder -->",
+            "Questions: Should the brief keep the old pricing table?\n",
+        ),
+        (
+            "<!-- orch:v1 kind=questions from=claude-bot role=builder -->",
+            "Questions.\n",
+        ),
+    ],
+)
+def test_t5_real_questions_still_queue_clarify(
+    tmp_path: Path,
+    header: str,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    author = "grok-login" if "grok-bot" in header else "claude-login"
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
 def test_t5_rejects_untrusted_questions_and_answers_and_writes_waiting_state(
     tmp_path: Path,
 ) -> None:
@@ -4603,3 +4700,325 @@ def test_dispatcher_cannot_execute_a_harness_binary(
         )
         assert "subprocess" not in imported
         assert "os" not in imported
+
+
+BUILDER_QUESTIONS = "<!-- orch:v1 kind=questions from=claude-bot role=builder -->"
+REVIEWER_QUESTIONS = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Questions**\n**Should the brief retain the old pricing table?**\n",
+        "**Questions**\n**Should the brief retain the old pricing table?**:\n",
+        "## Questions\n### 1. Pricing?\n",
+        "**Questions**\n### 1. Pricing?\n",
+        "**Questions**\n### 1. Pricing\nKeep the old table or drop it.\n",
+        "## Questions\n### Pricing\nKeep the old table or drop it.\n",
+        "**Restatement**\nIntake.\n\n**Questions**\n"
+        "**Keep the old pricing table?**\n\n**Notes**\nNone.\n",
+        # Round 2 (F2.2): a sub-label or formatted heading directly under
+        # Questions is question content, whatever its style or level.
+        "**Questions:**\n### Pricing\nKeep the old table or drop it?\n",
+        "**Questions**\n**Pricing**\n- Should the brief keep the old table?\n",
+        "**Questions**\n### **Pricing?**\n",
+        "## Questions\n## Pricing ##\nKeep it?\n",
+        "**Questions**\n### Pricing ###\nKeep the old table or drop it.\n",
+        "Questions:\n## Pricing\nKeep it?\n",
+        "# Questions\n# Pricing\nKeep it?\n",
+    ],
+)
+def test_t5_heading_style_questions_queue_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Questions**\nNone.\n\n**Notes**\nThe brief is long.\n",
+        "## Questions\nN/A\n\n## Notes\nThe brief is long.\n",
+        "## Questions\nNo questions.\n\n# Plan\nShip it.\n",
+        # Further guards for the round-2 rule: an inline marker, a bold
+        # Questions label, and a Questions heading with nothing after it.
+        "**Questions:**\nNone\n### Notes\nThe brief is long.\n",
+        "**Questions:** N/A\n### Notes\nThe brief is long.\n",
+        "## Questions\n",
+        "**Questions**\n\n",
+    ],
+)
+def test_t5_empty_questions_section_then_other_section_queues_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Preservation guard: these pass before and after the round-2 fix."""
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n### Notes\n",
+        "## Questions\nN/A\n### Notes\nThe brief is long.\n",
+        "# Questions\nNo questions.\n## Plan\nShip it.\n",
+        "## Questions ##\nNone.\n## Plan\nShip it.\n",
+        "## Questions\n- None.\n### Notes\nThe brief is long?\n",
+        "## Questions\n### None\n### Notes\nThe brief is long.\n",
+    ],
+)
+def test_t5_none_marker_then_any_heading_queues_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 2 (F2.1): the first thing under Questions is a none-marker, so
+    nothing that follows it (deeper headings included) counts as a question.
+    """
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+def test_t5_heading_right_after_questions_is_content_fail_closed(
+    tmp_path: Path,
+    header: str,
+    author: str,
+) -> None:
+    """Round 2: headings never close the Questions section. A same-level
+    heading right under Questions can be a question label ("## Pricing ##"),
+    so with no explicit none-marker the comment counts as questions, as
+    every trusted questions comment did on main.
+    """
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment(
+        "questions-1",
+        f"{header}\n## Questions\n\n## Plan\nShip it.\n",
+        author=author,
+    )
+
+    dispatcher.process(ticket(question, head=head))
+
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
+T5_TRUSTED_ROLES = pytest.mark.parametrize(
+    ("header", "author"),
+    [
+        (BUILDER_QUESTIONS, "claude-login"),
+        (REVIEWER_QUESTIONS, "codex-login"),
+    ],
+)
+
+
+def _process_t5_questions(tmp_path: Path, header: str, author: str, body: str):
+    dispatcher, queue = setup(tmp_path)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    question = comment("questions-1", f"{header}\n{body}", author=author)
+    dispatcher.process(ticket(question, head=head))
+    return queue
+
+
+def _assert_t5_waiting_max(queue) -> None:
+    assert handled_outcome(queue, "questions-1") == "waiting-max"
+    assert job_count(queue, "clarify") == 1
+    assert workflow_state(queue) == "waiting-max"
+
+
+def _assert_t5_no_questions(queue) -> None:
+    assert handled_outcome(queue, "questions-1") == "no-questions"
+    assert job_count(queue, "clarify") == 0
+    assert workflow_state(queue) != "waiting-max"
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n\n## Questions\n"
+        "Should we retain the pricing table?\n",
+        "## Questions\nNone.\n\n## Questions for Max\n1. Keep the old table?\n",
+        "## Questions\nNone.\n\n**Questions:**\n- Keep the old table?\n",
+        "**Questions:** N/A\n\n### Questions\n- Keep the old table?\n",
+    ],
+)
+def test_t5_later_questions_section_with_content_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): every Questions heading counts. A none-marker under
+    the first one must not hide a real question under a later one.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Example of the previous report:\n```markdown\n## Questions\nNone.\n"
+        "```\n\n## Questions\nShould we retain the pricing table?\n",
+        "```\n## Questions\nNone.\n```\n## Questions\n"
+        "Should we retain the pricing table?\n",
+        "~~~\n## Questions\nN/A\n~~~\n## Questions\n1. Keep the old table?\n",
+        "````md\n**Questions:** None\n```\nnested\n```\n````\n"
+        "**Questions:**\n- Keep the old table?\n",
+        # A Questions heading only inside a fence is not a heading, so the
+        # no-heading rule applies: any line that is not a none-marker counts.
+        "Notes:\n```\n## Questions\nNone.\n```\nShould we keep the old table?\n",
+        # An unclosed fence is not skipped (fail closed).
+        "## Questions\nNone.\n```\n## Questions\nShould we keep the old table?\n",
+    ],
+)
+def test_t5_fenced_none_questions_example_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): a Questions heading inside fenced code (``` or ~~~)
+    is example text. Its "None." must not hide the real Questions section.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```markdown\n## Questions\nShould we keep it?\n```\n\n"
+        "## Questions\nNone.\n",
+        "~~~\n**Questions:**\n- Keep the old table?\n~~~\n**Questions:** N/A\n",
+    ],
+)
+def test_t5_fenced_questions_example_then_none_queues_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Round 3 (F3.1): a Questions heading inside fenced code is ignored, so
+    the real Questions section outside the fence decides.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_no_questions(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\nNone.\n\n## Questions\nN/A\n",
+        "**Questions:** None\n\n## Notes\nShort.\n\n## Questions\n"
+        "No questions.\n",
+        "## Questions\nNone.\n\n```\n## Questions\nShould we keep it?\n```\n",
+        "## Questions\nN/A\n\nExample:\n~~~\nQuestions: keep the table?\n~~~\n",
+    ],
+)
+def test_t5_all_none_questions_sections_queue_nothing(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Preservation guard (round 3): pass before and after the F3.1 fix.
+    Every Questions section outside fences says none, so there are no
+    questions, even with a fenced Questions example that asks something.
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_no_questions(queue)
+
+
+@T5_TRUSTED_ROLES
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Questions\n```\nNone.\n```\n",
+        "## Questions\n\n~~~\nShould we keep the old table?\n~~~\n",
+    ],
+)
+def test_t5_fenced_block_first_under_questions_queues_clarify(
+    tmp_path: Path,
+    header: str,
+    author: str,
+    body: str,
+) -> None:
+    """Preservation guard (round 3): pass before and after the F3.1 fix.
+    A fenced block is never a none-marker: as the first content under a
+    Questions heading it counts as questions (fail closed).
+    """
+    queue = _process_t5_questions(tmp_path, header, author, body)
+
+    _assert_t5_waiting_max(queue)

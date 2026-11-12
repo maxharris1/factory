@@ -25,7 +25,14 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig, parse_factory_md
-from lib.github_actions import GitHubReviewActions, LinearReviewActions, Runner, run_gh
+from lib.github_actions import (
+    GhResult,
+    GitHubReviewActions,
+    LinearReviewActions,
+    Runner,
+    _is_read,
+    run_gh,
+)
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 
@@ -86,6 +93,9 @@ mutation FactoryReadyForReview($issue: String!, $state: String!) {
 }
 """.strip()
 BACKOFF_SECONDS = 300.0
+GH_CALL_TIMEOUT_SECONDS = 20.0
+GH_CALL_ATTEMPTS = 3
+GH_RETRY_BACKOFF_SECONDS = 2.0
 LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
@@ -122,6 +132,7 @@ class HTTPResult:
 
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 ErrorSink = Callable[[str, str, str], None]
+DeferralSink = Callable[[str], None]
 TerminalSink = Callable[[str, str, str], None]
 
 
@@ -169,8 +180,11 @@ class LivePollSource:
         linear_transport: LinearTransport = post_json,
         timeout_seconds: float = TIMEOUT_SECONDS,
         error_sink: ErrorSink | None = None,
+        deferral_sink: DeferralSink | None = None,
         terminal_sink: TerminalSink | None = None,
         clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
     ):
         self.config = config
         self.environ = environ
@@ -178,8 +192,11 @@ class LivePollSource:
         self.linear_transport = linear_transport
         self.timeout_seconds = timeout_seconds
         self.error_sink = error_sink
+        self.deferral_sink = deferral_sink
         self.terminal_sink = terminal_sink
         self.clock = clock
+        self.sleep = sleep
+        self.gh_call_timeout_seconds = gh_call_timeout_seconds
         self._factory_cache: dict[str, FactoryConfig] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
@@ -191,10 +208,13 @@ class LivePollSource:
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
         self._cycle_errors = 0
+        self._cycle_deferrals: dict[str, int] = {}
         cleared = _secret_env_names(config)
+        # list_comments and ci_status are polling reads: they get the same
+        # short timeout, retries and backoff as every other gh read here.
         self.github = GitHubReviewActions(
-            runner=gh_runner,
-            timeout_seconds=timeout_seconds,
+            runner=self._adapter_runner,
+            timeout_seconds=gh_call_timeout_seconds,
             cleared_variables=cleared,
         )
         self.gh = self.github.gh
@@ -228,8 +248,17 @@ class LivePollSource:
         self._linear_requests = 0
         self._linear_complexity = 0
         self._cycle_errors = 0
+        self._cycle_deferrals = {}
 
     def end_cycle(self) -> None:
+        if self._cycle_deferrals and self.deferral_sink is not None:
+            self.deferral_sink(
+                "; ".join(
+                    f"{reason} x{count}"
+                    for reason, count in sorted(self._cycle_deferrals.items())
+                )
+            )
+        self._cycle_deferrals = {}
         if self._cycle_errors:
             raise PollCycleError(
                 f"poll cycle recorded {self._cycle_errors} source error(s)"
@@ -347,13 +376,7 @@ class LivePollSource:
                     LINEAR_ISSUE_QUERY,
                     reserve=tracked_reserve + LINEAR_PROCESS_HEADROOM,
                 ):
-                    self._record(
-                        "linear",
-                        "-",
-                        RetryablePollSourceError(
-                            "Linear poll budget deferred discovery"
-                        ),
-                    )
+                    self._defer("Linear poll budget deferred discovery")
                     break
                 self._linear_candidate_cursor = _linear_candidate_key(issue)
                 complete = self._linear_issue(issue_id)
@@ -403,13 +426,7 @@ class LivePollSource:
                         LINEAR_ISSUE_QUERY,
                         reserve=LINEAR_PROCESS_HEADROOM,
                     ):
-                        self._record(
-                            ref.repo,
-                            ref.ticket_id,
-                            RetryablePollSourceError(
-                                "Linear poll budget deferred tracked ticket"
-                            ),
-                        )
+                        self._defer("Linear poll budget deferred tracked ticket")
                         continue
                     if not cached:
                         self._linear_tracked_cursor = _linear_ref_key(ref)
@@ -493,13 +510,7 @@ class LivePollSource:
                 LINEAR_SEARCH_QUERY,
                 reserve=reserve,
             ):
-                self._record(
-                    "linear",
-                    "-",
-                    RetryablePollSourceError(
-                        "Linear poll budget deferred discovery"
-                    ),
-                )
+                self._defer("Linear poll budget deferred discovery")
                 break
             document = self._linear_request(
                 {
@@ -531,13 +542,7 @@ class LivePollSource:
             if page.get("hasNextPage") is not True:
                 break
             if pages >= LINEAR_SEARCH_MAX_PAGES:
-                self._record(
-                    "linear",
-                    "-",
-                    RetryablePollSourceError(
-                        "Linear search page limit deferred discovery"
-                    ),
-                )
+                self._defer("Linear search page limit deferred discovery")
                 break
             after_value = page.get("endCursor")
             if not isinstance(after_value, str) or not after_value:
@@ -933,12 +938,7 @@ class LivePollSource:
             if cached is not None:
                 argv.extend(("-H", f"If-None-Match: {cached[0]}"))
         argv.extend(args)
-        try:
-            result = self.gh_runner(argv, self.timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            raise PollSourceError("gh api timed out") from exc
-        except OSError as exc:
-            raise PollSourceError(f"gh could not run: {type(exc).__name__}") from exc
+        result = self._run_gh_read(argv)
         included: tuple[int, dict[str, str], str] | None = None
         if conditional and result.stdout.startswith("HTTP/"):
             included = _included_response(result.stdout)
@@ -972,6 +972,35 @@ class LivePollSource:
         if etag is not None:
             self._etag_cache[cache_key] = (etag, body)
         return body
+
+    def _adapter_runner(self, argv: Sequence[str], timeout: float) -> GhResult:
+        """Retry the poll adapter's GETs; never repeat a write."""
+        call = list(argv)
+        if _is_read(call[call.index("api") + 1 :]):
+            return self._run_gh_read(call)
+        return self.gh_runner(call, self.timeout_seconds)
+
+    def _run_gh_read(self, argv: list[str]) -> GhResult:
+        """Every _gh_call is a GET, so a timed-out call is safe to repeat."""
+        attempt = 1
+        while True:
+            try:
+                return self.gh_runner(argv, self.gh_call_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                if attempt >= GH_CALL_ATTEMPTS:
+                    raise RetryablePollSourceError(
+                        f"gh api timed out after {attempt} attempts"
+                    ) from None
+            except OSError as exc:
+                raise PollSourceError(
+                    f"gh could not run: {type(exc).__name__}"
+                ) from exc
+            self.sleep(GH_RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1))
+            attempt += 1
+
+    def _defer(self, reason: str) -> None:
+        """A budget or page-limit cutoff is expected load shedding, not an error."""
+        self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
         self._cycle_errors += 1
@@ -1129,6 +1158,7 @@ def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
             (
                 config.grok.webhook_url_env,
                 config.grok.webhook_key_env,
+                config.grok.webhook_auth_env,
             )
         )
     return tuple(dict.fromkeys(names))
