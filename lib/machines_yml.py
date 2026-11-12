@@ -7,7 +7,11 @@ OS user whose login Max provisioned on that device. A harness may only
 map to its own bot user (claude -> claude-bot, and so on).
 
 Every remote device names a workdir_root, the absolute directory jobs
-run under on that device. It may not be under /mnt/, so a WSL device
+run under on that device, and an ssh_alias: the Host alias in the box's
+own ~/.ssh/config that reaches that device as one bot user. The alias
+must contain the token {bot}, resolved per harness to its bot user, so
+each bot logs in through its own alias (pc-wsl-{bot} -> pc-wsl-codex-bot).
+No key path, user@ or ssh option is ever written here (F2-02). It may not be under /mnt/, so a WSL device
 never works on a mounted Windows drive. A whole path component may be
 the token {bot}, which resolves to the harness's bot user, so one device
 can give each bot its own home (/home/{bot}/factory-work).
@@ -54,7 +58,11 @@ _DEVICE_KEYS = {
     "slot_max",
     "harnesses",
     "workdir_root",
+    "ssh_alias",
 }
+# An ssh_alias once {bot} is resolved: a bare Host alias. No user@, no
+# leading '-' (it would be read as an option), no spaces or shell syntax.
+_SSH_ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,7 @@ class Device:
     enabled: bool = True
     workdir_root: str | None = None
     placeholders: tuple[str, ...] = ()
+    ssh_alias: str | None = None
 
     @property
     def placeholder(self) -> bool:
@@ -88,6 +97,16 @@ class Device:
         if self.workdir_root is None or harness not in self.harnesses:
             return None
         return self.workdir_root.replace(BOT_TOKEN, self.harnesses[harness])
+
+    def ssh_alias_for(self, harness: str) -> str | None:
+        """ssh_alias with {bot} resolved to the harness's bot user.
+
+        None on the local device, when ssh_alias is unset (placeholder),
+        or when the device does not list the harness.
+        """
+        if self.ssh_alias is None or harness not in self.harnesses:
+            return None
+        return self.ssh_alias.replace(BOT_TOKEN, self.harnesses[harness])
 
 
 def tailscale_key(name: str) -> str:
@@ -301,6 +320,33 @@ def _device(
         else:
             findings.append(Finding("error", f"{prefix}.workdir_root {problem}"))
 
+    ssh_alias: str | None = None
+    raw_alias = item.get("ssh_alias")
+    if local:
+        if "ssh_alias" in item:
+            findings.append(
+                Finding(
+                    "error",
+                    f"{prefix}.ssh_alias must be omitted on the local device",
+                )
+            )
+    elif "ssh_alias" not in item:
+        findings.append(
+            Finding(
+                "error",
+                f"missing required field '{prefix}.ssh_alias' "
+                "(every remote device names the box's SSH alias, with {bot})",
+            )
+        )
+    elif is_placeholder(raw_alias):
+        placeholder("ssh_alias")
+    else:
+        problem = _ssh_alias_problem(raw_alias)
+        if problem is None:
+            ssh_alias = str(raw_alias)
+        else:
+            findings.append(Finding("error", f"{prefix}.ssh_alias {problem}"))
+
     slot_max: int | None = None
     raw_slots = item.get("slot_max")
     if "slot_max" not in item:
@@ -372,6 +418,7 @@ def _device(
         enabled=enabled,
         workdir_root=workdir_root,
         placeholders=tuple(placeholders),
+        ssh_alias=ssh_alias,
     )
 
 
@@ -414,6 +461,20 @@ def _workdir_problem(value: object) -> str | None:
         return "must be a normalized directory below /"
     if value == FORBIDDEN_WORKDIR_ROOT or value.startswith(FORBIDDEN_WORKDIR_ROOT + "/"):
         return "must not be under /mnt/ (a mounted Windows drive on WSL)"
+    return None
+
+
+def _ssh_alias_problem(value: object) -> str | None:
+    if not isinstance(value, str) or BOT_TOKEN not in value:
+        return (
+            f"must contain '{BOT_TOKEN}' so each bot logs in through its own "
+            "alias (for example pc-wsl-{bot})"
+        )
+    if _SSH_ALIAS.fullmatch(value.replace(BOT_TOKEN, "bot")) is None:
+        return (
+            "must be a bare SSH Host alias from the box's ~/.ssh/config "
+            "(letters, digits, '.', '_' and '-'; no user@, option or space)"
+        )
     return None
 
 

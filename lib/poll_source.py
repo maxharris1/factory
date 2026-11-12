@@ -10,7 +10,7 @@ import subprocess
 import time
 from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -378,14 +378,35 @@ class LivePollSource:
                         issue = _object(raw, "GitHub issue")
                         if "pull_request" not in issue:
                             continue
-                        if not _has_label(issue.get("labels"), label_prefix):
+                        # Issue #59: a ready_starts_review project builds its
+                        # PRs outside the queue, so nothing writes the
+                        # orch:state/ label before tracking starts. Its open
+                        # PRs are candidates on a parseable ready;
+                        # Dispatcher._starts_tracking then admits them only
+                        # on a trusted builder ready naming the PR head
+                        # (admitted_by_ready: a Grok brief/go does not count). Other projects stay label-only and
+                        # pay no comment read here.
+                        labelled = _has_label(issue.get("labels"), label_prefix)
+                        if not labelled and not project.ready_starts_review:
                             continue
                         number = str(
                             _positive_int(issue.get("number"), "issue number")
                         )
-                        tickets.append(
-                            self._github_ticket(project, factory, number)
+                        comments: tuple[Comment, ...] | None = None
+                        if not labelled:
+                            comments = self.github.list_comments(
+                                project.repo, number
+                            )
+                            if not _has_ready(comments):
+                                continue
+                        ticket = self._github_ticket(
+                            project, factory, number, comments=comments
                         )
+                        if not labelled:
+                            # Not cached: the flag describes this
+                            # discovery, not the PR snapshot.
+                            ticket = replace(ticket, admitted_by_ready=True)
+                        tickets.append(ticket)
                     except Exception as exc:
                         if isinstance(exc, _TerminalTicket):
                             continue
@@ -973,6 +994,7 @@ class LivePollSource:
         *,
         fresh: bool = False,
         allow_merged: bool = False,
+        comments: tuple[Comment, ...] | None = None,
     ) -> TrackedTicket:
         cache_key = ("github", project.repo.lower(), number)
         cached = None if fresh else self._ticket_cache.get(cache_key)
@@ -986,7 +1008,8 @@ class LivePollSource:
         head = _object(pull.get("head"), "GitHub pull request head").get("sha")
         if not isinstance(head, str):
             raise PollSourceError(f"{project.repo}#{number} has no head")
-        comments = self.github.list_comments(project.repo, number)
+        if comments is None:
+            comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
             repo=project.repo,
             ticket_id=number,

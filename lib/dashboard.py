@@ -1208,14 +1208,26 @@ def _machines(
 # --- writing --------------------------------------------------------------------
 
 
-def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
+def write_snapshot(out_dir: Path, snapshot: dict) -> tuple[Path, Path]:
+    """Write status.json and every page (PAGES) from one snapshot, as a set.
+
+    The same write as `write_snapshot_pages`; returns just
+    (status.json, index.html). Callers that need every written path (the
+    push, the CLI) use `write_snapshot_pages`.
+    """
+    paths = write_snapshot_pages(out_dir, snapshot)
+    return paths[0], out_dir / "index.html"
+
+
+def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     """Write status.json and every page (PAGES) from one snapshot, as a set.
 
     Each is written to a temp file in the same directory and fsynced, then
     renamed into place, status.json first. If a later rename fails, every
     file already renamed is put back as it was (or removed if there was
     none), so the directory never mixes files from this snapshot with files
-    from an earlier one. Returns the paths, status.json first.
+    from an earlier one. Returns every path, status.json first, then the
+    pages in PAGES order.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True) + "\n"}
@@ -1282,4 +1294,5 @@ __all__ = [
     "render_html",
     "render_pages",
     "write_snapshot",
+    "write_snapshot_pages",
 ]

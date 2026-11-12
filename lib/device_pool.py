@@ -13,11 +13,20 @@ A queued job never holds a slot. Requeueing a claimed job
 claim drops any slot row left on a queued job before counting, so a
 requeued job can always be claimed again.
 
-Finishing, failing or timing out a job does not free its slot. A device
-that loses power mid-job keeps the slot held while T6 times the job out
-(never done) and, on the second failure, marks the ticket stuck. Apart
-from a requeue, only `DevicePool.release` frees a slot; F2-02 calls it
-once the worker is confirmed gone.
+Finishing, failing or timing out a job does not free its slot. Apart
+from a requeue, only `DevicePool.release` frees a slot, and F2-02 calls
+it only once the worker is confirmed gone: `orch job run` after its
+command exits (a remote worker is checked over SSH first), or the
+dispatcher's `DeviceMonitor` for a finished job whose runner died.
+
+F2-02 records on the slot row who runs the job: `runner_pid` and
+`runner_start` (the box's `orch job run`), `worker_pid` and
+`worker_start` (its local command), `remote_started` (a remote start
+was attempted, so the device must confirm the worker gone) and
+`worker_tag` (the random tag every process of that remote start carries,
+lib/remote.py, so a check never trusts a stored process number). The
+`device_health` table holds each remote device's last successful SSH
+contact and when it began failing, for the 60-minute offline check.
 
 This module starts nothing and contacts no device.
 """
@@ -25,12 +34,24 @@ This module starts nothing and contacts no device.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job
+from lib.remote import new_tag
 from lib.schema import HARNESSES
+
+HEALTH_TABLE = "device_health"
+# Columns F2-02 added to the F2-01 slot table, added in place on an old database.
+_SLOT_COLUMNS = (
+    ("runner_pid", "INTEGER"),
+    ("runner_start", "TEXT"),
+    ("worker_pid", "INTEGER"),
+    ("worker_start", "TEXT"),
+    ("remote_started", "INTEGER NOT NULL DEFAULT 0"),
+    ("worker_tag", "TEXT"),
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +61,20 @@ class Placement:
     harness: str
     os_user: str
     placed_at: float
+    runner_pid: int | None = None
+    runner_start: str | None = None
+    worker_pid: int | None = None
+    worker_start: str | None = None
+    remote_started: bool = False
+    worker_tag: str | None = None
+
+
+@dataclass(frozen=True)
+class HeldSlot:
+    """A held slot and its job's state (None when the job row is gone)."""
+
+    placement: Placement
+    job_state: str | None
 
 
 def choose_device(
@@ -67,7 +102,10 @@ class DevicePool:
             )
         self.queue = queue
         self.config = config
+        if not self._needs_schema():
+            return
         with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {SLOTS_TABLE} (
@@ -79,6 +117,42 @@ class DevicePool:
                 )
                 """
             )
+            present = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
+            }
+            for name, kind in _SLOT_COLUMNS:
+                if name not in present:
+                    connection.execute(
+                        f"ALTER TABLE {SLOTS_TABLE} ADD COLUMN {name} {kind}"
+                    )
+            connection.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {HEALTH_TABLE} (
+                    device TEXT PRIMARY KEY,
+                    last_ok_at REAL,
+                    failing_since REAL
+                )
+                """
+            )
+            connection.commit()
+
+    def _needs_schema(self) -> bool:
+        """True unless both tables and every F2-02 column already exist.
+
+        Checked without a write lock, so a waiter starting while the poller
+        writes does not queue behind it just to find nothing to do.
+        """
+        with self.queue.connect() as connection:
+            columns = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
+            }
+            health = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (HEALTH_TABLE,),
+            ).fetchone()
+        return health is None or not {name for name, _ in _SLOT_COLUMNS} <= columns
 
     def claim(
         self,
@@ -181,17 +255,211 @@ class DevicePool:
             ).fetchone()
         if row is None:
             return None
-        return Placement(
-            job_id=str(row["job_id"]),
-            device=str(row["device"]),
-            harness=str(row["harness"]),
-            os_user=str(row["os_user"]),
-            placed_at=float(row["placed_at"]),
+        return _placement(row)
+
+    def attach_runner(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        pid: int,
+        start: str | None,
+        alive: Callable[[int | None, str | None], bool],
+    ) -> None:
+        """Record the box process (`orch job run`) that runs a placed job.
+
+        Refused while another recorded runner is still alive, so two runners
+        never share one slot (the later one could release it under the other).
+        """
+
+        def guard(row: sqlite3.Row) -> None:
+            other = row["runner_pid"]
+            if (
+                other is not None
+                and int(other) != pid
+                and alive(int(other), _text(row["runner_start"]))
+            ):
+                raise QueueError(f"job {job_id} is already run by pid {other}")
+
+        self._update_slot(
+            job_id,
+            owner,
+            "runner_pid = ?, runner_start = ?",
+            (pid, start),
+            guard=guard,
         )
+
+    def attach_worker(
+        self,
+        job_id: str,
+        *,
+        owner: str,
+        pid: int | None = None,
+        start: str | None = None,
+        remote: bool = False,
+        tag: str | None = None,
+    ) -> str | None:
+        """Record the worker: a local command's pid, or that a remote start began.
+
+        A remote start is recorded, with its worker tag (a fresh one unless
+        given), before ssh is spawned, so a runner that dies mid-spawn still
+        leaves the device to confirm the worker gone. Returns the tag.
+        """
+        if remote:
+            worker_tag = tag if tag is not None else new_tag()
+            self._update_slot(
+                job_id, owner, "remote_started = 1, worker_tag = ?", (worker_tag,)
+            )
+            return worker_tag
+        else:
+            self._update_slot(
+                job_id,
+                owner,
+                "worker_pid = ?, worker_start = ?",
+                (pid, start),
+            )
+            return None
+
+    def held(self) -> tuple[HeldSlot, ...]:
+        """Every held slot with its job's state, oldest placement first."""
+        with self.queue.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT slots.*, jobs.state AS job_state
+                FROM {SLOTS_TABLE} AS slots
+                LEFT JOIN jobs ON jobs.id = slots.job_id
+                ORDER BY slots.placed_at, slots.job_id
+                """
+            ).fetchall()
+        return tuple(
+            HeldSlot(
+                placement=_placement(row),
+                job_state=(
+                    str(row["job_state"]) if row["job_state"] is not None else None
+                ),
+            )
+            for row in rows
+        )
+
+    def health(self, device: str) -> tuple[float | None, float | None]:
+        """(last_ok_at, failing_since) for a device, or (None, None)."""
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT last_ok_at, failing_since FROM {HEALTH_TABLE} WHERE device = ?",
+                (device,),
+            ).fetchone()
+        if row is None:
+            return None, None
+        return _float(row["last_ok_at"]), _float(row["failing_since"])
+
+    def record_contact(self, device: str, *, ok: bool, at: float) -> float | None:
+        """Record one SSH probe. Returns failing_since (None while reachable)."""
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if ok:
+                connection.execute(
+                    f"""
+                    INSERT INTO {HEALTH_TABLE} (device, last_ok_at, failing_since)
+                    VALUES (?, ?, NULL)
+                    ON CONFLICT(device) DO UPDATE SET
+                        last_ok_at = excluded.last_ok_at,
+                        failing_since = NULL
+                    """,
+                    (device, at),
+                )
+                connection.commit()
+                return None
+            connection.execute(
+                f"""
+                INSERT INTO {HEALTH_TABLE} (device, last_ok_at, failing_since)
+                VALUES (?, NULL, ?)
+                ON CONFLICT(device) DO UPDATE SET
+                    failing_since = COALESCE(failing_since, excluded.failing_since)
+                """,
+                (device, at),
+            )
+            row = connection.execute(
+                f"SELECT failing_since FROM {HEALTH_TABLE} WHERE device = ?",
+                (device,),
+            ).fetchone()
+            connection.commit()
+        return _float(row["failing_since"])
+
+    def forget_health(self, *, keep: Collection[str]) -> None:
+        """Drop the offline clock of every device that holds no slot now.
+
+        A later failure then starts a fresh clock instead of resuming one
+        left from an earlier outage.
+        """
+        kept = sorted(set(keep))
+        marks = ", ".join("?" for _ in kept)
+        where = f"WHERE device NOT IN ({marks})" if kept else ""
+        with self.queue.connect() as connection:
+            connection.execute(f"DELETE FROM {HEALTH_TABLE} {where}", kept)
+
+    def _update_slot(
+        self,
+        job_id: str,
+        owner: str,
+        assignments: str,
+        values: tuple[object, ...],
+        *,
+        guard: Callable[[sqlite3.Row], None] | None = None,
+    ) -> None:
+        if owner not in HARNESSES:
+            raise QueueError(f"unknown owner {owner!r}")
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                raise QueueError(f"job {job_id} holds no device slot")
+            if row["harness"] != owner:
+                raise QueueError(
+                    f"slot for job {job_id} belongs to {row['harness']}, not {owner}"
+                )
+            if guard is not None:
+                guard(row)
+            connection.execute(
+                f"UPDATE {SLOTS_TABLE} SET {assignments} WHERE job_id = ?",
+                (*values, job_id),
+            )
+            connection.commit()
 
     def used(self) -> dict[str, int]:
         with self.queue.connect() as connection:
             return _used(connection)
+
+
+def _placement(row: sqlite3.Row) -> Placement:
+    return Placement(
+        job_id=str(row["job_id"]),
+        device=str(row["device"]),
+        harness=str(row["harness"]),
+        os_user=str(row["os_user"]),
+        placed_at=float(row["placed_at"]),
+        runner_pid=_int(row["runner_pid"]),
+        runner_start=_text(row["runner_start"]),
+        worker_pid=_int(row["worker_pid"]),
+        worker_start=_text(row["worker_start"]),
+        remote_started=bool(row["remote_started"]),
+        worker_tag=_text(row["worker_tag"]),
+    )
+
+
+def _int(value: object) -> int | None:
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _text(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _float(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _used(connection: sqlite3.Connection) -> dict[str, int]:

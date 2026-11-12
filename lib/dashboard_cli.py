@@ -28,7 +28,7 @@ from pathlib import Path
 from lib.dashboard import (
     DashboardError,
     collect_snapshot,
-    write_snapshot,
+    write_snapshot_pages,
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_push import NoopTransport, run_push, transport_for
@@ -155,7 +155,7 @@ def _snapshot(
         refresh_seconds=refresh if refresh is not None else config.refresh_seconds,
         last_cycle_at=last_cycle_at,
     )
-    return write_snapshot(out, snapshot)
+    return write_snapshot_pages(out, snapshot)
 
 
 def _env_path(name: str) -> Path | None:

@@ -1,11 +1,16 @@
-# machines.yml schema v1. See docs/SPEC.md sections 13 and 17 (F2-01).
+# machines.yml schema v1. See docs/SPEC.md sections 13 and 17 (F2-01, F2-02).
 # Each device: name, tailscale_name (omitted only on the local device),
 # slot_max, harnesses (harness -> its bot OS user), workdir_root (required
 # on remote devices, never under /mnt/; a {bot} path component resolves to
-# the harness's bot user), and enabled (default true).
+# the harness's bot user), ssh_alias (required on remote devices: the
+# Host alias in the box user's own SSH client config, containing {bot}, so
+# each bot logs in through its own alias; never a key path, user@ or
+# option), and enabled (default true).
 # A disabled device or one with a REPLACE_WITH_ value is never scheduled.
 # Slots are counted per device name: list each host (tailscale_name) once.
-# No device has SSH yet; nothing here implies a device is reachable.
+# F2-02 starts a remote job over `ssh -l <bot user> <ssh_alias>`; nothing
+# here implies a device is reachable, and a remote device stays disabled
+# until Max enables it.
 devices:
   # The box runs orch and every bot today (Phase 1).
   - name: box
@@ -19,9 +24,10 @@ devices:
       codex: codex-bot
       cursor: cursor-bot
   # The WSL Ubuntu node on the PC, not the Windows host.
-  # Stays disabled until F2-02 remote start lands (Factory, Nov 11).
-  # F2-02 reaches it through the box's SSH aliases pc-wsl-claude-bot,
-  # pc-wsl-codex-bot and pc-wsl-cursor-bot, one per bot user.
+  # Stays disabled until Max enables it (F2-02 remote start is built; Max
+  # turns the device on). F2-02 reaches it through the box's SSH aliases
+  # pc-wsl-claude-bot, pc-wsl-codex-bot and pc-wsl-cursor-bot, one per bot
+  # user, resolved from ssh_alias below.
   - name: pc
     enabled: false
     tailscale_name: pc-wsl-bots.tail68624b.ts.net
@@ -33,11 +39,13 @@ devices:
     # Each bot's own home, e.g. /home/codex-bot/factory-work. Jobs stay off
     # the Windows C: drive; /mnt/ is refused.
     workdir_root: /home/{bot}/factory-work
-  # Its bot users do not exist yet and SSH is off. Stays disabled until
-  # F2-02 remote start lands.
+    ssh_alias: pc-wsl-{bot}
+  # Its bot users do not exist yet and SSH is off. Stays disabled until Max
+  # provisions them and enables it.
   - name: mac
     enabled: false
     tailscale_name: maxs-macbook-pro.tail68624b.ts.net
     slot_max: 2
     harnesses: {}
     workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT
+    ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS

@@ -29,6 +29,7 @@ from lib.wait import (
     open_queue,
     wait_for_job,
 )
+from tests.pool_helpers import pool_claim
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -475,11 +476,13 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
     db, _ = make_db(tmp_path)
     queue = SQLiteJobQueue(db, clock=time.time)
     job = queue.enqueue(request(recipient="cursor"), dedupe_key="a")
-    assert queue.claim("cursor") is not None
+    assert pool_claim(queue, "cursor").id == job.id
     result = run(["job", "run", "cursor-bot", job.id, "--", "true"], PATH=path, ORCH_DB=str(db))
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
-    for name in ("job_run.py", "worktrees.py", "cli.py"):
+    for name in (
+        "job_run.py", "worktrees.py", "cli.py", "placed_run.py", "remote.py", "device_monitor.py",
+    ):
         tree = ast.parse((ROOT / "lib" / name).read_text(encoding="utf-8"))
         literals = {
             node.value
@@ -487,8 +490,11 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
         }
         assert not literals & set(HARNESS_BINARIES), name
-    # The poller side still execs nothing but gh.
+    # The poller side still execs nothing but gh, plus (F2-02) the `ssh`
+    # checks in lib/remote.py; the device monitor itself execs nothing.
     assert _exec_calls(ROOT / "lib" / "dispatcher.py") == []
+    assert _exec_calls(ROOT / "lib" / "device_monitor.py") == []
+    assert _exec_calls(ROOT / "lib" / "placed_run.py") == []
 
 
 JOB_RUN_GIT_SUBCOMMANDS = {
@@ -531,7 +537,7 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
         ),
         dedupe_key="a",
     )
-    assert queue.claim("cursor") is not None
+    assert pool_claim(queue, "cursor").id == job.id
 
     real_popen = subprocess.Popen
     started: list[list[str]] = []
@@ -551,7 +557,16 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
     code = cli_main(["job", "run", "cursor-bot", job.id, "--db", str(db), *extra, "--", *command])
     monkeypatch.setattr(subprocess, "Popen", real_popen)
 
-    assert [argv for argv in started if argv[0] != "git"] == [command]
+    # The command is spawned behind lib/job_run.py's fixed gate (Codex r1
+    # F1.4: it waits until its pid is recorded, then execs the argv as is).
+    from lib import job_run
+
+    def ungated(argv: list[str]) -> list[str]:
+        gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
+        assert argv[:5] == gate and argv[5].isdigit(), argv
+        return argv[6:]
+
+    assert [ungated(argv) for argv in started if argv[0] != "git"] == [command]
     assert code == 0
     git_calls = [argv for argv in started if argv[0] == "git"]
     assert bool(git_calls) == worktree
@@ -673,10 +688,10 @@ def test_a_signal_during_cli_delivery_exits_zero_without_a_traceback(tmp_path: P
     (hook / "sitecustomize.py").write_text(
         "import os, signal, lib.wait as w\n"
         "real = w.deliver\n"
-        "def deliver(queue, job, out):\n"
+        "def deliver(queue, job, out, **kwargs):\n"
         "    os.kill(os.getpid(), signal.SIGINT)\n"
         "    os.kill(os.getpid(), signal.SIGTERM)\n"
-        "    real(queue, job, out)\n"
+        "    real(queue, job, out, **kwargs)\n"
         "w.deliver = deliver\n",
         encoding="utf-8",
     )

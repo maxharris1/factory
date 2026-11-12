@@ -12,6 +12,7 @@ import pytest
 
 from lib import job_run
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
+from tests.pool_helpers import pool_claim
 
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
@@ -183,9 +184,7 @@ def _running_job(queue: SQLiteJobQueue, *, timeout: int = 60, recipient: str = "
         ),
         dedupe_key=f"k-{time.monotonic_ns()}",
     )
-    job = queue.claim(recipient)
-    assert job is not None
-    return job
+    return pool_claim(queue, recipient)
 
 
 def _last_activity(queue: SQLiteJobQueue, job_id: str) -> float:

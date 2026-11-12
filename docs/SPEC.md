@@ -35,6 +35,8 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | Nov 11 | The PC's `workdir_root` is `/home/<bot>/factory-work` on `pc-wsl-bots`, written `/home/{bot}/factory-work` and resolved per harness to that harness's bot user, so jobs stay off `/mnt/c`. F2-02 reaches the PC through the box's SSH aliases `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`. The PC and the Mac stay `enabled: false` until F2-02 remote start lands. | Factory decided (technical) |
 | Nov 12, 10:02 AM | Linear discovery moves to a Linear webhook. Max's words: "Go straight to a Linear webhook through Tailscale Funnel". This supersedes the Nov 11, 2:31 PM "accepts no inbound webhooks" for this one listener only. `orch linear-webhook serve` verifies Linear's HMAC signature and timestamp and only marks issues dirty in `orch.db`; the poller reads dirty issues each cycle and runs the full search as a reconcile every `linear_webhook.reconcile_seconds` (default 900). With no `linear_webhook` in `orch.yml` nothing changes. Tailscale Network owns the Funnel; Max creates the Linear webhook and saves its signing secret on the box (issue #55, section 7). | Max; details Factory decided (technical) |
 | Nov 12, 5:29 AM | Factory lessons batch 1, ops: the job heartbeat is orch-owned. A bot starts its harness as `orch job run <bot> <id> [--worktree] -- <command>`, which heartbeats every third of `timeout_seconds` and stops when the command exits, the job is no longer running, or `orch job run` dies (issue #49). With `--worktree`, a job checkout is a git worktree of one shared clone per repo, removed when the command exits unless it has uncommitted changes or unpushed commits; `orch gc` removes stale ones. `orch poll` writes and removes its own pidfile under its single-poller lock, and `deploy/poller-service.sh` is the no-systemd service with opt-in autostart. | Max approved the batch ("Proceed with fixes"); details Factory decided (technical) |
+| Nov 12, 10:12 AM | Continue with Phase 2: F2-02 remote start is built next. Max's words: "continue with phase 2". | Max |
+| Nov 12 | F2-02 design: each remote device in `machines.yml` names an `ssh_alias` containing `{bot}` (the PC's is `pc-wsl-{bot}`, so `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`), the box's own SSH config holds the host and key, and `orch` always passes `-l <bot user>` and never a key path. `orch wait` claims through the device pool; `orch job run` starts a remote job over that alias in `<workdir_root>/jobs/<job-id>` (`--worktree` stays box-only). A slot is released only once the worker is confirmed gone: by `orch job run` when its command ends (a remote worker still running is sent SIGTERM and checked again), or by the poller for a finished job whose runner died. The poller checks each remote device holding a slot over SSH once per poll; a device that fails every check for 60 minutes marks each job still running on it `stuck` at once (no T6 retry), wakes Grok Bot once through the ticket's stuck flag, and keeps the slot held. The PC and Mac stay `enabled: false` until Max turns them on. | Factory decided (technical) |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
 
@@ -108,20 +110,20 @@ stateDiagram-v2
   Questions --> Planning: no open product calls, ticket over 3 files (D36)
   Questions --> Building: no open product calls, 3 files or fewer
   Planning --> PlanCheck: trusted builder posts kind=plan
-  Planning --> Stuck: job dies twice (T6)
+  Planning --> Stuck: job dies twice (T6), or its device is offline 60 minutes
   PlanCheck --> Planning: an AC is unmapped (once)
   PlanCheck --> Building: every AC mapped
   PlanCheck --> Stuck: gaps a 2nd time
   Building --> Review: builder posts ready, CI green on that head
   Building --> Building: CI red, fix (gate retries don't count as rounds)
-  Building --> Stuck: CI red 3 times in a row, or the job dies twice
+  Building --> Stuck: CI red 3 times in a row, the job dies twice, or its device is offline 60 minutes
   Review --> Fixing: REVISE, under the round cap
   Fixing --> Review: fixed head ready, CI green
-  Fixing --> Stuck: job dies twice (T6)
+  Fixing --> Stuck: job dies twice (T6), or its device is offline 60 minutes
   Review --> Capped: REVISE at the cap, or a 2nd AC-unmet verdict
   Review --> Blocked: BLOCKED
   Review --> Ship: APPROVE on the current head
-  Review --> Stuck: job dies twice (T6)
+  Review --> Stuck: job dies twice (T6), or its device is offline 60 minutes
   Ship --> Review: head changed and the patch differs (D33-D)
   Ship --> Merged: ship = merge
   Ship --> HandedOff: ship = handoff (Max merges, or the Aut0 RfR handoff)
@@ -160,7 +162,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
 | T5 | `questions` comment from any session, then `answers` | Set state `orch:state/waiting-max`. On answers, re-queue the same step with the answer linked (not a round) | Grok Bot (it decides technical ones itself) |
-| T6 | Job exits with no handoff comment, or 60 minutes pass with no heartbeat or progress (or the project's `job_timeout` in `orch.yml`) | Retry once. 2nd time → `stuck` | Grok Bot on the 2nd |
+| T6 | Job exits with no handoff comment, or 60 minutes pass with no heartbeat or progress (or the project's `job_timeout` in `orch.yml`). Phase 2 (F2-02): the device the job runs on has failed every SSH check for 60 minutes | Retry once. 2nd time → `stuck`. Device offline 60 minutes → `stuck` at once, no retry; the slot stays held | Grok Bot on the 2nd, or once for the offline device |
 | T7 | `verdict=BLOCKED`, `stuck`, `capped`, config refused, anything unparsed | No known answer | Grok Bot, once |
 | T8 | `ok head=<sha>` / `decline` from the external approver | OK on the previewed SHA → ship. Decline → `fix` (3rd → `stuck`) | Builder's bot on decline |
 | T9 | PR merged and the project has `post_merge` | Queue a `post-merge` job. A fail files a blocking follow-up on the project's ticket tracker. Deferred from Phase 1. | QA owner bot |
@@ -458,11 +460,15 @@ Review state the handoff still completes and the `done` wake reports that the
 issue was not moved.
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
 `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
-`trusted_logins` author) whose head names the PR head starts tracking a
-labelled PR with no Grok `brief` or `go`, and starts the first review even
-with no build job, for a project whose PRs are built outside the queue (the
-factory repo itself). With the flag off, only a trusted Grok `brief` or `go`
-starts tracking.
+`trusted_logins` author) whose head names the PR head starts tracking an
+open PR with no Grok `brief` or `go`, and starts the first review even with
+no build job, for a project whose PRs are built outside the queue (the
+factory repo itself). Such a PR needs no `orch:state/` label to be
+discovered: an open PR with a parseable `kind=ready` comment is a candidate,
+the trust and head rules above decide, and the poller writes the label once
+it tracks the PR (issue #59). Only that trusted `ready` admits an unlabelled
+PR: a Grok `brief` or `go` on it starts nothing until the PR is labelled. With the flag off, only a trusted Grok `brief`
+or `go` on a labelled PR starts tracking.
 
 ## 8. Review and merge rules
 
@@ -500,7 +506,7 @@ The builder brief says "run as poteto-mode". The builder follows the playbook th
 | `verdict=REVISE` at the cap, or a second AC-unmet verdict | `Capped`. Grok Bot tells Max once. Max's own words can OK one more round. |
 | `verdict=BLOCKED`, anything unparsed, or config refused later | Wake Grok Bot once. Grok Bot tells Max once, with evidence and a recommended next step. |
 | External `decline` | One fix pass per decline. Third decline: `Stuck`. |
-| Device offline 60 minutes (Phase 2 only) | `Stuck`. Until F2-02 adds an offline check, a device that drops mid-job is caught by T6: no heartbeat for the job timeout, one retry, then `Stuck`. Its slot stays held and the job is never `done`. |
+| Device offline 60 minutes (Phase 2 only) | `Stuck` (F2-02). Each poll runs one SSH check on every remote device that holds a slot. When a device has failed every check for 60 minutes, each job still running on it is failed with its failure already handled (no T6 retry), its ticket is marked `stuck`, and Grok Bot is woken once. The slot stays held until the device confirms the worker gone, and the job is never `done`. A device that drops mid-job and is back before then is still caught by T6 if the job stops heartbeating. |
 | Post-merge check fails (deferred) | File a blocking follow-up on the project's tracker, then `Done`. |
 
 Grok Bot reports each stop once. It does not poll Max about the same stop.
@@ -547,8 +553,9 @@ Live acceptance is three real tickets, one each on three projects Max picks, run
 Start only after Phase 1 works.
 
 - **Device pool.** `machines.yml` with the box, PC and Mac (Tailscale names), a declared safe maximum of slots per device, and each harness eligible only where Max has provisioned its login under that bot's user (`claude-bot`, `codex-bot`, `cursor-bot`).
-  Each device has `name`, `tailscale_name`, `slot_max`, `harnesses` (each eligible harness mapped to its own bot user), `workdir_root` and `enabled` (default `true`). The one `local: true` device is the box that runs `orch`; it omits `tailscale_name` and `workdir_root`. Every remote device names an absolute `workdir_root` that is not under `/mnt/`, so a WSL node never works on a Windows drive; a whole path component may be `{bot}`, resolved to the harness's bot user (the PC uses `/home/{bot}/factory-work`). The PC and Mac stay `enabled: false` until F2-02 remote start lands. A device schedules only when it is enabled, has no `REPLACE_WITH_` value, and lists the harness. `orch check-config` refuses a placeholder unless `--allow-placeholders` is passed, then names it, and always names a disabled device. Scheduling holds one slot per job on the first eligible device in file order with a free slot, in the same transaction that claims the job, so two claims cannot take the same last slot; any free slot takes any harness. A queued job never holds a slot: requeueing a claimed job frees its slot in the same transaction. A job's slot is not freed when it finishes, fails or times out, only by an explicit release once the worker is gone. No two devices may share a `tailscale_name`. Nothing assumes a device is reachable. `orch status` lists each device's harnesses, slots held over `slot_max`, its running jobs, and whether it is disabled or a placeholder; a pool-placed job is not also counted under `Slots — box`.
+  Each device has `name`, `tailscale_name`, `slot_max`, `harnesses` (each eligible harness mapped to its own bot user), `workdir_root` and `enabled` (default `true`). The one `local: true` device is the box that runs `orch`; it omits `tailscale_name` and `workdir_root`. Every remote device names an absolute `workdir_root` that is not under `/mnt/`, so a WSL node never works on a Windows drive; a whole path component may be `{bot}`, resolved to the harness's bot user (the PC uses `/home/{bot}/factory-work`). Every remote device also names an `ssh_alias`, the Host alias in the box's own SSH config, containing `{bot}` so each bot logs in through its own alias (the PC's `pc-wsl-{bot}`); it is never a key path, `user@` or option. The PC and Mac stay `enabled: false` until Max turns them on. A device schedules only when it is enabled, has no `REPLACE_WITH_` value, and lists the harness. `orch check-config` refuses a placeholder unless `--allow-placeholders` is passed, then names it, and always names a disabled device. Scheduling holds one slot per job on the first eligible device in file order with a free slot, in the same transaction that claims the job, so two claims cannot take the same last slot; any free slot takes any harness. A queued job never holds a slot: requeueing a claimed job frees its slot in the same transaction. A job's slot is not freed when it finishes, fails or times out, only by an explicit release once the worker is gone. No two devices may share a `tailscale_name`. Nothing assumes a device is reachable. `orch status` lists each device's harnesses, slots held over `slot_max`, its running jobs, and whether it is disabled or a placeholder; a pool-placed job is not also counted under `Slots — box`.
 - **Remote start.** Each owning bot starts its harness on a device over Tailscale SSH as its own user. A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
+  `orch wait` claims through the device pool and prints the job's `device` and `remote` (and, on a remote device, its `workdir`). `orch job run` refuses a job that holds no slot, whose slot is another bot's, that another live `orch job run` already runs, or whose earlier worker (left by a runner that died) is not confirmed gone. On the box the command's pid is recorded on the slot before the command may run. On a remote device it runs the command as `ssh -o BatchMode=yes ... -l <bot user> -- <ssh_alias> <script>` under a fresh worker tag recorded on the slot first; the script makes `<workdir_root>/jobs/<job-id>`, records the worker's process group and boot id there, and runs the command with `ORCH_JOB_ID`, `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE`, `ORCH_JOB_WORKDIR` and `ORCH_WORKER_TAG`, exiting with its status. `--worktree` is box-only. When the command ends (done, failed or killed) the slot is released once the worker is confirmed gone: on the box, the command has exited; on a remote device, an SSH check finds no process carrying the tag and no process left in the recorded group, after a SIGTERM to the tagged processes if any were left running. An unreachable device keeps the slot; each poll then releases slots whose job is no longer running and whose worker is confirmed gone (stopping an orphaned remote worker first), and runs the 60-minute offline check (section 9).
 - **Self-hosted CI.** Runner labels live in each repo's `factory.md` as `ci_runner:`. The device inventory lives in `orch.yml` (or `machines.yml`). Plus a registration checklist for Max. Max registers the runners himself. Credential-holding deploy workflows stay hosted.
 - **`orch status`.** A read-only text summary of queue, slots and paused items, generated from the tracker and the local job list.
 
@@ -577,7 +584,7 @@ factory/
   bots/                  # short "orch jobs" sections for Claude/Codex/Cursor Bot skills
   config/orch.example.yml
   config/machines.example.yml
-  machines.yml           # Phase 2 device pool (F2-01)
+  machines.yml           # Phase 2 device pool (F2-01) and SSH aliases (F2-02)
   model/                 # TLA+ model + Mermaid statechart of the orchestrator loop
   docs/SPEC.md           # this file
   docs/PLAN.md           # shorter plan
@@ -716,7 +723,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 - **Description:** `machines.yml` with the box, PC and Mac (Tailscale names), slot maximums, and harness eligibility only where Max has provisioned the login under that bot's user.
 - **Acceptance criteria:** A harness is never scheduled on a device that is not listed as eligible for it. Slot counts are not exceeded. Missing inventory is not invented; it is asked of Max. Concurrent claims cannot take the same last slot. A disabled or placeholder device never schedules and `check-config` names it. A device that drops mid-job keeps its slot and goes `stuck` through T6, never `done`. `orch status` shows device rows.
 - **Depends on:** Phase 1 complete (F1-10), and Max's inventory.
-- **Built:** `machines.yml`, `lib/machines_yml.py`, `lib/device_pool.py`. No SSH, remote start, or harness execution; Phase 1 `orch wait` does not yet claim through the pool (F2-02).
+- **Built:** `machines.yml`, `lib/machines_yml.py`, `lib/device_pool.py`. No SSH, remote start, or harness execution; at F2-01 `orch wait` did not yet claim through the pool (F2-02 added that).
 - **Size:** M.
 
 #### F2-02 — Remote start
@@ -724,6 +731,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 - **Description:** Each owning bot starts its harness on a device over Tailscale SSH as its own user. A slot stays held until the worker is confirmed gone. 60 minutes offline means `stuck`.
 - **Acceptance criteria:** Only the owning bot starts that harness, over SSH as `claude-bot`, `codex-bot`, or `cursor-bot`. A slot is released only after the worker is gone. An offline host for 60 minutes marks the job `stuck` and wakes Grok Bot once.
 - **Depends on:** F2-01.
+- **Built:** `ssh_alias` in `machines.yml`, `lib/remote.py` (SSH argv and the remote start, check and stop scripts), `lib/placed_run.py` (`orch job run` for a placed job), `lib/device_monitor.py` (slot release and the offline check, run by the poller), and `orch wait` claiming through `lib/device_pool.py`. The model has `T6DeviceOffline`. The PC and Mac still ship `enabled: false`; nothing has been run against a real device.
 - **Size:** M.
 
 #### F2-03 — Self-hosted CI

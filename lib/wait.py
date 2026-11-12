@@ -1,8 +1,13 @@
-"""Blocking `orch wait` and the `orch job` helpers (SPEC F1-06).
+"""Blocking `orch wait` and the `orch job` helpers (SPEC F1-06, F2-02).
 
-The waiter sleeps on F1-04's queue (lib/queue.py) until `claim` returns a
+The waiter sleeps on F1-04's queue (lib/queue.py) until a claim returns a
 job, prints it, and exits. It calls no model and never execs a process:
 the owning bot that ran the shell call starts its own harness afterwards.
+
+Since F2-02 the claim goes through the device pool (lib/device_pool.py):
+the job moves to running and holds a slot on the first eligible device
+in one transaction, and the printed line names the device. With no free
+eligible slot the job stays queued and the waiter keeps waiting.
 
 An owning bot is `<recipient>-bot`, the name the dispatcher already
 expects on a `ready` comment. Only the three harness bots may wait.
@@ -26,6 +31,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TextIO, TypeVar
 
+from lib.device_pool import DevicePool, Placement
 from lib.queue import Job, JobQueue, QueueError, SQLiteJobQueue
 
 POLL_SECONDS = 1.0
@@ -116,10 +122,12 @@ def wait_for_job(
     out: TextIO,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    pool: DevicePool | None = None,
 ) -> Job:
     """Claim the next job for recipient, print it, and return it.
 
-    A locked database means the poller is writing; keep waiting with backoff.
+    With a pool, the claim holds a device slot (F2-02). A locked database
+    means the poller is writing; keep waiting with backoff.
     """
     locked = 0
     while True:
@@ -127,14 +135,15 @@ def wait_for_job(
         leaving = True
         try:
             try:
-                job = _claim(queue, recipient)
+                claimed = _claim(queue, recipient, pool)
             except _Locked:
-                job = None
+                claimed = None
                 locked += 1
             else:
                 locked = 0
-            if job is not None:
-                deliver(queue, job, out)
+            if claimed is not None:
+                job, placement = claimed
+                deliver(queue, job, out, pool=pool, placement=placement)
                 return job
             leaving = False
         finally:
@@ -184,15 +193,28 @@ def _lock_backoff(attempt: int) -> float:
     return min(LOCK_BACKOFF_MAX_SECONDS, delay)
 
 
-def deliver(queue: JobQueue, job: Job, out: TextIO) -> None:
-    """Print a claimed job. If it does not reach the bot, fail it so T6 retries now."""
+def deliver(
+    queue: JobQueue,
+    job: Job,
+    out: TextIO,
+    *,
+    pool: DevicePool | None = None,
+    placement: Placement | None = None,
+) -> None:
+    """Print a claimed job. If it does not reach the bot, fail it so T6 retries now.
+
+    An undelivered job never reached a bot, so no worker can exist for it:
+    its device slot is released with it.
+    """
     try:
-        out.write(format_job(job))
+        out.write(format_job(job, placement=placement, pool=pool))
         out.flush()
     except Exception as exc:
         reason = _one_line(exc)
         try:
             queue.finish(job.id, owner=job.request.recipient, handoff_comment_id=None)
+            if pool is not None and placement is not None:
+                pool.release(job.id, owner=job.request.recipient)
         except Exception as finish_exc:
             raise WaitError(
                 f"could not deliver job {job.id} ({reason}) or fail it "
@@ -201,12 +223,26 @@ def deliver(queue: JobQueue, job: Job, out: TextIO) -> None:
         raise WaitError(f"could not deliver job {job.id} ({reason}); failed it for T6") from exc
 
 
-def format_job(job: Job) -> str:
-    payload = {
+def format_job(
+    job: Job,
+    *,
+    placement: Placement | None = None,
+    pool: DevicePool | None = None,
+) -> str:
+    payload: dict[str, object] = {
         "id": job.id,
         "bot": f"{job.request.recipient}-bot",
         **asdict(job.request),
     }
+    if placement is not None:
+        device = pool.config.device(placement.device) if pool is not None else None
+        remote = device is None or not device.local
+        payload["device"] = placement.device
+        payload["remote"] = remote
+        if remote and device is not None:
+            payload["workdir"] = (
+                f"{device.workdir_for(placement.harness)}/jobs/{job.id}"
+            )
     return json.dumps(payload, sort_keys=True) + "\n"
 
 
@@ -230,9 +266,16 @@ class _Locked(Exception):
     pass
 
 
-def _claim(queue: JobQueue, recipient: str) -> Job | None:
+def _claim(
+    queue: JobQueue,
+    recipient: str,
+    pool: DevicePool | None,
+) -> tuple[Job, Placement | None] | None:
     try:
-        return queue.claim(recipient)
+        if pool is not None:
+            return pool.claim(recipient)
+        job = queue.claim(recipient)
+        return None if job is None else (job, None)
     except (*STORAGE_ERRORS, TypeError, ValueError) as exc:
         if is_locked(exc):
             raise _Locked from exc

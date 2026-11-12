@@ -28,7 +28,7 @@ import pytest
 
 import lib.dashboard as dashboard
 import lib.dashboard_flow as flow
-from lib.dashboard import collect_snapshot, render_pages, write_snapshot
+from lib.dashboard import collect_snapshot, render_pages, write_snapshot, write_snapshot_pages
 from tests.test_dashboard import (
     FREE_TEXT_SECRETS,
     GH_CLASSIC,
@@ -153,7 +153,7 @@ def _diagram(markup: str) -> tuple[dict[str, set[str]], dict[tuple[str, str], se
 
 def test_snapshot_writes_status_json_and_every_page(tmp_path: Path) -> None:
     out = tmp_path / "out"
-    paths = write_snapshot(out, _snapshot(tmp_path))
+    paths = write_snapshot_pages(out, _snapshot(tmp_path))
     assert dashboard.PAGES == PAGES
     assert paths == (out / "status.json", *(out / name for name in PAGES))
     assert sorted(path.name for path in out.iterdir()) == sorted(("status.json", *PAGES))
