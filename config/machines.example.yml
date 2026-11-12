@@ -1,0 +1,8 @@
+# Minimal machines.yml: the one local device that runs orch.
+# See docs/SPEC.md section 13 and the shipped machines.yml.
+devices:
+  - name: box
+    local: true
+    slot_max: 1
+    harnesses:
+      claude: claude-bot

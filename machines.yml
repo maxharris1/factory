@@ -1,0 +1,34 @@
+# machines.yml schema v1. See docs/SPEC.md sections 13 and 17 (F2-01).
+# Each device: name, tailscale_name (omitted only on the local device),
+# slot_max, harnesses (harness -> its bot OS user), workdir_root (required
+# on remote devices, never under /mnt/), and enabled (default true).
+# A disabled device or one with a REPLACE_WITH_ value is never scheduled.
+# No device has SSH yet; nothing here implies a device is reachable.
+devices:
+  # The box runs orch and every bot today (Phase 1).
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+  # The WSL Ubuntu node on the PC, not the Windows host.
+  # Max enables it once SSH is OK'd.
+  - name: pc
+    enabled: false
+    tailscale_name: pc-wsl-bots.tail68624b.ts.net
+    slot_max: 3
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+    # Jobs stay off the Windows C: drive; /mnt/ is refused.
+    workdir_root: REPLACE_WITH_PC_WORKDIR_ROOT
+  # Its bot users do not exist yet and SSH is off.
+  - name: mac
+    enabled: false
+    tailscale_name: maxs-macbook-pro.tail68624b.ts.net
+    slot_max: 2
+    harnesses: {}
+    workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT
