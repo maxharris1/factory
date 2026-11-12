@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from lib.factory_md import FactoryConfig
+from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
@@ -307,6 +308,13 @@ class Dispatcher:
                 (repo.lower(), ticket_id, error, self.queue.now()),
             )
 
+    def record_poll_deferral(self, detail: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO poll_deferrals (detail, recorded_at) VALUES (?, ?)",
+                (detail, self.queue.now()),
+            )
+
     def record_terminal(self, repo: str, ticket_id: str, state: str) -> None:
         if state not in ("merged", "handed-off", "done"):
             raise ValueError(f"{state!r} is not a completed terminal state")
@@ -461,10 +469,10 @@ class Dispatcher:
                     handoff_comment_id=receipt,
                 )
             except Exception as exc:
-                self._record_job_error(
-                    job,
-                    f"grok-delivery:{type(exc).__name__}",
-                )
+                reason = type(exc).__name__
+                if isinstance(exc, GrokDeliveryError):
+                    reason = f"{reason}:{exc.detail}"
+                self._record_job_error(job, f"grok-delivery:{reason}")
                 try:
                     self.queue.release(
                         job.id,
@@ -2645,6 +2653,15 @@ class Dispatcher:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS poll_deferrals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    detail TEXT NOT NULL,
                     recorded_at REAL NOT NULL
                 )
                 """

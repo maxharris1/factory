@@ -105,8 +105,18 @@ discovery is PR-only in Phase 1; a label on an issue is not enough. Linear
 projects use GraphQL search with `LINEAR_HANDOFF_QUERY`.
 
 Runtime names live in `orch.yml`. `linear.api_key_env` names the environment
-variable containing the Linear API key. `grok.webhook_url_env` and
-`grok.webhook_key_env` name the existing Grok routine webhook variables.
+variable containing the Linear API key. `grok.webhook_url_env`,
+`grok.webhook_auth_env`, and `grok.webhook_key_env` name the existing Grok
+routine webhook variables; the shipped names are `FACTORY_WEBHOOK_URL`,
+`FACTORY_WEBHOOK_AUTH`, and `FACTORY_WEBHOOK_KEY`. `FACTORY_WEBHOOK_AUTH` is a
+full `Authorization` header value (for example `Bearer <key>`) sent verbatim;
+`FACTORY_WEBHOOK_KEY` is a bare key sent as `Bearer <key>`. Set one of them;
+when both are set, `FACTORY_WEBHOOK_AUTH` wins. `webhook_auth_env` defaults to
+`FACTORY_WEBHOOK_AUTH` when omitted. A missing variable fails by naming every
+accepted variable, and a failed delivery is recorded in `poll_errors` as
+`grok-delivery:GrokDeliveryError:<detail>`, where the detail is the HTTP
+status, the exception type, or the missing variable names, never the URL, key,
+headers, or body.
 `projects[].factory_ref` selects the trusted branch containing `factory.md`;
 `projects[].linear_project_id` maps an immutable Linear project ID to its
 repo. `trusted_logins` maps GitHub authors to sets of bot markers, while
@@ -146,6 +156,12 @@ state writes Linear, and `ship: handoff` never merges.
 `<db>.lock`, so a second poller is refused. Source failures are recorded per
 project or ticket and the long-running loop continues after the 60-second
 interval; `--once` reports a cycle-level failure with a nonzero exit.
+Each `gh api` read has a 20-second timeout and is tried three times with
+2- and 4-second backoff; a ref that still times out records a retryable
+`gh api timed out after 3 attempts` error and the cycle moves on.
+Linear budget and search page-limit deferrals are expected load shedding, not
+errors: they do not fail the cycle and are written as at most one aggregated
+row per cycle to `poll_deferrals`, not `poll_errors`.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
@@ -164,7 +180,11 @@ bin/orch job done claude-bot <job-id> --failed
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
 `codex`, `cursor`). It checks for a job once a second, claims the oldest, and
-prints one JSON line. If that line cannot be printed, the job is finished as
+prints one JSON line. While the poller holds a write, a claim that sees
+`database is locked` (after a 5-second SQLite busy timeout) keeps waiting with
+backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
+up to 8 attempts. Other database errors still fail at once.
+If that line cannot be printed, the job is finished as
 failed so T6 retries it at once. `orch` never starts a harness: the bot that ran
 the shell call starts its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
@@ -201,14 +221,25 @@ Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh).
 database exists, opens, and has the runtime tables, and that the factory
 wrapper is the `orch` found on `PATH`.
 
-[`deploy/orch-poll.service`](deploy/orch-poll.service) is a systemd user unit
-for the long-running poller. Max creates
-`~/.config/factory/orch-poll.env` mode `0600`; it names `ORCH_DB` and the
-Linear/webhook variables named by `orch.yml`. Values are not documented or
-committed. Copy or link the unit to
+[`deploy/run-poller.sh`](deploy/run-poller.sh) is the long-running poller
+launcher: it sources `~/.config/factory/webhook.env` and
+`~/.config/factory/orch-poll.env` with `set -a`, sets `PYTHONUNBUFFERED=1`,
+and runs `orch poll`; redirect its output to `poller.log`. `orch poll` also
+line-buffers its own stdout and stderr, so the log stays current.
+[`deploy/orch-poll.service`](deploy/orch-poll.service) is the systemd user
+unit alternative; it reads the same two files and sets `PYTHONUNBUFFERED=1`.
+Max creates both files mode `0600`. `orch-poll.env` names `ORCH_DB` and the
+Linear variable named by `orch.yml`. `webhook.env` holds `FACTORY_WEBHOOK_URL`
+and either `FACTORY_WEBHOOK_AUTH` or `FACTORY_WEBHOOK_KEY`;
+`deploy/install.sh` installs the names-only template
+[`deploy/webhook.env.example`](deploy/webhook.env.example) as
+`~/.config/factory/webhook.env.example`. Quote every value, because an
+unquoted `Bearer <key>` does not set the variable when the file is sourced.
+Values are not documented or committed. Copy or link the unit to
 `~/.config/systemd/user/orch-poll.service`, review its checkout path, and then
 use `systemctl --user daemon-reload`, `enable`, and `start`. Nothing in this
-repository installs, enables, starts, or writes the environment file.
+repository installs, enables, or starts the service, or writes either
+environment file.
 
 ## Status
 

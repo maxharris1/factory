@@ -228,6 +228,10 @@ def _poll(argv: list[str]) -> int:
     parser.add_argument("--orch", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
     try:
         path = _db_path(args.db)
         with _poll_lock(path):
@@ -321,6 +325,7 @@ def _runtime(
     delivery = WebhookGrokDelivery(
         url_env=config.grok.webhook_url_env,
         key_env=config.grok.webhook_key_env,
+        auth_env=config.grok.webhook_auth_env,
     )
     t8 = T8Hook()
     source = LivePollSource(config)
@@ -333,6 +338,7 @@ def _runtime(
         hooks=(T7Hook(), t8),
     )
     source.error_sink = dispatcher.record_poll_error
+    source.deferral_sink = dispatcher.record_poll_deferral
     source.terminal_sink = dispatcher.record_terminal
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source

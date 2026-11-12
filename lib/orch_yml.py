@@ -20,6 +20,7 @@ from lib.load import Finding, is_strict_int, load_yaml
 
 POLL_SECONDS = 60
 DEFAULT_JOB_TIMEOUT_MINUTES = 90
+DEFAULT_WEBHOOK_AUTH_ENV = "FACTORY_WEBHOOK_AUTH"
 
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -63,6 +64,7 @@ class LinearConfig:
 class GrokConfig:
     webhook_url_env: str
     webhook_key_env: str
+    webhook_auth_env: str = DEFAULT_WEBHOOK_AUTH_ENV
 
 
 @dataclass(frozen=True)
@@ -350,7 +352,7 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
         return None
     _unknown_keys(
         value,
-        {"webhook_url_env", "webhook_key_env"},
+        {"webhook_url_env", "webhook_key_env", "webhook_auth_env"},
         "grok",
         findings,
     )
@@ -364,9 +366,14 @@ def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:
         "grok.webhook_key_env",
         findings,
     )
-    if url_name is None or key_name is None:
+    auth_name = _env_name(
+        value.get("webhook_auth_env", DEFAULT_WEBHOOK_AUTH_ENV),
+        "grok.webhook_auth_env",
+        findings,
+    )
+    if url_name is None or key_name is None or auth_name is None:
         return None
-    return GrokConfig(url_name, key_name)
+    return GrokConfig(url_name, key_name, auth_name)
 
 
 def _trusted_logins(

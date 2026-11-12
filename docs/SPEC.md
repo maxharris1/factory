@@ -306,6 +306,7 @@ linear:
   api_key_env: LINEAR_API_KEY
 grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_auth_env: FACTORY_WEBHOOK_AUTH
   webhook_key_env: FACTORY_WEBHOOK_KEY
 trusted_logins:
   maxharris1: [grok-bot, claude-bot, codex-bot, cursor-bot]
@@ -371,7 +372,8 @@ normal one-page-per-term case uses two requests, leaves two requests for a
 same-cycle handoff, and permits up to 16 direct issue reads: at most 1,200
 requests and about 726,720 complexity per hour if all process headroom is
 used. Every additional search page is counted against both budgets and
-reduces direct reads. A page-limit or budget discovery cutoff is recorded.
+reduces direct reads. A page-limit or budget cutoff is recorded as a
+non-error deferral, at most one aggregated row per cycle.
 Tracked reads and discovery fair-share the remaining budget, and tracked
 reads rotate across cycles so a deferred ticket is served later. Search hits
 already tracked are not fetched directly again, and a direct issue read is

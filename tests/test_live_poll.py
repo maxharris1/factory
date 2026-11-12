@@ -1,5 +1,7 @@
 import base64
+import io
 import json
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -30,6 +32,9 @@ from lib.orch_yml import (
     Project,
 )
 from lib.poll_source import (
+    GH_CALL_ATTEMPTS,
+    GH_CALL_TIMEOUT_SECONDS,
+    GH_RETRY_BACKOFF_SECONDS,
     HTTPResult,
     LINEAR_COMPLEXITY_PER_HOUR,
     LINEAR_ISSUE_COMPLEXITY,
@@ -42,6 +47,7 @@ from lib.poll_source import (
     LivePollSource,
     PollCycleError,
     PollSourceError,
+    TIMEOUT_SECONDS,
     _linear_ready_state_id,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -395,6 +401,7 @@ def test_github_candidate_parsing_uses_gh_without_network() -> None:
         "-u", "LINEAR_KEY",
         "-u", "FACTORY_WEBHOOK_URL",
         "-u", "FACTORY_WEBHOOK_KEY",
+        "-u", "FACTORY_WEBHOOK_AUTH",
         "gh", "api",
     ]
     assert all(call[: len(expected_prefix)] == expected_prefix for call in gh.calls)
@@ -402,6 +409,7 @@ def test_github_candidate_parsing_uses_gh_without_network() -> None:
         "LINEAR_KEY",
         "FACTORY_WEBHOOK_URL",
         "FACTORY_WEBHOOK_KEY",
+        "FACTORY_WEBHOOK_AUTH",
     ):
         assert ("-u", name) in tuple(
             zip(source.gh, source.gh[1:])
@@ -455,6 +463,104 @@ def test_failing_project_does_not_stop_healthy_project() -> None:
         "repos/acme/widgets/issues?state=open&per_page=100" in call
         for call in gh.calls
     )
+
+
+def test_gh_timeout_is_retried_with_backoff_and_a_short_timeout() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    timeouts: list[float] = []
+    sleeps: list[float] = []
+    remaining = [2]
+
+    def runner(argv, timeout):
+        timeouts.append(timeout)
+        if remaining[0]:
+            remaining[0] -= 1
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return gh(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
+
+    assert source._gh_pages("repos/acme/widgets/issues?state=open&per_page=100")
+    assert sleeps == [GH_RETRY_BACKOFF_SECONDS, GH_RETRY_BACKOFF_SECONDS * 2]
+    assert set(timeouts) == {GH_CALL_TIMEOUT_SECONDS}
+    assert GH_CALL_TIMEOUT_SECONDS < TIMEOUT_SECONDS
+    assert len(timeouts) == 3
+
+
+def test_gh_timeout_gives_up_with_a_retryable_error() -> None:
+    sleeps: list[float] = []
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout):
+        calls.append(list(argv))
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    source = LivePollSource(config(), gh_runner=runner, sleep=sleeps.append)
+
+    with pytest.raises(RetryableStateError, match="gh api timed out"):
+        source._gh_call("repos/acme/widgets/pulls/12")
+    assert len(calls) == GH_CALL_ATTEMPTS
+    assert len(sleeps) == GH_CALL_ATTEMPTS - 1
+
+
+def test_gh_timeout_on_one_ref_records_it_and_the_cycle_continues(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 10)
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={"github": {"grok-login": {"grok-bot"}}, "linear": {}},
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+    with queue.connect() as connection:
+        for number in ("12", "13"):
+            connection.execute(
+                """
+                INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at)
+                VALUES ('acme/widgets', ?, 'github', 0)
+                """,
+                (number,),
+            )
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+
+    def runner(argv, timeout):
+        if any(part.endswith("/pulls/12") for part in argv):
+            raise subprocess.TimeoutExpired(argv, timeout)
+        return gh(argv, timeout)
+
+    source = LivePollSource(
+        OrchConfig(
+            poll_seconds=60,
+            projects=(Project("acme/widgets", factory_ref="main"),),
+        ),
+        gh_runner=runner,
+        error_sink=dispatcher.record_poll_error,
+        sleep=lambda seconds: None,
+    )
+    dispatcher.process = Mock()
+    dispatcher.reconcile_jobs = Mock()
+
+    with pytest.raises(PollCycleError):
+        dispatcher.poll_once(source)
+
+    assert [call.args[0].ticket_id for call in dispatcher.process.call_args_list] == [
+        "13"
+    ]
+    dispatcher.reconcile_jobs.assert_called_once_with()
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT repo, ticket_id, error FROM poll_errors"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (
+            "acme/widgets",
+            "12",
+            f"PollSourceError:gh api timed out after {GH_CALL_ATTEMPTS} attempts",
+        )
+    ]
 
 
 def test_project_error_is_recorded_in_dispatcher_database(tmp_path: Path) -> None:
@@ -995,21 +1101,21 @@ def test_linear_search_page_cap_records_discovery_cutoff() -> None:
             cursor=str(page),
         )
 
+    deferrals: list[str] = []
     source = LivePollSource(
         config(linear=True),
         environ={"LINEAR_KEY": "key"},
         linear_transport=transport,
         error_sink=lambda repo, ticket, error: errors.append(error),
+        deferral_sink=deferrals.append,
     )
     source.begin_cycle()
 
     assert len(source._linear_issues("one term")) == LINEAR_SEARCH_MAX_PAGES
     assert len(requests) == LINEAR_SEARCH_MAX_PAGES
-    assert errors == [
-        "PollSourceError:Linear search page limit deferred discovery"
-    ]
-    with pytest.raises(PollCycleError):
-        source.end_cycle()
+    assert errors == []
+    source.end_cycle()
+    assert deferrals == ["Linear search page limit deferred discovery x1"]
 
 
 def test_linear_request_hard_cap_is_retryable() -> None:
@@ -1043,6 +1149,7 @@ def test_linear_request_hard_cap_is_retryable() -> None:
 
 def test_tracked_budget_deferral_keeps_cached_and_github_tickets() -> None:
     errors: list[tuple[str, str, str]] = []
+    deferrals: list[str] = []
 
     def transport(url, headers, body, timeout):
         del url, headers, timeout
@@ -1067,6 +1174,7 @@ def test_tracked_budget_deferral_keeps_cached_and_github_tickets() -> None:
         error_sink=lambda repo, ticket, error: errors.append(
             (repo, ticket, error)
         ),
+        deferral_sink=deferrals.append,
     )
     source.begin_cycle()
     source._linear_issue_cache["AUT-cached"] = linear_issue(
@@ -1087,11 +1195,12 @@ def test_tracked_budget_deferral_keeps_cached_and_github_tickets() -> None:
     ) == 19
     assert any(ticket.ticket_id == "AUT-cached" for ticket in found)
     assert any(ticket.ticket_id == "12" for ticket in found)
-    assert [ticket for _, ticket, _ in errors] == [
-        f"AUT-{index:03d}" for index in range(18, 41)
-    ]
-    with pytest.raises(PollCycleError):
-        source.end_cycle()
+    assert errors == []
+    assert {f"AUT-{index:03d}" for index in range(18)} <= {
+        ticket.ticket_id for ticket in found
+    }
+    source.end_cycle()
+    assert deferrals == ["Linear poll budget deferred tracked ticket x23"]
 
 
 def test_tracked_budget_rotation_serves_every_ticket() -> None:
@@ -1447,14 +1556,12 @@ def test_linear_poll_hour_stays_within_shared_budget(
         gh_runner=FakeGh(FACTORY.format(tickets="linear", ship="handoff")),
         linear_transport=transport,
         error_sink=dispatcher.record_poll_error,
+        deferral_sink=dispatcher.record_poll_deferral,
     )
 
     cycles = 3600 // source.config.poll_seconds
     for cycle in range(cycles):
-        try:
-            dispatcher.poll_once(source)
-        except PollCycleError:
-            pass
+        dispatcher.poll_once(source)
 
     searches = sum(
         request["query"].startswith("query FactoryPoll")
@@ -1504,24 +1611,20 @@ def test_linear_poll_hour_stays_within_shared_budget(
     assert requests_per_hour <= shared_request_budget
     assert complexity_per_hour <= shared_complexity_budget
     with queue.connect() as connection:
-        recorded_errors = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT DISTINCT error FROM poll_errors"
-            )
-        }
+        recorded_errors = connection.execute(
+            "SELECT count(*) FROM poll_errors"
+        ).fetchone()[0]
+        deferral_rows = connection.execute(
+            "SELECT count(*) FROM poll_deferrals"
+        ).fetchone()[0]
         discovery_cutoffs = connection.execute(
             """
-            SELECT count(*) FROM poll_errors
-            WHERE error = (
-                'PollSourceError:Linear poll budget deferred discovery'
-            )
+            SELECT count(*) FROM poll_deferrals
+            WHERE detail LIKE '%Linear poll budget deferred discovery%'
             """
         ).fetchone()[0]
-    assert recorded_errors <= {
-        "PollSourceError:Linear poll budget deferred discovery",
-        "PollSourceError:Linear poll budget deferred tracked ticket",
-    }
+    assert recorded_errors == 0
+    assert deferral_rows <= cycles
     search_pages = 2 * ((len(searchable) + 49) // 50)
     discovery_capacity = (
         cycle_request_limit
@@ -1579,10 +1682,10 @@ def test_linear_transport_error_does_not_expose_key() -> None:
 def test_webhook_delivery_uses_job_contract_and_does_not_log_key(caplog) -> None:
     sent: list[dict] = []
 
-    def transport(url, key, body, timeout):
+    def transport(url, authorization, body, timeout):
         del timeout
         assert url == "https://webhook.test"
-        assert key == "secret-webhook-key"
+        assert authorization == "Bearer secret-webhook-key"
         sent.append(json.loads(body))
         return WebhookResult(200, {"X-Request-Id": "receipt-1"})
 
@@ -1693,6 +1796,194 @@ def test_webhook_transport_refuses_non_https_without_network() -> None:
         send_webhook("http://webhook.test", "key", b"{}", 1)
 
 
+def grok_job() -> Job:
+    request = JobRequest(
+        repo="acme/widgets",
+        ticket_id="12",
+        action="stuck",
+        recipient="grok",
+        source_comment_id="7",
+        timeout_seconds=60,
+    )
+    return Job("job-1", "dedupe", request, "running", 1, 1, None, None)
+
+
+def webhook_delivery(environ: dict[str, str], sent: list[str]) -> WebhookGrokDelivery:
+    def transport(url, authorization, body, timeout):
+        del url, body, timeout
+        sent.append(authorization)
+        return WebhookResult(200, {"X-Request-Id": "receipt"})
+
+    return WebhookGrokDelivery(
+        url_env="FACTORY_WEBHOOK_URL",
+        key_env="FACTORY_WEBHOOK_KEY",
+        auth_env="FACTORY_WEBHOOK_AUTH",
+        environ={"FACTORY_WEBHOOK_URL": "https://webhook.test", **environ},
+        transport=transport,
+    )
+
+
+@pytest.mark.parametrize(
+    ("environ", "authorization"),
+    [
+        (
+            {"FACTORY_WEBHOOK_AUTH": "Bearer secret-auth-value"},
+            "Bearer secret-auth-value",
+        ),
+        ({"FACTORY_WEBHOOK_KEY": "secret-key-value"}, "Bearer secret-key-value"),
+        (
+            {
+                "FACTORY_WEBHOOK_AUTH": "Bearer secret-auth-value",
+                "FACTORY_WEBHOOK_KEY": "secret-key-value",
+            },
+            "Bearer secret-auth-value",
+        ),
+    ],
+    ids=["auth-only", "key-only", "auth-wins"],
+)
+def test_webhook_auth_is_verbatim_and_key_gets_bearer(
+    environ: dict[str, str],
+    authorization: str,
+) -> None:
+    sent: list[str] = []
+
+    webhook_delivery(environ, sent).deliver(grok_job(), logical_key="logical-1")
+
+    assert sent == [authorization]
+
+
+def test_webhook_without_auth_or_key_names_every_accepted_var() -> None:
+    sent: list[str] = []
+    delivery = webhook_delivery({}, sent)
+
+    with pytest.raises(GrokDeliveryError) as raised:
+        delivery.deliver(grok_job(), logical_key="logical-1")
+
+    assert "FACTORY_WEBHOOK_AUTH" in str(raised.value)
+    assert "FACTORY_WEBHOOK_KEY" in str(raised.value)
+    assert raised.value.detail == (
+        "missing-env:FACTORY_WEBHOOK_AUTH|FACTORY_WEBHOOK_KEY"
+    )
+    assert sent == []
+
+
+@pytest.mark.parametrize("name", ["FACTORY_WEBHOOK_AUTH", "FACTORY_WEBHOOK_KEY"])
+def test_webhook_errors_never_contain_the_secret(name: str) -> None:
+    def transport(url, authorization, body, timeout):
+        del url, body, timeout
+        raise RuntimeError(authorization)
+
+    delivery = WebhookGrokDelivery(
+        url_env="FACTORY_WEBHOOK_URL",
+        key_env="FACTORY_WEBHOOK_KEY",
+        auth_env="FACTORY_WEBHOOK_AUTH",
+        environ={
+            "FACTORY_WEBHOOK_URL": "https://secret-host.test/hook",
+            name: "secret-webhook-value",
+        },
+        transport=transport,
+    )
+
+    with pytest.raises(GrokDeliveryError) as raised:
+        delivery.deliver(grok_job(), logical_key="logical-1")
+
+    text = f"{raised.value} {raised.value.detail}"
+    assert "secret-webhook-value" not in text
+    assert "secret-host" not in text
+    assert raised.value.detail == "RuntimeError"
+    assert raised.value.__cause__ is None
+
+
+def test_send_webhook_sends_auth_verbatim_and_derives_automation_key(
+    monkeypatch,
+) -> None:
+    sent: list[dict[str, str]] = []
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_open(request, timeout):
+        del timeout
+        sent.append(dict(request.header_items()))
+        return Response()
+
+    monkeypatch.setattr("lib.grok_delivery._OPENER.open", fake_open)
+
+    send_webhook("https://webhook.test", "Bearer secret-key", b"{}", 1)
+
+    assert sent[0]["Authorization"] == "Bearer secret-key"
+    assert sent[0]["X-automation-key"] == "secret-key"
+
+
+@pytest.mark.parametrize(
+    ("environ", "transport_status", "expected"),
+    [
+        (
+            {"FACTORY_WEBHOOK_KEY": "secret-webhook-value"},
+            503,
+            "grok-delivery:GrokDeliveryError:HTTP-503",
+        ),
+        (
+            {},
+            200,
+            "grok-delivery:GrokDeliveryError:"
+            "missing-env:FACTORY_WEBHOOK_AUTH|FACTORY_WEBHOOK_KEY",
+        ),
+    ],
+    ids=["http-status", "missing-env"],
+)
+def test_grok_delivery_failure_records_safe_detail(
+    tmp_path: Path,
+    caplog,
+    capsys,
+    environ: dict[str, str],
+    transport_status: int,
+    expected: str,
+) -> None:
+    database = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(database, clock=lambda: 10)
+    delivery = WebhookGrokDelivery(
+        url_env="FACTORY_WEBHOOK_URL",
+        key_env="FACTORY_WEBHOOK_KEY",
+        auth_env="FACTORY_WEBHOOK_AUTH",
+        environ={
+            "FACTORY_WEBHOOK_URL": "https://secret-host.test/hook",
+            **environ,
+        },
+        transport=lambda url, authorization, body, timeout: WebhookResult(
+            transport_status, {}
+        ),
+    )
+    dispatcher = Dispatcher(
+        database,
+        queue,
+        trusted_logins={"github": {"grok-login": {"grok-bot"}}, "linear": {}},
+        review_actions=Mock(),
+        grok_delivery=delivery,
+    )
+    queue.enqueue(grok_job().request, dedupe_key="grok-1")
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        errors = [
+            str(row[0])
+            for row in connection.execute("SELECT error FROM poll_errors")
+        ]
+    assert errors and set(errors) == {expected}
+    captured = capsys.readouterr()
+    for text in (" ".join(errors), caplog.text, captured.out, captured.err):
+        assert "secret-webhook-value" not in text
+        assert "secret-host" not in text
+
+
 def test_poll_once_runs_one_cycle(monkeypatch, tmp_path: Path) -> None:
     class FakeDispatcher:
         def __init__(self):
@@ -1716,6 +2007,25 @@ def test_poll_once_runs_one_cycle(monkeypatch, tmp_path: Path) -> None:
 
     assert result == 0
     assert dispatcher.polls == 1
+
+
+def test_poll_line_buffers_stdout_and_stderr(monkeypatch, tmp_path: Path) -> None:
+    streams = {
+        name: io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        for name in ("stdout", "stderr")
+    }
+    for name, stream in streams.items():
+        monkeypatch.setattr(cli.sys, name, stream)
+    database = tmp_path / "orch.db"
+    database.write_bytes(b"database")
+    monkeypatch.setattr(
+        cli,
+        "_runtime",
+        lambda db, orch, create: (Mock(), object()),
+    )
+
+    assert cli.main(["poll", "--db", str(database), "--once"]) == 0
+    assert all(stream.line_buffering for stream in streams.values())
 
 
 def test_real_dispatcher_is_idempotent_across_two_once_runs(

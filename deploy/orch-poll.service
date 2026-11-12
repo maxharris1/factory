@@ -4,7 +4,9 @@ Description=Factory dispatcher poll loop
 [Service]
 Type=simple
 WorkingDirectory=%h/factory
+EnvironmentFile=-%h/.config/factory/webhook.env
 EnvironmentFile=%h/.config/factory/orch-poll.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/factory/bin/orch poll
 Restart=on-failure
 RestartSec=60

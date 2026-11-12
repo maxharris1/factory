@@ -32,6 +32,7 @@ cat >"$WRAPPER" <<EOF
 exec "${VENV}/bin/python" "${ROOT}/bin/orch" "\$@"
 EOF
 chmod 0755 "$WRAPPER"
+install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 export ORCH_DB="${DB}"
 export PATH="\${HOME}/.local/bin:\${PATH}"

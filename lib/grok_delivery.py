@@ -13,10 +13,15 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from lib.queue import Job
 
 TIMEOUT_SECONDS = 8.0
+BEARER = "Bearer "
 
 
 class GrokDeliveryError(RuntimeError):
-    pass
+    """detail is safe to record: a status, an exception type, or env names."""
+
+    def __init__(self, message: str, *, detail: str):
+        super().__init__(message)
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,7 @@ _OPENER = build_opener(_NoRedirect)
 
 def send_webhook(
     url: str,
-    key: str,
+    authorization: str,
     body: bytes,
     timeout: float,
 ) -> WebhookResult:
@@ -46,23 +51,22 @@ def send_webhook(
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("webhook URL must use https")
-        request = Request(
-            url,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "X-Automation-Key": key,
-            },
-        )
+        headers = {
+            "Authorization": authorization,
+            "Content-Type": "application/json",
+        }
+        if authorization[: len(BEARER)].lower() == BEARER.lower():
+            headers["X-Automation-Key"] = authorization[len(BEARER) :].strip()
+        request = Request(url, data=body, method="POST", headers=headers)
         with _OPENER.open(request, timeout=timeout) as response:
             return WebhookResult(response.status, dict(response.headers.items()))
     except HTTPError as exc:
         return WebhookResult(exc.code, {})
     except (OSError, URLError, ValueError) as exc:
+        detail = _exception_detail(exc)
         raise GrokDeliveryError(
-            f"Grok webhook request failed: {type(exc).__name__}"
+            f"Grok webhook request failed: {detail}",
+            detail=detail,
         ) from None
 
 
@@ -72,23 +76,31 @@ class WebhookGrokDelivery:
         *,
         url_env: str,
         key_env: str,
+        auth_env: str | None = None,
         environ: Mapping[str, str] = os.environ,
         transport: WebhookTransport = send_webhook,
         timeout_seconds: float = TIMEOUT_SECONDS,
     ):
         self.url_env = url_env
         self.key_env = key_env
+        self.auth_env = auth_env
         self.environ = environ
         self.transport = transport
         self.timeout_seconds = timeout_seconds
 
     def deliver(self, job: Job, *, logical_key: str) -> str:
-        url = self._required(self.url_env)
-        key = self._required(self.key_env)
+        url = self.environ.get(self.url_env)
+        if not url:
+            raise GrokDeliveryError(
+                f"set {self.url_env} for Grok webhook delivery",
+                detail=f"missing-env:{self.url_env}",
+            )
+        authorization = self._authorization()
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.netloc:
             raise GrokDeliveryError(
-                f"{self.url_env} must contain an https URL"
+                f"{self.url_env} must contain an https URL",
+                detail=f"bad-env:{self.url_env}",
             )
         request = job.request
         target_bot = None
@@ -119,22 +131,46 @@ class WebhookGrokDelivery:
             sort_keys=True,
         ).encode("utf-8")
         try:
-            result = self.transport(url, key, body, self.timeout_seconds)
+            result = self.transport(url, authorization, body, self.timeout_seconds)
         except GrokDeliveryError:
             raise
         except Exception as exc:
+            detail = _exception_detail(exc)
             raise GrokDeliveryError(
-                f"Grok webhook request failed: {type(exc).__name__}"
+                f"Grok webhook request failed: {detail}",
+                detail=detail,
             ) from None
         if result.status != 200:
             raise GrokDeliveryError(
-                f"Grok webhook returned HTTP {result.status}"
+                f"Grok webhook returned HTTP {result.status}",
+                detail=f"HTTP-{result.status}",
             )
         receipt = result.headers.get("X-Request-Id")
         return receipt if receipt else logical_key
 
-    def _required(self, name: str) -> str:
-        value = self.environ.get(name)
-        if not value:
-            raise GrokDeliveryError(f"set {name} for Grok webhook delivery")
-        return value
+    def _authorization(self) -> str:
+        """auth_env holds a full Authorization value and wins over key_env."""
+        names = [name for name in (self.auth_env, self.key_env) if name]
+        for name in names:
+            value = self.environ.get(name)
+            if not value:
+                continue
+            if "\r" in value or "\n" in value:
+                raise GrokDeliveryError(
+                    f"{name} must be one line",
+                    detail=f"bad-env:{name}",
+                )
+            return value if name == self.auth_env else BEARER + value
+        joined = " or ".join(names)
+        raise GrokDeliveryError(
+            f"set {joined} for Grok webhook delivery",
+            detail="missing-env:" + "|".join(names),
+        )
+
+
+def _exception_detail(exc: BaseException) -> str:
+    name = type(exc).__name__
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, URLError) and isinstance(reason, BaseException):
+        return f"{name}:{type(reason).__name__}"
+    return name

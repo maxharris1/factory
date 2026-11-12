@@ -31,6 +31,7 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
     assert config.grok is not None
     assert config.grok.webhook_url_env == "FACTORY_WEBHOOK_URL"
     assert config.grok.webhook_key_env == "FACTORY_WEBHOOK_KEY"
+    assert config.grok.webhook_auth_env == "FACTORY_WEBHOOK_AUTH"
     assert config.trusted_logins == {
         "maxharris1": frozenset(
             {"grok-bot", "claude-bot", "codex-bot", "cursor-bot"}
@@ -89,6 +90,36 @@ def test_minimal_example_has_no_extra_required_fields() -> None:
     assert config.projects[0].job_timeout is None
     assert config.projects[0].linear_ready_for_review is False
     assert resolve_job_timeout(config, "owner/name") == 90
+
+
+def test_grok_webhook_auth_env_defaults_and_can_be_renamed(tmp_path: Path) -> None:
+    path = tmp_path / "orch.yml"
+    base = """
+poll_seconds: 60
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+projects:
+  - repo: acme/widgets
+""".strip()
+    path.write_text(base + "\n", encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None and config.grok is not None
+    assert config.grok.webhook_auth_env == "FACTORY_WEBHOOK_AUTH"
+
+    path.write_text(
+        base.replace(
+            "grok:\n",
+            "grok:\n  webhook_auth_env: OTHER_WEBHOOK_AUTH\n",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(path)
+    assert findings == []
+    assert config is not None and config.grok is not None
+    assert config.grok.webhook_auth_env == "OTHER_WEBHOOK_AUTH"
 
 
 def test_project_timeout_overrides_file_and_default(tmp_path: Path) -> None:
