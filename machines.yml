@@ -9,6 +9,8 @@ devices:
   # The box runs orch and every bot today (Phase 1).
   - name: box
     local: true
+    # One slot per Phase 1 owning bot, each running one blocking `orch wait`:
+    # lib/wait.py:35 (OWNING_BOTS) and docs/SPEC.md:33 (Factory decision).
     slot_max: 3
     harnesses:
       claude: claude-bot

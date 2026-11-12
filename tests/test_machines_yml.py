@@ -180,6 +180,31 @@ def test_workdir_root_bot_token_rules(tmp_path: Path, value: str, message: str) 
     ), findings
 
 
+def test_shipped_box_slot_max_comes_from_the_phase1_slot_config() -> None:
+    """The box's slot_max is not a guess: it is one slot per Phase 1 owning
+    bot (lib/wait.py OWNING_BOTS, each running one blocking `orch wait` at
+    a time), as Factory recorded in docs/SPEC.md. The machines.yml comment
+    cites both by file:line, and the cited lines must still say so."""
+    from lib.wait import OWNING_BOTS
+
+    config, _ = load_machines_yml(ROOT / "machines.yml", allow_placeholders=True)
+    assert config is not None
+    box = config.device("box")
+    assert box is not None
+    assert box.slot_max == len(OWNING_BOTS) == 3
+
+    text = (ROOT / "machines.yml").read_text(encoding="utf-8")
+    citations = {
+        "docs/SPEC.md:33": "it keeps 3 slots, one per harness bot as in Phase 1",
+        "lib/wait.py:35": "OWNING_BOTS = {",
+    }
+    for citation, expected in citations.items():
+        assert citation in text, citation
+        name, line = citation.split(":")
+        cited = (ROOT / name).read_text(encoding="utf-8").splitlines()[int(line) - 1]
+        assert expected in cited, (citation, cited)
+
+
 def test_example_passes_strict_check() -> None:
     config, findings = load_machines_yml(ROOT / "config" / "machines.example.yml")
 
