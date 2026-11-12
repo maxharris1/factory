@@ -436,23 +436,28 @@ def test_killed_remote_job_stops_its_worker_before_the_slot_is_released(tmp_path
         "--machines", str(machines), "--", sys.executable, "-c", script,
         env=ssh.env(),
     )
-    deadline = time.monotonic() + 20
-    while not pid_file.exists() or not pid_file.read_text():
-        assert time.monotonic() < deadline, proc.stderr.read() if proc.poll() is not None else ""
-        time.sleep(0.05)
-    worker = int(pid_file.read_text())
-    assert pool.placement(job_id).remote_started
+    worker: int | None = None
+    try:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() or not pid_file.read_text():
+            assert time.monotonic() < deadline, proc.stderr.read() if proc.poll() is not None else ""
+            time.sleep(0.05)
+        worker = int(pid_file.read_text())
+        assert pool.placement(job_id).remote_started
 
-    proc.send_signal(signal.SIGTERM)
-    _, err = proc.communicate(timeout=30)
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=30)
 
-    assert proc.returncode == 128 + signal.SIGTERM, err
-    assert "stopping it" in err
-    with pytest.raises(ProcessLookupError):
-        os.kill(worker, 0)
-    scripts = [call["script"] for call in ssh.calls()]
-    assert any("kill -TERM" in item for item in scripts)
-    assert pool.placement(job_id) is None
+        assert proc.returncode == 128 + signal.SIGTERM, err
+        assert "stopping it" in err
+        assert wait_gone(worker)
+        scripts = [call["script"] for call in ssh.calls()]
+        assert any("kill -TERM" in item for item in scripts)
+        assert pool.placement(job_id) is None
+    finally:
+        kill_quietly(worker)
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_an_unreachable_device_after_the_job_keeps_the_slot(tmp_path: Path) -> None:
@@ -522,17 +527,22 @@ def test_a_second_runner_is_refused_while_the_first_still_runs(tmp_path: Path) -
         "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
         "--machines", str(machines), "--", "sh", "-c", f"touch {started}; exec sleep 30",
     )
-    deadline = time.monotonic() + 20
-    while not started.exists():
-        assert time.monotonic() < deadline
-        time.sleep(0.05)
-    second = orch(
-        "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
-        "--machines", str(machines), "--", "true",
-    )
-    _, err = second.communicate(timeout=20)
-    first.send_signal(signal.SIGTERM)
-    first.communicate(timeout=20)
+    try:
+        deadline = time.monotonic() + 20
+        while not started.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        second = orch(
+            "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--", "true",
+        )
+        _, err = second.communicate(timeout=20)
+        first.send_signal(signal.SIGTERM)
+        first.communicate(timeout=20)
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.communicate(timeout=20)
     assert second.returncode == 2
     assert f"already run by pid {first.pid}" in err
     assert pool.placement(job_id) is None  # the first runner released it on exit
@@ -774,3 +784,736 @@ def test_suite_guard_shadows_any_real_ssh() -> None:
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 255
     assert "real ssh is disabled" in result.stderr
+
+
+# --- Codex r1: worker identity, takeover, spawn gap, probes ------------------
+#
+# These run the real check/stop scripts (tests/fake_ssh.py runs them under
+# `sh -c` in a new session, as sshd would), not scripted FakeTransport
+# results, so they test what the scripts do to real processes.
+
+
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+
+
+def gone(pid: int) -> bool:
+    """True once pid has exited (a zombie waiting to be reaped counts as gone)."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return text.rpartition(")")[2].split()[0] == "Z"
+
+
+def wait_gone(pid: int, seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while not gone(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def wait_file(path: Path, proc: subprocess.Popen | None = None, seconds: float = 20.0) -> str:
+    deadline = time.monotonic() + seconds
+    while not path.exists() or not path.read_text(encoding="utf-8").strip():
+        if proc is not None and proc.poll() is not None:
+            raise AssertionError(proc.stderr.read() if proc.stderr else "runner exited")
+        assert time.monotonic() < deadline, f"{path} never written"
+        time.sleep(0.05)
+    return path.read_text(encoding="utf-8").strip()
+
+
+def kill_quietly(pid: int | None, *, group: bool = False) -> None:
+    if pid is None:
+        return
+    try:
+        if group:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def use_fake_ssh(monkeypatch: pytest.MonkeyPatch, ssh: Ssh) -> None:
+    """Make the in-process SshTransport find tests/fake_ssh.py first on PATH."""
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+
+
+def job_dir(tmp_path: Path, bot: str, job_id: str) -> Path:
+    return tmp_path / "remote" / bot / "work" / "jobs" / job_id
+
+
+def starts(ssh: Ssh) -> list[dict]:
+    return [call for call in ssh.calls() if "mkdir -p" in (call["script"] or "")]
+
+
+# A remote command that leaves a child in its process group and exits. The
+# child redirects its standard streams and ignores SIGHUP (and, for the
+# stubborn variant, SIGTERM), then writes its pid; the command waits for
+# that pid file so the child's handlers are in place before it exits.
+CHILD = (
+    "import os, signal, sys, time\n"
+    "signal.signal(signal.SIGHUP, signal.SIG_IGN)\n"
+    "{extra}"
+    "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+    "os.rename(sys.argv[1] + '.tmp', sys.argv[1])\n"
+    "time.sleep(60)\n"
+)
+LEAVE_CHILD = (
+    "import os, subprocess, sys, time\n"
+    "path = sys.argv[1]\n"
+    "subprocess.Popen([sys.executable, '-c', sys.argv[2], path],\n"
+    "                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                 stderr=subprocess.DEVNULL)\n"
+    "while not os.path.exists(path):\n"
+    "    time.sleep(0.02)\n"
+)
+
+
+def leave_child_command(child_pid: Path, *, stubborn: bool) -> list[str]:
+    extra = "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if stubborn else ""
+    return [sys.executable, "-c", LEAVE_CHILD, str(child_pid), CHILD.format(extra=extra)]
+
+
+# F1.1: removing the pid file is not evidence the worker's group is empty.
+
+
+def test_r1_f11_remote_child_left_in_the_group_is_stopped_before_the_slot_is_released(
+    tmp_path: Path,
+) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    child_pid = tmp_path / "child.pid"
+    child: int | None = None
+    try:
+        proc = orch(
+            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--",
+            *leave_child_command(child_pid, stubborn=False),
+            env=ssh.env(),
+        )
+        _, err = proc.communicate(timeout=60)
+        child = int(wait_file(child_pid))
+        assert proc.returncode == 0, err
+        assert "stopping it" in err, err  # the leftover child was found running
+        assert wait_gone(child)
+        assert pool.placement(job_id) is None
+    finally:
+        kill_quietly(child)
+
+
+def test_r1_f11_remote_child_that_will_not_stop_keeps_the_slot_until_it_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    child_pid = tmp_path / "child.pid"
+    child: int | None = None
+    try:
+        proc = orch(
+            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--",
+            *leave_child_command(child_pid, stubborn=True),
+            env=ssh.env(),
+        )
+        _, err = proc.communicate(timeout=90)
+        child = int(wait_file(child_pid))
+        assert proc.returncode == 0, err
+        assert "not confirmed gone (running); slot held" in err, err
+        assert not gone(child)
+        assert pool.placement(job_id) is not None
+
+        # The poller, with the runner gone, finds it still running too.
+        use_fake_ssh(monkeypatch, ssh)
+        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        result = monitor.reconcile(time.time(), lambda *_: None)
+        assert result.released == ()
+        assert pool.placement(job_id) is not None
+
+        kill_quietly(child)
+        assert wait_gone(child)
+        result = monitor.reconcile(time.time(), lambda *_: None)
+        assert result.released == (job_id,)
+    finally:
+        kill_quietly(child)
+
+
+# F1.2: a stored group number must not stop (or count as) another group.
+
+
+def _finished_remote_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    use_fake_ssh(monkeypatch, ssh)
+    pool.attach_worker(job_id, owner="codex", remote=True)
+    queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+    directory = job_dir(tmp_path, "codex-bot", job_id)
+    directory.mkdir(parents=True)
+    return machines, queue, pool, job_id, ssh, directory
+
+
+@pytest.mark.parametrize(
+    "record",
+    ["{pid}\n", "{pid} {boot}\n"],
+    ids=["pid-only", "pid-and-this-boot"],
+)
+def test_r1_f12_stale_pid_file_naming_another_live_group_leaves_it_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: str
+) -> None:
+    machines, queue, pool, job_id, ssh, directory = _finished_remote_slot(tmp_path, monkeypatch)
+    other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        (directory / remote.PID_FILE).write_text(
+            record.format(pid=other.pid, boot=BOOT_ID), encoding="utf-8"
+        )
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        for _ in range(2):
+            result = monitor.reconcile(time.time(), lambda *_: None)
+            assert (result.stopped, result.released) == ((), ())
+        time.sleep(0.2)
+        assert other.poll() is None  # the other group was never signalled
+        assert pool.placement(job_id) is not None  # cannot tell: slot kept
+        assert not any("kill -TERM" in (call["script"] or "") for call in ssh.calls())
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_r1_f12_pid_file_from_an_earlier_boot_is_gone_and_signals_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    machines, queue, pool, job_id, ssh, directory = _finished_remote_slot(tmp_path, monkeypatch)
+    other = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        (directory / remote.PID_FILE).write_text(
+            f"{other.pid} 00000000-0000-0000-0000-000000000000\n", encoding="utf-8"
+        )
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        result = monitor.reconcile(time.time(), lambda *_: None)
+        assert result.released == (job_id,)
+        assert result.stopped == ()
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
+
+
+class ChecksOnly:
+    """Runs check scripts through the fake ssh; records stop scripts, never runs them.
+
+    A stop built from a record of `1` would signal every process this user
+    owns, so stops are never executed here.
+    """
+
+    def __init__(self) -> None:
+        self.real = remote.SshTransport()
+        self.stops: list[str] = []
+        self.codes: list[int] = []
+
+    def run(self, argv, *, timeout: float) -> int:
+        if "kill -TERM" in argv[-1]:
+            self.stops.append(argv[-1])
+            return 0
+        code = self.real.run(argv, timeout=timeout)
+        self.codes.append(code)
+        return code
+
+
+@pytest.mark.parametrize(
+    "record",
+    ["0\n", "1\n", "007\n", "\n", "-5\n", "12abc\n", "0 {boot}\n", "1 {boot}\n", "x {boot}\n"],
+    ids=["zero", "one", "leading-zero", "empty", "negative", "junk",
+         "zero-boot", "one-boot", "junk-boot"],
+)
+def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record: str
+) -> None:
+    machines, queue, pool, job_id, ssh, directory = _finished_remote_slot(tmp_path, monkeypatch)
+    (directory / remote.PID_FILE).write_text(record.format(boot=BOOT_ID), encoding="utf-8")
+    transport = ChecksOnly()
+    monitor = DeviceMonitor(pool, config_of(machines), transport)
+    result = monitor.reconcile(time.time(), lambda *_: None)
+    assert transport.stops == []
+    assert transport.codes == [3]  # UNKNOWN: the device answered, but cannot tell
+    assert (result.stopped, result.released) == ((), ())
+    assert pool.placement(job_id) is not None
+
+
+# F1.3: a new runner must not start while an earlier runner's worker lives.
+
+
+def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
+    tmp_path: Path,
+) -> None:
+    machines = machines_file(tmp_path)
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
+    pool = DevicePool(queue, config_of(machines))
+    job_id = enqueue(queue, "claude", "1")
+    assert pool.claim("claude")[1].device == "box"
+    worker_pid = tmp_path / "worker.pid"
+    marker = tmp_path / "second-ran"
+    worker: int | None = None
+    first = orch(
+        "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", "sh", "-c", f"echo $$ > {worker_pid}; exec sleep 60",
+    )
+    try:
+        worker = int(wait_file(worker_pid, first))
+        first.kill()  # the runner dies; its worker keeps running
+        first.wait(timeout=20)  # not communicate(): the worker holds its pipes
+        assert not gone(worker)
+
+        second = orch(
+            "job", "run", "claude-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--", "touch", str(marker),
+        )
+        _, err = second.communicate(timeout=20)
+        assert second.returncode == 2, err
+        assert f"earlier worker pid {worker} still runs" in err
+        assert not marker.exists()
+        assert pool.placement(job_id) is not None
+        assert pool.placement(job_id).worker_pid == worker  # identity kept
+
+        queue.finish(job_id, owner="claude", handoff_comment_id="c1")
+        monitor = DeviceMonitor(pool, config_of(machines), FakeTransport())
+        assert monitor.reconcile(time.time(), lambda *_: None).released == ()
+        assert pool.placement(job_id) is not None
+        kill_quietly(worker)
+        assert wait_gone(worker)
+        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+    finally:
+        kill_quietly(worker)
+        if first.poll() is None:
+            first.kill()
+
+
+def test_r1_f13_remote_takeover_is_refused_while_the_dead_runners_worker_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    group_file = tmp_path / "group"
+    marker = tmp_path / "second-ran"
+    group: int | None = None
+    script = (
+        "import os, sys, time\n"
+        f"open({str(group_file)!r} + '.tmp', 'w').write(str(os.getpgid(0)))\n"
+        f"os.rename({str(group_file)!r} + '.tmp', {str(group_file)!r})\n"
+        "time.sleep(60)\n"
+    )
+    first = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", sys.executable, "-c", script,
+        env=ssh.env(),
+    )
+    try:
+        group = int(wait_file(group_file, first))
+        first.kill()  # the runner dies; the remote worker keeps running
+        first.wait(timeout=20)  # not communicate(): the worker holds its pipes
+
+        second = orch(
+            "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+            "--machines", str(machines), "--", "touch", str(marker),
+            env=ssh.env(),
+        )
+        _, err = second.communicate(timeout=30)
+        assert second.returncode == 2, err
+        assert "earlier worker on pc is not confirmed gone (running)" in err
+        assert not marker.exists()
+        assert len(starts(ssh)) == 1  # no second worker was started
+        assert pool.placement(job_id) is not None
+
+        # The orphan is stopped by the poller, and only then is the slot freed.
+        use_fake_ssh(monkeypatch, ssh)
+        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
+        result = monitor.reconcile(time.time(), lambda *_: None)
+        assert result.stopped == (job_id,)
+        assert pool.placement(job_id) is not None
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+    finally:
+        kill_quietly(group, group=True)
+        if first.poll() is None:
+            first.kill()
+
+
+# F1.4: no command may run before its worker identity is recorded.
+
+SPAWN_THEN_DIE = """
+import os, sys
+sys.path.insert(0, {root!r})
+from lib import job_run
+
+def started(pid):
+    open({pid_file!r}, "w").write(str(pid))
+    {action}
+
+code = job_run.run(
+    ["sh", "-c", "touch " + {marker!r}],
+    beat=lambda: None,
+    interval=60,
+    log=lambda message: print(message, file=sys.stderr, flush=True),
+    started=started,
+)
+sys.exit(code)
+"""
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        ("os._exit(9)", 9),  # the runner dies before it records the worker
+        ("raise OSError('database is locked')", 127),  # recording fails
+    ],
+    ids=["runner-dies", "record-fails"],
+)
+def test_r1_f14_command_never_runs_unless_its_worker_was_recorded(
+    tmp_path: Path, action: str, expected: int
+) -> None:
+    pid_file = tmp_path / "child.pid"
+    marker = tmp_path / "ran"
+    source = SPAWN_THEN_DIE.format(
+        root=str(ROOT), pid_file=str(pid_file), marker=str(marker), action=action
+    )
+    child: int | None = None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", source], capture_output=True, text=True, timeout=30
+        )
+        child = int(wait_file(pid_file))
+        assert result.returncode == expected, result.stderr
+        assert wait_gone(child)
+        time.sleep(0.3)
+        assert not marker.exists()  # the command never ran
+    finally:
+        kill_quietly(child)
+
+
+def test_r1_f14_recorded_worker_runs_the_command_with_the_recorded_pid(tmp_path: Path) -> None:
+    from lib import job_run
+
+    seen: list[int] = []
+    report = tmp_path / "pid"
+    code = job_run.run(
+        ["sh", "-c", f"echo $$ > {report}"],
+        beat=lambda: None,
+        interval=60,
+        log=lambda _m: None,
+        started=seen.append,
+    )
+    assert code == 0
+    assert seen == [int(report.read_text(encoding="utf-8"))]
+
+
+# F1.5: every remote device holding a slot is probed every poll.
+
+
+def test_r1_f15_device_holding_only_finished_jobs_with_live_runners_is_probed_each_poll(
+    tmp_path: Path,
+) -> None:
+    queue, pool, config, job_id = monitor_setup(tmp_path, "codex", box=False)
+    pool.attach_runner(job_id, owner="codex", pid=11, start="s", alive=lambda *_: False)
+    pool.attach_worker(job_id, owner="codex", remote=True)
+    queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+    transport = FakeTransport(check=255)
+    monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: True)  # runner lives
+    for poll, now in enumerate((0.0, 60.0, 120.0), start=1):
+        result = monitor.reconcile(now, lambda *_: None)
+        assert result == type(result)()
+        assert len(transport.calls) == poll
+        assert transport.calls[-1] == ("check", "codex-bot", "fakepc-codex-bot")
+    assert pool.health("pc") == (None, 0.0)
+    transport.check = 1
+    monitor.reconcile(180.0, lambda *_: None)
+    assert pool.health("pc") == (180.0, None)
+    assert pool.placement(job_id) is not None  # the runner still owns its release
+
+
+def test_r1_f15_probe_is_skipped_once_cleanup_frees_every_slot(tmp_path: Path) -> None:
+    queue, pool, config, job_id = monitor_setup(tmp_path, "codex", box=False)
+    queue.finish(job_id, owner="codex", handoff_comment_id="c1")
+    transport = FakeTransport(check=255)
+    result = DeviceMonitor(pool, config, transport, alive=lambda *_: False).reconcile(
+        0.0, lambda *_: None
+    )
+    assert result.released == (job_id,)
+    assert transport.calls == []
+
+
+# Test gaps named in the r1 audit.
+
+
+def _tamper_slot(queue: SQLiteJobQueue, job_id: str, **values: str) -> None:
+    sets = ", ".join(f"{name} = ?" for name in values)
+    with queue.connect() as connection:
+        connection.execute(
+            f"UPDATE device_slots SET {sets} WHERE job_id = ?", (*values.values(), job_id)
+        )
+
+
+def test_r1_gap_a_slot_for_another_bot_user_is_refused_and_kept(tmp_path: Path) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    _tamper_slot(queue, job_id, os_user="cursor-bot")
+    marker = tmp_path / "ran"
+    proc = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", "touch", str(marker),
+        env=ssh.env(),
+    )
+    _, err = proc.communicate(timeout=20)
+    assert proc.returncode == 2
+    assert f"job {job_id}'s slot is for cursor-bot, not codex-bot" in err
+    assert ssh.calls() == []
+    assert not marker.exists()
+    assert pool.placement(job_id).os_user == "cursor-bot"
+
+
+def test_r1_gap_a_slot_on_a_device_machines_yml_no_longer_lists_is_refused_and_kept(
+    tmp_path: Path,
+) -> None:
+    machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    _tamper_slot(queue, job_id, device="retired")
+    marker = tmp_path / "ran"
+    proc = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
+        "--machines", str(machines), "--", "touch", str(marker),
+        env=ssh.env(),
+    )
+    _, err = proc.communicate(timeout=20)
+    assert proc.returncode == 2
+    assert "placed on 'retired', which machines.yml no longer lists" in err
+    assert ssh.calls() == []
+    assert not marker.exists()
+    assert pool.placement(job_id).device == "retired"
+
+
+def test_r1_gap_an_unknown_check_keeps_the_slot_stops_nothing_and_counts_as_contact(
+    tmp_path: Path,
+) -> None:
+    queue, pool, config, job_id = monitor_setup(tmp_path, "codex", box=False)
+    pool.attach_worker(job_id, owner="codex", remote=True)
+    queue.finish(job_id, owner="codex", handoff_comment_id=None)
+    transport = FakeTransport(check=3)
+    monitor = DeviceMonitor(pool, config, transport, alive=lambda *_: False)
+    result = monitor.reconcile(500.0, lambda *_: None)
+    assert (result.released, result.stopped) == ((), ())
+    assert [kind for kind, *_ in transport.calls] == ["check"]
+    assert pool.placement(job_id) is not None
+    assert pool.health("pc") == (500.0, None)
+
+
+def test_r1_gap_offline_runs_before_t6_when_both_are_due(tmp_path: Path) -> None:
+    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
+    dispatcher.reconcile_jobs()  # the first failed probe, at 0; no heartbeat since
+    now[0] = 3600.0  # T6's timeout and the offline hour are both due now
+    dispatcher.reconcile_jobs()
+    assert state(queue, job.id) == "failed"
+    with queue.connect() as connection:
+        reason = connection.execute("SELECT stuck_reason FROM ticket_state").fetchone()[0]
+    assert reason == "device-offline"
+    assert [item for item in queue.outstanding() if item.request.recipient == "claude"] == []
+    assert len(stuck_wakes(grok)) == 1
+
+
+def test_r1_gap_offline_failure_is_handled_in_its_own_transaction(tmp_path: Path) -> None:
+    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
+    monitor = dispatcher.devices
+    monitor.reconcile(0.0, dispatcher._device_offline)
+    monitor.reconcile(3600.0, dispatcher._device_offline)  # no T6 runs here
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, failure_handled FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()
+    assert (row["state"], row["failure_handled"]) == ("failed", 1)
+    assert [item.id for item in queue.unhandled_failures()] == []
+
+
+def test_r1_gap_offline_leaves_a_job_that_is_no_longer_running_alone(tmp_path: Path) -> None:
+    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
+    queue.finish(job.id, owner="claude", handoff_comment_id="c1")
+    dispatcher._device_offline(job.id, "pc", 3600.0)
+    assert state(queue, job.id) == "done"
+    assert not dispatcher.is_stuck(snapshot)
+    with queue.connect() as connection:
+        wakes = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE recipient = 'grok' AND action = 'stuck'"
+        ).fetchone()[0]
+    assert wakes == 0
+
+
+def test_r1_gap_offline_rolls_back_when_the_wake_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now, queue, pool, transport, grok, dispatcher, snapshot, job = offline_setup(tmp_path)
+    dispatcher.reconcile_jobs()
+
+    def broken(*_args, **_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(dispatcher, "_ensure_stuck_wake_in_transaction", broken)
+    now[0] = 3600.0
+    queue.heartbeat(job.id, owner="claude")
+    dispatcher.reconcile_jobs()
+    assert state(queue, job.id) == "running"  # the failure rolled back with the wake
+    assert not dispatcher.is_stuck(snapshot)
+    with queue.connect() as connection:
+        errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
+    assert ("devices", "OperationalError") in [tuple(row) for row in errors]
+
+
+def test_r1_gap_offline_fails_every_running_job_on_the_device(tmp_path: Path) -> None:
+    now = [0.0]
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    config = config_of(machines_file(tmp_path, box_enabled=False))
+    pool = DevicePool(queue, config)
+    grok = FakeGrokDelivery()
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=grok,
+        devices=DeviceMonitor(pool, config, FakeTransport(check=255), alive=lambda *_: True),
+    )
+    snapshots = [
+        ticket(
+            comment(f"go-{number}", GO.format(state="building"), author="grok-login"),
+            timeout=600,
+            ticket_id=str(number),
+        )
+        for number in (41, 42)
+    ]
+    for snapshot in snapshots:
+        dispatcher.process(snapshot)
+    jobs = [pool.claim("claude")[0] for _ in snapshots]
+    for job in jobs:
+        pool.attach_worker(job.id, owner="claude", remote=True)
+    dispatcher.reconcile_jobs()
+    now[0] = 3600.0
+    dispatcher.reconcile_jobs()
+    assert [state(queue, job.id) for job in jobs] == ["failed", "failed"]
+    assert all(dispatcher.is_stuck(snapshot) for snapshot in snapshots)
+    assert sorted(job.request.ticket_id for job in stuck_wakes(grok)) == ["41", "42"]
+    assert all(pool.placement(job.id) is not None for job in jobs)
+
+
+def test_r1_gap_hostile_workdir_and_environment_values_reach_the_command_verbatim(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "w o'r\"k $(touch pwn1) `touch pwn2`"
+    target = remote.RemoteTarget(
+        device="pc",
+        alias="fakepc-codex-bot",
+        user="codex-bot",
+        workdir_root=str(root),
+        job_id="abc123",
+        tag="0123456789abcdef0123456789abcdef",
+    )
+    values = {
+        "ORCH_JOB_ID": "abc123",
+        "ORCH_JOB_BOT": "x'; touch pwn3 #",
+        "ORCH_JOB_DEVICE": "$(touch pwn4)\n`touch pwn5`\"",
+    }
+    report = tmp_path / "report.json"
+    dump = (
+        "import json, os, sys\n"
+        "json.dump({'cwd': os.getcwd(), 'argv': sys.argv[1:],"
+        " 'env': {k: os.environ.get(k) for k in"
+        " ('ORCH_JOB_ID', 'ORCH_JOB_BOT', 'ORCH_JOB_DEVICE', 'ORCH_JOB_WORKDIR')}},"
+        f" open({str(report)!r}, 'w'))\n"
+    )
+    script = remote.start_script(
+        target, [sys.executable, "-c", dump, "a b", "$(touch pwn6)", "'"], values
+    )
+    result = subprocess.run(
+        ["sh", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(report.read_text(encoding="utf-8"))
+    assert seen["cwd"] == target.job_dir
+    assert seen["argv"] == ["a b", "$(touch pwn6)", "'"]
+    assert seen["env"] == {**values, "ORCH_JOB_WORKDIR": target.job_dir}
+    assert not any(tmp_path.rglob("pwn*"))
+
+
+def _f2_01_database(path: Path) -> SQLiteJobQueue:
+    queue = SQLiteJobQueue(path, clock=time.time)
+    with queue.connect() as connection:
+        connection.execute(
+            "CREATE TABLE device_slots (job_id TEXT PRIMARY KEY, device TEXT NOT NULL,"
+            " harness TEXT NOT NULL, os_user TEXT NOT NULL, placed_at REAL NOT NULL)"
+        )
+    return queue
+
+
+def _columns(queue: SQLiteJobQueue) -> set[str]:
+    with queue.connect() as connection:
+        return {str(row["name"]) for row in connection.execute("PRAGMA table_info(device_slots)")}
+
+
+def test_r1_gap_f2_01_migration_survives_concurrent_startup(tmp_path: Path) -> None:
+    import threading
+
+    queue = _f2_01_database(tmp_path / "old.db")
+    config = config_of(machines_file(tmp_path))
+    errors: list[BaseException] = []
+    gate = threading.Barrier(6)
+
+    def start() -> None:
+        try:
+            gate.wait()
+            DevicePool(SQLiteJobQueue(tmp_path / "old.db", clock=time.time), config)
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=start) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert errors == []
+    from lib import device_pool
+
+    assert {name for name, _ in device_pool._SLOT_COLUMNS} <= _columns(queue)
+    assert DevicePool(queue, config).health("pc") == (None, None)
+
+
+def test_r1_gap_f2_01_migration_rolls_back_as_a_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib import device_pool
+
+    queue = _f2_01_database(tmp_path / "old.db")
+    before = _columns(queue)
+    monkeypatch.setattr(
+        device_pool,
+        "_SLOT_COLUMNS",
+        (*device_pool._SLOT_COLUMNS, ("broken", "INTEGER UNIQUE")),  # ALTER refuses UNIQUE
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        DevicePool(queue, config_of(machines_file(tmp_path)))
+    assert _columns(queue) == before
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'device_health'"
+        ).fetchone() is None
+
+
+def test_r1_gap_fake_ssh_joins_remote_arguments_like_ssh(tmp_path: Path) -> None:
+    ssh = Ssh(tmp_path)
+    result = subprocess.run(
+        ["ssh", "-l", "codex-bot", "--", "fakepc-codex-bot", "echo", "a", "b  c"],
+        env={**os.environ, **ssh.env()}, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "a b c\n"  # one string, re-split by the remote shell
