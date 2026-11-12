@@ -528,8 +528,10 @@ def test_push_publishes_complete_files_and_never_a_mismatched_pair(
     new_pair = tuple(path.read_text(encoding="utf-8") for path in paths)
     # Uploads first, then exactly one rename step: a reader sees the old pair
     # until the rename, then the new pair, never one of each.
-    assert runner.programs == [method, method, "ssh"]
+    mismatched = [pair for pair in runner.seen if pair not in (OLD_PAIR, new_pair)]
+    assert mismatched == []
     assert runner.seen == [OLD_PAIR, OLD_PAIR, new_pair]
+    assert runner.programs == [method, method, "ssh"]
 
 
 def test_ssh_transport_never_names_keys_or_credentials(tmp_path: Path) -> None:
