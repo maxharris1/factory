@@ -3,9 +3,11 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes two files to an output directory, each atomically (temp file in
-the same directory, fsync, then rename): status.json and a static,
-self-contained index.html that renders the same data and reloads itself
-every refresh_seconds (15 to 30).
+the same directory, fsync, then rename): status.json and a self-contained
+index.html. The page is a live mission-control view: its inline script
+fetches status.json every 1 to 2 seconds and updates in place. Without
+script (or when status.json cannot be fetched) the server-rendered tables
+underneath reload every refresh_seconds (15 to 30), as before.
 
 Secrets: only allowlisted columns are selected (never jobs.detail, heads,
 comment bodies or environment values; the environment is not read except
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import re
 import sqlite3
@@ -38,8 +41,11 @@ from pathlib import Path
 import yaml
 
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
+from lib.dashboard_page import CSS as PAGE_CSS
+from lib.dashboard_page import page_head, page_hud, page_script
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.load import load_yaml
+from lib.orch_yml import POLL_SECONDS
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES
 
@@ -50,6 +56,17 @@ RAW_LINE_LIMIT = 4096
 LINE_LIMIT = 300
 RECENT_ERRORS = 20
 RECENT_DEFERRALS = 10
+RECENT_HANDOFFS = 12
+RECENT_VERDICTS = 12
+# The Linear share of the hourly API budget the poller allows itself
+# (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
+LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
+LINEAR_BUDGET_COMPLEXITY_PER_HOUR = 1_500_000
+# Poll health from the age of the last finished cycle (orch poll, POLL_SECONDS).
+HEALTH_OK_SECONDS = 2 * POLL_SECONDS + 30
+HEALTH_LATE_SECONDS = 5 * POLL_SECONDS
+# A handled orch:v1 comment's outcome as the dispatcher writes it.
+_OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
@@ -540,13 +557,22 @@ def collect_snapshot(
     now: float,
     machines_path: Path | None = None,
     refresh_seconds: int = REFRESH_DEFAULT,
+    last_cycle_at: float | None = None,
 ) -> dict:
+    """Read everything once. `last_cycle_at` is when the poller's last cycle
+    ended (the live push passes it); without it poll health is "unknown"."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
         or not REFRESH_MIN <= refresh_seconds <= REFRESH_MAX
     ):
         raise DashboardError("refresh_seconds must be 15 to 30")
+    if last_cycle_at is not None and (
+        isinstance(last_cycle_at, bool)
+        or not isinstance(last_cycle_at, (int, float))
+        or not math.isfinite(last_cycle_at)
+    ):
+        raise DashboardError("last_cycle_at must be a Unix time")
     connection = open_readonly(db_path)
     try:
         connection.execute("BEGIN")
@@ -601,10 +627,62 @@ def collect_snapshot(
             "last_activity_age_seconds": _age(now, max(activity)) if activity else None,
             "errors": db["errors"],
             "deferrals": db["deferrals"],
+            "health": _poll_health(
+                _age(now, last_cycle_at),
+                _age(now, max(activity)) if activity else None,
+            ),
+            "linear_budget": db["linear_budget"],
+            "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+def _poll_health(cycle_age: int | None, activity_age: int | None) -> dict:
+    if cycle_age is None:
+        state = "unknown"
+    elif cycle_age <= HEALTH_OK_SECONDS:
+        state = "ok"
+    elif cycle_age <= HEALTH_LATE_SECONDS:
+        state = "late"
+    else:
+        state = "stale"
+    return {
+        "state": state,
+        "cycle_seconds": POLL_SECONDS,
+        "last_cycle_age_seconds": cycle_age,
+        "last_activity_age_seconds": activity_age,
+    }
+
+
+def _verdict_kind(outcome: str) -> str:
+    """Group a handled comment's outcome for the feed."""
+    if outcome.startswith("queued-"):
+        return "routed"
+    if outcome.startswith("stale-"):
+        return "stale"
+    if outcome.startswith(("rejected-", "refused-")):
+        return "rejected"
+    if outcome.startswith(("stuck-", "capped-")):
+        return "stuck"
+    if outcome in ("merged", "merge-confirmed", "handed-off"):
+        return "shipped"
+    if outcome.startswith("ship-") or outcome == "approve-ci-red":
+        return "blocked"
+    if outcome.startswith(("waiting-", "already-waiting")) or outcome == "no-questions":
+        return "waiting"
+    return "other"
+
+
+def _handoff_kind(recipient: str, state: str, has_handoff: bool) -> str:
+    if state == "failed":
+        return "failed"
+    if recipient == "grok":
+        return "bot_to_bot"
+    if has_handoff and recipient in WAIT_RECIPIENTS:
+        return "scripted"
+    return "done"
 
 
 def _read_db(connection: sqlite3.Connection, now: float) -> dict:
@@ -632,10 +710,22 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
 
     held: dict[str, int] = {}
     placed: set[str] = set()
+    placements: dict[str, tuple[str, float | None]] = {}
     if "device_slots" in tables:
-        for row in connection.execute("SELECT job_id, device FROM device_slots"):
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(device_slots)")
+        }
+        placed_at = "placed_at" if "placed_at" in columns else "NULL"
+        for row in connection.execute(
+            f"SELECT job_id, device, {placed_at} AS placed_at FROM device_slots"
+        ):
             placed.add(str(row["job_id"]))
             held[str(row["device"])] = held.get(str(row["device"]), 0) + 1
+            placements[str(row["job_id"])] = (
+                str(row["device"]),
+                float(row["placed_at"]) if row["placed_at"] is not None else None,
+            )
 
     running: list[dict] = []
     queued: list[dict] = []
@@ -660,11 +750,29 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
             timeout = int(row["timeout_seconds"])
             if row["state"] == "running":
                 age = _age(now, row["last_activity_at"]) or 0
+                # The lane: a device-pool placement, else a box slot (grok
+                # wakes hold none). jobs has no claim time, so an unplaced
+                # job's elapsed time counts from when it was queued.
+                placement = placements.get(str(row["id"]))
+                if placement is not None:
+                    device: str | None = _clean(placement[0], 40)
+                    started = placement[1]
+                    elapsed_from = "placed"
+                else:
+                    device = None if row["recipient"] == "grok" else "box"
+                    started = None
+                    elapsed_from = "queued"
+                if started is None:
+                    started = row["created_at"]
+                    elapsed_from = "queued"
                 item = {
                     **base,
                     "heartbeat_age_seconds": age,
                     "timeout_seconds": timeout,
                     "overdue": age > timeout,
+                    "device": device,
+                    "elapsed_seconds": _age(now, started) or 0,
+                    "elapsed_from": elapsed_from,
                 }
                 running.append(item)
                 # Like `orch status` (lib/status.py box_slots), a job holding a
@@ -793,6 +901,87 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
+    recent_handoffs: list[dict] = []
+    if jobs:
+        for row in connection.execute(
+            """
+            SELECT id, repo, ticket_id, action, recipient, state, finished_at,
+                   handoff_comment_id IS NOT NULL AS has_handoff
+            FROM jobs
+            WHERE state IN ('done', 'failed') AND finished_at IS NOT NULL
+            ORDER BY finished_at DESC, id DESC
+            LIMIT ?
+            """,
+            (RECENT_HANDOFFS,),
+        ):
+            recipient = _enum(row["recipient"], RECIPIENTS)
+            state = _enum(row["state"], STATES)
+            recent_handoffs.append(
+                {
+                    "job": _clean(str(row["id"])[:8], 8),
+                    "repo": _clean(row["repo"], 100),
+                    "ticket_id": _clean(row["ticket_id"], 64),
+                    "action": _enum(row["action"], ACTIONS),
+                    "recipient": recipient,
+                    "state": state,
+                    "kind": _handoff_kind(recipient, state, bool(row["has_handoff"])),
+                    "age_seconds": _age(now, row["finished_at"]),
+                }
+            )
+
+    verdicts = None
+    if "handled_comments" in tables:
+        verdicts = []
+        for row in connection.execute(
+            "SELECT repo, ticket_id, outcome FROM handled_comments "
+            "ORDER BY rowid DESC LIMIT ?",
+            (RECENT_VERDICTS,),
+        ):
+            outcome = str(row["outcome"])
+            if _OUTCOME.fullmatch(outcome) is None:
+                outcome = "other"
+            verdicts.append(
+                {
+                    "repo": _clean(row["repo"], 100),
+                    "ticket_id": _clean(row["ticket_id"], 64),
+                    "outcome": _clean(outcome, 48),
+                    "kind": _verdict_kind(outcome),
+                }
+            )
+
+    budget = {"deferrals": 0, "exhausted": 0, "rate_limited": 0}
+    if "poll_deferrals" in tables:
+        row = connection.execute(
+            "SELECT count(*) AS n FROM poll_deferrals "
+            "WHERE recorded_at >= ? AND detail LIKE '%Linear poll budget%'",
+            (now - 3600,),
+        ).fetchone()
+        budget["deferrals"] = int(row["n"])
+    if "poll_errors" in tables:
+        row = connection.execute(
+            """
+            SELECT
+              COALESCE(SUM(error LIKE '%Linear poll budget is exhausted%'), 0)
+                AS exhausted,
+              COALESCE(SUM(error LIKE '%Linear returned HTTP 429%'
+                           OR error LIKE '%Linear returned RATELIMITED%'
+                           OR error LIKE '%Linear rate-limit backoff%'), 0)
+                AS rate_limited
+            FROM poll_errors WHERE recorded_at >= ?
+            """,
+            (now - 3600,),
+        ).fetchone()
+        budget["exhausted"] = int(row["exhausted"])
+        budget["rate_limited"] = int(row["rate_limited"])
+    if budget["rate_limited"]:
+        budget_state = "rate_limited"
+    elif budget["exhausted"]:
+        budget_state = "exhausted"
+    elif budget["deferrals"]:
+        budget_state = "deferring"
+    else:
+        budget_state = "ok"
+
     scripted = in_flight = bot_to_bot = 0
     if jobs:
         marks = ",".join("?" for _ in WAIT_RECIPIENTS)
@@ -830,6 +1019,15 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
         "deferrals": deferrals,
         "newest_deferral_at": newest_deferral_at,
         "held": held,
+        "verdicts": verdicts,
+        "linear_budget": {
+            "state": budget_state,
+            "deferrals_last_hour": budget["deferrals"],
+            "exhausted_last_hour": budget["exhausted"],
+            "rate_limited_last_hour": budget["rate_limited"],
+            "requests_per_hour": LINEAR_BUDGET_REQUESTS_PER_HOUR,
+            "complexity_per_hour": LINEAR_BUDGET_COMPLEXITY_PER_HOUR,
+        },
         "handoff_savings": {
             "scripted": scripted,
             "scripted_in_flight": in_flight,
@@ -838,6 +1036,7 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                 round(scripted / denominator, 3) if denominator else None
             ),
             "definition": HANDOFF_SAVINGS_DEFINITION,
+            "recent": recent_handoffs,
         },
     }
 
@@ -961,32 +1160,6 @@ def _write_temp(path: Path, text: str, temps: list[str]) -> str:
 
 # --- rendering ----------------------------------------------------------------
 
-_CSS = """
-body{font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;margin:24px;
-color:#1f2328;background:#fff}
-h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:24px 0 8px}
-.meta{color:#59636e}.stale{color:#b42318;font-weight:600}
-.tiles{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
-.tile{border:1px solid #d1d9e0;border-radius:6px;padding:8px 12px;min-width:120px}
-.tile b{display:block;font-size:20px}
-table{border-collapse:collapse;margin:0 0 8px}
-th,td{border-bottom:1px solid #e6eaef;padding:3px 10px 3px 0;text-align:left;
-vertical-align:top}th{color:#59636e;font-weight:600}
-td.num{text-align:right;font-variant-numeric:tabular-nums}
-.bad{color:#b42318;font-weight:600}.empty{color:#59636e}
-pre{background:#f6f8fa;padding:8px;overflow-x:auto;font-size:12px}
-@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}
-.tile,th,td{border-color:#30363d}pre{background:#161b22}.meta,th,.empty{color:#9198a1}}
-"""
-
-_SCRIPT = (
-    "(function(){var g=Number(document.body.getAttribute('data-generated'));"
-    "var e=document.getElementById('age');function t(){var s=Math.max(0,"
-    "Math.round(Date.now()/1000-g));e.textContent=s+'s ago';"
-    "e.className=s>120?'stale':'';}t();setInterval(t,1000);})();"
-)
-
-
 def _e(value: object) -> str:
     if value is None:
         return "—"
@@ -1040,19 +1213,27 @@ def render_html(snapshot: dict) -> str:
         ("scripted share", "—" if share is None else f"{round(share * 100)}%"),
         ("poller last activity", _duration(poller["last_activity_age_seconds"])),
     ]
+    refresh = int(snapshot["refresh_seconds"])
     parts = [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
-        f'<meta http-equiv="refresh" content="{int(snapshot["refresh_seconds"])}">',
+        # Without script the page reloads itself; with script it polls
+        # status.json and never reloads.
+        f'<noscript><meta http-equiv="refresh" content="{refresh}"></noscript>',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         '<meta name="robots" content="noindex">',
-        "<title>factory status</title>",
-        f"<style>{_CSS}</style></head>",
-        f'<body data-generated="{float(snapshot["generated_at_epoch"]):.3f}">',
+        '<meta name="color-scheme" content="dark">',
+        "<title>factory mission control</title>",
+        f"<style>{PAGE_CSS}</style></head>",
+        f'<body data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
+        f'data-refresh="{refresh}">',
+        page_head(str(snapshot["generated_at"])),
+        page_hud(),
+        '<section id="static">',
         "<h1>factory status</h1>",
-        f'<p class="meta">snapshot {_e(snapshot["generated_at"])} '
-        f'(<span id="age"></span>), reloads every '
-        f'{int(snapshot["refresh_seconds"])}s. Read-only and redacted.</p>',
+        f'<p class="meta">snapshot {_e(snapshot["generated_at"])}; this static view '
+        f"reloads every {refresh}s (the live view polls status.json). "
+        "Read-only and redacted.</p>",
         '<div class="tiles">',
         *(f'<div class="tile"><b>{_e(value)}</b>{_e(label)}</div>' for label, value in tiles),
         "</div>",
@@ -1224,7 +1405,8 @@ def render_html(snapshot: dict) -> str:
             "<pre>" + "\n".join(_e(line) for line in poller["log"]["tail"]) + "</pre>",
             "<h2>Handoff savings</h2>",
             f"<p>{_e(savings['definition'])}</p>",
-            f"<script>{_SCRIPT}</script>",
+            "</section>",
+            f"<script>{page_script()}</script>",
             "</body></html>",
         ]
     )

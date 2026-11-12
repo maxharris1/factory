@@ -17,7 +17,7 @@ from types import FrameType
 
 from lib import job_run, worktrees
 from lib.dashboard_cli import main as dashboard_main
-from lib.dashboard_push import PollPusher, poll_pusher_for
+from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
@@ -314,14 +314,23 @@ def _poll(argv: list[str]) -> int:
             if args.once:
                 loop.run(max_polls=1, after_poll=after_poll)
             else:
-                loop.run(
-                    on_error=lambda exc: dispatcher.record_poll_error(
-                        "poll",
-                        "-",
-                        type(exc).__name__,
-                    ),
-                    after_poll=after_poll,
-                )
+                # dashboard.push.live: watch orch.db for changes between and
+                # during cycles; stopped on the way out, so a stop starts no push.
+                watcher = after_poll if isinstance(after_poll, LivePusher) else None
+                if watcher is not None:
+                    watcher.start()
+                try:
+                    loop.run(
+                        on_error=lambda exc: dispatcher.record_poll_error(
+                            "poll",
+                            "-",
+                            type(exc).__name__,
+                        ),
+                        after_poll=after_poll,
+                    )
+                finally:
+                    if watcher is not None:
+                        watcher.stop()
     except (
         GrokDeliveryError,
         PollSourceError,

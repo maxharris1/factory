@@ -11,7 +11,9 @@ projects:
 #   scp -F /home/box/.ssh/config status.json index.html pc-wsl-cursor-bot:factory-dashboard/
 # i.e. /home/cursor-bot/factory-dashboard, served tailnet-only at
 # http://pc-wsl-bots.tail68624b.ts.net:8090/. No secrets: SSH uses the login
-# Max provisioned behind that alias.
+# Max provisioned behind that alias. Uncomment `live: true` to also push
+# status.json on every orch.db change (about once a second at most), which
+# the mission-control page polls for real-time updates.
 dashboard:
   refresh_seconds: 20
   push:
@@ -20,3 +22,4 @@ dashboard:
     ssh_config: /home/box/.ssh/config
     remote_dir: factory-dashboard
     method: scp
+    # live: true
