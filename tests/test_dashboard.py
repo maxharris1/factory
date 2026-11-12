@@ -911,7 +911,9 @@ def test_redact_keeps_hiding_values_split_by_a_decoded_separator(name: str) -> N
 def test_redact_hides_the_whole_value_and_keeps_the_key_name() -> None:
     assert redact(SPLIT_SAMPLES["percent space in a bare value"][1]) == "password=[redacted]"
     assert redact(SPLIT_SAMPLES["percent semicolon in a bare value"][1]) == "token=[redacted]"
-    assert redact(SPLIT_SAMPLES["escaped quote in a JSON value"][1]) == '{"password":[redacted]}'
+    # The decoded pass sees the value end at the unescaped quote, so it hides
+    # the rest of that token too (here the closing "}): wider, never narrower.
+    assert redact(SPLIT_SAMPLES["escaped quote in a JSON value"][1]) == '{"password":[redacted]'
     # The key is only visible once decoded: the encoded key stays, the
     # whole raw value after it goes.
     assert redact(SPLIT_SAMPLES["encoded key, percent space"][1]) == "password%3D[redacted]"
@@ -961,6 +963,13 @@ def test_no_encoded_separator_cuts_any_secret_value_short() -> None:
             if "Tiny" in text or "Secret7" in text:
                 leaks.append((sample, text))
     assert leaks == []
+
+
+def test_text_still_decoding_after_the_last_round_is_hidden_whole() -> None:
+    # Ten levels of %25 outlast DECODE_ROUNDS; rather than show a half-decoded
+    # value, the whole string is replaced.
+    sample = "token=abc%" + "25" * 10 + "20" + TINY
+    assert redact(sample) == dashboard.ENCODED_MARK
 
 
 def test_redact_keeps_encoded_ordinary_text_as_written() -> None:

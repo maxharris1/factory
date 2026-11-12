@@ -19,7 +19,10 @@ empty. This server:
   (the two files `orch dashboard push` writes). Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
-- opens each file relative to the directory with O_NOFOLLOW and serves it
+- opens the directory once at startup (O_NOFOLLOW) and keeps that
+  descriptor, so swapping the directory or an ancestor for a symlink later
+  changes nothing;
+- opens each file relative to that descriptor with O_NOFOLLOW and serves it
   only if it is a regular file with one link, so neither a symlink nor a
   hard link to a file elsewhere is served.
 
@@ -116,21 +119,33 @@ def load_config(environ: dict[str, str]) -> tuple[str, int, Path]:
     )
 
 
-def read_snapshot_file(root: Path, name: str) -> bytes | None:
-    """The file's bytes if `name` is a regular, singly linked file directly in
-    root, reached without following any symlink; otherwise None."""
-    nofollow = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+NOFOLLOW = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def open_root(root: Path) -> int:
+    """Open the served directory once, without following a symlink at its
+    last component, and return the descriptor. Files are then opened
+    relative to it, so replacing the directory or any ancestor of it with a
+    symlink after startup cannot change what is served."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
     try:
-        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | nofollow)
-    except OSError:
-        return None
+        if not os.path.samestat(os.fstat(fd), os.stat(root, follow_symlinks=False)):
+            raise OSError(f"{root} changed while it was opened")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_snapshot_file(root_fd: int, name: str) -> bytes | None:
+    """The file's bytes if `name` is a regular, singly linked file directly in
+    the pinned root directory, reached without following any symlink;
+    otherwise None."""
     try:
         # O_NONBLOCK so a FIFO planted under the name cannot hang the open.
-        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | nofollow, dir_fd=directory)
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | NOFOLLOW, dir_fd=root_fd)
     except OSError:
         return None
-    finally:
-        os.close(directory)
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -153,7 +168,7 @@ class SnapshotHandler(BaseHTTPRequestHandler):
 
     def _serve(self, *, body: bool) -> None:
         name = ROUTES.get(urlsplit(self.path).path)
-        data = read_snapshot_file(self.server.root, name) if name else None  # type: ignore[attr-defined]
+        data = read_snapshot_file(self.server.root_fd, name) if name else None  # type: ignore[attr-defined]
         if name is None or data is None:
             self._send(404, b"not found\n", "text/plain; charset=utf-8", body=body)
             return
@@ -175,7 +190,18 @@ class SnapshotServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], root: Path):
         self.root = root
-        super().__init__(address, SnapshotHandler)
+        self.root_fd = open_root(root)
+        try:
+            super().__init__(address, SnapshotHandler)
+        except BaseException:
+            os.close(self.root_fd)
+            raise
+
+    def server_close(self) -> None:
+        super().server_close()
+        if self.root_fd >= 0:
+            os.close(self.root_fd)
+            self.root_fd = -1
 
 
 def make_server(host: str, port: int, root: Path) -> SnapshotServer:

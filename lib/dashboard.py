@@ -10,10 +10,13 @@ every refresh_seconds (15 to 30).
 Secrets: only allowlisted columns are selected (never jobs.detail, heads,
 comment bodies or environment values; the environment is not read except
 for the ORCH_* path variables). Every free-text value (stuck reasons,
-poll_errors, deferrals, log lines) goes through `redact`, which first
-undoes percent and JSON escaping so encoded secrets are seen, and the log
-tail also goes through `redact_key_blocks`, which removes private-key
-blocks that span lines. The finished snapshot is walked once more so every
+poll_errors, deferrals, log lines) goes through `redact`. It runs its rules
+on the text as written and again on a decoded copy (percent and JSON
+escapes undone, so encoded secrets are seen); what the decoded pass finds is
+cut out of the original text with the rest of its token, so decoding only
+ever widens what is hidden. The log tail also goes through
+`redact_key_blocks`, which removes private-key blocks that span lines, with
+markers matched in decoded form. The finished snapshot is walked once more so every
 string in it has been through `redact` before it is written. Enumerated
 fields (including ticket workflow states) outside their known values are
 shown as "other".
@@ -28,10 +31,9 @@ import re
 import sqlite3
 import shutil
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
 
 import yaml
 
@@ -111,6 +113,8 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 # \u00XX (ASCII only, so no lone surrogate can reach the UTF-8 writer).
 _JSON_ESCAPE = re.compile(r"\\(?:u00([0-7][0-9A-Fa-f])|([/\"']))")
 DECODE_ROUNDS = 8
+REDACT_PASSES = 4
+ENCODED_MARK = "[redacted-encoded]"
 # PEM/OpenSSH/PGP armor. A block without its END runs to the end of the text.
 _KEY_MARKER = r"-----\s*{0} [A-Z0-9 ]{{1,60}}-----"
 _KEY_BEGIN = re.compile(_KEY_MARKER.format("BEGIN"))
@@ -122,75 +126,245 @@ _KEY_ORPHAN_END = re.compile(r"\A[\s\S]*?" + _KEY_MARKER.format("END"))
 KEY_BLOCK_MARK = "[redacted-key-block]"
 
 
-def _scheme_token(match: re.Match[str]) -> str:
+# Each rule returns None to leave a match alone, or (keep, marker): keep the
+# first `keep` characters of the match (a key name, a scheme) and replace the
+# rest with the marker.
+Rule = Callable[[re.Match[str]], "tuple[int, str] | None"]
+
+
+def _whole(marker: str) -> Rule:
+    return lambda match: (0, marker)
+
+
+def _scheme_token(match: re.Match[str]) -> tuple[int, str] | None:
     scheme, space, value = match.groups()
     # "Bearer x" is always a credential; "token"/"basic" need a token-like value.
     if scheme.lower() != "bearer" and not (
         any(ch.isdigit() for ch in value) or "=" in value or len(value) >= 16
     ):
-        return match.group(0)
-    return f"{scheme}{space}[redacted]"
+        return None
+    return len(scheme) + len(space), "[redacted]"
 
 
-def _opaque(match: re.Match[str]) -> str:
+def _auth_header(match: re.Match[str]) -> tuple[int, str]:
+    return len(match.group(1)) + len(match.group(2)), "[redacted]"
+
+
+def _assignment(match: re.Match[str]) -> tuple[int, str] | None:
+    if match.group(3).startswith("[redacted"):
+        return None
+    return len(match.group(1)) + len(match.group(2)), "[redacted]"
+
+
+def _opaque(match: re.Match[str]) -> tuple[int, str] | None:
     value = match.group(0)
     digits = sum(ch.isdigit() for ch in value)
     letters = sum(ch.isalpha() for ch in value)
     # A repo path like owner1/some-long-repo-name has at most one digit.
-    return "[redacted]" if digits >= 2 and letters >= 2 else value
+    return (0, "[redacted]") if digits >= 2 and letters >= 2 else None
 
 
-def _decode(text: str) -> str:
+_RULES = (
+    (_KEY_BLOCK, _whole(KEY_BLOCK_MARK)),
+    (_KEY_ORPHAN_END, _whole(KEY_BLOCK_MARK)),
+    (_URL, _whole("[redacted-url]")),
+    (_AUTH_HEADER, _auth_header),
+    (_SCHEME_TOKEN, _scheme_token),
+    (_KNOWN_TOKEN, _whole("[redacted-token]")),
+    (_USERINFO, _whole("[redacted-credentials]")),
+    (_EMAIL, _whole("[redacted-email]")),
+    (_SECRET_ASSIGNMENT, _assignment),
+    (_OPAQUE, _opaque),
+)
+MARKER = -1  # origin of a character a rule inserted
+
+
+def _apply_rules(text: str) -> tuple[str, list[int], set[int]]:
+    """Run every rule in order over text.
+
+    Returns the redacted text, the origin of each of its characters (an
+    index into `text`, or MARKER for inserted marker text) and the set of
+    indices into `text` that some rule removed.
+    """
+    origin = list(range(len(text)))
+    removed: set[int] = set()
+    for pattern, rule in _RULES:
+        pieces: list[str] = []
+        origins: list[int] = []
+        last = 0
+        for match in pattern.finditer(text):
+            decision = rule(match)
+            if decision is None:
+                continue
+            keep, marker = decision
+            cut = match.start() + keep
+            pieces.append(text[last:cut])
+            origins.extend(origin[last:cut])
+            pieces.append(marker)
+            origins.extend([MARKER] * len(marker))
+            removed.update(index for index in origin[cut : match.end()] if index >= 0)
+            last = match.end()
+        if pieces:
+            pieces.append(text[last:])
+            origins.extend(origin[last:])
+            text, origin = "".join(pieces), origins
+    return text, origin, removed
+
+
+def _hex(text: str) -> bool:
+    return len(text) == 2 and all(ch in "0123456789abcdefABCDEF" for ch in text)
+
+
+def _decode_once(
+    text: str, spans: list[tuple[int, int]]
+) -> tuple[str, list[tuple[int, int]]]:
+    """One round of percent and JSON-escape decoding, keeping for every output
+    character the span of original characters it came from."""
+    out: list[str] = []
+    out_spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "%" and _hex(text[index + 1 : index + 3]):
+            # A run of %XX bytes decodes as UTF-8 together, like unquote.
+            end = index
+            data = bytearray()
+            while text[end : end + 1] == "%" and _hex(text[end + 1 : end + 3]):
+                data.append(int(text[end + 1 : end + 3], 16))
+                end += 3
+            span = (spans[index][0], spans[end - 1][1])
+            for decoded in data.decode("utf-8", errors="replace"):
+                out.append(decoded)
+                out_spans.append(span)
+            index = end
+            continue
+        if char == "\\":
+            match = _JSON_ESCAPE.match(text, index)
+            if match is not None:
+                out.append(
+                    chr(int(match.group(1), 16)) if match.group(1) else match.group(2)
+                )
+                out_spans.append((spans[index][0], spans[match.end() - 1][1]))
+                index = match.end()
+                continue
+        out.append(char)
+        out_spans.append(spans[index])
+        index += 1
+    return "".join(out), out_spans
+
+
+def _decode_map(text: str) -> tuple[str, list[tuple[int, int]], bool]:
     """Undo percent-encoding and JSON string escapes until nothing changes.
 
-    Repeated, so double-encoded text (%253A) is seen too. Control
-    characters an escape produced (%0A, \u0000) are removed afterwards.
+    Repeated, so double-encoded text (%253A) is seen too. Returns the
+    decoded text, for each decoded character the [start, end) span of
+    `text` it came from, and whether decoding settled within DECODE_ROUNDS.
+    Control characters an escape produced (%0A is kept as a line break,
+    \u0000 is dropped) are removed, as in `_strip_control`.
     """
+    spans = [(index, index + 1) for index in range(len(text))]
+    current = text
+    settled = False
     for _ in range(DECODE_ROUNDS):
-        decoded = _JSON_ESCAPE.sub(
-            lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2),
-            unquote(text, errors="replace"),
-        )
-        if decoded == text:
+        decoded, decoded_spans = _decode_once(current, spans)
+        if decoded == current:
+            settled = True
             break
-        text = decoded
-    return _strip_control(text)
+        current, spans = decoded, decoded_spans
+    kept = [
+        (char, span)
+        for char, span in zip(current, spans)
+        if char == "\n" or not _CONTROL.match(char)
+    ]
+    current = "".join(" " if char == "\t" else char for char, _ in kept)
+    return current, [span for _, span in kept], settled
 
 
-def redact_key_blocks(lines: Sequence[str]) -> list[str]:
-    """Replace every log line inside a private-key block with a marker.
+def _token_end(text: str, index: int) -> int:
+    while index < len(text) and not text[index].isspace():
+        index += 1
+    return index
 
-    The tail is read line by line, so a block spans entries: the BEGIN line,
-    the base64 body (whose short last line no other rule would catch) and
-    the END line. When the tail starts inside a block (an END comes before
-    any BEGIN, because the BEGIN line scrolled out), the lines up to that
-    END are treated as the block's body. A block with no END hides the
-    rest of the tail.
+
+def _widen(text: str, decoded: str, spans: list[tuple[int, int]]) -> set[int]:
+    """Indices of `text` to hide because its decoded form holds a secret.
+
+    The rules run again over the decoded text. Every character they remove
+    maps back to the original characters it came from, and the hidden part
+    runs on from there to the end of that original whitespace-separated
+    token. A separator that exists only once decoded (%20, %3B, %22, \")
+    can therefore end a match early but never shows what follows it.
     """
-    inside = _starts_inside_key_block(lines)
-    result: list[str] = []
-    for line in lines:
-        if inside:
-            end = _KEY_END.search(line)
-            if end is None:
-                result.append(KEY_BLOCK_MARK)
-                continue
-            line = KEY_BLOCK_MARK + line[end.end() :]
-        opened = False
-
-        def mark(match: re.Match[str]) -> str:
-            nonlocal opened
-            opened = _KEY_END.search(match.group(0)) is None
-            return KEY_BLOCK_MARK
-
-        line = _KEY_BLOCK.sub(mark, line)
-        inside = opened
-        result.append(line)
-    return result
+    if decoded == text:
+        return set()
+    _, _, removed = _apply_rules(decoded)
+    hidden: set[int] = set()
+    run_start = previous = None
+    for index in sorted(removed) + [None]:
+        if index is not None and previous is not None and index == previous + 1:
+            previous = index
+            continue
+        if run_start is not None and previous is not None:
+            start = spans[run_start][0]
+            end = _token_end(text, spans[previous][1])
+            hidden.update(range(start, end))
+        run_start = previous = index
+    return hidden
 
 
-def _starts_inside_key_block(lines: Sequence[str]) -> bool:
-    for line in lines:
+def _drop(text: str, origin: list[int], hidden: set[int]) -> str:
+    """Replace each run of characters whose origin is hidden with a marker
+    (none when the run touches a marker already there)."""
+    pieces: list[str] = []
+    index = 0
+    while index < len(text):
+        if origin[index] not in hidden or origin[index] == MARKER:
+            pieces.append(text[index])
+            index += 1
+            continue
+        end = index
+        while end < len(text) and origin[end] != MARKER and origin[end] in hidden:
+            end += 1
+        touches = (index > 0 and origin[index - 1] == MARKER) or (
+            end < len(text) and origin[end] == MARKER
+        )
+        if not touches:
+            pieces.append("[redacted]")
+        index = end
+    return "".join(pieces)
+
+
+def _redact_pass(text: str) -> str:
+    decoded, spans, settled = _decode_map(text)
+    if not settled:
+        # Still changing after DECODE_ROUNDS rounds: too deep to inspect.
+        return ENCODED_MARK
+    redacted, origin, _ = _apply_rules(text)
+    hidden = _widen(text, decoded, spans)
+    return _drop(redacted, origin, hidden) if hidden else redacted
+
+
+def redact(text: str) -> str:
+    """Remove anything shaped like a credential, key, URL or email address.
+
+    The rules run on the text as written, then on its decoded form (percent
+    and JSON escapes undone); anything the decoded pass finds is cut out of
+    the original text together with the rest of its token (see `_widen`).
+    Decoding can only widen what is hidden. The result is the original text
+    with secrets replaced by markers, never a decoded form, and is checked
+    again until a further pass changes nothing.
+    """
+    text = _strip_control(text)
+    for _ in range(REDACT_PASSES):
+        redacted = _redact_pass(text)
+        if redacted == text:
+            return redacted
+        text = redacted
+    return ENCODED_MARK if _redact_pass(text) != text else text
+
+
+def _starts_inside_key_block(decoded_lines: Sequence[str]) -> bool:
+    for line in decoded_lines:
         begin = _KEY_BEGIN.search(line)
         end = _KEY_END.search(line)
         if end is not None and (begin is None or end.start() < begin.start()):
@@ -200,24 +374,49 @@ def _starts_inside_key_block(lines: Sequence[str]) -> bool:
     return False
 
 
-def redact(text: str) -> str:
-    """Remove anything shaped like a credential, key, URL or email address."""
-    text = _decode(text)
-    text = _KEY_BLOCK.sub(KEY_BLOCK_MARK, text)
-    text = _KEY_ORPHAN_END.sub(KEY_BLOCK_MARK, text)
-    text = _URL.sub("[redacted-url]", text)
-    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
-    text = _SCHEME_TOKEN.sub(_scheme_token, text)
-    text = _KNOWN_TOKEN.sub("[redacted-token]", text)
-    text = _USERINFO.sub("[redacted-credentials]", text)
-    text = _EMAIL.sub("[redacted-email]", text)
-    text = _SECRET_ASSIGNMENT.sub(
-        lambda m: m.group(0)
-        if m.group(3).startswith("[redacted")
-        else f"{m.group(1)}{m.group(2)}[redacted]",
-        text,
-    )
-    return _OPAQUE.sub(_opaque, text)
+def redact_key_blocks(lines: Sequence[str]) -> list[str]:
+    """Replace every log line inside a private-key block with a marker.
+
+    The tail is read line by line, so a block spans entries: the BEGIN line,
+    the base64 body (whose short last line no other rule would catch) and
+    the END line. The markers are looked for in each line's decoded form,
+    so percent- or JSON-escaped markers count too; the text kept around a
+    marker is the original. When the tail starts inside a block (an END
+    comes before any BEGIN, because the BEGIN line scrolled out), the lines
+    up to that END are treated as the block's body. A block with no END
+    hides the rest of the tail.
+    """
+    decoded_lines = [_decode_map(line) for line in lines]
+    inside = _starts_inside_key_block([decoded for decoded, _, _ in decoded_lines])
+    result: list[str] = []
+    for line, (decoded, spans, _) in zip(lines, decoded_lines):
+        pieces: list[str] = []
+        raw_at = 0
+        decoded_at = 0
+        if inside:
+            end = _KEY_END.search(decoded)
+            if end is None:
+                result.append(KEY_BLOCK_MARK)
+                continue
+            pieces.append(KEY_BLOCK_MARK)
+            raw_at = spans[end.end() - 1][1]
+            decoded_at = end.end()
+            inside = False
+        while True:
+            block = _KEY_BLOCK.search(decoded, decoded_at)
+            if block is None:
+                break
+            pieces.append(line[raw_at : max(raw_at, spans[block.start()][0])])
+            pieces.append(KEY_BLOCK_MARK)
+            if _KEY_END.search(block.group(0)) is None:
+                inside = True
+                raw_at = len(line)
+                break
+            raw_at = spans[block.end() - 1][1]
+            decoded_at = block.end()
+        pieces.append(line[raw_at:])
+        result.append("".join(pieces))
+    return result
 
 
 def _strip_control(text: str) -> str:
@@ -431,6 +630,13 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
             )
             entry[state] += int(row["n"])
 
+    held: dict[str, int] = {}
+    placed: set[str] = set()
+    if "device_slots" in tables:
+        for row in connection.execute("SELECT job_id, device FROM device_slots"):
+            placed.add(str(row["job_id"]))
+            held[str(row["device"])] = held.get(str(row["device"]), 0) + 1
+
     running: list[dict] = []
     queued: list[dict] = []
     overdue: list[dict] = []
@@ -461,7 +667,9 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
                     "overdue": age > timeout,
                 }
                 running.append(item)
-                if row["recipient"] != "grok":
+                # Like `orch status` (lib/status.py box_slots), a job holding a
+                # device-pool slot counts on its device, not on the box.
+                if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
             else:
                 age = _age(now, row["created_at"]) or 0
@@ -584,13 +792,6 @@ def _read_db(connection: sqlite3.Connection, now: float) -> dict:
             ]
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
-
-    held: dict[str, int] = {}
-    if "device_slots" in tables:
-        for row in connection.execute(
-            "SELECT device, count(*) AS n FROM device_slots GROUP BY device"
-        ):
-            held[str(row["device"])] = int(row["n"])
 
     scripted = in_flight = bot_to_bot = 0
     if jobs:

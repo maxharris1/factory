@@ -315,7 +315,9 @@ database; `--machines`, else the checkout's `machines.yml` when present.
 
 The snapshot shows the queue (queued, running, done and failed jobs by
 recipient and action), running jobs with the age of their last heartbeat,
-queued jobs with their wait, box slots and, when `machines.yml` (F2-01) is
+queued jobs with their wait, box slots (running harness jobs that hold no
+device-pool slot, as in `orch status`; a job placed on a device counts on
+that device's row) and, when `machines.yml` (F2-01) is
 present, device rows (enabled, placeholder, harnesses, slots held from
 `device_slots` when that table exists; absent or invalid files show no
 device rows), stuck tickets and overdue jobs (a heartbeat or queue wait
@@ -342,9 +344,17 @@ read apart from the three `ORCH_*` path variables. Unknown action,
 recipient, job state, ticket workflow state or tracker values show as
 `other`. Every free-text value (stuck reasons, poll errors, deferrals, log
 lines) goes through one redactor, and the finished snapshot is walked once
-more before writing. The redactor first undoes percent-encoding (repeated,
-so `%253A` is seen too) and JSON string escapes (`\/`, `\"`, `\u00XX`),
-then removes private-key blocks (`-----BEGIN ... -----` to the matching
+more before writing. The redactor runs its rules twice: on the text as
+written, and on a decoded copy with percent-encoding (repeated, so `%253A`
+is seen too) and JSON string escapes (`\/`, `\"`, `\u00XX`) undone.
+Whatever the decoded pass finds is cut out of the original text together
+with the rest of its whitespace-separated token, so a separator that only
+exists once decoded (`password=abc%20rest`, `token=abc%3Brest`, an escaped
+quote inside a JSON value) can never leave part of a value visible:
+decoding only widens what is hidden. Text still changing after eight
+decoding rounds is replaced whole. The output is the original text with
+markers in place of secrets, never a decoded copy. The rules remove
+private-key blocks (`-----BEGIN ... -----` to the matching
 `END`, or to the end of the text), every URL (so webhook URLs and
 `user:pass@` URLs go whole), `Authorization`/`Cookie`/API-key headers,
 `Bearer` and token-like `token`/`basic` values, GitHub (`ghp_`, `gho_`,
@@ -354,8 +364,9 @@ JSON or repr pairs (`{"password":"..."}`, `'api_key': '...'`) whose name
 looks like a secret (the name stays, the value goes), email addresses,
 and long opaque strings (32 or more token characters with digits, which
 includes full SHAs). The log tail is also read as a whole for key blocks
-that span lines: every line from a `BEGIN` line to its `END` line is
-replaced, and when the tail starts inside a block (its `BEGIN` scrolled
+that span lines, with the markers matched in decoded form (so
+`-----BEGIN%20PRIVATE%20KEY-----` counts): every line from a `BEGIN` line
+to its `END` line is replaced, and when the tail starts inside a block (its `BEGIN` scrolled
 out), the lines up to the `END` are too. Lines are capped after
 redaction, and a log line over 4096 characters is dropped rather than
 cut. `tests/test_dashboard.py` plants a fake webhook URL (plain, percent-
@@ -414,7 +425,9 @@ follows symlinks out of its directory, lists directories, and serves the
 home directory when `--directory` is empty). It answers GET and HEAD only,
 and only for `/`, `/index.html` and `/status.json`: every other path, dot-
 file, `..` or encoded slash is a 404, and no directory is ever listed. Each
-file is opened relative to the directory with `O_NOFOLLOW` and served only
+file is opened, with `O_NOFOLLOW`, relative to a descriptor for the
+directory that the server opens once at startup (so swapping the directory
+or an ancestor for a symlink later changes nothing), and served only
 if it is a regular file with a single link, so neither a symlink nor a hard
 link to a file elsewhere is served. It binds only the node's tailnet IPv4
 address, never a wildcard address. Before starting (`ExecStartPre`, and
