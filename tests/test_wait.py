@@ -491,6 +491,88 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
     assert _exec_calls(ROOT / "lib" / "dispatcher.py") == []
 
 
+JOB_RUN_GIT_SUBCOMMANDS = {
+    "init", "remote", "fetch", "rev-parse", "worktree", "cat-file", "status", "rev-list",
+}
+
+
+@pytest.mark.parametrize("worktree", [False, True], ids=["plain", "worktree"])
+def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
+    tmp_path: Path, monkeypatch, worktree: bool
+) -> None:
+    # #52 F1.9: the literal scan above cannot see an absolute harness path or
+    # a harness added on one path only. Every process `orch job run` starts
+    # is recorded: the bot's own argv, unchanged, exactly once, and otherwise
+    # only the git operations a job worktree needs.
+    for key, value in {
+        "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    remotes = tmp_path / "remotes"
+    bare = remotes / "owner" / "repo.git"
+    bare.parent.mkdir(parents=True)
+    subprocess.run(["git", "init", "--bare", "-q", "-b", "main", str(bare)], check=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", "-q", str(bare), str(seed)], check=True, capture_output=True)
+    (seed / "README").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-q", "-m", "one"], check=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "HEAD:main"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(seed), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(
+        JobRequest(
+            repo="owner/repo", ticket_id="42", action="review", recipient="cursor",
+            source_comment_id="go-1", timeout_seconds=5400, head=head,
+        ),
+        dedupe_key="a",
+    )
+    assert queue.claim("cursor") is not None
+
+    real_popen = subprocess.Popen
+    started: list[list[str]] = []
+
+    def recording_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs["args"]
+        started.append([str(part) for part in argv])
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    command = [sys.executable, "-c", "pass"]
+    extra = (
+        ["--worktree", "--work-root", str(tmp_path / "work"),
+         "--git-url-template", f"file://{remotes}/{{repo}}.git"]
+        if worktree else []
+    )
+    code = cli_main(["job", "run", "cursor-bot", job.id, "--db", str(db), *extra, "--", *command])
+    monkeypatch.setattr(subprocess, "Popen", real_popen)
+
+    assert [argv for argv in started if argv[0] != "git"] == [command]
+    assert code == 0
+    git_calls = [argv for argv in started if argv[0] == "git"]
+    assert bool(git_calls) == worktree
+    assert {argv[1] for argv in git_calls} <= JOB_RUN_GIT_SUBCOMMANDS
+
+
+def test_no_doc_still_says_orch_refuses_every_harness_exec() -> None:
+    # #52 F1.10: `orch job run` runs the command its owning bot passes, so
+    # the old blanket rule is no longer true anywhere it is restated.
+    for name in ("docs/SPEC.md", "docs/PLAN.md", "README.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "refuses to exec" not in text, name
+
+
+def test_readme_states_the_worktree_and_install_rules_as_implemented() -> None:
+    text = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    assert "after the commit the job started at" in text
+    assert "It does not install or start the service." not in text
+    assert "Without `--autostart` it does not install or start the service" in text
+
+
 def test_open_queue_is_f1_04s_sqlite_queue(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
     assert isinstance(open_queue(db), SQLiteJobQueue)

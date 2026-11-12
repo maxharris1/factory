@@ -447,7 +447,7 @@ Grok Bot reports each stop once. It does not poll Max about the same stop.
   errors, and logs contain only environment-variable names, never credential
   values.
 - Credential-holding deploy workflows stay on hosted runners (D21). Phase 2 self-hosted CI is for non-credential checks. The plan never touches runner tokens.
-- `orch` refuses to exec `claude`, `codex`, or `cursor-agent`.
+- The dispatcher, `orch poll` and `orch wait` never exec `claude`, `codex`, or `cursor-agent`. The one `orch` command that runs a harness is `orch job run`, and only the command its owning bot passes after `--`, for a running job that bot owns; `orch` never names a harness itself (section 4.3).
 - `factory.md` and `orch.yml` are read from the relevant base branch, not from an untrusted PR head, when deciding whether a project may run and how it ships.
 - The factory does not create GitHub issues or labels on Aut0.
 

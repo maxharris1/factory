@@ -290,17 +290,24 @@ is on no branch) or the remote default branch. The root is `--work-root`, else
 else `$ORCH_GIT_URL_TEMPLATE`, else `https://github.com/{repo}.git`. When the
 command exits, done or failed, the worktree is removed and the clone pruned,
 unless it has uncommitted changes (untracked files included; ignored build
-output is not) or commits on no remote-tracking ref, in which case it is kept
-and the reason logged. `orch gc` applies the same rule to worktrees older than
-`--older-than` hours (default 24) whose owning `orch job run` is gone,
-reports what it kept and why, and prunes each clone; `--dry-run` only reports.
+output is not) or commits made after the commit the job started at that are on
+no remote-tracking ref, in which case it is kept and the reason logged. (The
+start commit itself, such as a PR head fetched by SHA, does not count.) `orch gc`
+applies the same rule to worktrees older than `--older-than` hours (default
+24) whose owning `orch job run` is gone, reports what it kept and why, and
+prunes each clone; `--dry-run` only reports. Both decide under the clone's
+lock, and gc removes only a worktree of the clone derived from the record's
+repo. A URL template carrying credentials (`https://user:token@...`) is
+refused; git authenticates through its credential helper.
 
 ## Install after merge
 
 Do not run these steps until Max gives the go. `deploy/install.sh` creates a
 venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
 under `$HOME/.local/bin`, initializes one shared database, and writes
-`$HOME/.config/factory/profile.sh`. It does not install or start the service.
+`$HOME/.config/factory/profile.sh`. Without `--autostart` it does not install
+or start the service; with `--autostart` it also runs `deploy/poller-service.sh
+install-autostart`, which turns on autostart but does not start the poller.
 Stop `orch-poll` (or `deploy/poller-service.sh stop`) before re-running
 `deploy/install.sh`; both install paths replace the venv.
 Keep the checkout at
@@ -360,15 +367,19 @@ On a host with no systemd user session (the box), use
 running or held stopped). It runs `deploy/run-poller.sh --pidfile
 ~/.local/state/factory/poller.pid` under `nohup`, appending to `poller.log`
 beside it, and treats a pidfile whose process is gone or is not `orch poll`
-as not running. `deploy/install.sh --autostart` (or `poller-service.sh
-install-autostart`) turns on autostart: it writes
+(argv `orch poll ...`, read from `/proc`, else `ps`) as not running. `start`,
+`stop`, `restart` and `ensure` serialize on `poller-service.lock` (where
+`flock` exists), and `ensure` never clears a stop.
+`deploy/install.sh --autostart` (or `poller-service.sh install-autostart`)
+turns on autostart: it writes
 `~/.config/factory/poller-autostart`, which makes the installed `profile.sh`
 run `ensure` in the background whenever a bot shell starts, and, when
 `crontab` exists, adds an `@reboot` line and a 5-minute `ensure` watchdog
 tagged `# factory-orch-poll` (replaced, never duplicated).
-`remove-autostart` undoes both. `ORCH_CRONTAB` names the crontab command
-(default `crontab` on `PATH`); the caller's `PATH` keeps precedence over the
-standard directories the script appends. `deploy/install.sh` without `--autostart`
+`remove-autostart` undoes both. If the crontab cannot be read (anything but
+"no crontab for <user>"), both change nothing and exit 1. `ORCH_CRONTAB` names
+the crontab command (default `crontab` on `PATH`); the caller's `PATH` keeps
+precedence over the standard directories the script appends. `deploy/install.sh` without `--autostart`
 changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.
