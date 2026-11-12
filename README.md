@@ -183,8 +183,8 @@ another bot; no key, `-i` or config path is ever passed. Each remote start gets
 a fresh random worker tag, recorded on the slot before ssh starts, and the
 start script runs under `exec env ORCH_WORKER_TAG=<tag>`, so the command and
 every process it starts carry the tag; the tag, not a process number, names
-the job's worker. The script refuses (exit 125, nothing run) a device without
-Linux `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
+the job's worker. On Linux the script refuses (exit 125, nothing run) a device
+without `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
 the worker's process group and boot id (sshd starts the command in its own
 session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
@@ -193,6 +193,21 @@ with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 `--worktree` is box-only and refused for a remote job (exit 2): the harness
 checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+
+A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
+process's environment, so there the worker is named by its record alone. The
+start refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot
+session id and the start leads its own process group, then records
+`<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
+UTC). The check reads that record and `ps -A -o pgid=,pid=,uid=`: no record, a
+record from an earlier boot session or for another tag, or an empty group is
+gone; a group still holding only the bot's own processes, led by the recorded
+leader or by none (its leader exited and left children), is running; a
+malformed record, another user's process in the group, or a leader with a
+different start time (the number was reused) cannot tell. The stop sends
+SIGTERM to the recorded group only when the check would say running. A process
+that leaves the job's group (`setsid`) is not seen on macOS. Every script runs
+under POSIX `sh` whatever the login shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
