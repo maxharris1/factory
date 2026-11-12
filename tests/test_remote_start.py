@@ -762,3 +762,15 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
     with queue.connect() as connection:
         rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
     assert [tuple(row) for row in rows] == [("devices", "OperationalError")]
+
+
+def test_suite_guard_shadows_any_real_ssh() -> None:
+    """tests/conftest.py puts a refusing ssh first on PATH for every test."""
+    import shutil
+
+    found = shutil.which("ssh")
+    assert found is not None and "no-real-ssh" in found
+    result = subprocess.run([found, "-o", "BatchMode=yes", "example.invalid", "true"],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 255
+    assert "real ssh is disabled" in result.stderr
