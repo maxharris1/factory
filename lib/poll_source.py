@@ -586,6 +586,9 @@ class LivePollSource:
         for ref in ordered:
             project = projects.get(ref.repo.lower())
             if project is None:
+                if ref.tracker == "linear":
+                    # Its repo left orch.yml: never read, so ack its dirty rows.
+                    self._note_unread(ref.ticket_id)
                 continue
             try:
                 if ref.tracker == "linear":
@@ -775,6 +778,12 @@ class LivePollSource:
                 self._linear_issue_cache[alias] = issue
         self._note_linear_read(identifier, issue)
         return issue
+
+    def _note_unread(self, identifier: str) -> None:
+        """Webhook mode: ack the dirty rows of a ticket nothing will read."""
+        for row in self._dirty.values():
+            if row.identifier == identifier:
+                self._dirty_fetched[row.issue_id] = row
 
     def _note_linear_read(
         self,
