@@ -65,13 +65,16 @@ def _machines(tmp_path: Path) -> Path:
 
 
 def _history(connection: sqlite3.Connection) -> None:
-    """Ticket 40: built, reviewed, revised once, now in its second review."""
+    """Ticket 40: built, reviewed, revised once, now in its second review.
+
+    The ticket has one completed review round; the running job's detail
+    says it is round 2 of 3, and that is the round a slot shows (#75)."""
     add_ticket(connection, "maxharris1/cleffy", "40", state="review", review_round=1)
-    for job_id, action, recipient, state, created in (
-        ("h-build", "build", "claude", "done", NOW - 5000),
-        ("h-review1", "review", "codex", "done", NOW - 4000),
-        ("h-fix", "fix", "claude", "done", NOW - 3000),
-        ("h-review2", "review", "codex", "running", NOW - 2000),
+    for job_id, action, recipient, state, created, detail in (
+        ("h-build", "build", "claude", "done", NOW - 5000, None),
+        ("h-review1", "review", "codex", "done", NOW - 4000, '{"round":"1/3"}'),
+        ("h-fix", "fix", "claude", "done", NOW - 3000, None),
+        ("h-review2", "review", "codex", "running", NOW - 2000, '{"round":"2/3"}'),
     ):
         add_job(
             connection,
@@ -82,6 +85,7 @@ def _history(connection: sqlite3.Connection) -> None:
             ticket_id="40",
             created_at=created,
             last_activity_at=NOW - 30,
+            detail=detail,
         )
 
 
@@ -208,7 +212,7 @@ def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) 
     assert "PR" in text and "cleffy#40" in text  # a GitHub ticket is a PR
     assert "codex" in text  # bot
     assert "review" in text  # step
-    assert "round 1" in text
+    assert "round 2/3" in text  # the job's detail.round, not the ticket's count
     assert "T+ 33m 20s" in text  # elapsed since it was queued
 
 
@@ -451,7 +455,7 @@ def test_job_path_follows_its_history_through_the_chart() -> None:
 def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
-    assert job["round"] == 1
+    assert job["round"] == "2/3"
     assert job["tracker"] == "github"
     assert job["flow"] == {
         "state": "review",
@@ -477,7 +481,7 @@ def test_job_page_highlights_the_path_and_current_state(tmp_path: Path) -> None:
         ("fixing", "review"),
     }
     text = _text(article)
-    assert "round 1" in text
+    assert "round 2/3" in text
     assert "33m 20s in review" in text
     assert "intake → questions → building → review → fixing → review" in text
     assert "codex" in text and "cleffy#40" in text
@@ -655,7 +659,8 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     assert out["text"]["attention-count"] == "3"
     lanes = out["dump"]["lanes"]
     assert "a.slot.job[href=job.html#job-r-codex-]" in lanes
-    for needle in ("cleffy#13", "codex", "review", "round 2", "T+ ", "OVERDUE", "DISABLED"):
+    for needle in ("cleffy#13", "codex", "review", "round 3/3", "T+ ", "OVERDUE", "DISABLED",
+                   "stale heartbeat"):
         assert needle in out["text"]["lanes"], (needle, lanes)
     # #63 FU-1: pc holds 2 slots with 1 job running; the lane is full.
     pc = lanes[lanes.index("[data-device=pc]") :]
@@ -689,7 +694,7 @@ def test_script_highlights_the_selected_jobs_path(tmp_path: Path) -> None:
                     hash_="#job-h-review")
     view = out["dump"]["jobview"]
     assert "cleffy#40" in out["text"]["jobview"]
-    assert "round 1" in out["text"]["jobview"]
+    assert "round 2/3" in out["text"]["jobview"]
     assert "33m 2" in out["text"]["jobview"]  # time in state, ticking from 33m 20s
     visited = set(re.findall(r"g\.node\.visited(?:\.current)?\[data-state=([^\]]+)\]", view))
     current = set(re.findall(r"g\.node\.visited\.current\[data-state=([^\]]+)\]", view))
@@ -762,10 +767,11 @@ def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -
         connection.execute("DROP TABLE ticket_state")
     snapshot = collect_snapshot(db, log, now=NOW)
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "13")
-    assert (job["tracker"], job["round"], job["flow"]["state"]) == (None, None, None)
+    # The round is the job's own (detail.round), so it survives (#75).
+    assert (job["tracker"], job["round"], job["flow"]["state"]) == (None, "3/3", None)
     # Only a review job: intake -> review is three chart steps, more than a
     # bridge, so it stays a jump.
     assert job["flow"]["path"] == ["intake", "review"]
     pages = render_pages(snapshot)
     assert 'id="job-r-codex-"' in pages["job.html"]
-    assert "round —" in _text(_section(_no_script(pages["index.html"]), "lanes"))
+    assert "round 3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))

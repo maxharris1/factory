@@ -224,6 +224,10 @@ T2CiRedStuck ==
 
 \* T6. No handoff, or the job timeout. Retry once. Second time: stuck.
 \* Section 4.1 draws that edge from Planning, Review, and Fixing, and from Building.
+\* Issue #75: a dead job (its runner and worker confirmed gone) is a job
+\* death here, the same as a timeout. A job its bot claimed and never started
+\* is put back in the queue as the same job: the ticket's state, round and
+\* deaths do not change, so that requeue is a stutter step and has no action.
 T6JobRetry ==
   /\ "T6" \notin Omit
   /\ state \in JobStates

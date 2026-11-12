@@ -35,10 +35,14 @@ class Beats:
             return len(self.times)
 
 
-def test_interval_defaults_to_a_third_of_the_job_timeout() -> None:
-    assert job_run.heartbeat_interval(3600, None) == 1200
+def test_interval_defaults_to_30_seconds_or_a_third_of_a_short_timeout() -> None:
+    # #75: a 60-minute job used to beat every 20 minutes, so a 2-minute
+    # stale threshold would flag every live job.
+    assert job_run.heartbeat_interval(3600, None) == 30
+    assert job_run.heartbeat_interval(9000, None) == 30
     assert job_run.heartbeat_interval(60, None) == 20
     assert job_run.heartbeat_interval(60, 5) == 5
+    assert job_run.heartbeat_interval(3600, 600) == 600
 
 
 @pytest.mark.parametrize("timeout", [1, 2, 3])

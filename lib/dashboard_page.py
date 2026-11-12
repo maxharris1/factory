@@ -265,6 +265,13 @@ SCRIPT = r"""
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
+  // #75: lib/job_state.py's state of a running job, as a chip.
+  var JOB_STATE = {claimed: ['claimed, not started', 'warn'], running: ['running', 'ok'],
+                   stale: ['stale heartbeat', 'warn'], dead: ['runner dead', 'bad']};
+  function stateChip(r) {
+    var s = JOB_STATE[r.job_state];
+    return s ? chip(s[0], s[1]) : null;
+  }
   function ticking(node, base, prefix, suffix) {
     prefix = prefix || '';
     suffix = suffix || '';
@@ -366,12 +373,22 @@ SCRIPT = r"""
     var kind = jobKind(r);
     if (kind) add(top, el('span', 'kind', kind));
     add(top, el('span', 'ticket', jobLabel(r)));
+    var state = stateChip(r);
+    if (state) add(top, state);
     if (r.overdue) add(top, chip('OVERDUE', 'bad'));
     var step = add(card, el('div', 'step'));
     add(step, el('span', 'action', r.action));
     add(step, el('span', 'round', 'round ' + (r.round === null || r.round === undefined ? '—' : r.round)));
     var times = add(card, el('div', 'times'));
     var elapsed = add(times, el('span'));
+    if (r.job_state === 'claimed') {
+      // Claimed and never started: no runner, so no T+ or heartbeat bar.
+      elapsed.title = 'no orch job run has started this job';
+      add(elapsed, el('span', null, 'claimed '));
+      ticking(add(elapsed, el('b')), r.elapsed_seconds, '', ' ago');
+      add(times, el('span', 'warn', 'not started'));
+      return mark('lanes', r.job, card);
+    }
     elapsed.title = r.elapsed_from === 'placed' ? 'since it was placed on this device' : 'since it was queued';
     add(elapsed, el('span', null, 'T+ '));
     ticking(add(elapsed, el('b')), r.elapsed_seconds);
@@ -470,7 +487,7 @@ SCRIPT = r"""
 
   // --- activity page ---------------------------------------------------------
 
-  var ATTENTION = {stuck: 'bad', overdue: 'bad', paused: 'warn'};
+  var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', stale: 'warn', paused: 'warn'};
   function renderAttention(d) {
     var a = d.attention || {count: 0, items: []};
     var root = panel('attention', 'Needs attention', a.count + (a.count === 1 ? ' item' : ' items'));
@@ -696,6 +713,8 @@ SCRIPT = r"""
     add(row, el('span', 'what', 'step ' + r.action));
     if (state === 'running') ticking(add(row, el('span', 'muted')), r.elapsed_seconds, 'T+ ');
     else ticking(add(row, el('span', 'muted')), r.age_seconds, 'waiting ');
+    var jobState = stateChip(r);
+    if (jobState) add(row, jobState);
     if (r.overdue) add(row, chip('OVERDUE', 'bad'));
     var flow = r.flow || {state: null, path: [], state_age_seconds: null};
     var where = add(art, el('p', 'where'));
@@ -971,7 +990,7 @@ def _bar(snapshot: dict, page: str) -> str:
         f'<nav class="nav" id="nav" aria-label="Pages">{links}</nav>'
         f'<a class="badge{"" if count else " clear"}" id="attention-badge" '
         'href="activity.html#attention" '
-        'title="stuck tickets, overdue jobs and paused tickets">'
+        'title="stuck tickets, overdue, stale or dead jobs and paused tickets">'
         f'<b id="attention-count">{count}</b> needs attention</a>'
         '<div class="link boot" id="link" role="status" aria-live="polite">'
         '<span class="dot" aria-hidden="true"></span>'
@@ -1031,6 +1050,20 @@ def _linear_webhook(snapshot: dict) -> str:
     )
 
 
+# #75: lib/job_state.py's state of a running job, as a chip (JOB_STATE in the script).
+_JOB_STATE = {
+    "claimed": ("claimed, not started", "warn"),
+    "running": ("running", "ok"),
+    "stale": ("stale heartbeat", "warn"),
+    "dead": ("runner dead", "bad"),
+}
+
+
+def _state_chip(row: dict) -> str:
+    found = _JOB_STATE.get(row.get("job_state"))  # type: ignore[arg-type]
+    return _chip(found[0], found[1]) if found else ""
+
+
 def _slot(row: dict) -> str:
     kind = _job_kind(row)
     rnd = "—" if row.get("round") is None else row["round"]
@@ -1042,6 +1075,21 @@ def _slot(row: dict) -> str:
         if row.get("elapsed_from") == "placed"
         else "since it was queued"
     )
+    if row.get("job_state") == "claimed":
+        # Claimed and never started: no runner, so no T+ or heartbeat bar.
+        times = (
+            '<div class="times"><span title="no orch job run has started this job">'
+            f'<span>claimed </span><b>{duration(row["elapsed_seconds"])} ago</b></span>'
+            + _span("warn", "not started")
+            + "</div>"
+        )
+    else:
+        times = (
+            f'<div class="times"><span title="{since}"><span>T+ </span>'
+            f'<b>{duration(row["elapsed_seconds"])}</b></span>'
+            f'<span title="last heartbeat"><span>hb </span><b>{duration(age)} ago</b></span></div>'
+            f'<div class="hb{level}"><i style="width:{max(2, round(frac * 100))}%"></i></div>'
+        )
     return (
         f'<a class="slot job{" overdue" if row["overdue"] else ""}" '
         f'href="job.html#{anchor(row["job"])}" '
@@ -1049,14 +1097,12 @@ def _slot(row: dict) -> str:
         f'<div class="top">{_bot(row["recipient"])}'
         + (_span("kind", kind) if kind else "")
         + _span("ticket", _job_label(row))
+        + _state_chip(row)
         + (_chip("OVERDUE", "bad") if row["overdue"] else "")
         + "</div>"
         f'<div class="step">{_span("action", row["action"])}{_span("round", f"round {rnd}")}</div>'
-        f'<div class="times"><span title="{since}"><span>T+ </span>'
-        f'<b>{duration(row["elapsed_seconds"])}</b></span>'
-        f'<span title="last heartbeat"><span>hb </span><b>{duration(age)} ago</b></span></div>'
-        f'<div class="hb{level}"><i style="width:{max(2, round(frac * 100))}%"></i></div>'
-        "</a>"
+        + times
+        + "</a>"
     )
 
 
@@ -1175,7 +1221,7 @@ def _queue(snapshot: dict) -> str:
 # --- activity page -----------------------------------------------------------------
 
 
-_ATTENTION = {"stuck": "bad", "overdue": "bad", "paused": "warn"}
+_ATTENTION = {"stuck": "bad", "overdue": "bad", "dead": "bad", "stale": "warn", "paused": "warn"}
 
 
 def _attention(snapshot: dict) -> str:
@@ -1438,6 +1484,7 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         + _span("ticket", _job_label(row))
         + _span("what", f"step {row['action']}")
         + timing
+        + _state_chip(row)
         + (_chip("OVERDUE", "bad") if row.get("overdue") else "")
         + "</div>"
         + where

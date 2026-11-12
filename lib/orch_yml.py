@@ -18,6 +18,11 @@ from typing import Mapping
 import yaml
 
 from lib.dashboard_config import DashboardConfig, parse_dashboard
+from lib.job_state import (
+    DEFAULT_RELEASE_CLAIMED_MINUTES,
+    DEFAULT_STALE_MINUTES,
+    JobStateConfig,
+)
 from lib.load import Finding, is_strict_int, load_yaml
 
 POLL_SECONDS = 60
@@ -44,7 +49,9 @@ _TOP_KEYS = {
     "trusted_linear_users",
     "dashboard",
     "linear_webhook",
+    "job_states",
 }
+_JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
 _LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds"}
 _PROJECT_KEYS = {
     "repo",
@@ -114,6 +121,7 @@ class OrchConfig:
     )
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     linear_webhook: LinearWebhookConfig | None = None
+    job_states: JobStateConfig = field(default_factory=JobStateConfig)
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -173,6 +181,7 @@ def _validate(
     trusted_linear_users = _trusted_linear_users(data, findings)
     dashboard = parse_dashboard(data.get("dashboard"), findings)
     linear_webhook = _linear_webhook(data, findings)
+    job_states = _job_states(data, findings)
     if (
         "linear_webhook" in data
         and projects is not None
@@ -209,6 +218,7 @@ def _validate(
             trusted_linear_users=MappingProxyType(trusted_linear_users),
             dashboard=dashboard or DashboardConfig(),
             linear_webhook=linear_webhook,
+            job_states=job_states or JobStateConfig(),
         ),
         findings,
     )
@@ -478,6 +488,39 @@ def _linear_webhook(
         secret_file=secret_file,
         path=str(path),
         reconcile_seconds=int(reconcile),
+    )
+
+
+def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
+    """job_states (#75): when a running job counts as stale, and how long a
+    claimed job that was never started waits before the poller requeues it.
+    Whole minutes, at least 1; the stale threshold must stay above `orch job
+    run`'s 30-second heartbeat."""
+    if "job_states" not in data:
+        return None
+    value = data["job_states"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "job_states must be a mapping"))
+        return None
+    start = len(findings)
+    _unknown_keys(value, _JOB_STATES_KEYS, "job_states", findings)
+    minutes: dict[str, int] = {}
+    for key, default in (
+        ("stale_minutes", DEFAULT_STALE_MINUTES),
+        ("release_claimed_minutes", DEFAULT_RELEASE_CLAIMED_MINUTES),
+    ):
+        item = value.get(key, default)
+        if not is_strict_int(item) or item < 1:
+            findings.append(
+                Finding("error", f"job_states.{key} must be a positive integer (minutes)")
+            )
+            continue
+        minutes[key] = int(item)
+    if len(findings) > start:
+        return None
+    return JobStateConfig(
+        stale_seconds=minutes["stale_minutes"] * 60.0,
+        release_claimed_seconds=minutes["release_claimed_minutes"] * 60.0,
     )
 
 

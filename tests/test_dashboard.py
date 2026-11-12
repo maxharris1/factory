@@ -265,6 +265,7 @@ def seeded(tmp_path: Path) -> tuple[Path, Path]:
             state="running",
             last_activity_at=NOW - 45,
             ticket_id="13",
+            detail='{"round":"3/3"}',
         )
         add_job(
             connection,

@@ -15,8 +15,16 @@ from typing import Protocol
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
+from lib.job_state import (
+    DEAD,
+    JobStateConfig,
+    Liveness,
+    claimed_too_long,
+    derive,
+    read_placements,
+)
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
-from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue, _job
+from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 POLL_SECONDS = 60
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -303,7 +311,11 @@ class Hook(Protocol):
 
 
 class DeviceChecks(Protocol):
-    """F2-02's DeviceMonitor: release gone workers' slots, find offline devices."""
+    """F2-02's DeviceMonitor: release gone workers' slots, find offline devices.
+
+    A DeviceMonitor also has `liveness(placement)` (#75), which the
+    dispatcher uses, when present, to find dead jobs.
+    """
 
     def reconcile(
         self,
@@ -323,6 +335,8 @@ class Dispatcher:
         grok_delivery: GrokDelivery,
         hooks: Sequence[Hook] = (),
         devices: DeviceChecks | None = None,
+        job_states: JobStateConfig | None = None,
+        log: Callable[[str], None] | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -341,6 +355,8 @@ class Dispatcher:
         self.grok_delivery = grok_delivery
         self.hooks = tuple(hooks)
         self.devices = devices
+        self.job_states = job_states if job_states is not None else JobStateConfig()
+        self.log = log
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -531,6 +547,7 @@ class Dispatcher:
         deferred_grok_jobs: set[str] = set()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._check_devices()
+        self._check_job_states()
         now = self.queue.now()
         for job in self.queue.outstanding():
             activity = (
@@ -556,6 +573,156 @@ class Dispatcher:
             self.devices.reconcile(self.queue.now(), self._device_offline)
         except Exception as exc:
             self.record_poll_error("devices", "-", type(exc).__name__)
+
+    def _check_job_states(self) -> None:
+        """#75: requeue jobs claimed but never started; fail dead jobs.
+
+        Each running job's state comes from lib/job_state.py. A job claimed
+        for more than job_states.release_claimed_seconds goes back to
+        queued as the same job row (same round, same T6 attempt). A dead
+        job is failed now, so T6 handles it as it would a timeout. Both
+        writes are guarded, so a runner that starts or heartbeats in
+        between wins. Runs after the device checks and before the timeouts.
+        A failure is recorded and never stops the poll.
+        """
+        try:
+            now = self.queue.now()
+            with self._connect() as connection:
+                connection.execute("BEGIN")
+                rows = connection.execute(
+                    "SELECT * FROM jobs WHERE state = 'running' ORDER BY created_at, id"
+                ).fetchall()
+                placements = read_placements(connection)
+                connection.commit()
+        except Exception as exc:
+            self.record_poll_error("job-states", "-", type(exc).__name__)
+            return
+        check = getattr(self.devices, "liveness", None)
+        for row in rows:
+            job = _job(row)
+            try:
+                placement = placements.get(job.id)
+                facts = (
+                    check(placement)
+                    if check is not None
+                    and placement is not None
+                    and placement.runner_pid is not None
+                    else Liveness()
+                )
+                state = derive(
+                    last_activity_at=job.last_activity_at,
+                    now=now,
+                    placement=placement,
+                    stale_seconds=self.job_states.stale_seconds,
+                    liveness=facts,
+                )
+                if claimed_too_long(
+                    state, placement, now, self.job_states.release_claimed_seconds
+                ):
+                    assert placement is not None
+                    self._release_claimed(job, placement.placed_at, now)
+                elif state == DEAD:
+                    assert placement is not None
+                    self._fail_dead(job, placement.runner_pid, now)
+            except Exception as exc:
+                self.record_poll_error(
+                    job.request.repo, job.request.ticket_id, f"job-states:{type(exc).__name__}"
+                )
+
+    def _release_claimed(self, job: Job, placed_at: float, now: float) -> None:
+        """Requeue a job its bot claimed and never started (no round charged).
+
+        One transaction, guarded: the job is still running with no
+        heartbeat since the claim, and its slot is the same placement with
+        no runner recorded. Its slot is freed; a late `orch job run` then
+        finds the job queued and refuses it before anything starts.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs SET state = 'queued'
+                WHERE id = ? AND state = 'running' AND last_activity_at = ?
+                  AND EXISTS (
+                    SELECT 1 FROM {SLOTS_TABLE}
+                    WHERE job_id = ? AND placed_at = ? AND runner_pid IS NULL
+                  )
+                """,
+                (job.id, job.last_activity_at, job.id, placed_at),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job.id,))
+            detail = (
+                f"{job.request.recipient} claimed it {int((now - placed_at) // 60)} "
+                "minutes ago and never started it; requeued, no round charged"
+            )
+            self._record_job_event(connection, job, "released-claimed", detail, now)
+            connection.commit()
+        self._log_job_event(job, "released-claimed", detail)
+
+    def _fail_dead(self, job: Job, runner_pid: int | None, now: float) -> None:
+        """Fail a job whose runner and worker are gone; T6 takes it from here.
+
+        Guarded like a timeout (no heartbeat since it was read) and on the
+        same recorded runner, so a new `orch job run` that took the job
+        over in between is left alone.
+        """
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs
+                SET state = 'failed', finished_at = ?, last_activity_at = ?
+                WHERE id = ? AND state = 'running' AND last_activity_at = ?
+                  AND EXISTS (
+                    SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ? AND runner_pid = ?
+                  )
+                """,
+                (now, now, job.id, job.last_activity_at, job.id, runner_pid),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            detail = f"runner pid {runner_pid} and its worker are gone; failed for T6"
+            self._record_job_event(connection, job, "dead", detail, now)
+            connection.commit()
+        self._log_job_event(job, "dead", detail)
+
+    def _record_job_event(
+        self,
+        connection: sqlite3.Connection,
+        job: Job,
+        event: str,
+        detail: str,
+        now: float,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.id,
+                job.request.repo.lower(),
+                job.request.ticket_id,
+                job.request.action,
+                job.request.recipient,
+                event,
+                detail,
+                now,
+            ),
+        )
+
+    def _log_job_event(self, job: Job, event: str, detail: str) -> None:
+        if self.log is None:
+            return
+        self.log(
+            f"job {job.id[:8]} {job.request.repo}#{job.request.ticket_id} "
+            f"{job.request.action}: {event}: {detail}"
+        )
 
     def _device_offline(self, job_id: str, device: str, seconds: float) -> None:
         """Fail a job running on an offline device and mark its ticket stuck.
@@ -3147,6 +3314,23 @@ class Dispatcher:
                 """
                 CREATE TABLE IF NOT EXISTS poll_deferrals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    detail TEXT NOT NULL,
+                    recorded_at REAL NOT NULL
+                )
+                """
+            )
+            # #75: what the poller did to a job because of its state
+            # (released-claimed, dead), one row each, for the log and audit.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    event TEXT NOT NULL,
                     detail TEXT NOT NULL,
                     recorded_at REAL NOT NULL
                 )

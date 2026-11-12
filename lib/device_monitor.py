@@ -34,7 +34,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib.device_pool import DevicePool, HeldSlot
+from lib.device_pool import DevicePool, HeldSlot, Placement
+from lib.job_state import Liveness, liveness
 from lib.machines_yml import Device, MachinesConfig
 from lib.remote import (
     GONE,
@@ -124,6 +125,26 @@ class DeviceMonitor:
             self._remote(device, slots, now, on_offline, released, stopped, offline)
         self.pool.forget_health(keep=self.pool.used().keys())
         return MonitorResult(tuple(released), tuple(stopped), tuple(offline))
+
+    def liveness(self, placement: Placement) -> Liveness:
+        """Is the job's recorded runner gone, and then its worker? (job_state)"""
+        return liveness(placement, self.alive, self._remote_gone)
+
+    def _remote_gone(self, placement: Placement) -> bool | None:
+        device = self.config.device(placement.device)
+        if device is None or device.local or placement.worker_tag is None:
+            return None
+        target = remote_target(
+            device, placement.harness, placement.job_id, placement.worker_tag
+        )
+        if target is None:
+            return None
+        status = check_worker(self.transport, target)
+        if status == GONE:
+            return True
+        if status == RUNNING:
+            return False
+        return None
 
     def _local_gone(self, slot: HeldSlot) -> bool:
         if slot.job_state == "running":

@@ -6,7 +6,8 @@ when configured, pushes it out. Paths:
   --db   else $ORCH_DB (required)
   --log  else $ORCH_POLL_LOG, else poller.log next to the database
   --out  else $ORCH_DASHBOARD_DIR, else dashboard/ next to the database
-  --orch else the checkout's orch.yml (only its dashboard section is used)
+  --orch else the checkout's orch.yml (only its dashboard and job_states
+         sections are used)
   --machines else the checkout's machines.yml, when present
 
 `snapshot` writes status.json and the four pages (index.html, activity.html,
@@ -32,6 +33,7 @@ from lib.dashboard import (
 )
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_push import NoopTransport, run_push, transport_for
+from lib.job_state import JobStateConfig
 from lib.orch_yml import load_orch_yml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,9 +82,10 @@ def main(argv: list[str]) -> int:
     ):
         print(f"{prog}: --refresh must be 15 to 30 seconds", file=sys.stderr)
         return 2
-    config = _config(args.orch, prog)
-    if config is None:
+    loaded = _config(args.orch, prog)
+    if loaded is None:
         return 1
+    config, job_states = loaded
 
     if args.command == "push":
         transport = transport_for(config.push)
@@ -91,7 +94,9 @@ def main(argv: list[str]) -> int:
             return 2
 
         def snapshot() -> tuple[Path, ...]:
-            paths = _snapshot(args, config, None, last_cycle_at=args.last_cycle)
+            paths = _snapshot(
+                args, config, None, last_cycle_at=args.last_cycle, job_states=job_states
+            )
             # Live pushes send status.json alone; the page polls it.
             return paths[:1] if args.status_only else paths
 
@@ -107,7 +112,7 @@ def main(argv: list[str]) -> int:
     if not _paths_ok(args, prog):
         return 2
     try:
-        paths = _snapshot(args, config, args.refresh)
+        paths = _snapshot(args, config, args.refresh, job_states=job_states)
     except (DashboardError, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
@@ -122,17 +127,19 @@ def _paths_ok(args: argparse.Namespace, prog: str) -> bool:
     return True
 
 
-def _config(path: Path | None, prog: str) -> DashboardConfig | None:
+def _config(
+    path: Path | None, prog: str
+) -> tuple[DashboardConfig, JobStateConfig] | None:
     orch_path = path if path is not None else ROOT / "orch.yml"
     if path is None and not orch_path.is_file():
-        return DashboardConfig()
+        return DashboardConfig(), JobStateConfig()
     config, findings = load_orch_yml(orch_path, allow_placeholders=True)
     errors = [item for item in findings if item.severity == "error"]
     if config is None or errors:
         for item in errors or findings:
             print(f"{prog}: {item.format(str(orch_path))}", file=sys.stderr)
         return None
-    return config.dashboard
+    return config.dashboard, config.job_states
 
 
 def _snapshot(
@@ -141,6 +148,7 @@ def _snapshot(
     refresh: int | None,
     *,
     last_cycle_at: float | None = None,
+    job_states: JobStateConfig | None = None,
 ) -> tuple[Path, ...]:
     """status.json first, then every page."""
     db = args.db if args.db is not None else Path(os.environ["ORCH_DB"])
@@ -154,6 +162,7 @@ def _snapshot(
         machines_path=machines,
         refresh_seconds=refresh if refresh is not None else config.refresh_seconds,
         last_cycle_at=last_cycle_at,
+        job_states=job_states,
     )
     return write_snapshot_pages(out, snapshot)
 
