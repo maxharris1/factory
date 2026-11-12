@@ -439,7 +439,8 @@ def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
 ) -> None:
     """Driven through poll_once, so discovery tracks the PR from the ready."""
     actions = FakeReviewActions()
-    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, review_actions=actions, grok_delivery=delivery)
     source = OnePrSource()
     ready_1 = comment("ready-1", READY.format(head=HEAD_1), author="claude-login", created_at=1)
 
@@ -482,8 +483,7 @@ def test_factory_pr_loop_review_fix_review_approve_hands_off_and_wakes_grok(
     assert actions.merges == []
     assert actions.fast_forwards == []
     assert actions.states[-1] == "handed-off"
-    grok = queue.claim("grok")
-    assert grok is not None
-    assert grok.request.action == "done"
-    detail = json.loads(str(grok.request.detail))
+    # poll_once's reconcile step delivers the wake through the Grok webhook.
+    assert [job.request.action for job in delivery.jobs] == ["done"]
+    detail = json.loads(str(delivery.jobs[0].request.detail))
     assert (detail["outcome"], detail["project_bot"]) == ("handed-off", "grok-bot")

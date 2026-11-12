@@ -2328,15 +2328,7 @@ class Dispatcher:
                     fields = parse_comment(item.body).as_dict()
                 except HandoffError:
                     continue
-                if fields["kind"] not in ("brief", "go"):
-                    continue
-                if not self._trusted(
-                    ticket,
-                    item,
-                    fields,
-                    "grok-bot",
-                    role="orchestrator",
-                ):
+                if not self._starts_tracking(ticket, item, fields):
                     continue
                 with self._connect() as connection:
                     connection.execute(
@@ -2361,6 +2353,39 @@ class Dispatcher:
                         (ticket.repo.lower(), ticket.ticket_id),
                     )
                 break
+
+    def _starts_tracking(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> bool:
+        """A trusted Grok brief/go, or (ready_starts_review) the builder's ready.
+
+        The ready path applies T2's own trust rule (factory.md's builder,
+        role=builder, a trusted_logins author) and needs the ready head to
+        name the PR head, so T2 can then queue the review in the same cycle.
+        """
+        if fields["kind"] in ("brief", "go"):
+            return self._trusted(
+                ticket,
+                comment,
+                fields,
+                "grok-bot",
+                role="orchestrator",
+            )
+        if fields["kind"] != "ready" or not ticket.ready_starts_review:
+            return False
+        return (
+            self._trusted(
+                ticket,
+                comment,
+                fields,
+                f"{ticket.factory.builder_harness}-bot",
+                role="builder",
+            )
+            and _matching_head(fields["head"], ticket.current_head) is not None
+        )
 
     def _tracked_refs(self) -> tuple[TicketRef, ...]:
         with self._connect() as connection:

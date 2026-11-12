@@ -227,10 +227,13 @@ Review state"` so the project bot can move the issue by hand. No other
 dispatcher state writes Linear, and `ship: handoff` never merges.
 `projects[].ready_starts_review` defaults off. When it is on, a trusted
 `ready` from `factory.md`'s builder (`from=<builder>-bot role=builder`, by a
-`trusted_logins` author) queues the first review even when no `go` queued a
-build job, for a project whose PRs are built outside the queue. Every other
-rule is unchanged: the PR still needs an `orch:state/` label to be
-discovered, the `ready` head must be the PR head with CI green, and later
+`trusted_logins` author) both starts tracking the PR and queues the first
+review, even though no Grok `brief` or `go` was posted and no build job
+exists, for a project whose PRs are built outside the queue. Discovery
+tracks the PR on that `ready` only when its head names the PR head; T2 then
+queues the round-1 review in the same poll once CI on the head is green.
+Every other rule is unchanged: the PR still needs an `orch:state/` label to
+be discovered, an untrusted or wrong-role `ready` starts nothing, and later
 fixes come back through the queue. The factory repo itself
 (`maxharris1/factory`) is listed this way, GitHub-only with `ship: handoff`
 in its `factory.md`: review and fix jobs go through `orch wait`, and an

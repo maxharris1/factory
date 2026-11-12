@@ -399,8 +399,12 @@ to (completed, canceled, or started after it). On a team with no Ready for
 Review state the handoff still completes and the `done` wake reports that the
 issue was not moved.
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
-`factory.md`'s builder starts the first review even with no build job, for a
-project whose PRs are built outside the queue (the factory repo itself).
+`factory.md`'s builder (`from=<builder>-bot role=builder`, by a
+`trusted_logins` author) whose head names the PR head starts tracking a
+labelled PR with no Grok `brief` or `go`, and starts the first review even
+with no build job, for a project whose PRs are built outside the queue (the
+factory repo itself). With the flag off, only a trusted Grok `brief` or `go`
+starts tracking.
 
 ## 8. Review and merge rules
 
