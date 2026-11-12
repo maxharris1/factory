@@ -16,8 +16,12 @@ import pytest
 from lib.cli import main as cli_main
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.factory_md import FactoryConfig
+from lib import wait as wait_module
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.wait import (
+    LOCK_ATTEMPTS,
+    LOCK_BACKOFF_MAX_SECONDS,
+    LOCK_BACKOFF_SECONDS,
     OWNING_BOTS,
     POLL_SECONDS,
     ExistingJobQueue,
@@ -814,3 +818,151 @@ def _exec_calls(path: Path) -> list[str]:
         ):
             found.append(name)
     return found
+
+
+def hold_write_lock(db: Path) -> sqlite3.Connection:
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    return holder
+
+
+def test_wait_survives_a_held_write_lock_and_claims_after_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_signals: None,
+) -> None:
+    monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.05)
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    waiter = open_queue(db)
+    holder = hold_write_lock(db)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            holder.execute("COMMIT")
+
+    out = io.StringIO()
+    try:
+        claimed = wait_for_job(waiter, "claude", out, sleep=sleep)
+    finally:
+        holder.close()
+
+    assert claimed.id == job.id
+    assert json.loads(out.getvalue())["id"] == job.id
+    assert sleeps == [
+        LOCK_BACKOFF_SECONDS,
+        LOCK_BACKOFF_SECONDS * 2,
+        LOCK_BACKOFF_SECONDS * 4,
+    ]
+    assert state_of(db, job.id)["state"] == "running"
+
+
+def test_wait_lock_backoff_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    restore_signals: None,
+) -> None:
+    monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.01)
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request(), dedupe_key="a")
+    waiter = open_queue(db)
+    holder = hold_write_lock(db)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 12:
+            holder.execute("COMMIT")
+
+    try:
+        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleep)
+    finally:
+        holder.close()
+
+    assert max(sleeps) == LOCK_BACKOFF_MAX_SECONDS
+    assert sleeps[-1] == LOCK_BACKOFF_MAX_SECONDS
+
+
+def test_wait_still_fails_on_a_real_database_error(
+    tmp_path: Path,
+    restore_signals: None,
+) -> None:
+    db, _ = make_db(tmp_path)
+    waiter = open_queue(db)
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE jobs")
+    sleeps: list[float] = []
+
+    with pytest.raises(WaitError, match="claim failed: no such table"):
+        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append)
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_state", "expected_out"),
+    [
+        (["heartbeat"], "running", "heartbeat {id}\n"),
+        (["done", "--handoff", "c-9"], "done", "done {id}\n"),
+    ],
+    ids=["heartbeat", "done"],
+)
+def test_heartbeat_and_done_retry_a_held_write_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+    expected_state: str,
+    expected_out: str,
+) -> None:
+    monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.05)
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    assert queue.claim("claude") is not None
+    holder = hold_write_lock(db)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            holder.execute("COMMIT")
+
+    monkeypatch.setattr(wait_module.time, "sleep", sleep)
+    argv = ["job", command[0], "claude-bot", job.id, *command[1:], "--db", str(db)]
+    try:
+        code = cli_main(argv)
+    finally:
+        holder.close()
+
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert captured.out == expected_out.format(id=job.id)
+    assert sleeps == [LOCK_BACKOFF_SECONDS, LOCK_BACKOFF_SECONDS * 2]
+    assert state_of(db, job.id)["state"] == expected_state
+
+
+@pytest.mark.parametrize("command", [["heartbeat"], ["done", "--handoff", "c-9"]])
+def test_heartbeat_and_done_give_up_after_bounded_lock_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.01)
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    assert queue.claim("claude") is not None
+    holder = hold_write_lock(db)
+    sleeps: list[float] = []
+    monkeypatch.setattr(wait_module.time, "sleep", sleeps.append)
+    argv = ["job", command[0], "claude-bot", job.id, *command[1:], "--db", str(db)]
+    try:
+        code = cli_main(argv)
+    finally:
+        holder.close()
+
+    assert code == 1
+    assert "database is locked" in capsys.readouterr().err
+    assert len(sleeps) == LOCK_ATTEMPTS - 1
+    assert state_of(db, job.id)["state"] == "running"
