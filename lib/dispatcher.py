@@ -242,12 +242,15 @@ class ShipError(RuntimeError):
     """A ship that did not complete.
 
     write_confirmed is True unless the raiser knows that no external write
-    it sent was confirmed before it failed. Only a handoff failure with
-    write_confirmed False is eligible for the one handoff re-drive.
-    safe_detail, when set, is the only text recorded in ship_intents.error.
+    it sent was confirmed before it failed. A handoff failure with
+    write_confirmed False, or a merge failure the raiser marked retryable
+    (a draft or not-yet-mergeable PR, a GitHub 5xx, a timeout: issue #83),
+    is eligible for the one ship re-drive. safe_detail, when set, is the
+    only text recorded in ship_intents.error.
     """
 
     write_confirmed: bool = True
+    retryable: bool = False
     safe_detail: str | None = None
 
 
@@ -339,6 +342,17 @@ class DeviceChecks(Protocol):
     ) -> object: ...
 
 
+class Feeder(Protocol):
+    """The backlog feeder (lib/feeder.py, issue #85).
+
+    feed_once opens a draft PR plus brief and go handoffs for each eligible
+    ticket that fits the free capacity and returns a report whose `fed`
+    lists the tickets it fed this poll as TicketRefs.
+    """
+
+    def feed_once(self) -> object: ...
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -352,6 +366,7 @@ class Dispatcher:
         devices: DeviceChecks | None = None,
         job_states: JobStateConfig | None = None,
         log: Callable[[str], None] | None = None,
+        feeder: Feeder | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -372,6 +387,7 @@ class Dispatcher:
         self.devices = devices
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
+        self.feeder = feeder
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
@@ -385,6 +401,7 @@ class Dispatcher:
         if begin is not None:
             begin()
         self._polled = {}
+        self._feed(source)
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
@@ -418,6 +435,33 @@ class Dispatcher:
         self.reconcile_jobs()
         if end is not None:
             end()
+
+    def _feed(self, source: PollSource) -> None:
+        """Run the backlog feeder, then start tracking what it fed.
+
+        A fed ticket is read fresh and discovered here, so its go queues
+        the job in this same poll (issue #85: N eligible tickets are N
+        queued jobs within one poll). A feeder error is recorded and the
+        poll goes on.
+        """
+        if self.feeder is None:
+            return
+        try:
+            report = self.feeder.feed_once()
+        except Exception as exc:
+            self.record_poll_error("feeder", "-", type(exc).__name__)
+            return
+        fresh_reader = getattr(source, "fresh_ticket", None)
+        if fresh_reader is None:
+            return
+        for ref in getattr(report, "fed", ()):
+            try:
+                ticket = fresh_reader(ref)
+            except Exception as exc:
+                self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
+                continue
+            if ticket is not None:
+                self._discover((ticket,), tracker=ref.tracker)
 
     def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
         with self._connect() as connection:
@@ -551,20 +595,26 @@ class Dispatcher:
                 if kind not in ("verdict", "questions", "answers"):
                     raise
                 error = safe_ship_error(exc)
+                eligible = _redrive_eligible(exc, ticket.factory.ship)
                 if self._mark_ship_intent_failed(
                     ticket,
                     comment.id,
                     error,
-                    redrive=(
-                        isinstance(exc, ShipError)
-                        and exc.write_confirmed is False
-                    ),
+                    redrive=eligible,
                 ):
                     self._wake_ship_failed(
                         ticket,
                         comment,
                         f"ship raised {error}",
                     )
+                    if not eligible:
+                        # Issue #83: no retry is coming, so a person must look.
+                        self.flag_attention(
+                            ticket.repo,
+                            ticket.ticket_id,
+                            "ship-failed",
+                            f"{ticket.factory.ship} ship failed: {error}",
+                        )
                 self._mark_handled(
                     ticket,
                     comment.id,
@@ -588,11 +638,54 @@ class Dispatcher:
             # (#77 F1.2), so a release never times out a job for the wait
             # before its claim. A running job's is its last heartbeat.
             if now - job.last_activity_at >= job.request.timeout_seconds:
-                self.queue.mark_timed_out(job)
+                if not self.queue.mark_timed_out(job) and job.state == "running":
+                    self._note_timeout_held(job, now)
         for job in self.queue.unhandled_failures():
             self._t6(job)
         self._ensure_all_stuck_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
+
+    def _note_timeout_held(self, job: Job, now: float) -> None:
+        """#87 r3 F2.1: a timed-out job whose worker may still run stays running.
+
+        The queue refuses to time out a running job whose slot records a
+        remote start, so T6 never queues attempt 2 beside it. The job
+        leaves running through the dead path once its runner and worker are
+        confirmed gone (then T6 retries as before), or as stuck when its
+        device stays offline for an hour. This only records the hold, once
+        per job, so `orch status` and the dashboard's job events show why a
+        stale job has not been retried. A failure here never stops the poll.
+        """
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                placement = read_placements(connection).get(job.id)
+                started = placement is not None and placement.remote_started
+                noted = connection.execute(
+                    "SELECT 1 FROM job_events WHERE job_id = ? AND event = 'timeout-held'",
+                    (job.id,),
+                ).fetchone()
+                row = connection.execute(
+                    "SELECT state FROM jobs WHERE id = ?", (job.id,)
+                ).fetchone()
+                if not started or noted is not None or row is None or row[0] != "running":
+                    connection.commit()
+                    return
+                assert placement is not None
+                detail = (
+                    f"no heartbeat for {int((now - job.last_activity_at) // 60)} minutes, "
+                    f"past its {int(job.request.timeout_seconds // 60)}-minute timeout, "
+                    f"but its worker on {placement.device} is not confirmed gone; "
+                    "no retry until it is"
+                )
+                self._record_job_event(connection, job, "timeout-held", detail, now)
+                connection.commit()
+        except Exception as exc:
+            self.record_poll_error(
+                job.request.repo, job.request.ticket_id, f"timeout-held:{type(exc).__name__}"
+            )
+            return
+        self._log_job_event(job, "timeout-held", detail)
 
     def _check_devices(self) -> None:
         """F2-02: free gone workers' slots; a device offline 60 minutes is stuck.
@@ -1035,6 +1128,7 @@ class Dispatcher:
         if workflow_state == "capped" and action is not None:
             action = "fix"
             state = "fixing"
+        resumed = workflow_state == "capped" and action is not None
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -1060,7 +1154,8 @@ class Dispatcher:
                 ),
             )
             return True, "queued-go-clarification"
-        self.queue.enqueue(
+        self._enqueue_or_flag(
+            ticket,
             JobRequest(
                 repo=ticket.repo,
                 ticket_id=ticket.ticket_id,
@@ -1069,7 +1164,7 @@ class Dispatcher:
                 source_comment_id=comment.id,
                 timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
-                detail=self._job_detail(ticket, action=action),
+                detail=self._job_detail(ticket, action=action, resume=resumed),
             ),
             dedupe_key=(
                 f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
@@ -1351,7 +1446,8 @@ class Dispatcher:
                 ),
             )
             return True, "stuck-ci-red-3"
-        self.queue.enqueue(
+        self._enqueue_or_flag(
+            ticket,
             JobRequest(
                 repo=ticket.repo,
                 ticket_id=ticket.ticket_id,
@@ -1976,6 +2072,7 @@ class Dispatcher:
                         self._review_context(ticket)[1] + 1 if action == "review" else None
                     ),
                     instruction=_comment_link(comment),
+                    resume=True,
                 ),
             ),
             dedupe_key=(
@@ -2061,7 +2158,8 @@ class Dispatcher:
     ) -> None:
         _state, completed_rounds = self._review_context(ticket)
         review_round = completed_rounds + 1
-        self.queue.enqueue(
+        self._enqueue_or_flag(
+            ticket,
             JobRequest(
                 repo=ticket.repo,
                 ticket_id=ticket.ticket_id,
@@ -2084,6 +2182,64 @@ class Dispatcher:
                 f"{head}:r{review_round}"
             ),
         )
+
+    def _enqueue_or_flag(
+        self,
+        ticket: TrackedTicket,
+        request: JobRequest,
+        *,
+        dedupe_key: str,
+    ) -> Job:
+        """Enqueue; when dedupe drops the job, flag the ticket (issue #84).
+
+        A drop is benign while the job already holding the key is still
+        queued or running. When that job is finished, the comment queues
+        nothing and the ticket would stall silently, so it is flagged
+        needs-attention instead. A job that is queued clears the flag.
+        """
+        job = self.queue.enqueue(request, dedupe_key=dedupe_key)
+        if job.request.source_comment_id == request.source_comment_id:
+            self.clear_attention(ticket.repo, ticket.ticket_id, "dedupe-dropped")
+        elif job.state not in ("queued", "running"):
+            self.flag_attention(
+                ticket.repo,
+                ticket.ticket_id,
+                "dedupe-dropped",
+                f"{request.action} for comment {request.source_comment_id} matched "
+                f"finished job {job.id} ({job.state}); nothing was queued",
+            )
+        return job
+
+    def flag_attention(
+        self,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        detail: str,
+    ) -> None:
+        """Show a ticket as needs-attention in orch status and the dashboard."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(repo, ticket_id, reason) DO UPDATE SET
+                    detail = excluded.detail, raised_at = excluded.raised_at
+                """,
+                (repo.lower(), ticket_id, reason, detail[:SHIP_ERROR_LIMIT], self.queue.now()),
+            )
+        if self.log is not None:
+            self.log(f"needs attention: {repo}#{ticket_id} {reason}")
+
+    def clear_attention(self, repo: str, ticket_id: str, reason: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM needs_attention
+                WHERE repo = ? AND ticket_id = ? AND reason = ?
+                """,
+                (repo.lower(), ticket_id, reason),
+            )
 
     def _queue_patch_review(
         self,
@@ -2277,6 +2433,7 @@ class Dispatcher:
                 (state, ticket.repo.lower(), ticket.ticket_id),
             )
             connection.commit()
+        self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
     def _mark_ship_intent_failed(
         self,
@@ -2287,14 +2444,15 @@ class Dispatcher:
         redrive: bool = False,
     ) -> bool:
         """pending -> failed. A handoff that failed before any confirmed
-        write is marked redrive='eligible' for one re-drive."""
+        write, or a merge that failed with a retryable error (issue #83), is
+        marked redrive='eligible' for one re-drive."""
         with self._connect() as connection:
             changed = connection.execute(
                 """
                 UPDATE ship_intents
                 SET status = 'failed', error = ?,
                     redrive = CASE
-                        WHEN ? AND policy = 'handoff' THEN 'eligible'
+                        WHEN ? AND policy IN ('handoff', 'merge') THEN 'eligible'
                         ELSE NULL
                     END
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
@@ -2311,7 +2469,14 @@ class Dispatcher:
         return changed == 1
 
     def _redrive_handoffs(self, ticket: TrackedTicket) -> None:
-        """Re-drive, once, a handoff that failed before any confirmed write.
+        """Re-drive, once, a ship that failed in a way that may be retried.
+
+        A handoff that failed before any confirmed write, or (issue #83) a
+        merge that failed with a retryable error. For a merge the re-drive
+        first checks whether the PR is already merged at the head, and then
+        ships through the same path as T4 (which marks a draft PR ready
+        before the squash merge). A re-drive that fails again flags the
+        ticket needs-attention: no further retry is made.
 
         The intent's comment must still be the APPROVE in force: the latest
         trusted reviewer verdict on the ticket, picked by the same rule the
@@ -2337,17 +2502,18 @@ class Dispatcher:
         so Grok keeps the wake from the first failure. Success completes
         the intent, wakes done and lets T4 replay the state label.
         """
-        if ticket.factory.ship != "handoff":
+        policy = ticket.factory.ship
+        if policy not in ("handoff", "merge"):
             return
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT comment_id, head FROM ship_intents
-                WHERE repo = ? AND ticket_id = ? AND policy = 'handoff'
+                WHERE repo = ? AND ticket_id = ? AND policy = ?
                   AND status = 'failed' AND redrive = 'eligible'
                 ORDER BY comment_id
                 """,
-                (ticket.repo.lower(), ticket.ticket_id),
+                (ticket.repo.lower(), ticket.ticket_id, policy),
             ).fetchall()
         if not rows:
             return
@@ -2367,7 +2533,7 @@ class Dispatcher:
                 approve_in_force is None
                 or comment_id != approve_in_force[0].id
                 or self._review_context(ticket)[0] in ("merged", "handed-off", "done")
-                or self._has_completed_handoff_at(ticket, str(row["head"]))
+                or self._has_completed_ship_at(ticket, str(row["head"]), policy)
                 or not self._approval_covers(
                     ticket, approve_in_force[1].get("head", ""), str(row["head"])
                 )
@@ -2386,10 +2552,20 @@ class Dispatcher:
             if ci.status != "success":
                 self._set_redrive(ticket, comment_id, "spent", "eligible")
                 continue
+            if policy == "merge" and self._held(ticket, head):
+                # Issue #86 on the #83 re-drive: a hold that applies at this
+                # head (a label put back after the OK, or an unread hold
+                # input) keeps the merge waiting; the re-drive is kept.
+                continue
             if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
                 continue
             try:
-                note = self._review_actions(ticket).handoff(ticket, head)
+                if policy == "handoff":
+                    note = self._review_actions(ticket).handoff(ticket, head)
+                else:
+                    note = None
+                    if not self._review_actions(ticket).is_merged(ticket, head):
+                        self._ship_head(ticket, head)
             except RetryableStateError:
                 self._set_redrive(ticket, comment_id, "eligible", "spent")
                 raise
@@ -2407,11 +2583,18 @@ class Dispatcher:
                 self._wake_ship_failed(
                     ticket,
                     comment,
-                    f"handoff re-drive raised {error}",
+                    f"{policy} re-drive raised {error}",
+                )
+                self.flag_attention(
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "ship-failed",
+                    f"{policy} ship failed again on its one retry: {error}",
                 )
                 continue
-            self._complete_redrive(ticket, comment_id)
-            self._wake_done(ticket, comment, "handed-off", note=note)
+            state = _ship_state(policy)
+            self._complete_redrive(ticket, comment_id, state)
+            self._wake_done(ticket, comment, state, note=note)
 
     def _approval_covers(
         self,
@@ -2436,7 +2619,12 @@ class Dispatcher:
             and approved_patch.lower() == current_patch.lower()
         )
 
-    def _complete_redrive(self, ticket: TrackedTicket, comment_id: str) -> None:
+    def _complete_redrive(
+        self,
+        ticket: TrackedTicket,
+        comment_id: str,
+        state: str = "handed-off",
+    ) -> None:
         """failed -> completed, and hand the APPROVE back to T4.
 
         T4 then finds the completed intent and replays its label write, as
@@ -2456,10 +2644,10 @@ class Dispatcher:
             )
             connection.execute(
                 """
-                UPDATE ticket_state SET workflow_state = 'handed-off'
+                UPDATE ticket_state SET workflow_state = ?
                 WHERE repo = ? AND ticket_id = ?
                 """,
-                scope,
+                (state, *scope),
             )
             connection.execute(
                 """
@@ -2469,16 +2657,22 @@ class Dispatcher:
                 (*scope, comment_id),
             )
             connection.commit()
+        self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
-    def _has_completed_handoff_at(self, ticket: TrackedTicket, head: str) -> bool:
+    def _has_completed_ship_at(
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        policy: str = "handoff",
+    ) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM ship_intents
-                WHERE repo = ? AND ticket_id = ? AND policy = 'handoff'
+                WHERE repo = ? AND ticket_id = ? AND policy = ?
                   AND head = ? AND status = 'completed'
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, head),
+                (ticket.repo.lower(), ticket.ticket_id, policy, head),
             ).fetchone()
         return row is not None
 
@@ -3262,6 +3456,7 @@ class Dispatcher:
         head: str | None = None,
         round_number: int | None = None,
         instruction: str | None = None,
+        resume: bool = False,
     ) -> str:
         cap = (
             ticket.factory.rounds_low
@@ -3293,6 +3488,10 @@ class Dispatcher:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if resume:
+            # Claim order (lib/queue.py): a resumed paused step goes before
+            # bug and ordinary work, after urgent (issue #85).
+            context["resume"] = True
         return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
     def _wake_comment_problem(
@@ -3594,6 +3793,26 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
             if existing is not None:
+                if existing["status"] == "failure" and status == "success":
+                    # Issue #84: CI was rerun at this head and its latest
+                    # attempts all passed. The recorded failure no longer
+                    # holds; green resets the gate count as a new head would.
+                    connection.execute(
+                        """
+                        UPDATE ci_events SET status = 'success', gate_count_after = 0
+                        WHERE repo = ? AND ticket_id = ? AND head = ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id, head),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE ticket_state SET gate_count = 0
+                        WHERE repo = ? AND ticket_id = ?
+                        """,
+                        (ticket.repo.lower(), ticket.ticket_id),
+                    )
+                    connection.commit()
+                    return "success", 0
                 connection.commit()
                 return str(existing["status"]), int(existing["gate_count_after"])
             row = connection.execute(
@@ -3842,6 +4061,21 @@ class Dispatcher:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     detail TEXT NOT NULL,
                     recorded_at REAL NOT NULL
+                )
+                """
+            )
+            # #83/#84: tickets that need a person (a ship that failed and
+            # will not be retried, a job dedupe dropped). Shown by orch
+            # status and the dashboard; cleared when the ticket moves on.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS needs_attention (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    detail TEXT,
+                    raised_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, reason)
                 )
                 """
             )
@@ -4182,6 +4416,17 @@ def _matching_head(reported: str, current: str | None) -> str | None:
     if current.startswith(reported) or reported.startswith(current):
         return current
     return None
+
+
+def _redrive_eligible(exc: BaseException, policy: str) -> bool:
+    """Whether a failed ship gets its one re-drive (issue #47, issue #83)."""
+    if not isinstance(exc, ShipError):
+        return False
+    if policy == "handoff":
+        return exc.write_confirmed is False
+    if policy == "merge":
+        return exc.retryable is True
+    return False
 
 
 def _holds(ticket: TrackedTicket) -> bool:

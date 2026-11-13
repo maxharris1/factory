@@ -13,8 +13,9 @@ Done means Max can hand Grok Bot a ticket on any project, answer only product qu
 1. **pstack in every harness.** One pinned pstack source, installed natively where Claude Code, Codex and Cursor load skills. pstack (poteto-mode plus the principle skills) decides *how* work gets done. The orchestrator adds no work rules of its own.
 2. **One handoff format.** Each piece of work is one ticket plus its PR. The brief, questions, answers, plan, verdicts and "done" are comments on the PR (and on the ticket when the tracker is GitHub), with one small machine-readable header (section 5). There is no other state store. The dispatcher's local job list can be rebuilt from the tracker at any time.
    - **Default (GitHub):** the long-term ticket is the GitHub issue. The
-     Phase 1 production poller discovers PRs only; issue-only discovery is a
-     deferred follow-up. Labels show the current state.
+     poller discovers PRs; since issue #85 the backlog feeder turns an issue
+     carrying the project's intake label into a draft PR plus brief and go
+     by itself (SPEC section 4). Labels show the current state.
    - **Aut0, and any repo whose `factory.md` says `tickets: linear`:** Linear is the ticket source of truth. Every repo change goes through a PR. The orchestrator creates **no GitHub issues or labels** in that repo. State lives on the Linear ticket and in PR comments.
 3. **One Grok Bot skill, `orchestrate-project`.** Grok Bot plans with Max, asks him product questions, decides technical ones, picks the builder and reviewer, and handles everything the dispatcher can't decide. It reads each project's `factory.md` for models, review policy, ship rule, ticket source, special skills and repo context (section 7).
 4. **One dispatcher script, `orch`, a few hundred lines.** It polls the configured trackers, applies the table in section 4, and wakes an agent only when judgment is needed. Bots wait on it with a blocking `orch wait <role>` shell call. That costs no tokens, and the shell exiting wakes the bot. It accepts no inbound webhooks or new credentials; outbound Grok delivery uses the existing routine webhook. It uses the existing `gh` login (and Linear, for Aut0). The factory repo's `orch.yml` lists which projects to poll and the dispatcher settings. It does not repeat the per-repo policy; that lives in each project's `factory.md`.
@@ -114,7 +115,7 @@ The comment kinds are `brief`, `questions`, `answers`, `plan`, `ready`, `verdict
 ## 6. Grok Bot orchestration skill (`orchestrate-project`)
 
 1. **Intake.** It reads the project's `factory.md`, then writes the ticket `brief`: goal, acceptance criteria, files likely touched, a risk class, and done-evidence (pstack orchestrate kickoff rules).
-2. **Questions (D31, always).** It posts the restatement (in-your-own-words) and the open questions. Each question gets classified:
+2. **Questions (D31, every ticket).** It posts the restatement (in-your-own-words) and the open questions. The one exception is a ticket the backlog feeder took in (issue #85): the chat in which it was filed was its questions step, and the feeder posts its brief and `orch:go`, so the skill posts no brief, questions or `orch:go` for it. Each question gets classified:
    - Observable: settled with a prototype.
    - Default-able: decided by the bot and recorded.
    - Product call: asked of Max, one at a time, in chat. The answers get posted as an `answers` comment.

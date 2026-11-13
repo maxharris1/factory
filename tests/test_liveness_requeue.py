@@ -114,10 +114,10 @@ def test_a_long_silent_review_under_a_live_runner_is_not_marked_stale(tmp_path: 
 
 def _box_poller(tmp_path: Path) -> tuple[Poller, str]:
     """A Poller whose clock is real time, so `orch job run` and it agree."""
-    poller = Poller(tmp_path, now=time.time())
+    poller = Poller(tmp_path, now=time.time(), box_slots=3)  # most free slots: the box
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
-    poller.claim()
+    assert poller.claim().device == "box"
     return poller, job_id
 
 
@@ -571,11 +571,12 @@ def _autostart_box(tmp_path: Path) -> tuple[Poller, str]:
     """A box job claimed by an autostart waiter: this test process, the run's parent."""
     from lib.worktrees import process_start
 
-    poller = Poller(tmp_path, now=time.time())
+    poller = Poller(tmp_path, now=time.time(), box_slots=3)  # most free slots: the box
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     me = os.getpid()
-    assert poller.pool.claim("codex", autostart=(me, process_start(me))) is not None
+    claimed = poller.pool.claim("codex", autostart=(me, process_start(me)))
+    assert claimed is not None and claimed[1].device == "box"
     return poller, job_id
 
 
@@ -705,36 +706,41 @@ def _run_in_process(
     return competing
 
 
-def _assert_never_finished_by_another_turn(poller: Poller, job_id: str, competing: list) -> None:
+def _assert_never_finished_by_another_turn(
+    poller: Poller, job_id: str, competing: list, state: str = "failed"
+) -> None:
     assert competing and "release" in [when for when, _r in competing]
     for when, result in competing:
         assert result.returncode in (1, 2), (when, result.returncode, result.stdout, result.stderr)
     row = poller.row(job_id)
-    assert (row["state"], row["handoff_comment_id"]) == ("failed", None)
+    assert (row["state"], row["handoff_comment_id"]) == (state, None)
     assert poller.pool.placement(job_id) is None
 
 
 def test_r2_a_started_box_autostart_run_keeps_its_ownership_until_the_job_is_failed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    poller = Poller(tmp_path, now=time.time())
+    poller = Poller(tmp_path, now=time.time(), box_slots=3)
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     competing = _run_in_process(poller, job_id, monkeypatch)
     _assert_never_finished_by_another_turn(poller, job_id, competing)
 
 
-def test_r2_a_started_remote_autostart_run_keeps_its_ownership_until_the_job_is_failed(
+def test_r2_a_started_remote_autostart_run_keeps_its_ownership_and_is_left_to_its_waiter(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # A remote autostart job is finished by its waiter from the run's exit
+    # status and final ORCH-HANDOFF line (lib/waiter.py), not by orch job run.
     poller = Poller(tmp_path, box=False, now=time.time())
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     competing = _run_in_process(poller, job_id, monkeypatch, env=Ssh(tmp_path).env())
-    _assert_never_finished_by_another_turn(poller, job_id, competing)
+    assert "fail" not in [when for when, _r in competing]
+    _assert_never_finished_by_another_turn(poller, job_id, competing, state="running")
 
 
-def test_r2_a_started_autostart_run_whose_slot_stays_held_still_goes_to_t6(
+def test_r2_a_started_remote_autostart_run_whose_slot_stays_held_keeps_it_running(
     tmp_path: Path, monkeypatch
 ) -> None:
     poller = Poller(tmp_path, box=False, now=time.time())
@@ -746,11 +752,12 @@ def test_r2_a_started_autostart_run_whose_slot_stays_held_still_goes_to_t6(
         poller, job_id, monkeypatch, env=ssh.env(),
         before=f"import pathlib; pathlib.Path({str(offline)!r}).touch(); ",
     )
-    assert [when for when, _r in competing] == ["fail"]
-    assert competing[0][1].returncode == 2
+    assert competing == []
     row = poller.row(job_id)
-    assert (row["state"], row["handoff_comment_id"]) == ("failed", None)
-    assert poller.pool.placement(job_id) is not None  # the DeviceMonitor frees it later
+    assert (row["state"], row["handoff_comment_id"]) == ("running", None)
+    assert poller.pool.placement(job_id) is not None  # the DeviceMonitor confirms it later
+    tokenless = _tokenless_done(poller, job_id)
+    assert tokenless.returncode == 2, tokenless.stderr
 
 
 def test_r1_a3_a_review_job_with_no_round_never_takes_a_posted_verdict(
@@ -955,3 +962,4 @@ def test_r1_a6_the_bots_login_profile_cannot_change_orchs_env_or_directory(
         "ORCH_JOB_WORKDIR": workdir,
         remote.TAG_ENV: tag,
     }
+

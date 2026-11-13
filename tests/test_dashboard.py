@@ -518,8 +518,10 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "poller",
         "handoff_savings",
         "attention",
+        "feeder",
         "statechart",
     }
+    assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)
 
 
@@ -687,14 +689,15 @@ devices:
     )
     slots = collect_snapshot(db, log, now=NOW, machines_path=machines)["slots"]
     assert slots["machines_yml"] == "present"
-    # r-codex-review holds a device-pool slot, so only the unplaced running
-    # job counts as a box job (F2.4).
-    assert slots["box"] == {"running": 1, "slot_max": 3}
+    # r-codex-review holds a box slot; r-cursor-fix-overdue runs with no
+    # placement, so it runs on the box too. One count for the box (#90):
+    # both are box jobs, and both are in its held slots.
+    assert slots["box"] == {"running": 2, "slot_max": 3}
     assert slots["devices"] == [
         {
             "name": "box",
             "slot_max": 3,
-            "held": 1,
+            "held": 2,
             "enabled": True,
             "placeholder": False,
             "harnesses": ["claude", "codex", "cursor"],
@@ -732,8 +735,8 @@ def _place(db: Path, job_id: str, device: str) -> None:
 
 
 def test_box_running_counts_only_jobs_not_placed_on_a_device(tmp_path: Path) -> None:
-    # Like `orch status` (lib/status.py box_slots): a running job that holds
-    # a device-pool slot is counted on its device, not on the box.
+    # Like `orch status`: a running job that holds a device-pool slot on
+    # another device is counted on that device, not on the box.
     db, log = seeded(tmp_path)
     _place(db, "r-codex-review", "pc")
     slots = collect_snapshot(db, log, now=NOW)["slots"]

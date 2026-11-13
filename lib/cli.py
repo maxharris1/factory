@@ -27,6 +27,8 @@ from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
 from lib.device_monitor import DeviceMonitor
+from lib.feeder import Feeder
+from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
@@ -136,7 +138,7 @@ wait <bot> --autostart [--db PATH] [--machines PATH] [--harness-config PATH]
 
 job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         [--worktree] [--work-root DIR] [--git-url-template URL]
-        -- COMMAND [ARG ...]
+        [--status-file PATH] -- COMMAND [ARG ...]
   Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
   before it starts (a job that is not running is refused and nothing
   runs), then one every --interval seconds (default 15, or a third of the
@@ -173,6 +175,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   slot freed (no round or attempt charged), with one line saying why, and
   the exit status is 75. The git remote is --git-url-template, else
   $ORCH_GIT_URL_TEMPLATE, else https://github.com/{repo}.git.
+  --status-file PATH: when this exits, its exit status is written to PATH
+  (mode 600); the autostart waiter uses it to finish a remote run after a
+  waiter restart.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
@@ -361,10 +366,6 @@ def _wait(argv: list[str]) -> int:
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
-        if args.autostart:
-            machines = waiter.local_only(machines)
-            if not machines.devices:
-                raise waiter.WaiterError("machines.yml has no local device to autostart jobs on")
         pool = _device_pool(queue, machines)
     except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -589,6 +590,7 @@ def _runtime(
     t8 = T8Hook()
     source = LivePollSource(config)
     devices = None
+    machines = None
     if not create:
         machines = _machines_config(machines_path, required=False)
         if machines is not None:
@@ -597,6 +599,9 @@ def _runtime(
                 machines,
                 SshTransport(),
             )
+    feeder = None
+    if not create and any(project.intake is not None for project in config.projects):
+        feeder = _feeder(config, queue, machines, source, cleared)
     dispatcher = Dispatcher(
         path,
         queue,
@@ -607,6 +612,7 @@ def _runtime(
         devices=devices,
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
+        feeder=feeder,
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
@@ -617,6 +623,35 @@ def _runtime(
         source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+def _feeder(
+    config: OrchConfig,
+    queue: SQLiteJobQueue,
+    machines: MachinesConfig | None,
+    source: LivePollSource,
+    cleared: list[str],
+) -> Feeder:
+    """The backlog feeder (issue #85) for projects with an orch.yml intake."""
+    linear = None
+    if config.linear is not None:
+        linear = LinearIntakeClient(
+            source,
+            {
+                project.linear_project_id: project.repo
+                for project in config.projects
+                if project.linear_project_id is not None
+            },
+        )
+    return Feeder(
+        queue,
+        config,
+        machines,
+        github=GitHubIntakeClient(cleared_variables=cleared),
+        linear=linear,
+        factory_for=source.factory_context,
+        log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
+    )
 
 
 def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | None:
@@ -863,6 +898,43 @@ def _has_slots(connection: sqlite3.Connection) -> bool:
 
 
 def _job_run(argv: list[str]) -> int:
+    """`orch job run`; with --status-file, its exit status is left there (#87 F1.4).
+
+    The waiter starts a remote run in its own session, so the run outlives a
+    waiter restart; the status file is how a restarted waiter learns how the
+    run ended. It is written (atomically, mode 600) whenever this returns.
+    """
+    own = argv[: argv.index("--")] if "--" in argv else argv
+    status_file: Path | None = None
+    for index, arg in enumerate(own):
+        if arg == "--status-file" and index + 1 < len(own):
+            status_file = Path(own[index + 1])
+        elif arg.startswith("--status-file="):
+            status_file = Path(arg.partition("=")[2])
+    code = 1
+    try:
+        code = _job_run_command(argv)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 2
+        raise
+    finally:
+        if status_file is not None:
+            _write_status(status_file, code)
+    return code
+
+
+def _write_status(path: Path, code: int) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{code}\n")
+        os.replace(temporary, path)
+    except OSError as exc:
+        print(f"orch job run: cannot write {path}: {exc}", file=sys.stderr)
+
+
+def _job_run_command(argv: list[str]) -> int:
     prog = "orch job run"
     if "--" in argv:
         split = argv.index("--")
@@ -878,6 +950,7 @@ def _job_run(argv: list[str]) -> int:
     parser.add_argument("--worktree", action="store_true")
     parser.add_argument("--work-root", type=Path)
     parser.add_argument("--git-url-template")
+    parser.add_argument("--status-file", type=Path)  # read and written by _job_run
     args = parser.parse_args(own)
     if not command:
         print(f"{prog}: pass the command to run after --", file=sys.stderr)
@@ -1042,9 +1115,12 @@ def _job_run(argv: list[str]) -> int:
         return 1
     finally:
         placed.ended(code)  # #91: the exit reason, while the job still runs
+        # A remote run's job is finished by its waiter on the box, from the
+        # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
+        # only a box run is failed here.
         settle = (
             (lambda: _fail_unfinished(queue, args.job_id, owner, log))
-            if placed.autostart
+            if placed.autostart and not placed.remote
             else None
         )
         try:
