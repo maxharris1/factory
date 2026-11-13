@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lib import cli
+from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "poller-service.sh"
@@ -251,15 +252,6 @@ def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
     )
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    stat = Path(f"/proc/{pid}/stat")
-    return not stat.exists() or stat.read_text().rpartition(")")[2].split()[0] != "Z"
-
-
 def test_service_start_is_single_instance_and_stop_cleans_up(home: Path) -> None:
     started = _service(home, "start")
     assert started.returncode == 0, started.stderr
@@ -277,7 +269,7 @@ def test_service_start_is_single_instance_and_stop_cleans_up(home: Path) -> None
     stopped = _service(home, "stop")
     assert stopped.returncode == 0, stopped.stderr
     assert f"stopped orch poll (pid {pid})" in stopped.stdout
-    assert not _alive(pid)
+    assert not alive(pid)
     assert not _pidfile(home).exists()
     status = _service(home, "status")
     assert status.returncode == 3
@@ -289,7 +281,7 @@ def test_ensure_restarts_a_dead_poller_but_respects_stop(home: Path) -> None:
     first = int(_pidfile(home).read_text())
     os.kill(first, signal.SIGKILL)  # a crash: the pidfile is left behind
     deadline = time.monotonic() + 5
-    while _alive(first) and time.monotonic() < deadline:
+    while alive(first) and time.monotonic() < deadline:
         time.sleep(0.05)
 
     revived = _service(home, "ensure")
@@ -495,4 +487,4 @@ def test_without_proc_the_poller_is_recognized_by_ps(home: Path, tmp_path: Path)
     pid = int(_pidfile(home).read_text())
     assert _service(home, "status", **no_proc).stdout == f"running (pid {pid})\n"
     assert _service(home, "stop", **no_proc).returncode == 0
-    assert not _alive(pid)
+    assert not alive(pid)
