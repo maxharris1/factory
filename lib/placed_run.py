@@ -226,7 +226,11 @@ class PlacedRun:
             target = self.target
             retry_locked(
                 lambda: self.pool.attach_worker(
-                    self.placement.job_id, owner=self.owner, remote=True, tag=target.tag
+                    self.placement.job_id,
+                    owner=self.owner,
+                    remote=True,
+                    tag=target.tag,
+                    runner=self.runner,
                 )
             )
             self.spawned = True
@@ -247,6 +251,7 @@ class PlacedRun:
                 owner=self.owner,
                 pid=pid,
                 start=start,
+                runner=self.runner,
             )
         )
 
@@ -501,7 +506,7 @@ def prepare(
             raise PlacementError(f"device {device.name} maps {owner} to {target.user}, not {bot}")
     runner = os.getpid() if pid is None else pid
     try:
-        retry_locked(
+        placement = retry_locked(
             lambda: pool.attach_runner(
                 job_id,
                 owner=owner,
@@ -513,6 +518,9 @@ def prepare(
         )
     except QueueError as exc:
         raise PlacementError(str(exc)) from exc
+    # #70 F2.1: takeover is decided on the row attach_runner read while it
+    # held the slot, never on the read above: a runner that recorded its
+    # worker and died in between left that worker on this row.
     _earlier_worker_gone(placement, device, transport, alive)
     if placement.worker_pid is not None or placement.remote_started:
         try:
