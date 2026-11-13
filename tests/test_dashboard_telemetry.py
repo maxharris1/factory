@@ -20,6 +20,7 @@ from lib import telemetry
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
+from tests.test_telemetry import QUOTING_ONLY_SECRETS, readable
 
 STEPS = [
     {"at": NOW - 50, "kind": "tool", "title": "Read lib/app.py", "status": "ok"},
@@ -267,9 +268,9 @@ def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> No
     assert "no telemetry" in eff["text"]["tokens"]
 
 
+@pytest.mark.parametrize("secret", ["walrus'" + "harbor", *QUOTING_ONLY_SECRETS])
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_shell_quoted_env_secret_never_reaches_status_json(tmp_path: Path, harness: str) -> None:
-    secret = "walrus'" + "harbor"
+def test_a_shell_quoted_env_secret_never_reaches_status_json(tmp_path: Path, harness: str, secret: str) -> None:
     command = shlex.join(["deploy", "--pin", secret])
     if harness == "claude":
         event = {"type": "assistant", "message": {"id": "m", "content": [
@@ -289,5 +290,4 @@ def test_a_shell_quoted_env_secret_never_reaches_status_json(tmp_path: Path, har
     status = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))[0]
     title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
     assert title.startswith("$ deploy --pin") and "[redacted-env]" in title
-    assert secret not in shlex.split(title[2:])
-    assert "walrusharbor" not in title.replace("'", "").replace('"', "")
+    assert not readable(secret, title), title

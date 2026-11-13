@@ -59,6 +59,7 @@ one log line and never stops the job, its heartbeat or its cleanup.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -258,7 +259,7 @@ class Scrubber:
             and not _NOT_SECRET_NAME.fullmatch(name)
         }
         lines = {line.strip() for value in values for line in value.splitlines()}
-        unquoted = {_unquoted(value)[0] for value in values | lines} - {""}
+        unquoted = {_unquoted(value)[0] for value in values | lines}
         self._values = sorted(unquoted, key=len, reverse=True)
 
     def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
@@ -273,17 +274,22 @@ class Scrubber:
     @staticmethod
     def _cut(text: str, secret: str) -> str:
         """Replace every run of `text` that reads as `secret` once quoting is
-        ignored, so `'walrus'"'"'harbor'` goes as surely as `walrus'harbor`."""
+        ignored, with the quoting around it, so `'walrus'"'"'harbor'` goes as
+        surely as `walrus'harbor`. A secret made only of quoting (`\\`) reads
+        as the empty string, so it takes every run of quoting with it."""
         bare, where = _unquoted(text)
-        spans: list[tuple[int, int]] = []
+        kept = [-1, *where, len(text)]
+        hidden = [False] * len(text)
         start = bare.find(secret)
         while start >= 0:
             end = start + len(secret)
-            spans.append((where[start], where[end - 1] + 1))
-            start = bare.find(secret, end)
-        for first, last in reversed(spans):
-            text = text[:first] + "[redacted-env]" + text[last:]
-        return text
+            first, last = kept[start] + 1, kept[end + 1]
+            hidden[first:last] = [True] * (last - first)
+            start = bare.find(secret, max(end, start + 1))
+        return "".join(
+            "[redacted-env]" if gone else "".join(char for char, _ in run)
+            for gone, run in itertools.groupby(zip(text, hidden), key=lambda pair: pair[1])
+        )
 
 
 # --- the raw log -------------------------------------------------------------------

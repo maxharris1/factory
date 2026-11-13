@@ -394,13 +394,31 @@ def test_a_short_env_secret_never_reaches_the_table(tmp_path: Path, secret: str)
 
 
 QUOTED_SECRET = "walrus'" + 'har"b\\or'
+QUOTING_ONLY_SECRETS = ["\\", "'", '"', ("'" + '"' + "\\") * 4]
 
 
 def _unquoted(text: str) -> str:
     return "".join(char for char in text if char not in "'\"\\")
 
 
-@pytest.mark.parametrize("secret", [QUOTED_SECRET, "plainpass", "multi\nline-secret-tail"])
+def readable(secret: str, title: str) -> bool:
+    """Whether `secret`, or a line of it, reads back from `title` as written,
+    through the shell, or with quoting ignored."""
+    try:
+        words = shlex.split(title)
+    except ValueError:
+        words = []
+    for line in {secret, *secret.splitlines()}:
+        if line in title or any(line in word for word in words):
+            return True
+        if _unquoted(line) and _unquoted(line) in _unquoted(title):
+            return True
+    return not _unquoted(secret) and any(char in title for char in "'\"\\")
+
+
+@pytest.mark.parametrize("secret", [
+    QUOTED_SECRET, "plainpass", "multi\nline-secret-tail", "'walrus'", "\\harbor\"", *QUOTING_ONLY_SECRETS,
+])
 @pytest.mark.parametrize("harness", ["claude", "codex"])
 def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str, secret: str) -> None:
     commands = [
@@ -421,10 +439,9 @@ def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str
                 "exit_code": 0, "status": "completed"}}, 1.0)
     titles = [step["title"] for step in json.loads(summary.row()["steps"])]
     assert len(titles) == len(commands)
-    for line in secret.splitlines():
-        for title in titles:
-            assert "[redacted-env]" in title, title
-            assert _unquoted(line) not in _unquoted(title), title
+    for title in titles:
+        assert "[redacted-env]" in title, title
+        assert not readable(secret, title), title
 
 
 def test_flags_and_system_session_variables_are_not_treated_as_secrets() -> None:
