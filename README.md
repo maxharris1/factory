@@ -654,8 +654,10 @@ the claim, with no model turn and no message to any bot. The harness posts its
   `codex`, found on the device's own login PATH (`bash -lc`, as every placed
   command already runs), and takes each `--add-dir` out of the argv: the
   start script gives `--add-dir <dir>` back only if `test -d <dir>` holds on
-  the device. No box state dir is sent (the device has no `orch.db`; the
-  waiter runs `orch job done` on the box), and no device path is made up.
+  the device; a relative `<dir>` is tested under codex's `-C`/`--cd`
+  directory, where codex resolves it. No box state dir is sent (the device
+  has no `orch.db`; the waiter runs `orch job done` on the box), and no
+  device path is made up.
   Claude and Cursor commands run exactly as configured.
 - **Every device (issue #85).** The autostart waiter claims through the whole
   device pool, so the least-loaded device takes the job. On a remote device

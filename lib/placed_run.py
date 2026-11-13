@@ -216,6 +216,7 @@ class PlacedRun:
                 env,
                 guarded_dirs=device.guarded_dirs,
                 insert_at=device.insert_at,
+                cd=device.cd,
             ),
         )
 

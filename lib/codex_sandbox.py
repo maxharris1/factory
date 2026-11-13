@@ -40,8 +40,11 @@ remote run `for_device` makes the command device-neutral (Factory, Nov 13):
 * every `--add-dir` the command names (before `--`) is taken out and given
   back only where the device has that directory: lib/remote.py puts a
   `test -d` guard for each into the start script, so the device decides at
-  start time. No directory is invented for the device: machines.yml names
-  no state dir, and the box's ORCH_DB directory is never sent.
+  start time. Codex resolves a relative `--add-dir` against its working
+  directory (the last `-C`/`--cd`, itself relative to the job directory),
+  so the guard tests it there. No directory is invented for the device:
+  machines.yml names no state dir, and the box's ORCH_DB directory is never
+  sent.
 
 Any other command (claude, cursor, a wrapper such as `env codex`) comes back
 unchanged, with no guarded directories.
@@ -60,6 +63,7 @@ CODEX = "codex"
 WORKSPACE_WRITE = "workspace-write"
 
 _EXEC = frozenset({"exec", "e"})
+_CD = frozenset({"-C", "--cd"})
 # codex options (global and exec) whose value is the next word.
 _VALUE_OPTIONS = frozenset(
     {
@@ -132,12 +136,14 @@ class DeviceCommand:
 
     argv is what the device runs under `bash -lc`. Each of guarded_dirs is
     given to it as `--add-dir <dir>`, at index insert_at of argv, only when
-    `test -d <dir>` holds on the device (lib/remote.py start_script).
+    `test -d <dir>` holds on the device (lib/remote.py start_script); a
+    relative dir is tested under cd, codex's -C/--cd, when argv names one.
     """
 
     argv: tuple[str, ...]
     guarded_dirs: tuple[str, ...] = ()
     insert_at: int = 0
+    cd: str | None = None
 
 
 def for_device(command: Sequence[str]) -> DeviceCommand:
@@ -146,7 +152,8 @@ def for_device(command: Sequence[str]) -> DeviceCommand:
     For argv[0] named `codex` (any directory): argv[0] becomes the bare
     `codex`, resolved by the device's login PATH, and each `--add-dir` (or
     `--add-dir=`) before `--` is taken out and becomes a guarded dir, kept
-    in order, once each; they go back at the first one's place.
+    in order, once each; they go back at the first one's place. cd is the
+    last `-C`/`--cd` value before `--`, if any.
     """
     argv = list(command)
     if not argv or Path(argv[0]).name != CODEX:
@@ -176,7 +183,13 @@ def for_device(command: Sequence[str]) -> DeviceCommand:
         if _is_option(part) and part in _VALUE_OPTIONS and index < len(argv):
             kept.append(argv[index])  # an option's value, never an --add-dir
             index += 1
-    return DeviceCommand(tuple(kept), tuple(dirs), insert_at if insert_at is not None else 0)
+    cd = None
+    for name, value in _options(argv):
+        if name in _CD and value is not None:
+            cd = value
+    return DeviceCommand(
+        tuple(kept), tuple(dirs), insert_at if insert_at is not None else 0, cd
+    )
 
 
 def _exec_index(argv: list[str]) -> int | None:

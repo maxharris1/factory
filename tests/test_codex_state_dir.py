@@ -389,6 +389,19 @@ def test_the_box_adds_no_state_dir_that_does_not_exist(tmp_path: Path) -> None:
         (["cursor-agent", "-p", "--force"], DeviceCommand(("cursor-agent", "-p", "--force"))),
         (["env", "codex", "exec", "--add-dir", "/x"],
          DeviceCommand(("env", "codex", "exec", "--add-dir", "/x"))),
+        # codex resolves a relative --add-dir against its -C/--cd directory
+        (["codex", "exec", "-C", "/p", "--add-dir", "../s", "-"],
+         DeviceCommand(("codex", "exec", "-C", "/p", "-"), ("../s",), 4, "/p")),
+        (["codex", "exec", "--cd", "p", "--add-dir", "s", "-"],
+         DeviceCommand(("codex", "exec", "--cd", "p", "-"), ("s",), 4, "p")),
+        (["codex", "exec", "--cd=/p", "--add-dir", "s", "-"],
+         DeviceCommand(("codex", "exec", "--cd=/p", "-"), ("s",), 3, "/p")),
+        (["codex", "exec", "--add-dir", "s", "-C/p", "-"],
+         DeviceCommand(("codex", "exec", "-C/p", "-"), ("s",), 2, "/p")),
+        (["codex", "-C", "/a", "exec", "-C", "/b", "--add-dir", "s", "-"],
+         DeviceCommand(("codex", "-C", "/a", "exec", "-C", "/b", "-"), ("s",), 6, "/b")),
+        (["codex", "exec", "--add-dir", "s", "--", "-C", "/p"],
+         DeviceCommand(("codex", "exec", "--", "-C", "/p"), ("s",), 2)),
     ],
 )
 def test_a_device_command_names_codex_bare_and_guards_its_add_dirs(
@@ -480,3 +493,56 @@ def test_a_placed_codex_with_no_add_dir_gets_none(tmp_path: Path) -> None:
     assert "--add-dir" not in calls[0]["script"]
     assert "test -d" not in calls[0]["script"]
     assert "added --add-dir" not in err
+
+
+def _device_jobs_dir(tmp_path: Path) -> Path:
+    """The parent of the fake device's job directory (machines_file's workdir_root)."""
+    return tmp_path / "remote" / "codex-bot" / "work" / "jobs"
+
+
+@pytest.mark.parametrize(
+    "cd", [["-C", "{project}"], ["--cd", "{project}"], ["--cd={project}"], ["-C{project}"]]
+)
+def test_a_relative_add_dir_is_checked_where_codex_resolves_it(
+    tmp_path: Path, cd: list[str]
+) -> None:
+    # Codex resolves a relative --add-dir against its -C/--cd directory, not
+    # the directory it was started in (the job directory).
+    project = tmp_path / "project"
+    project.mkdir()
+    (tmp_path / "shared").mkdir()
+    flags = [part.format(project=project) for part in cd]
+    argv, _, err = _placed_codex_run(
+        tmp_path,
+        [BOX_CODEX, "exec", *flags, "--add-dir", "../shared", "-s", "workspace-write", "-"],
+    )
+
+    assert argv == ["exec", *flags, "--add-dir", "../shared", "-s", "workspace-write", "-"], err
+
+
+def test_a_relative_add_dir_beside_only_the_job_directory_is_not_given(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (_device_jobs_dir(tmp_path) / "shared").mkdir(parents=True)
+    argv, _, err = _placed_codex_run(
+        tmp_path,
+        [BOX_CODEX, "exec", "-C", str(project), "--add-dir", "../shared",
+         "-s", "workspace-write", "-"],
+    )
+
+    assert argv == ["exec", "-C", str(project), "-s", "workspace-write", "-"], err
+
+
+def test_a_relative_cd_and_add_dir_resolve_from_the_job_directory(tmp_path: Path) -> None:
+    # -C itself is relative to the job directory; the --add-dir to that.
+    (_device_jobs_dir(tmp_path) / "shared").mkdir(parents=True)
+    argv, _, err = _placed_codex_run(
+        tmp_path,
+        ["codex", "exec", "--cd", "..", "--add-dir", "shared", "--add-dir", "../shared",
+         "-s", "workspace-write", "-"],
+    )
+
+    assert argv == ["exec", "--cd", "..", "--add-dir", "shared",
+                    "-s", "workspace-write", "-"], err

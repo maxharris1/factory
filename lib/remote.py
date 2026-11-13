@@ -94,6 +94,7 @@ on its own.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import secrets
 import shlex
@@ -145,14 +146,15 @@ _START_EXEC = (
 _START_HARNESS = _START_ENTER + _START_EXEC
 # Factory, Nov 13: a harness's `--add-dir` directories are given only where
 # the device has them. After `--` come k (where the kept `--add-dir <dir>`
-# pairs go in the command), n, then n directories, then the command. Each
-# directory is tested with `test -d` on the device at start time, after the
-# profile ran; the command (still "$1") is then found and exec'd as above.
-# Directories are positional arguments, never spliced into the script text.
+# pairs go in the command), n, then n pairs of (path to test, directory as
+# given), then the command. Each path is tested with `test -d` on the device
+# at start time, after the profile ran; the command (still "$1") is then
+# found and exec'd as above. Paths and directories are positional
+# arguments, never spliced into the script text.
 _GUARD_DIRS = (
     'k=$1; n=$2; shift 2; a=(); '
-    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$1"); fi; '
-    'shift; n=$((n-1)); done; '
+    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$2"); fi; '
+    'shift 2; n=$((n-1)); done; '
     'c=("$@"); set -- "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"; '
 )
 _START_GUARDED = _START_ENTER + _GUARD_DIRS + _START_EXEC
@@ -340,12 +342,15 @@ def start_script(
     *,
     guarded_dirs: Sequence[str] = (),
     insert_at: int = 0,
+    cd: str | None = None,
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
     guarded_dirs (Factory, Nov 13): each is passed to the command as
     `--add-dir <dir>`, at index insert_at, only if `test -d` holds for it on
-    the device when the job starts. With none, the command runs as given.
+    the device when the job starts. A relative dir is tested under cd (the
+    directory the command resolves it against, itself relative to the job
+    directory) when one is given. With none, the command runs as given.
     """
     tag = target.require_tag()
     if not command:
@@ -366,8 +371,11 @@ def start_script(
     script, guard = _START_HARNESS, ""
     if guarded_dirs:
         # Factory, Nov 13: each --add-dir only where the device has it.
-        dirs = " ".join(shlex.quote(path) for path in guarded_dirs)
-        script, guard = _START_GUARDED, f"{insert_at} {len(guarded_dirs)} {dirs} "
+        pairs = " ".join(
+            f"{shlex.quote(posixpath.join(cd or '', path))} {shlex.quote(path)}"
+            for path in guarded_dirs
+        )
+        script, guard = _START_GUARDED, f"{insert_at} {len(guarded_dirs)} {pairs} "
     login = (
         f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {shlex.quote(launch_record(target))} {assignments} '
