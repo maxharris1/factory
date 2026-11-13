@@ -435,7 +435,7 @@ def _wait(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         with beats:
-            wait_for_job(queue, recipient, sys.stdout, pool=pool)
+            wait_for_job(queue, recipient, sys.stdout, pool=pool, keep_ignored=True)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)

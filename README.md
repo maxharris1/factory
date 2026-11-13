@@ -107,6 +107,14 @@ without a handoff ID invokes T6. `claim` is intentionally non-blocking so
 `orch wait` can add blocking behavior without changing the queue contract. One
 clock is injected when the queue opens; all timestamps use that clock.
 
+`release`, `heartbeat` and `finish` take `owner=`, the recipient that claimed
+the job. Each refuses an owner that is not a recipient, a job that belongs to
+another recipient, and a job that is not running; a refused call changes
+nothing. A repeated `finish` with the same outcome and handoff ID returns the
+recorded job unchanged; one with a different outcome or handoff ID is refused
+and the first stays. `claim` takes a job in the issue #85 order: urgent, then a
+resumed paused step, then bug, then the oldest.
+
 Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, `stuck`,
 or the Grok wakes `blocked`, `capped`, `refused`, `unparsed` and `ship-failed`),
 one recipient (`claude`, `codex`, `cursor`, or `grok`), and a generation. The
@@ -569,14 +577,18 @@ bin/orch gc [--older-than HOURS] [--dry-run]
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
-`codex`, `cursor`). It checks for a job once a second, claims the oldest
-through the device pool (`--machines`, default the checkout's `machines.yml`,
+`codex`, `cursor`). It checks for a job once a second, claims the next one
+in the queue's claim order (urgent, resumed, bug, then oldest) through the
+device pool (`--machines`, default the checkout's `machines.yml`,
 placeholders accepted and never scheduled), and prints one JSON line with the
 job's `device` and `remote` and, on a remote device, its `workdir`. With no free
 slot on an eligible device the job stays queued and the waiter keeps waiting. While the poller holds a write, a claim that sees
 `database is locked` (after a 5-second SQLite busy timeout) keeps waiting with
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
+SIGINT and SIGTERM are held from each claim until its line is printed, so a
+signal may wait up to the 5-second busy timeout, or until stdout drains,
+before it takes effect; SIGKILL always works.
 If that line cannot be printed, the job is finished as
 failed so T6 retries it at once, and its slot is released (no bot got it). Plain `orch wait` never starts a harness:
 the bot that ran the shell call starts its own, through `orch job run`, or its autostart waiter does (below). `orch` never chooses a harness on its own. `job heartbeat` and `job done` refuse a job that

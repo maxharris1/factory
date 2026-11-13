@@ -241,14 +241,16 @@ class SQLiteJobQueue:
             if row is None:
                 connection.commit()
                 return None
-            connection.execute(
+            changed = connection.execute(
                 """
                 UPDATE jobs
                 SET state = 'running', last_activity_at = ?
                 WHERE id = ? AND state = 'queued'
                 """,
                 (now, row["id"]),
-            )
+            ).rowcount
+            if changed != 1:
+                raise QueueError(f"job {row['id']} is no longer queued")
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (row["id"],),
