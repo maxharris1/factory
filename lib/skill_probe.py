@@ -13,7 +13,8 @@ the model's context and never from what the model says.
   frontmatter, which Claude lists without opening the file) shows up in a
   record the model did not write: a tool result that is not an error, or an
   injected user, system or attachment record. Assistant text never counts.
-* Helper = yes when a spawn call has a result that is not an error.
+* Helper = yes when a spawn call has a result that is not an error; for
+  Codex the decoded result must also name the started agent (`agent_id`).
 * No transcript: every cell is `unknown`.
 
 The probe opens only the canary skill, the waiter config, machines.yml, its
@@ -291,7 +292,7 @@ def codex_evidence(records: Iterable[Mapping], canary: str) -> Evidence:
         return UNKNOWN
     version = None
     calls: dict[str, str] = {}
-    outputs: dict[str, tuple[str, bool]] = {}
+    outputs: dict[str, object] = {}
     read_via: str | None = None
     for record in records:
         payload = record.get("payload")
@@ -309,21 +310,39 @@ def codex_evidence(records: Iterable[Mapping], canary: str) -> Evidence:
             name = payload.get("name") or ("shell" if kind == "local_shell_call" else "tool")
             calls[str(payload.get("call_id"))] = str(name)
         elif kind in ("function_call_output", "custom_tool_call_output"):
-            output = payload.get("output")
-            failed = isinstance(output, Mapping) and output.get("success") is False
-            body = _text(output)
+            output = _decoded(payload.get("output"))
             call_id = str(payload.get("call_id"))
-            outputs[call_id] = (body, failed)
-            if read_via is None and not failed and canary in body:
+            outputs[call_id] = output
+            if read_via is None and not _failed(output) and canary in _text(output):
                 read_via = calls.get(call_id, "tool")
         elif kind == "message" and payload.get("role") != "assistant":
             if read_via is None and canary in _text(payload.get("content")):
                 read_via = "injected"
-    helper: Outcome = "no"
-    for call_id, name in calls.items():
-        if name in CODEX_HELPER_TOOLS:
-            helper = _better(helper, _spawn_outcome(outputs.get(call_id)))
-    return Evidence("yes" if read_via else "no", read_via, helper, "n/a", version)
+    spawned = any(
+        name in CODEX_HELPER_TOOLS and _codex_spawned(outputs.get(call_id))
+        for call_id, name in calls.items()
+    )
+    return Evidence("yes" if read_via else "no", read_via, "yes" if spawned else "no", "n/a",
+                    version)
+
+
+def _decoded(output: object) -> object:
+    """A Codex tool output as one value: rollouts hold it as a mapping or as its JSON text."""
+    if isinstance(output, str):
+        try:
+            return json.loads(output)
+        except ValueError:
+            return output
+    return output
+
+
+def _failed(output: object) -> bool:
+    return isinstance(output, Mapping) and output.get("success") is False
+
+
+def _codex_spawned(output: object) -> bool:
+    """A spawn counts only when its output names the started agent."""
+    return isinstance(output, Mapping) and not _failed(output) and bool(output.get("agent_id"))
 
 
 PARSERS: Mapping[str, Callable[[Iterable[Mapping], str], Evidence]] = {
@@ -438,7 +457,7 @@ def claude_transcript(config_dir: Path, run_dir: str) -> Path | None:
         folder = projects / claude_slug(cwd)
         if not folder.is_dir() or not _inside(folder, projects):
             continue
-        found += [p for p in folder.glob("*.jsonl") if p.is_file() and _inside(p, folder)]
+        found += [p for p in folder.glob("*.jsonl") if p.is_file() and not p.is_symlink()]
     return max(found, key=lambda p: p.stat().st_mtime, default=None)
 
 
@@ -450,7 +469,8 @@ def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | Non
     wanted = {run_dir, os.path.realpath(run_dir)}
     newest: Path | None = None
     for path in sessions.rglob("rollout-*.jsonl"):
-        if not path.is_file() or not _inside(path, sessions) or path.stat().st_mtime < since:
+        if (not path.is_file() or path.is_symlink() or not _inside(path, sessions)
+                or path.stat().st_mtime < since):
             continue
         with path.open(encoding="utf-8", errors="replace") as handle:
             first = parse_jsonl(handle.readline())
@@ -465,15 +485,20 @@ def fetch_script(harness: str, run_dir: str) -> str:
     """Under the bot's login shell, cat the one transcript of the run in run_dir."""
     if harness == "claude":
         script = (
-            'f=$(ls -t -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$1"/*.jsonl '
-            "2>/dev/null | head -n 1); "
-            '[ -n "$f" ] && [ -f "$f" ] && exec cat -- "$f"; exit 3'
+            'p="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; '
+            'r=$(cd -P -- "$p" 2>/dev/null && pwd -P) || exit 3; '
+            'd=$(cd -P -- "$p/$1" 2>/dev/null && pwd -P) || exit 3; '
+            'case "$d" in "$r"/*) ;; *) exit 3 ;; esac; '
+            'f=$(ls -t -- "$d" | while IFS= read -r n; do case "$n" in (*.jsonl) '
+            '[ -f "$d/$n" ] && [ ! -L "$d/$n" ] && { printf "%s\\n" "$d/$n"; break; } ;; '
+            'esac; done); '
+            '[ -n "$f" ] && exec cat -- "$f"; exit 3'
         )
         args = [claude_slug(run_dir)]
     else:
         script = (
             's="${CODEX_HOME:-$HOME/.codex}/sessions"; [ -d "$s" ] || exit 3; '
-            'f=$(find "$s" -type f -name "rollout-*.jsonl" -newer "$1" | while read -r f; do '
+            'f=$(find -H "$s" -type f -name "rollout-*.jsonl" -newer "$1" | while read -r f; do '
             'head -n 1 "$f" | grep -qF -e "\\"cwd\\":\\"$1\\"" -e "\\"cwd\\": \\"$1\\"" '
             '&& { printf "%s\\n" "$f"; break; }; done); '
             '[ -n "$f" ] && exec cat -- "$f"; exit 3'

@@ -27,7 +27,7 @@ Known before any run (checked on Nov 13, 2026):
   - A style that does not apply to a harness shows `n/a`.
 - **Read.** `yes` only when the canary appears in a record the model did not write. The canary is the first body line of the pinned `SKILL.md` after its title, never the frontmatter `description`, which Claude lists without opening the file. A record the model did not write is a tool result that is not an error, or an injected user, system or attachment record such as a slash expansion. Assistant text, thinking and Codex reasoning never count, so a model that says it loaded the skill without reading it scores `no`. `unknown` means no transcript was found.
 - **Read via.** The tool whose result held the canary (`Read`, `Bash`, `Skill`, `shell`, ...) or `injected`.
-- **Helper.** Claude: an `Agent` (or legacy `Task`) call of type `general-purpose` whose result is not an error. Codex: a `spawn_agent` call whose output is not a failure.
+- **Helper.** Claude: an `Agent` (or legacy `Task`) call of type `general-purpose` whose result is not an error. Codex: a `spawn_agent` call whose output, decoded from its JSON text when the rollout stores it that way, names the started agent (`agent_id`) and is not a failure. A plain-text or serialized error scores `no`.
 - **poteto-agent.** Claude only. `missing` when the call failed because the agent type is not installed (T07 vendors it later). `n/a` on Codex.
 - **Version.** From the transcript: Claude's record `version`, Codex's `session_meta.cli_version`.
 
@@ -35,7 +35,7 @@ Known before any run (checked on Nov 13, 2026):
 
 `bin/skill-probe run` reads the bot's own waiter config (`~/.config/factory/waiter-<bot>.yml`, through `load_harness_command`) and runs that argv unchanged, with only `harness_env` added and the prompt on stdin, as the waiter does. Each launch gets a fresh, empty run directory. On a remote device it goes through `remote.start_script` over the bot's own SSH alias with `-l <bot>`, and a codex argv is made device-neutral by `codex_sandbox.for_device`, exactly as a placed job. It never goes through `orch job run`, so nothing enters the live queue. Launches run one at a time.
 
-Transcripts are read only from `~/.claude/projects/<slug>/` (or `$CLAUDE_CONFIG_DIR`) and `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`), and only the run's own file: the Claude slug of its run directory, or the rollout whose `session_meta.cwd` is that directory. Paths that resolve outside those folders are refused. On a remote device one fixed script under the bot's login shell finds and prints that single file. No credential file is opened.
+Transcripts are read only from `~/.claude/projects/<slug>/` (or `$CLAUDE_CONFIG_DIR`) and `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`), and only the run's own file: the Claude slug of its run directory, or the rollout whose `session_meta.cwd` is that directory. Symlinked transcript files, and folders that resolve outside those roots, are refused. On a remote device one fixed script under the bot's login shell applies the same rules, then prints that single file. No credential file is opened.
 
 The Codex record names (`spawn_agent`, the rollout layout) follow the Codex CLI rollout format and are provisional until the first codex-bot run confirms them. A renamed tool is one edit to `CODEX_HELPER_TOOLS` in `lib/skill_probe.py`.
 

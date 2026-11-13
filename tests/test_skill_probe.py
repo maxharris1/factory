@@ -139,6 +139,51 @@ def test_codex_subagent_spawn_counts_as_helper():
     assert evidence("codex", "codex_shell_read.jsonl").helper == "yes"
 
 
+def codex_spawn(output) -> list:
+    meta = {"type": "session_meta", "payload": {"cwd": "/r", "cli_version": "0.130.0"}}
+    call = {"type": "function_call", "name": "spawn_agent", "arguments": "{}", "call_id": "c"}
+    result = {"type": "function_call_output", "call_id": "c", "output": output}
+    return [meta, {"type": "response_item", "payload": call},
+            {"type": "response_item", "payload": result}]
+
+
+FAILED_SPAWN = {"content": "unsupported call: spawn_agent", "success": False}
+
+
+@pytest.mark.parametrize("output", [
+    FAILED_SPAWN,
+    json.dumps(FAILED_SPAWN),
+    "unsupported call: spawn_agent",
+    json.dumps({"agent_id": "019a", "success": False}),
+    json.dumps({"status": "error"}),
+    "",
+    None,
+], ids=["mapping", "serialized", "plain", "serialized-failed-id", "no-id", "empty", "none"])
+def test_codex_spawn_without_an_agent_id_is_not_a_helper(output):
+    assert sp.codex_evidence(codex_spawn(output), CANARY).helper == "no"
+
+
+@pytest.mark.parametrize("output", [{"agent_id": "019a"}, json.dumps({"agent_id": "019a"})],
+                         ids=["mapping", "serialized"])
+def test_codex_spawn_with_an_agent_id_is_a_helper(output):
+    assert sp.codex_evidence(codex_spawn(output), CANARY).helper == "yes"
+
+
+def test_codex_serialized_failure_scores_like_its_mapping_form():
+    records = sp.parse_jsonl((FIXTURES / "codex_claim_only.jsonl").read_text(encoding="utf-8"))
+    for record in records:
+        payload = record.get("payload", {})
+        if payload.get("type") == "function_call_output":
+            payload["output"] = json.dumps(payload["output"])
+    assert sp.codex_evidence(records, CANARY).helper == "no"
+
+
+@pytest.mark.parametrize("encode", [lambda o: o, json.dumps], ids=["mapping", "serialized"])
+def test_codex_failed_output_with_the_canary_is_not_a_read(encode):
+    records = codex_spawn(encode({"content": CANARY, "success": False}))
+    assert sp.codex_evidence(records, CANARY).read == "no"
+
+
 def test_missing_transcript_is_unknown():
     for parser in sp.PARSERS.values():
         assert parser([], CANARY) == sp.UNKNOWN
@@ -350,6 +395,106 @@ def test_fetch_script_cats_only_the_runs_transcript(tmp_path, harness):
         check=False,
     )
     assert empty.returncode == 3 and empty.stdout == b""
+
+
+def remote_fetch(harness: str, home: Path, run_dir: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["sh", "-c", sp.fetch_script(harness, run_dir)],
+        env={"HOME": str(home), "PATH": os.environ["PATH"]},
+        capture_output=True, text=True, check=False,
+    )
+
+
+def local_fetch(harness: str, home: Path, run_dir: str) -> str | None:
+    if harness == "claude":
+        path = sp.claude_transcript(home / ".claude", run_dir)
+    else:
+        path = sp.codex_transcript(home / ".codex", run_dir, since=0)
+    return None if path is None else path.read_text()
+
+
+def escape_file_link(harness, home, run_dir, outside):
+    if harness == "claude":
+        folder = home / ".claude" / "projects" / sp.claude_slug(run_dir)
+        folder.mkdir(parents=True)
+        (folder / "session.jsonl").symlink_to(outside)
+    else:
+        day = home / ".codex" / "sessions" / "2026" / "11" / "13"
+        day.mkdir(parents=True)
+        (day / "rollout-evil.jsonl").symlink_to(outside)
+
+
+def escape_dir_link(harness, home, run_dir, outside):
+    elsewhere = outside.parent / "elsewhere"
+    elsewhere.mkdir()
+    if harness == "claude":
+        (home / ".claude" / "projects").mkdir(parents=True)
+        (home / ".claude" / "projects" / sp.claude_slug(run_dir)).symlink_to(elsewhere)
+        (elsewhere / "session.jsonl").symlink_to(outside)
+        (elsewhere / "plain.jsonl").write_text(outside.read_text())
+    else:
+        (home / ".codex" / "sessions").mkdir(parents=True)
+        (home / ".codex" / "sessions" / "2026").symlink_to(elsewhere)
+        (elsewhere / "rollout-plain.jsonl").write_text(outside.read_text())
+
+
+def escape_root_link(harness, home, run_dir, outside):
+    elsewhere = outside.parent / "elsewhere"
+    elsewhere.mkdir()
+    if harness == "claude":
+        (elsewhere / sp.claude_slug(run_dir)).mkdir()
+        (elsewhere / sp.claude_slug(run_dir) / "session.jsonl").write_text(outside.read_text())
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "projects").symlink_to(elsewhere)
+    else:
+        (elsewhere / "rollout-plain.jsonl").write_text(outside.read_text())
+        (home / ".codex").mkdir(parents=True)
+        (home / ".codex" / "sessions").symlink_to(elsewhere)
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+@pytest.mark.parametrize("escape", [escape_file_link, escape_dir_link],
+                         ids=["file-link", "dir-link"])
+def test_remote_fetch_refuses_links_out_of_the_transcript_dir(tmp_path, harness, escape):
+    home = tmp_path / "home"
+    run_dir = str(tmp_path / "jobs" / "run")
+    Path(run_dir).mkdir(parents=True)
+    os.utime(run_dir, (1, 1))
+    outside = tmp_path / "marker.txt"
+    outside.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": run_dir}})
+                       + "\nOUTSIDE_TRANSCRIPT_ROOT\n")
+    escape(harness, home, run_dir, outside)
+    assert local_fetch(harness, home, run_dir) is None
+    done = remote_fetch(harness, home, run_dir)
+    assert (done.returncode, done.stdout) == (3, "")
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_remote_fetch_matches_the_local_locator_through_a_linked_root(tmp_path, harness):
+    home = tmp_path / "home"
+    run_dir = str(tmp_path / "jobs" / "run")
+    Path(run_dir).mkdir(parents=True)
+    os.utime(run_dir, (1, 1))
+    outside = tmp_path / "transcript.jsonl"
+    outside.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": run_dir}}) + "\n")
+    escape_root_link(harness, home, run_dir, outside)
+    want = local_fetch(harness, home, run_dir)
+    assert want == outside.read_text()
+    assert remote_fetch(harness, home, run_dir).stdout == want
+
+
+def test_remote_claude_fetch_skips_a_newer_link_for_the_real_session(tmp_path):
+    home = tmp_path / "home"
+    run_dir = str(tmp_path / "jobs" / "run")
+    folder = home / ".claude" / "projects" / sp.claude_slug(run_dir)
+    folder.mkdir(parents=True)
+    (folder / "real.jsonl").write_text('{"type":"user"}\n')
+    os.utime(folder / "real.jsonl", (1, 1))
+    outside = tmp_path / "marker.txt"
+    outside.write_text("OUTSIDE_TRANSCRIPT_ROOT\n")
+    (folder / "newer.jsonl").symlink_to(outside)
+    assert local_fetch("claude", home, run_dir) == '{"type":"user"}\n'
+    assert remote_fetch("claude", home, run_dir).stdout == '{"type":"user"}\n'
 
 
 # End to end through the CLI, and the credential guard (criterion 3)
