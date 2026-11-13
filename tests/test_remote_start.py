@@ -411,19 +411,28 @@ def test_only_the_owning_bot_starts_a_remote_job(tmp_path: Path) -> None:
     assert pool.placement(job_id) is not None
 
 
-def test_remote_job_refuses_worktree_starts_nothing_and_keeps_its_slot(tmp_path: Path) -> None:
+def test_remote_worktree_preflight_failure_starts_nothing_and_requeues(tmp_path: Path) -> None:
+    """#94: --worktree is no longer box-only; a device lacking tools requeues.
+
+    (tests/test_remote_checkout.py covers the checkout itself.)
+    """
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
+    home = tmp_path / "bot-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text("PATH=/nonexistent\nexport PATH\n", encoding="utf-8")
     proc = orch(
         "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
-        "--machines", str(machines), "--worktree", "--", "true",
-        env=ssh.env(),
+        "--machines", str(machines), "--worktree",
+        "--git-url-template", f"file://{tmp_path}/none/{{repo}}.git", "--", "fakeharness",
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
     )
     _, err = proc.communicate(timeout=20)
-    assert proc.returncode == 2
-    assert "--worktree is box-only" in err
-    assert ssh.calls() == []
-    assert pool.placement(job_id) is not None
-    assert not pool.placement(job_id).remote_started
+    assert proc.returncode == 75, err
+    assert "--worktree is box-only" not in err
+    assert "missing under bash -lc on pc: git gh fakeharness" in err
+    assert len(ssh.calls()) == 1 and "command -v" in ssh.calls()[0]["script"]
+    assert pool.placement(job_id) is None
+    assert state(queue, job_id) == "queued"
 
 
 def test_killed_remote_job_stops_its_worker_before_the_slot_is_released(tmp_path: Path) -> None:
