@@ -1418,6 +1418,10 @@ class Dispatcher:
         head = _matching_head(reported_head, ticket.current_head)
         if head is None:
             return True, "stale-ready-head"
+        if self._verdict_after(ticket, comment, head):
+            # #71: that review already ran. A ready posted after the verdict
+            # (a fix that changed nothing) is still reviewed, as round N+1.
+            return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
             return False, "ci-pending"
@@ -1470,6 +1474,24 @@ class Dispatcher:
             ),
         )
         return True, "queued-ci-fix"
+
+    def _verdict_after(self, ticket: TrackedTicket, ready: Comment, head: str) -> bool:
+        """A trusted reviewer verdict for head, posted after the ready (#71)."""
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        for item in ticket.comments:
+            if _comment_order(item) <= _comment_order(ready):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                fields.get("kind") == "verdict"
+                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and _matching_head(fields.get("head") or "", head) is not None
+            ):
+                return True
+        return False
 
     def _t3(
         self,
@@ -3122,8 +3144,17 @@ class Dispatcher:
         ticket still has this head (a fix that changed nothing and readied
         the same head needs it: that ready's review dedupes onto this failed
         job), and is dropped for good once the head was replaced.
+        #71: a head this poll read as replaced is dropped at once, fix or not.
         True when the retry is not queued now.
         """
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if (
+            ticket is not None
+            and ticket.current_head is not None
+            and _matching_head(job.request.head or "", ticket.current_head) is None
+        ):
+            self._skip_review_retry(job, ticket.current_head)
+            return True
         if self._open_fix_for_head(job):
             self._record_job_event_once(
                 job,
@@ -3134,7 +3165,6 @@ class Dispatcher:
             return True
         if not self._job_event_recorded(job, "retry-deferred"):
             return False
-        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
         if ticket is None:
             return True  # the head is not known this poll; look again next poll
         if _matching_head(job.request.head or "", ticket.current_head) is not None:
@@ -3180,7 +3210,7 @@ class Dispatcher:
                 return
             detail = (
                 f"head {(job.request.head or '')[:12]} was replaced by "
-                f"{(current_head or 'none')[:12]} while its fix ran; no T6 retry review"
+                f"{(current_head or 'none')[:12]}; no T6 retry review"
             )
             self._record_job_event(connection, job, "retry-skipped", detail, now)
             connection.commit()
