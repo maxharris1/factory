@@ -32,9 +32,11 @@ out holds one slot on one device. `orch job run` then:
   device answers that no process carries the start's worker tag and none
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
   dispatcher's DeviceMonitor confirms it on a later poll;
-* for an autostart job, fails the job for T6 (after the slot step, so a
-  harness that never started is requeued instead) when the command ended
-  without `orch job done` (#80);
+* for an autostart job, fails the job for T6 when the command ended
+  without `orch job done` (#80): after the unstarted check, so a harness
+  that never started is requeued instead, but before the slot (with the
+  run's token) is deleted, so no other process can finish the job
+  in between (`finish(settle=...)`);
 * #91: records how the command ended (`ended`: a run-died or run-exited
   job_events row, with the exit status) while the job is still running, so
   the poller can fail a job whose harness died and say why;
@@ -271,11 +273,17 @@ class PlacedRun:
             return False
         return harness_launched(self.transport, self.target) is False
 
-    def finish(self, code: int | None = None) -> bool:
+    def finish(
+        self, code: int | None = None, settle: Callable[[], None] | None = None
+    ) -> bool:
         """Release the slot once the worker is confirmed gone. True if released.
 
         #91: with the command's exit status, a job whose harness never
         started is requeued (or failed, budget spent) in the same step.
+        Unless the job was requeued, settle runs once: before the slot is
+        deleted, since the slot holds the autostart claim and run token
+        that keep other callers from finishing the job (#99 round 2), or
+        while it stays held.
         """
         job_id = self.placement.job_id
         if self.requeued:
@@ -288,8 +296,8 @@ class PlacedRun:
             for pid, start in workers:
                 if self.alive(pid, start):
                     self.log(f"worker pid {pid} still runs; slot held")
-                    return False
-            return self._release(code)
+                    return _held(settle)
+            return self._release(code, settle)
         status = check_worker(self.transport, self.target)
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
@@ -300,16 +308,17 @@ class PlacedRun:
             status = check_worker(self.transport, self.target)
             checks += 1
         if status == GONE:
-            return self._release(code)
+            return self._release(code, settle)
         self.log(
             f"job {job_id} worker on {self.device.name} not confirmed gone ({status}); "
             "slot held until the dispatcher confirms it"
         )
-        return False
+        return _held(settle)
 
-    def _release(self, code: int | None = None) -> bool:
+    def _release(self, code: int | None, settle: Callable[[], None] | None) -> bool:
         if self.unstarted(code) and self._requeue(code):
             return True
+        _held(settle)
         released = retry_locked(
             lambda: self.pool.release(self.placement.job_id, owner=self.owner)
         )
@@ -353,6 +362,13 @@ class PlacedRun:
             return False
         self.log(f"released {self.device.name} slot of job {job_id}; {result[0]}: {result[1]}")
         return True
+
+
+def _held(settle: Callable[[], None] | None) -> bool:
+    """Settle the job while its slot is still held. False: nothing released."""
+    if settle is not None:
+        settle()
+    return False
 
 
 def check_autostart(

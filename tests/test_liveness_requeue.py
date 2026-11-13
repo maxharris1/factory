@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-from lib import job_run, remote
+from lib import cli, job_run, job_token, remote
 from lib.dashboard import collect_snapshot
 from lib.dispatcher import CIResult, Dispatcher
 from lib.job_state import (
@@ -44,7 +45,7 @@ from tests.test_dispatcher import (
     ticket,
 )
 from tests.test_job_state import CLAIMED_AT, Poller, placement
-from tests.test_remote_start import Ssh, orch
+from tests.test_remote_start import ORCH, Ssh, orch
 
 HEAD = "e88a661" + "0" * 33
 
@@ -654,6 +655,102 @@ def test_r1_a2_a_remote_start_refused_before_the_harness_is_requeued(tmp_path: P
     assert not marker.exists()
     assert poller.row(job_id)["state"] == "queued"
     assert poller.events()[-1] == (job_id, REQUEUED_EARLY_EXIT)
+
+
+# --- PR #99 round 2 (Codex REVISE): a started autostart run is settled before its slot goes
+
+
+def _tokenless_done(poller: Poller, job_id: str) -> subprocess.CompletedProcess:
+    clean = {k: v for k, v in os.environ.items() if k not in ("ORCH_DB", job_token.PROOF_ENV)}
+    return subprocess.run(
+        [sys.executable, str(ORCH), "job", "done", "codex-bot", job_id,
+         "--db", str(poller.path), "--handoff", "unrelated-turn"],
+        env=clean, capture_output=True, text=True,
+    )
+
+
+def _run_in_process(
+    poller: Poller, job_id: str, monkeypatch, env: dict | None = None, before: str = ""
+) -> list:
+    """`orch job run` of a started harness that fails, in this process (its waiter is our parent).
+
+    Every slot release and the T6 failure first run a real tokenless
+    `orch job done` for the job, as an unrelated same-bot turn would.
+    """
+    from lib.device_pool import DevicePool
+    from lib.worktrees import process_start
+
+    parent = os.getppid()
+    assert poller.pool.claim("codex", autostart=(parent, process_start(parent))) is not None
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    competing: list = []
+    release, fail = DevicePool.release, cli._fail_unfinished
+
+    def released(pool, job, *, owner):
+        competing.append(("release", _tokenless_done(poller, job)))
+        return release(pool, job, owner=owner)
+
+    def failed(*args):
+        competing.append(("fail", _tokenless_done(poller, job_id)))
+        return fail(*args)
+
+    monkeypatch.setattr(DevicePool, "release", released)
+    monkeypatch.setattr(cli, "_fail_unfinished", failed)
+    code = cli._job_run([
+        "codex-bot", job_id, "--db", str(poller.path), "--machines", str(poller.machines),
+        "--interval", "0.2", "--", sys.executable, "-c", f"{before}raise SystemExit(1)",
+    ])
+    assert code == 1
+    return competing
+
+
+def _assert_never_finished_by_another_turn(poller: Poller, job_id: str, competing: list) -> None:
+    assert competing and "release" in [when for when, _r in competing]
+    for when, result in competing:
+        assert result.returncode in (1, 2), (when, result.returncode, result.stdout, result.stderr)
+    row = poller.row(job_id)
+    assert (row["state"], row["handoff_comment_id"]) == ("failed", None)
+    assert poller.pool.placement(job_id) is None
+
+
+def test_r2_a_started_box_autostart_run_keeps_its_ownership_until_the_job_is_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    poller = Poller(tmp_path, now=time.time())
+    poller.queue.clock = time.time
+    job_id = poller.review(timeout=3600)
+    competing = _run_in_process(poller, job_id, monkeypatch)
+    _assert_never_finished_by_another_turn(poller, job_id, competing)
+
+
+def test_r2_a_started_remote_autostart_run_keeps_its_ownership_until_the_job_is_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    poller = Poller(tmp_path, box=False, now=time.time())
+    poller.queue.clock = time.time
+    job_id = poller.review(timeout=3600)
+    competing = _run_in_process(poller, job_id, monkeypatch, env=Ssh(tmp_path).env())
+    _assert_never_finished_by_another_turn(poller, job_id, competing)
+
+
+def test_r2_a_started_autostart_run_whose_slot_stays_held_still_goes_to_t6(
+    tmp_path: Path, monkeypatch
+) -> None:
+    poller = Poller(tmp_path, box=False, now=time.time())
+    poller.queue.clock = time.time
+    job_id = poller.review(timeout=3600)
+    ssh = Ssh(tmp_path)
+    offline = ssh.offline("fakepc-codex-bot")
+    competing = _run_in_process(
+        poller, job_id, monkeypatch, env=ssh.env(),
+        before=f"import pathlib; pathlib.Path({str(offline)!r}).touch(); ",
+    )
+    assert [when for when, _r in competing] == ["fail"]
+    assert competing[0][1].returncode == 2
+    row = poller.row(job_id)
+    assert (row["state"], row["handoff_comment_id"]) == ("failed", None)
+    assert poller.pool.placement(job_id) is not None  # the DeviceMonitor frees it later
 
 
 def test_r1_a3_a_review_job_with_no_round_never_takes_a_posted_verdict(
