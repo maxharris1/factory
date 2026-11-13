@@ -273,6 +273,8 @@ _SECRET_ASSIGNMENT = re.compile(
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
 POLL_ERROR_FRAMES = 10
 POLL_ERROR_DETAIL_LIMIT = 4000
+_POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
+_POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
 
 
 def _redact(text: str) -> str:
@@ -282,17 +284,43 @@ def _redact(text: str) -> str:
     return _SECRET_ASSIGNMENT.sub("<secret>", text)
 
 
-def poll_error_detail(exc: BaseException) -> str:
-    """The exception's message and its newest frames, redacted and capped.
+def _without_body(exc: BaseException) -> str:
+    name, separator, message = "".join(
+        traceback.format_exception_only(type(exc), exc)
+    ).partition(": ")
+    return name.rstrip() + separator + _SECRET_BODY.sub("<body omitted>", message).rstrip() + "\n"
 
-    Stored in poll_errors.detail beside the bare class name; the tail is
-    kept when the cap cuts, so the raising frame and message survive.
+
+def poll_error_detail(exc: BaseException) -> str:
+    """The exception chain's messages and newest frames, redacted and capped.
+
+    Each message loses everything from its first {, [ or < on, so no
+    structured body reaches the redactors. Stored in poll_errors.detail
+    beside the bare class name; the tail is kept when the cap cuts, so the
+    raising frame and message survive.
     """
     from lib.dashboard import redact
 
-    text = _redact(
-        redact("".join(traceback.format_exception(exc, limit=-POLL_ERROR_FRAMES)).rstrip())
-    )
+    blocks: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        seen.add(id(current))
+        frames = "".join(traceback.format_tb(current.__traceback__, limit=-POLL_ERROR_FRAMES))
+        if frames:
+            blocks.append(f"Traceback (most recent call last):\n{frames}{_without_body(current)}")
+        else:
+            blocks.append(_without_body(current))
+        if current.__cause__ is not None:
+            link, current = _POLL_ERROR_CAUSE, current.__cause__
+        elif not current.__suppress_context__:
+            link, current = _POLL_ERROR_CONTEXT, current.__context__
+        else:
+            current = None
+        if current is None or id(current) in seen:
+            break
+        blocks.append(link)
+    text = _redact(redact("".join(reversed(blocks)).rstrip()))
     if len(text) > POLL_ERROR_DETAIL_LIMIT:
         text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
     return text

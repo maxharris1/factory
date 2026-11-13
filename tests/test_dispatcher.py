@@ -2597,6 +2597,12 @@ CREDENTIAL_BODIES = (
     repr({"api_key": CANARY}),
     f"Authorization: Bearer {CANARY}",
     f"password={CANARY}",
+    json.dumps({"credentials": {"password": CANARY}}),
+    json.dumps({"credentials": [CANARY]}),
+    json.dumps({"auth": {"user": "bot", "pass": CANARY}}),
+    json.dumps({"errors": [{"extensions": {"secret": CANARY}}]}, indent=2),
+    repr({"credentials": {"password": CANARY}}),
+    f"<html><input name=pass value={CANARY}></html>",
 )
 
 
@@ -2650,12 +2656,12 @@ def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
     assert_canary_hidden(queue, log)
 
 
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
 def test_github_adapter_error_body_stays_out_of_detail_stderr_and_dashboard(
     tmp_path: Path,
+    body: str,
 ) -> None:
-    actions = GitHubReviewActions(
-        runner=lambda *_: GhResult(1, "", json.dumps({"password": CANARY}))
-    )
+    actions = GitHubReviewActions(runner=lambda *_: GhResult(1, "", body))
     dispatcher, queue = setup(tmp_path, review_actions=actions)
     tracked = ticket(comment("go", GO.format(state="building"), author="grok-login"))
     with queue.connect() as connection:
