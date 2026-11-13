@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import job_run, telemetry
+from lib import job_run, telemetry, waiter
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.telemetry import (
     EventLog,
@@ -497,6 +497,84 @@ def test_session_entry_points_never_raise_from_a_broken_summary(tmp_path: Path, 
     session.flush()
     session.finish(0)
     assert messages == ["telemetry: summary not written (OverflowError: int too large)"]
+
+
+# --- a remote run's ORCH-HANDOFF line still reaches run.log (#87 merge) ------------------
+
+
+def _stream(*events: object) -> bytes:
+    return b"".join(
+        (event if isinstance(event, str) else json.dumps(event)).encode() + b"\n" for event in events
+    )
+
+
+def test_claude_result_handoff_line_reaches_run_log_as_its_last_line(tmp_path: Path) -> None:
+    session, db, out, _ = _session(tmp_path)
+    lines = fixture_lines("claude_stream.jsonl")
+    result = json.loads(lines[-1])
+    result["result"] = "Posted the handoff.\n\nORCH-HANDOFF: 4242424242\n"
+    session.consume(io.BytesIO(("\n".join([*lines[:-1], json.dumps(result)]) + "\n").encode()))
+    session.finish(0)
+    assert out.getvalue() == b"ORCH-HANDOFF: 4242424242\n"  # nothing else of the message
+    assert waiter.handoff_marker(out.getvalue().decode()) == "4242424242"
+    assert _row(db)["exit_reason"] == "success; exit 0"
+
+
+def test_codex_handoff_line_comes_from_the_last_agent_message_only(tmp_path: Path) -> None:
+    uuid = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    session, _, out, _ = _session(tmp_path)
+    session.consume(io.BytesIO(_stream(
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "a", "type": "agent_message", "text": "ORCH-HANDOFF: 1"}},
+        {"type": "item.completed", "item": {"id": "b", "type": "agent_message", "text": "Still working."}},
+        {"type": "turn.completed", "usage": {}},
+    )))
+    session.finish(0)
+    assert out.getvalue() == b""  # an earlier message's marker is not the final word
+
+    (tmp_path / "second").mkdir()
+    session, _, out, _ = _session(tmp_path / "second")
+    session.consume(io.BytesIO(_stream(
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "a", "type": "agent_message", "text": f"Done.\nORCH-HANDOFF: {uuid}"}},
+        {"type": "turn.completed", "usage": {}},
+    )))
+    session.finish(0)
+    assert out.getvalue() == f"ORCH-HANDOFF: {uuid}\n".encode()  # once, at turn.completed
+    assert waiter.handoff_marker(out.getvalue().decode()) == uuid
+
+
+def test_handoff_line_goes_out_at_the_end_event_before_the_pipe_closes(tmp_path: Path) -> None:
+    session, _, out, _ = _session(tmp_path)
+    seen: list[bytes] = []
+    lines = [
+        json.dumps({"type": "result", "subtype": "success", "result": "ORCH-HANDOFF: failed"}).encode() + b"\n",
+    ]
+
+    class Pipe:
+        def readline(self, limit: int = -1) -> bytes:
+            if lines:
+                return lines.pop(0)
+            seen.append(out.getvalue())  # what run.log had while the pipe was still open
+            return b""
+
+    session.consume(Pipe())
+    session.finish(1)
+    assert seen == [b"ORCH-HANDOFF: failed\n"]
+    assert out.getvalue() == b"ORCH-HANDOFF: failed\n"  # not written twice
+
+
+def test_a_final_message_without_a_handoff_line_never_reaches_run_log(tmp_path: Path) -> None:
+    session, _, out, _ = _session(tmp_path)
+    session.consume(io.BytesIO(_stream(
+        {"type": ["not", "hashable"], "result": 1},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": ["ORCH-HANDOFF: 1"]}},
+        {"type": "result", "subtype": "success", "result": "ORCH-HANDOFF: 12\nthen more text"},
+        "a plain line",
+        {"type": "result", "subtype": "success", "result": "ORCH-HANDOFF: " + "9" * 200},
+    )))
+    session.finish(0)
+    assert out.getvalue() == b"a plain line\n"
 
 
 def test_last_seen_reads_the_summary_time_or_none(tmp_path: Path) -> None:

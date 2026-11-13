@@ -16,7 +16,13 @@ stdout on a pipe and hands the pipe to a `Session` here:
   to `events.jsonl.1` (replacing an older one), so at most two files are
   kept. The raw log never leaves the machine. Lines that are not JSON
   objects are also copied to this process's stdout (the waiter's run.log),
-  as before; JSON events are not, so run.log stays small.
+  as before; JSON events are not, so run.log stays small. One exception
+  keeps a remote run's handoff (#87): the last line of the CLI's final
+  message (Claude Code's `result`, Codex's last
+  `agent_message`) is copied there if it is an `ORCH-HANDOFF: ...` line, as
+  text mode would have printed it, so the waiter on the box still reads it
+  as run.log's last line. It is copied at the CLI's end event (`result`,
+  `turn.completed`), else when the stream ends, and only once.
 * Each JSON event updates a `Summary`: turns, tool calls by type, files
   touched, commands run, the last test run's pass and fail counts, tokens
   in (of which cached) and out, cost when the CLI reports it, the last
@@ -717,6 +723,47 @@ def exit_reason(code: int | None, cli_reason: str | None) -> str:
     return f"{cli_reason}; {status}" if cli_reason else status
 
 
+# A remote harness ends its final message with `ORCH-HANDOFF: <id|failed>`, and
+# the waiter on the box reads it as the last line of run.log (#87,
+# lib/waiter.py handoff_marker). In stream mode that message is inside a JSON
+# event, which is not copied to run.log, so a session copies the last line of
+# the run's final message there at the end of the run, only when it is such a
+# line. No other assistant text reaches run.log.
+_HANDOFF_LINE = re.compile(r"ORCH-HANDOFF:[^\r\n]{0,100}")
+# The CLI's own end of a run: the line goes out then (and at the end of the
+# stream otherwise), so a process left holding the pipe cannot keep it back.
+_END_EVENTS = frozenset({"result", "turn.completed"})
+
+
+def final_message(event: dict) -> str | None:
+    """The CLI's final answer text in this event, or None.
+
+    Claude Code's `result` event carries what `claude -p` prints in text
+    mode; Codex's completed `agent_message` items are its messages, the last
+    of which is what `codex exec` prints in text mode.
+    """
+    kind = event.get("type")
+    if kind == "result":
+        text = event.get("result")
+        return text if isinstance(text, str) else None
+    if kind == "item.completed":
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            return text if isinstance(text, str) else None
+    return None
+
+
+def handoff_line(text: str | None) -> str | None:
+    """The last non-blank line of `text` when it is an ORCH-HANDOFF line."""
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines or not _HANDOFF_LINE.fullmatch(lines[-1]):
+        return None
+    return lines[-1]
+
+
 # --- the session: one run's tee, summary and table row ------------------------------
 
 
@@ -755,9 +802,17 @@ class Session:
         self._lock = threading.Lock()
         self._finished = False
         self._warned: set[str] = set()
+        self._final: str | None = None  # the run's last final message (#87 handoff line)
+        self._final_sent = True
 
     # Runs on the reader thread until the command's stdout closes.
     def consume(self, stream: IO[bytes]) -> None:
+        try:
+            self._consume(stream)
+        finally:
+            self._send_handoff()  # a stream that ended without the CLI's end event
+
+    def _consume(self, stream: IO[bytes]) -> None:
         skipping = False
         event_line = False
         while True:
@@ -793,6 +848,16 @@ class Session:
                     self.summary.feed(event, self.clock())
                 except Exception as exc:  # a malformed event never stops the tee
                     self._warn("parse", f"telemetry: skipped an event ({type(exc).__name__})")
+            try:
+                message = final_message(event)
+            except Exception:
+                message = None
+            if message is not None:
+                self._final = message
+                self._final_sent = False
+            kind = event.get("type")
+            if isinstance(kind, str) and kind in _END_EVENTS:
+                self._send_handoff()
 
     def flush(self) -> None:
         """Write the summary so far (orch job run calls this after each heartbeat)."""
@@ -847,6 +912,15 @@ class Session:
                     )
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
+
+    def _send_handoff(self) -> None:
+        """Copy the final message's ORCH-HANDOFF line to stdout, once (#87)."""
+        if self._final_sent:
+            return
+        self._final_sent = True
+        line = handoff_line(self._final)
+        if line is not None:
+            self._passthrough(line.encode("utf-8", errors="replace") + b"\n")
 
     def _passthrough(self, chunk: bytes) -> None:
         if self.stdout is None:
