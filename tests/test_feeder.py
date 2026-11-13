@@ -788,7 +788,7 @@ def test_a_feeder_error_never_stops_the_poll(tmp_path: Path) -> None:
     dispatcher.poll_once(FeederSource(github))
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
-    assert ("feeder", "RuntimeError") in errors
+    assert ("feeder", "RuntimeError: boom") in errors
 
 
 # --- #87 review F1.3, F1.6: recovery reuses only what is really ours -----------

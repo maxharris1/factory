@@ -787,7 +787,7 @@ def test_a_device_check_error_is_recorded_and_never_stops_the_poll(tmp_path: Pat
     dispatcher.reconcile_jobs()
     with queue.connect() as connection:
         rows = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
-    assert [tuple(row) for row in rows] == [("devices", "OperationalError")]
+    assert [tuple(row) for row in rows] == [("devices", "OperationalError: boom")]
 
 
 def test_suite_guard_shadows_any_real_ssh() -> None:
@@ -1386,7 +1386,7 @@ def test_r1_gap_offline_rolls_back_when_the_wake_cannot_be_written(
     assert not dispatcher.is_stuck(snapshot)
     with queue.connect() as connection:
         errors = connection.execute("SELECT repo, error FROM poll_errors").fetchall()
-    assert ("devices", "OperationalError") in [tuple(row) for row in errors]
+    assert ("devices", "OperationalError: disk I/O error") in [tuple(row) for row in errors]
 
 
 def test_r1_gap_offline_fails_every_running_job_on_the_device(tmp_path: Path) -> None:
