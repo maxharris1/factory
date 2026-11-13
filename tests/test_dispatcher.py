@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import json
 import os
 import sqlite3
@@ -18,7 +19,9 @@ from lib.dispatcher import (
     TrackedTicket,
     ship_mode,
 )
+from lib.dashboard import collect_snapshot
 from lib.factory_md import FactoryConfig
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -2584,6 +2587,87 @@ def test_poll_error_detail_keeps_the_newest_frames_within_the_cap(
         detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
     assert len(detail) <= 4000
     assert detail.endswith("x" * 100)
+
+
+CANARY = "hunter" + "2"
+CREDENTIAL_BODIES = (
+    json.dumps({"password": CANARY}),
+    json.dumps({"client_secret": CANARY, "message": "Bad credentials"}),
+    json.dumps({"token": f"{CANARY} with spaces"}),
+    repr({"api_key": CANARY}),
+    f"Authorization: Bearer {CANARY}",
+    f"password={CANARY}",
+)
+
+
+class GhFailure(FakeSource):
+    def __init__(self, body: str, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.body = body
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        try:
+            raise RuntimeError(f"inner {self.body}")
+        except RuntimeError as inner:
+            raise ValueError(f"outer {self.body}") from inner
+
+
+def assert_canary_hidden(queue: SQLiteJobQueue, log: Path) -> None:
+    with queue.connect() as connection:
+        details = [
+            row["detail"]
+            for row in connection.execute("SELECT detail FROM poll_errors").fetchall()
+        ]
+    assert details and all(details)
+    assert not [detail for detail in details if CANARY in detail]
+    assert CANARY not in log.read_text()
+    snapshot = collect_snapshot(queue.path, log, now=100)
+    assert snapshot["poller"]["log"]["tail"]
+    assert CANARY not in json.dumps(snapshot)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(GhFailure(body))
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert "The above exception was the direct cause" in detail
+    assert "RuntimeError: inner" in detail
+    assert "ValueError: outer" in detail
+    assert_canary_hidden(queue, log)
+
+
+def test_github_adapter_error_body_stays_out_of_detail_stderr_and_dashboard(
+    tmp_path: Path,
+) -> None:
+    actions = GitHubReviewActions(
+        runner=lambda *_: GhResult(1, "", json.dumps({"password": CANARY}))
+    )
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    tracked = ticket(comment("go", GO.format(state="building"), author="grok-login"))
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo','42','github',0)")
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(FakeSource(tracked))
+
+    with queue.connect() as connection:
+        error = connection.execute("SELECT error FROM poll_errors").fetchone()[0]
+    assert error == "RetryableStateError"
+    assert_canary_hidden(queue, log)
 
 
 def test_duplicate_ready_for_one_head_does_not_increment_gate_twice(

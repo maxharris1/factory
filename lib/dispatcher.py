@@ -288,8 +288,10 @@ def poll_error_detail(exc: BaseException) -> str:
     Stored in poll_errors.detail beside the bare class name; the tail is
     kept when the cap cuts, so the raising frame and message survive.
     """
+    from lib.dashboard import redact
+
     text = _redact(
-        "".join(traceback.format_exception(exc, limit=-POLL_ERROR_FRAMES)).rstrip()
+        redact("".join(traceback.format_exception(exc, limit=-POLL_ERROR_FRAMES)).rstrip())
     )
     if len(text) > POLL_ERROR_DETAIL_LIMIT:
         text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
