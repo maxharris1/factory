@@ -114,6 +114,18 @@ PID_FILE = ".orch-worker.pid"
 LOGIN_SHELL = "bash"
 LOGIN_NAME = "orch-job"
 _EXEC_ARGS = 'exec "$@"'
+# Factory, Nov 13: a harness's `--add-dir` directories are given only where
+# the device has them. Arguments: k (where the kept `--add-dir <dir>` pairs
+# go in the command), n, then n directories, then the command. Each
+# directory is tested with `test -d` on the device at start time; the exec
+# still keeps the start's pid and group. Directories are positional
+# arguments, never spliced into the script text.
+_GUARDED_EXEC = (
+    'k=$1; n=$2; shift 2; a=(); '
+    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$1"); fi; '
+    'shift; n=$((n-1)); done; '
+    'c=("$@"); exec "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"'
+)
 PREFLIGHT_TOOLS = ("git", "gh")
 _PREFLIGHT_MARK = "orch-preflight: missing"
 _CHECKOUT_MARK = "orch-checkout:"
@@ -302,11 +314,21 @@ def start_script(
     target: RemoteTarget,
     command: Sequence[str],
     env: Mapping[str, str],
+    *,
+    guarded_dirs: Sequence[str] = (),
+    insert_at: int = 0,
 ) -> str:
-    """The remote script that runs command as the job's tagged worker."""
+    """The remote script that runs command as the job's tagged worker.
+
+    guarded_dirs (Factory, Nov 13): each is passed to the command as
+    `--add-dir <dir>`, at index insert_at, only if `test -d` holds for it on
+    the device when the job starts. With none, the command runs as given.
+    """
     tag = target.require_tag()
     if not command:
         raise RemoteError("no command to run")
+    if guarded_dirs and not 1 <= insert_at <= len(command):
+        raise RemoteError(f"cannot add directories at argument {insert_at}")
     for name in env:
         if not _ENV_NAME.fullmatch(name) or name == TAG_ENV:
             raise RemoteError(f"environment name {name!r} is not plain")
@@ -317,6 +339,12 @@ def start_script(
     # #94: the harness runs under the bot's login shell, so its own PATH (gh,
     # claude, codex) is loaded. `exec "$@"` keeps the start's pid and group.
     login = f"{LOGIN_SHELL} -lc {shlex.quote(_EXEC_ARGS)} {LOGIN_NAME} {argv}"
+    if guarded_dirs:
+        dirs = " ".join(shlex.quote(path) for path in guarded_dirs)
+        login = (
+            f"{LOGIN_SHELL} -lc {shlex.quote(_GUARDED_EXEC)} {LOGIN_NAME} "
+            f"{insert_at} {len(guarded_dirs)} {dirs} {argv}"
+        )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
     darwin_file = shlex.quote(darwin_record(tag))

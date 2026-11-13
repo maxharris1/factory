@@ -11,6 +11,13 @@
 # worktree ($ORCH_JOB_WORKTREE) with ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB set,
 # and must end with `orch job done` as the brief says.
 #
+# A Codex harness run as `codex exec --sandbox workspace-write` needs no
+# --add-dir for the orch state dir: on the box, `orch job run` adds the
+# directory of ORCH_DB itself (issue #103), and skips it if already given.
+# The same command also runs on remote devices: there codex is run by its
+# bare name from the device's login PATH (an absolute box path is dropped),
+# and each --add-dir is given only if that directory exists on the device.
+#
 # Pick the flags the bot already uses for unattended runs; the lines below
 # are an example shape, not a recommendation. Only `bot` and `command` are
 # accepted.

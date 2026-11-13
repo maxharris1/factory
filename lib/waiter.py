@@ -48,6 +48,15 @@ else (`load_harness_command`). Nothing from a job row or a comment reaches an
 argv: the only job value in the `orch job run` argv is the job id, which must
 be a plain token. Everything else goes into the brief, on stdin.
 
+The configured command is passed to `orch job run` as is, and one config
+serves every device the bot runs on. On the box, `orch job run` itself adds
+the orch state dir (the directory of ORCH_DB, where it exists) as a writable
+root to a sandboxed `codex exec` (lib/codex_sandbox.py, issue #103), so its
+`orch job done` can write orch.db. On a remote device it runs a codex
+command by its bare name from the device's login PATH and keeps each
+`--add-dir` only where the device has that directory (a `test -d` guard in
+the start script), so no box path is run there.
+
 A job that has no standard brief, or whose start fails, is failed at once
 (T6 retries it) and its slot is freed, as `orch wait` does for a job it
 could not print. A run that ends while its job is still running (the

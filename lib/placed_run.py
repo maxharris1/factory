@@ -18,7 +18,11 @@ out holds one slot on one device. `orch job run` then:
 * on a remote device, runs the command there over the box's SSH alias for
   this bot (`ssh -l <bot> -- <alias> <start script>`, lib/remote.py) in
   `<workdir_root>/jobs/<job-id>`, under the bot's login shell (`bash -lc`)
-  and a fresh worker tag recorded on the slot first;
+  and a fresh worker tag recorded on the slot first. A codex command runs
+  by its bare name, found on the device's login PATH, and each of its
+  `--add-dir` directories is given only if the device has it (`test -d`,
+  lib/codex_sandbox.py `for_device`); box paths never reach the device's
+  argv unguarded;
 * with `--worktree` on a remote device (#94), first checks over the same
   alias that git, gh and the harness binary exist under `bash -lc`, then
   clones or fetches the job's checkout into that directory at the job's
@@ -46,6 +50,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
 from lib.machines_yml import Device, MachinesConfig
@@ -132,7 +137,8 @@ class PlacedRun:
         except (WorktreeError, KeyError, IndexError, ValueError) as exc:
             raise CheckoutError(_line(exc)) from exc
         base, branch = _branches(detail)
-        preflight(self.transport, self.target, harness)
+        # the binary the device will run: a codex command's bare name
+        preflight(self.transport, self.target, for_device([harness]).argv[0])
         try:
             sha, reused = checkout(
                 self.transport,
@@ -169,7 +175,20 @@ class PlacedRun:
     def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
         if self.target is None:
             return list(command)
-        return ssh_argv(self.target, start_script(self.target, command, env))
+        # Factory, Nov 13: the waiter config is shared by every device, so a
+        # codex command runs by its bare name (the device's login PATH finds
+        # it) and keeps each --add-dir only where the device has it.
+        device = for_device(command)
+        return ssh_argv(
+            self.target,
+            start_script(
+                self.target,
+                device.argv,
+                env,
+                guarded_dirs=device.guarded_dirs,
+                insert_at=device.insert_at,
+            ),
+        )
 
     def before_start(self) -> None:
         """Record a remote start before ssh is spawned (a crash then still checks)."""
