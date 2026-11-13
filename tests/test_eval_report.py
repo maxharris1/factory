@@ -201,20 +201,47 @@ def test_fixture_report_covers_every_f1_14_measure() -> None:
         assert heading in text
 
 
-def test_chart_edges_match_section_4_1() -> None:
-    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+SPEC_EDGE = re.compile(r"  (\[\*\]|[A-Za-z]+) --> (\[\*\]|[A-Za-z]+)(?:: .+)?")
+MMD_EDGE = re.compile(r"  s(\d+) --> s(\d+): .+")
+
+
+def spec_edges(spec: str) -> set[tuple[str, str]]:
     start = spec.index("stateDiagram-v2")
     block = spec[start : spec.index("```", start)]
     found: set[tuple[str, str]] = set()
     for line in block.splitlines():
-        match = re.search(r"(\[\*\]|[A-Za-z]+) --> (\[\*\]|[A-Za-z]+)", line)
-        if match is None:
+        if "-->" not in line:
             continue
-        src, dst = match.group(1), match.group(2)
+        match = SPEC_EDGE.fullmatch(line)
+        assert match is not None, f"unparsed section 4.1 edge: {line!r}"
+        src, dst = match.groups()
         if src == "[*]" or dst == "[*]":
             continue
         found.add((SPEC_STATE[src], SPEC_STATE[dst]))
-    assert found == CHART_TRANSITIONS
+    return found
+
+
+def mmd_edges(text: str) -> set[tuple[str, str]]:
+    names: dict[str, str] = {}
+    edges: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        state = re.fullmatch(r"  s(\d+): (.+)", line)
+        if state:
+            names[state.group(1)] = state.group(2)
+            continue
+        if "-->" not in line or line.startswith("  [*] -->"):
+            continue
+        edge = MMD_EDGE.fullmatch(line)
+        assert edge is not None, f"unparsed chart.mmd edge: {line!r}"
+        pair = (names[edge.group(1)], names[edge.group(2)])
+        assert pair not in edges, f"chart.mmd draws {pair} twice"
+        edges.add(pair)
+    return edges
+
+
+def test_chart_edges_match_section_4_1() -> None:
+    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    assert spec_edges(spec) == CHART_TRANSITIONS
     assert set(SPEC_STATE.values()) == set(STATES)
     for src, dst in CHART_TRANSITIONS:
         assert src in STATES
@@ -223,18 +250,48 @@ def test_chart_edges_match_section_4_1() -> None:
 
 def test_chart_mmd_edges_match_transitions() -> None:
     text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
-    names: dict[str, str] = {}
-    edges: set[tuple[str, str]] = set()
-    for line in text.splitlines():
-        state = re.fullmatch(r"  s(\d+): (.+)", line)
-        if state:
-            names[state.group(1)] = state.group(2)
-            continue
-        edge = re.fullmatch(r"  s(\d+) --> s(\d+): .+", line)
-        if edge is None:
-            continue
-        edges.add((names[edge.group(1)], names[edge.group(2)]))
-    assert edges == CHART_TRANSITIONS
+    assert mmd_edges(text) == CHART_TRANSITIONS
+
+
+def test_t2_self_loops_are_charted() -> None:
+    tla = (ROOT / "model" / "Orchestrator.tla").read_text(encoding="utf-8")
+    start = tla.index("T2CiRed ==")
+    action = tla[start : tla.index("\n\n", start)]
+    assert "state' = state" in action
+    looped = re.search(r"state \\in \{([^}]*)\}", action)
+    assert looped is not None
+    states = re.findall(r'"([a-z-]+)"', looped.group(1))
+    assert states == ["building", "fixing"]
+    spec = spec_edges((ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8"))
+    chart = mmd_edges((ROOT / "model" / "chart.mmd").read_text(encoding="utf-8"))
+    for state in states:
+        assert (state, state) in CHART_TRANSITIONS
+        assert (state, state) in spec
+        assert (state, state) in chart
+
+
+@pytest.mark.parametrize(
+    ("source", "bad", "message"),
+    [
+        ("spec", "  Fixing -->Review: CI green", "unparsed section 4.1 edge"),
+        ("chart", "  s12 --> s8", "unparsed chart.mmd edge"),
+        ("chart", "  s3 --> s8: ready again", "draws .* twice"),
+    ],
+    ids=["spec-unparsed", "chart-unlabelled", "chart-duplicate"],
+)
+def test_chart_edges_fail_on_an_unparsed_line(
+    source: str, bad: str, message: str
+) -> None:
+    if source == "spec":
+        spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+        spec = spec.replace("  Done --> [*]", f"{bad}\n  Done --> [*]", 1)
+        with pytest.raises(AssertionError, match=message):
+            spec_edges(spec)
+    else:
+        text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
+        text = text.replace("  class s0 ", f"{bad}\n  class s0 ", 1)
+        with pytest.raises(AssertionError, match=message):
+            mmd_edges(text)
 
 
 def test_week_window_uses_the_same_directory_shape() -> None:

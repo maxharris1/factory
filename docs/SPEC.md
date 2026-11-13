@@ -133,6 +133,7 @@ stateDiagram-v2
   Building --> Stuck: CI red 3 times in a row, the job dies twice, or its device is offline 60 minutes
   Review --> Fixing: REVISE, under the round cap
   Fixing --> Review: fixed head ready, CI green
+  Fixing --> Fixing: CI red, fix (gate retries don't count as rounds)
   Fixing --> Stuck: job dies twice (T6), or its device is offline 60 minutes
   Review --> Capped: REVISE at the cap, or a 2nd AC-unmet verdict
   Review --> Blocked: BLOCKED
@@ -162,6 +163,8 @@ stateDiagram-v2
   Capped --> Fixing: Max's own words OK one more round
   Done --> [*]
 ```
+
+A T6 retry (a job that dies once is retried in the same state) is a self-loop the chart does not draw. Building and Fixing draw their CI-red self-loops.
 
 Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts. Each one wakes Grok Bot once, and Grok Bot tells Max once. On Aut0, a blocking follow-up is a Linear ticket, never a GitHub issue.
 
@@ -224,6 +227,8 @@ deduplication key.
 | Reviewer stays cross-family; last 20% of a usage cycle is reserved; only urgent work may use the reserve | `factory.md` plus each owning bot's usage check |
 | Contradictory config never runs | `orch check-config` |
 | Waiting, abandoned, external and deploy-wait states mean one thing | Labels on GitHub-issue repos; Linear + `orch:` comments on Aut0, with no GitHub labels |
+
+The model (`model/Orchestrator.tla`) checks these as safety invariants only. No liveness property is checked, and none holds by design: the capped to fixing to review loop (each extra round needs Max's own words) and the ship to review loop (a head whose patch differs goes back to review, D33-D) have no bound. `ShipPinnedToCoveredHead` holds because a new head, a REVISE and a decline clear the covered head; `model/fixtures/omit-ship-guard.cfg` drops the guard on ship = merge and must break it.
 
 ## 5. Handoff comment format
 

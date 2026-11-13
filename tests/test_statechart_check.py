@@ -2,6 +2,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / "model" / "check.sh"
 
@@ -79,7 +81,7 @@ def test_statechart_fetch_survives_github_rate_limit(tmp_path: Path) -> None:
     result = run_check(env)
 
     assert count.read_text().strip() == "3"
-    assert "1/6 phase 1 model" in result.stdout, result.stderr
+    assert "1/7 phase 1 model" in result.stdout, result.stderr
     assert "exited 3, expected 0" in result.stderr
 
 
@@ -105,3 +107,73 @@ def test_tlc_jar_download_survives_github_rate_limit(tmp_path: Path) -> None:
     assert count.read_text().strip() == "3"
     assert "429" in result.stderr
     assert "FAILED" in result.stdout + result.stderr
+
+
+FAKE_STATECHART = """#!/bin/sh
+while [ $# -gt 0 ]; do
+  case $1 in
+    --config) cfg=$(basename "$2"); shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+chart={chart}
+breaks() {{
+  printf '## %s breaks\\nThe shortest path has 2 steps:\\n0. intake\\n' "$1" > "$out/report.md"
+  printf '%s\\n' "$2" >> "$out/report.md"
+  exit 1
+}}
+case $cfg in
+  Orchestrator.cfg)
+    printf '## Rules that hold\\nT1KindGo, T1PDecided, Phase1T9Off\\n' > "$out/report.md" ;;
+  OrchestratorAll.cfg)
+    printf '## Rules that hold\\nT9Decided\\n' > "$out/report.md" ;;
+  chart.cfg) grep -v ': post-merge$' "$chart" > "$out/chart.mmd" ;;
+  chart-all.cfg) cp "$chart" "$out/chart.mmd" ;;
+  omit-t1.cfg) breaks T1KindGo '{t1_steps}' ;;
+  omit-t1p.cfg)
+    breaks T1PDecided '1. brief and acceptance criteria posted: questions
+2. kind=go, queue plan: planning' ;;
+  omit-ship-guard.cfg) breaks ShipPinnedToCoveredHead '1. ship = merge: merged' ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.parametrize(
+    ("t1_steps", "passes"),
+    [
+        ("1. brief and acceptance criteria posted: questions", True),
+        (
+            "1. brief and acceptance criteria posted: questions\n"
+            "2. kind=go, queue plan: planning",
+            False,
+        ),
+    ],
+    ids=["ends-in-questions", "ends-elsewhere"],
+)
+def test_check_sh_fails_when_the_break_trace_ends_elsewhere(
+    tmp_path: Path,
+    t1_steps: str,
+    passes: bool,
+) -> None:
+    _bin_dir, env = sandbox(tmp_path)
+    fake = tmp_path / "statechart"
+    write_tool(
+        fake,
+        FAKE_STATECHART.format(
+            chart=ROOT / "model" / "chart.mmd",
+            t1_steps=t1_steps,
+        ),
+    )
+    env["STATECHART"] = str(fake)
+    env["TLA2TOOLS"] = str(tmp_path / "tla2tools.jar")
+
+    result = run_check(env)
+
+    if passes:
+        assert result.returncode == 0, result.stderr
+        assert "statechart ok" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "omit-t1 counterexample did not end in questions" in result.stderr

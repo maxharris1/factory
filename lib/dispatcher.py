@@ -1786,8 +1786,22 @@ class Dispatcher:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            held = state == "awaiting-ok" or self._held(ticket, current_head)
-            return not held, "approve-ci-red"
+            if state == "awaiting-ok" or self._held(ticket, current_head):
+                return False, "approve-ci-red"
+            self.wake_grok_once(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                reason="blocked",
+                source_comment_id=comment.id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                detail=self._project_wake_detail(
+                    ticket,
+                    f"APPROVE {_comment_link(comment)} landed on red CI at "
+                    f"{current_head}",
+                ),
+                head=current_head,
+            )
+            return True, "approve-ci-red"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -2478,7 +2492,12 @@ class Dispatcher:
         if intent_head != current_head or intent_policy != policy:
             raise RuntimeError("ship intent does not match approval")
         if status == "completed":
-            self._write_state_label(ticket, _ship_state(policy))
+            state = _ship_state(policy)
+            if state == "waiting-external" and self._external_ship_completed(
+                ticket, intent_head
+            ):
+                state = "merged"
+            self._write_state_label(ticket, state)
             return True, f"ship-already-completed-{policy}"
         if status == "pending":
             if policy == "merge" and self._review_actions(ticket).is_merged(
@@ -2498,6 +2517,18 @@ class Dispatcher:
             self._wake_ship_failed(ticket, comment, f"{policy} ship failed")
             return True, "ship-failed"
         raise RuntimeError(f"unknown ship intent status {status!r}")
+
+    def _external_ship_completed(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM external_ship_intents
+                WHERE repo = ? AND ticket_id = ? AND head = ?
+                  AND status = 'completed'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        return row is not None
 
     def _prepare_ship_intent(
         self,
@@ -4151,33 +4182,23 @@ class Dispatcher:
                 )
                 """
             )
-            columns = {
-                str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(ticket_state)"
-                ).fetchall()
-            }
-            if "stuck_wake_job_id" not in columns:
-                connection.execute(
-                    "ALTER TABLE ticket_state ADD COLUMN stuck_wake_job_id TEXT"
-                )
-            migrations = {
-                "workflow_state": "TEXT",
-                "review_round": "INTEGER NOT NULL DEFAULT 0",
-                "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
-                "plan_check_comment_id": "TEXT",
-                "paused_action": "TEXT",
-                "paused_recipient": "TEXT",
-                "paused_head": "TEXT",
-                "paused_generation": "INTEGER",
-                "paused_question_id": "TEXT",
-                "cap_extra": "INTEGER NOT NULL DEFAULT 0",
-            }
-            for name, declaration in migrations.items():
-                if name not in columns:
-                    connection.execute(
-                        f"ALTER TABLE ticket_state ADD COLUMN {name} {declaration}"
-                    )
+            _add_missing_columns(
+                connection,
+                "ticket_state",
+                {
+                    "stuck_wake_job_id": "TEXT",
+                    "workflow_state": "TEXT",
+                    "review_round": "INTEGER NOT NULL DEFAULT 0",
+                    "plan_gap_count": "INTEGER NOT NULL DEFAULT 0",
+                    "plan_check_comment_id": "TEXT",
+                    "paused_action": "TEXT",
+                    "paused_recipient": "TEXT",
+                    "paused_head": "TEXT",
+                    "paused_generation": "INTEGER",
+                    "paused_question_id": "TEXT",
+                    "cap_extra": "INTEGER NOT NULL DEFAULT 0",
+                },
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ci_events (
@@ -4245,18 +4266,14 @@ class Dispatcher:
                 )
                 """
             )
-            ship_columns = {
-                str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(external_ship_intents)"
-                ).fetchall()
-            }
-            for name in ("settled", "settle_failures"):
-                if name not in ship_columns:
-                    connection.execute(
-                        f"ALTER TABLE external_ship_intents ADD COLUMN {name} "
-                        "INTEGER NOT NULL DEFAULT 0"
-                    )
+            _add_missing_columns(
+                connection,
+                "external_ship_intents",
+                {
+                    "settled": "INTEGER NOT NULL DEFAULT 0",
+                    "settle_failures": "INTEGER NOT NULL DEFAULT 0",
+                },
+            )
         self._migrate_ship_intent_redrive()
         with self._connect() as connection:
             connection.execute(
@@ -4363,8 +4380,9 @@ class ReviewShipper:
     one request never merges twice. Once the completed write for that
     intent has committed, ship no longer raises: a failed merged state or
     label write is retried by Dispatcher.process, and wakes Grok after
-    SETTLE_FAILURES_TO_WAKE failures. Before that commit, any failure
-    raises.
+    SETTLE_FAILURES_TO_WAKE failed attempts, not polls: the ship's own
+    settle and each later process call are attempts, so the wake can come
+    on the second poll. Before that commit, any failure raises.
     """
 
     def __init__(self, dispatcher: Dispatcher, source: PollSource):
@@ -4831,6 +4849,22 @@ def _is_patch_id(value: str) -> bool:
 
 def _is_full_sha(value: str) -> bool:
     return re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _add_missing_columns(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: Mapping[str, str],
+) -> None:
+    connection.execute("BEGIN IMMEDIATE")
+    present = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, declaration in columns.items():
+        if name not in present:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    connection.commit()
 
 
 def _ship_state(policy: str) -> str:
