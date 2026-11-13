@@ -29,9 +29,11 @@ shown as "other".
 
 Health (#92): the component heartbeats in orch.health.db beside the
 database (lib/health.py, also opened read-only) become `health`; each
-down component and each harness with queued jobs but no live waiter is a
-needs-attention item linked to the Health tab, and such a queued job
-carries `no_waiter`. With no orch.health.db nothing is flagged.
+down component (including one machines.yml or orch.yml expects that has
+never beaten), each harness with queued jobs but no live waiter, and an
+orch.health.db that cannot be read is a needs-attention item linked to the
+Health tab, and such a queued job carries `no_waiter`. With no
+orch.health.db nothing is flagged.
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ from lib.job_state import (
 )
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
-from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED
+from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -598,6 +600,7 @@ def collect_snapshot(
     job_states: JobStateConfig | None = None,
     alive: Alive | None = pid_alive,
     poll_seconds: int = POLL_SECONDS,
+    orch: OrchConfig | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
@@ -606,7 +609,9 @@ def collect_snapshot(
     `chart_path` is the statechart chart the job page draws (default
     model/chart.mmd); only its file name is copied out. `job_states` is
     orch.yml's job_states (the stale threshold); `alive` checks a recorded
-    runner pid on this host (lib/job_state.py), never over SSH."""
+    runner pid on this host (lib/job_state.py), never over SSH. `orch` is
+    the loaded orch.yml, which says whether the Linear listener and the
+    dashboard writer are expected to heartbeat (lib/health.py)."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -664,6 +669,7 @@ def collect_snapshot(
             if machines_path is not None
             else None
         ),
+        orch=orch,
     )
     for item in db["queued"]:
         flag = report.no_waiter_for(item["recipient"])
@@ -734,8 +740,8 @@ def _attention(
 ) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
     overdue jobs, paused tickets that are not already listed as stuck, then
-    (#92) down components and harnesses whose queued jobs have no live
-    waiter, each linked to its Health tab row. `count` is the badge on
+    (#92) down components, an unreadable orch.health.db and harnesses whose
+    queued jobs have no live waiter, each linked to the Health tab. `count` is the badge on
     every page."""
     items: list[dict] = []
     for row in stuck:
@@ -772,6 +778,10 @@ def _attention(
                       "component": component.label,
                       "link": f"health.html#{component.anchor}",
                       "detail": f"down{reason}"})
+    if health is not None and health.error is not None:
+        items.append({"kind": "health", "repo": "", "ticket_id": "",
+                      "component": "health storage", "link": "health.html#components",
+                      "detail": f"unknown: {health.error}"})
     for flag in health.no_waiter if health is not None else ():
         count = len(flag.jobs)
         items.append({"kind": "no-waiter", "repo": "", "ticket_id": "",

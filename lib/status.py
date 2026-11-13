@@ -489,6 +489,7 @@ def main(
     # threshold is used with a warning, so status keeps working.
     orch_path = args.orch if args.orch is not None else ROOT / "orch.yml"
     job_states = JobStateConfig()
+    orch = None
     if args.orch is not None or orch_path.is_file():
         orch, orch_findings = load_orch_yml(orch_path, allow_placeholders=True)
         if orch is not None:
@@ -518,7 +519,7 @@ def main(
                 job_states=job_states,
                 alive=pid_alive,
                 health=lambda now, queued: component_health.load_report(
-                    path, now, queued=queued, machines=machines
+                    path, now, queued=queued, machines=machines, orch=orch
                 ),
             )
         )

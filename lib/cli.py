@@ -195,17 +195,15 @@ linear-webhook serve [--db PATH] [--orch PATH] [--bind HOST:PORT]
   linear_dirty row in the existing database; nothing else is done. --bind
   overrides linear_webhook.bind. Exits 2 when no webhook is configured.
 
-health [--db PATH] [--machines PATH] [--json]
+health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   Print each component's heartbeat (poller, waiters, Linear listener,
   tunnel, dashboard writer, device probes) as up, stale or down, with
   last-seen in ET, pid and device, and each queued harness job with no
-  live waiter on an eligible device ("no waiter for <harness>"). Reads
-  orch.health.db beside the database. Exits 3 when a component is down
-  or a queued job has no waiter, else 0.
-health beat <component> [--db PATH] [--device NAME] [--bot BOT] [--pid PID]
-            [--interval SECONDS]
-  Record one heartbeat for a component orch does not run itself (the
-  tunnel). With --pid, nothing is recorded unless that pid is running.
+  live waiter on an eligible device ("no waiter for <harness>"). A
+  component machines.yml or orch.yml expects that has never beaten is
+  down. Reads orch.health.db beside the database. Exits 3 when a
+  component is down or a queued job has no waiter, 1 when orch.health.db
+  cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
 """
@@ -1102,7 +1100,8 @@ def _linear_webhook(argv: list[str]) -> int:
     print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        with health.beating(path, health.LISTENER):  # heartbeat (#92)
+        # Heartbeat (#92), and the tunnel probe when public_url is set.
+        with health.listener_beats(path, webhook.public_url):
             server.serve_forever()
     except KeyboardInterrupt:
         return 130

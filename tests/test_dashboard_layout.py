@@ -622,7 +622,7 @@ global.document = {body, hidden: false, activeElement: null, getElementById: (id
   createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
   addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
 // Scripted user actions, run after the first render: click a node (by href,
-// id or class), press a key, or record what the body holds.
+// id or class), press a key, advance the clock, or record what the body holds.
 function find(node, pred) {
   if (pred(node)) return node;
   for (const c of node.children) { const f = find(c, pred); if (f) return f; }
@@ -649,6 +649,11 @@ function act(actions) {
       steps.push({click: arg, prevented: fire(node, 'click').defaultPrevented});
     } else if (kind === 'key') {
       steps.push({key: arg, prevented: fire(body, 'keydown', {key: arg}).defaultPrevented});
+    } else if (kind === 'advance') {
+      // Move the clock on by `arg` seconds and run the page's interval timers.
+      nowMs += arg * 1000;
+      intervals.forEach(fn => fn());
+      steps.push({advance: arg});
     } else if (kind === 'record') {
       const modal = find(body, n => n.attrs.id === 'job-modal');
       steps.push({record: arg, kids: body.children.map(c => c.attrs.id || c.tagName),
@@ -662,7 +667,10 @@ let fetches = 0;
 global.fetch = (url, opts) => { fetches += 1;
   if (url !== 'status.json' || opts.cache !== 'no-store') throw new Error('bad fetch ' + url);
   return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve(status)}); };
-Date.now = () => 1800000003000;
+let nowMs = 1800000003000;
+Date.now = () => nowMs;
+const intervals = [];
+global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
 eval(script);
 setTimeout(() => {
   act(JSON.parse(actionsText || '[]'));

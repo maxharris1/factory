@@ -377,6 +377,20 @@ def test_linear_webhook_accepts_overrides_and_expands_home(
     assert webhook.reconcile_seconds == 600
 
 
+def test_linear_webhook_public_url_is_the_funnel_url_of_its_path(tmp_path: Path) -> None:
+    config, findings = _webhook_config(
+        tmp_path,
+        "linear_webhook:\n"
+        "  bind: 127.0.0.1:8787\n"
+        "  secret_file: /s\n"
+        "  public_url: https://box.tail68624b.ts.net/linear-webhook\n",
+    )
+
+    assert findings == []
+    assert config is not None and config.linear_webhook is not None
+    assert config.linear_webhook.public_url == "https://box.tail68624b.ts.net/linear-webhook"
+
+
 def test_linear_webhook_check_does_not_read_the_secret_file(tmp_path: Path) -> None:
     config, findings = _webhook_config(
         tmp_path,
@@ -430,6 +444,26 @@ def test_linear_webhook_check_does_not_read_the_secret_file(tmp_path: Path) -> N
             "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
             "  path: /a?b\n",
             "linear_webhook.path must be an absolute URL path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  public_url: http://box.example.ts.net/linear-webhook\n",
+            "linear_webhook.public_url must be an https URL whose path is linear_webhook.path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  public_url: https://box.example.ts.net/other\n",
+            "linear_webhook.public_url must be an https URL whose path is linear_webhook.path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  public_url: https://user:pw@box.example.ts.net/linear-webhook\n",
+            "linear_webhook.public_url must be an https URL whose path is linear_webhook.path",
+        ),
+        (
+            "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"
+            "  public_url: https://box.example.ts.net/linear-webhook?k=v\n",
+            "linear_webhook.public_url must be an https URL whose path is linear_webhook.path",
         ),
         (
             "linear_webhook:\n  bind: 127.0.0.1:8787\n  secret_file: /s\n"

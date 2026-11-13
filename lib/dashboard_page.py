@@ -318,6 +318,7 @@ SCRIPT = r"""
   var reloadArmed = false;
   var firstRender = true;
   var latest = null;
+  var healthKey = '';
   var tickers = [];
   var prevKeys = {};
   var nextKeys = {};
@@ -409,10 +410,36 @@ SCRIPT = r"""
 
   function renderBadge(d) {
     var a = d.attention || {count: 0};
+    var total = a.count + agedHealth(d).extra.length;
     var count = byId('attention-count');
-    if (count) count.textContent = String(a.count);
+    if (count) count.textContent = String(total);
     var badge = byId('attention-badge');
-    if (badge) badge.className = 'badge' + (a.count ? '' : ' clear');
+    if (badge) badge.className = 'badge' + (total ? '' : ' clear');
+  }
+
+  // #92: a component's state ages with the snapshot, so a snapshot that
+  // stops changing (its publisher died) never keeps showing UP.
+  function agedHealth(d) {
+    var h = d.health || {};
+    var t = h.thresholds || {};
+    var staleBeats = t.stale_beats || 3;
+    var downBeats = t.down_beats || 8;
+    var extra = [];
+    var rows = (h.components || []).map(function (c) {
+      var base = c.last_seen_age_seconds;
+      if (c.state === 'down' || base === null || base === undefined) return c;
+      var age = base + since();
+      var interval = Math.max(Number(c.interval_seconds) || 15, 1);
+      var state = age > downBeats * interval ? 'down' : age > staleBeats * interval ? 'stale' : c.state;
+      if (state === c.state) return c;
+      var reason = 'no heartbeat for ' + dur(age);
+      if (state === 'down' && c.configured !== false) {
+        extra.push({kind: 'down', repo: '', ticket_id: '', component: c.label,
+                    link: 'health.html#' + c.anchor, detail: 'down (' + reason + ')'});
+      }
+      return Object.assign({}, c, {state: state, reason: reason});
+    });
+    return {rows: rows, extra: extra, key: rows.map(function (c) { return c.state; }).join(',')};
   }
 
   // --- main page: status, lanes and slots, the queue rail ------------------
@@ -584,12 +611,13 @@ SCRIPT = r"""
   // --- activity page ---------------------------------------------------------
 
   var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', stale: 'warn', paused: 'warn',
-                   down: 'bad', 'no-waiter': 'bad'};
+                   down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   function renderAttention(d) {
     var a = d.attention || {count: 0, items: []};
-    var root = panel('attention', 'Needs attention', a.count + (a.count === 1 ? ' item' : ' items'));
+    var items = (a.items || []).concat(agedHealth(d).extra);
+    var root = panel('attention', 'Needs attention', items.length + (items.length === 1 ? ' item' : ' items'));
     if (!root) return;
-    list(root, a.items, 'all clear', function (x) {
+    list(root, items, 'all clear', function (x) {
       var li = el('li');
       add(li, chip(x.kind, ATTENTION[x.kind] || 'muted'));
       if (x.component) add(li, link('ticket', healthLink(x.link))).textContent = x.component;
@@ -1047,8 +1075,9 @@ SCRIPT = r"""
   var HEALTH_STATE = {up: ['UP', 'ok'], stale: ['STALE', 'warn'], down: ['DOWN', 'bad']};
   function renderComponents(d) {
     var h = d.health || {known: false, components: []};
-    var rows = h.components || [];
-    var root = panel('components', 'Components', rows.length + ' components · ' + (h.down || 0) + ' down');
+    var rows = agedHealth(d).rows;
+    var down = rows.filter(function (c) { return c.state === 'down' && c.configured !== false; }).length;
+    var root = panel('components', 'Components', rows.length + ' components · ' + down + ' down');
     if (!root) return;
     if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
     var table = add(root, el('table'));
@@ -1065,6 +1094,7 @@ SCRIPT = r"""
       var st = HEALTH_STATE[c.state] || ['OTHER', 'muted'];
       add(cell, chip(st[0], st[1]));
       if (c.reason) add(cell, el('span', 'muted', ' ' + c.reason));
+      if (c.configured === false) add(cell, el('span', 'muted', ' (not configured)'));
       add(tr, el('td', null, c.last_seen_et || 'never'));
       ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
       add(tr, el('td', 'num', c.pid === null || c.pid === undefined ? '—' : c.pid));
@@ -1117,6 +1147,7 @@ SCRIPT = r"""
     scrollTrails();
     prevKeys = nextKeys;
     firstRender = false;
+    healthKey = agedHealth(d).key;
   }
 
   function updateLink() {
@@ -1140,6 +1171,7 @@ SCRIPT = r"""
   function tick() {
     var d = since();
     tickers.forEach(function (t) { t.run(d); });
+    if (latest && agedHealth(latest).key !== healthKey) render(latest);
     updateLink();
   }
 
@@ -1596,7 +1628,7 @@ def _queue(snapshot: dict) -> str:
 
 
 _ATTENTION = {"stuck": "bad", "overdue": "bad", "dead": "bad", "stale": "warn", "paused": "warn",
-              "down": "bad", "no-waiter": "bad"}
+              "down": "bad", "no-waiter": "bad", "health": "bad"}
 _HEALTH_LINK = re.compile(r"health\.html#[A-Za-z0-9_-]+")
 
 
@@ -1794,6 +1826,8 @@ def _components(snapshot: dict) -> str:
     for row in rows:
         label, cls = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
         reason = _span("muted", " " + row["reason"]) if row.get("reason") else ""
+        if row.get("configured") is False:
+            reason += _span("muted", " (not configured)")
         body.append(
             f'<tr{_anchor_attr(row.get("anchor"))}>'
             + _td(row["component"])
