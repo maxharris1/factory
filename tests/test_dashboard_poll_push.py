@@ -303,7 +303,10 @@ dashboard:
     push = seen["after_poll"]
     assert isinstance(push, PollPusher)
     assert push.every_seconds == 120
-    assert push.argv[-4:] == ["--db", str(tmp_path / "orch.db"), "--orch", str(tmp_path / "orch.yml")]
+    assert push.argv[-6:] == [
+        "--db", str(tmp_path / "orch.db"), "--orch", str(tmp_path / "orch.yml"),
+        "--poll-seconds", "60",
+    ]
 
 
 def test_poller_service_runs_orch_poll_which_owns_the_dashboard_push() -> None:

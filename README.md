@@ -919,10 +919,13 @@ handoff comment id itself is never copied); `poller.verdicts`, the newest
 `outcome` (a dispatcher outcome such as `queued-review-fix`, anything else
 `other`) and `kind` (`routed`, `shipped`, `stale`, `rejected`, `stuck`,
 `blocked`, `waiting`, `other`), `null` without that table;
-`poller.health`, `ok` while the last poll cycle ended at most 150 s ago,
-`late` to 300 s, then `stale`, and `unknown` when the snapshot was not
-told when the last cycle ended (only live pushes pass `--last-cycle`;
-`main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
+`poller.health`, with `cycle_seconds` set to the poller's `poll_seconds`
+(`P`, 30 or 60; `orch poll` passes it to each push as `--poll-seconds`,
+otherwise orch.yml's value is used): `ok` while the last poll cycle ended
+at most `2P + 30` seconds ago (90 s at 30, 150 s at 60), `late` to `5P`
+(150 s at 30, 300 s at 60), then `stale`, and `unknown` when the snapshot
+was not told when the last cycle ended (only live pushes pass
+`--last-cycle`; `main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
 (Linear 429 or `RATELIMITED` errors in the last hour), `exhausted` (`Linear
 poll budget is exhausted` errors), `deferring` (`Linear poll budget`
 deferrals) or `ok`, with those hourly counts and the poller's Linear share
