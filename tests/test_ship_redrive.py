@@ -545,7 +545,9 @@ def test_aut_2286_legacy_failed_intent_completes_after_the_fix_is_installed(
     assert state == "handed-off"
     assert handled == "ship-already-completed-handoff"
     assert [action for action, _ in grok_wakes(queue)] == ["done"]
-    assert not any(ref.ticket_id == "AUT-2286" for ref in dispatcher._tracked_refs())
+    # #108: a handed-off ticket stays polled (slowly), with nothing to replay.
+    refs = [ref for ref in dispatcher._tracked_refs() if ref.ticket_id == "AUT-2286"]
+    assert [ref.allow_merged for ref in refs] == [False]
 
     dispatcher.process(aut0_2286())
     Dispatcher(

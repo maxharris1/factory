@@ -141,7 +141,7 @@ class HTTPResult:
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 ErrorSink = Callable[[str, str, str], None]
 DeferralSink = Callable[[str], None]
-TerminalSink = Callable[[str, str, str], None]
+TerminalSink = Callable[[str, str, str, "TrackedTicket | None"], None]
 
 
 class DirtyQueue(Protocol):
@@ -671,7 +671,14 @@ class LivePollSource:
                         raise PollSourceError(
                             "Linear issue is not in its configured project"
                         )
-                    found.append(self._linear_ticket(project, issue))
+                    found.append(
+                        self._linear_ticket(
+                            project,
+                            issue,
+                            tracked=True,
+                            allow_merged=ref.allow_merged,
+                        )
+                    )
                     continue
                 if ref.tracker != "github":
                     continue
@@ -1082,13 +1089,22 @@ class LivePollSource:
         if cached is not None:
             return cached
         pull = self._github_pull(project.repo, number, fresh=fresh)
-        if pull.get("merged") is True and not allow_merged:
-            if self.terminal_sink is not None:
-                self.terminal_sink(project.repo, number, "merged")
-            raise _TerminalTicket()
+        merged = pull.get("merged") is True
         head = _object(pull.get("head"), "GitHub pull request head").get("sha")
         if not isinstance(head, str):
             raise PollSourceError(f"{project.repo}#{number} has no head")
+        if merged and not fresh:
+            # #108: every merge the poll sees ends the ticket; the fresh read
+            # is a caller's mid-step read and records nothing (#42 N3).
+            if self.terminal_sink is not None:
+                self.terminal_sink(
+                    project.repo,
+                    number,
+                    "merged",
+                    self._merged_ticket(project, factory, number, pull, head),
+                )
+            if not allow_merged:
+                raise _TerminalTicket()
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
@@ -1109,9 +1125,34 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
+            merged=merged and fresh,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _merged_ticket(
+        self,
+        project: Project,
+        factory: FactoryConfig,
+        number: str,
+        pull: Mapping[str, Any],
+        head: str,
+    ) -> TrackedTicket:
+        """Enough of a merged PR for its orch:state/merged label: no comment
+        or CI read."""
+        return TrackedTicket(
+            repo=project.repo,
+            ticket_id=number,
+            factory=factory,
+            comments=(),
+            current_head=head,
+            ci={},
+            risk="high",
+            ticket_url=_optional_string(pull.get("html_url")),
+            pr_number=number,
+            grok_bot=project.grok_bot,
+            merged=True,
+        )
 
     def _hold_inputs(
         self,
@@ -1160,6 +1201,8 @@ class LivePollSource:
         issue: Mapping[str, Any],
         *,
         fresh: bool = False,
+        tracked: bool = False,
+        allow_merged: bool = False,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
@@ -1191,6 +1234,12 @@ class LivePollSource:
         )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
+            if pull.get("merged") is True and tracked:
+                # #108: a hand merge of a tracked Linear ticket's PR ends it too.
+                if self.terminal_sink is not None:
+                    self.terminal_sink(project.repo, identifier, "merged", None)
+                if not allow_merged:
+                    raise _TerminalTicket()
             pr_head = _object(
                 pull.get("head"),
                 "GitHub pull request head",

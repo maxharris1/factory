@@ -7,6 +7,7 @@ import re
 import sqlite3
 import sys
 import time
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,10 @@ GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
 FINISHED_STATES = ("merged", "done")
 _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
+# #108 (#42 N4): states where no bot is working and no person is waiting on
+# the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
+STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
+STOPPED_POLL_SECONDS = 300
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
 GROK_WAKE_REASONS = (
     "blocked",
@@ -126,6 +131,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # #108 (#42 N3): the PR is merged. Set only on a fresh read, which never
+    # records the merge itself: its caller decides.
+    merged: bool = False
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -396,6 +404,9 @@ class Dispatcher:
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
         # #105: the source's uncached read, for a ready naming a newer head.
         self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
+        # #108: the poll cycle count and interval, for the stopped-state cadence.
+        self._cycle = 0
+        self._poll_seconds = POLL_SECONDS
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -407,6 +418,10 @@ class Dispatcher:
             begin()
         self._polled = {}
         self._fresh_reader = getattr(source, "fresh_ticket", None)
+        self._poll_seconds = getattr(
+            getattr(source, "config", None), "poll_seconds", POLL_SECONDS
+        )
+        self._cycle += 1
         self._feed(source)
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
@@ -429,7 +444,7 @@ class Dispatcher:
             linear = ()
         self._discover(linear, tracker="linear")
         try:
-            tracked = source.tracked_tickets(self._tracked_refs())
+            tracked = source.tracked_tickets(self._tracked_refs(self._cycle))
         except Exception as exc:
             self.record_poll_error("tracked", "-", type(exc).__name__)
             tracked = ()
@@ -466,7 +481,7 @@ class Dispatcher:
             except Exception as exc:
                 self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
                 continue
-            if ticket is not None:
+            if ticket is not None and not ticket.merged:
                 self._discover((ticket,), tracker=ref.tracker)
 
     def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
@@ -1638,6 +1653,9 @@ class Dispatcher:
                 fresh = self._fresh_ticket(ticket)
             except Exception:
                 return False, "pr-head-unavailable"
+            if fresh is not None and fresh.merged:
+                # #108: the next poll's own read records the merge.
+                return True, "ready-on-merged-pr"
             if fresh is not None:
                 head = _matching_head(reported_head, fresh.current_head)
             if head is None:
@@ -3635,61 +3653,81 @@ class Dispatcher:
             and _matching_head(fields["head"], ticket.current_head) is not None
         )
 
-    def _tracked_refs(self) -> tuple[TicketRef, ...]:
+    def _tracked_refs(self, cycle: int | None = None) -> tuple[TicketRef, ...]:
+        """The tracked tickets poll_once reads (#108).
+
+        Every ticket that is not merged, done or abandoned, plus a merged or
+        handed-off one with a completed ship intent left to replay or an
+        external ship left to settle. A handed-off ticket stays polled, so
+        its merge is seen and a trusted ready may re-enter review.
+
+        With cycle, a ticket in a stopped state (handed-off, capped, blocked,
+        refused, or stuck) with nothing to replay is read only on its turn:
+        once every STOPPED_POLL_SECONDS, spread across cycles by a hash of
+        its identity. Every other ticket is read every cycle.
+        """
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                       CASE
-                         WHEN state.workflow_state IN ('merged', 'handed-off')
-                         THEN 1
-                         ELSE 0
-                       END AS allow_merged
-                FROM tracked_tickets AS tracked
-                LEFT JOIN ticket_state AS state
-                  ON state.repo = tracked.repo
-                 AND state.ticket_id = tracked.ticket_id
-                WHERE state.workflow_state IS NULL
-                   OR state.workflow_state NOT IN (
-                       'merged', 'handed-off', 'done', 'abandoned'
-                   )
-                   OR (
-                       state.workflow_state IN ('merged', 'handed-off')
-                       AND EXISTS (
-                           SELECT 1
-                           FROM ship_intents AS ship
-                           LEFT JOIN handled_comments AS handled
-                             ON handled.repo = ship.repo
-                            AND handled.ticket_id = ship.ticket_id
-                            AND handled.comment_id = ship.comment_id
-                           WHERE ship.repo = tracked.repo
-                             AND ship.ticket_id = tracked.ticket_id
-                             AND ship.status = 'completed'
-                             AND handled.comment_id IS NULL
-                       )
-                   )
-                   OR (
-                       state.workflow_state = 'merged'
-                       AND EXISTS (
-                           SELECT 1
-                           FROM external_ship_intents AS external
-                           WHERE external.repo = tracked.repo
-                             AND external.ticket_id = tracked.ticket_id
-                             AND external.settled = 0
-                       )
-                   )
-                ORDER BY tracked.repo, tracked.ticket_id
+                SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
+                       unsettled
+                FROM (
+                    SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
+                           state.workflow_state,
+                           COALESCE(state.stuck, 0) AS stuck,
+                           EXISTS (
+                               SELECT 1
+                               FROM ship_intents AS ship
+                               LEFT JOIN handled_comments AS handled
+                                 ON handled.repo = ship.repo
+                                AND handled.ticket_id = ship.ticket_id
+                                AND handled.comment_id = ship.comment_id
+                               WHERE ship.repo = tracked.repo
+                                 AND ship.ticket_id = tracked.ticket_id
+                                 AND ship.status = 'completed'
+                                 AND handled.comment_id IS NULL
+                           ) AS replay,
+                           EXISTS (
+                               SELECT 1
+                               FROM external_ship_intents AS external
+                               WHERE external.repo = tracked.repo
+                                 AND external.ticket_id = tracked.ticket_id
+                                 AND external.settled = 0
+                           ) AS unsettled
+                    FROM tracked_tickets AS tracked
+                    LEFT JOIN ticket_state AS state
+                      ON state.repo = tracked.repo
+                     AND state.ticket_id = tracked.ticket_id
+                )
+                WHERE workflow_state IS NULL
+                   OR workflow_state NOT IN ('merged', 'done', 'abandoned')
+                   OR (workflow_state = 'merged' AND (replay OR unsettled))
+                ORDER BY repo, ticket_id
                 """
             ).fetchall()
-        return tuple(
-            TicketRef(
-                repo=str(row["repo"]),
-                ticket_id=str(row["ticket_id"]),
-                tracker=str(row["tracker"]),
-                allow_merged=bool(row["allow_merged"]),
+        every = max(1, STOPPED_POLL_SECONDS // max(1, self._poll_seconds))
+        refs: list[TicketRef] = []
+        for row in rows:
+            state = row["workflow_state"]
+            catching_up = bool(row["replay"]) or bool(row["unsettled"])
+            stopped = bool(row["stuck"]) or state in STOPPED_STATES
+            if (
+                cycle is not None
+                and stopped
+                and not catching_up
+                and (cycle + _spread(row["repo"], row["ticket_id"])) % every != 0
+            ):
+                continue
+            refs.append(
+                TicketRef(
+                    repo=str(row["repo"]),
+                    ticket_id=str(row["ticket_id"]),
+                    tracker=str(row["tracker"]),
+                    allow_merged=state == "merged"
+                    or (state == "handed-off" and bool(row["replay"])),
+                )
             )
-            for row in rows
-        )
+        return tuple(refs)
 
     def active_job_tickets(self) -> frozenset[tuple[str, str]]:
         """(repo, ticket) pairs with a queued or running job, repo lowercased.
@@ -4556,7 +4594,9 @@ class ReviewShipper:
         tracker = self.dispatcher._tracker(request.repo, request.ticket_id)
         if tracker is None:
             raise ShipError(f"{request.repo}#{request.ticket_id} is not tracked")
-        ref = TicketRef(request.repo, request.ticket_id, tracker)
+        # #108 (#42 N3): a merged PR is read, not dropped; the is_merged
+        # check in ship confirms it.
+        ref = TicketRef(request.repo, request.ticket_id, tracker, allow_merged=True)
         fresh_reader = getattr(self.source, "fresh_ticket", None)
         if fresh_reader is not None:
             fresh = fresh_reader(ref)
@@ -4634,6 +4674,10 @@ def _after_poll(hook: Callable[[], None]) -> None:
         hook()
     except Exception as exc:  # a dashboard push never breaks polling
         print(f"dashboard push: {type(exc).__name__}", file=sys.stderr, flush=True)
+
+
+def _spread(repo: str, ticket_id: str) -> int:
+    return zlib.crc32(f"{str(repo).lower()}#{ticket_id}".encode())
 
 
 def _scope(repo: str, ticket_id: str) -> str:
