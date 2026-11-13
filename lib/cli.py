@@ -133,7 +133,7 @@ wait <bot> --autostart [--db PATH] [--machines PATH] [--harness-config PATH]
 
 job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         [--worktree] [--work-root DIR] [--git-url-template URL]
-        -- COMMAND [ARG ...]
+        [--status-file PATH] -- COMMAND [ARG ...]
   Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
   before it starts (a job that is not running is refused and nothing
   runs), then one every --interval seconds (default 15, or a third of the
@@ -156,7 +156,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   COMMAND exits the worktree is removed and pruned, unless it has
   uncommitted changes or unpushed commits; then it is kept and logged.
   The remote is --git-url-template, else $ORCH_GIT_URL_TEMPLATE, else
-  https://github.com/{repo}.git.
+  https://github.com/{repo}.git. --status-file PATH: when this exits, its
+  exit status is written to PATH (mode 600); the autostart waiter uses it
+  to finish a remote run after a waiter restart.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
@@ -771,6 +773,43 @@ def _job(argv: list[str]) -> int:
 
 
 def _job_run(argv: list[str]) -> int:
+    """`orch job run`; with --status-file, its exit status is left there (#87 F1.4).
+
+    The waiter starts a remote run in its own session, so the run outlives a
+    waiter restart; the status file is how a restarted waiter learns how the
+    run ended. It is written (atomically, mode 600) whenever this returns.
+    """
+    own = argv[: argv.index("--")] if "--" in argv else argv
+    status_file: Path | None = None
+    for index, arg in enumerate(own):
+        if arg == "--status-file" and index + 1 < len(own):
+            status_file = Path(own[index + 1])
+        elif arg.startswith("--status-file="):
+            status_file = Path(arg.partition("=")[2])
+    code = 1
+    try:
+        code = _job_run_command(argv)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 2
+        raise
+    finally:
+        if status_file is not None:
+            _write_status(status_file, code)
+    return code
+
+
+def _write_status(path: Path, code: int) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{code}\n")
+        os.replace(temporary, path)
+    except OSError as exc:
+        print(f"orch job run: cannot write {path}: {exc}", file=sys.stderr)
+
+
+def _job_run_command(argv: list[str]) -> int:
     prog = "orch job run"
     if "--" in argv:
         split = argv.index("--")
@@ -786,6 +825,7 @@ def _job_run(argv: list[str]) -> int:
     parser.add_argument("--worktree", action="store_true")
     parser.add_argument("--work-root", type=Path)
     parser.add_argument("--git-url-template")
+    parser.add_argument("--status-file", type=Path)  # read and written by _job_run
     args = parser.parse_args(own)
     if not command:
         print(f"{prog}: pass the command to run after --", file=sys.stderr)
