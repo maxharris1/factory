@@ -13,6 +13,14 @@ direct transition, a bridge of at most MAX_BRIDGE steps through the chart is
 filled in (intake -> questions -> building, since questions is Grok Bot's
 step and has no job of its own); longer gaps are kept as a jump with no
 edge drawn.
+
+The job view draws that path as a left-to-right chain, one node per visit
+(a ticket revised twice shows review, fixing, review, fixing, review), the
+current step highlighted, and the chart's direct successors of the current
+state grayed (render_path_svg). The full chart (render_svg) stays behind a
+toggle. A state is finished (is_terminal) when the chart has no way back to
+work from it: no state reachable from it lies on a cycle (done, merged,
+handed-off, ...); a finished job's current step does not breathe.
 """
 
 from __future__ import annotations
@@ -172,14 +180,49 @@ def path_edges(chart: dict | None, path: Sequence[str]) -> list[tuple[str, str]]
     return [pair for pair in zip(path, path[1:]) if pair in edges]
 
 
+def successors(chart: dict | None, state: str | None) -> list[str]:
+    """The chart's direct successors of `state`, in chart order."""
+    if chart is None or state is None:
+        return []
+    return list(dict.fromkeys(edge["to"] for edge in chart["edges"] if edge["from"] == state))
+
+
+def _reach(adjacency: dict[str, list[str]], state: str) -> set[str]:
+    """Every state reachable from `state` by at least one transition."""
+    seen: set[str] = set()
+    queue = deque(adjacency.get(state, ()))
+    while queue:
+        nxt = queue.popleft()
+        if nxt not in seen:
+            seen.add(nxt)
+            queue.extend(adjacency.get(nxt, ()))
+    return seen
+
+
+def is_terminal(chart: dict | None, state: str | None) -> bool:
+    """True when the chart has no way back to work from `state`: no state
+    reachable from it (itself included) lies on a cycle. done, abandoned and
+    the other stop states qualify, and so do merged and post-merge, which
+    only lead on to done."""
+    if chart is None or state is None:
+        return False
+    adjacency = _adjacency(chart)
+    if state not in adjacency:
+        return False
+    ahead = {state} | _reach(adjacency, state)
+    return not any(name in _reach(adjacency, name) for name in ahead)
+
+
 def job_flow(
     chart: dict | None,
     history: Sequence[tuple[str, float]],
     current: str | None,
     now: float,
 ) -> dict:
-    """{state, path, state_age_seconds} for a ticket whose jobs, oldest
-    first, are `history` as (action, created_at)."""
+    """{state, path, state_age_seconds, next, terminal} for a ticket whose
+    jobs, oldest first, are `history` as (action, created_at). `next` is the
+    chart's direct successors of the current state; `terminal` says the
+    current state is finished (is_terminal)."""
     steps = [(JOB_STATES[action], at) for action, at in history if action in JOB_STATES]
     start = chart["start"] if chart is not None else None
     path = chart_path(chart, [start, *(state for state, _ in steps), current])
@@ -195,7 +238,13 @@ def job_flow(
         while index > 0 and steps[index - 1][0] == current:
             index -= 1
         age = int(max(0.0, now - float(steps[index][1])))
-    return {"state": current, "path": path, "state_age_seconds": age}
+    return {
+        "state": current,
+        "path": path,
+        "state_age_seconds": age,
+        "next": successors(chart, current),
+        "terminal": is_terminal(chart, current),
+    }
 
 
 # --- drawing ------------------------------------------------------------------------
@@ -343,6 +392,144 @@ def render_svg(
                 if gloss
                 else ""
             )
+            + "</g>"
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+
+# --- the job view: the path taken, the current step, what can come next -------------
+
+VISIT_H = 50
+HOP = 44
+PATH_LEFT = 16
+PATH_TOP = 14
+NEXT_ROW = 60
+
+
+def path_geometry() -> dict:
+    """The simplified diagram's sizes, shared with the page script so the
+    live redraw matches the server's."""
+    return {
+        "w": NODE_W, "h": VISIT_H, "hop": HOP, "left": PATH_LEFT, "top": PATH_TOP,
+        "row": NEXT_ROW, "arrow": ARROW, "gloss": GLOSS,
+    }
+
+
+def _lines(y: float, texts: Sequence[tuple[str, str]]) -> list[tuple[float, str, str]]:
+    """Baselines for one to three lines of text in a node at `y`."""
+    baselines = {1: (VISIT_H / 2 + 4,), 2: (21, 36), 3: (17, 30, 43)}[len(texts)]
+    return [(y + base, cls, text) for base, (cls, text) in zip(baselines, texts)]
+
+
+def render_path_svg(
+    chart: dict,
+    path: Sequence[str],
+    current: str | None,
+    *,
+    next_steps: Sequence[str] | None = None,
+    terminal: bool | None = None,
+    meta: str = "",
+    label: str = "Path taken",
+) -> str:
+    """The path a ticket took as inline SVG: one node per visit, left to
+    right in the order the ticket went (a revisited state appears again),
+    arrows in that order, the current step (the last visit of `current`)
+    highlighted and, unless it is finished, breathing; then the chart's
+    direct successors of the current state, grayed with dashed arrows.
+    Nothing else from the chart. `meta` (round, time in state) goes on the
+    current step only."""
+    if next_steps is None:
+        next_steps = successors(chart, current)
+    if terminal is None:
+        terminal = is_terminal(chart, current)
+    at = max((i for i, state in enumerate(path) if state == current), default=-1)
+    nexts = list(next_steps) if at >= 0 else []
+    group = {state["name"]: state["group"] for state in chart["states"]}
+    labels = {(edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]}
+    step = NODE_W + HOP
+    rows = max(1, len(nexts))
+    y0 = PATH_TOP + (rows - 1) * NEXT_ROW / 2
+    mid = y0 + VISIT_H / 2
+    width = 2 * PATH_LEFT + max(1, len(path) + (1 if nexts else 0)) * step - HOP
+    height = 2 * PATH_TOP + (rows - 1) * NEXT_ROW + VISIT_H
+    e = lambda value: html.escape(str(value), quote=True)  # noqa: E731
+
+    def title(a: str, b: str) -> str:
+        if (a, b) not in labels:
+            return f"{a} → {b} (no direct transition on the chart)"
+        return f"{a} → {b}" + (f": {labels[(a, b)]}" if labels[(a, b)] else "")
+
+    def texts(name: str, extra: str = "") -> list[tuple[str, str]]:
+        lines = [("", name)]
+        if GLOSS.get(name):
+            lines.append(("gloss", GLOSS[name]))
+        if extra:
+            lines.append(("meta", extra))
+        return lines
+
+    def node(x: float, y: float, lines: list[tuple[str, str]]) -> str:
+        out = []
+        for base, cls, text in _lines(y, lines):
+            attr = f' class="{cls}"' if cls else ""
+            out.append(f'<text{attr} x="{_n(x + NODE_W / 2)}" y="{_n(base)}">{e(text)}</text>')
+        return "".join(out)
+
+    parts = [
+        f'<svg class="flow steps" viewBox="0 0 {_n(width)} {_n(height)}" width="{_n(width)}" '
+        f'height="{_n(height)}" role="img" aria-label="{e(label)}">'
+    ]
+    for i in range(1, len(path)):
+        a, b = path[i - 1], path[i]
+        x1, x2 = PATH_LEFT + (i - 1) * step + NODE_W, PATH_LEFT + i * step
+        classes = "hop" if (a, b) in labels else "hop jump"
+        parts.append(
+            f'<g class="{classes}" data-from="{e(a)}" data-to="{e(b)}" data-step="{i}">'
+            f"<title>{e(title(a, b))}</title>"
+            f'<path d="M{_n(x1)} {_n(mid)} L{_n(x2 - ARROW * 1.6)} {_n(mid)}"/>'
+            f'<polygon points="{_arrow(x2, mid, x1, mid)}"/></g>'
+        )
+    if nexts:
+        sx = PATH_LEFT + at * step + NODE_W
+        nx = PATH_LEFT + len(path) * step
+        for j, name in enumerate(nexts):
+            ny = PATH_TOP + j * NEXT_ROW + VISIT_H / 2
+            bend = (nx - sx) / 2
+            parts.append(
+                f'<g class="hop next" data-from="{e(current)}" data-to="{e(name)}">'
+                f"<title>{e(title(str(current), name))}</title>"
+                f'<path d="M{_n(sx)} {_n(mid)} C{_n(sx + bend)} {_n(mid)} {_n(nx - bend)} {_n(ny)} '
+                f'{_n(nx - ARROW * 1.6)} {_n(ny)}"/>'
+                f'<polygon points="{_arrow(nx, ny, nx - bend, ny)}"/></g>'
+            )
+    for i, name in enumerate(path):
+        x = PATH_LEFT + i * step
+        classes = ["visit"]
+        if i == at:
+            classes.append("current")
+            if not terminal:
+                classes.append("breathe")
+        halo = (
+            f'<rect class="halo" x="{_n(x - 4)}" y="{_n(y0 - 4)}" width="{NODE_W + 8}" '
+            f'height="{VISIT_H + 8}" rx="9"/>'
+            if i == at
+            else ""
+        )
+        parts.append(
+            f'<g class="{" ".join(classes)}" data-state="{e(name)}" data-step="{i}">'
+            f"<title>{e(name)}{' (now)' if i == at else ''}</title>"
+            f'<rect x="{_n(x)}" y="{_n(y0)}" width="{NODE_W}" height="{VISIT_H}" rx="6" '
+            f'class="box g-{e(group.get(name, "other"))}"/>{halo}'
+            + node(x, y0, texts(name, meta if i == at else ""))
+            + "</g>"
+        )
+    for j, name in enumerate(nexts):
+        x, y = PATH_LEFT + len(path) * step, PATH_TOP + j * NEXT_ROW
+        parts.append(
+            f'<g class="next" data-state="{e(name)}"><title>{e(name)} (can come next)</title>'
+            f'<rect x="{_n(x)}" y="{_n(y)}" width="{NODE_W}" height="{VISIT_H}" rx="6" class="box"/>'
+            + node(x, y, texts(name))
             + "</g>"
         )
     parts.append("</svg>")

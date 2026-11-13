@@ -183,8 +183,8 @@ another bot; no key, `-i` or config path is ever passed. Each remote start gets
 a fresh random worker tag, recorded on the slot before ssh starts, and the
 start script runs under `exec env ORCH_WORKER_TAG=<tag>`, so the command and
 every process it starts carry the tag; the tag, not a process number, names
-the job's worker. The script refuses (exit 125, nothing run) a device without
-Linux `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
+the job's worker. On Linux the script refuses (exit 125, nothing run) a device
+without `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
 the worker's process group and boot id (sshd starts the command in its own
 session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
@@ -193,6 +193,32 @@ with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 `--worktree` is box-only and refused for a remote job (exit 2): the harness
 checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+
+A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
+process's environment, so there the worker is named by its record alone, one
+file per start (`.orch-worker-<tag>.pid` in the job directory). The start
+refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
+id (a UUID) and the start leads its own process group, then creates the record with
+noclobber (it refuses if the file exists), holding
+`<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
+UTC). A check that finds no record cannot tell whether the start is still on
+its way, so it creates the record itself as a fence (`fenced`) and cannot tell
+this time; the fenced start then refuses, and later checks read the fence as
+gone. A start that never ran (unreachable, refused) so frees its slot one check
+later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+every step to succeed with a well-formed result: ps exits 0, every line it
+lists is three numbers, and awk reads all of them, exits 0 and prints exactly
+three 0/1 answers. Then a record from an earlier boot session or an empty group
+is gone; a group holding only the bot's own processes and led by the recorded
+leader is running; a malformed record, another tag, another user's process in the group,
+a group whose leader has exited (nothing ties the processes left to this start),
+a leader with a different start time (the number was reused), or any failed or
+malformed step (no boot session UUID, a user id that is not a number, ps, awk)
+cannot tell. The stop sends SIGTERM to the recorded group only when the check
+would say running. A process that leaves the job's group (`setsid`), or stays in
+it after its leader exits, is never signalled on macOS; the latter keeps the
+slot until it ends. Every script runs under POSIX `sh` whatever the login shell
+(the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
@@ -745,7 +771,8 @@ place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
 
-**Pages.** Every page shares one bar: links to the pages, the link state
+**Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
+Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
 and a **needs attention** badge with a count that links to the Activity
 page (stuck tickets, overdue, stale or dead jobs, then paused tickets not
@@ -764,18 +791,29 @@ already listed as stuck, each once).
   how long ago it was claimed and `not started` instead of a timer and
   heartbeat bar. Stale and dead jobs count in stuck / overdue. A lane counts `max(held, running)` slots, so a slot still
   held in `device_slots` is never shown as idle (#63 FU-1). The queue sits
-  in a side rail beside the lanes with wait times. A slot or queue item
-  opens its job page.
+  in a side rail beside the lanes with wait times. Clicking a slot or a
+  queue item opens that job's flow (the same view as `job.html#job-<id>`)
+  in a modal; Esc, the close button or a click on the backdrop closes it,
+  and focus returns to the job. Without script (or with a modifier key)
+  the link goes to `job.html#job-<id>`.
 - **Job** (`job.html`, `job.html#job-<id>` for one job): every running or
-  queued job with a flow diagram of the ticket statechart, from the ticket
-  (start) to shipped: build, review, the revise loop (`fixing`), ready for
-  review (`handed-off`) and the ship states. The diagram is generated from
+  queued job with the path its ticket took, drawn left to right in the
+  order it went: one node per visit, so a ticket that was reviewed, revised
+  and reviewed again shows review, fixing, review (not a loop back). The
+  current step is highlighted in the accent and breathes (a slow glow,
+  2.6 s) unless the job is finished; `prefers-reduced-motion: reduce`
+  leaves a static highlight. It carries the job's round and time in that
+  state (`r2/3 · 33m 20s`). After it, grayed with dashed arrows, are the
+  chart's direct successors of the current state, and nothing else from the
+  chart. A state is finished when the chart has no way back to work from
+  it (no state reachable from it lies on a cycle: done, merged, post-merge,
+  handed-off and the stop states). The full statechart, with the path
+  highlighted, is behind a "full chart" toggle, collapsed by default. Both
+  are generated from
   [`model/chart.mmd`](model/chart.mmd), the chart the statechart check
   draws from `model/Orchestrator.tla` (CI fails if they differ), so a
-  change to the statechart changes the diagram; only the layout and a few
-  plain-word glosses are the dashboard's. The path the job's ticket took
-  and its current state are highlighted, with its round and time in that
-  state. The path is the start state, then the state each of the ticket's
+  change to the statechart changes them; only the layout and a few
+  plain-word glosses are the dashboard's. The path is the start state, then the state each of the ticket's
   jobs worked in (`build` is `building`, `review` is `review`, `fix` is
   `fixing`, ...), then the ticket's current workflow state; where two of
   those have no direct transition, a bridge of at most two steps through
@@ -796,7 +834,9 @@ job, which `:target` marks. With script, each page fetches the relative
 `status.json` every 1.5 seconds (`cache: 'no-store'`) and rebuilds its
 panels in place, with no reload; ages tick every second between fetches,
 rows that appear since the last snapshot flash briefly, and the job page
-copies the server-drawn diagram and moves the highlight. If `status.json`
+redraws each job's path (SVG nodes made with `createElementNS`, in the
+namespace of the server-drawn chart) and copies the server-drawn full chart
+with the highlight moved. If `status.json`
 cannot be fetched at all, the server-rendered page stays and reloads as
 without script. Everything is inline: no external asset, font or CDN, so it
 works offline on the tailnet. The look follows Omarchy (omarchy.org): the
@@ -807,7 +847,8 @@ script as bytes, registered with `FontFace`, so nothing is fetched and the
 static server's CSP is unchanged; without script the system fonts are used.
 Values are only ever set as text
 (`createElement`/`textContent`), never parsed as HTML. Animations (brand
-caret, link pulse, heartbeat shimmer, new-row flash) stop under
+caret, link pulse, heartbeat shimmer, new-row flash, the current step's
+breathing) stop under
 `prefers-reduced-motion: reduce`, and every text colour meets WCAG AA
 (4.5:1) on every panel background (`tests/test_dashboard_mission_control.py`
 checks the palette). Paths: `--db`, else
@@ -855,7 +896,8 @@ of the hourly budget (1250 requests, 1,500,000 complexity).
 For the layout: each running and queued job's `tracker` (`github`,
 `linear` or `null`), `round` (its ticket's review round, `null` when the
 ticket is not tracked) and `flow` (`state`, the ticket's workflow state on
-the chart; `path`; `state_age_seconds`); `attention` (`count` and `items`,
+the chart; `path`; `state_age_seconds`; `next`, the chart's direct
+successors of `state`; `terminal`, whether `state` is finished); `attention` (`count` and `items`,
 each with `kind` `stuck`, `overdue` or `paused`); `statechart` (the parsed
 chart: `source` is the file name only, `start`, `states` with their colour
 `group`, `edges` with their labels, `legend`; `null` when the chart cannot

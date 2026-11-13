@@ -1,12 +1,16 @@
 """The dashboard pages: inline CSS, the server-rendered panels and the script.
 
-Four pages share one bar (navigation and the needs-attention badge):
+Four pages share one bar (navigation, in this order, and the
+needs-attention badge):
 
-- index.html (main): factory status (with Linear webhook health when a
-  listener has run), lanes and slots, the queue rail;
-- job.html: every running or queued job with the ticket statechart
-  (model/chart.mmd, see lib/dashboard_flow.py), its path and current state
-  highlighted; job.html#job-<id> shows one job;
+- index.html (Lanes): factory status (with Linear webhook health when a
+  listener has run), lanes and slots, the queue rail; with script, a click
+  on a job opens its flow in a modal (without script the link goes to
+  job.html#job-<id>);
+- job.html (Jobs): every running or queued job with the path its ticket
+  took through the statechart (model/chart.mmd, see lib/dashboard_flow.py),
+  the current step and what can come next; the full chart is behind a
+  collapsed toggle; job.html#job-<id> shows one job;
 - activity.html: needs attention, recent handoffs and verdicts, tickets, log;
 - efficiency.html: poll and Linear budget, handoff savings.
 
@@ -20,8 +24,9 @@ in the script as bytes (see font_faces), so no font is ever fetched. The
 script fetches the relative
 `status.json` every POLL_MS (1 to 2 seconds) and rebuilds the current
 page's panels in place with createElement/textContent only, never HTML
-strings, so no value from the snapshot is ever parsed as markup. On the job
-page it copies the server-drawn diagram and only moves the highlight. If
+strings, so no value from the snapshot is ever parsed as markup (SVG nodes
+are made with createElementNS, in the namespace of the server-drawn chart).
+The full chart is a copy of the server-drawn one with the highlight moved. If
 status.json cannot be fetched at all, the server-rendered page stays and
 reloads every refresh_seconds.
 """
@@ -35,7 +40,7 @@ import json
 import re
 from pathlib import Path
 
-from lib.dashboard_flow import render_svg
+from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
 
 POLL_MS = 1500
 
@@ -221,17 +226,46 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:lowercase;color:
 .legend .key{color:var(--g,var(--muted))}
 .legend .key::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border:2px solid currentColor}
 .legend .key.path{color:var(--accent)}
+.legend .key.now{color:var(--accent)}.legend .key.now::before{background:var(--accent)}
+.legend .key.next::before{border-style:dashed;border-color:var(--line-hi)}
+.flow.steps .visit .box{fill:var(--panel-hi);stroke:var(--g,var(--line-hi));stroke-width:2}
+.flow.steps .visit.current .box{fill:var(--sel);stroke:var(--accent);stroke-width:3}
+.flow.steps .visit.current text{fill:var(--accent)}
+.flow.steps .halo{fill:none;stroke:var(--accent);stroke-width:4;opacity:.35}
+.flow.steps .meta{fill:var(--text);font-size:10px}
+.flow.steps .next .box{fill:none;stroke:var(--line-hi);stroke-width:1.5;stroke-dasharray:5 4}
+.flow.steps .next text{fill:var(--muted)}
+.flow.steps .hop path{fill:none;stroke:var(--accent);stroke-width:2}
+.flow.steps .hop polygon{fill:var(--accent)}
+.flow.steps .hop.jump path{stroke-dasharray:2 4}
+.flow.steps .hop.next path{stroke:var(--line-hi);stroke-width:1.4;stroke-dasharray:5 4}
+.flow.steps .hop.next polygon{fill:var(--line-hi)}
+.flow .visit.breathe .halo{animation:breathe 2.6s ease-in-out infinite}
+.fullchart{margin-top:6px}
+.modal{position:fixed;inset:0;z-index:10;display:flex;align-items:flex-start;justify-content:center;
+padding:6vh 16px;overflow-y:auto;background:color-mix(in srgb,var(--ink) 78%,transparent)}
+.modal-box{position:relative;width:min(1300px,100%);background:var(--panel);box-shadow:var(--elev-hi)}
+.modal-box .jobpage{box-shadow:none}
+.modal-box .jobpage h2{padding-right:92px}
+.modal-box .more{padding:0 16px 14px}
+.modal-close{position:absolute;top:10px;right:12px;z-index:1;padding:2px 10px;border:1px solid var(--line-hi);
+background:var(--panel-hi);color:var(--text-2);font:500 12px/1.6 var(--mono);cursor:pointer}
+.modal-close:hover{color:var(--text);border-color:var(--brand)}
+.modal-close:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+body.modal-open{overflow:hidden}
 .definition{margin:8px 0 4px;color:var(--text-2)}
 [hidden]{display:none !important}
 @keyframes caret{50%{opacity:0}}
 @keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}100%{box-shadow:0 0 0 8px transparent}}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
+@keyframes breathe{0%,100%{opacity:.18;stroke:var(--accent);stroke-width:3}50%{opacity:.8;stroke:var(--accent);stroke-width:7}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts,#health,#savings{grid-column:1/-1}}
 @media (max-width:640px){.bar{padding:8px 14px}main{padding:14px 12px 24px;gap:12px}.bar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
-.fresh{outline:2px solid var(--brand);outline-offset:-2px}}
+.fresh{outline:2px solid var(--brand);outline-offset:-2px}
+.flow .visit.breathe .halo{animation:none;opacity:.45}}
 """
 
 SCRIPT = r"""
@@ -257,6 +291,8 @@ SCRIPT = r"""
 (function () {
   'use strict';
   var POLL_MS = __POLL_MS__;
+  // The job view's simplified diagram (lib/dashboard_flow.py path_geometry).
+  var FLOW = __FLOW__;
   var STATUS_URL = 'status.json';
   var FETCH_TIMEOUT_MS = 5000;
   var LINK_LOST_MS = 6000;
@@ -280,6 +316,8 @@ SCRIPT = r"""
   var prevKeys = {};
   var nextKeys = {};
   var openDetails = {};
+  var modal = null;
+  var trails = [];
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -345,8 +383,8 @@ SCRIPT = r"""
     if (count !== undefined && count !== null) add(head, el('span', 'count', count));
     return root;
   }
-  function details(root, id, summary) {
-    var box = add(root, el('details'));
+  function details(root, id, summary, cls) {
+    var box = add(root, el('details', cls));
     box.open = !!openDetails[id];
     if (box.addEventListener) box.addEventListener('toggle', function () { openDetails[id] = box.open; });
     add(box, el('summary', null, summary));
@@ -415,7 +453,7 @@ SCRIPT = r"""
   }
 
   function slotCard(r) {
-    var card = link('slot job' + (r.overdue ? ' overdue' : ''), 'job.html#' + anchor(r.job));
+    var card = opensModal(link('slot job' + (r.overdue ? ' overdue' : ''), 'job.html#' + anchor(r.job)), r.job);
     card.title = r.repo + '#' + r.ticket_id + ' (job ' + r.job + ')';
     var top = add(card, el('div', 'top'));
     add(top, bot(r.recipient));
@@ -525,7 +563,7 @@ SCRIPT = r"""
     if (!root) return;
     list(root, rows, 'queue empty', function (r) {
       var li = el('li');
-      var a = add(li, link('queue-item', 'job.html#' + anchor(r.job)));
+      var a = add(li, opensModal(link('queue-item', 'job.html#' + anchor(r.job)), r.job));
       add(a, bot(r.recipient));
       add(a, el('span', 'ticket', jobLabel(r)));
       add(a, el('span', 'what', r.action));
@@ -748,6 +786,106 @@ SCRIPT = r"""
     return svg;
   }
 
+  // --- the simplified flow: the path taken, now, what can come next ----------
+
+  function fmt(v) { return String(Math.round(v * 10) / 10); }
+  function svgNode(ns, tag, attrs) {
+    var node = document.createElementNS(ns, tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
+    return node;
+  }
+  function arrowPoints(x, y, cx, cy) {
+    var dx = x - cx, dy = y - cy;
+    var len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var ux = dx / len, uy = dy / len, a = FLOW.arrow;
+    var bx = x - ux * a * 1.6, by = y - uy * a * 1.6;
+    return [[x, y], [bx - uy * a * 0.7, by + ux * a * 0.7], [bx + uy * a * 0.7, by - ux * a * 0.7]]
+      .map(function (p) { return fmt(p[0]) + ',' + fmt(p[1]); }).join(' ');
+  }
+  // Mirrors render_path_svg: one node per visit, left to right, arrows in
+  // that order; the current step highlighted (breathing unless the job is
+  // finished); the chart's direct successors of it grayed, dashed.
+  function trailSvg(ns, chart, flow, meta, label) {
+    var path = flow.path || [];
+    var at = flow.state ? path.lastIndexOf(flow.state) : -1;
+    var nexts = at >= 0 ? (flow.next || []) : [];
+    var group = {};
+    (chart.states || []).forEach(function (st) { group[st.name] = st.group; });
+    var labels = {};
+    (chart.edges || []).forEach(function (e) { labels[e.from + '\n' + e.to] = e.label; });
+    var step = FLOW.w + FLOW.hop;
+    var rows = Math.max(1, nexts.length);
+    var y0 = FLOW.top + (rows - 1) * FLOW.row / 2;
+    var mid = y0 + FLOW.h / 2;
+    var width = 2 * FLOW.left + Math.max(1, path.length + (nexts.length ? 1 : 0)) * step - FLOW.hop;
+    var height = 2 * FLOW.top + (rows - 1) * FLOW.row + FLOW.h;
+    var svg = svgNode(ns, 'svg', {'class': 'flow steps', viewBox: '0 0 ' + fmt(width) + ' ' + fmt(height),
+                                  width: fmt(width), height: fmt(height), role: 'img', 'aria-label': label});
+    function title(g, text) { add(g, svgNode(ns, 'title')).textContent = text; }
+    function hopTitle(a, b) {
+      var key = a + '\n' + b;
+      if (!(key in labels)) return a + ' → ' + b + ' (no direct transition on the chart)';
+      return a + ' → ' + b + (labels[key] ? ': ' + labels[key] : '');
+    }
+    function lines(g, x, y, name, extra) {
+      var texts = [['', name]];
+      if (FLOW.gloss[name]) texts.push(['gloss', FLOW.gloss[name]]);
+      if (extra) texts.push(['meta', extra]);
+      var bases = {1: [FLOW.h / 2 + 4], 2: [21, 36], 3: [17, 30, 43]}[texts.length];
+      return texts.map(function (t, i) {
+        var node = add(g, svgNode(ns, 'text', {x: fmt(x + FLOW.w / 2), y: fmt(y + bases[i])}));
+        if (t[0]) node.setAttribute('class', t[0]);
+        node.textContent = t[1];
+        return node;
+      });
+    }
+    for (var i = 1; i < path.length; i++) {
+      var a = path[i - 1], b = path[i];
+      var x1 = FLOW.left + (i - 1) * step + FLOW.w, x2 = FLOW.left + i * step;
+      var hop = add(svg, svgNode(ns, 'g', {'class': (a + '\n' + b) in labels ? 'hop' : 'hop jump',
+                                           'data-from': a, 'data-to': b, 'data-step': i}));
+      title(hop, hopTitle(a, b));
+      add(hop, svgNode(ns, 'path', {d: 'M' + fmt(x1) + ' ' + fmt(mid) + ' L' + fmt(x2 - FLOW.arrow * 1.6) + ' ' + fmt(mid)}));
+      add(hop, svgNode(ns, 'polygon', {points: arrowPoints(x2, mid, x1, mid)}));
+    }
+    var sx = FLOW.left + at * step + FLOW.w;
+    var nx = FLOW.left + path.length * step;
+    nexts.forEach(function (name, j) {
+      var ny = FLOW.top + j * FLOW.row + FLOW.h / 2;
+      var bend = (nx - sx) / 2;
+      var hop = add(svg, svgNode(ns, 'g', {'class': 'hop next', 'data-from': flow.state, 'data-to': name}));
+      title(hop, hopTitle(flow.state, name));
+      add(hop, svgNode(ns, 'path', {d: 'M' + fmt(sx) + ' ' + fmt(mid) + ' C' + fmt(sx + bend) + ' ' + fmt(mid) + ' ' +
+        fmt(nx - bend) + ' ' + fmt(ny) + ' ' + fmt(nx - FLOW.arrow * 1.6) + ' ' + fmt(ny)}));
+      add(hop, svgNode(ns, 'polygon', {points: arrowPoints(nx, ny, nx - bend, ny)}));
+    });
+    var metaNode = null;
+    path.forEach(function (name, i) {
+      var x = FLOW.left + i * step;
+      var cls = 'visit' + (i === at ? ' current' + (flow.terminal ? '' : ' breathe') : '');
+      var g = add(svg, svgNode(ns, 'g', {'class': cls, 'data-state': name, 'data-step': i}));
+      title(g, name + (i === at ? ' (now)' : ''));
+      add(g, svgNode(ns, 'rect', {x: fmt(x), y: fmt(y0), width: FLOW.w, height: FLOW.h, rx: 6,
+                                  'class': 'box g-' + (group[name] || 'other')}));
+      if (i === at) {
+        add(g, svgNode(ns, 'rect', {'class': 'halo', x: fmt(x - 4), y: fmt(y0 - 4), width: FLOW.w + 8,
+                                    height: FLOW.h + 8, rx: 9}));
+      }
+      var texts = lines(g, x, y0, name, i === at ? meta.text : '');
+      if (i === at && meta.text) metaNode = texts[texts.length - 1];
+    });
+    nexts.forEach(function (name, j) {
+      var x = nx, y = FLOW.top + j * FLOW.row;
+      var g = add(svg, svgNode(ns, 'g', {'class': 'next', 'data-state': name}));
+      title(g, name + ' (can come next)');
+      add(g, svgNode(ns, 'rect', {x: fmt(x), y: fmt(y), width: FLOW.w, height: FLOW.h, rx: 6, 'class': 'box'}));
+      lines(g, x, y, name, '');
+    });
+    // The time in state ticks like every other age on the page.
+    if (metaNode && meta.age !== null) ticking(metaNode, meta.age, meta.round ? meta.round + ' · ' : '');
+    return svg;
+  }
+
   function jobArticle(r, state, d) {
     var art = el('article', 'panel jobpage');
     art.setAttribute('id', anchor(r.job));
@@ -775,16 +913,30 @@ SCRIPT = r"""
       ticking(add(where, el('span')), flow.state_age_seconds, '', ' in ' + flow.state);
     }
     add(art, el('p', 'path', 'path: ' + ((flow.path || []).length ? flow.path.join(' → ') : '—')));
-    var box = add(art, el('div', 'flowbox'));
+    // The full chart drawn on the server (#flow-template) is the source of
+    // the SVG namespace too, so the page names no URL.
     var tpl = byId('flow-template');
     var src = tpl && tpl.children ? tpl.children[0] : null;
-    if (src && d.statechart) add(box, highlight(src.cloneNode(true), flow));
-    else add(box, el('p', 'empty', 'statechart unavailable'));
-    if (d.statechart) {
-      var legend = add(art, el('p', 'legend'));
-      add(legend, el('span', 'key path', 'path taken'));
-      (d.statechart.legend || []).forEach(function (k) { add(legend, el('span', 'key g-' + k.group, k.name)); });
+    if (!src || !d.statechart) {
+      add(add(art, el('div', 'flowbox')), el('p', 'empty', 'statechart unavailable'));
+      return art;
     }
+    var round = r.round === null || r.round === undefined ? '' : 'r' + r.round;
+    var age = flow.state && flow.state_age_seconds !== null && flow.state_age_seconds !== undefined
+      ? flow.state_age_seconds : null;
+    var meta = {round: round, age: age, text: [round, age === null ? '' : dur(age)].filter(Boolean).join(' · ')};
+    var box = add(art, el('div', 'flowbox trail'));
+    add(box, trailSvg(src.namespaceURI, d.statechart, flow, meta, jobLabel(r) + ': the path its ticket took'));
+    trails.push(box);
+    var keys = add(art, el('p', 'legend'));
+    add(keys, el('span', 'key path', 'path taken'));
+    add(keys, el('span', 'key now', 'now'));
+    add(keys, el('span', 'key next', 'can come next'));
+    var full = details(art, 'full-chart:' + r.job, 'full chart', 'fullchart');
+    add(add(full, el('div', 'flowbox')), highlight(src.cloneNode(true), flow));
+    var legend = add(full, el('p', 'legend'));
+    add(legend, el('span', 'key path', 'path taken'));
+    (d.statechart.legend || []).forEach(function (k) { add(legend, el('span', 'key g-' + k.group, k.name)); });
     return art;
   }
 
@@ -807,11 +959,83 @@ SCRIPT = r"""
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
 
+  // --- the job modal on the lanes page (#78) ----------------------------------
+
+  // A slot or queue link opens its job's flow in a modal; without script (or
+  // with a modifier key) the link still goes to job.html#job-<id>.
+  function opensModal(a, job) {
+    if (PAGE !== 'main') return a;
+    a.addEventListener('click', function (ev) {
+      if (ev.defaultPrevented || ev.button || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      ev.preventDefault();
+      openModal(job, a);
+    });
+    if (modal && modal.job === job) modal.opener = a;
+    return a;
+  }
+
+  function fillModal() {
+    if (!modal || !latest) return;
+    var box = modal.box;
+    box.replaceChildren();
+    var close = add(box, el('button', 'modal-close', '✕ close'));
+    close.setAttribute('type', 'button');
+    close.setAttribute('aria-label', 'Close');
+    close.addEventListener('click', function () { closeModal(); });
+    modal.close = close;
+    var found = activeJobs(latest).filter(function (j) { return j.row.job === modal.job; })[0];
+    if (found) {
+      add(box, jobArticle(found.row, found.state, latest));
+      modal.node.setAttribute('aria-label', jobLabel(found.row) + ' flow');
+    } else {
+      var gone = add(box, el('section', 'panel jobpage'));
+      add(add(gone, el('h2')), el('span', null, anchor(modal.job)));
+      add(gone, el('p', 'empty', 'That job is no longer running or queued.'));
+    }
+    var more = add(box, el('p', 'more'));
+    add(more, link(null, 'job.html#' + anchor(modal.job))).textContent = 'open on the job page';
+  }
+
+  function openModal(job, opener) {
+    if (modal && modal.node.parentNode) modal.node.parentNode.removeChild(modal.node);
+    var node = el('div', 'modal');
+    node.setAttribute('id', 'job-modal');
+    node.setAttribute('role', 'dialog');
+    node.setAttribute('aria-modal', 'true');
+    // A click on the backdrop (outside the box) closes it.
+    node.addEventListener('click', function (ev) { if (ev.target === node) closeModal(); });
+    modal = {job: job, node: node, box: add(node, el('div', 'modal-box')), opener: opener, close: null};
+    fillModal();
+    add(body, node);
+    body.classList.add('modal-open');
+    scrollTrails();
+    if (modal.close && modal.close.focus) modal.close.focus();
+  }
+
+  function closeModal() {
+    if (!modal) return;
+    var m = modal;
+    modal = null;
+    if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
+    body.classList.remove('modal-open');
+    if (m.opener && m.opener.isConnected && m.opener.focus) m.opener.focus();
+  }
+
+  document.addEventListener('keydown', function (ev) {
+    if (modal && (ev.key === 'Escape' || ev.key === 'Esc')) { ev.preventDefault(); closeModal(); }
+  });
+
+  // Long paths scroll; keep the current step (at the right end) in view.
+  function scrollTrails() {
+    trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
+    trails = [];
+  }
+
   var PAGES = {
     main: [renderKpis, renderLinearWebhook, renderLanes, renderQueue],
+    job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
-    efficiency: [renderHealth, renderSavings],
-    job: [renderJobs, renderJobView]
+    efficiency: [renderHealth, renderSavings]
   };
   var RENDERERS = [renderBadge].concat(PAGES[PAGE] || []);
 
@@ -822,6 +1046,10 @@ SCRIPT = r"""
     RENDERERS.forEach(function (draw) {
       try { draw(d); } catch (err) { if (window.console) console.error('dashboard panel', err); }
     });
+    if (modal) {
+      try { fillModal(); } catch (err) { if (window.console) console.error('dashboard modal', err); }
+    }
+    scrollTrails();
     prevKeys = nextKeys;
     firstRender = false;
   }
@@ -931,7 +1159,11 @@ def font_faces() -> str:
 
 
 def page_script() -> str:
-    return SCRIPT.replace("__POLL_MS__", str(POLL_MS)).replace("__FONTS__", font_faces())
+    return (
+        SCRIPT.replace("__POLL_MS__", str(POLL_MS))
+        .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
+        .replace("__FONTS__", font_faces())
+    )
 
 
 # --- server-side rendering ----------------------------------------------------------
@@ -940,12 +1172,13 @@ def page_script() -> str:
 # builds, so a page reads the same without script (it then reloads every
 # refresh_seconds) and the script only has to replace their contents.
 
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+# In nav order (#78).
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html")
 _PAGE_NAMES = {
     "index.html": ("main", "Lanes"),
+    "job.html": ("job", "Jobs"),
     "activity.html": ("activity", "Activity"),
     "efficiency.html": ("efficiency", "Efficiency"),
-    "job.html": ("job", "Jobs"),
 }
 LIST_MAX = 12
 _BOTS = ("claude", "codex", "cursor", "grok")
@@ -1513,6 +1746,23 @@ def _legend(chart: dict) -> str:
     return f'<p class="legend">{keys}</p>'
 
 
+_TRAIL_LEGEND = (
+    '<p class="legend">' + _span("key path", "path taken") + _span("key now", "now")
+    + _span("key next", "can come next") + "</p>"
+)
+
+
+def _meta(row: dict, flow: dict) -> str:
+    """The current step's label: the job's round and time in that state,
+    where the data has them."""
+    parts = []
+    if row.get("round") is not None:
+        parts.append(f"r{row['round']}")
+    if flow["state"] and flow.get("state_age_seconds") is not None:
+        parts.append(duration(flow["state_age_seconds"]))
+    return " · ".join(parts)
+
+
 def _job_article(row: dict, state: str, chart: dict | None) -> str:
     flow = row.get("flow") or {"state": None, "path": [], "state_age_seconds": None}
     kind = _job_kind(row)
@@ -1537,12 +1787,20 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         diagram = '<div class="flowbox"><p class="empty">statechart unavailable</p></div>'
         legend = ""
     else:
-        diagram = (
-            '<div class="flowbox">'
-            + render_svg(chart, flow["path"], flow["state"], label=f"{_job_label(row)} on the ticket statechart")
-            + "</div>"
+        trail = render_path_svg(
+            chart, flow["path"], flow["state"],
+            next_steps=flow.get("next"), terminal=flow.get("terminal"),
+            meta=_meta(row, flow), label=f"{_job_label(row)}: the path its ticket took",
         )
-        legend = _legend(chart)
+        full = render_svg(
+            chart, flow["path"], flow["state"], label=f"{_job_label(row)} on the ticket statechart"
+        )
+        diagram = f'<div class="flowbox trail">{trail}</div>'
+        legend = (
+            _TRAIL_LEGEND
+            + '<details class="fullchart"><summary>full chart</summary>'
+            + f'<div class="flowbox">{full}</div>{_legend(chart)}</details>'
+        )
     count = f"{state} · job {row['job']}"
     return (
         f'<article class="panel jobpage" id="{anchor(row["job"])}">'
@@ -1593,7 +1851,8 @@ def _page(snapshot: dict, name: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
-    extra = _flow_template(snapshot) if name == "job.html" else ""
+    # The job page and the lanes page's job modal copy the full chart from here.
+    extra = _flow_template(snapshot) if name in ("job.html", "index.html") else ""
     return "\n".join(
         [
             "<!doctype html>",
