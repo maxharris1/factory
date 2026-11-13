@@ -48,6 +48,7 @@ JOB_STATES = {
     "blocked": "blocked",
     "capped": "capped",
     "refused": "refused",
+    "awaiting-ok": "awaiting-ok",
 }
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
@@ -56,6 +57,7 @@ GLOSS = {
     "fixing": "revise",
     "handed-off": "ready for review",
     "done": "shipped",
+    "awaiting-ok": "waiting on a human OK",
 }
 
 _STATE = re.compile(r"^  (s\d+): (\S.*?)\s*$")

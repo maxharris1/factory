@@ -38,6 +38,15 @@ still ship `enabled: false` until Max turns them on.
   merged some other way is refused and wakes Grok Bot. `ship: merge` repos
   still squash-merge with `--match-head-commit`; `ship: handoff` repos are
   never merged by the factory.
+- A `ship: merge` repo may add `hold:` to `factory.md` (issue #86,
+  [`lib/hold.py`](lib/hold.py)). A PR carrying `hold.label` (default
+  `factory:hold`), or whose diff touches a `hold.paths` glob, is not merged on
+  APPROVE: it waits in `orch:state/awaiting-ok` ("waiting on <approver>" in
+  `orch status` and the dashboard) until `hold.approver` posts
+  `<!-- orch:v1 kind=ok head=<sha> -->` for the current head, or removes the
+  label on a label-only hold. Grok Bot is woken once per held head. The OK
+  carries to a moved head only on an equal patch-id, and `stable_patch_id` is
+  not built (below), so today a moved head needs a new OK.
   Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter
@@ -191,8 +200,24 @@ session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 database stays on the box, and the bot runs `orch job done` there); ssh exits
 with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
-`--worktree` is box-only and refused for a remote job (exit 2): the harness
-checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+The command runs under the bot's login shell (`bash -lc 'exec "$@"'`), so the
+bot's own PATH (gh, claude, codex) is loaded, and stdin is forwarded to it.
+
+`--worktree` works the same on every device (#94): the harness runs in the
+job's checkout, `$ORCH_JOB_WORKTREE`. On a remote device `orch job run` first
+checks over the same alias that `git`, `gh` and the command's binary exist
+under `bash -lc`, then clones or fetches the job's repo into
+`<workdir_root>/jobs/<job-id>` at the job's head (on the job's branch when
+that branch's tip is the head, else detached; with no head, the base
+branch), keeping orch's worker records out of `git status`, and copies
+`$ORCH_JOB_BRIEF`, if set, to `<job-id>.brief.md` beside the checkout
+(`ORCH_JOB_BRIEF` then names that copy on the device). An existing checkout
+is reused as is, and a remote checkout is never removed. If the check or the
+checkout fails (a missing tool, an unreachable device, a failed clone),
+nothing starts: the job is requeued and its slot freed in one transaction,
+with no round or attempt charged, a `requeued-unstarted` job event, one log
+line saying why, and exit status 75. Harnesses never build their own remote
+command.
 
 A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
 process's environment, so there the worker is named by its record alone, one
@@ -355,8 +380,20 @@ of the poller merging.
 
 `orch poll` opens an initialized database without creating it and holds
 `<db>.lock`, so a second poller is refused. Source failures are recorded per
-project or ticket and the long-running loop continues after the 60-second
-interval; `--once` reports a cycle-level failure with a nonzero exit.
+project or ticket and the long-running loop continues after the
+`poll_seconds` interval; `--once` reports a cycle-level failure with a
+nonzero exit.
+
+*Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
+every cycle. Linear keeps its own 60-second cadence and budget: the
+discovery search, dirty-row reads (with `linear_webhook`) and tracked Linear
+reads run only on every second cycle at 30 seconds (every cycle at 60), and
+the per-window Linear budget (20 requests, 25,000 complexity) still covers 60
+seconds. A direct Linear read between those cycles (the fresh read before a
+ship or write) counts against the same window, so a 30-second poller makes
+no more Linear calls per hour than a 60-second one, and the webhook's
+`reconcile_seconds` fallback is unchanged (docs/SPEC.md section 7).
+
 Each polling `gh api` read, including PR comments, check runs and commit
 status, has a 20-second timeout and is tried three times with 2- and 4-second
 backoff (writes are never retried); a ref that still times out records a retryable
@@ -437,7 +474,8 @@ owns the Funnel that exposes only the listener path. This repository
 installs no service for the listener and changes no network configuration.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
-tickets with queued or running jobs each cycle. Dirty untracked issues are
+tickets with queued or running jobs each Linear cycle (every cycle at
+`poll_seconds: 60`, every second cycle at 30). Dirty untracked issues are
 read directly, oldest first, under the same Linear budget; one outside the
 configured projects, completed, canceled or deleted is dropped quietly.
 A tracked ticket is reread in full only when it is dirty, has an active job,
@@ -542,7 +580,19 @@ the claim, with no model turn and no message to any bot. The harness posts its
   claimed job, which the poller requeues after `release_claimed_minutes`.
 - **One handoff per job.** The claim records the waiter on the job's slot.
   From then on only that waiter's own `orch job run` may run the job, and
-  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  only that run may `orch job done` it. The run proves it with a secret
+  token (issue #96): `orch job run` mints one per run, records only its
+  SHA-256 on the slot, and gives the harness the token only in
+  `$ORCH_JOB_PROOF`, never on disk: the waiter and the bot's other sessions
+  run as one Unix user, so a file could be found and presented by any of
+  them. The name has no `KEY`, `SECRET` or `TOKEN` in it, so Codex's default
+  `shell_environment_policy` passes it to the commands the harness runs.
+  There is no process-tree check, so a harness sandbox with its own PID
+  namespace (Codex) can finish its job, as long as it can write the orch
+  database's directory. The known limit: a process of the same Unix user
+  that reads the run's `/proc/<pid>/environ` can take the token; the check
+  stops bot turns that were never handed it, not a hostile same-user
+  process. A bot turn's `orch job
   run` or `orch job done` is refused (exit 2, nothing changed), and a plain
   `orch wait <bot>` is refused while the bot's autostart waiter runs. A
   second `orch job run` of a running job is refused. `orch job done` with the
@@ -906,10 +956,13 @@ handoff comment id itself is never copied); `poller.verdicts`, the newest
 `outcome` (a dispatcher outcome such as `queued-review-fix`, anything else
 `other`) and `kind` (`routed`, `shipped`, `stale`, `rejected`, `stuck`,
 `blocked`, `waiting`, `other`), `null` without that table;
-`poller.health`, `ok` while the last poll cycle ended at most 150 s ago,
-`late` to 300 s, then `stale`, and `unknown` when the snapshot was not
-told when the last cycle ended (only live pushes pass `--last-cycle`;
-`main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
+`poller.health`, with `cycle_seconds` set to the poller's `poll_seconds`
+(`P`, 30 or 60; `orch poll` passes it to each push as `--poll-seconds`,
+otherwise orch.yml's value is used): `ok` while the last poll cycle ended
+at most `2P + 30` seconds ago (90 s at 30, 150 s at 60), `late` to `5P`
+(150 s at 30, 300 s at 60), then `stale`, and `unknown` when the snapshot
+was not told when the last cycle ended (only live pushes pass
+`--last-cycle`; `main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
 (Linear 429 or `RATELIMITED` errors in the last hour), `exhausted` (`Linear
 poll budget is exhausted` errors), `deferring` (`Linear poll budget`
 deferrals) or `ok`, with those hourly counts and the poller's Linear share
@@ -1011,7 +1064,7 @@ it commented out, so nothing pushes until Max turns it on.
 
 *When it runs.* `orch poll`, which
 [`deploy/poller-service.sh`](deploy/poller-service.sh) runs, pushes after
-every poll cycle (60 seconds), or at most every `every_minutes` (1 to 1440)
+every poll cycle (`poll_seconds`, 30 as shipped), or at most every `every_minutes` (1 to 1440)
 when that is set. After a cycle it starts `orch dashboard push --once --db
 <db> [--orch <orch.yml>]` as a separate process and does not wait for it;
 if the previous push is still running it skips that cycle and logs so. The

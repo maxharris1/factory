@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import job_run, linear_webhook, placed_run, telemetry, waiter, worktrees
+from lib import job_run, job_token, linear_webhook, placed_run, telemetry, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -45,6 +45,10 @@ from lib.wait import (
 
 DB_ENV = "ORCH_DB"
 PIDFILE_ENV = "ORCH_POLL_PIDFILE"
+# `orch job run` could not start a remote job (preflight or checkout failed,
+# #94) and requeued it: EX_TEMPFAIL, nothing ran, try again.
+REQUEUED_EXIT = 75
+MAX_BRIEF_BYTES = 1024 * 1024
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -150,18 +154,27 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
-  ssh_alias (ssh -l <bot> -- <alias>), in <workdir_root>/jobs/<job-id>,
-  with ORCH_JOB_ID, ORCH_JOB_BOT, ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR;
-  --worktree is refused there. When COMMAND ends the slot is released once
-  the worker is confirmed gone (a remote worker still running is sent
-  SIGTERM first); otherwise it stays held for the poller to confirm.
-  --worktree runs COMMAND in a git worktree of one shared clone per repo
-  under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work), at the
-  job's head or the default branch, exported as ORCH_JOB_WORKTREE. When
-  COMMAND exits the worktree is removed and pruned, unless it has
-  uncommitted changes or unpushed commits; then it is kept and logged.
-  The remote is --git-url-template, else $ORCH_GIT_URL_TEMPLATE, else
-  https://github.com/{repo}.git.
+  ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
+  in <workdir_root>/jobs/<job-id>, with ORCH_JOB_ID, ORCH_JOB_BOT,
+  ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR; stdin is forwarded. When COMMAND
+  ends the slot is released once the worker is confirmed gone (a remote
+  worker still running is sent SIGTERM first); otherwise it stays held for
+  the poller to confirm.
+  --worktree runs COMMAND in the job's checkout on the device it is placed
+  on, at the job's head or the default branch, exported as
+  ORCH_JOB_WORKTREE. On the box that is a git worktree of one shared clone
+  per repo under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work);
+  when COMMAND exits it is removed and pruned, unless it has uncommitted
+  changes or unpushed commits; then it is kept and logged. On a remote
+  device orch first checks over ssh that git, gh and COMMAND's binary exist
+  under bash -lc, then clones or fetches the checkout into
+  <workdir_root>/jobs/<job-id> (on the job's branch when its tip is the
+  head) and copies $ORCH_JOB_BRIEF, if set, to <job-id>.brief.md beside it
+  (ORCH_JOB_BRIEF then names that copy); the checkout is kept. If that
+  check or the checkout fails, nothing runs: the job is requeued and its
+  slot freed (no round or attempt charged), with one line saying why, and
+  the exit status is 75. The git remote is --git-url-template, else
+  $ORCH_GIT_URL_TEMPLATE, else https://github.com/{repo}.git.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
@@ -507,6 +520,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
         orch=orch_path,
         environ=os.environ,
         log=lambda line: print(line, file=sys.stderr, flush=True),
+        poll_seconds=config.poll_seconds,
     )
 
 
@@ -774,8 +788,12 @@ def _done_settled(
 
     (0, line) when the same outcome is already recorded: a repeat is a no-op.
     (1, error) when a different outcome is recorded: nothing changes.
-    (2, error) when the job is an autostart waiter's and this process is not
-    in its `orch job run`'s process tree: a bot turn must not finish it.
+    (2, error) when the job is an autostart waiter's and this process does
+    not hold its current `orch job run`'s secret token (#96): a bot turn
+    must not finish it. The token comes from ORCH_JOB_PROOF
+    (lib/job_token.py), and only its hash is compared. There is no
+    process-tree check: a sandbox in its own PID namespace (Codex) cannot
+    see the run, but it inherits the token.
     None when the job may be finished here.
     """
     target = "done" if handoff is not None else "failed"
@@ -805,18 +823,28 @@ def _done_settled(
     # table may predate the autostart columns (an update while a job runs).
     # A missing column reads as NULL: no autostart waiter can have claimed a
     # job in a table it could not record itself in.
+    # The same holds for run_token_hash (#96): a slot without the column has
+    # no token, and its autostart claim (if any) is refused below.
     autostart = _slot_value(slot, "autostart_pid")
-    if state != "running" or autostart is None:
+    stored = _slot_value(slot, "run_token_hash")
+    if state != "running" or (autostart is None and stored is None):
         return None
-    runner = _slot_value(slot, "runner_pid")
-    if runner is not None and worktrees.pid_alive(
-        int(runner), _slot_value(slot, "runner_start")
-    ) and worktrees.descends_from(os.getpid(), int(runner)):
+    token = job_token.presented(os.environ)
+    if job_token.matches(token, stored):
         return None
+    if stored is None:
+        why = (
+            "its claim has no run token (claimed before run tokens, #96, or its "
+            "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+        )
+    elif token is None:
+        why = "this process has no ORCH_JOB_PROOF from that run"
+    else:
+        why = "the ORCH_JOB_PROOF this process holds is not that run's"
     return 2, (
         f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
         "whose harness run finishes it; only that run may call orch job done, so a bot "
-        "turn must not run or post for it. Nothing changed"
+        f"turn must not run or post for it; {why}. Nothing changed"
     )
 
 
@@ -860,7 +888,7 @@ def _job_run(argv: list[str]) -> int:
         database = _db_path(args.db).absolute()
         queue = open_queue(database)
         owned_job(queue, args.bot, args.job_id)
-        repo, head, timeout_seconds = _job_row(queue, args.job_id)
+        repo, head, timeout_seconds, detail = _job_row(queue, args.job_id)
     except WaitError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
@@ -890,6 +918,9 @@ def _job_run(argv: list[str]) -> int:
         # first heartbeat, read only, so a refused run leaves the job claimed
         # (and the poller's claimed-job release requeues it).
         checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
+        # #96: an autostart run proves itself to `orch job done` with a
+        # fresh secret token; only its hash goes on the slot (in prepare).
+        token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
@@ -914,6 +945,7 @@ def _job_run(argv: list[str]) -> int:
             log=log,
             transport=SshTransport(),
             checked_autostart=checked_autostart,
+            token_hash=token_hash,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -935,6 +967,8 @@ def _job_run(argv: list[str]) -> int:
         sessions.append(session)
         command = session.argv
     environment = dict(os.environ)
+    # Never pass on a token this process inherited (another job's run).
+    environment.pop(job_token.PROOF_ENV, None)
     environment.update(
         {
             "ORCH_JOB_ID": args.job_id,
@@ -943,15 +977,29 @@ def _job_run(argv: list[str]) -> int:
         }
     )
     checkout: list[worktrees.JobCheckout] = []
+    box_brief = os.environ.get(waiter.BRIEF_ENV) or None
     remote_env = {
         "ORCH_JOB_ID": args.job_id,
         "ORCH_JOB_BOT": args.bot,
         "ORCH_JOB_DEVICE": placed.device.name,
+        # #94: with --worktree, the checkout's and the brief's remote paths
+        **placed.remote_env(worktree=args.worktree, brief=box_brief is not None),
     }
 
     def setup() -> Path | None:
+        if args.worktree and placed.remote:
+            # #94: the same --worktree, on the placed device: preflight and
+            # checkout there before any worker is recorded or started.
+            placed.remote_checkout(
+                harness=command[0],
+                repo=repo,
+                head=head,
+                detail=detail,
+                url_template=worktrees.url_template(args.git_url_template),
+                brief=_read_brief(box_brief),
+            )
         placed.before_start()
-        if not args.worktree:
+        if not args.worktree or placed.remote:
             return None
         made = worktrees.prepare(
             worktrees.work_root(args.work_root),
@@ -972,6 +1020,9 @@ def _job_run(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
     code: int | None = None
     try:
         code = job_run.run(
@@ -986,6 +1037,22 @@ def _job_run(argv: list[str]) -> int:
             output=session.consume if session is not None else None,
         )
         return code
+    except placed_run.CheckoutError as exc:
+        reason = " ".join(str(exc).split())
+        try:
+            requeued = placed.requeue(reason)
+        except (QueueError, sqlite3.Error, OSError) as error:
+            log(f"job {args.job_id} not started: {reason}; could not requeue it: "
+                f"{' '.join(str(error).split())}")
+            return 1
+        if not requeued:
+            log(f"job {args.job_id} not started: {reason}; it changed meanwhile, not requeued")
+            return 1
+        log(
+            f"job {args.job_id} not started: {reason}; slot released and job requeued "
+            "(no round or attempt charged)"
+        )
+        return REQUEUED_EXIT
     except worktrees.WorktreeError as exc:
         log(str(exc))
         return 1
@@ -1019,18 +1086,34 @@ def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callab
     log(f"the command ended without orch job done; failed job {job_id} for T6")
 
 
-def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int]:
+def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, str | None]:
     try:
         with queue.connect() as connection:
             row = connection.execute(
-                "SELECT repo, head, timeout_seconds FROM jobs WHERE id = ?",
+                "SELECT repo, head, timeout_seconds, detail FROM jobs WHERE id = ?",
                 (job_id,),
             ).fetchone()
     except (QueueError, sqlite3.Error, OSError) as exc:
         raise WaitError(f"cannot read job {job_id}: {' '.join(str(exc).split())}") from exc
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
-    return str(row["repo"]), row["head"], int(row["timeout_seconds"])
+    return str(row["repo"]), row["head"], int(row["timeout_seconds"]), row["detail"]
+
+
+def _read_brief(path: str | None) -> bytes | None:
+    """The box's brief (ORCH_JOB_BRIEF), to copy beside a remote checkout (#94)."""
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_BRIEF_BYTES + 1)
+    except OSError as exc:
+        raise placed_run.CheckoutError(
+            f"cannot read the brief {path}: {' '.join(str(exc).split()) or type(exc).__name__}"
+        ) from exc
+    if len(data) > MAX_BRIEF_BYTES:
+        raise placed_run.CheckoutError(f"the brief {path} is over {MAX_BRIEF_BYTES} bytes")
+    return data
 
 
 def _linear_webhook(argv: list[str]) -> int:

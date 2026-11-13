@@ -59,6 +59,7 @@ STATES = (
     "merged",
     "handed-off",
     "waiting-external",
+    "awaiting-ok",
     "post-merge",
     "done",
     "stuck",
