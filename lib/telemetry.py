@@ -33,8 +33,11 @@ stdout on a pipe and hands the pipe to a `Session` here:
 Secrets: every string that goes into the table (step titles, file paths,
 exit reasons, tool names) is scrubbed first (`Scrubber`): the values of this
 process's environment variables whose names look secret are replaced,
-whatever their length (only boolean flag values such as `1` or `true`, and
-the XDG_SESSION_* and DESKTOP_SESSION descriptors, are kept), then
+whatever their length and however the text quotes or escapes them (quote
+and backslash characters are ignored when matching, so a shell-quoted
+`'walrus'"'"'harbor'` goes like `walrus'harbor`; each line of a multi-line
+value is matched on its own), keeping only boolean flag values such as `1`
+or `true` and the XDG_SESSION_* and DESKTOP_SESSION descriptors; then
 the dashboard's `redact` removes token-shaped strings, auth headers, key
 assignments, URLs and email addresses, and the text is cut to one short
 line. Assistant text and tool output are never stored; tool output is only
@@ -224,6 +227,13 @@ _SECRET_NAME = re.compile(
 )
 _NOT_SECRET_NAME = re.compile(r"XDG_SESSION_\w+|DESKTOP_SESSION")
 _FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
+_QUOTING = frozenset("'\"\\")
+
+
+def _unquoted(text: str) -> tuple[str, list[int]]:
+    """`text` without shell and JSON quoting characters, and where each kept one was."""
+    kept = [(index, char) for index, char in enumerate(text) if char not in _QUOTING]
+    return "".join(char for _, char in kept), [index for index, _ in kept]
 
 
 class Scrubber:
@@ -241,16 +251,32 @@ class Scrubber:
             and _SECRET_NAME.search(name)
             and not _NOT_SECRET_NAME.fullmatch(name)
         }
-        self._values = sorted(values, key=len, reverse=True)
+        lines = {line.strip() for value in values for line in value.splitlines()}
+        unquoted = {_unquoted(value)[0] for value in values | lines} - {""}
+        self._values = sorted(unquoted, key=len, reverse=True)
 
     def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
         text = str(value)[: limit * 16]
         for secret in self._values:
-            if secret in text:
-                text = text.replace(secret, "[redacted-env]")
+            text = self._cut(text, secret)
         text = self._redact(" ".join(text.split()))
         if len(text) > limit:
             text = text[: limit - 1] + "…"
+        return text
+
+    @staticmethod
+    def _cut(text: str, secret: str) -> str:
+        """Replace every run of `text` that reads as `secret` once quoting is
+        ignored, so `'walrus'"'"'harbor'` goes as surely as `walrus'harbor`."""
+        bare, where = _unquoted(text)
+        spans: list[tuple[int, int]] = []
+        start = bare.find(secret)
+        while start >= 0:
+            end = start + len(secret)
+            spans.append((where[start], where[end - 1] + 1))
+            start = bare.find(secret, end)
+        for first, last in reversed(spans):
+            text = text[:first] + "[redacted-env]" + text[last:]
         return text
 
 

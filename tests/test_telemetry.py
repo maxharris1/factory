@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -390,6 +391,40 @@ def test_a_short_env_secret_never_reaches_the_table(tmp_path: Path, secret: str)
     assert len(titles) == 3 and all("[redacted-env]" in title for title in titles)
     for text in (*titles, row["files"], row["exit_reason"], row["tool_calls"]):
         assert secret not in text, text
+
+
+QUOTED_SECRET = "walrus'" + 'har"b\\or'
+
+
+def _unquoted(text: str) -> str:
+    return "".join(char for char in text if char not in "'\"\\")
+
+
+@pytest.mark.parametrize("secret", [QUOTED_SECRET, "plainpass", "multi\nline-secret-tail"])
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str, secret: str) -> None:
+    commands = [
+        shlex.join(["deploy", "--pin", secret]),
+        "deploy --pin " + json.dumps(secret),
+        "deploy --pin " + "".join("\\" + char for char in secret),
+        "bash -lc " + shlex.quote(shlex.join(["deploy", "--pin", secret])),
+        "deploy --pin " + "''".join(secret),
+    ]
+    summary = Summary(harness, Scrubber({"DEPLOY_PASSWORD": secret}))
+    for index, command in enumerate(commands):
+        if harness == "claude":
+            summary.feed({"type": "assistant", "message": {"id": f"m{index}", "content": [
+                {"type": "tool_use", "id": f"t{index}", "name": "Bash", "input": {"command": command}}]}}, 1.0)
+        else:
+            summary.feed({"type": "item.completed", "item": {
+                "id": f"t{index}", "type": "command_execution", "command": command,
+                "exit_code": 0, "status": "completed"}}, 1.0)
+    titles = [step["title"] for step in json.loads(summary.row()["steps"])]
+    assert len(titles) == len(commands)
+    for line in secret.splitlines():
+        for title in titles:
+            assert "[redacted-env]" in title, title
+            assert _unquoted(line) not in _unquoted(title), title
 
 
 def test_flags_and_system_session_variables_are_not_treated_as_secrets() -> None:

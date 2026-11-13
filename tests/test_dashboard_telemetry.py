@@ -7,8 +7,10 @@ and job, value checks and redaction, and the page script drawing the same.
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import shlex
 import sqlite3
 from pathlib import Path
 
@@ -263,3 +265,29 @@ def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> No
     assert "no telemetry" in out["text"]["jobview"]
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     assert "no telemetry" in eff["text"]["tokens"]
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_shell_quoted_env_secret_never_reaches_status_json(tmp_path: Path, harness: str) -> None:
+    secret = "walrus'" + "harbor"
+    command = shlex.join(["deploy", "--pin", secret])
+    if harness == "claude":
+        event = {"type": "assistant", "message": {"id": "m", "content": [
+            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}
+    else:
+        event = {"type": "item.completed", "item": {
+            "id": "t", "type": "command_execution", "command": command, "exit_code": 0, "status": "completed"}}
+    db, log = seeded(tmp_path)
+    session = telemetry.Session(
+        connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
+        repo="maxharris1/cleffy", harness=harness, argv=[harness], raw_log=None,
+        scrub=telemetry.Scrubber({"DEPLOY_PASSWORD": secret}), log=lambda _: None,
+        stdout=io.BytesIO(), clock=lambda: NOW - 5,
+    )
+    session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+    session.flush()
+    status = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))[0]
+    title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
+    assert title.startswith("$ deploy --pin") and "[redacted-env]" in title
+    assert secret not in shlex.split(title[2:])
+    assert "walrusharbor" not in title.replace("'", "").replace('"', "")
