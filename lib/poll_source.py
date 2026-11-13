@@ -1136,6 +1136,9 @@ class LivePollSource:
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
             merged=merged and fresh,
+            mergeable=pull.get("mergeable") if isinstance(pull.get("mergeable"), bool) else None,
+            mergeable_state=_optional_string(pull.get("mergeable_state")),
+            closed=pull.get("state") == "closed" and not merged,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket

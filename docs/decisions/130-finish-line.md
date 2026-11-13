@@ -1,0 +1,5 @@
+- **Decision:** Each project sets its finish line in `factory.md` with `finish_line: ready-for-review | merge`; omitted, it follows `ship` (`ship: merge` gives `merge`, `ship: handoff` and `ship: after:<approver>` give `ready-for-review`), `check-config` refuses `ship: merge` with `finish_line: ready-for-review`, and this repo sets `finish_line: merge` while Aut0 keeps Ready for Review.
+- **When:** 2026-11-13 3:59 PM ET, by Max
+- **Source:** Max's chat message, filed as [issue #130](https://github.com/maxharris1/factory/issues/130): "This feature should be configurable in factory.md since for some tickets ready for review is the right state, like auth zero, whereas other ones we want it to get all the way to merge." and "Yes, file the approved-but-conflicting fix and start building it"
+
+The default and the `ship: merge` contradiction are Factory's technical calls in the [#130 plan](https://github.com/maxharris1/factory/pull/131) ("Decisions this plan makes", 2), so Aut0 and Tracy do not change unless they opt in. `ship: after:<approver>` with `finish_line: merge` is allowed: the queue updates the PR, and the approver's `ok` still ships it.

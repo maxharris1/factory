@@ -48,6 +48,7 @@ from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
+from lib.update_check import UpdateClass, classify as classify_update
 from lib.wait import (
     WaitError,
     open_queue,
@@ -736,6 +737,7 @@ def _runtime(
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
+        update_classifier=_classify_update,
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
@@ -746,6 +748,14 @@ def _runtime(
         source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+def _classify_update(repo: str, base: str, approved: str, head: str) -> UpdateClass:
+    """#130: the trivial-update check, on the waiter's bare clone of repo."""
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
+    )
+    return classify_update(clone, approved, head, f"refs/remotes/origin/{base}")
 
 
 def _feeder(

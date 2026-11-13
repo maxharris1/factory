@@ -1332,10 +1332,13 @@ class Dispatcher:
                 ),
             )
             return True, "queued-go-clarification"
+        once = f"g{generation}"
         if current in (*WATCHED_STATES, "waiting-external"):
             # #130: a go on a watched ticket is honored; the ticket leaves
-            # the merge queue and ship waits for a new APPROVE.
+            # the merge queue and ship waits for a new APPROVE. Keyed on the
+            # go, since the build that got it approved holds this generation.
             self._leave_merge_queue(ticket, "go")
+            once = comment.id
         answered = self._answered_by(
             ticket, comment, action, ticket.factory.builder_harness
         )
@@ -1359,10 +1362,7 @@ class Dispatcher:
                     ),
                 ),
             ),
-            dedupe_key=(
-                f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
-                f"g{generation}"
-            ),
+            dedupe_key=f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:{once}",
             answered=answered,
         )
         self._set_workflow_state(ticket, state)
@@ -2345,7 +2345,7 @@ class Dispatcher:
 
     def _advance_merge_queue(self, row: sqlite3.Row) -> None:
         polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
-        if polled is None or row["workflow_state"] == "updating":
+        if polled is None:
             return
         ticket = self._fresh_ticket(polled)
         if ticket is None:
@@ -2356,7 +2356,8 @@ class Dispatcher:
         if ticket.closed:
             self._abandon_closed(ticket)
             return
-        if ticket.factory.finish_line != "merge":
+        if row["workflow_state"] == "updating" or ticket.factory.finish_line != "merge":
+            # An update job is out: its ready (T2) or failure (T6) moves on.
             return
         if ticket.mergeable_state in ("dirty", "behind"):
             self._queue_update(ticket, row)

@@ -1,0 +1,243 @@
+"""#130: an approved PR that conflicts with base gets a Claude
+update-from-main job. A trivial update keeps the approval and merges; any
+other update goes back to cross-family review; two failed updates stop and
+ask Max."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from lib.brief import brief_kind
+from lib.queue import _job
+from lib.update_check import UpdateClass
+from tests.merge_queue_support import Board, sha
+
+
+def conflicted(tmp_path: Path, **options) -> tuple[Board, object, str]:
+    board = Board(tmp_path, **options)
+    pr = board.open("42", sha(1))
+    approve = board.build_and_approve(pr, mergeable=False)
+    return board, pr, approve
+
+
+def test_a_conflicting_queue_head_gets_one_update_job(tmp_path: Path) -> None:
+    board, pr, approve = conflicted(tmp_path)
+
+    [job] = board.jobs("update-from-main")
+    assert job["recipient"] == "claude"
+    assert job["head"] == sha(1)
+    assert job["source_comment_id"] == approve
+    assert job["state"] == "queued"
+    detail = json.loads(job["detail"])
+    assert detail["round"] == "1/3"
+    assert detail["base_branch"] == "main"
+    assert brief_kind(_job(job)) == "merge-only"
+    row = board.state("42")
+    assert row["workflow_state"] == "updating"
+    assert row["update_from_head"] == sha(1)
+    assert board.actions.states[-1] == "updating"
+
+    board.poll()
+    board.poll()
+    assert len(board.jobs("update-from-main")) == 1
+
+
+def test_a_behind_queue_head_is_updated_too(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=None)
+    pr.mergeable, pr.mergeable_state = True, "behind"
+    board.poll()
+    assert len(board.jobs("update-from-main")) == 1
+
+
+def test_trivial_update_carries_the_approval_and_merges(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.finish("claude")
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.poll()
+
+    assert board.outcome(ready) == f"approval-carried:{sha(1)[:12]}->{sha(2)[:12]}"
+    assert board.classified == [("owner/repo", "main", sha(1), sha(2))]
+    assert [job["action"] for job in board.jobs("review")] == ["review"]
+    assert board.actions.merges == [(True, sha(2))]
+    row = board.state("42")
+    assert row["workflow_state"] == "merged"
+    assert row["approved_head"] == sha(2)
+    [wake] = board.wakes("done")
+    assert wake["outcome"] == "merged"
+
+
+def test_trivial_update_waits_for_green_ci_before_it_is_classified(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.finish("claude")
+    pr.push(sha(2), ci="pending")
+    ready = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready) is None
+    assert board.classified == []
+
+    pr.ci[sha(2)] = "success"
+    board.poll()
+    assert board.outcome(ready).startswith("approval-carried:")
+    assert board.actions.merges == [(True, sha(2))]
+
+
+def test_non_trivial_update_is_re_reviewed_at_the_approved_round(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.verdict = UpdateClass(False, "a conflict hunk was not resolved to exactly one side")
+    board.finish("claude")
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    review = board.jobs("review")[-1]
+    assert review["recipient"] == "codex"
+    assert review["head"] == sha(2)
+    assert json.loads(review["detail"])["round"] == "1/3"
+    row = board.state("42")
+    assert row["workflow_state"] == "review"
+    assert row["approved_head"] is None
+    board.poll()
+    assert board.actions.merges == []
+
+    board.finish("codex")
+    approve = board.approve(pr, "1/3", comment_id="approve-again")
+    board.poll()
+    assert board.outcome(approve) == "merge-queue"
+    assert board.actions.merges == [(True, sha(2))]
+    assert board.state("42")["workflow_state"] == "merged"
+
+
+def test_no_update_check_fails_closed_to_re_review(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path, classifier=False)
+    board.finish("claude")
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready) == "queued-review"
+    assert board.actions.merges == []
+
+
+def test_a_raising_update_check_fails_closed_to_re_review(tmp_path: Path) -> None:
+    def broken(*args):
+        raise RuntimeError("clone unavailable")
+
+    board, pr, _approve = conflicted(tmp_path, classifier=broken)
+    board.finish("claude")
+    pr.push(sha(2))
+    ready = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready) == "queued-review"
+
+
+def test_red_ci_on_the_update_goes_to_a_ci_fix_and_leaves_the_queue(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.finish("claude")
+    pr.push(sha(2), ci="failure")
+    ready = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready) == "queued-ci-fix"
+    assert board.classified == []
+    row = board.state("42")
+    assert row["workflow_state"] == "fixing"
+    assert row["approved_head"] is None
+
+
+def test_two_failed_update_jobs_stop_and_ask_max(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.fail("claude")
+    board.poll()
+    row = board.state("42")
+    assert row["update_failures"] == 1
+    assert row["stuck"] == 0
+    assert row["workflow_state"] == "merge-queue"
+    board.poll()
+    row = board.state("42")
+    second = board.jobs("update-from-main")
+    assert len(second) == 2
+    assert second[-1]["state"] == "queued"
+    assert row["workflow_state"] == "updating"
+
+    board.fail("claude")
+    board.poll()
+    row = board.state("42")
+    assert row["stuck"] == 1
+    assert row["stuck_reason"] == "update-failed-2"
+    stuck = [job for job in board.jobs("stuck") if job["recipient"] == "grok"]
+    assert len(stuck) == 1
+    assert "ask Max" in json.loads(stuck[0]["detail"])["detail"]
+
+    for _ in range(3):
+        board.poll()
+    assert len(board.jobs("update-from-main")) == 2
+    assert [job["attempt"] for job in board.jobs("update-from-main")] == [1, 1]
+
+
+def test_a_ready_that_still_conflicts_counts_as_a_failed_update(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.finish("claude")
+    pr.push(sha(2), state="dirty")
+    first = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(first) == "update-failed-1"
+    assert board.state("42")["update_failures"] == 1
+    assert len(board.jobs("update-from-main")) == 2
+
+    board.finish("claude")
+    pr.push(sha(3), state="dirty")
+    second = board.ready(pr, sha(3))
+    board.poll()
+    assert board.outcome(second) == "stuck-update-failed-2"
+    assert board.state("42")["stuck_reason"] == "update-failed-2"
+    assert len(board.jobs("update-from-main")) == 2
+
+
+def test_a_successful_update_resets_the_failure_count(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.fail("claude")
+    board.poll()
+    assert board.state("42")["update_failures"] == 1
+    board.poll()
+
+    board.finish("claude")
+    pr.push(sha(2), state="unstable")
+    pr.mergeable = None
+    board.ready(pr, sha(2))
+    board.poll()
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
+    row = board.state("42")
+    assert row["update_failures"] == 0
+    assert row["workflow_state"] == "merged"
+
+
+def test_replay_an_approved_pr_conflicts_is_updated_and_merges_with_no_human(
+    tmp_path: Path,
+) -> None:
+    """The #111 shape: approved, base moves, the PR conflicts. No human
+    comment follows the APPROVE; only bots and the poller act."""
+    board = Board(tmp_path)
+    pr = board.open("111", sha(11))
+    approve = board.build_and_approve(pr, mergeable=None)
+    assert board.outcome(approve) == "merge-queue"
+    humans = len([c for c in pr.comments if c.author == "grok-login"])
+
+    pr.conflict()
+    board.poll()
+    job = board.claim("claude")
+    assert job.request.action == "update-from-main"
+    pr.push(sha(12), ci="pending")
+    board.ready(pr, sha(12))
+    board.queue.finish(job.id, owner="claude", handoff_comment_id="ready")
+    board.poll()
+    assert board.state("111")["workflow_state"] == "updating"
+    pr.ci[sha(12)] = "success"
+    board.poll()
+
+    assert board.actions.merges == [(True, sha(12))]
+    assert board.state("111")["workflow_state"] == "merged"
+    assert len([c for c in pr.comments if c.author == "grok-login"]) == humans
