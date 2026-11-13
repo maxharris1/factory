@@ -209,6 +209,16 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
         return numbers[0] if numbers else None
 
+    def pull_state(self, repo: str, number: int) -> str:
+        """open, closed or merged: a recorded PR is rechecked before a feed resumes."""
+        pull = self._json(f"{_repo_path(repo)}/pulls/{int(number)}")
+        state = pull.get("state") if isinstance(pull, dict) else None
+        if state not in ("open", "closed"):
+            raise GitHubAdapterError("pull request state is not readable")
+        if pull.get("merged") is True or pull.get("merged_at") is not None:
+            return "merged"
+        return str(state)
+
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         made = self._json(
             "-X", "POST", f"{_repo_path(repo)}/pulls",

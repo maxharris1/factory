@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from lib.device_pool import SLOTS_TABLE, Placement
-from lib.feeder import feeder_counts, feeder_items
+from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
@@ -154,9 +154,9 @@ class SQLiteStatusReader:
         """The feeder's last poll, or None when no feeder has run here."""
         connection = self._connect()
         try:
-            items = feeder_items(connection)
-            if not items:
+            if last_feeder_poll(connection) is None:
                 return None
+            items = feeder_items(connection)
             counts = feeder_counts(connection)
         finally:
             connection.close()
@@ -517,6 +517,7 @@ def render(status: Status) -> str:
             label = {
                 "waiting-capacity": "waiting for capacity",
                 "done": "fed, job queued",
+                "closed": "PR closed, not fed",
             }.get(state, state)
             where = f" -> PR #{pr}" if pr else ""
             lines.append(f"  {repo}#{issue} {label}{where}")

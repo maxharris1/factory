@@ -454,7 +454,8 @@ SCRIPT = r"""
 
   // Backlog feeder (#85): appended to Factory status like the webhook block.
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
-    'feeding': 'feeding', 'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued'};
+    'feeding': 'feeding', 'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued',
+    'closed': 'PR closed, not fed'};
   function renderFeeder(d) {
     var root = byId('kpis');
     var f = d.feeder;
@@ -1352,6 +1353,7 @@ _FEEDER_STATE = {
     "error": "feed error, retrying",
     "fed": "fed",
     "done": "fed, job queued",
+    "closed": "PR closed, not fed",
 }
 
 

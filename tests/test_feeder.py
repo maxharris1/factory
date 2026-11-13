@@ -21,6 +21,7 @@ from lib.feeder import (
     Feeder,
     IntakeIssue,
     feeder_counts,
+    feeder_items,
     go_state_for,
 )
 from lib.handoff import Handoff, format_comment, parse_comment
@@ -174,6 +175,12 @@ class FakeGitHub:
             if pull_repo == repo and pull["head"] == branch and pull.get("state", "open") == "open":
                 return number
         return None
+
+    def pull_state(self, repo: str, number: int) -> str:
+        pull = self.pulls[(repo, number)]
+        if pull.get("merged"):
+            return "merged"
+        return pull.get("state", "open")
 
     def open_draft_pull(self, repo: str, *, branch: str, base: str, title: str, body: str) -> int:
         self._maybe_fail("pull")
@@ -872,3 +879,156 @@ def test_a_running_job_with_no_placement_uses_up_box_capacity(tmp_path: Path) ->
     queue.claim("claude")  # an older `orch wait`, with no device placement
     github.issues["owner/app"] = [issue(n, created_at=float(n)) for n in range(1, 4)]
     assert len(feeder.feed_once().fed) == 2
+
+
+# --- #87 review r2: recovery keeps every bound new intake has -----------------
+
+
+def claude_backlog(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    return sorted(
+        (job.request.repo, job.request.ticket_id)
+        for job in queue.outstanding()
+        if job.request.recipient == "claude"
+    )
+
+
+def test_a_resumed_feed_waits_when_other_work_took_the_capacity(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    github.issues["owner/app"] = [issue(501)]
+    github.fail["pull"] = 1
+    assert feeder.feed_once().fed == ()  # stuck in error after the branch
+    queue.enqueue(JobRequest(repo="other/app", ticket_id="88", action="build",
+                             recipient="claude", source_comment_id="x",
+                             timeout_seconds=600), dedupe_key="other")
+
+    dispatcher_for(tmp_path, queue, feeder=feeder).poll_once(FeederSource(github))
+
+    assert claude_backlog(queue) == [("other/app", "88")]
+    assert github.pulls == {}
+    assert rows(tmp_path / "orch.db")["501"]["state"] == "error"
+
+
+def test_a_resumed_feed_is_fed_first_once_there_is_room(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    github.issues["owner/app"] = [issue(1, created_at=1.0)]
+    github.fail["pull"] = 1
+    feeder.feed_once()
+    github.issues["owner/app"] = [issue(1, created_at=1.0),
+                                  issue(2, labels=("factory:ready", "urgent"), created_at=0.0)]
+    report = feeder.feed_once()
+    assert [ref.ticket_id for ref in report.fed] == ["501"]
+    assert github.pulls[("owner/app", 501)]["head"] == "factory/issue-1"
+    assert rows(tmp_path / "orch.db")["2"]["state"] == "waiting-capacity"
+
+
+def test_restoring_a_lost_signal_never_feeds_past_capacity(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, box=1, now=now)
+    github.issues["owner/app"] = [issue(1, created_at=1.0)]
+    github.fail["pull"] = 1
+    feeder.feed_once()
+    github.issues["owner/app"] = [issue(2, created_at=2.0)]
+    now[0] += 60
+    assert len(feeder.feed_once().fed) == 1
+    github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
+    now[0] += 60
+    assert feeder.feed_once().fed == ()
+    assert len(github.pulls) == 1
+
+
+@pytest.mark.parametrize("ended", [{"state": "closed"}, {"state": "closed", "merged": True}])
+@pytest.mark.parametrize("failing", ["labels", "comment"])
+def test_a_saved_pr_that_is_no_longer_open_gets_no_new_work(
+    tmp_path: Path, ended: dict, failing: str
+) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    github.issues["owner/app"] = [issue(1)]
+    github.fail[failing] = 1
+    assert feeder.feed_once().fed == ()
+    assert rows(tmp_path / "orch.db")["1"]["pr_number"] == "501"
+    posted = list(github.posted.get(("owner/app", 501), []))
+    github.pulls[("owner/app", 501)].update(ended)
+
+    dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher.poll_once(FeederSource(github))
+    dispatcher.poll_once(FeederSource(github))
+
+    assert github.posted.get(("owner/app", 501), []) == posted
+    assert list(github.pulls) == [("owner/app", 501)]
+    assert claude_backlog(queue) == []
+    assert rows(tmp_path / "orch.db")["1"]["state"] == "closed"
+
+
+def test_a_closed_feed_holds_no_room(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, box=1)
+    github.issues["owner/app"] = [issue(1, created_at=1.0)]
+    github.fail["labels"] = 1
+    feeder.feed_once()
+    github.pulls[("owner/app", 501)]["state"] = "closed"
+    github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
+    assert [ref.ticket_id for ref in feeder.feed_once().fed] == ["502"]
+
+
+@pytest.mark.parametrize(
+    ("labels", "urgent", "bug"),
+    [(("factory:ready", "urgent"), 1, 0), (("factory:ready", "bug"), 0, 1)],
+)
+def test_a_priority_change_after_feeding_reaches_the_claim_order(
+    tmp_path: Path, labels: tuple[str, ...], urgent: int, bug: int
+) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, box=2, now=now)
+    github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
+    feeder.feed_once()
+    for key in ("501", "502"):
+        now[0] += 1
+        queue.enqueue(JobRequest(repo="owner/app", ticket_id=key, action="build",
+                                 recipient="claude", source_comment_id=key,
+                                 timeout_seconds=600), dedupe_key=key)
+    github.issues["owner/app"] = [issue(1, created_at=1.0),
+                                  issue(2, labels=labels, created_at=2.0)]
+    now[0] += 1
+    feeder.feed_once()
+    with queue.connect() as connection:
+        priority = {
+            row[0]: (row[1], row[2])
+            for row in connection.execute("SELECT ticket_id, urgent, bug FROM ticket_priority")
+        }
+    assert priority == {"501": (0, 0), "502": (urgent, bug)}
+    claimed = DevicePool(queue, feeder.machines).claim("claude")
+    assert claimed is not None and claimed[0].request.ticket_id == "502"
+
+
+def test_an_empty_intake_poll_shows_zero_eligible(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, now=now)
+    github.issues["owner/app"] = [issue(1)]
+    feeder.feed_once()
+    github.issues["owner/app"] = []
+    now[0] += 60
+    assert feeder.feed_once().eligible == 0
+    with queue.connect() as connection:
+        assert feeder_counts(connection) == {"eligible": 0, "fed": 0, "waiting_capacity": 0}
+        assert feeder_items(connection) == []
+
+
+def test_status_and_dashboard_show_an_empty_latest_poll(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.status import SQLiteStatusReader, build_status, render
+
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, now=now)
+    dispatcher_for(tmp_path, queue)
+    github.issues["owner/app"] = [issue(1)]
+    feeder.feed_once()
+    github.issues["owner/app"] = []
+    now[0] += 60
+    feeder.feed_once()
+
+    reader = SQLiteStatusReader(tmp_path / "orch.db")
+    text = render(build_status(reader, reader, clock=lambda: 20_000.0,
+                               feeder=reader.feeder(), attention=reader.attention()))
+    assert "Feeder — eligible 0, fed 0, waiting for capacity 0" in text
+    assert "owner/app#1" not in text
+    snapshot = collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=20_000.0)
+    assert snapshot["feeder"] == {"eligible": 0, "fed": 0, "waiting_capacity": 0, "items": []}

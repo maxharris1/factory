@@ -413,15 +413,19 @@ Every step is recorded in `feeder_items` before the next, keyed on (repo,
 ticket): a re-poll never opens a second PR, a PR already open on the branch
 is reused (the open one, never an older merged or closed PR on the same
 branch), and a brief or go the orchestrator already posted is not posted
-again. Only a brief or go whose author orch.yml trusts as `grok-bot` counts as
+again. A retry on a PR already recorded first checks that PR is still open;
+one closed or merged meanwhile ends the feed (`closed`) with nothing posted. Only a brief or go whose author orch.yml trusts as `grok-bot` counts as
 already posted, so a forged one never stands in for the real go. A fed
 ticket is never fed again. Room for a harness is the free slots on every
 schedulable device that lists it, minus its queued jobs, minus tickets fed
 for it in the last 10 minutes whose job is not queued yet (so a go the
-poller never acts on cannot stall the feeder). Tickets are fed urgent first (an `urgent`
+poller never acts on cannot stall the feeder). A ticket whose feed failed
+midway resumes first, but takes room like a new one: it waits while the
+harness has none. Tickets are fed urgent first (an `urgent`
 label or Linear priority Urgent), then `bug`, then oldest; the feeder also
-records those marks in `ticket_priority`, which the queue's claim order
-reads (urgent, then a resumed paused step, then bug, then oldest). The live
+records those marks in `ticket_priority`, refreshed every poll (a label
+added after the feed still moves the queued job), which the queue's claim
+order reads (urgent, then a resumed paused step, then bug, then oldest). The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
 Linear request path and budget (every page of the intake state, read with
@@ -595,8 +599,10 @@ the claim, with no model turn and no message to any bot. The harness posts its
   that id only when `orch job run` exited 0 and the marker is the last line
   of this run's output (`run.log` from where this run began; the runner's
   own `orch job run:` lines are skipped), else failed for T6 (a nonzero
-  exit, or a last line that is missing, malformed or says failed). A job
-  already finished by then is left alone. The waiter records each remote
+  exit, or a last line that is missing, malformed or says failed). Once a
+  remote worker was started, a failed run leaves the job running instead:
+  the poller fails it when the device confirms the worker gone, so T6 never
+  starts attempt 2 beside it. A job already finished by then is left alone. The waiter records each remote
   run in `<job-dir>/remote.json` and starts it with `orch job run
   --status-file <job-dir>/exit`, so a restarted waiter adopts the remote runs
   still running for its bot and finishes each once it ends (a runner gone

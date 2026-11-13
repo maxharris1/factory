@@ -32,12 +32,20 @@ It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
 is reused, and a brief or go already on the ticket is not posted again. A
 ticket that was fed is never fed again, so a re-poll never opens a second PR.
+A feed that resumes on a recorded PR first checks that PR is still open; one
+closed or merged meanwhile ends the feed (`closed`) with nothing posted.
 
 Room for a harness h is the free slots on every schedulable device that
 lists h (machines.yml, minus held slots), minus the jobs queued for h,
 minus the tickets this feeder fed for h in the last FED_PENDING_SECONDS
-whose job is not queued yet, minus tickets still being fed. So the queue
-never holds more work for a harness than it has free slots.
+whose job is not queued yet. Every ticket fed this poll takes one unit of
+room, a resumed one (some steps already done) as much as a new one; resumed
+tickets only go first. So the queue never holds more work for a harness
+than it has free slots.
+
+Each poll also refreshes the claim order (`ticket_priority`) of every ticket
+the feeder has a ticket id for, so an urgent or bug label added after the
+feed still moves its queued job.
 
 The feeder starts no harness and runs no job. It writes only through the
 GitHub and Linear clients it is given; tests pass fakes.
@@ -66,12 +74,15 @@ from lib.queue import (
 )
 
 FEEDER_TABLE = "feeder_items"
+POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
-# next poll); fed: brief and go posted; done: fed and its job is queued.
-STATES = ("eligible", "waiting-capacity", "feeding", "error", "fed", "done")
+# next poll); fed: brief and go posted; done: fed and its job is queued;
+# closed: its recorded PR was closed or merged before the feed finished.
+STATES = ("eligible", "waiting-capacity", "feeding", "error", "fed", "done", "closed")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
+FINAL = (*FED, "closed")
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
 URGENT_LABELS = frozenset({"urgent", "priority:urgent"})
@@ -141,6 +152,8 @@ class GitHubIntake(Protocol):
     def create_branch(self, repo: str, branch: str, sha: str) -> None: ...
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
+
+    def pull_state(self, repo: str, number: int) -> str: ...
 
     def open_draft_pull(
         self, repo: str, *, branch: str, base: str, title: str, body: str
@@ -229,6 +242,10 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
+        "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
+    )
+    connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
             repo TEXT NOT NULL,
@@ -254,12 +271,18 @@ def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def last_feeder_poll(connection: sqlite3.Connection) -> float | None:
+    """When the feeder last read intake, or None when no feeder has run here."""
+    if not _has_table(connection, POLL_TABLE):
+        return None
+    row = connection.execute(f"SELECT at FROM {POLL_TABLE}").fetchone()
+    return None if row is None else float(row[0])
+
+
 def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     """Tickets eligible at the last poll, priority order, as plain rows."""
-    if not _has_table(connection, FEEDER_TABLE):
-        return []
-    last = connection.execute(f"SELECT MAX(seen_at) FROM {FEEDER_TABLE}").fetchone()[0]
-    if last is None:
+    last = last_feeder_poll(connection)
+    if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     cursor = connection.execute(
         f"""
@@ -323,16 +346,15 @@ class Feeder:
         for candidate in sorted(candidates, key=lambda item: (
             (item.issue.repo.lower(), item.issue.key) not in resumed, *item.order()
         )):
-            identity = (candidate.issue.repo.lower(), candidate.issue.key)
             state = self._state(candidate)
-            if state in FED:
+            if state in FINAL:
                 continue
-            if identity not in resumed:
-                if room.get(candidate.harness, 0) <= 0:
+            if room.get(candidate.harness, 0) <= 0:
+                if state not in IN_FLIGHT:
                     self._set_state(candidate, "waiting-capacity")
-                    waiting += 1
-                    continue
-                room[candidate.harness] = room.get(candidate.harness, 0) - 1
+                waiting += 1
+                continue
+            room[candidate.harness] = room.get(candidate.harness, 0) - 1
             try:
                 ref = self._feed(candidate, now)
             except Exception as exc:  # one ticket's failure never stops the poll
@@ -341,6 +363,13 @@ class Feeder:
                 self.log(
                     f"feeder: {candidate.issue.repo}#{candidate.issue.key} "
                     f"not fed yet: {safe_ship_error(exc)}"
+                )
+                continue
+            if ref is None:
+                room[candidate.harness] += 1
+                self.log(
+                    f"feeder: {candidate.issue.repo}#{candidate.issue.key} not fed: "
+                    "its PR was closed or merged"
                 )
                 continue
             fed.append(ref)
@@ -392,18 +421,14 @@ class Feeder:
                 pending = connection.execute(
                     f"""
                     SELECT COUNT(*) FROM {FEEDER_TABLE} AS item
-                    WHERE item.harness = ?
-                      AND (
-                        (item.state = 'fed' AND item.fed_at > ?)
-                        OR (item.state IN ('feeding', 'error') AND item.seen_at = ?)
-                      )
+                    WHERE item.harness = ? AND item.state = 'fed' AND item.fed_at > ?
                       AND NOT EXISTS (
                         SELECT 1 FROM jobs
                         WHERE lower(jobs.repo) = item.repo
                           AND jobs.ticket_id = item.ticket_id
                       )
                     """,
-                    (harness, now - FED_PENDING_SECONDS, now),
+                    (harness, now - FED_PENDING_SECONDS),
                 ).fetchone()[0]
                 room[harness] = free - int(queued) - int(pending)
         return room
@@ -425,8 +450,9 @@ class Feeder:
                         title = excluded.title,
                         urgent = excluded.urgent,
                         bug = excluded.bug,
-                        risk = CASE WHEN state IN ('fed', 'done') THEN risk ELSE excluded.risk END,
-                        harness = CASE WHEN state IN ('fed', 'done') THEN harness
+                        risk = CASE WHEN state IN ('fed', 'done', 'closed') THEN risk
+                                    ELSE excluded.risk END,
+                        harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
                                        ELSE excluded.harness END,
                         seen_at = excluded.seen_at
                     """,
@@ -444,6 +470,19 @@ class Feeder:
                         now,
                     ),
                 )
+                ticket = connection.execute(
+                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
+                    (issue.repo.lower(), issue.key),
+                ).fetchone()[0]
+                if ticket is not None:
+                    set_ticket_priority(
+                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug, at=now
+                    )
+            connection.execute(
+                f"INSERT INTO {POLL_TABLE} (id, at) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
+                (now,),
+            )
             # A ticket that lost its signal before it was fed is forgotten; a
             # fed one is kept forever, so it is never fed (or opened) twice.
             connection.execute(
@@ -489,7 +528,7 @@ class Feeder:
             connection.execute(
                 f"""
                 UPDATE {FEEDER_TABLE} SET state = ?, error = ?
-                WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done')
+                WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
                 """,
                 (state, error, candidate.issue.repo.lower(), candidate.issue.key),
             )
@@ -504,7 +543,8 @@ class Feeder:
 
     # -- one ticket ----------------------------------------------------------------
 
-    def _feed(self, candidate: _Candidate, now: float) -> TicketRef:
+    def _feed(self, candidate: _Candidate, now: float) -> TicketRef | None:
+        """Feed one ticket; None when its recorded PR is no longer open."""
         issue = candidate.issue
         config = candidate.context.config
         row = self._row(candidate)
@@ -516,7 +556,14 @@ class Feeder:
             raise ValueError(f"branch name {branch!r} is not safe")
         self._record(candidate, branch=branch)
         repo = candidate.project.repo
-        number = int(row["pr_number"]) if row["pr_number"] else self.github.find_pull(repo, branch)
+        if row["pr_number"]:
+            number: int | None = int(row["pr_number"])
+            pull = self.github.pull_state(repo, number)
+            if pull != "open":
+                self._set_state(candidate, "closed", error=f"PR #{number} is {pull}")
+                return None
+        else:
+            number = self.github.find_pull(repo, branch)
         if number is None:
             if self.github.branch_sha(repo, branch) is None:
                 base = self.github.branch_sha(repo, config.base_branch)

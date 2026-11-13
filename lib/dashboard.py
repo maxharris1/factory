@@ -47,7 +47,7 @@ from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
-from lib.feeder import feeder_counts, feeder_items
+from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.job_state import (
     DEAD,
@@ -1065,8 +1065,8 @@ def _read_db(
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
     feeder = None
-    items = feeder_items(connection)
-    if items:
+    if last_feeder_poll(connection) is not None:
+        items = feeder_items(connection)
         feeder = {
             **feeder_counts(connection),
             "items": [

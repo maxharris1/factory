@@ -242,3 +242,24 @@ def test_find_pull_takes_the_oldest_of_two_open_prs() -> None:
     gh = RecordedGh()
     gh.route(FIND, ok([pull(95, "open"), pull(90, "open"), pull(3, "closed")]))
     assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") == 90
+
+
+@pytest.mark.parametrize(
+    ("served", "state"),
+    [
+        (pull(90, "open"), "open"),
+        (pull(90, "closed"), "closed"),
+        (pull(90, "closed", merged=True), "merged"),
+    ],
+)
+def test_pull_state_reads_open_closed_or_merged(served: dict, state: str) -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/pulls/90",), ok(served))
+    assert GitHubIntakeClient(gh).pull_state("owner/app", 90) == state
+
+
+def test_pull_state_refuses_an_unreadable_pull() -> None:
+    gh = RecordedGh()
+    gh.route((f"{REPO}/pulls/90",), ok({"number": 90}))
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).pull_state("owner/app", 90)

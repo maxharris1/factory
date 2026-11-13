@@ -10,18 +10,24 @@ ends. Every SSH call here goes to tests/fake_ssh.py; nothing reaches a host.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from lib.brief import render_brief
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter, handoff_marker
+from lib.worktrees import pid_alive
 from tests.test_brief import detail
 from tests.test_remote_start import Ssh
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, slots, state
@@ -414,3 +420,126 @@ def test_a_restarted_waiter_leaves_a_job_finished_meanwhile_alone(tmp_path: Path
     assert not second.running()
     assert not (tmp_path / "state" / "jobs" / job_id / "remote.json").exists()
     assert _done_row(db, job_id) == ("done", "111")
+
+
+# --- #87 review r2 F2.1: a failed remote run is not retryable while its worker may run --
+
+
+def _started_remotely(waiter, job_id: str) -> None:
+    waiter.pool.attach_runner(job_id, owner="claude", pid=999_999, start="x", alive=lambda *_: False)
+    waiter.pool.attach_worker(job_id, owner="claude", remote=True, tag="t" * 32)
+
+
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("crashed\n", 1),
+        ("killed\n", -9),
+        ("ORCH-HANDOFF: 4242\n", 255),
+        ("ORCH-HANDOFF: failed\n", 0),
+        ("no marker\n", 0),
+    ],
+)
+def test_a_failed_remote_run_leaves_its_job_running_for_the_device_check(
+    tmp_path: Path, output: str, code: int
+) -> None:
+    waiter, spawn, db, job_id = _remote_run(tmp_path)
+    waiter.step()
+    _started_remotely(waiter, job_id)
+    _finish_run(tmp_path, job_id, spawn, output, code=code)
+    waiter.step()
+    assert _done_row(db, job_id) == ("running", None)
+    assert not waiter.running()
+    assert not (tmp_path / "state" / "jobs" / job_id / "remote.json").exists()
+
+
+def test_a_restarted_waiter_leaves_a_started_remote_run_to_the_device_check(
+    tmp_path: Path,
+) -> None:
+    machines = remote_machines(tmp_path, box_enabled=False)
+    first, queue, db = make_waiter(tmp_path, machines, FakeSpawn())
+    job_id = enqueue(queue, "a")
+    first.step()
+    _started_remotely(first, job_id)
+    alive = Liveness()
+    alive.running = False
+    second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=alive)
+    second.step()
+    assert _done_row(db, job_id) == ("running", None)
+
+
+def test_a_remote_run_whose_runner_is_killed_never_runs_two_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runner SIGKILLed, worker ignores SIGTERM: no attempt 2 until the worker is gone."""
+    from lib.device_monitor import DeviceMonitor
+    from lib.remote import SshTransport
+    from tests.test_wait import dispatcher_for
+
+    machines = remote_machines(tmp_path, box_enabled=False)
+    ssh = Ssh(tmp_path)
+    env = {"HOME": str(tmp_path), **ssh.env()}
+    pids = tmp_path / "workers"
+    harness = tmp_path / "harness.py"
+    harness.write_text(
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"with open({str(pids)!r}, 'a') as f: f.write(str(os.getpid()) + '\\n')\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    db = tmp_path / "orch.db"
+    queue = SQLiteJobQueue(db, clock=time.time)
+    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    pool = DevicePool(queue, config)
+    log: list[str] = []
+    waiter = Waiter(
+        bot="claude-bot",
+        queue=queue,
+        pool=pool,
+        harness=HarnessCommand(bot="claude-bot", command=(sys.executable, str(harness))),
+        context=FakeContext(),
+        state_dir=tmp_path / "state",
+        db=db,
+        machines=machines,
+        orch=(sys.executable, str(ORCH)),
+        spawn=subprocess.Popen,
+        log=log.append,
+        environ=env,
+    )
+    dispatcher = dispatcher_for(db)
+    for name, value in ssh.env().items():
+        monkeypatch.setenv(name, value)
+    dispatcher.devices = DeviceMonitor(pool, config, SshTransport())
+    job_id = enqueue(queue, "a", timeout_seconds=3600)
+
+    def workers() -> list[int]:
+        return [int(pid) for pid in pids.read_text().split()] if pids.exists() else []
+
+    def wait_for(check) -> None:
+        deadline = time.monotonic() + 20
+        while not check():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+    runner = None
+    try:
+        assert waiter.step() == job_id
+        runner = waiter._children[job_id]
+        wait_for(lambda: len(workers()) == 1)
+        os.kill(runner.pid, signal.SIGKILL)
+        runner.wait(timeout=10)
+        waiter.step()
+        dispatcher.reconcile_jobs()
+        assert waiter.step() is None, log
+        assert state(db, job_id) == "running"
+        assert len(workers()) == 1
+
+        os.kill(workers()[0], signal.SIGKILL)
+        wait_for(lambda: not pid_alive(workers()[0], None))
+        dispatcher.reconcile_jobs()
+        assert state(db, job_id) == "failed"
+    finally:
+        for pid in workers():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)

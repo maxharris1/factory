@@ -920,8 +920,9 @@ def test_three_handoff_skills_document_wait_heartbeat_and_done() -> None:
 
 
 def _readable(stream: object) -> bool:
-    ready, _, _ = select.select([stream], [], [], 0)
-    return bool(ready)
+    poller = select.poll()
+    poller.register(stream, select.POLLIN)
+    return bool(poller.poll(0))
 
 
 def _proc_state(pid: int) -> str:

@@ -11,6 +11,8 @@ Every read goes to GitHub's REST API at call time. There is no local
 clone and no cache.
 
 - is_merged: GET pulls/<n>. head.sha must be a full SHA, open or merged.
+  A 5xx or timeout on the read is raised with retryable=True, as for merge,
+  so a ship's merge preflight gets the same one re-drive.
   True only when merged and head.sha is head.
 - branch_tip: GET git/ref/heads/<branch>. The full lowercase SHA, or raise.
 - fast_forward: PATCH git/refs/heads/<branch> with sha=<head> and
@@ -202,9 +204,12 @@ class GitHubReviewActions:
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
         head = _sha(head, "head")
-        pull = _object(
-            self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
-        )
+        try:
+            read = self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
+        except GitHubAdapterError as exc:
+            exc.retryable = _transient(exc)
+            raise
+        pull = _object(read)
         merged = pull.get("merged")
         if not isinstance(merged, bool):
             raise GitHubAdapterError("pull request has no boolean merged field")
@@ -248,7 +253,7 @@ class GitHubReviewActions:
                 raise HeadMismatchError(
                     f"PR head is not {head}: {exc.safe_detail}"
                 ) from exc
-            exc.retryable = status is None or status == 405 or status >= 500
+            exc.retryable = status == 405 or _transient(exc)
             raise
         if result.get("merged") is not True:
             raise GitHubAdapterError(f"squash merge of {head} was not confirmed")
@@ -814,6 +819,12 @@ def _labels(pages: list[object]) -> list[str]:
                 raise GitHubAdapterError("label has no name")
             names.append(name)
     return names
+
+
+def _transient(exc: GitHubAdapterError) -> bool:
+    """A failure a later try may pass: a 5xx, a timeout, or no HTTP status at all."""
+    status = _status(exc)
+    return status is None or status >= 500
 
 
 def _status(exc: GitHubAdapterError) -> int | None:

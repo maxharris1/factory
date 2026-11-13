@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,51 @@ def test_a_merge_retry_finds_the_pr_already_merged_and_completes(tmp_path: Path)
     assert gh.count(MERGE) == 1
     assert intent(queue)["status"] == "completed"
     assert workflow(queue) == "merged"
+
+
+# --- #87 review r2 F2.5: the merge preflight read is classified like the merge
+
+
+SERVER_ERROR_502 = GhResult(1, "", "gh: Server Error (HTTP 502)\n")
+TRANSIENT_READS = [
+    pytest.param(SERVER_ERROR_502, id="502"),
+    pytest.param(subprocess.TimeoutExpired("gh", 60), id="timeout"),
+]
+
+
+@pytest.mark.parametrize("failure", TRANSIENT_READS)
+def test_a_transient_is_merged_read_failure_is_retryable(failure) -> None:
+    actions, gh = adapter()
+    gh.route(PULL, failure)
+    with pytest.raises(GitHubAdapterError) as raised:
+        actions.is_merged(pr("merge"), HEAD)
+    assert raised.value.retryable is True
+
+
+def test_a_refused_is_merged_read_is_not_retryable() -> None:
+    actions, gh = adapter()
+    gh.route(PULL, GhResult(1, "", "gh: Not Found (HTTP 404)\n"))
+    with pytest.raises(GitHubAdapterError) as raised:
+        actions.is_merged(pr("merge"), HEAD)
+    assert raised.value.retryable is False
+
+
+@pytest.mark.parametrize("failure", TRANSIENT_READS)
+def test_a_transient_merge_preflight_failure_is_retried_and_merges(
+    tmp_path: Path, failure
+) -> None:
+    dispatcher, queue, gh, snapshot = merge_setup(tmp_path)
+    gh.route(PULL, failure, served("pull-42-open.json"))
+    gh.route(MERGE, served("merge-squash-200.json"))
+
+    for _ in range(3):
+        dispatcher.process(snapshot)
+
+    row = intent(queue)
+    assert (row["status"], row["redrive"]) == ("completed", "spent")
+    assert gh.count(MERGE) == 1
+    assert workflow(queue) == "merged"
+    assert attention(queue) == []
 
 
 # --- #84: the latest attempt of each check -----------------------------------

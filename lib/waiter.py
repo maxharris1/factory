@@ -26,8 +26,11 @@ and when the run ends the waiter runs `orch job done` on the box: done with
 that comment id only when `orch job run` exited 0 and the marker is the last
 line of this run's output (run.log from the offset where this run began,
 skipping the runner's own `orch job run:` lines); failed (for T6) when the
-exit is nonzero or the last line is missing, malformed or says failed. A job
-already finished by then is left alone.
+exit is nonzero or the last line is missing, malformed or says failed. A
+failed run whose remote worker was started is not failed here: its job stays
+running until the poller's device check confirms the worker gone, so T6
+never retries it beside a live worker. A job already finished by then is
+left alone.
 
 A remote run is recorded in `<job-dir>/remote.json` (pid, process start,
 run.log offset) and started with `--status-file <job-dir>/exit`, so a
@@ -714,7 +717,10 @@ class Waiter:
 
         Done needs both: `orch job run` exited 0, and the last line of this
         run's output (after `offset` in run.log) is a comment-id marker.
-        Anything else fails the job for T6 (#87 F1.5).
+        Anything else fails the job for T6 (#87 F1.5), but only when no
+        remote worker was started: once one was, the job stays running
+        until the poller's device check confirms the worker gone and fails
+        it then, so a retry never runs beside it (#87 r2 F2.1).
         """
         try:
             with open(job_dir / "run.log", "rb") as handle:
@@ -726,6 +732,21 @@ class Waiter:
             tail = ""
         marker = handoff_marker(tail)
         handoff = None if code != 0 or marker in (None, "failed") else marker
+        if handoff is None:
+            try:
+                placement = self.pool.placement(job_id)
+            except (QueueError, sqlite3.Error, OSError) as exc:
+                self.log(f"job {job_id}: could not read its slot ({_one_line(exc)}); left to T6")
+                self._forget_remote(job_dir)
+                return
+            if placement is not None and placement.remote_started:
+                self.log(
+                    f"job {job_id}: remote run ended without a handoff (exit {code}); "
+                    "its worker may still run, so the poller fails it once the device "
+                    "confirms it gone"
+                )
+                self._forget_remote(job_dir)
+                return
         try:
             job = retry_locked(
                 lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=handoff)
