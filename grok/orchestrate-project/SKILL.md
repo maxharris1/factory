@@ -25,19 +25,23 @@ The dispatcher queues work. This skill does not start a harness.
 
 `lib.orchestrate` is the stable interface. F1-08 imports these names and does not rename them. Do not add a required field to `RouteRequest`.
 
-RouteRequest fields: `config`, `risk`, `urgent`, `summary`, `likely_files`, `scope_changed`
+RouteRequest fields: `config`, `risk`, `urgent`, `summary`, `likely_files`, `scope_changed`, `built_by`
 
 FitChoice fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`
 
-RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`, `builder_family`, `reviewer_family`, `job`, `urgent`, `risk`, `file_count`, `scope_changed`
+RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`, `builder_family`, `reviewer_family`, `job`, `urgent`, `risk`, `file_count`, `scope_changed`, `builder_using_reserve`, `reviewer_using_reserve`, `builder_fallback`, `reviewer_fallback`, `built_by`
 
-F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False) -> JobRoute`
+F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute`
 
 `JobRoute` has `builder`, `reviewer`, `reason`, and `ok`. `ok` is true only when both sides are set and `reason` is none. Each side has `harness` and `model`.
 
 F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
 
-`choose_route(request)` calls `route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. A usage source passed as `usage` is forwarded and is the only extra argument. This skill does not pass one. A route that is not ok raises `RouteError`. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
+`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError` instead of being routed around. It then calls `route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. A usage source passed as `usage` is forwarded, and so is `request.built_by`. This skill does not pass a usage source. A route that is not ok raises `RouteError`.
+
+`built_by` is optional. On a later round, set it to the `(harness, model)` that actually built, so the builder is that one and the reviewer is outside its family.
+
+`builder_using_reserve`, `reviewer_using_reserve`, `builder_fallback` and `reviewer_fallback` record what the route did: a side in its usage reserve, or a side that is not factory.md's harness. When any is true, the `orch:go` body ends with a **Routing** paragraph. It is for information: the dispatcher runs factory.md's pair. They are not header keys. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
 
 Webhook wakes contain `action`, `attempt`, `detail`, `generation`, `head`,
 `job_id`, `logical_key`, `repo`, `source_comment_id`, `target_bot`, and

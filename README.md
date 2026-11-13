@@ -1388,7 +1388,7 @@ always named on stderr and does not fail the check.
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` refuses a factory.md pair that fails `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
 
 ## pstack pin
 
@@ -1424,7 +1424,7 @@ The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run'
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
 
 - A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
-- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI. The family word must end the name or be followed by `-`, `.`, `_`, `:` or a digit, so `haikus`, `claudette` and `magnum-opus` resolve to no family. `opus-mt*`, `gpt-j*` and `gpt-neo*` are other model lines and resolve to no family.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
 
