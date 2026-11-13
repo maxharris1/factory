@@ -648,6 +648,8 @@ FAKE_HARNESS = f"#!{sys.executable}\n" + """# Stands in for the bot's harness: r
 import json, os, subprocess, sys, time
 from pathlib import Path
 
+RECORDED_ENV = ("ORCH_JOB_PROOF", "ORCH_JOB_ID", "ORCH_JOB_BOT", "ORCH_DB",
+                "ORCH_JOB_BRIEF", "ORCH_JOB_WORKTREE")
 out = Path(os.environ["FAKE_HARNESS_DIR"])
 job = os.environ["ORCH_JOB_ID"]
 (out / f"{job}.json").write_text(json.dumps({
@@ -657,6 +659,8 @@ job = os.environ["ORCH_JOB_ID"]
     "cwd": os.getcwd(),
     "job_bot": os.environ.get("ORCH_JOB_BOT"),
     "db": os.environ.get("ORCH_DB"),
+    # Only what the run hands the harness, never the whole environment.
+    "env": {name: value for name, value in os.environ.items() if name in RECORDED_ENV},
 }))
 go = out / f"{job}.go"
 crash = out / f"{job}.crash"

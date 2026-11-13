@@ -200,8 +200,24 @@ session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 database stays on the box, and the bot runs `orch job done` there); ssh exits
 with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
-`--worktree` is box-only and refused for a remote job (exit 2): the harness
-checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+The command runs under the bot's login shell (`bash -lc 'exec "$@"'`), so the
+bot's own PATH (gh, claude, codex) is loaded, and stdin is forwarded to it.
+
+`--worktree` works the same on every device (#94): the harness runs in the
+job's checkout, `$ORCH_JOB_WORKTREE`. On a remote device `orch job run` first
+checks over the same alias that `git`, `gh` and the command's binary exist
+under `bash -lc`, then clones or fetches the job's repo into
+`<workdir_root>/jobs/<job-id>` at the job's head (on the job's branch when
+that branch's tip is the head, else detached; with no head, the base
+branch), keeping orch's worker records out of `git status`, and copies
+`$ORCH_JOB_BRIEF`, if set, to `<job-id>.brief.md` beside the checkout
+(`ORCH_JOB_BRIEF` then names that copy on the device). An existing checkout
+is reused as is, and a remote checkout is never removed. If the check or the
+checkout fails (a missing tool, an unreachable device, a failed clone),
+nothing starts: the job is requeued and its slot freed in one transaction,
+with no round or attempt charged, a `requeued-unstarted` job event, one log
+line saying why, and exit status 75. Harnesses never build their own remote
+command.
 
 A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
 process's environment, so there the worker is named by its record alone, one
@@ -564,7 +580,19 @@ the claim, with no model turn and no message to any bot. The harness posts its
   claimed job, which the poller requeues after `release_claimed_minutes`.
 - **One handoff per job.** The claim records the waiter on the job's slot.
   From then on only that waiter's own `orch job run` may run the job, and
-  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  only that run may `orch job done` it. The run proves it with a secret
+  token (issue #96): `orch job run` mints one per run, records only its
+  SHA-256 on the slot, and gives the harness the token only in
+  `$ORCH_JOB_PROOF`, never on disk: the waiter and the bot's other sessions
+  run as one Unix user, so a file could be found and presented by any of
+  them. The name has no `KEY`, `SECRET` or `TOKEN` in it, so Codex's default
+  `shell_environment_policy` passes it to the commands the harness runs.
+  There is no process-tree check, so a harness sandbox with its own PID
+  namespace (Codex) can finish its job, as long as it can write the orch
+  database's directory. The known limit: a process of the same Unix user
+  that reads the run's `/proc/<pid>/environ` can take the token; the check
+  stops bot turns that were never handed it, not a hostile same-user
+  process. A bot turn's `orch job
   run` or `orch job done` is refused (exit 2, nothing changed), and a plain
   `orch wait <bot>` is refused while the bot's autostart waiter runs. A
   second `orch job run` of a running job is refused. `orch job done` with the

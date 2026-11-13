@@ -19,9 +19,18 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   and a grep that reads NUL-separated environments; make
   `<workdir>/jobs/<job-id>`, record `<process group> <boot id>` in
   `.orch-worker.pid` there, and exec the harness command with the job's
-  environment. sshd runs the command in a new session, so that process
-  group is the job's. The record is never removed: deleting bookkeeping
-  is not evidence the processes are gone;
+  environment under the bot's login shell (`bash -lc 'exec "$@"'`, #94),
+  so its own PATH (gh, claude, codex) is loaded; the exec keeps the pid.
+  sshd runs the command in a new session, so that process group is the
+  job's. The record is never removed: deleting bookkeeping is not
+  evidence the processes are gone;
+* preflight (#94, `orch job run --worktree`): under `bash -lc`, exit 0 when
+  git, gh and the harness binary are all found, else name the missing ones;
+* checkout (#94): under `bash -lc`, clone (git init + fetch, so a job
+  directory already holding a worker record still takes it) or reuse the
+  job's checkout in `<workdir>/jobs/<job-id>` at the job's head, and copy
+  the brief from stdin to `<workdir>/jobs/<job-id>.brief.md`. Job values
+  are passed as quoted positional arguments, never spliced into the script;
 * check: exit 1 while any process of this user carries the job's tag
   (wherever its group or session now is); otherwise exit 3 ("cannot tell")
   while the recorded group, from this boot, still has a process (one that
@@ -98,7 +107,16 @@ SSH_OPTIONS = (
     "ServerAliveCountMax=5",
 )
 PROBE_TIMEOUT_SECONDS = 60.0
+CHECKOUT_TIMEOUT_SECONDS = 900.0
 PID_FILE = ".orch-worker.pid"
+# #94: every command orch runs for a job on a device (the preflight, the
+# checkout and the harness) runs under the bot's login shell.
+LOGIN_SHELL = "bash"
+LOGIN_NAME = "orch-job"
+_EXEC_ARGS = 'exec "$@"'
+PREFLIGHT_TOOLS = ("git", "gh")
+_PREFLIGHT_MARK = "orch-preflight: missing"
+_CHECKOUT_MARK = "orch-checkout:"
 TAG_ENV = "ORCH_WORKER_TAG"
 # The start script's own exit status when it cannot make or enter the job
 # directory, or record the worker: the harness never ran.
@@ -111,6 +129,8 @@ UNKNOWN = "unknown"
 UNREACHABLE = "unreachable"
 
 _JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_SHA = re.compile(r"^[0-9a-f]{7,64}$")
+_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _TAG = re.compile(r"^[0-9a-f]{32}$")
 
@@ -294,6 +314,9 @@ def start_script(
         f"{name}={shlex.quote(value)}" for name, value in sorted(env.items())
     )
     argv = " ".join(shlex.quote(part) for part in command)
+    # #94: the harness runs under the bot's login shell, so its own PATH (gh,
+    # claude, codex) is loaded. `exec "$@"` keeps the start's pid and group.
+    login = f"{LOGIN_SHELL} -lc {shlex.quote(_EXEC_ARGS)} {LOGIN_NAME} {argv}"
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
     darwin_file = shlex.quote(darwin_record(tag))
@@ -305,7 +328,7 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
         f"|| exit {START_REFUSED}; "
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {argv}'
+        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {login}'
     )
     inner = (
         f"d={directory}; "
@@ -315,7 +338,7 @@ def start_script(
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {argv}'
+        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {login}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
 
@@ -377,8 +400,209 @@ def stop_script(target: RemoteTarget) -> str:
 PROBE_SCRIPT = "exit 0"
 
 
+# --- #94: preflight and job checkout on the placed device --------------------
+#
+# Both run under the bot's login shell (`bash -lc`), as the harness does, so
+# they see the PATH the harness will. Job values never reach the script text:
+# each script is a constant, and the values are its quoted positional
+# arguments (`bash -lc '<script>' <name> <arg>...`).
+
+# Prints `orch-preflight: missing <tool>...` on stderr and exits 3 when any
+# tool is not found under the login PATH.
+_PREFLIGHT = (
+    'm=; for t in "$@"; do command -v "$t" >/dev/null 2>&1 || m="$m $t"; done; '
+    '[ -z "$m" ] && exit 0; '
+    f"printf '{_PREFLIGHT_MARK}%s\\n' \"$m\" >&2; exit 3"
+)
+
+# $1 job dir, $2 git URL, $3 head (or empty), $4 base branch (or empty),
+# $5 the job's branch (or empty), $6 the brief's path (or empty: no brief).
+# Clones (git init + fetch, so a job directory that already holds orch's
+# worker record still takes the checkout) or reuses the job's checkout, puts
+# it at the head (on the job's branch when that branch's tip is exactly the
+# head, else detached; with no head, the base branch or origin's default),
+# keeps orch's own files out of `git status`, and writes the brief (stdin)
+# beside the checkout. Prints `orch-checkout: ok <sha> <new|reused>` on
+# success, `orch-checkout: <reason>` on stderr and exit 3 on failure.
+_CHECKOUT = (
+    'd=$1; u=$2; h=$3; m=$4; n=$5; b=$6; '
+    f"fail() {{ printf '{_CHECKOUT_MARK} %s\\n' \"$*\" >&2; exit 3; }}; "
+    "export GIT_TERMINAL_PROMPT=0; "
+    'mkdir -p -- "$d" || fail "cannot make $d"; '
+    'cd -- "$d" || fail "cannot enter $d"; '
+    'if [ -n "$b" ]; then (umask 077 && cat > "$b") || fail "cannot write the brief $b"; fi; '
+    "if [ -d .git ] && t=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
+    f"printf '{_CHECKOUT_MARK} ok %s reused\\n' \"$t\"; exit 0; fi; "
+    'git init -q . >/dev/null || fail "git init failed"; '
+    "git remote remove origin >/dev/null 2>&1; "
+    'git remote add origin "$u" || fail "git remote add failed"; '
+    'git fetch -q --prune origin || fail "git fetch failed"; '
+    'if [ -n "$h" ]; then '
+    'if ! git cat-file -e "$h^{commit}" 2>/dev/null; then '
+    'git fetch -q origin "$h" || fail "cannot fetch $h"; '
+    'git cat-file -e "$h^{commit}" 2>/dev/null || fail "cannot fetch $h"; '
+    "fi; "
+    't=$(git rev-parse "$h^{commit}") || fail "cannot resolve $h"; '
+    'elif [ -n "$m" ] && t=$(git rev-parse -q --verify "refs/remotes/origin/$m^{commit}"); then :; '
+    "else "
+    'git remote set-head origin --auto >/dev/null 2>&1 || fail "cannot find the default branch"; '
+    "t=$(git rev-parse -q --verify 'refs/remotes/origin/HEAD^{commit}') "
+    '|| fail "cannot find the default branch"; '
+    "fi; "
+    'if [ -n "$n" ] && [ -n "$h" ] '
+    '&& [ "$(git rev-parse -q --verify "refs/remotes/origin/$n^{commit}")" = "$t" ]; then '
+    'git checkout -q -B "$n" "$t" && git branch -q --set-upstream-to="origin/$n" "$n" '
+    '|| fail "git checkout failed"; '
+    "else "
+    'git checkout -q --detach "$t" || fail "git checkout failed"; '
+    "fi; "
+    "{ mkdir -p .git/info && "
+    "printf '%s\\n' /.orch-worker.pid '/.orch-worker-*.pid' >> .git/info/exclude; } "
+    '|| fail "cannot write .git/info/exclude"; '
+    f"printf '{_CHECKOUT_MARK} ok %s new\\n' \"$t\""
+)
+
+
+class CheckoutError(Exception):
+    """The job cannot start on its device: preflight or checkout failed. One line."""
+
+
+def brief_path(target: RemoteTarget) -> str:
+    """Where the job's brief is written on the device: beside its checkout."""
+    return f"{target.job_dir}.brief.md"
+
+
+def _login(script: str, name: str, args: Sequence[str]) -> str:
+    quoted = " ".join(shlex.quote(arg) for arg in args)
+    return f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {name} {quoted}".rstrip()
+
+
+def preflight_script(harness: str) -> str:
+    """Exit 0 when git, gh and harness are found under the bot's login PATH."""
+    if not harness:
+        raise RemoteError("no harness binary to check")
+    return _login(_PREFLIGHT, "orch-preflight", (*PREFLIGHT_TOOLS, harness))
+
+
+def plain_branch(name: str | None, what: str = "branch") -> str:
+    if name is None:
+        return ""
+    if (
+        not _BRANCH.fullmatch(name)
+        or ".." in name
+        or name.endswith((".lock", "/", "."))
+        or "//" in name
+        or "@{" in name
+    ):
+        raise RemoteError(f"{what} {name!r} is not a plain branch name")
+    return name
+
+
+def checkout_script(
+    target: RemoteTarget,
+    *,
+    url: str,
+    head: str | None,
+    base_branch: str | None,
+    branch: str | None,
+    brief: bool,
+) -> str:
+    """The remote script that makes (or reuses) the job's checkout at head."""
+    if head is not None and not _SHA.fullmatch(head):
+        raise RemoteError(f"head {head!r} is not a commit SHA")
+    if not url or url.startswith("-") or any(ord(c) < 32 for c in url):
+        raise RemoteError("the git URL is not usable")
+    args = (
+        target.job_dir,
+        url,
+        head or "",
+        plain_branch(base_branch, "base branch"),
+        plain_branch(branch, "branch"),
+        brief_path(target) if brief else "",
+    )
+    return _login(_CHECKOUT, "orch-checkout", args)
+
+
+@dataclass(frozen=True)
+class Called:
+    code: int
+    stdout: str
+    stderr: str
+
+
+def _marked(text: str, mark: str) -> str | None:
+    """The last line starting with mark, without it; None if there is none."""
+    found = None
+    for line in text.splitlines():
+        if line.startswith(mark):
+            found = line[len(mark):].strip()
+    return found
+
+
+def _git_detail(text: str) -> str:
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(("fatal:", "error:")):
+            return " ".join(line.split())[:200]
+    return ""
+
+
+def preflight(transport: CaptureTransport, target: RemoteTarget, harness: str) -> None:
+    """Check over ssh that git, gh and harness exist under bash -lc. Raises CheckoutError."""
+    result = transport.call(
+        ssh_argv(target, preflight_script(harness)), timeout=PROBE_TIMEOUT_SECONDS
+    )
+    if result.code == 0:
+        return
+    if result.code == SSH_UNREACHABLE:
+        raise CheckoutError(f"{target.device} is unreachable over ssh ({target.alias})")
+    missing = _marked(result.stderr, _PREFLIGHT_MARK)
+    if missing:
+        raise CheckoutError(f"missing under bash -lc on {target.device}: {missing}")
+    if result.code == 127:
+        raise CheckoutError(f"{LOGIN_SHELL} not found on {target.device}")
+    raise CheckoutError(f"preflight on {target.device} exited {result.code}")
+
+
+def checkout(
+    transport: CaptureTransport,
+    target: RemoteTarget,
+    *,
+    url: str,
+    head: str | None,
+    base_branch: str | None,
+    branch: str | None,
+    brief: bytes | None,
+) -> tuple[str, bool]:
+    """Make the job's checkout on the device. Returns (HEAD sha, reused)."""
+    script = checkout_script(
+        target, url=url, head=head, base_branch=base_branch, branch=branch,
+        brief=brief is not None,
+    )
+    result = transport.call(
+        ssh_argv(target, script), timeout=CHECKOUT_TIMEOUT_SECONDS, input=brief
+    )
+    done = _marked(result.stdout, _CHECKOUT_MARK) if result.code == 0 else None
+    if done is not None:
+        parts = done.split()
+        if len(parts) == 3 and parts[0] == "ok" and _SHA.fullmatch(parts[1]):
+            return parts[1], parts[2] == "reused"
+    if result.code == SSH_UNREACHABLE:
+        raise CheckoutError(f"{target.device} is unreachable over ssh ({target.alias})")
+    reason = _marked(result.stderr, _CHECKOUT_MARK) or f"exited {result.code}"
+    detail = _git_detail(result.stderr)
+    suffix = f": {detail}" if detail else ""
+    raise CheckoutError(f"checkout failed on {target.device}: {reason}{suffix}")
+
+
 class Transport(Protocol):
     def run(self, argv: Sequence[str], *, timeout: float) -> int: ...
+
+
+class CaptureTransport(Transport, Protocol):
+    def call(
+        self, argv: Sequence[str], *, timeout: float, input: bytes | None = None
+    ) -> Called: ...
 
 
 class SshTransport:
@@ -403,6 +627,28 @@ class SshTransport:
         except OSError:
             return SSH_UNREACHABLE
         return completed.returncode
+
+    def call(
+        self, argv: Sequence[str], *, timeout: float, input: bytes | None = None
+    ) -> Called:
+        """Run argv, feeding input (else /dev/null) and capturing its output."""
+        try:
+            completed = subprocess.run(
+                list(argv),
+                input=input if input is not None else b"",
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return Called(124, "", f"{_CHECKOUT_MARK} timed out after {timeout:g} seconds")
+        except OSError as exc:
+            return Called(SSH_UNREACHABLE, "", type(exc).__name__)
+        return Called(
+            completed.returncode,
+            completed.stdout.decode("utf-8", "replace"),
+            completed.stderr.decode("utf-8", "replace"),
+        )
 
 
 def check_worker(transport: Transport, target: RemoteTarget) -> str:

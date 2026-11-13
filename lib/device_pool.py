@@ -26,7 +26,8 @@ was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
 lib/remote.py, so a check never trusts a stored process number). #80 adds
 `autostart_pid` and `autostart_start`: the autostart waiter that claimed
-the job, if one did. The
+the job, if one did. #96 adds `run_token_hash`: the hash of the secret
+token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the 60-minute offline check.
 
@@ -55,10 +56,13 @@ _SLOT_COLUMNS = (
     ("worker_tag", "TEXT"),
     # #80: the autostart waiter (`orch wait <bot> --autostart`) that claimed
     # the job, recorded in the claim's own transaction. Only that waiter's
-    # child may `orch job run` the job, and only that run's process tree
-    # may `orch job done` it, so a bot turn never runs or finishes it too.
+    # child may `orch job run` the job, so a bot turn never runs it too.
     ("autostart_pid", "INTEGER"),
     ("autostart_start", "TEXT"),
+    # #96: SHA-256 of the secret token that `orch job run` minted for an
+    # autostart run (lib/job_token.py). Only that run, which holds the
+    # token, may `orch job done` the job. The token itself is never stored.
+    ("run_token_hash", "TEXT"),
 )
 
 
@@ -273,6 +277,65 @@ class DevicePool:
             connection.commit()
         return True
 
+    def requeue_unstarted(
+        self, job_id: str, *, owner: str, runner: int, reason: str
+    ) -> bool:
+        """Requeue a placed job whose start failed before any worker (#94).
+
+        One transaction, guarded: the job is still running for owner, and
+        its slot is still run by `runner` (this `orch job run`) with no
+        worker recorded, local or remote. The job goes back to queued with
+        its queue-wait clock restarted (created_at is kept, so it keeps its
+        place in line), its slot is freed, and nothing else changes: no
+        round, no attempt, no failure. Records a `requeued-unstarted` job
+        event when the dispatcher's job_events table exists. False (nothing
+        changed) when the guard does not hold.
+        """
+        if owner not in HARNESSES:
+            raise QueueError(f"unknown owner {owner!r}")
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs SET state = 'queued', last_activity_at = ?
+                WHERE id = ? AND state = 'running' AND recipient = ?
+                  AND EXISTS (
+                    SELECT 1 FROM {SLOTS_TABLE}
+                    WHERE job_id = ? AND harness = ? AND runner_pid = ?
+                      AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0
+                  )
+                """,
+                (now, job_id, owner, job_id, owner, runner),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return False
+            connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+            if _has_table(connection, "job_events"):
+                job = connection.execute(
+                    "SELECT repo, ticket_id, action, recipient FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                connection.execute(
+                    """
+                    INSERT INTO job_events (
+                        job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, 'requeued-unstarted', ?, ?)
+                    """,
+                    (
+                        job_id,
+                        str(job["repo"]).lower(),
+                        job["ticket_id"],
+                        job["action"],
+                        job["recipient"],
+                        f"{reason}; requeued, no round charged",
+                        now,
+                    ),
+                )
+            connection.commit()
+        return True
+
     def placement(self, job_id: str) -> Placement | None:
         with self.queue.connect() as connection:
             row = connection.execute(
@@ -291,11 +354,14 @@ class DevicePool:
         pid: int,
         start: str | None,
         alive: Callable[[int | None, str | None], bool],
+        token_hash: str | None = None,
     ) -> None:
         """Record the box process (`orch job run`) that runs a placed job.
 
         Refused while another recorded runner is still alive, so two runners
         never share one slot (the later one could release it under the other).
+        `token_hash` (#96) is written in the same update, replacing any
+        earlier run's, so only this run's token can finish the job.
         """
 
         def guard(row: sqlite3.Row) -> None:
@@ -313,8 +379,8 @@ class DevicePool:
         self._update_slot(
             job_id,
             owner,
-            "runner_pid = ?, runner_start = ?",
-            (pid, start),
+            "runner_pid = ?, runner_start = ?, run_token_hash = ?",
+            (pid, start, token_hash),
             guard=guard,
         )
 
@@ -348,6 +414,34 @@ class DevicePool:
                 (pid, start),
             )
             return None
+
+    def forget_worker(self, job_id: str, *, owner: str, runner: int, earlier: Placement) -> None:
+        """Drop the record of an earlier runner's worker, now confirmed gone.
+
+        Guarded: the slot is still run by `runner` and still names exactly
+        the worker that was confirmed gone, so a newer record is never
+        dropped. The slot then reads as never started, and a start that
+        fails before any worker can be requeued (#94).
+        """
+
+        def worker(slot: Placement) -> tuple[object, ...]:
+            return (slot.worker_pid, slot.worker_start, slot.remote_started, slot.worker_tag)
+
+        def guard(row: sqlite3.Row) -> None:
+            slot = _placement(row)
+            if slot.runner_pid != runner or worker(slot) != worker(earlier):
+                raise QueueError(
+                    f"job {job_id}'s slot changed while its earlier worker was checked; "
+                    "nothing was started"
+                )
+
+        self._update_slot(
+            job_id,
+            owner,
+            "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL",
+            (),
+            guard=guard,
+        )
 
     def held(self) -> tuple[HeldSlot, ...]:
         """Every held slot with its job's state, oldest placement first."""
@@ -461,6 +555,15 @@ class DevicePool:
     def used(self) -> dict[str, int]:
         with self.queue.connect() as connection:
             return _used(connection)
+
+
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
 
 
 def read_autostart(

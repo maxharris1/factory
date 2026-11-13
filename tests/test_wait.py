@@ -901,6 +901,11 @@ def test_three_handoff_skills_document_wait_heartbeat_and_done() -> None:
         assert "every few minutes" not in paragraph
         # The bot no longer runs its own `orch job heartbeat` loop.
         assert f"runs `orch job heartbeat {bot}" not in paragraph
+        # #94: a remote job keeps --worktree; orch makes the checkout there.
+        assert "drops `--worktree`" not in paragraph
+        assert "checks the repo out itself" not in paragraph
+        assert "never builds its own remote command" in paragraph
+        assert "`bash -lc`" in paragraph
 
 
 def _readable(stream: object) -> bool:
