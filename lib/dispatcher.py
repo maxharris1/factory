@@ -3089,7 +3089,13 @@ class Dispatcher:
         self._log_job_event(job, "done-from-verdict", detail)
 
     def _open_fix_for_head(self, job: Job) -> bool:
-        """A queued or running fix job on the same ticket for this job's head."""
+        """A fix job on the same ticket for this job's head that is still open.
+
+        Open is queued, running, or failed with its T6 handling still to
+        come (PR #99 r3): T6 handles failures oldest first, so a review that
+        failed before its fix would otherwise be retried in the same pass
+        that queues the fix's retry, and both would run on the same head.
+        """
         if job.request.head is None:
             return False
         with self._connect() as connection:
@@ -3097,7 +3103,9 @@ class Dispatcher:
                 """
                 SELECT head FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'fix'
-                  AND state IN ('queued', 'running') AND head IS NOT NULL
+                  AND head IS NOT NULL
+                  AND (state IN ('queued', 'running')
+                       OR (state = 'failed' AND failure_handled = 0))
                 """,
                 (job.request.repo.lower(), job.request.ticket_id),
             ).fetchall()
@@ -3108,11 +3116,12 @@ class Dispatcher:
     def _review_retry_waits(self, job: Job) -> bool:
         """#91: hold a failed review's T6 retry while a fix for its head is open.
 
-        The retry is deferred, not dropped: the failure stays unhandled and
-        is looked at again every poll. Once no fix is open, the retry goes
-        ahead if the ticket still has this head (a fix that changed nothing
-        and readied the same head needs it: that ready's review dedupes onto
-        this failed job), and is dropped for good once the head was replaced.
+        Open includes a failed fix awaiting its own T6 retry. The retry is
+        deferred, not dropped: the failure stays unhandled and is looked at
+        again every poll. Once no fix is open, the retry goes ahead if the
+        ticket still has this head (a fix that changed nothing and readied
+        the same head needs it: that ready's review dedupes onto this failed
+        job), and is dropped for good once the head was replaced.
         True when the retry is not queued now.
         """
         if self._open_fix_for_head(job):

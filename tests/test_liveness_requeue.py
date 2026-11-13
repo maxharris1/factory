@@ -963,3 +963,107 @@ def test_r1_a6_the_bots_login_profile_cannot_change_orchs_env_or_directory(
         remote.TAG_ENV: tag,
     }
 
+
+# --- r3: a fix awaiting its own T6 retry keeps the review retry deferred ------------
+
+
+def _review_deferred_then_fix_failed(tmp_path: Path):
+    """PR #99 r3: the review fails first (deferred), then its fix fails too.
+
+    Real poll_once, handoff parsing, queue writes and claims; the builder
+    posts ready on the same head before its run settles, so the round-2
+    review runs beside the fix, fails and is deferred; the fix then fails
+    without a handoff. Both failures are unhandled when the next poll runs
+    T6, the review's first (it finished first).
+    """
+    from dataclasses import replace
+
+    from tests.test_dispatcher import FakeSource
+
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    ci = {HEAD: CIResult("success")}
+
+    def poll(*comments) -> None:
+        snapshot = replace(ticket(*comments, head=HEAD, ci=ci), ready_starts_review=True)
+        dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+
+    ready = comment("ready-1", READY.format(head=HEAD), author="claude-login", created_at=100)
+    poll(ready)
+    review1 = queue.claim("codex")
+    assert review1 is not None and review1.request.action == "review"
+    now[0] = 120
+    revise = comment(
+        "revise-1",
+        VERDICT.format(round="1/3", head=HEAD, verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=120,
+    )
+    queue.finish(review1.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+
+    now[0] = 140
+    again = comment("ready-2", READY.format(head=HEAD), author="claude-login", created_at=140)
+    poll(ready, revise, again)
+    review2 = queue.claim("codex")
+    assert review2 is not None and review2.request.action == "review"
+    now[0] = 150
+    queue.finish(review2.id, owner="codex", handoff_comment_id=None)
+    poll(ready, revise, again)
+    assert "retry-deferred" in [event for event, _d in _events(queue)]
+
+    now[0] = 200
+    queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    assert [job.request.action for job in queue.unhandled_failures()] == ["review", "fix"]
+    return queue, poll, (ready, revise, again), now
+
+
+def test_r3_a_failed_fix_awaiting_its_retry_keeps_the_review_retry_deferred(
+    tmp_path: Path,
+) -> None:
+    queue, poll, comments, _now = _review_deferred_then_fix_failed(tmp_path)
+    poll(*comments)
+    assert queue.claim("codex") is None  # the review retry still waits
+    fix_retry = queue.claim("claude")
+    assert fix_retry is not None and fix_retry.request.action == "fix"
+    assert fix_retry.request.attempt == 2
+    assert [job.request.action for job in queue.unhandled_failures()] == ["review"]
+
+    poll(*comments)  # the fix retry runs: still deferred
+    assert queue.claim("codex") is None
+
+
+def test_r3_the_deferred_review_runs_once_the_fix_retry_readies_the_same_head(
+    tmp_path: Path,
+) -> None:
+    queue, poll, comments, now = _review_deferred_then_fix_failed(tmp_path)
+    poll(*comments)
+    fix_retry = queue.claim("claude")
+    assert fix_retry is not None
+    now[0] = 260
+    ready3 = comment("ready-3", READY.format(head=HEAD), author="claude-login", created_at=250)
+    queue.finish(fix_retry.id, owner="claude", handoff_comment_id=ready3.id)
+    poll(*comments, ready3)
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    assert review.request.head == HEAD
+    assert queue.claim("codex") is None  # exactly one review of that head
+
+
+def test_r3_a_fix_that_fails_twice_leaves_no_review_retry_beside_the_stuck_ticket(
+    tmp_path: Path,
+) -> None:
+    queue, poll, comments, now = _review_deferred_then_fix_failed(tmp_path)
+    poll(*comments)
+    fix_retry = queue.claim("claude")
+    assert fix_retry is not None
+    now[0] = 260
+    queue.finish(fix_retry.id, owner="claude", handoff_comment_id=None)
+    poll(*comments)
+    poll(*comments)
+    assert queue.claim("codex") is None
+    assert queue.claim("claude") is None
+    assert queue.unhandled_failures() == ()
