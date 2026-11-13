@@ -195,10 +195,10 @@ class PlacedRun:
         self.requeued = bool(requeued)
         return self.requeued
 
-    def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    def argv(self, command: Sequence[str], env: Mapping[str, str], *, report_env: bool = False) -> list[str]:
         if self.target is None:
             return list(command)
-        return ssh_argv(self.target, start_script(self.target, command, env))
+        return ssh_argv(self.target, start_script(self.target, command, env, report_env=report_env))
 
     def before_start(self) -> None:
         """Record a remote start before ssh is spawned (a crash then still checks)."""

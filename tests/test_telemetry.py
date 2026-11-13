@@ -266,7 +266,9 @@ def test_an_unwritable_raw_log_is_one_line_and_never_stops_the_run(tmp_path: Pat
 # --- the session: tee, summary and table row --------------------------------------------
 
 
-def _session(tmp_path: Path, *, connect=None, max_bytes: int = telemetry.MAX_LOG_BYTES, environ=None):
+def _session(
+    tmp_path: Path, *, connect=None, max_bytes: int = telemetry.MAX_LOG_BYTES, environ=None, worker_env=False
+):
     db = tmp_path / "orch.db"
     messages: list[str] = []
     out = io.BytesIO()
@@ -279,10 +281,11 @@ def _session(tmp_path: Path, *, connect=None, max_bytes: int = telemetry.MAX_LOG
         harness="claude",
         argv=["claude"],
         raw_log=EventLog(tmp_path / "state" / "events.jsonl", max_bytes=max_bytes, log=messages.append),
-        scrub=Scrubber(environ or {}),
+        scrub=Scrubber(environ or {}, blind=worker_env),
         log=messages.append,
         stdout=out,
         clock=lambda: float(next(clock)),
+        worker_env=worker_env,
     )
     return session, db, out, messages
 
@@ -882,3 +885,124 @@ def test_cli_job_run_with_a_plain_command_records_no_events_and_its_exit(tmp_pat
     log = tmp_path / "telemetry-claude-bot" / job.id / "events.jsonl"
     assert log.read_text() == "hello\n"
     assert stat.S_IMODE(log.parent.parent.stat().st_mode) == 0o700
+
+
+# --- a remote run scrubs against the worker's environment (#100 r5) ---------------------
+
+WORKER_SECRET = "walrus" + "harbor-pin"
+_REMOTE_EVENTS = {
+    "claude": (
+        ["-p"],
+        "{'type': 'assistant', 'message': {'id': 'm', 'content': [{'type': 'tool_use', "
+        "'id': 't', 'name': 'Bash', 'input': {'command': cmd}}]}}",
+    ),
+    "codex": (
+        ["exec", "-"],
+        "{'type': 'item.completed', 'item': {'id': 't', 'type': 'command_execution', "
+        "'command': cmd, 'status': 'completed', 'exit_code': 0}}",
+    ),
+}
+_PROFILE = f"echo welcome\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n"
+
+
+def _remote_run(tmp_path: Path, harness: str, env: dict | None = None):
+    from tests.test_remote_start import remote_setup
+
+    machines, queue, _, job_id, ssh = remote_setup(tmp_path, harness)
+    home = tmp_path / "worker-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(_PROFILE, encoding="utf-8")
+    args, event = _REMOTE_EVENTS[harness]
+    cli = tmp_path / harness
+    cli.write_text(
+        f"#!{sys.executable}\nimport json, os\n"
+        "cmd = 'deploy --pin ' + os.environ['DEPLOY_PASSWORD']\n"
+        f"print(json.dumps({event}))\n"
+        "print('plain worker line')\n",
+        encoding="utf-8",
+    )
+    cli.chmod(0o755)
+    run = _orch(
+        "job", "run", f"{harness}-bot", job_id, "--db", str(queue.path),
+        "--machines", str(machines), "--", str(cli), *args,
+        env={"HOME": str(tmp_path), **ssh.env(), "FAKE_SSH_HOME": str(home), **(env or {})},
+    )
+    return run, queue.path, job_id
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
+    tmp_path: Path, harness: str
+) -> None:
+    from lib.dashboard import collect_snapshot, write_snapshot_pages
+
+    run, db, job_id = _remote_run(tmp_path, harness)
+    assert run.returncode == 0, run.stderr
+    row = _row(db, job_id)
+    stored = [step["title"] for step in json.loads(row["steps"])]
+    status = write_snapshot_pages(
+        tmp_path / "public", collect_snapshot(db, tmp_path / "empty-log", now=time.time())
+    )[0]
+    published = json.loads(status.read_text())["telemetry"]["recent"][0]["steps"]
+    assert stored == [step["title"] for step in published] == ["$ deploy --pin [redacted-env]"]
+    assert run.stdout == "welcome\nplain worker line\n"
+    for text in (run.stdout, run.stderr, json.dumps(row), status.read_text()):
+        assert WORKER_SECRET not in text
+    raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
+    assert "ORCH-WORKER-ENV" not in raw and raw.startswith("welcome\n")
+
+
+def test_with_telemetry_off_a_remote_start_reports_no_environment(tmp_path: Path) -> None:
+    run, db, _ = _remote_run(tmp_path, "codex", env={"ORCH_TELEMETRY": "off"})
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines()[0] == "welcome"
+    assert "ORCH-WORKER-ENV" not in run.stdout
+
+
+def _report(environ: dict[str, str], *, end: bool = True) -> bytes:
+    entries = [f"{name}={value}" for name, value in environ.items()] + (["ORCH-WORKER-ENV-END"] if end else [])
+    return b"ORCH-WORKER-ENV " + "".join(entry + "\0" for entry in entries).encode().hex().encode() + b"\n"
+
+
+def _remote_session(tmp_path: Path, stream: bytes):
+    session, db, out, messages = _session(tmp_path, worker_env=True)
+    session.consume(io.BytesIO(stream))
+    session.finish(3)
+    return _row(db), out, messages
+
+
+def _bash(command: str) -> bytes:
+    event = {"type": "assistant", "message": {"id": "m", "content": [
+        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}
+    return (json.dumps(event) + "\n").encode()
+
+
+def test_a_remote_session_scrubs_the_reported_environment_and_never_keeps_the_report(tmp_path: Path) -> None:
+    report = _report({"DEPLOY_PASSWORD": WORKER_SECRET, "PATH": "/usr/bin"})
+    row, out, messages = _remote_session(tmp_path, b"hi\n" + report + _bash(f"deploy {WORKER_SECRET}"))
+    assert [step["title"] for step in json.loads(row["steps"])] == ["$ deploy [redacted-env]"]
+    assert row["exit_reason"] == "exit 3"
+    assert out.getvalue() == b"hi\n" and messages == []
+    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"hi\n" + _bash(f"deploy {WORKER_SECRET}")
+
+
+@pytest.mark.parametrize(
+    "report",
+    [b"", _report({"DEPLOY_PASSWORD": WORKER_SECRET}, end=False), b"ORCH-WORKER-ENV zz\n"],
+    ids=["missing", "cut-short", "not-hex"],
+)
+def test_a_remote_session_without_a_whole_report_hides_every_text(tmp_path: Path, report: bytes) -> None:
+    row, _, messages = _remote_session(tmp_path, report + _bash(f"deploy {WORKER_SECRET}"))
+    assert [step["title"] for step in json.loads(row["steps"])] == ["[redacted-env]"]
+    assert WORKER_SECRET not in json.dumps(row)
+    assert row["exit_reason"] == "exit 3"
+    assert messages == ([] if not report else ["telemetry: unreadable worker environment report; step text hidden"])
+
+
+def test_an_oversized_report_is_dropped_whole_and_the_session_stays_blind(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(telemetry, "MAX_LINE_BYTES", 64)
+    report = _report({"DEPLOY_PASSWORD": WORKER_SECRET * 8})
+    row, out, _ = _remote_session(tmp_path, report + b"after\n")
+    assert out.getvalue() == b"after\n"
+    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"after\n"
+    assert row["exit_reason"] == "exit 3"

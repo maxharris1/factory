@@ -1070,6 +1070,7 @@ def _job_run_command(argv: list[str]) -> int:
         repo=repo,
         command=command,
         log=log,
+        worker_env=placed.remote,
     )
     if session is not None:
         sessions.append(session)
@@ -1134,7 +1135,7 @@ def _job_run_command(argv: list[str]) -> int:
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
         code = job_run.run(
-            placed.argv(command, remote_env),
+            placed.argv(command, remote_env, report_env=session is not None),
             beat=beat,
             interval=interval,
             log=log,

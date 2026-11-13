@@ -49,7 +49,12 @@ only boolean flag values such as `1` or `true` and the XDG_SESSION_* and
 DESKTOP_SESSION descriptors; then
 the dashboard's `redact` removes token-shaped strings, auth headers, key
 assignments, URLs and email addresses, and the text is cut to one short
-line. Assistant text and tool output are never stored; tool output is only
+line. A remote run's text comes from the worker, so its scrubber also
+learns the harness's own environment there (after the login profile): the
+start prints it as one report line before the harness (lib/remote.py
+WORKER_ENV_MARK), which is never logged or copied. Until a whole report is
+read the scrubber is blind and every text is stored as `[redacted-env]`.
+Assistant text and tool output are never stored; tool output is only
 read for test counts. The dashboard (lib/dashboard_telemetry.py) shows
 only these summaries and scrubbed step titles.
 
@@ -78,6 +83,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import IO, Any
 
+from lib.remote import WORKER_ENV_END, WORKER_ENV_MARK
+
 TABLE = "job_telemetry"
 STATE_DIR_ENV = "ORCH_JOB_STATE_DIR"
 TELEMETRY_ENV = "ORCH_TELEMETRY"
@@ -88,6 +95,7 @@ RECENT_STEPS = 20
 MAX_FILES = 50
 MAX_TOOL_TYPES = 40
 TITLE_LIMIT = 120
+HIDDEN = "[redacted-env]"
 REASON_LIMIT = 100
 SCAN_BYTES = 64 * 1024
 MAX_COUNT = 2**53 - 1
@@ -344,12 +352,21 @@ def _readings(text: str) -> list[Reading]:
 
 
 class Scrubber:
-    """One short, secret-free line from any text that may leave the machine."""
+    """One short, secret-free line from any text that may leave the machine.
 
-    def __init__(self, environ: Mapping[str, str]):
+    A blind scrubber does not yet know the environment the text comes from
+    (a remote worker's, until `learn`), so it hides every text whole."""
+
+    def __init__(self, environ: Mapping[str, str], *, blind: bool = False):
         from lib.dashboard import redact  # late: lib.dashboard imports the dashboard side of this
 
         self._redact = redact
+        self._values: list[str] = []
+        self.learn(environ)
+        self.blind = blind
+
+    def learn(self, environ: Mapping[str, str]) -> None:
+        """Also replace the secret values of `environ`, and stop being blind."""
         values = {
             value.strip()
             for name, value in environ.items()
@@ -360,14 +377,14 @@ class Scrubber:
         }
         lines = {line.strip() for value in values for line in value.splitlines() if line.strip()}
         bare = {"".join(char for char in value if char not in _QUOTING) for value in values | lines}
-        self._values = sorted(bare, key=len, reverse=True)
+        self._values = sorted(bare | set(self._values), key=len, reverse=True)
+        self.blind = False
 
     def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
+        if self.blind:
+            return HIDDEN
         text = self._cut(str(value)[: limit * 16])
-        text = self._redact(" ".join(text.split()))
-        if len(text) > limit:
-            text = text[: limit - 1] + "…"
-        return text
+        return _clip(self._redact(" ".join(text.split())), limit)
 
     def _cut(self, text: str) -> str:
         """Replace every run of `text` that reads as a secret, as written or
@@ -394,6 +411,24 @@ class Scrubber:
             "[redacted-env]" if gone else "".join(char for char, _ in run)
             for gone, run in itertools.groupby(zip(text, hidden), key=lambda pair: pair[1])
         )
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def worker_environ(line: bytes) -> dict[str, str] | None:
+    """The environment a remote start reported (lib/remote.py WORKER_ENV_MARK),
+    or None when `line` is not a whole report."""
+    try:
+        data = bytes.fromhex(line[len(WORKER_ENV_MARK) :].decode("ascii").strip())
+    except ValueError:
+        return None
+    entries = data.split(b"\0")
+    if entries[-2:] != [WORKER_ENV_END.encode(), b""]:
+        return None
+    pairs = (entry.decode("utf-8", errors="replace").partition("=") for entry in entries[:-2])
+    return {name: value for name, _, value in pairs}
 
 
 # --- the raw log -------------------------------------------------------------------
@@ -888,11 +923,12 @@ class Session:
         harness: str,
         argv: Sequence[str],
         raw_log: EventLog | None,
-        scrub: Callable[..., str],
+        scrub: Scrubber,
         log: Log,
         stdout: IO[bytes] | None = None,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        worker_env: bool = False,
     ):
         self.connect = connect
         self.job_id = job_id
@@ -914,6 +950,7 @@ class Session:
         self._warned: set[str] = set()
         self._final: str | None = None  # the run's last final message (#87 handoff line)
         self._final_sent = True
+        self._worker_env = worker_env  # a remote start's environment report is still to come
 
     # Runs on the reader thread until the command's stdout closes.
     def consume(self, stream: IO[bytes]) -> None:
@@ -925,6 +962,7 @@ class Session:
     def _consume(self, stream: IO[bytes]) -> None:
         skipping = False
         event_line = False
+        dropping = False
         while True:
             try:
                 chunk = stream.readline(MAX_LINE_BYTES)
@@ -932,9 +970,17 @@ class Session:
                 break
             if not chunk:
                 break
+            complete = chunk.endswith(b"\n")
+            if dropping:  # the rest of an oversized environment report: never kept
+                dropping = not complete
+                continue
+            if self._worker_env and chunk.startswith(WORKER_ENV_MARK.encode() + b" "):
+                self._worker_env = False
+                self._learn(chunk if complete else b"")
+                dropping = not complete
+                continue
             if self.raw_log is not None:
                 self.raw_log.write(chunk)
-            complete = chunk.endswith(b"\n")
             if skipping:
                 if not event_line:
                     self._passthrough(chunk)
@@ -969,6 +1015,16 @@ class Session:
             if isinstance(kind, str) and kind in _END_EVENTS:
                 self._send_handoff()
 
+    def _learn(self, line: bytes) -> None:
+        """Scrub with the remote worker's own environment (#100 r5); a report
+        that cannot be read leaves the scrubber blind."""
+        environ = worker_environ(line)
+        if environ is None:
+            self._warn("worker-env", "telemetry: unreadable worker environment report; step text hidden")
+            return
+        with self._lock:
+            self.scrub.learn(environ)
+
     def flush(self) -> None:
         """Write the summary so far (orch job run calls this after each heartbeat)."""
         if self._finished:
@@ -1002,9 +1058,8 @@ class Session:
                 "finished_at": now if finished else None,
                 "elapsed_seconds": max(0.0, self.monotonic() - self._started),
                 "exit_code": code if finished else None,
-                "exit_reason": self.scrub(exit_reason(code, cli_reason), REASON_LIMIT)
-                if finished
-                else None,
+                # cli_reason was scrubbed when it was read; the rest is ours
+                "exit_reason": _clip(exit_reason(code, cli_reason), REASON_LIMIT) if finished else None,
             }
         )
         return data
@@ -1059,14 +1114,19 @@ def start_session(
     environ: Mapping[str, str] | None = None,
     stdout: IO[bytes] | None = None,
     max_log_bytes: int = MAX_LOG_BYTES,
+    worker_env: bool = False,
 ) -> Session | None:
-    """A session for one `orch job run`, or None when ORCH_TELEMETRY is off."""
+    """A session for one `orch job run`, or None when ORCH_TELEMETRY is off.
+
+    worker_env: the command runs on a remote device, whose start reports
+    the harness's environment first (lib/remote.py `start_script`); until
+    that report is read, every text is hidden."""
     env = os.environ if environ is None else environ
     if not enabled(env):
         return None
     try:
         argv, harness = harness_argv(command)
-        scrub = Scrubber(env)
+        scrub = Scrubber(env, blind=worker_env)
         raw = EventLog(
             state_dir(job_id, bot, database, env) / RAW_LOG_NAME, max_bytes=max_log_bytes, log=log
         )
@@ -1084,4 +1144,5 @@ def start_session(
         scrub=scrub,
         log=log,
         stdout=stdout if stdout is not None else getattr(sys.stdout, "buffer", None),
+        worker_env=worker_env,
     )
