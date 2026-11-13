@@ -165,16 +165,17 @@ class Follower:
         stopped_at: float | None = None
         while True:
             stopping = control.signum is not None
-            grace = min(self.grace, STOP_GRACE_SECONDS) if stopping else self.grace
             if stopping and stopped_at is None:
                 stopped_at = self.clock()
-                contact = min(contact, stopped_at)
+            elif stopped_at is not None and self.clock() - stopped_at >= STOP_GRACE_SECONDS:
+                # lib/placed_run.py finish checks it again and holds the slot.
+                return FollowEnd(STOPPED, 128 + (control.signum or 15), "not confirmed stopped")
             poll = self._poll()
             if poll is not None and poll.state in (EXITED, GONE, "none", "running"):
                 contact = self.clock()
             if poll is None:
-                if self.clock() - contact >= grace:
-                    return FollowEnd(LOST, None, f"no answer for {grace:g} seconds")
+                if self.clock() - contact >= self.grace:
+                    return FollowEnd(LOST, None, f"no answer for {self.grace:g} seconds")
                 wait = backoff(failures)
                 failures += 1
                 self.log(f"lost the link to {self.target.device}; reattaching in {wait:g}s")
@@ -195,8 +196,8 @@ class Follower:
                 if stopping:
                     return FollowEnd(STOPPED, 128 + (control.signum or 15))
                 return FollowEnd(GONE, None, "worker gone without an exit status")
-            if self.clock() - contact >= grace:
-                return FollowEnd(LOST, None, f"no certain answer for {grace:g} seconds")
+            if self.clock() - contact >= self.grace:
+                return FollowEnd(LOST, None, f"no certain answer for {self.grace:g} seconds")
             if stopping and poll.state == "running":
                 self._stop()
             sleep(pause)

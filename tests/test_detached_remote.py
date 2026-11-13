@@ -441,6 +441,18 @@ def test_a_cancel_stops_the_worker_and_follows_it_until_it_exits(tmp_path: Path)
     assert any("kill -TERM" in call for call in transport.calls)
 
 
+def test_a_worker_that_ignores_the_stop_is_left_to_finish_after_two_minutes(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    control = Stop()
+    control.signum = signal.SIGTERM
+    transport = Script([launched(), polled(0, "running")])
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", control)
+    assert (end.kind, end.code) == (STOPPED, 143)
+    assert 120 <= clock.now - 1000 < 130
+
+
 # --- the follower over the fake ssh: drops and late delivery ----------------
 
 
