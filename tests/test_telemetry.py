@@ -906,6 +906,7 @@ _PROFILES = {
     "newline": "echo welcome",
     "no-newline": "printf welcome",
     "background": "(sleep 0.2; printf late) &",
+    "traced": "set -x",
 }
 
 
@@ -919,7 +920,7 @@ def _remote_run(tmp_path: Path, harness: str, env: dict | None = None, *, profil
     worker_bin.mkdir()
     (home / ".bash_profile").write_text(
         f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n"
-        f"{_PROFILES[profile]}\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n",
+        f"export DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n{_PROFILES[profile]}\n",
         encoding="utf-8",
     )
     args, event = _REMOTE_EVENTS[harness]
@@ -963,6 +964,39 @@ def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
         assert "ORCH-WORKER-ENV" not in text and WORKER_SECRET.encode().hex() not in text
     for text in (run.stdout, run.stderr, json.dumps(row), status.read_text()):
         assert WORKER_SECRET not in text
+
+
+_TRACING = {
+    "xtrace": "set -x",
+    "xtrace-fd": "exec 9>&2; BASH_XTRACEFD=9; set -o xtrace",
+    "verbose": "set -xv",
+    "debug-trap": "set -T; trap 'eval \"echo $BASH_COMMAND\" >&2' DEBUG",
+}
+
+
+@pytest.mark.parametrize("report_env", [False, True], ids=["plain", "reporting"])
+@pytest.mark.parametrize("tracing", sorted(_TRACING))
+def test_a_tracing_login_profile_never_echoes_an_environment_value(
+    tmp_path: Path, tracing: str, report_env: bool
+) -> None:
+    from lib.remote import RemoteTarget, start_script
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        f"export DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n{_TRACING[tracing]}\n", encoding="utf-8"
+    )
+    job_secret = "otter" + "lantern-key"
+    target = RemoteTarget("pc", "unused", "codex-bot", str(tmp_path / "work"), "job", "a" * 32)
+    script = start_script(target, ["/usr/bin/printf", "finished\n"], {"JOB_TOKEN": job_secret}, report_env=report_env)
+    run = subprocess.run(
+        ["sh", "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        start_new_session=True, capture_output=True, text=True, timeout=30,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.endswith("finished\n")
+    for secret in (WORKER_SECRET, job_secret):
+        assert secret not in run.stderr and secret.encode().hex() not in run.stderr
 
 
 def test_with_telemetry_off_a_remote_start_reports_no_environment(tmp_path: Path) -> None:

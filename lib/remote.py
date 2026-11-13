@@ -141,8 +141,12 @@ START_REFUSED = 125
 # The start writes its worker tag to the launch record (`launch_record`)
 # just before the exec into the harness, once the harness is found under
 # the login PATH; a start with no record of its tag never ran the harness.
+# A login profile's tracing (set -x or -v, a DEBUG trap) would echo the
+# job's and the worker's environment values to stderr, so the start turns it
+# off first.
+_UNTRACE = "set +xvT; trap - DEBUG; "
 _START_ENTER = (
-    f'cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
+    f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
 )
