@@ -443,7 +443,10 @@ def test_no_job_field_reaches_the_argv_or_the_environment(tmp_path: Path) -> Non
         )
         started = waiter.step()
         assert started is not None
-        # What `orch job run` does once its command ends: free the box slot.
+        # The harness runs `orch job done`, then `orch job run` frees the box
+        # slot once its command ends. (A running job with no slot would still
+        # count on the box: issue #90.)
+        queue.finish(started, owner="claude", handoff_comment_id="1")
         waiter.pool.release(started, owner="claude")
     assert len(spawn.calls) == len(HOSTILE)
     for (argv, kwargs), value in zip(spawn.calls, HOSTILE):

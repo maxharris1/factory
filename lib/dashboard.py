@@ -632,7 +632,13 @@ def collect_snapshot(
         for value in (log_mtime, db["newest_error_at"], db["newest_deferral_at"])
         if value is not None
     ]
-    machines_state, devices, box_max = _machines(machines_path, db["held"])
+    # One slot count per device (#90): a running harness job with no
+    # placement runs on the box, so it counts in the box's held slots, and
+    # slots.box.running is every running job on the box, placed or not.
+    machines_state, devices, box_max, box_name = _machines(
+        machines_path, db["held"], unplaced=db["box_running"]
+    )
+    box_running = db["box_running"] + db["running_on"].get(box_name, 0)
 
     snapshot = {
         "schema": SCHEMA,
@@ -646,7 +652,7 @@ def collect_snapshot(
         "queued": db["queued"],
         "slots": {
             "machines_yml": machines_state,
-            "box": {"running": db["box_running"], "slot_max": box_max},
+            "box": {"running": box_running, "slot_max": box_max},
             "devices": devices,
         },
         "stuck": {
@@ -848,7 +854,8 @@ def _read_db(
     overdue: list[dict] = []
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
-    box_running = 0
+    box_running = 0  # running harness jobs with no placement: on the box (#90)
+    running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
             """
@@ -908,10 +915,13 @@ def _read_db(
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
-                # Like `orch status` (lib/status.py box_slots), a job holding a
-                # device-pool slot counts on its device, not on the box.
+                # Like `orch status`, a job holding a device-pool slot counts
+                # on its device; a harness job with no placement runs on the
+                # box and counts there (#90; added in collect_snapshot).
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
+                elif placement is not None:
+                    running_on[placement[0]] = running_on.get(placement[0], 0) + 1
             else:
                 # The poller's queue-wait clock: since it was queued, or
                 # since a claim that never started was released (#77 F1.2).
@@ -1219,6 +1229,7 @@ def _read_db(
         "running": running,
         "queued": queued,
         "box_running": box_running,
+        "running_on": running_on,
         "overdue_jobs": overdue,
         "tickets": tickets,
         "stuck_tickets": stuck_tickets,
@@ -1300,23 +1311,34 @@ def _has_placeholder(value: object) -> bool:
 def _machines(
     path: Path | None,
     held: dict[str, int],
-) -> tuple[str, list[dict], int | None]:
-    """Optional F2-01 inventory. Absent or invalid degrades to no device rows."""
+    *,
+    unplaced: int = 0,
+) -> tuple[str, list[dict], int | None, str]:
+    """Optional F2-01 inventory. Absent or invalid degrades to no device rows.
+
+    Also returns the box's name (the `local: true` device, else "box"); the
+    `unplaced` running jobs are counted in its held slots (#90).
+    """
     if path is None or not path.is_file():
-        return "absent", [], None
+        return "absent", [], None, "box"
     try:
         if path.stat().st_size > MACHINES_MAX_BYTES:
-            return "invalid", [], None
+            return "invalid", [], None, "box"
         data = load_yaml(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return "invalid", [], None
+        return "invalid", [], None, "box"
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        return "invalid", [], None
+        return "invalid", [], None, "box"
+    items = data["devices"]
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in items):
+        return "invalid", [], None, "box"
+    box_name = next(
+        (item["name"] for item in items if item.get("local") is True),
+        "box",
+    )
     devices: list[dict] = []
     box_max = None
-    for item in data["devices"]:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-            return "invalid", [], None
+    for item in items:
         slot_max = item.get("slot_max")
         slot_max = (
             slot_max
@@ -1332,7 +1354,8 @@ def _machines(
             {
                 "name": _clean(item["name"], 40),
                 "slot_max": slot_max,
-                "held": held.get(item["name"], 0),
+                "held": held.get(item["name"], 0)
+                + (unplaced if item["name"] == box_name else 0),
                 "enabled": enabled is True,
                 "placeholder": _has_placeholder(item),
                 "harnesses": sorted(
@@ -1340,9 +1363,9 @@ def _machines(
                 ),
             }
         )
-        if item.get("local") is True or item["name"] == "box":
+        if item["name"] == box_name:
             box_max = slot_max if box_max is None else box_max
-    return "present", devices, box_max
+    return "present", devices, box_max, box_name
 
 
 # --- writing --------------------------------------------------------------------

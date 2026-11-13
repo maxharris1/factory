@@ -31,6 +31,20 @@ from lib.wait import (
 )
 from tests.pool_helpers import pool_claim
 
+
+class QueuePool:
+    """Stands in for the device pool where a test is about signals, locks or
+    backoff around the claim, not placement: it claims through the wrapped
+    queue's own claim(), so fakes and lock injection keep working. Issue #90:
+    wait_for_job refuses a harness claim with no pool at all."""
+
+    def __init__(self, queue):
+        self.queue = queue
+
+    def claim(self, recipient: str):
+        job = self.queue.claim(recipient)
+        return None if job is None else (job, None)
+
 ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
 HARNESS_BINARIES = ("claude", "codex", "cursor-agent")
@@ -306,11 +320,11 @@ def test_a_job_that_cannot_be_printed_is_failed_for_t6(
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
     with pytest.raises(WaitError, match="failed it for T6"):
-        wait_for_job(queue, "claude", Broken())
+        wait_for_job(queue, "claude", Broken(), pool=QueuePool(queue))
     assert state_of(db, job.id)["state"] == "failed"
     dispatcher_for(db).reconcile_jobs()
     out = io.StringIO()
-    retried = wait_for_job(queue, "claude", out)
+    retried = wait_for_job(queue, "claude", out, pool=QueuePool(queue))
     assert retried.request.attempt == 2
     assert json.loads(out.getvalue())["id"] == retried.id
 
@@ -388,7 +402,8 @@ def test_wait_polls_once_per_second_with_one_claim_per_tick(
         def finish(self, job_id: str, *, owner: str, handoff_comment_id: str | None):
             raise AssertionError("delivered jobs are not failed")
 
-    job = wait_for_job(Queue(), "codex", io.StringIO(), sleep=sleeps.append)
+    queue = Queue()
+    job = wait_for_job(queue, "codex", io.StringIO(), sleep=sleeps.append, pool=QueuePool(queue))
     assert job.request.recipient == "codex"
     assert calls == ["codex"] * 4
     assert sleeps == [POLL_SECONDS] * 3
@@ -642,7 +657,8 @@ def test_a_signal_between_claim_and_print_still_delivers_the_job(
     signal.signal(signal.SIGTERM, _raise_interrupted)
     signal.signal(signal.SIGINT, _raise_interrupted)
     out = io.StringIO()
-    delivered = wait_for_job(SignalOnClaim(queue, signum), "claude", out)
+    signalling = SignalOnClaim(queue, signum)
+    delivered = wait_for_job(signalling, "claude", out, pool=QueuePool(signalling))
     assert delivered.id == job.id
     assert json.loads(out.getvalue())["id"] == job.id
     assert state_of(db, job.id)["state"] == "running"
@@ -661,7 +677,7 @@ def test_ctrl_c_while_printing_does_not_fail_a_delivered_job(
 
     signal.signal(signal.SIGINT, _raise_interrupted)
     out = InterruptingOut()
-    assert wait_for_job(queue, "claude", out).id == job.id
+    assert wait_for_job(queue, "claude", out, pool=QueuePool(queue)).id == job.id
     assert json.loads(out.getvalue())["id"] == job.id
     assert state_of(db, job.id)["state"] == "running"
 
@@ -676,7 +692,7 @@ def test_signals_are_unblocked_while_sleeping(tmp_path: Path, restore_signals: N
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        wait_for_job(queue, "claude", io.StringIO(), sleep=sleep)
+        wait_for_job(queue, "claude", io.StringIO(), sleep=sleep, pool=QueuePool(queue))
     assert all(signal.SIGINT not in mask and signal.SIGTERM not in mask for mask in masks)
 
 
@@ -827,7 +843,7 @@ def test_a_database_removed_while_waiting_is_not_recreated(
         raise AssertionError("claim should fail, not sleep")
 
     with pytest.raises(WaitError, match="claim failed"):
-        wait_for_job(queue, "claude", io.StringIO(), sleep=sleep)
+        wait_for_job(queue, "claude", io.StringIO(), sleep=sleep, pool=QueuePool(queue))
     assert not db.exists()
 
 
@@ -980,7 +996,7 @@ def test_wait_survives_a_held_write_lock_and_claims_after_release(
 
     out = io.StringIO()
     try:
-        claimed = wait_for_job(waiter, "claude", out, sleep=sleep)
+        claimed = wait_for_job(waiter, "claude", out, sleep=sleep, pool=QueuePool(waiter))
     finally:
         holder.close()
 
@@ -1012,7 +1028,7 @@ def test_wait_lock_backoff_is_bounded(
             holder.execute("COMMIT")
 
     try:
-        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleep)
+        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleep, pool=QueuePool(waiter))
     finally:
         holder.close()
 
@@ -1031,7 +1047,7 @@ def test_wait_still_fails_on_a_real_database_error(
     sleeps: list[float] = []
 
     with pytest.raises(WaitError, match="claim failed: no such table"):
-        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append)
+        wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append, pool=QueuePool(waiter))
     assert sleeps == []
 
 
@@ -1131,7 +1147,7 @@ def test_wait_survives_more_locked_claims_than_float_backoff_can_hold(
     waiter.claim = flaky_claim
     sleeps: list[float] = []
 
-    job = wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append)
+    job = wait_for_job(waiter, "claude", io.StringIO(), sleep=sleeps.append, pool=QueuePool(waiter))
 
     assert job is not None
     assert len(sleeps) == 1100

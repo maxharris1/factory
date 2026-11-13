@@ -51,7 +51,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from lib.device_pool import free_slots
+from lib.device_pool import free_slots, slots_in_use
 from lib.dispatcher import Comment, TicketRef, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
@@ -59,7 +59,6 @@ from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project
 from lib.queue import (
     PRIORITY_TABLE,
-    SLOTS_TABLE,
     SQLiteJobQueue,
     _has_table,
     priority_rank,
@@ -382,14 +381,8 @@ class Feeder:
     def _room(self, harnesses: set[str], now: float) -> dict[str, int]:
         room: dict[str, int] = {}
         with self.queue.connect() as connection:
-            used: dict[str, int] = {}
-            if _has_table(connection, SLOTS_TABLE):
-                used = {
-                    str(row[0]): int(row[1])
-                    for row in connection.execute(
-                        f"SELECT device, COUNT(*) FROM {SLOTS_TABLE} GROUP BY device"
-                    )
-                }
+            # Held slots, plus running jobs with no placement on the box (#90).
+            used = slots_in_use(connection, self.machines)
             for harness in harnesses:
                 free = free_slots(self.machines, harness, used) if self.machines else 0
                 queued = connection.execute(
@@ -560,18 +553,35 @@ class Feeder:
         else:
             existing = list(self.github.comments(repo, number))
             post = lambda body: self.github.post_comment(repo, number, body)
-        brief_id = row["brief_comment_id"] or _existing(existing, "brief")
+        authors = self._orchestrator_authors(issue.tracker)
+        brief_id = row["brief_comment_id"] or _existing(existing, "brief", authors)
         if brief_id is None:
             brief_id = post(
                 _brief(issue, candidate.context, number=number, branch=branch, risk=risk,
                        state=state, visible=linear)
             )
         self._record(candidate, brief_comment_id=brief_id)
-        go_id = row["go_comment_id"] or _existing(existing, "go")
+        go_id = row["go_comment_id"] or _existing(existing, "go", authors)
         if go_id is None:
             go_id = post(_go(issue, state=state, risk=risk, number=number, visible=linear))
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
+
+    def _orchestrator_authors(self, tracker: str) -> frozenset[str]:
+        """Who may have posted the orchestrator's own brief or go (#87 F1.3).
+
+        The logins (GitHub) or Linear user ids that orch.yml trusts as
+        grok-bot: the same rule the dispatcher applies to a go (T1), so a
+        reused go is one the dispatcher will act on.
+        """
+        table = (
+            self.config.trusted_linear_users
+            if tracker == "linear"
+            else self.config.trusted_logins
+        )
+        return frozenset(
+            _bare_author(key) for key, bots in table.items() if ORCHESTRATOR in bots
+        )
 
     @staticmethod
     def _branch_for(issue: IntakeIssue) -> str:
@@ -602,14 +612,29 @@ def _pull_body(issue: IntakeIssue) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _existing(comments: Sequence[Comment], kind: str) -> str | None:
-    """The id of a brief or go the orchestrator already posted, if any."""
+def _bare_author(author: str) -> str:
+    """A comment author or trust key without the poller's `linear:` prefix."""
+    return author.removeprefix("linear:")
+
+
+def _existing(comments: Sequence[Comment], kind: str, authors: frozenset[str]) -> str | None:
+    """The id of a brief or go the orchestrator already posted, if any.
+
+    Only a comment by a trusted orchestrator author counts: a forged handoff
+    from anyone else is ignored, so it can never stand in for the real one.
+    """
     for item in comments:
+        if _bare_author(item.author) not in authors:
+            continue
         try:
             fields = parse_comment(item.body).as_dict()
         except HandoffError:
             continue
-        if fields.get("kind") == kind and fields.get("from") == ORCHESTRATOR:
+        if (
+            fields.get("kind") == kind
+            and fields.get("from") == ORCHESTRATOR
+            and fields.get("role") == "orchestrator"
+        ):
             return item.id
     return None
 

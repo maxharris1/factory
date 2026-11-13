@@ -110,6 +110,9 @@ def test_slot_max_is_never_exceeded_and_slots_are_generic(tmp_path: Path) -> Non
         "running",
     ]
 
+    # The slot is released once the job ended and its worker is gone. (A
+    # running job with no slot still counts on the box: issue #90.)
+    queue.finish(first[0].id, owner="claude", handoff_comment_id="1")
     assert pool.release(first[0].id, owner="claude") is True
     reused = pool.claim("codex")
     assert reused is not None
@@ -187,8 +190,8 @@ def test_claim_holds_the_write_lock_from_counting_to_placing(
     )
     original = device_pool._used
 
-    def count_then_race(connection: sqlite3.Connection) -> dict[str, int]:
-        counts = original(connection)
+    def count_then_race(connection: sqlite3.Connection, config=None) -> dict[str, int]:
+        counts = original(connection, config)
         if not rival_thread.is_alive() and not rival_result:
             rival_thread.start()
             rival_thread.join(timeout=0.5)

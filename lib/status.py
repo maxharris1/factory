@@ -71,6 +71,7 @@ class DeviceRow:
     enabled: bool = True
     placeholder: bool = False
     listed: bool = True
+    local: bool = False  # the box: running jobs with no placement count here (#90)
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,8 @@ class AttentionRow:
 class Status:
     observed_at: float
     queued: tuple[JobRow, ...]
-    box_slots: tuple[JobRow, ...]
+    # Running grok wakes: bot-to-bot, they hold no device slot.
+    wakes: tuple[JobRow, ...]
     devices: tuple[DeviceRow, ...]
     paused: tuple[TrackerRow, ...]
     device_jobs: Mapping[str, tuple[JobRow, ...]] = field(default_factory=dict)
@@ -104,6 +106,9 @@ class Status:
     webhook: WebhookHealth | None = None
     feeder: FeederState | None = None
     attention: tuple[AttentionRow, ...] = ()
+    # Running harness jobs with no device placement (a claim made without a
+    # device, issue #90): listed and counted on the box device.
+    unplaced: frozenset[str] = frozenset()
 
 
 class TrackerReader(Protocol):
@@ -329,6 +334,7 @@ def device_rows(
             slot_max=device.slot_max,
             enabled=device.enabled,
             placeholder=device.placeholder,
+            local=device.local,
         )
         for device in config.devices
     ]
@@ -356,10 +362,13 @@ def build_status(
     attention: Sequence[AttentionRow] = (),
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
-    running job with a placement is listed under its device; only running
-    jobs without one (Phase 1 claims) occupy `Slots — box`. Each running
-    job gets its job_state from `slots` (the full placements), the stale
-    threshold in `job_states`, and `alive` (a local pid check, or None)."""
+    running job with a placement is listed under its device. A running
+    harness job without one (a claim made with no device, issue #90) runs on
+    the box, so it is listed under the box device and counted in its slots:
+    one slot count per device. Running grok wakes hold no slot and are
+    listed apart. Each running job gets its job_state from `slots` (the
+    full placements), the stale threshold in `job_states`, and `alive` (a
+    local pid check, or None)."""
     observed_at = clock()
     config = job_states if job_states is not None else JobStateConfig()
     held = slots or {}
@@ -389,11 +398,30 @@ def build_status(
             row.id,
         ),
     )
+    device_rows_out = list(devices)
+    box = next((row.device for row in device_rows_out if row.local), "box")
     device_jobs: dict[str, tuple[JobRow, ...]] = {}
+    unplaced: set[str] = set()
     for row in running:
         if row.id in placed:
             name = placed[row.id]
-            device_jobs[name] = (*device_jobs.get(name, ()), row)
+        elif row.recipient != "grok":
+            name = box
+            unplaced.add(row.id)
+        else:
+            continue
+        device_jobs[name] = (*device_jobs.get(name, ()), row)
+    if unplaced:
+        for index, row in enumerate(device_rows_out):
+            if row.device == box:
+                device_rows_out[index] = replace(row, used=row.used + len(unplaced))
+                break
+        else:
+            device_rows_out.insert(
+                0,
+                DeviceRow(device=box, harnesses=None, used=len(unplaced), slot_max=None,
+                          listed=False, local=True),
+            )
     return Status(
         observed_at=observed_at,
         queued=tuple(
@@ -405,9 +433,12 @@ def build_status(
         webhook=webhook,
         feeder=feeder,
         attention=tuple(attention),
-        box_slots=tuple(row for row in running if row.id not in placed),
-        devices=tuple(devices),
+        wakes=tuple(
+            row for row in running if row.id not in placed and row.recipient == "grok"
+        ),
+        devices=tuple(device_rows_out),
         device_jobs=device_jobs,
+        unplaced=frozenset(unplaced),
         paused=tuple(
             sorted(
                 (
@@ -437,23 +468,24 @@ def render(status: Status) -> str:
     if not status.queued:
         lines.append("  empty")
 
-    lines.extend(("", f"Slots — box ({len(status.box_slots)} occupied)"))
-    lines.extend(
-        _job_line(row, status.observed_at, row.last_activity_at)
-        for row in status.box_slots
-    )
-    if not status.box_slots:
-        lines.append("  idle")
-
     lines.extend(("", f"Devices ({len(status.devices)})"))
     for device in status.devices:
         lines.append(_device_line(device))
         lines.extend(
-            "  " + _job_line(row, status.observed_at, row.last_activity_at)
+            "  "
+            + _job_line(row, status.observed_at, row.last_activity_at)
+            + (" no-placement" if row.id in status.unplaced else "")
             for row in status.device_jobs.get(device.device, ())
         )
     if not status.devices:
         lines.append("  none")
+
+    if status.wakes:
+        lines.extend(("", f"Grok wakes ({len(status.wakes)})"))
+        lines.extend(
+            _job_line(row, status.observed_at, row.last_activity_at)
+            for row in status.wakes
+        )
 
     lines.extend(("", f"Paused ({len(status.paused)})"))
     for row in status.paused:

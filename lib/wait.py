@@ -10,7 +10,8 @@ starts nothing.
 Since F2-02 the claim goes through the device pool (lib/device_pool.py):
 the job moves to running and holds a slot on the first eligible device
 in one transaction, and the printed line names the device. With no free
-eligible slot the job stays queued and the waiter keeps waiting.
+eligible slot the job stays queued and the waiter keeps waiting. A harness
+claim with no pool is refused (issue #90): every harness job holds a slot.
 
 An owning bot is `<recipient>-bot`, the name the dispatcher already
 expects on a `ready` comment. Only the three harness bots may wait.
@@ -36,6 +37,7 @@ from typing import TextIO, TypeVar
 
 from lib.device_pool import DevicePool, Placement
 from lib.queue import Job, JobQueue, QueueError, SQLiteJobQueue
+from lib.schema import HARNESSES
 
 POLL_SECONDS = 1.0
 BUSY_TIMEOUT_SECONDS = 5.0
@@ -274,6 +276,13 @@ def claim_once(
     recipient: str,
     pool: DevicePool | None,
 ) -> tuple[Job, Placement | None] | None:
+    if pool is None and recipient in HARNESSES:
+        # Issue #90: a harness job always runs on a device and holds its
+        # slot, so a claim with no device pool would run outside slot_max.
+        raise WaitError(
+            f"a {recipient} claim needs the device pool (machines.yml); "
+            "a claim with no device placement is refused"
+        )
     try:
         if pool is not None:
             return pool.claim(recipient)

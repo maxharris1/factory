@@ -10,6 +10,10 @@ in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
 
+A running harness job with no slot row (claimed without a device: an older
+`orch wait`, issue #90) counts as one slot on the box, so the box never runs
+more than its slot_max; `lib/wait.py claim_once` refuses such a claim now.
+
 A queued job never holds a slot. Requeueing a claimed job
 (SQLiteJobQueue.release) frees its slot in the same transaction, and
 claim drops any slot row left on a queued job before counting, so a
@@ -191,7 +195,7 @@ class DevicePool:
                 WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
                 """
             )
-            device = choose_device(self.config, harness, _used(connection))
+            device = choose_device(self.config, harness, _used(connection, self.config))
             if device is None:
                 connection.commit()
                 return None
@@ -446,7 +450,7 @@ class DevicePool:
 
     def used(self) -> dict[str, int]:
         with self.queue.connect() as connection:
-            return _used(connection)
+            return _used(connection, self.config)
 
 
 def _placement(row: sqlite3.Row) -> Placement:
@@ -477,10 +481,64 @@ def _float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _used(connection: sqlite3.Connection) -> dict[str, int]:
-    return {
-        str(row[0]): int(row[1])
-        for row in connection.execute(
-            f"SELECT device, COUNT(*) FROM {SLOTS_TABLE} GROUP BY device"
-        )
-    }
+def box_device(config: MachinesConfig | None) -> str:
+    """The box: the `local: true` device in machines.yml (else "box")."""
+    if config is not None:
+        for device in config.devices:
+            if device.local:
+                return device.name
+    return "box"
+
+
+def used_slots(queue: SQLiteJobQueue, config: MachinesConfig | None) -> dict[str, int]:
+    """Slots in use per device, as claims see them (issue #90)."""
+    with queue.connect() as connection:
+        return _used(connection, config)
+
+
+def slots_in_use(
+    connection: sqlite3.Connection,
+    config: MachinesConfig | None,
+) -> dict[str, int]:
+    """used_slots on an open connection (the feeder's capacity read)."""
+    return _used(connection, config)
+
+
+def _used(
+    connection: sqlite3.Connection,
+    config: MachinesConfig | None = None,
+) -> dict[str, int]:
+    """Held slots per device, plus every running harness job that has no
+    placement (a claim made without a device, issue #90) on the box.
+
+    Such a job runs on the box all the same, so it takes a box slot: the box
+    never runs more than its slot_max, however the job was claimed.
+    """
+    has_slots = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (SLOTS_TABLE,),
+    ).fetchone() is not None
+    used: dict[str, int] = {}
+    if has_slots:
+        used = {
+            str(row[0]): int(row[1])
+            for row in connection.execute(
+                f"SELECT device, COUNT(*) FROM {SLOTS_TABLE} GROUP BY device"
+            )
+        }
+    harnesses = sorted(HARNESSES)
+    marks = ", ".join("?" for _ in harnesses)
+    unplaced_filter = (
+        f" AND id NOT IN (SELECT job_id FROM {SLOTS_TABLE})" if has_slots else ""
+    )
+    unplaced = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE state = 'running' "
+            f"AND recipient IN ({marks}){unplaced_filter}",
+            harnesses,
+        ).fetchone()[0]
+    )
+    if unplaced:
+        box = box_device(config)
+        used[box] = used.get(box, 0) + unplaced
+    return used
