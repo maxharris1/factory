@@ -18,8 +18,10 @@ from lib.dispatcher import (
     TrackedTicket,
     ship_mode,
 )
+from lib.device_pool import DevicePool
 from lib.factory_md import FactoryConfig
 from lib.handoff import parse_comment
+from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
@@ -5971,6 +5973,72 @@ def test_reconciliation_starts_no_work_on_an_abandoned_ticket(
     assert len(delivery.jobs) == delivered
     if scenario is _abandon_while_attempt_2_runs:
         assert not workflow["stuck"]
+
+
+def _queue_claim(queue: SQLiteJobQueue) -> Job | None:
+    return queue.claim("claude")
+
+
+def _pool_claim(queue: SQLiteJobQueue) -> Job | None:
+    pool = DevicePool(
+        queue,
+        MachinesConfig(
+            devices=(
+                Device(
+                    name="box",
+                    slot_max=2,
+                    harnesses={"claude": "claude-bot"},
+                    local=True,
+                ),
+            )
+        ),
+    )
+    claimed = pool.claim("claude")
+    return None if claimed is None else claimed[0]
+
+
+@pytest.mark.parametrize("claim", [_queue_claim, _pool_claim], ids=["queue", "pool"])
+def test_no_claim_takes_queued_work_once_abandonment_commits(
+    tmp_path: Path, claim
+) -> None:
+    seen: list[tuple[Job | None, list[tuple]]] = []
+
+    def jobs() -> list[tuple]:
+        with queue.connect() as connection:
+            return [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT action, state, failure_handled FROM jobs"
+                )
+            ]
+
+    class ClaimOnAbandon(FakeReviewActions):
+        def set_state(self, ticket: TrackedTicket, state: str) -> None:
+            super().set_state(ticket, state)
+            if state == "abandoned":
+                seen.append((claim(queue), jobs()))
+
+    dispatcher, queue = setup(tmp_path, review_actions=ClaimOnAbandon())
+    go = _go_poll(dispatcher, queue)
+    _drop_poll(dispatcher, go)
+
+    assert seen == [(None, [("build", "failed", 1)])]
+    assert jobs() == [("build", "failed", 1)]
+
+
+@pytest.mark.parametrize("claim", [_queue_claim, _pool_claim], ids=["queue", "pool"])
+def test_a_released_claim_on_an_abandoned_ticket_is_never_reclaimed(
+    tmp_path: Path, claim
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = _go_poll(dispatcher, queue)
+    held = queue.claim("claude")
+    assert held is not None
+    _drop_poll(dispatcher, go)
+
+    queue.release(held.id, owner="claude")
+
+    assert claim(queue) is None
 
 
 def test_answers_abandoned_from_an_untrusted_login_is_ignored(

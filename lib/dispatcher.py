@@ -803,6 +803,7 @@ class Dispatcher:
         ):
             return "rejected-answers-author"
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 INSERT INTO ticket_state (
@@ -813,6 +814,9 @@ class Dispatcher:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             )
+            closed = self._fail_abandoned_queued(connection)
+            connection.commit()
+        self._log_abandoned_jobs(closed)
         self._write_state_label(ticket, "abandoned")
         return "abandoned"
 
@@ -871,37 +875,46 @@ class Dispatcher:
     def _close_abandoned_jobs(self) -> None:
         """#109: a queued job on an abandoned ticket never starts.
 
-        It is failed with its failure already handled, so T6 neither retries
-        it nor marks the ticket stuck. Runs before Grok delivery and again
-        after the job-state checks, which may requeue a claimed job.
+        Claims already skip it (lib/queue.py claim_order); this fails it with
+        its failure handled, so T6 neither retries it nor marks the ticket
+        stuck. Abandonment does this in its own transaction; reconciliation
+        repeats it for a job requeued since, before Grok delivery and again
+        after the job-state checks.
         """
-        now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT jobs.* FROM jobs
-                JOIN ticket_state AS ticket
-                  ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
-                WHERE jobs.state = 'queued' AND ticket.workflow_state = 'abandoned'
-                ORDER BY jobs.created_at, jobs.id
-                """
-            ).fetchall()
-            closed = [_job(row) for row in rows]
-            for job in closed:
-                connection.execute(
-                    """
-                    UPDATE jobs
-                    SET state = 'failed', failure_handled = 1,
-                        finished_at = ?, last_activity_at = ?
-                    WHERE id = ? AND state = 'queued'
-                    """,
-                    (now, now, job.id),
-                )
-                self._record_job_event(
-                    connection, job, "abandoned", _ABANDONED_JOB_DETAIL, now
-                )
+            closed = self._fail_abandoned_queued(connection)
             connection.commit()
+        self._log_abandoned_jobs(closed)
+
+    def _fail_abandoned_queued(self, connection: sqlite3.Connection) -> list[Job]:
+        now = self.queue.now()
+        rows = connection.execute(
+            """
+            SELECT jobs.* FROM jobs
+            JOIN ticket_state AS ticket
+              ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
+            WHERE jobs.state = 'queued' AND ticket.workflow_state = 'abandoned'
+            ORDER BY jobs.created_at, jobs.id
+            """
+        ).fetchall()
+        closed = [_job(row) for row in rows]
+        for job in closed:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state = 'failed', failure_handled = 1,
+                    finished_at = ?, last_activity_at = ?
+                WHERE id = ? AND state = 'queued'
+                """,
+                (now, now, job.id),
+            )
+            self._record_job_event(
+                connection, job, "abandoned", _ABANDONED_JOB_DETAIL, now
+            )
+        return closed
+
+    def _log_abandoned_jobs(self, closed: list[Job]) -> None:
         for job in closed:
             self._log_job_event(job, "abandoned", _ABANDONED_JOB_DETAIL)
 
