@@ -112,6 +112,15 @@ def ok(head: str, *, author: str = APPROVER, comment_id: str = "ok-1") -> Commen
     return comment(comment_id, OK.format(head=head), author=author, created_at=20)
 
 
+def revise(head: str = HEAD, risk: str = "high") -> Comment:
+    return comment(
+        "revise-1",
+        VERDICT.format(round=1, head=head, verdict="REVISE", risk=risk),
+        author="codex-login",
+        created_at=15,
+    )
+
+
 def snapshot(
     *comments: Comment,
     head: str = HEAD,
@@ -119,6 +128,8 @@ def snapshot(
     labels: tuple[str, ...] | None = (),
     files: tuple[str, ...] | None = ("lib/server.py",),
     events: tuple[LabelEvent, ...] | None = (),
+    ci: str = "success",
+    risk: str = "high",
 ) -> TrackedTicket:
     return TrackedTicket(
         repo="owner/repo",
@@ -126,8 +137,8 @@ def snapshot(
         factory=factory or hold_factory(),
         comments=comments,
         current_head=head,
-        ci={head: CIResult("success")},
-        risk="high",
+        ci={head: CIResult(ci)},
+        risk=risk,
         pr_number="42",
         ticket_url="https://github.com/owner/repo/pull/42",
         labels=labels,
@@ -311,6 +322,110 @@ def test_the_hold_wakes_grok_once_and_writes_the_state_once(tmp_path: Path) -> N
     assert json.loads(wakes[0]["detail"])["reasons"] == ["label", "paths"]
 
 
+def test_a_path_with_a_newline_is_still_auto_held(tmp_path: Path) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    actions.states.clear()
+
+    dispatcher.process(snapshot(approve(), files=("lib/a.py", "public/a\nb.svg")))
+
+    assert_held(queue, actions)
+    detail = json.loads(grok_jobs(queue)[-1]["detail"])
+    assert detail["held_paths"] == ["public/a\nb.svg"]
+
+
+@pytest.mark.parametrize("ci", ["failure", "pending"])
+def test_a_ci_failure_while_held_does_not_consume_the_approve(
+    tmp_path: Path,
+    ci: str,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    files = ("src/view/Board.tsx",)
+    dispatcher.process(snapshot(approve(), files=files))
+    assert workflow_state(queue) == "awaiting-ok"
+
+    dispatcher.process(snapshot(approve(), ok(HEAD), files=files, ci=ci))
+    assert actions.merges == []
+    assert workflow_state(queue) == "awaiting-ok"
+
+    dispatcher.process(snapshot(approve(), ok(HEAD), files=files))
+    dispatcher.process(snapshot(approve(), ok(HEAD), files=files))
+    assert actions.merges == [(True, HEAD)]
+
+
+@pytest.mark.parametrize(
+    ("risk", "state", "job_action"),
+    [("high", "fixing", "fix"), ("low", "capped", "capped")],
+)
+@pytest.mark.parametrize("same_poll", [False, True])
+def test_a_revise_after_a_held_approve_supersedes_it(
+    tmp_path: Path,
+    risk: str,
+    state: str,
+    job_action: str,
+    same_poll: bool,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    files = ("src/view/Board.tsx",)
+    dispatcher.process(snapshot(approve(), files=files, risk=risk))
+    assert workflow_state(queue) == "awaiting-ok"
+
+    if not same_poll:
+        dispatcher.process(snapshot(approve(), revise(risk=risk), files=files, risk=risk))
+    for _ in range(2):
+        dispatcher.process(
+            snapshot(approve(), revise(risk=risk), ok(HEAD), files=files, risk=risk)
+        )
+
+    assert actions.merges == []
+    assert workflow_state(queue) == state
+    with queue.connect() as connection:
+        actions_queued = [
+            row[0] for row in connection.execute("SELECT action FROM jobs").fetchall()
+        ]
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+    assert job_action in actions_queued
+    assert outcomes["approve-1"] == "superseded-approve"
+    assert "stale" not in [row["action"] for row in grok_jobs(queue)]
+
+
+def test_a_revise_from_an_untrusted_login_does_not_supersede_a_held_approve(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    files = ("src/view/Board.tsx",)
+    forged = comment(
+        "revise-1",
+        VERDICT.format(round=1, head=HEAD, verdict="REVISE", risk="high"),
+        author="claude-login",
+        created_at=15,
+    )
+    dispatcher.process(snapshot(approve(), files=files))
+
+    dispatcher.process(snapshot(approve(), forged, ok(HEAD), files=files))
+
+    assert actions.merges == [(True, HEAD)]
+
+
+def test_on_a_hold_repo_a_same_poll_revise_supersedes_an_unheld_approve(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(approve(), revise()))
+
+    assert actions.merges == []
+    assert workflow_state(queue) == "fixing"
+
+
 # --- clearing the hold ---------------------------------------------------
 
 
@@ -461,6 +576,34 @@ def test_an_approver_missing_from_trusted_logins_never_clears(tmp_path: Path) ->
             ok(HEAD, author="not-trusted"),
             factory=factory,
             labels=("factory:hold",),
+        )
+    )
+
+    assert actions.merges == []
+    assert workflow_state(queue) == "awaiting-ok"
+
+
+def test_an_approver_missing_from_trusted_logins_cannot_clear_by_removing_the_label(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    factory = hold_factory(approver="not-trusted")
+    dispatcher.process(
+        snapshot(
+            approve(),
+            factory=factory,
+            labels=("factory:hold",),
+            events=(labeled("grok-login"),),
+        )
+    )
+
+    dispatcher.process(
+        snapshot(
+            approve(),
+            factory=factory,
+            labels=(),
+            events=(labeled("grok-login"), unlabeled("not-trusted")),
         )
     )
 
@@ -780,6 +923,14 @@ def test_factory_md_warns_that_hold_has_no_effect_without_ship_merge(
         ("**/*.css", "a.css", True),
         ("**/*.css", "x/y/a.css", True),
         ("a.b", "aXb", False),
+        ("public/**", "public/a\nb.svg", True),
+        ("src/**/*.tsx", "src/a\nb/C.tsx", True),
+        ("src/view/**", "src/view/\n", True),
+        ("**/*.css", "x\ny/a.css", True),
+        ("src/*.ts", "src/a\nb.ts", True),
+        ("src/?.ts", "src/\n.ts", True),
+        ("index.html", "index.html\n", False),
+        ("src/*.ts", "src/a.ts\n", False),
     ],
 )
 def test_glob_matches(pattern: str, path: str, expected: bool) -> None:

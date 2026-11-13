@@ -1325,7 +1325,7 @@ class Dispatcher:
             assert state is not None
             round_number = int(state["review_round"]) + 1
             if (
-                state["workflow_state"] != "review"
+                state["workflow_state"] not in ("review", "awaiting-ok")
                 or reported_round != round_number
             ):
                 connection.commit()
@@ -1435,6 +1435,10 @@ class Dispatcher:
         reported_round = (
             int(round_field.split("/", 1)[0]) if round_field is not None else None
         )
+        if _holds(ticket) and self._superseded_by_revise(
+            ticket, comment, reported_round
+        ):
+            return True, "superseded-approve"
         review_head = self._latest_review_head(ticket)
         if state not in ("review", "awaiting-ok") or reported_round != review_round + 1:
             self._wake_comment_problem(
@@ -1454,7 +1458,7 @@ class Dispatcher:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            return True, "approve-ci-red"
+            return state != "awaiting-ok", "approve-ci-red"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -1520,6 +1524,35 @@ class Dispatcher:
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _superseded_by_revise(
+        self,
+        ticket: TrackedTicket,
+        approve: Comment,
+        reported_round: int | None,
+    ) -> bool:
+        """Issue #86: a held APPROVE can wait long enough for the reviewer
+        to post a REVISE for the same round at the current head. That
+        REVISE replaces the APPROVE; T3 acts on it in the same pass."""
+        for item in ticket.comments:
+            if _comment_order(item) <= _comment_order(approve):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            round_field = fields.get("round")
+            if (
+                fields["kind"] == "verdict"
+                and fields.get("verdict") == "REVISE"
+                and round_field is not None
+                and int(round_field.split("/", 1)[0]) == reported_round
+                and _matching_head(fields.get("head") or "", ticket.current_head)
+                is not None
+                and self._trusted_reviewer(ticket, item, fields)
+            ):
+                return True
+        return False
 
     def _hold_gate(
         self,

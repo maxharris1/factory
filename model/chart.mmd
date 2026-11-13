@@ -67,6 +67,7 @@ stateDiagram-v2
   s5 --> s12: answer, same step resumes
   s13 --> s8: head changed and the patch differs
   s13 --> s15: approver's OK at the head, or approver removes a label-only hold
+  s13 --> s12: REVISE, under the round cap
   s15 --> s17: merged
   s15 --> s18: project has a post-merge check
   s16 --> s15: OK names the previewed SHA
@@ -75,6 +76,7 @@ stateDiagram-v2
   s18 --> s17: post-merge fails, follow-up filed or post-merge passes
   s8 --> s19: REVISE at the cap
   s19 --> s12: Max okays one more round
+  s13 --> s19: REVISE at the cap
   s16 --> s9: 3rd decline
   s3 --> s3: CI red, fix
   class s0 blue

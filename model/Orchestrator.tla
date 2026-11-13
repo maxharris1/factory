@@ -261,9 +261,10 @@ T6DeviceOffline ==
   /\ counts' = [counts EXCEPT !.deaths = 2, !.gate = 0]
 
 \* T3. REVISE under the cap queues fix. At the cap, or a second AC-unmet verdict: capped.
+\* A REVISE also replaces a held APPROVE (T4H, issue #86).
 T3Revise ==
   /\ "T3" \notin Omit
-  /\ state = "review"
+  /\ state \in {"review", "awaiting-ok"}
   /\ keep
   /\ flags' = flags
   /\ \/ /\ counts.acUnmet = 1
@@ -517,7 +518,7 @@ T2Decided ==
   /\ state \in {"building", "fixing"} /\ counts.gate = 2 => ENABLED T2CiRedStuck
 
 T3Decided ==
-  state = "review" => ENABLED T3Revise
+  state \in {"review", "awaiting-ok"} => ENABLED T3Revise
 
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve

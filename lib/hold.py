@@ -15,7 +15,8 @@ green CI does not merge while the PR is held:
 The hold clears on a kind=ok head=<40-char sha> comment from the approver
 whose head covers the current head by the ship rule (the same commit, or
 an equal git patch-id --stable), or, for a label-only hold, by the
-approver removing the label. Anything unread fails closed.
+approver removing the label. Neither clears unless the approver is a
+trusted_logins key. Anything unread fails closed.
 
 Globs are matched against repo-relative paths: ``*`` and ``?`` never
 cross ``/``; ``**`` matches any number of whole directories (``a/**``
@@ -55,7 +56,7 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(pattern[index]))
             index += 1
-    return re.compile("".join(out))
+    return re.compile("".join(out), re.DOTALL)
 
 
 def glob_matches(pattern: str, path: str) -> bool:
@@ -127,7 +128,8 @@ def decide(
     on_pr = any(label.casefold() == wanted for label in labels)
     latest = _latest_label_event(label_events, wanted)
     removed_by_approver = (
-        latest is not None
+        approver_trusted
+        and latest is not None
         and latest.action == "unlabeled"
         and latest.actor.casefold() == approver
     )

@@ -44,7 +44,9 @@ still ship `enabled: false` until Max turns them on.
   APPROVE: it waits in `orch:state/awaiting-ok` ("waiting on <approver>" in
   `orch status` and the dashboard) until `hold.approver` posts
   `<!-- orch:v1 kind=ok head=<sha> -->` for the current head, or removes the
-  label on a label-only hold. Grok Bot is woken once per held head.
+  label on a label-only hold. Grok Bot is woken once per held head. The OK
+  carries to a moved head only on an equal patch-id, and `stable_patch_id` is
+  not built (below), so today a moved head needs a new OK.
   Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter
