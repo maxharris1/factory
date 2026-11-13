@@ -435,3 +435,127 @@ def test_review_shipper_reads_a_merged_pr(tmp_path: Path) -> None:
 
     assert found.ticket_id == TICKET
     assert [ref.allow_merged for ref in refs] == [True]
+
+
+# --- Unit 5: re-entry after handoff (AC 2) ----------------------------------------
+
+
+def _reviews(queue) -> list[sqlite3.Row]:
+    return jobs(queue, "review")
+
+
+def test_ready_after_handoff_reenters_review_at_the_next_round(tmp_path: Path) -> None:
+    """#110's shape: APPROVE at 2/3, handed off, then a ready at a new head."""
+    flow = Flow(tmp_path)
+    flow.hand_off_at(2)
+    flow.actions.states.clear()
+
+    assert flow.ready(HEADS[5]) == "queued-review"
+
+    review = _reviews(flow.queue)[-1]
+    assert (review["head"], review["state"], round_of(review)) == (HEADS[5], "queued", "3/3")
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("review", 2)
+    assert flow.actions.states == ["review"]
+
+    flow.finish("codex")
+    assert flow.approve("3/3") == "handed-off"
+    assert flow.ready(HEADS[6]) == "ready-after-cap"
+    assert attention(flow.queue) == ["ready-after-cap"]
+    assert len(_reviews(flow.queue)) == 3
+
+
+def test_ready_after_handoff_past_the_cap_flags_and_queues_nothing(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(3)
+    before = len(jobs(flow.queue))
+
+    assert flow.ready(HEADS[5]) == "ready-after-cap"
+
+    assert len(jobs(flow.queue)) == before
+    assert attention(flow.queue) == ["ready-after-cap"]
+    assert flow.state()["workflow_state"] == "handed-off"
+
+
+def test_ready_after_handoff_with_an_extra_round_reenters(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(3)
+    with flow.queue.connect() as connection:
+        connection.execute("UPDATE ticket_state SET cap_extra = 1")
+
+    assert flow.ready(HEADS[5]) == "queued-review"
+
+    assert round_of(_reviews(flow.queue)[-1]) == "4/4"
+
+
+def test_ready_at_the_shipped_head_is_a_no_op(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    before = len(jobs(flow.queue))
+
+    body = READY.format(head=HEADS[1])
+    assert flow.post("ready-again", body, "claude-login") == "ready-already-shipped"
+
+    assert len(jobs(flow.queue)) == before
+    assert flow.state()["workflow_state"] == "handed-off"
+
+
+def test_untrusted_ready_after_handoff_is_rejected(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    before = len(_reviews(flow.queue))
+
+    assert flow.ready(HEADS[5], author="codex-login") == "rejected-ready-author"
+
+    assert len(_reviews(flow.queue)) == before
+    assert flow.state()["workflow_state"] == "handed-off"
+
+
+def test_ready_after_handoff_waits_for_ci_with_no_write(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    flow.ci = "pending"
+
+    assert flow.ready(HEADS[5]) is None  # not handled: read again next poll
+
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("handed-off", 0)
+    flow.ci = "success"
+    flow.dispatcher.process(flow.snapshot())
+    assert outcome(flow.queue, f"ready-{HEADS[5][:6]}") == "queued-review"
+
+
+def test_red_ci_after_handoff_queues_the_fix_for_the_next_round(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    flow.ci = "failure"
+
+    assert flow.ready(HEADS[5]) == "queued-ci-fix"
+
+    fix = jobs(flow.queue, "fix")[-1]
+    assert round_of(fix) == "2/3"
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("fixing", 1)
+
+
+def test_verdict_after_handoff_without_reentry_is_silent(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    grok_before = [row["action"] for row in jobs(flow.queue) if row["recipient"] == "grok"]
+
+    assert flow.revise("2/3") == "after-handoff"
+    assert flow.approve("2/3") == "after-handoff"
+
+    grok_after = [row["action"] for row in jobs(flow.queue) if row["recipient"] == "grok"]
+    assert grok_after == grok_before == ["done"]
+    assert flow.state()["workflow_state"] == "handed-off"
+
+
+def test_go_after_handoff_changes_nothing(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.hand_off_at(1)
+    before = len(jobs(flow.queue))
+    flow.actions.states.clear()
+
+    assert flow.go("go-2") == "go-after-handoff"
+
+    assert len(jobs(flow.queue)) == before
+    assert flow.state()["workflow_state"] == "handed-off"
+    assert flow.actions.states == []

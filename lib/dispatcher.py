@@ -693,6 +693,13 @@ class Dispatcher:
                         continue
                     if self._after_finish(ticket, comment):
                         continue
+                    if (
+                        self._review_context(ticket)[0] == "handed-off"
+                        and self._ship_intent(ticket, comment.id) is None
+                    ):
+                        # #108: a verdict with no re-entry behind it wakes nobody.
+                        self._mark_handled(ticket, comment.id, "after-handoff")
+                        continue
                     if verdict == "REVISE":
                         handled, outcome = self._t3(ticket, comment, fields)
                     elif verdict == "APPROVE":
@@ -1254,6 +1261,10 @@ class Dispatcher:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return True, "rejected-go-author"
+        if self._review_context(ticket)[0] == "handed-off":
+            # #108: a handed-off ticket re-enters only through the builder's
+            # ready, inside the cap; a go changes nothing.
+            return True, "go-after-handoff"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
@@ -1653,6 +1664,19 @@ class Dispatcher:
             self._flag_ready_after_cap(ticket, comment, fields["head"])
             return True, "capped-ready"
         reported_head = fields["head"]
+        reentry: int | None = None
+        if state == "handed-off":
+            shipped = self._shipped_approval(ticket)
+            if shipped is not None and _matching_head(reported_head, shipped[0]):
+                return True, "ready-already-shipped"
+            reentry = (
+                shipped[1]
+                if shipped is not None and shipped[1] is not None
+                else review_round + 1
+            )
+            if reentry + 1 > self._effective_cap(ticket):
+                self._flag_ready_after_cap(ticket, comment, reported_head)
+                return True, "ready-after-cap"
         head = _matching_head(reported_head, ticket.current_head)
         if head is None:
             try:
@@ -1672,6 +1696,10 @@ class Dispatcher:
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
             return False, "ci-pending"
+        if reentry is not None:
+            if not self._reenter_after_handoff(ticket, reentry):
+                return True, "stale-ready"
+            review_round = reentry
         timeout_seconds = ticket.job_timeout_minutes * 60
         recorded_status, count = self._record_ci_result(ticket, head, result.status)
         generation = self._generation(ticket.repo, ticket.ticket_id)
@@ -1722,7 +1750,55 @@ class Dispatcher:
                 f"g{generation}"
             ),
         )
+        if reentry is not None:
+            self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _shipped_approval(self, ticket: TrackedTicket) -> tuple[str, int | None] | None:
+        """(head, round) of the APPROVE whose ship intent completed last."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT comment_id, head FROM ship_intents
+                WHERE repo = ? AND ticket_id = ? AND status = 'completed'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return None
+        approve = next(
+            (item for item in ticket.comments if item.id == row["comment_id"]), None
+        )
+        approved_round = None
+        if approve is not None:
+            try:
+                fields = parse_comment(approve.body).as_dict()
+            except HandoffError:
+                fields = {}
+            approved_round = _round_number(fields.get("round"))
+        return str(row["head"]), approved_round
+
+    def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
+        """#108: a trusted ready after handoff re-enters review. The approved
+        round counts as completed, so the next review is approved_round + 1.
+        False when the ticket left handed-off meanwhile."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE ticket_state SET review_round = ?
+                WHERE repo = ? AND ticket_id = ? AND workflow_state = 'handed-off'
+                """,
+                (approved_round, ticket.repo.lower(), ticket.ticket_id),
+            ).rowcount
+            connection.commit()
+        if changed == 1 and self.log is not None:
+            self.log(
+                f"re-entry: {ticket.repo}#{ticket.ticket_id} after handoff, "
+                f"next review round {approved_round + 1}"
+            )
+        return changed == 1
 
     def _t3(
         self,
