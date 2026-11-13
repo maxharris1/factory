@@ -56,6 +56,12 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 check and stop run as `exec sh -c '<script>'`, so they are POSIX sh whatever
 the bot's login shell is (bash on Linux, zsh on macOS).
 
+#128: the start is not sent as the SSH command any more. The launch call
+(`launch_script`) starts it detached under setsid, with a wrapper that
+keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
+it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
+they find the detached start by its tag or record as before.
+
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
 another process's environment) the same contract holds through the record,
 one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:

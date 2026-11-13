@@ -74,7 +74,6 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
@@ -228,13 +227,10 @@ class PlacedRun:
         env: Mapping[str, str],
         brief: bytes,
         control: Control,
-        *,
-        sink: BinaryIO | None = None,
-        clock: Callable[[], float] = time.time,
     ) -> int:
         """Launch the command detached on the device and follow it (#128).
 
-        Its output is relayed to sink (stdout: the waiter's run.log). Returns
+        Its output is relayed to stdout (the waiter's run.log). Returns
         the device's exit status for it; 125 (124 when another run of the job
         is live there) for a refused launch, which ran nothing; 255 when the
         worker is gone without a status or the device went quiet for the
@@ -257,13 +253,13 @@ class PlacedRun:
             self.target,
             start,
             size=len(brief),
-            not_after=int(clock()) + LAUNCH_TTL_SECONDS,
+            not_after=int(time.time()) + LAUNCH_TTL_SECONDS,
         )
         assert isinstance(self.transport, ByteTransport)
         follower = Follower(
             self.transport,
             self.target,
-            sink if sink is not None else sys.stdout.buffer,
+            sys.stdout.buffer,
             log=self.log,
             grace=self.grace,
         )
