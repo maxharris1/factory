@@ -17,6 +17,7 @@ thing that runs or finishes that job:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -50,10 +51,19 @@ from tests.test_waiter import (  # noqa: F401  (autostart is a fixture)
 )
 
 
-def orch(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if k not in ("ORCH_DB", "ORCH_AUTOSTART")}
+def orch(
+    *args: str,
+    cwd: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+    prefix: tuple[str, ...] = (),
+) -> subprocess.CompletedProcess:
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("ORCH_DB", "ORCH_AUTOSTART", "ORCH_JOB_TOKEN", "ORCH_JOB_PROOF_FILE")
+    }
+    env.update(extra_env or {})
     return subprocess.run(
-        [sys.executable, str(ORCH), *args],
+        [*prefix, sys.executable, str(ORCH), *args],
         env=env, cwd=cwd, text=True, capture_output=True, timeout=60, check=False,
     )
 
@@ -362,6 +372,7 @@ def test_a_bot_turn_cannot_finish_a_job_the_autostart_waiter_runs(
     result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
     assert result.returncode == 2
     assert "claimed by its autostart waiter" in result.stderr
+    assert "this process has no ORCH_JOB_TOKEN" in result.stderr
     assert "Nothing changed" in result.stderr
     assert job_row(db, job_id) == ("running", None)
     # The harness inside the run finishes it with its own handoff.
@@ -375,6 +386,170 @@ def test_a_bot_turn_cannot_finish_a_job_the_autostart_waiter_runs(
     other = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "c-other")
     assert other.returncode == 1
     assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+
+
+# --- #96: the run's token, not its process tree, proves it is the run ---------
+
+
+def _harness_record(autostart: dict, job_id: str) -> dict:
+    path = autostart["harness_dir"] / f"{job_id}.json"
+    return json.loads(_wait_for(lambda: path.exists() and path.read_text(), 20, autostart["proc"]))
+
+
+def _slot(db: Path, job_id: str) -> sqlite3.Row:
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT * FROM device_slots WHERE job_id = ?", (job_id,)
+        ).fetchone()
+
+
+def _released(db: Path, job_id: str) -> bool:
+    return _slot(db, job_id) is None
+
+
+def _new_pid_namespace() -> tuple[str, ...]:
+    """`unshare` into a new user and PID namespace, as Codex's sandbox does."""
+    prefix = ("unshare", "--user", "--map-root-user", "--pid", "--fork", "--mount-proc")
+    try:
+        probe = subprocess.run([*prefix, "sh", "-c", "echo $$"], capture_output=True,
+                               text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("unshare is not available")
+    if probe.returncode != 0 or probe.stdout.strip() != "1":
+        pytest.skip("this host cannot make an unprivileged PID namespace")
+    return prefix
+
+
+@pytest.mark.parametrize("outcome", [["--handoff", "c-sandbox"], ["--failed"]])
+@pytest.mark.parametrize("proof", ["env", "file", "pid-namespace"])
+def test_the_run_finishes_its_job_with_its_token_whatever_the_process_tree(
+    autostart: dict, outcome: list[str], proof: str
+) -> None:
+    from lib.worktrees import descends_from
+
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    record = _harness_record(autostart, job_id)
+    assert record["token"] and Path(record["proof_file"]).is_file()
+    # This test process is not in the run's process tree, nor is its child.
+    assert not descends_from(os.getpid(), int(_slot(db, job_id)["runner_pid"]))
+    if proof == "file":  # a harness that drops *TOKEN* variables still has the file
+        extra, prefix = {"ORCH_JOB_PROOF_FILE": record["proof_file"]}, ()
+    elif proof == "pid-namespace":
+        extra, prefix = {"ORCH_JOB_TOKEN": record["token"]}, _new_pid_namespace()
+    else:
+        extra, prefix = {"ORCH_JOB_TOKEN": record["token"]}, ()
+    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome,
+                  extra_env=extra, prefix=prefix)
+    assert result.returncode == 0, result.stderr
+    expected = ("done", "c-sandbox") if outcome[0] == "--handoff" else ("failed", None)
+    assert job_row(db, job_id) == expected
+    (autostart["harness_dir"] / f"{job_id}.crash").touch()
+    _wait_for(lambda: _released(db, job_id), 20, proc)
+    assert job_row(db, job_id) == expected
+    assert not Path(record["proof_file"]).exists()
+
+
+@pytest.mark.parametrize("outcome", [["--handoff", "c-forged"], ["--failed"]])
+@pytest.mark.parametrize("proof", ["env", "file"])
+def test_a_wrong_token_is_refused_and_changes_nothing(
+    autostart: dict, tmp_path: Path, outcome: list[str], proof: str
+) -> None:
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    record = _harness_record(autostart, job_id)
+    forged = record["token"][:-1] + ("A" if record["token"][-1] != "A" else "B")
+    if proof == "file":
+        wrong = tmp_path / "forged-proof"
+        wrong.write_text(forged, encoding="utf-8")
+        extra = {"ORCH_JOB_PROOF_FILE": str(wrong)}
+    else:
+        extra = {"ORCH_JOB_TOKEN": forged}
+    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome,
+                  extra_env=extra)
+    assert result.returncode == 2
+    assert "is not that run's" in result.stderr
+    assert "Nothing changed" in result.stderr
+    assert forged not in result.stderr and record["token"] not in result.stderr
+    assert job_row(db, job_id) == ("running", None)
+    missing = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome,
+                   extra_env={"ORCH_JOB_PROOF_FILE": str(tmp_path / "no-such-file")})
+    assert missing.returncode == 2
+    assert job_row(db, job_id) == ("running", None)
+
+
+def test_the_token_is_kept_only_as_its_hash_and_never_written_out(autostart: dict) -> None:
+    from lib import job_token
+
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    record = _harness_record(autostart, job_id)
+    token = record["token"]
+    slot = _slot(db, job_id)
+    assert slot["run_token_hash"] == job_token.digest(token)
+    assert token not in [str(value) for value in tuple(slot)]
+    proof = Path(record["proof_file"])
+    assert proof.stat().st_mode & 0o077 == 0
+    assert proof.parent == Path(record["brief_env"]).parent
+    status = orch("status", "--db", str(db), "--machines", str(MACHINES))
+    assert token not in status.stdout + status.stderr
+    (autostart["harness_dir"] / f"{job_id}.go").touch()
+    _wait_for(lambda: _released(db, job_id), 20, proc)
+    assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+    assert not proof.exists()
+    job_dir = Path(record["brief_env"]).parent
+    for path in job_dir.iterdir():
+        assert token not in path.read_text(encoding="utf-8", errors="replace"), path
+    with sqlite3.connect(db) as connection:
+        dump = "\n".join(connection.iterdump())
+    assert token not in dump
+    assert token not in autostart["gh_log"].read_text(encoding="utf-8")
+
+
+def test_a_token_minted_for_one_run_does_not_reach_the_next_job(autostart: dict) -> None:
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    first = enqueue(queue, "a", head=None)
+    second = enqueue(queue, "b", head=None)
+    _wait_for(lambda: _running(db, first) and _running(db, second), 20, proc)
+    one, two = _harness_record(autostart, first), _harness_record(autostart, second)
+    assert one["token"] != two["token"]
+    result = orch("job", "done", "claude-bot", second, "--db", str(db), "--failed",
+                  extra_env={"ORCH_JOB_TOKEN": one["token"]})
+    assert result.returncode == 2
+    assert job_row(db, second) == ("running", None)
+
+
+def test_an_autostart_claim_with_no_recorded_token_is_refused(tmp_path: Path) -> None:
+    from lib import job_token
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    taken = local_pool(queue).claim("claude", autostart=(os.getpid(), None))
+    assert taken is not None and taken[0].id == job_id
+    token, _hash = job_token.mint()
+    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--failed",
+                  extra_env={"ORCH_JOB_TOKEN": token})
+    assert result.returncode == 2
+    assert "its claim has no run token" in result.stderr
+    assert job_row(db, job_id) == ("running", None)
+
+
+def test_job_token_matching() -> None:
+    from lib import job_token
+
+    token, stored = job_token.mint()
+    assert job_token.matches(token, stored)
+    assert not job_token.matches(token + "x", stored)
+    assert not job_token.matches(None, stored)
+    assert not job_token.matches(token, None)
+    assert not job_token.matches(token, "")
+    assert job_token.presented({}) is None
+    assert job_token.presented({"ORCH_JOB_TOKEN": token}) == token
+    assert job_token.presented({"ORCH_JOB_TOKEN": "", "ORCH_JOB_PROOF_FILE": ""}) is None
 
 
 def test_descends_from_walks_the_parent_chain() -> None:

@@ -26,7 +26,8 @@ was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
 lib/remote.py, so a check never trusts a stored process number). #80 adds
 `autostart_pid` and `autostart_start`: the autostart waiter that claimed
-the job, if one did. The
+the job, if one did. #96 adds `run_token_hash`: the hash of the secret
+token the job's current `orch job run` holds (never the token itself). The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the 60-minute offline check.
 
@@ -55,10 +56,13 @@ _SLOT_COLUMNS = (
     ("worker_tag", "TEXT"),
     # #80: the autostart waiter (`orch wait <bot> --autostart`) that claimed
     # the job, recorded in the claim's own transaction. Only that waiter's
-    # child may `orch job run` the job, and only that run's process tree
-    # may `orch job done` it, so a bot turn never runs or finishes it too.
+    # child may `orch job run` the job, so a bot turn never runs it too.
     ("autostart_pid", "INTEGER"),
     ("autostart_start", "TEXT"),
+    # #96: SHA-256 of the secret token that `orch job run` minted for an
+    # autostart run (lib/job_token.py). Only that run, which holds the
+    # token, may `orch job done` the job. The token itself is never stored.
+    ("run_token_hash", "TEXT"),
 )
 
 
@@ -291,11 +295,14 @@ class DevicePool:
         pid: int,
         start: str | None,
         alive: Callable[[int | None, str | None], bool],
+        token_hash: str | None = None,
     ) -> None:
         """Record the box process (`orch job run`) that runs a placed job.
 
         Refused while another recorded runner is still alive, so two runners
         never share one slot (the later one could release it under the other).
+        `token_hash` (#96) is written in the same update, replacing any
+        earlier run's, so only this run's token can finish the job.
         """
 
         def guard(row: sqlite3.Row) -> None:
@@ -313,8 +320,8 @@ class DevicePool:
         self._update_slot(
             job_id,
             owner,
-            "runner_pid = ?, runner_start = ?",
-            (pid, start),
+            "runner_pid = ?, runner_start = ?, run_token_hash = ?",
+            (pid, start, token_hash),
             guard=guard,
         )
 

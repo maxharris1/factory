@@ -10,7 +10,8 @@ out holds one slot on one device. `orch job run` then:
   earlier worker (left by a runner that died) is not confirmed gone: a
   live recorded pid on the box, or a remote check that does not answer
   gone. A worker's identity is never overwritten while it may still run;
-* records itself on the slot as the job's runner;
+* records itself on the slot as the job's runner, with the hash of the
+  run's secret token for an autostart job (#96, lib/job_token.py);
 * on the box (the `local: true` device), runs the command as before and
   records its pid as the worker before the command may start
   (lib/job_run.py holds it at a gate until then);
@@ -209,8 +210,12 @@ def prepare(
     pid: int | None = None,
     parent_pid: int | None = None,
     checked_autostart: tuple[int, str | None] | None = None,
+    token_hash: str | None = None,
 ) -> PlacedRun:
     """Record this process as the job's runner on its slot.
+
+    token_hash (#96) is the hash of the token this run minted; it is
+    recorded with the runner, so only this run can `orch job done` the job.
 
     checked_autostart is what check_autostart returned before the run's
     first heartbeat: this run's parent was then the claiming waiter. The
@@ -269,6 +274,7 @@ def prepare(
                 pid=runner,
                 start=process_start(runner),
                 alive=alive,
+                token_hash=token_hash,
             )
         )
     except QueueError as exc:

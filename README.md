@@ -542,7 +542,14 @@ the claim, with no model turn and no message to any bot. The harness posts its
   claimed job, which the poller requeues after `release_claimed_minutes`.
 - **One handoff per job.** The claim records the waiter on the job's slot.
   From then on only that waiter's own `orch job run` may run the job, and
-  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  only that run may `orch job done` it. The run proves it with a secret
+  token (issue #96): `orch job run` mints one per run, records only its
+  SHA-256 on the slot, and gives the harness the token in `$ORCH_JOB_TOKEN`
+  and in an owner-only file named by `$ORCH_JOB_PROOF_FILE` (beside the
+  brief, removed when the run ends) for a harness that drops `*TOKEN*`
+  variables. There is no process-tree check, so a harness sandbox with its
+  own PID namespace (Codex) can finish its job, as long as it can write the
+  orch database's directory. A bot turn's `orch job
   run` or `orch job done` is refused (exit 2, nothing changed), and a plain
   `orch wait <bot>` is refused while the bot's autostart waiter runs. A
   second `orch job run` of a running job is refused. `orch job done` with the
