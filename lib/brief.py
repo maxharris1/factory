@@ -317,9 +317,8 @@ def _finish_section(job: Job, bot: str) -> str:
         "## Finish the job\n"
         f"- After the handoff comment is posted: `orch job done {bot} {job.id} --handoff <comment-id>`.\n"
         f"- If you cannot finish: `orch job done {bot} {job.id} --failed` (T6 retries the job once).\n"
-        "- `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_TOKEN` and in the "
-        "file at `$ORCH_JOB_PROOF_FILE`, so run it from this environment. Never print, post or commit "
-        "the token or that file's contents.\n"
+        "- `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it "
+        "from this environment. Never print, post, write down or commit that value.\n"
         "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another harness."
     )
 

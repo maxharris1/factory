@@ -770,10 +770,10 @@ def _done_settled(
     (1, error) when a different outcome is recorded: nothing changes.
     (2, error) when the job is an autostart waiter's and this process does
     not hold its current `orch job run`'s secret token (#96): a bot turn
-    must not finish it. The token comes from ORCH_JOB_TOKEN, else the file
-    named by ORCH_JOB_PROOF_FILE (lib/job_token.py), and only its hash is
-    compared. There is no process-tree check: a sandbox in its own PID
-    namespace (Codex) cannot see the run, but it inherits the token.
+    must not finish it. The token comes from ORCH_JOB_PROOF
+    (lib/job_token.py), and only its hash is compared. There is no
+    process-tree check: a sandbox in its own PID namespace (Codex) cannot
+    see the run, but it inherits the token.
     None when the job may be finished here.
     """
     target = "done" if handoff is not None else "failed"
@@ -815,12 +815,12 @@ def _done_settled(
     if stored is None:
         why = (
             "its claim has no run token (claimed before run tokens, #96, or its "
-            "orch job run has not started), so no ORCH_JOB_TOKEN can finish it"
+            "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
         )
     elif token is None:
-        why = "this process has no ORCH_JOB_TOKEN (or ORCH_JOB_PROOF_FILE) from that run"
+        why = "this process has no ORCH_JOB_PROOF from that run"
     else:
-        why = "the ORCH_JOB_TOKEN this process holds is not that run's"
+        why = "the ORCH_JOB_PROOF this process holds is not that run's"
     return 2, (
         f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
         "whose harness run finishes it; only that run may call orch job done, so a bot "
@@ -931,8 +931,7 @@ def _job_run(argv: list[str]) -> int:
 
     environment = dict(os.environ)
     # Never pass on a token this process inherited (another job's run).
-    environment.pop(job_token.TOKEN_ENV, None)
-    environment.pop(job_token.PROOF_FILE_ENV, None)
+    environment.pop(job_token.PROOF_ENV, None)
     environment.update(
         {
             "ORCH_JOB_ID": args.job_id,
@@ -970,13 +969,10 @@ def _job_run(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
-    proof_file: list[Path] = []
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
     try:
-        if token is not None and not placed.remote:
-            # Not sent to a remote device: it would be on the ssh command line.
-            environment[job_token.TOKEN_ENV] = token
-            proof_file.append(job_token.write_proof_file(token, _brief_dir()))
-            environment[job_token.PROOF_FILE_ENV] = str(proof_file[0])
         return job_run.run(
             placed.argv(command, remote_env),
             beat=beat,
@@ -994,20 +990,12 @@ def _job_run(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
-        for path in proof_file:
-            job_token.remove_proof_file(path)
         if placed.autostart:
             _fail_unfinished(queue, args.job_id, owner, log)
         try:
             placed.finish()
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
-
-
-def _brief_dir() -> Path | None:
-    """The waiter's private job directory (where the brief is), if any."""
-    brief = os.environ.get(waiter.BRIEF_ENV)
-    return Path(brief).parent if brief else None
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:

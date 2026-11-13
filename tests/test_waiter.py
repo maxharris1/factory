@@ -657,8 +657,7 @@ job = os.environ["ORCH_JOB_ID"]
     "cwd": os.getcwd(),
     "job_bot": os.environ.get("ORCH_JOB_BOT"),
     "db": os.environ.get("ORCH_DB"),
-    "token": os.environ.get("ORCH_JOB_TOKEN"),
-    "proof_file": os.environ.get("ORCH_JOB_PROOF_FILE"),
+    "env": dict(os.environ),
 }))
 go = out / f"{job}.go"
 crash = out / f"{job}.crash"
