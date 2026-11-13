@@ -945,7 +945,7 @@ def test_autostart_runs_with_only_remote_devices(tmp_path: Path) -> None:
     proc = subprocess.Popen(
         [sys.executable, str(ORCH), "wait", "claude-bot", "--autostart", "--db", str(db),
          "--machines", str(machines), "--harness-config", str(config),
-         "--state-dir", str(tmp_path / "state"), "--orch", str(tmp_path / "missing.yml")],
+         "--state-dir", str(tmp_path / "state"), "--orch", str(ROOT / "orch.yml")],
         env=env, text=True, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
     )
     try:

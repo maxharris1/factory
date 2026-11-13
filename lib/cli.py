@@ -43,7 +43,14 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
-from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
+from lib.orch_yml import (
+    OrchConfig,
+    approvals,
+    hold_approver_findings,
+    load_approvals,
+    load_orch_yml,
+    parse_bind,
+)
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
@@ -313,13 +320,11 @@ def _check_config(argv: list[str]) -> int:
     else:
         factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
 
-    failed = _report(
+    orch_config, orch_findings = load_orch_yml(
         orch_path,
-        load_orch_yml(
-            orch_path,
-            allow_placeholders=args.allow_placeholders,
-        )[1],
+        allow_placeholders=args.allow_placeholders,
     )
+    failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:
         machines_path = ROOT / "machines.yml"
@@ -332,7 +337,10 @@ def _check_config(argv: list[str]) -> int:
             )[1],
         ) or failed
     for path in factory_paths:
-        failed = _report(path, load_factory_md(path)[1]) or failed
+        factory, findings = load_factory_md(path)
+        if orch_config is not None and factory is not None:
+            findings = findings + hold_approver_findings(orch_config, factory.hold)
+        failed = _report(path, findings) or failed
     if failed:
         return 1
     print("ok")
@@ -462,6 +470,16 @@ def _wait_autostart(
 
     if note is not None:
         log(f"factory.md context is off: {note}")
+    if config is not None:
+        policy = approvals(config)
+    else:
+        policy, approval_findings = load_approvals(orch_path)
+        if policy is None:
+            print(
+                f"orch wait: {orch_path}: approval settings: {approval_findings[0].message}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         run = waiter.Waiter(
             bot=args.bot,
@@ -473,6 +491,7 @@ def _wait_autostart(
             db=_db_path(args.db),
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
+            approvals=policy,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -662,6 +681,7 @@ def _runtime(
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
+        approvals=approvals(config),
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
