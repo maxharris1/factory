@@ -242,7 +242,7 @@ def test_finishing_a_job_does_not_free_its_slot(tmp_path: Path) -> None:
     assert pool.claim("claude") is None
 
 
-def test_device_power_loss_keeps_slot_held_and_goes_stuck_never_done(
+def test_device_power_loss_keeps_slot_held_and_never_done(
     tmp_path: Path,
 ) -> None:
     now = [0.0]
@@ -261,6 +261,11 @@ def test_device_power_loss_keeps_slot_held_and_goes_stuck_never_done(
     assert claimed is not None
     job, placement = claimed
     assert job.request.timeout_seconds == 3600
+    # Started the way `orch job run` starts a remote job: a runner and a
+    # remote start recorded (#91: a placed job with neither never started).
+    pool.attach_runner(job.id, owner="claude", pid=4242, start=None, alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True)
+    placement = pool.placement(job.id)
     now[0] = 600
     queue.heartbeat(job.id, owner="claude")
 
@@ -270,27 +275,26 @@ def test_device_power_loss_keeps_slot_held_and_goes_stuck_never_done(
     assert job_state(queue, job.id) == "running"
     assert pool.placement(job.id) == placement
 
+    # Past its timeout the started remote job is held, never failed beside
+    # a worker that may still run (#87 r3 F2.1); the DeviceMonitor's offline
+    # hour makes it stuck (tests/test_timeout_remote_worker.py).
     now[0] = 600 + 3600
     dispatcher.reconcile_jobs()
-    assert job_state(queue, job.id) == "failed"
-    assert pool.placement(job.id) == placement
-    assert not dispatcher.is_stuck(snapshot)
-
-    retry = next(item for item in queue.outstanding() if item.id != job.id)
-    assert (retry.state, retry.request.attempt) == ("queued", 2)
-    assert pool.claim("claude") is None
-
-    now[0] = retry.created_at + 3600
+    assert job_state(queue, job.id) == "running"
+    assert [item.id for item in queue.outstanding()] == [job.id]  # no attempt 2
+    now[0] = 600 + 3 * 3600
     dispatcher.reconcile_jobs()
-
-    assert dispatcher.is_stuck(snapshot)
-    assert job_state(queue, job.id) == "failed"
-    assert job_state(queue, retry.id) == "failed"
+    assert job_state(queue, job.id) == "running"
     with queue.connect() as connection:
         done = connection.execute(
             "SELECT COUNT(*) FROM jobs WHERE recipient = 'claude' AND state = 'done'"
         ).fetchone()[0]
+        held = connection.execute(
+            "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = 'timeout-held'",
+            (job.id,),
+        ).fetchone()[0]
     assert done == 0
+    assert held == 1
     assert pool.placement(job.id) == placement
     assert pool.used() == {"pc": 1}
 

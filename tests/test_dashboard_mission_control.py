@@ -311,6 +311,7 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
         "index.html": ("kpis", "lanes", "queue"),
         "activity.html": ("attention", "handoffs", "verdicts", "tickets", "log"),
         "efficiency.html": ("health", "savings"),
+        "health.html": ("components", "no-waiter"),
         "job.html": ("jobs", "jobview"),
     }
     for name, panels in where.items():

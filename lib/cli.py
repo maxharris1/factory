@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import job_run, job_token, linear_webhook, placed_run, telemetry, waiter, worktrees
+from lib import health, job_run, job_token, linear_webhook, placed_run, telemetry, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -70,6 +70,7 @@ commands:
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
+  health           component heartbeats: report, beat or forget (issue #92)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -162,6 +163,10 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   ends the slot is released once the worker is confirmed gone (a remote
   worker still running is sent SIGTERM first); otherwise it stays held for
   the poller to confirm.
+  How COMMAND ended is recorded in job_events while the job still runs
+  (#91). If its harness never started (no worker, or it was never
+  exec'd), the job is requeued, no round charged, in the step that frees
+  the slot.
   --worktree runs COMMAND in the job's checkout on the device it is placed
   on, at the job's head or the default branch, exported as
   ORCH_JOB_WORKTREE. On the box that is a git worktree of one shared clone
@@ -217,6 +222,18 @@ linear-webhook serve [--db PATH] [--orch PATH] [--bind HOST:PORT]
   A signed Issue or Comment for a configured Linear project upserts one
   linear_dirty row in the existing database; nothing else is done. --bind
   overrides linear_webhook.bind. Exits 2 when no webhook is configured.
+
+health [--db PATH] [--machines PATH] [--orch PATH] [--json]
+  Print each component's heartbeat (poller, waiters, Linear listener,
+  tunnel, dashboard writer, device probes) as up, stale or down, with
+  last-seen in ET, pid and device, and each queued harness job with no
+  live waiter on an eligible device ("no waiter for <harness>"). A
+  component machines.yml or orch.yml expects that has never beaten is
+  down. Reads orch.health.db beside the database. Exits 3 when a
+  component is down or a queued job has no waiter, 1 when orch.health.db
+  cannot be read, else 0.
+health forget <component> [--db PATH] [--device NAME] [--bot BOT]
+  Remove a retired component's rows.
 """
 
 
@@ -250,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_gc, argv[1:])
     if argv[0] == "linear-webhook":
         return _call(_linear_webhook, argv[1:])
+    if argv[0] == "health":
+        return health.main(argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -384,11 +403,23 @@ def _wait(argv: list[str]) -> int:
     except (waiter.WaiterError, OSError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    # Heartbeats (#92): one waiter row per device this waiter claims on.
+    # An autostart waiter marks its rows stopped on exit; a plain wait,
+    # which exits by design once it claims, removes them.
+    beats = health.Beater(
+        database,
+        health.WAITER,
+        devices=health.waiter_devices(machines, args.bot),
+        bot=args.bot,
+        on_exit="stop" if harness is not None else "delete",
+    )
     if harness is not None:
-        return _wait_autostart(args, queue, pool, harness)
+        with beats:
+            return _wait_autostart(args, queue, pool, harness)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        wait_for_job(queue, recipient, sys.stdout, pool=pool)
+        with beats:
+            wait_for_job(queue, recipient, sys.stdout, pool=pool)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -476,6 +507,9 @@ def _poll(argv: list[str]) -> int:
                 watcher = after_poll if isinstance(after_poll, LivePusher) else None
                 if watcher is not None:
                     watcher.start()
+                # Heartbeats (#92): the poller's own row and the per-device
+                # SSH reachability probe, each in its own daemon thread.
+                beats = health.poller_beats(path, args.machines).start()
                 try:
                     loop.run(
                         on_error=lambda exc: dispatcher.record_poll_error(
@@ -488,6 +522,7 @@ def _poll(argv: list[str]) -> int:
                 finally:
                     if watcher is not None:
                         watcher.stop()
+                    beats.stop()
     except (
         GrokDeliveryError,
         PollSourceError,
@@ -1096,7 +1131,7 @@ def _job_run_command(argv: list[str]) -> int:
     if token is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = token
-    code: int | None = None
+    code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
         code = job_run.run(
             placed.argv(command, remote_env),
@@ -1108,6 +1143,7 @@ def _job_run_command(argv: list[str]) -> int:
             teardown=teardown,
             started=placed.started,
             output=session.consume if session is not None else None,
+            execed=placed.execed,
         )
         return code
     except placed_run.CheckoutError as exc:
@@ -1135,15 +1171,23 @@ def _job_run_command(argv: list[str]) -> int:
     finally:
         if session is not None:
             session.finish(code)
+        placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
         # only a box run is failed here.
-        if placed.autostart and not placed.remote:
-            _fail_unfinished(queue, args.job_id, owner, log)
+        settle = (
+            (lambda: _fail_unfinished(queue, args.job_id, owner, log))
+            if placed.autostart and not placed.remote
+            else None
+        )
         try:
-            placed.finish()
+            # #91: requeues a harness that never started; otherwise settles
+            # the job while its slot is held (#99 round 2).
+            placed.finish(code, settle)
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
+            if settle is not None:
+                settle()  # a settled or requeued job is no longer running: left alone
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
@@ -1255,7 +1299,9 @@ def _linear_webhook(argv: list[str]) -> int:
     print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        server.serve_forever()
+        # Heartbeat (#92), and the tunnel probe when public_url is set.
+        with health.listener_beats(path, webhook.public_url):
+            server.serve_forever()
     except KeyboardInterrupt:
         return 130
     finally:

@@ -3,7 +3,8 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes status.json and the self-contained pages (PAGES: index.html,
-job.html, activity.html, efficiency.html; see lib/dashboard_page.py) to an
+job.html, activity.html, efficiency.html, health.html; see
+lib/dashboard_page.py) to an
 output directory, each atomically (temp file in the same directory, fsync,
 then rename). Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. Without script (or when status.json cannot
@@ -25,6 +26,14 @@ markers matched in decoded form. The finished snapshot is walked once more so ev
 string in it has been through `redact` before it is written. Enumerated
 fields (including ticket workflow states) outside their known values are
 shown as "other".
+
+Health (#92): the component heartbeats in orch.health.db beside the
+database (lib/health.py, also opened read-only) become `health`; each
+down component (including one machines.yml or orch.yml expects that has
+never beaten), each harness with queued jobs but no live waiter, and an
+orch.health.db that cannot be read is a needs-attention item linked to the
+Health tab, and such a queued job carries `no_waiter`. With no
+orch.health.db nothing is flagged.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from pathlib import Path
 
 import yaml
 
+from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
@@ -63,7 +73,7 @@ from lib.job_state import (
 )
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
-from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED
+from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -597,6 +607,8 @@ def collect_snapshot(
     job_states: JobStateConfig | None = None,
     alive: Alive | None = pid_alive,
     poll_seconds: int = POLL_SECONDS,
+    orch: OrchConfig | None = None,
+    publish_seconds: float | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
@@ -605,7 +617,12 @@ def collect_snapshot(
     `chart_path` is the statechart chart the job page draws (default
     model/chart.mmd); only its file name is copied out. `job_states` is
     orch.yml's job_states (the stale threshold); `alive` checks a recorded
-    runner pid on this host (lib/job_state.py), never over SSH."""
+    runner pid on this host (lib/job_state.py), never over SSH. `orch` is
+    the loaded orch.yml, which says whether the Linear listener and the
+    dashboard writer are expected to heartbeat (lib/health.py).
+    `publish_seconds` is how often a pushing writer publishes the snapshot
+    (None for a one-off snapshot): the page keeps the component states it
+    observed until a newer snapshot is overdue (lib/dashboard_page.py)."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -662,6 +679,22 @@ def collect_snapshot(
     )
     box_running = db["box_running"] + db["running_on"].get(box_name, 0)
     attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
+    report = component_health.load_report(
+        db_path,
+        now,
+        queued=[(item["job"], item["recipient"]) for item in db["queued"]],
+        machines=(
+            component_health.load_machines(machines_path)
+            if machines_path is not None
+            else None
+        ),
+        orch=orch,
+    )
+    for item in db["queued"]:
+        flag = report.no_waiter_for(item["recipient"])
+        if flag is not None:
+            item["no_waiter"] = flag.harness
+            item["no_waiter_link"] = f"health.html#{flag.anchor}"
 
     snapshot = {
         "schema": SCHEMA,
@@ -710,8 +743,11 @@ def collect_snapshot(
         },
         "handoff_savings": db["handoff_savings"],
         "attention": _attention(
-            db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"]
+            db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
+            report,
         ),
+        "health": {**component_health.report_json(report, now),
+                   "publish_seconds": publish_seconds},
         # The backlog feeder at its last poll (issue #85); None when none has run.
         "feeder": db["feeder"],
         "statechart": chart,
@@ -725,11 +761,14 @@ def _attention(
     overdue: list[dict],
     paused: list[dict],
     flags: Sequence[dict] = (),
+    health: component_health.HealthReport | None = None,
 ) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
     overdue jobs, tickets flagged needs-attention (a ship that failed and
-    will not be retried, a job dedupe dropped: #83, #84), then paused
-    tickets that are not already listed. `count` is the badge on every page."""
+    will not be retried, a job dedupe dropped: #83, #84), paused tickets
+    that are not already listed, then (#92) down components, an unreadable
+    orch.health.db and harnesses whose queued jobs have no live waiter, each
+    linked to the Health tab. `count` is the badge on every page."""
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
@@ -764,6 +803,23 @@ def _attention(
             detail += f" (waiting on {row['waiting_on']})"
         items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
                       "detail": detail})
+    for component in health.down if health is not None else ():
+        reason = f" ({component.reason})" if component.reason else ""
+        items.append({"kind": "down", "repo": "", "ticket_id": "",
+                      "component": component.label,
+                      "link": f"health.html#{component.anchor}",
+                      "detail": f"down{reason}"})
+    if health is not None and health.error is not None:
+        items.append({"kind": "health", "repo": "", "ticket_id": "",
+                      "component": "health storage", "link": "health.html#components",
+                      "detail": f"unknown: {health.error}"})
+    for flag in health.no_waiter if health is not None else ():
+        count = len(flag.jobs)
+        items.append({"kind": "no-waiter", "repo": "", "ticket_id": "",
+                      "component": f"waiter {flag.bot}",
+                      "link": f"health.html#{flag.anchor}",
+                      "detail": f"no waiter for {flag.harness} "
+                                f"({count} queued job{'' if count == 1 else 's'})"})
     return {"count": len(items), "items": items}
 
 

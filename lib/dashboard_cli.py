@@ -10,14 +10,18 @@ when configured, pushes it out. Paths:
          poll_seconds are used)
   --machines else the checkout's machines.yml, when present
 
-`snapshot` writes status.json and the four pages (index.html, job.html,
-activity.html, efficiency.html); `push` sends them all. `push --status-only`
-sends status.json alone (the live pushes `orch poll`
+`snapshot` writes status.json and the five pages (index.html, job.html,
+activity.html, efficiency.html, health.html); `push` sends them all.
+`push --status-only` sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
 last cycle ended, reported as poll health. `--poll-seconds` (30 or 60) is the
 running poller's poll_seconds, which `orch poll` passes so poll health's
 `cycle_seconds` and thresholds match the interval it actually sleeps; without
-it orch.yml's poll_seconds is used (60 when there is no orch.yml).
+it orch.yml's poll_seconds is used (60 when there is no orch.yml). Each push
+snapshot first records the `dashboard` heartbeat in orch.health.db
+(lib/health.py, #92), at the writer's publication interval, which the
+snapshot also carries as `health.publish_seconds`; a heartbeat that cannot be
+written is logged and the push goes on.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import sys
 import time
 from pathlib import Path
 
+from lib import health
 from lib.dashboard import (
     DashboardError,
     collect_snapshot,
@@ -37,7 +42,7 @@ from lib.dashboard import (
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_push import NoopTransport, run_push, transport_for
 from lib.job_state import JobStateConfig
-from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, load_orch_yml
+from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig, load_orch_yml
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -89,7 +94,7 @@ def main(argv: list[str]) -> int:
     loaded = _config(args.orch, prog)
     if loaded is None:
         return 1
-    config, job_states, poll_seconds = loaded
+    config, job_states, poll_seconds, orch = loaded
 
     if args.command == "push":
         transport = transport_for(config.push)
@@ -97,16 +102,35 @@ def main(argv: list[str]) -> int:
         if not isinstance(transport, NoopTransport) and not _paths_ok(args, prog):
             return 2
 
+        cycle = args.poll_seconds if args.poll_seconds is not None else poll_seconds
+        # How often this writer publishes (#92): the push loop's interval, or
+        # the poller's schedule (a live push publishes every poll cycle).
+        every = config.push.every_minutes
+        if not args.once:
+            publish = config.push.interval_seconds
+        elif every and not config.push.live:
+            publish = every * 60
+        else:
+            publish = cycle
+
         def snapshot() -> tuple[Path, ...]:
+            # The writer's heartbeat goes first, so the snapshot shows it.
+            health.beat_once(
+                _db(args),
+                health.DASHBOARD,
+                interval=publish,
+                machines=args.machines,
+                log=lambda line: print(line, file=sys.stderr, flush=True),
+            )
             paths = _snapshot(
                 args,
                 config,
                 None,
                 last_cycle_at=args.last_cycle,
                 job_states=job_states,
-                poll_seconds=(
-                    args.poll_seconds if args.poll_seconds is not None else poll_seconds
-                ),
+                poll_seconds=cycle,
+                orch=orch,
+                publish_seconds=publish,
             )
             # Live pushes send status.json alone; the page polls it.
             return paths[:1] if args.status_only else paths
@@ -124,7 +148,8 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         paths = _snapshot(
-            args, config, args.refresh, job_states=job_states, poll_seconds=poll_seconds
+            args, config, args.refresh, job_states=job_states, poll_seconds=poll_seconds,
+            orch=orch,
         )
     except (DashboardError, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -142,17 +167,17 @@ def _paths_ok(args: argparse.Namespace, prog: str) -> bool:
 
 def _config(
     path: Path | None, prog: str
-) -> tuple[DashboardConfig, JobStateConfig, int] | None:
+) -> tuple[DashboardConfig, JobStateConfig, int, OrchConfig | None] | None:
     orch_path = path if path is not None else ROOT / "orch.yml"
     if path is None and not orch_path.is_file():
-        return DashboardConfig(), JobStateConfig(), POLL_SECONDS
+        return DashboardConfig(), JobStateConfig(), POLL_SECONDS, None
     config, findings = load_orch_yml(orch_path, allow_placeholders=True)
     errors = [item for item in findings if item.severity == "error"]
     if config is None or errors:
         for item in errors or findings:
             print(f"{prog}: {item.format(str(orch_path))}", file=sys.stderr)
         return None
-    return config.dashboard, config.job_states, config.poll_seconds
+    return config.dashboard, config.job_states, config.poll_seconds, config
 
 
 def _snapshot(
@@ -163,9 +188,11 @@ def _snapshot(
     last_cycle_at: float | None = None,
     job_states: JobStateConfig | None = None,
     poll_seconds: int = POLL_SECONDS,
+    orch: OrchConfig | None = None,
+    publish_seconds: float | None = None,
 ) -> tuple[Path, ...]:
     """status.json first, then every page."""
-    db = args.db if args.db is not None else Path(os.environ["ORCH_DB"])
+    db = _db(args)
     log = args.log or _env_path("ORCH_POLL_LOG") or db.parent / "poller.log"
     out = args.out or _env_path("ORCH_DASHBOARD_DIR") or db.parent / "dashboard"
     machines = args.machines if args.machines is not None else ROOT / "machines.yml"
@@ -178,8 +205,14 @@ def _snapshot(
         last_cycle_at=last_cycle_at,
         job_states=job_states,
         poll_seconds=poll_seconds,
+        orch=orch,
+        publish_seconds=publish_seconds,
     )
     return write_snapshot_pages(out, snapshot)
+
+
+def _db(args: argparse.Namespace) -> Path:
+    return args.db if args.db is not None else Path(os.environ["ORCH_DB"])
 
 
 def _env_path(name: str) -> Path | None:

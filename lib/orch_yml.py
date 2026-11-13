@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -48,6 +49,11 @@ _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _URL_PATH = re.compile(r"^(?:/[A-Za-z0-9._~-]+)+$")
+# The listener's Funnel URL (#92): https, a DNS name, an optional port, a plain path.
+_PUBLIC_URL = re.compile(
+    r"^https://[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\.[A-Za-z0-9-]{1,63})*"
+    r"(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~-]+)+$"
+)
 _BIND = re.compile(r"^(?:\[(?P<v6>[0-9A-Fa-f:.]+)\]|(?P<v4>[0-9.]+)):(?P<port>[0-9]{1,5})$")
 _TOP_KEYS = {
     "poll_seconds",
@@ -62,7 +68,7 @@ _TOP_KEYS = {
     "job_states",
 }
 _JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
-_LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds"}
+_LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds", "public_url"}
 _PROJECT_KEYS = {
     "repo",
     "job_timeout",
@@ -129,7 +135,9 @@ class LinearWebhookConfig:
     secret_file names the signing-secret file; check-config never reads it.
     reconcile_seconds is how often the poller still runs the full discovery
     search and rereads every tracked ticket, so a missed webhook costs at
-    most one interval.
+    most one interval. public_url is the Funnel URL of `path` that the
+    listener's tunnel heartbeat GETs (issue #92); without it the tunnel
+    shows down.
     """
 
     host: str
@@ -137,6 +145,7 @@ class LinearWebhookConfig:
     secret_file: Path
     path: str = DEFAULT_LINEAR_WEBHOOK_PATH
     reconcile_seconds: int = DEFAULT_LINEAR_RECONCILE_SECONDS
+    public_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -582,6 +591,15 @@ def _linear_webhook(
                 f"{LINEAR_RECONCILE_MAX_SECONDS}",
             )
         )
+    public_url = value.get("public_url")
+    if public_url is not None and not _public_url_ok(public_url, path):
+        findings.append(
+            Finding(
+                "error",
+                "linear_webhook.public_url must be an https URL whose path is "
+                "linear_webhook.path",
+            )
+        )
     if len(findings) > start or bind is None or secret_file is None:
         return None
     return LinearWebhookConfig(
@@ -590,7 +608,14 @@ def _linear_webhook(
         secret_file=secret_file,
         path=str(path),
         reconcile_seconds=int(reconcile),
+        public_url=public_url,
     )
+
+
+def _public_url_ok(url: object, path: object) -> bool:
+    if not isinstance(url, str) or _PUBLIC_URL.fullmatch(url) is None:
+        return False
+    return urlsplit(url).path == path
 
 
 def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:

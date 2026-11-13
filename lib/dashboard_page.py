@@ -1,6 +1,6 @@
 """The dashboard pages: inline CSS, the server-rendered panels and the script.
 
-Four pages share one bar (navigation, in this order, and the
+Five pages share one bar (navigation, in this order, and the
 needs-attention badge):
 
 - index.html (Lanes): factory status (with Linear webhook health when a
@@ -14,7 +14,13 @@ needs-attention badge):
 - activity.html: needs attention, recent handoffs and verdicts, tickets, log;
 - efficiency.html: poll and Linear budget, handoff savings, tokens and cost
   per harness, repo and job (#93, lib/dashboard_telemetry.py). Each job's
-  article (job page and modal) ends with its telemetry feed.
+  article (job page and modal) ends with its telemetry feed;
+- health.html (Health, #92): each component heartbeat (poller, waiters,
+  Linear listener, tunnel, dashboard writer, device probes) as up, stale or
+  down with last-seen in ET, pid and device, and each harness whose queued
+  jobs have no live waiter. Down components and those harnesses are also
+  needs-attention items, and a queued job with no waiter carries a
+  "no waiter for <harness>" link to its Health row.
 
 Every panel is rendered server-side here, so a page reads without script
 (and then reloads every refresh_seconds). Everything is inline (no external
@@ -95,7 +101,7 @@ gap:16px;max-width:1600px;margin:0 auto;padding:20px 24px 32px}
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
-#kpis,#tickets,#log,#attention,#jobs,#jobview{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
+#kpis,#tickets,#log,#attention,#jobs,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
 #handoffs,#verdicts,#health,#savings{grid-column:span 6}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
@@ -315,6 +321,7 @@ SCRIPT = r"""
   var reloadArmed = false;
   var firstRender = true;
   var latest = null;
+  var healthKey = '';
   var tickers = [];
   var prevKeys = {};
   var nextKeys = {};
@@ -355,6 +362,8 @@ SCRIPT = r"""
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
   function chip(text, cls) { return el('span', 'chip ' + (cls || 'muted'), text); }
+  // #92: only a link into the Health tab, never a value used as a URL.
+  function healthLink(href) { return /^health\.html#[A-Za-z0-9_-]+$/.test(String(href)) ? String(href) : 'health.html'; }
   // #75: lib/job_state.py's state of a running job, as a chip.
   var JOB_STATE = {claimed: ['claimed, not started', 'warn'], running: ['running', 'ok'],
                    stale: ['stale heartbeat', 'warn'], dead: ['runner dead', 'bad']};
@@ -404,10 +413,58 @@ SCRIPT = r"""
 
   function renderBadge(d) {
     var a = d.attention || {count: 0};
+    var total = a.count + agedHealth(d).extra.length;
     var count = byId('attention-count');
-    if (count) count.textContent = String(a.count);
+    if (count) count.textContent = String(total);
     var badge = byId('attention-badge');
-    if (badge) badge.className = 'badge' + (a.count ? '' : ' clear');
+    if (badge) badge.className = 'badge' + (total ? '' : ' clear');
+  }
+
+  // #92: a snapshot vouches for the states it observed until its next
+  // publication is overdue (stale_beats publication intervals; a one-off
+  // snapshot vouches for none). Past that, a component that is not still
+  // inside its up window is unknown, not down: the page cannot see it. Only
+  // the dashboard writer, whose beats are the publications, ages to stale
+  // and down; with no writer row that can alert, the overdue snapshot is one
+  // attention item.
+  function agedHealth(d) {
+    var h = d.health || {};
+    var t = h.thresholds || {};
+    var staleBeats = t.stale_beats || 3;
+    var downBeats = t.down_beats || 8;
+    var age = since();
+    var vouched = age <= staleBeats * (Number(h.publish_seconds) || 0);
+    var extra = [];
+    var writer = false;
+    var unknown = false;
+    var waiterUnknown = false;
+    var rows = (h.components || []).map(function (c) {
+      var isWriter = c.component === 'dashboard';
+      writer = writer || (isWriter && c.configured !== false);
+      var base = c.last_seen_age_seconds;
+      if (vouched || c.state === 'down' || base === null || base === undefined) return c;
+      var seen = base + age;
+      var interval = Math.max(Number(c.interval_seconds) || 15, 1);
+      var state = seen > downBeats * interval ? 'down' : seen > staleBeats * interval ? 'stale' : c.state;
+      if (!isWriter && (state !== 'up' || c.state !== 'up')) {
+        unknown = true;
+        waiterUnknown = waiterUnknown || c.component === 'waiter';
+        return Object.assign({}, c, {state: 'unknown', reason: 'no snapshot for ' + dur(age)});
+      }
+      if (state === c.state) return c;
+      var reason = 'no heartbeat for ' + dur(seen);
+      if (state === 'down' && c.configured !== false) {
+        extra.push({kind: 'down', repo: '', ticket_id: '', component: c.label,
+                    link: 'health.html#' + c.anchor, detail: 'down (' + reason + ')'});
+      }
+      return Object.assign({}, c, {state: state, reason: reason});
+    });
+    if (unknown && !writer) {
+      extra.push({kind: 'health', repo: '', ticket_id: '', component: 'health snapshot',
+                  link: 'health.html#components', detail: 'unknown: no snapshot for ' + dur(age)});
+    }
+    return {rows: rows, extra: extra, waiterUnknown: waiterUnknown, age: age,
+            key: rows.map(function (c) { return c.state; }).join(',')};
   }
 
   // --- main page: status, lanes and slots, the queue rail ------------------
@@ -591,23 +648,27 @@ SCRIPT = r"""
       add(a, el('span', 'ticket', jobLabel(r)));
       add(a, el('span', 'what', r.action));
       ticking(add(a, el('span', 'when')), r.age_seconds, 'waiting ');
+      if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
       return mark('queue', r.job, li);
     });
   }
 
   // --- activity page ---------------------------------------------------------
 
-  var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn'};
+  var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn',
+                   down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   function renderAttention(d) {
     var a = d.attention || {count: 0, items: []};
-    var root = panel('attention', 'Needs attention', a.count + (a.count === 1 ? ' item' : ' items'));
+    var items = (a.items || []).concat(agedHealth(d).extra);
+    var root = panel('attention', 'Needs attention', items.length + (items.length === 1 ? ' item' : ' items'));
     if (!root) return;
-    list(root, a.items, 'all clear', function (x) {
+    list(root, items, 'all clear', function (x) {
       var li = el('li');
       add(li, chip(x.kind, ATTENTION[x.kind] || 'muted'));
-      add(li, el('span', 'ticket', ticketOf(x)));
+      if (x.component) add(li, link('ticket', healthLink(x.link))).textContent = x.component;
+      else add(li, el('span', 'ticket', ticketOf(x)));
       add(li, el('span', 'what', x.detail));
-      return mark('attention', x.kind + ':' + x.repo + '#' + x.ticket_id, li);
+      return mark('attention', x.kind + ':' + (x.component || x.repo + '#' + x.ticket_id), li);
     });
   }
 
@@ -1058,11 +1119,75 @@ SCRIPT = r"""
   }
 
 __TELEMETRY__
+
+  // --- health page (#92) -------------------------------------------------------
+
+  var HEALTH_STATE = {up: ['UP', 'ok'], stale: ['STALE', 'warn'], down: ['DOWN', 'bad'],
+                      unknown: ['UNKNOWN', 'muted']};
+  function renderComponents(d) {
+    var h = d.health || {known: false, components: []};
+    var rows = agedHealth(d).rows;
+    var down = rows.filter(function (c) { return c.state === 'down' && c.configured !== false; }).length;
+    var root = panel('components', 'Components', rows.length + ' components · ' + down + ' down');
+    if (!root) return;
+    if (!h.known) { add(root, el('p', 'empty', h.error ? 'unknown: ' + h.error : 'no heartbeats recorded yet')); return; }
+    var table = add(root, el('table'));
+    var head = add(add(table, el('thead')), el('tr'));
+    ['component', 'bot', 'device', 'state', 'last seen (ET)', 'ago', 'pid', 'version', 'started (ET)'].forEach(function (t) { add(head, el('th', null, t)); });
+    var tbody = add(table, el('tbody'));
+    rows.forEach(function (c) {
+      var tr = add(tbody, el('tr'));
+      tr.setAttribute('id', c.anchor);
+      add(tr, el('td', null, c.component));
+      add(tr, el('td', null, c.bot || '—'));
+      add(tr, el('td', null, c.device));
+      var cell = add(tr, el('td'));
+      var st = HEALTH_STATE[c.state] || ['OTHER', 'muted'];
+      add(cell, chip(st[0], st[1]));
+      if (c.reason) add(cell, el('span', 'muted', ' ' + c.reason));
+      if (c.configured === false) add(cell, el('span', 'muted', ' (not configured)'));
+      add(tr, el('td', null, c.last_seen_et || 'never'));
+      ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
+      add(tr, el('td', 'num', c.pid === null || c.pid === undefined ? '—' : c.pid));
+      add(tr, el('td', null, c.version));
+      add(tr, el('td', null, c.started_at_et || '—'));
+      mark('components', c.anchor + ':' + c.state, tr);
+    });
+    var t = h.thresholds || {};
+    add(root, el('p', 'muted', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
+      ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
+      ' · down: older, stopped or never seen · unknown: this snapshot is too old to tell'));
+  }
+
+  function renderNoWaiter(d) {
+    var h = d.health || {};
+    var rows = h.no_waiter || [];
+    var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length ? rows.length + ' harnesses' : 'none');
+    if (!root) return;
+    if (!rows.length) {
+      var aged = agedHealth(d);
+      add(root, el('p', 'empty', !h.known ? 'unknown until a component heartbeats'
+        : aged.waiterUnknown ? 'unknown: no snapshot for ' + dur(aged.age)
+        : 'every queued job has a live waiter'));
+      return;
+    }
+    var ul = add(root, el('ul', 'feed'));
+    rows.forEach(function (n) {
+      var li = add(ul, el('li'));
+      li.setAttribute('id', n.anchor);
+      add(li, chip('no waiter', 'bad'));
+      add(li, el('span', 'ticket', 'waiter ' + n.bot));
+      add(li, el('span', 'what', 'no waiter for ' + n.harness + ': ' + n.count + ' queued job' + (n.count === 1 ? '' : 's') + ' (' + n.jobs.join(', ') + ')'));
+      mark('no-waiter', n.anchor, li);
+    });
+  }
+
   var PAGES = {
     main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
     job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
-    efficiency: [renderHealth, renderSavings, renderTokens]
+    efficiency: [renderHealth, renderSavings, renderTokens],
+    health: [renderComponents, renderNoWaiter]
   };
   var RENDERERS = [renderBadge].concat(PAGES[PAGE] || []);
 
@@ -1079,6 +1204,7 @@ __TELEMETRY__
     scrollTrails();
     prevKeys = nextKeys;
     firstRender = false;
+    healthKey = agedHealth(d).key;
   }
 
   function updateLink() {
@@ -1102,6 +1228,7 @@ __TELEMETRY__
   function tick() {
     var d = since();
     tickers.forEach(function (t) { t.run(d); });
+    if (latest && agedHealth(latest).key !== healthKey) render(latest);
     updateLink();
   }
 
@@ -1201,12 +1328,13 @@ def page_script() -> str:
 # refresh_seconds) and the script only has to replace their contents.
 
 # In nav order (#78).
-PAGES = ("index.html", "job.html", "activity.html", "efficiency.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
 _PAGE_NAMES = {
     "index.html": ("main", "Lanes"),
     "job.html": ("job", "Jobs"),
     "activity.html": ("activity", "Activity"),
     "efficiency.html": ("efficiency", "Efficiency"),
+    "health.html": ("health", "Health"),
 }
 LIST_MAX = 12
 _BOTS = ("claude", "codex", "cursor", "grok")
@@ -1319,7 +1447,8 @@ def _bar(snapshot: dict, page: str) -> str:
         f'<nav class="nav" id="nav" aria-label="Pages">{links}</nav>'
         f'<a class="badge{"" if count else " clear"}" id="attention-badge" '
         'href="activity.html#attention" '
-        'title="stuck tickets, overdue, stale or dead jobs and paused tickets">'
+        'title="stuck tickets, overdue, stale or dead jobs, paused tickets, '
+        'down components and queued jobs with no waiter">'
         f'<b id="attention-count">{count}</b> needs attention</a>'
         '<div class="link boot" id="link" role="status" aria-live="polite">'
         '<span class="dot" aria-hidden="true"></span>'
@@ -1573,6 +1702,12 @@ def _queue(snapshot: dict) -> str:
             f'<a class="queue-item" href="job.html#{anchor(row["job"])}">'
             f'{_bot(row["recipient"])}{_span("ticket", _job_label(row))}'
             f'{_span("what", row["action"])}{_when(row["age_seconds"], "waiting ")}</a>'
+            + (
+                f'<a class="chip bad" href="{_e(_health_link(row.get("no_waiter_link")))}">'
+                f'no waiter for {_e(row["no_waiter"])}</a>'
+                if row.get("no_waiter")
+                else ""
+            )
         )
 
     return _panel(
@@ -1586,17 +1721,29 @@ def _queue(snapshot: dict) -> str:
 
 _ATTENTION = {
     "stuck": "bad", "overdue": "bad", "dead": "bad", "needs-attention": "bad",
-    "stale": "warn", "paused": "warn",
+    "stale": "warn", "paused": "warn", "down": "bad", "no-waiter": "bad", "health": "bad",
 }
+_HEALTH_LINK = re.compile(r"health\.html#[A-Za-z0-9_-]+")
+
+
+def _health_link(href: object) -> str:
+    """Only a link into the Health tab (#92); anything else is the tab itself."""
+    return str(href) if isinstance(href, str) and _HEALTH_LINK.fullmatch(href) else "health.html"
 
 
 def _attention(snapshot: dict) -> str:
     attention = snapshot["attention"]
 
     def draw(row: dict) -> str:
+        who = (
+            f'<a class="ticket" href="{_e(_health_link(row.get("link")))}">'
+            f'{_e(row["component"])}</a>'
+            if row.get("component")
+            else _span("ticket", _ticket(row))
+        )
         return (
             _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
-            + _span("ticket", _ticket(row))
+            + who
             + _span("what", row["detail"])
         )
 
@@ -1747,6 +1894,90 @@ def _health(snapshot: dict) -> str:
         + recent_html
     )
     return _panel("health", "Poll and Linear budget", inner)
+
+
+# --- health page (#92) ---------------------------------------------------------------
+
+
+_HEALTH_STATE = {"up": ("UP", "ok"), "stale": ("STALE", "warn"), "down": ("DOWN", "bad")}
+_ANCHOR = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _anchor_attr(value: object) -> str:
+    return f' id="{value}"' if isinstance(value, str) and _ANCHOR.fullmatch(value) else ""
+
+
+def _components(snapshot: dict) -> str:
+    health = snapshot.get("health") or {"known": False, "components": []}
+    rows = health.get("components") or []
+    count = f"{len(rows)} components · {health.get('down') or 0} down"
+    if not health.get("known"):
+        text = f"unknown: {health['error']}" if health.get("error") else "no heartbeats recorded yet"
+        return _panel("components", "Components", f'<p class="empty">{_e(text)}</p>', count=count)
+    heads = ("component", "bot", "device", "state", "last seen (ET)", "ago", "pid", "version",
+             "started (ET)")
+    body = []
+    for row in rows:
+        label, cls = _HEALTH_STATE.get(row["state"], ("OTHER", "muted"))
+        reason = _span("muted", " " + row["reason"]) if row.get("reason") else ""
+        if row.get("configured") is False:
+            reason += _span("muted", " (not configured)")
+        body.append(
+            f'<tr{_anchor_attr(row.get("anchor"))}>'
+            + _td(row["component"])
+            + _td(row["bot"] or None)
+            + _td(row["device"])
+            + f"<td>{_chip(label, cls)}{reason}</td>"
+            + _td(row["last_seen_et"] or "never")
+            + _td(duration(row["last_seen_age_seconds"]), "num")
+            + _td(row["pid"], "num")
+            + _td(row["version"])
+            + _td(row["started_at_et"])
+            + "</tr>"
+        )
+    thresholds = health.get("thresholds") or {}
+    note = (
+        f"up: a beat within {thresholds.get('stale_beats', 3)} intervals "
+        f"({_e(thresholds.get('beat_seconds', 15))} s each; device probes every "
+        f"{_e(thresholds.get('probe_seconds', 60))} s) · stale: within "
+        f"{thresholds.get('down_beats', 8)} · down: older, stopped or never seen"
+    )
+    inner = (
+        "<table><thead><tr>"
+        + "".join(f"<th>{_e(text)}</th>" for text in heads)
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + f'</tbody></table><p class="muted">{_e(note)}</p>'
+    )
+    return _panel("components", "Components", inner, count=count)
+
+
+def _no_waiter(snapshot: dict) -> str:
+    health = snapshot.get("health") or {}
+    rows = health.get("no_waiter") or []
+    if not rows:
+        text = (
+            "every queued job has a live waiter"
+            if health.get("known")
+            else "unknown until a component heartbeats"
+        )
+        return _panel("no-waiter", "Queued jobs with no waiter", f'<p class="empty">{_e(text)}</p>',
+                      count="none")
+    items = "".join(
+        f'<li{_anchor_attr(row.get("anchor"))}>'
+        + _chip("no waiter", "bad")
+        + _span("ticket", f"waiter {row['bot']}")
+        + _span(
+            "what",
+            f"no waiter for {row['harness']}: {row['count']} queued job"
+            + ("" if row["count"] == 1 else "s")
+            + f" ({', '.join(row['jobs'])})",
+        )
+        + "</li>"
+        for row in rows
+    )
+    return _panel("no-waiter", "Queued jobs with no waiter", f'<ul class="feed">{items}</ul>',
+                  count=f"{len(rows)} harnesses")
 
 
 def _savings(snapshot: dict) -> str:
@@ -1909,6 +2140,7 @@ _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
     "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
     "efficiency.html": (_health, _savings, rollup_panel),
+    "health.html": (_components, _no_waiter),
     "job.html": (_jobs, _jobview),
 }
 

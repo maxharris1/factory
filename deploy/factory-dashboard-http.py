@@ -15,8 +15,9 @@ empty. This server:
 - serves DASHBOARD_DIR, which must be set, absolute, an existing directory,
   and neither / nor $HOME nor any directory that contains $HOME (it is
   resolved through symlinks before those checks);
-- answers GET and HEAD only, and only for /, /status.json and the four
-  pages (/index.html, /activity.html, /efficiency.html, /job.html), the
+- answers GET and HEAD only, and only for /, /status.json and the five
+  pages (/index.html, /activity.html, /efficiency.html, /job.html,
+  /health.html), the
   files `orch dashboard push` writes. Every other path, including
   dot-files such as the push's temp files and anything with `..` or an
   encoded slash, is 404, and no directory is ever listed;
@@ -46,7 +47,7 @@ from urllib.parse import urlsplit
 TAILNET = ipaddress.ip_network("100.64.0.0/10")
 DEFAULT_PORT = 8787
 MAX_BYTES = 8 * 1024 * 1024
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+PAGES = ("index.html", "activity.html", "efficiency.html", "job.html", "health.html")
 ROUTES = {
     "/": "index.html",
     "/status.json": "status.json",
