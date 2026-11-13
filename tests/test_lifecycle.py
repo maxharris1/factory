@@ -26,6 +26,7 @@ from tests.test_dispatcher import (
     VERDICT,
     FakeGrokDelivery,
     FakeReviewActions,
+    FakeSource,
     comment,
     factory,
     setup,
@@ -116,6 +117,18 @@ class Flow:
                 self.finish("claude")
         assert self.approve(f"{rounds}/3") == "handed-off"
         assert self.state()["workflow_state"] == "handed-off"
+
+
+class _FreshSource(FakeSource):
+    """A poll whose cached read predates a push; the fresh read sees it."""
+
+    def __init__(self, cached: TrackedTicket, *, fresh: TrackedTicket):
+        super().__init__(cached)
+        self.fresh = fresh
+
+    def fresh_ticket(self, ref) -> TrackedTicket:
+        del ref
+        return self.fresh
 
 
 def outcome(queue, comment_id: str) -> str | None:
@@ -645,11 +658,14 @@ def test_revise_with_a_later_ready_queues_no_fix(tmp_path: Path) -> None:
         "codex-login",
     )
     flow.add("ready-2", READY.format(head=HEADS[2]), "claude-login")
-    flow.ci = "pending"  # keep the later ready unhandled
+    cached = flow.snapshot()
+    flow.head, flow.ci = HEADS[2], "pending"  # the push the poll's read missed
+    source = _FreshSource(cached, fresh=flow.snapshot())
 
-    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.poll_once(source)
 
     assert outcome(flow.queue, "revise-1") == "answered-fix"
+    assert outcome(flow.queue, "ready-2") is None  # waits for CI at HEADS[2]
     assert _harness_jobs(flow.queue)[-1] == ("fix", "cancelled")
     assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("fixing", 1)
 
@@ -722,6 +738,76 @@ def test_an_answer_of_another_kind_does_not_answer_the_step(
     assert outcome(flow.queue, "go-1") == f"queued-{action}"
     assert outcome(flow.queue, "answer-1").startswith("rejected-")
     assert _harness_jobs(flow.queue) == [(action, "queued")]
+
+
+@pytest.mark.parametrize(
+    ("state", "answer", "action", "rejected"),
+    [
+        ("planning", PLAN.format(round="2", ac="met"), "plan", "stale-plan"),
+        ("building", READY.format(head=HEADS[1]), "build", "stale-ready-head"),
+    ],
+    ids=["plan-of-another-round", "ready-at-another-head"],
+)
+def test_an_answer_rejected_when_handled_leaves_the_step_runnable(
+    tmp_path: Path, state: str, answer: str, action: str, rejected: str
+) -> None:
+    """A fresh database replays a go and a trusted answer of the right kind
+    that its own row then rejects. The step it was taken to answer is
+    queued again, so the ticket is not left with no runnable work."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state=state), "grok-login")
+    flow.add("answer-1", answer, "claude-login")
+
+    for _ in range(2):
+        flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answer-1") == rejected
+    assert _harness_jobs(flow.queue) == [(action, "queued")]
+    job = flow.queue.claim("claude")
+    assert job is not None and job.request.action == action
+
+
+def test_a_rejected_answer_with_a_later_accepted_one_keeps_the_step_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Ready H1 names a head the PR never had; ready H0 is the build's real
+    answer. The build stays cancelled throughout: it is never queued again
+    between the two readies."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("ready-stale", READY.format(head=HEADS[1]), "claude-login")
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "ready-stale") == "stale-ready-head"
+    assert outcome(flow.queue, "ready-1") == "queued-review"
+    assert _harness_jobs(flow.queue) == [("build", "cancelled"), ("review", "queued")]
+    with flow.queue.connect() as connection:
+        events = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT event, detail FROM job_events WHERE action = 'build'"
+            )
+        ]
+    assert events == [("cancelled", "answered-by:ready-stale")]
+
+
+def test_an_answer_missing_from_a_later_read_does_not_requeue_the_step(
+    tmp_path: Path,
+) -> None:
+    """Only an answer handled as rejected requeues: one the next read no
+    longer shows (deleted, say) leaves the answered build cancelled."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+    flow.comments.pop()
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert _harness_jobs(flow.queue) == [("build", "cancelled")]
 
 
 def test_a_restored_job_answered_after_the_backup_is_cancelled(tmp_path: Path) -> None:

@@ -599,7 +599,7 @@ def test_t8_ok_without_after_ship_is_refused(tmp_path: Path) -> None:
         ticket(
             approve("verdict-1", HEAD_A, 1),
             say("ok-1", OK.format(head=HEAD_A), "tracy-login", 2),
-            ship="merge",
+            ship="handoff",
         )
     )
 
@@ -1862,14 +1862,11 @@ def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
     forged = say("ok-forged", OK.format(head=HEAD_A), "claude-login", 3)
     source.tickets = (ticket(BRIEFED, APPROVED, OK_1, forged),)
     dispatcher.poll_once(source)
-    assert outcomes(queue)["ok-forged"] == "rejected-ok-author"
+    assert outcomes(queue)["ok-forged"] == "after-merge"
     for _poll in range(3):
         dispatcher.poll_once(source)
 
-    assert sorted(jobs(queue)) == [
-        ("rejected", "grok"),
-        ("ship-failed", "grok"),
-    ]
+    assert jobs(queue) == [("ship-failed", "grok")]
     grok = delivery.jobs
     ship_failed = next(
         job for job in grok if job.request.action == "ship-failed"
@@ -2340,3 +2337,34 @@ def test_a_later_revise_blocks_the_ship_only_from_a_trusted_reviewer(
         assert actions.fast_forwards == []
         assert workflow_state(queue) != "merged"
     assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    "late",
+    [
+        say("late", DECLINE, "tracy-login", 2),
+        say("late", OK.format(head=HEAD_A), "tracy-login", 2),
+        say("late", VERDICT.format(head=HEAD_A, verdict="BLOCKED"), "codex-login", 2),
+        stop("late", 2, state="blocked"),
+        say("late", "<!-- orch:v1 kind=nonsense -->\nHuh.\n", "claude-login", 2),
+    ],
+    ids=["t8-decline", "t8-ok", "t7-blocked", "t7-stuck", "t7-unparsed"],
+)
+def test_no_hook_acts_on_a_merged_ticket(tmp_path: Path, late: Comment) -> None:
+    """#108: merged is absorbing for hooks too. The approver was shown a
+    preview, the PR was then merged; a late decline, ok or stop is handled
+    as after-merge with no job, wake or ship."""
+    shipper = FakeShipper()
+    dispatcher, queue = setup(tmp_path, shipper)
+    in_review(queue, HEAD_A)
+    approved = approve("1", HEAD_A, 1)
+    dispatcher.process(ticket(approved))
+    before = jobs(queue)
+    dispatcher.record_terminal("owner/repo", "42", "merged")
+
+    dispatcher.process(ticket(approved, late))
+
+    assert outcomes(queue)["late"] == "after-merge"
+    assert jobs(queue) == before
+    assert shipper.requests == []
+    assert workflow_state(queue) == "merged"

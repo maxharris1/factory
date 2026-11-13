@@ -132,8 +132,8 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
-    # #108 (#42 N3): the PR is merged. Set only on a fresh read, which never
-    # records the merge itself: its caller decides.
+    # #108 (#42 N3): the PR is merged. A fresh read never records the merge
+    # itself: its caller decides.
     merged: bool = False
 
     def __post_init__(self) -> None:
@@ -628,6 +628,7 @@ class Dispatcher:
             self._redrive_handoffs(ticket)
             self._process_comments(ticket, comments)
             self._cancel_answered_jobs(ticket)
+            self._requeue_unanswered_jobs(ticket)
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
@@ -655,6 +656,8 @@ class Dispatcher:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 fields = None
+            if self._after_finish(ticket, comment):
+                continue
             hooked = self._run_hooks(ticket, comment, fields)
             if hooked is not None:
                 handled, outcome = hooked
@@ -687,8 +690,6 @@ class Dispatcher:
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
                 self._mark_handled(ticket, comment.id, "ticket-stuck")
                 continue
-            if kind != "verdict" and self._after_finish(ticket, comment):
-                continue
             try:
                 if kind == "go":
                     handled, outcome = self._t1(ticket, comment, fields)
@@ -704,8 +705,6 @@ class Dispatcher:
                         # One verdict per review job (#80): a repeat of a
                         # handled verdict starts no job, ship or wake.
                         self._mark_handled(ticket, comment.id, "duplicate-verdict")
-                        continue
-                    if self._after_finish(ticket, comment):
                         continue
                     if (
                         self._review_context(ticket)[0] == "handed-off"
@@ -769,8 +768,8 @@ class Dispatcher:
 
     def _after_finish(self, ticket: TrackedTicket, comment: Comment) -> bool:
         """merged and done are absorbing (#108): on a finished ticket only a
-        ship intent's replay acts; any other comment is handled with no
-        job, state write or wake."""
+        ship intent's replay acts; any other comment, a hook's included, is
+        handled with no job, ship, state write or wake."""
         if (
             self._review_context(ticket)[0] not in FINISHED_STATES
             or self._ship_intent(ticket, comment.id) is not None
@@ -2734,6 +2733,73 @@ class Dispatcher:
                 if current is not None and current["state"] == "queued":
                     self._cancel_answered(connection, job, job.request, answer)
             connection.commit()
+
+    def _requeue_unanswered_jobs(self, ticket: TrackedTicket) -> None:
+        """Queue again a step cancelled as answered when that answer was then
+        handled as rejected and no other trusted answer still stands (#108).
+
+        The cancel relied on that answer being accepted. Without this, a
+        replay that met a plan of another round, or a ready at a head the PR
+        does not have, left the ticket with no runnable work.
+        """
+        ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+        if self._is_stuck(ticket) or self._review_context(ticket)[0] in FINISHED_STATES:
+            return
+        sources = {comment.id: comment for comment in ticket.comments}
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT jobs.*, (
+                    SELECT detail FROM job_events
+                    WHERE job_id = jobs.id AND event = 'cancelled'
+                    ORDER BY id DESC LIMIT 1
+                ) AS cancel_reason
+                FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'cancelled'
+                  AND recipient != 'grok'
+                  AND action IN ({", ".join("?" for _ in _ANSWERS)})
+                ORDER BY created_at, id
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, *_ANSWERS),
+            ).fetchall()
+        unanswered: list[tuple[Job, str]] = []
+        for row in rows:
+            reason = row["cancel_reason"] or ""
+            source = sources.get(row["source_comment_id"])
+            if not reason.startswith("answered-by:") or source is None:
+                continue
+            answer_id = reason.removeprefix("answered-by:")
+            outcome = self._handled_outcome(ticket, answer_id)
+            if outcome is None or not outcome.startswith(_REJECTED_OUTCOMES):
+                continue
+            job = _job(row)
+            if self._answered_by(
+                ticket,
+                source,
+                job.request.action,
+                job.request.recipient,
+                head=job.request.head,
+                round_number=_detail_round_number(job.request.detail),
+            ) is None:
+                unanswered.append((job, answer_id))
+        if not unanswered:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            requeued = [
+                (job, answer_id)
+                for job, answer_id in unanswered
+                if self.queue.requeue(
+                    job.id, f"answer-rejected:{answer_id}", connection=connection
+                )
+            ]
+            connection.commit()
+        if self.log is not None:
+            for job, answer_id in requeued:
+                self.log(
+                    f"requeued {job.request.action}: answer {answer_id} was rejected "
+                    f"({ticket.repo}#{ticket.ticket_id})"
+                )
 
     def _cancel_answered(
         self,

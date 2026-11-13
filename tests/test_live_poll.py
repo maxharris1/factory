@@ -2627,6 +2627,45 @@ def test_linear_ticket_with_merged_pr_moves_to_merged() -> None:
     assert not any("/comments" in part for call in gh.calls for part in call)
 
 
+def test_a_discovered_linear_ticket_whose_pr_is_merged_queues_no_build(
+    tmp_path: Path,
+) -> None:
+    """Discovery reads the ticket untracked and caches it; the tracked read
+    in the same cycle reused that read and never saw the merge, so the go
+    queued a build a waiter could claim before the next poll."""
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.trusted_logins["linear"] = {"linear:user-1": {"grok-bot"}}
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        if json.loads(body)["query"].startswith("query FactoryPoll"):
+            return linear_search_page([linear_issue()])
+        return HTTPResult(200, json.dumps({"data": {"issue": linear_issue()}}))
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=_merged_runner(gh),
+        linear_transport=transport,
+        terminal_sink=dispatcher.record_terminal,
+        error_sink=dispatcher.record_poll_error,
+    )
+
+    dispatcher.poll_once(source)
+
+    with queue.connect() as connection:
+        states = [tuple(row) for row in connection.execute(
+            "SELECT ticket_id, workflow_state FROM ticket_state"
+        )]
+        harness = [tuple(row) for row in connection.execute(
+            "SELECT action, state FROM jobs WHERE recipient != 'grok'"
+        )]
+    assert states == [("AUT-42", "merged")]
+    assert harness == []
+    assert queue.claim("claude") is None
+
+
 # --- #108 r1: stopped tickets on the live source's own cadence ---------------
 
 

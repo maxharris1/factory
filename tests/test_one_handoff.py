@@ -651,7 +651,7 @@ def test_a_duplicate_approve_at_the_same_head_does_not_ship_twice(tmp_path: Path
     ]
     outcomes = _outcomes(queue)
     assert outcomes["a-1"] == "merged"
-    assert outcomes["a-2"] == "duplicate-verdict"
+    assert outcomes["a-2"] == "after-merge"
     # Only the first verdict's done wake exists.
     assert not [job for job in jobs if job[2].endswith(":a-2")]
 
@@ -670,7 +670,7 @@ def test_a_duplicate_approve_on_a_later_poll_does_not_ship_twice(tmp_path: Path)
     dispatcher.process(ticket(first, duplicate, head=head, ci=green))
     assert actions.merges == [(True, head)]
     assert _jobs(queue) == jobs
-    assert _outcomes(queue)["a-2"] == "duplicate-verdict"
+    assert _outcomes(queue)["a-2"] == "after-merge"
 
 
 def test_a_different_verdict_at_the_same_head_is_not_a_duplicate(tmp_path: Path) -> None:

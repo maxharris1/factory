@@ -439,6 +439,39 @@ class SQLiteJobQueue:
             )
         return _job(row)
 
+    def requeue(
+        self, job_id: str, reason: str, *, connection: sqlite3.Connection
+    ) -> bool:
+        """cancelled -> queued, with a job_events row naming the reason;
+        False when the job is no longer cancelled.
+
+        Only for the dispatcher's answered-by cancel (#108), when the answer
+        it relied on was then rejected: the step was never done. The write
+        joins the caller's transaction.
+        """
+        now = self.now()
+        changed = connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', finished_at = NULL, last_activity_at = ?
+            WHERE id = ? AND state = 'cancelled'
+            """,
+            (now, job_id),
+        ).rowcount
+        if changed != 1:
+            return False
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            )
+            SELECT id, lower(repo), ticket_id, action, recipient, 'requeued', ?, ?
+            FROM jobs WHERE id = ?
+            """,
+            (reason, now, job_id),
+        )
+        return True
+
     def outstanding(self) -> tuple[Job, ...]:
         with self._connect() as connection:
             rows = connection.execute(

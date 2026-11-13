@@ -1220,6 +1220,8 @@ class LivePollSource:
         cache_key = ("linear", project.repo.lower(), identifier)
         cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
+            if cached.merged and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             return cached
         comments_data = _object(issue.get("comments"), "Linear comments")
         comments_page = _object(
@@ -1236,6 +1238,7 @@ class LivePollSource:
         comments = linear_comments
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
+        merged = False
         pr_number = self._linked_pr_number(
             project.repo,
             identifier,
@@ -1244,12 +1247,9 @@ class LivePollSource:
         )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
-            if pull.get("merged") is True and tracked:
-                # #108: a hand merge of a tracked Linear ticket's PR ends it too.
-                if self.terminal_sink is not None:
-                    self.terminal_sink(project.repo, identifier, "merged", None)
-                if not allow_merged:
-                    raise _TerminalTicket()
+            merged = pull.get("merged") is True
+            if merged and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             pr_head = _object(
                 pull.get("head"),
                 "GitHub pull request head",
@@ -1298,9 +1298,20 @@ class LivePollSource:
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(issue),
             ready_starts_review=project.ready_starts_review,
+            merged=merged,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _linear_merged(
+        self, project: Project, identifier: str, allow_merged: bool
+    ) -> None:
+        """#108: a tracked Linear ticket whose PR is merged ends, from a new
+        read or from the one discovery cached earlier in the cycle."""
+        if self.terminal_sink is not None:
+            self.terminal_sink(project.repo, identifier, "merged", None)
+        if not allow_merged:
+            raise _TerminalTicket()
 
     def _linked_pr_number(
         self,
