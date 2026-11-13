@@ -15,7 +15,7 @@ from typing import Protocol
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
-from lib.hold import LabelEvent, decide
+from lib.hold import HoldDecision, LabelEvent, decide
 from lib.job_state import (
     DEAD,
     JobStateConfig,
@@ -1458,7 +1458,8 @@ class Dispatcher:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            return state != "awaiting-ok", "approve-ci-red"
+            held = state == "awaiting-ok" or self._held(ticket, current_head)
+            return not held, "approve-ci-red"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -1566,30 +1567,26 @@ class Dispatcher:
         Grok Bot once per head with the PR and head."""
         hold = ticket.factory.hold
         assert hold is not None
-        decision = decide(
-            hold,
-            labels=ticket.labels,
-            changed_files=ticket.changed_files,
-            label_events=ticket.label_events,
-            comments=ticket.comments,
-            approver_trusted=self._trusted_login(hold.approver),
-            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
-        )
+        decision = self._hold_decision(ticket, head)
         if decision.unread is not None:
             return False, "hold-unread"
         if not decision.blocks:
             return None
         scope = (ticket.repo.lower(), ticket.ticket_id)
+        reasons = ",".join(decision.reasons)
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT head FROM ship_holds WHERE repo = ? AND ticket_id = ?
+                SELECT head, approver, reasons FROM ship_holds
+                WHERE repo = ? AND ticket_id = ?
                 """,
                 scope,
             ).fetchone()
         state, _round = self._review_context(ticket)
-        if state != "awaiting-ok" or row is None or row["head"] != head:
-            self._write_state_label(ticket, "awaiting-ok")
+        stored = None if row is None else (row["head"], row["approver"], row["reasons"])
+        if state != "awaiting-ok" or stored != (head, hold.approver, reasons):
+            if state != "awaiting-ok":
+                self._write_state_label(ticket, "awaiting-ok")
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
@@ -1603,13 +1600,14 @@ class Dispatcher:
                         approver = excluded.approver,
                         reasons = excluded.reasons,
                         approve_comment_id = excluded.approve_comment_id,
-                        held_at = excluded.held_at
+                        held_at = CASE WHEN ship_holds.head = excluded.head
+                            THEN ship_holds.held_at ELSE excluded.held_at END
                     """,
                     (
                         *scope,
                         head,
                         hold.approver,
-                        ",".join(decision.reasons),
+                        reasons,
                         comment.id,
                         self.queue.now(),
                     ),
@@ -1656,6 +1654,25 @@ class Dispatcher:
             ),
         )
         return False, "awaiting-ok"
+
+    def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
+        hold = ticket.factory.hold
+        assert hold is not None
+        return decide(
+            hold,
+            labels=ticket.labels,
+            changed_files=ticket.changed_files,
+            label_events=ticket.label_events,
+            comments=ticket.comments,
+            approver_trusted=self._trusted_login(hold.approver),
+            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
+        )
+
+    def _held(self, ticket: TrackedTicket, head: str) -> bool:
+        if ticket.factory.ship != "merge" or ticket.factory.hold is None:
+            return False
+        decision = self._hold_decision(ticket, head)
+        return decision.unread is not None or bool(decision.reasons)
 
     def _hold_ok_outcome(self, ticket: TrackedTicket, comment: Comment) -> str:
         hold = ticket.factory.hold

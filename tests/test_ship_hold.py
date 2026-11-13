@@ -355,6 +355,94 @@ def test_a_ci_failure_while_held_does_not_consume_the_approve(
 
 
 @pytest.mark.parametrize(
+    "interrupted",
+    ["labels", "files", "events", "state-write", "red-poll-unread", "ok-before-red"],
+)
+def test_red_ci_before_the_hold_is_entered_does_not_consume_the_approve(
+    tmp_path: Path,
+    interrupted: str,
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    files = ("src/view/A.tsx",)
+    first = {"labels": (), "files": files, "events": ()}
+    if interrupted in ("labels", "files", "events"):
+        first[interrupted] = None
+    elif interrupted == "state-write":
+        actions.state_failures.add(("owner/repo", "awaiting-ok"))
+    else:
+        first["labels"] = None
+    try:
+        dispatcher.process(snapshot(approve(), **first))
+    except Exception:
+        pass
+    actions.state_failures.clear()
+    assert workflow_state(queue) == "review"
+
+    red = {"files": files, "ci": "failure"}
+    if interrupted == "red-poll-unread":
+        red["labels"] = None
+    comments = (approve(), ok(HEAD)) if interrupted == "ok-before-red" else (approve(),)
+    dispatcher.process(snapshot(*comments, **red))
+    with queue.connect() as connection:
+        handled = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'approve-1'"
+        ).fetchone()
+    assert handled is None
+    assert actions.merges == []
+
+    for _ in range(2):
+        dispatcher.process(snapshot(approve(), ok(HEAD), files=files))
+    assert actions.merges == [(True, HEAD)]
+
+
+def test_a_red_ci_on_an_unheld_pr_still_consumes_the_approve(tmp_path: Path) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+
+    dispatcher.process(snapshot(approve(), ci="failure"))
+    dispatcher.process(snapshot(approve()))
+
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'approve-1'"
+        ).fetchone()[0]
+    assert outcome == "approve-ci-red"
+    assert actions.merges == []
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({"factory": hold_factory(approver="maxharris1")}, ("maxharris1", "label")),
+        ({"files": ("index.html",)}, (APPROVER, "label,paths")),
+    ],
+)
+def test_the_stored_hold_follows_a_changed_approver_or_reasons_at_the_same_head(
+    tmp_path: Path,
+    change: dict,
+    expected: tuple[str, str],
+) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    dispatcher.process(snapshot(approve(), labels=("factory:hold",)))
+    with queue.connect() as connection:
+        held_at = connection.execute("SELECT held_at FROM ship_holds").fetchone()[0]
+    queue.clock = lambda: 200.0
+
+    dispatcher.process(snapshot(approve(), labels=("factory:hold",), **change))
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT head, approver, reasons, held_at FROM ship_holds"
+        ).fetchone()
+    assert (row["head"], row["approver"], row["reasons"]) == (HEAD, *expected)
+    assert row["held_at"] == held_at
+    assert actions.merges == []
+    assert workflow_state(queue) == "awaiting-ok"
+
+
+@pytest.mark.parametrize(
     ("risk", "state", "job_action"),
     [("high", "fixing", "fix"), ("low", "capped", "capped")],
 )
