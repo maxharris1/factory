@@ -38,9 +38,11 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | Nov 12, 10:12 AM | Continue with Phase 2: F2-02 remote start is built next. Max's words: "continue with phase 2". | Max |
 | Nov 12 | F2-02 design: each remote device in `machines.yml` names an `ssh_alias` containing `{bot}` (the PC's is `pc-wsl-{bot}`, so `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`), the box's own SSH config holds the host and key, and `orch` always passes `-l <bot user>` and never a key path. `orch wait` claims through the device pool; `orch job run` starts a remote job over that alias in `<workdir_root>/jobs/<job-id>` (`--worktree` stays box-only). A slot is released only once the worker is confirmed gone: by `orch job run` when its command ends (a remote worker still running is sent SIGTERM and checked again), or by the poller for a finished job whose runner died. The poller checks each remote device holding a slot over SSH once per poll; a device that fails every check for 60 minutes marks each job still running on it `stuck` at once (no T6 retry), wakes Grok Bot once through the ticket's stuck flag, and keeps the slot held. The PC and Mac stay `enabled: false` until Max turns them on. | Factory decided (technical) |
 | Nov 12, 4:03 PM | Job states (issue #75). A running job is `claimed` (it holds a device slot, no `orch job run` recorded itself, and nothing has heartbeated since the claim), `running` (fresh heartbeat), `stale` (no heartbeat for more than `job_states.stale_minutes`, default 2) or `dead` (its recorded runner is gone and its worker is confirmed gone, by pid on the box or by `check_worker` over SSH), derived in one function, `lib/job_state.py`, used by the poller, the dashboard and `orch status`. `orch job run` heartbeats every 30 seconds by default (or a third of the timeout if shorter). The poller requeues a job claimed for more than `job_states.release_claimed_minutes` (default 5) as the same job row, so no review round or T6 attempt is charged, frees its slot and logs a `job_events` row; a dead job takes the existing failure path (failed, then T6). The dashboard shows the state on each slot, the job's own round (`detail.round`), and counts stale and dead jobs in stuck / overdue and needs attention. | Max approved the scope ("yes lets address these fixes"); details Factory decided (technical) |
+| Nov 12, 8:26 PM | Per-PR human hold before ship (issue #86). Max's words: "There are some features that I wouldn't want to merge before we do a UI QA test ... I'm wondering if there's a way we can add a human approval gate." He picked: "Add the hold and apply it automatically to any PR that touches UI files". `factory.md` gains an optional `hold:` (section 6). On a `ship: merge` repo a PR that carries the hold label, or whose diff against base touches a `hold.paths` glob, is not merged on a covered APPROVE with green CI: it moves to `orch:state/awaiting-ok`, `orch status` and the dashboard show "waiting on <approver>", and Grok Bot is woken once per held head with the PR and head. The approver's `kind=ok head=<sha>` at the current head (or, on a label-only hold, the approver removing the label) clears it, and the factory merges with `--match-head-commit` as before. Grok Bot posts that `ok` only with Max's own words for that PR. A hold is never applied on `ship: handoff` or `ship: after:<approver>`. | Max; details Factory decided (technical) |
 | Nov 12 | Job states follow-up (PR #77). A job the poller requeues after an unstarted claim restarts its queue-wait clock at the release (`last_activity_at`; `created_at` is kept for its place in line), so the job timeout and T6 never act on time it spent queued before the claim; a failed Grok delivery requeue keeps its original clock. `orch job run` heartbeats every 15 seconds by default (or a third of the timeout if shorter); an `--interval` override is capped at 30 seconds (half the smallest `job_states.stale_minutes`) and at a third of the timeout. | Factory decided (technical) |
 | Nov 12, 6:59 PM | The waiter starts claimed jobs itself (issue #80). Max's words, 6:13 PM: "We shouldn't require any bot-to-bot handoffs. To your point, we should have a standard brief that is augmented by the factory.md additional context in each repo." And 6:59 PM: "Yes, let the waiter start the harness itself and update the spec rule." `orch wait <bot> --autostart`, running as the owning bot's own user and login, starts each claimed job under `orch job run` from the standard brief for its kind plus the repo's `factory.md`, then waits again. Waiters run under a restart supervisor. The dispatcher and `orch poll` still never exec a harness. Section 4.3 and section 10 updated. | Max |
 | Nov 12, 9:19 PM | Component heartbeats and a Health tab (issue #92). Max's words: "Yes, file it and build after #82". Every long-running part writes one heartbeat row (component, device, bot, pid, started_at, last_seen, version) every 15 seconds: `orch poll` (`poller`), each bot's `orch wait` per device it claims on (`waiter`), `orch linear-webhook serve` (`linear-listener`), the dashboard writer (`dashboard`, once per push snapshot), and a per-device SSH reachability probe the poller runs every 60 seconds on each enabled remote device (`device-probe`; only an answer counts as seen). The tunnel in front of the listener is not a factory process, so whatever runs it reports with `orch health beat tunnel --pid <pid>`. A component is up while its last beat is at most 3 intervals old, stale up to 8 intervals (45 seconds and 2 minutes at 15 seconds; 3 and 8 minutes for a probe), then down; a clean stop or no beat at all is down. A queued harness job with no up or stale waiter for its bot on any device eligible for its harness is flagged "no waiter for <harness>". The dashboard's Health tab (after Efficiency), its needs-attention line, `orch status` (a Health section) and `orch health` read the same report; the hourly momentum check reads `orch health --json` (exit 3 when anything needs attention) instead of ad-hoc process checks. Rows live in `orch.health.db` beside `orch.db`, so heartbeats never wake the live dashboard push. Section 9 and section 10 updated. | Max; details Factory decided (technical) |
+| Nov 12 | GitHub polling may run every 30 seconds. `poll_seconds` is 30 or 60 (shipped 30; anything else is refused) and is the sleep after each cycle, so a cycle's elapsed time includes its own work and 30 seconds is the poll interval, not a 30-second pickup promise. Linear keeps its own 60-second cadence (`LINEAR_POLL_SECONDS`): its discovery search, dirty-row reads and tracked reads run only on every second 30-second cycle, under the same per-window budget as before (20 requests and 25,000 complexity per 60-second window), and the `linear_webhook` reconcile fallback keeps its `reconcile_seconds`. A 30-second poller makes no more Linear calls per hour than a 60-second one. | Max asked (relayed by Factory); the cadence split is the builder's design, in review |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
 
@@ -91,7 +93,7 @@ The 125-item old factory plan, its state-chart formalization of that plan, and i
 | Orchestrator | Grok Bot, skill `orchestrate-project` (this Factory bot) | Intake, clarifying questions, routing, technical decisions, stop reports, posting `orch:go`, relaying product questions. | Does not start `claude`, `codex`, or `cursor-agent`. Does not create logins or credentials. Does not treat another agent's approval as Max's. Does not create GitHub issues or labels on Aut0. |
 | Builder session | Claude Bot, Codex Bot, or Cursor Bot, as routed | Its own waiter (`orch wait <bot> --autostart`, running as that bot) starts its harness under `orch job run` from the standard brief plus `factory.md`; the session builds or plans as poteto-mode, self-checks, posts `ready`. | Does not start a harness it does not own. |
 | Reviewer session | A bot whose model family differs from the builder | Reviews, runs the named verify skill (UI and database checks), posts `verdict`. Blocks only on a demonstrated failure. | Does not merge. Does not act as a second Judge. |
-| Dispatcher | `orch`, a script | Polls trackers every 60 seconds, applies the transition table, queues jobs, merges when `ship: merge` and the head is the approved SHA, marks terminal states. | Does not make judgment calls. Does not exec a harness binary. Wakes Grok Bot or a harness bot when the next action is not fully determined. |
+| Dispatcher | `orch`, a script | Polls GitHub every `poll_seconds` (30 or 60; shipped 30) and Linear on its own 60-second cadence, applies the transition table, queues jobs, merges when `ship: merge` and the head is the approved SHA, marks terminal states. | Does not make judgment calls. Does not exec a harness binary. Wakes Grok Bot or a harness bot when the next action is not fully determined. |
 | Aut0 after handoff | Oliver's existing flow | Whatever Aut0 already does after Ready for Review, which may include Aut0 Judge and human review. | Not part of the factory loop. The factory does not run a second judge. |
 
 Harness ownership is fixed: **Claude Bot starts every Claude session, Codex Bot every Codex session, Cursor Bot every Cursor CLI job.** Grok Bot, the dispatcher and `orch poll` only queue requests. A bot's harness is started by that bot's own waiter, which runs as the bot's own user and login (section 4.3).
@@ -132,6 +134,11 @@ stateDiagram-v2
   Ship --> Merged: ship = merge
   Ship --> HandedOff: ship = handoff (Max merges, or the Aut0 RfR handoff)
   Ship --> WaitingExternal: ship = after an approver (Tracy Site)
+  Ship --> AwaitingOk: ship = merge and the PR is held (hold label or hold.paths)
+  AwaitingOk --> Merged: approver's OK at the head, or approver removes a label-only hold
+  AwaitingOk --> Review: head changed and the patch differs
+  AwaitingOk --> Fixing: REVISE, under the round cap
+  AwaitingOk --> Capped: REVISE at the cap
   WaitingExternal --> Merged: OK names the previewed SHA
   WaitingExternal --> Fixing: declined (one fix pass, 3rd decline = Stuck)
   WaitingExternal --> Stuck: 3rd decline
@@ -156,7 +163,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 
 ### 4.2 Dispatcher transition table
 
-`orch` polls each configured repo every 60 s (`env -u GH_TOKEN gh`, plus Linear for Aut0). It reads only tickets and PRs it already tracks, and comments that carry an `orch:` header. Every row is a plain `if`. It is idempotent: each handled comment ID is recorded, so a restart never acts twice.
+`orch` polls each configured repo every `poll_seconds` (`env -u GH_TOKEN gh`), 30 or 60 seconds and 30 as shipped, plus Linear for Aut0 on its own 60-second cadence. `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. Linear's discovery, dirty-row and tracked reads run at most once per 60 seconds whatever `poll_seconds` is (every second cycle at 30), so the faster GitHub cycle neither doubles Linear discovery or fallback polling nor raises Linear API calls (section 7). It reads only tickets and PRs it already tracks, and comments that carry an `orch:` header. Every row is a plain `if`. It is idempotent: each handled comment ID is recorded, so a restart never acts twice.
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
@@ -165,6 +172,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 | T2 | `ready head=<sha>` comment, then CI finishes on that SHA | Green: queue `review` for the reviewer. Red: queue `fix` with the failing log (gate count +1; 3rd in a row → `stuck`) | Reviewer's or builder's bot |
 | T3 | `verdict=REVISE` | Round under the cap: queue `fix` with the verdict link. At the cap: mark `capped` | Builder's bot, or Grok Bot at the cap |
 | T4 | `verdict=APPROVE head=<sha>` | Head equals sha, or patch-id equal → ship per `factory.md` (`merge` = `gh pr merge --squash --match-head-commit`, `handoff`, `after:<bot>`). Else queue a re-`review` | Nobody on merge. The approver bot for `after:` |
+| T4H | `ship: merge` with `hold:` in `factory.md`, and the covered head is held: the PR carries `hold.label`, or its diff against base touches a `hold.paths` glob (issue #86) | Do not merge. Set `orch:state/awaiting-ok` and keep re-checking the APPROVE every poll at the current head (labels, diff and label events are read uncached; an unread one holds). The approver's `kind=ok head=<40-char sha>` covering the current head (same commit, or equal patch-id) clears it; on a label-only hold, the approver removing the label also clears it. Neither clears unless the approver is a `trusted_logins` key. Then merge as T4. Red CI while held does not use up the APPROVE, even before `awaiting-ok` is written and even when a hold input is unread: it waits for green. A later trusted REVISE for the same round at the current head replaces the held APPROVE and goes through T3. A head whose patch differs goes back to review and needs a new APPROVE and a new OK. The GitHub adapter has no `stable_patch_id` yet, so today an OK carries only at the same commit | Grok Bot, once per held head, with the PR and head |
 | T5 | `questions` comment from any session, then `answers` | Set state `orch:state/waiting-max`. On answers, re-queue the same step with the answer linked (not a round) | Grok Bot (it decides technical ones itself) |
 | T6 | Job exits with no handoff comment, or 60 minutes pass with no heartbeat or progress (or the project's `job_timeout` in `orch.yml`), or the job is `dead` (its `orch job run` and worker are confirmed gone, issue #75). Phase 2 (F2-02): the device the job runs on has failed every SSH check for 60 minutes | Retry once. 2nd time → `stuck`. Device offline 60 minutes → `stuck` at once, no retry; the slot stays held | Grok Bot on the 2nd, or once for the offline device |
 | T7 | `verdict=BLOCKED`, `stuck`, `capped`, config refused, anything unparsed | No known answer | Grok Bot, once |
@@ -200,6 +208,7 @@ deduplication key.
 | Every acceptance criterion is mapped before building; the mapping is for the current plan | PlanCheck; a scope-changing answer returns to Planning |
 | Gate loops, declines, two AC-unmet verdicts, and the round cap are bounded | Counters on the ticket, enforced by the dispatcher |
 | Ship is pinned to the covered head; an inherited verdict is only valid on an exact patch-id rebase | T4: `--match-head-commit`; otherwise re-review |
+| A held PR (`hold:` label or paths) merges only after the approver's OK pinned to the current head, by the same patch-id rule; never on `handoff` or `after:` repos | T4H, `lib/hold.py` |
 | Only the owning harness bot starts that harness | The dispatcher and `orch poll` exec no harness, and plain `orch wait` starts nothing. The waiter, running as the owning bot's own user and login, may start that bot's harness under `orch job run` from the standard brief plus `factory.md` (`orch wait <bot> --autostart`, issue #80). The harness command comes only from that bot's own config file (`~/.config/factory/waiter-<bot>.yml`, owned by the bot and writable by no one else); the brief goes on stdin and into a file, and no job, PR or comment text reaches a command line. `orch job run` only runs the command it is passed after `--`, for a running job that bot owns, and never names a harness itself |
 | Reviewer stays cross-family; last 20% of a usage cycle is reserved; only urgent work may use the reserve | `factory.md` plus each owning bot's usage check |
 | Contradictory config never runs | `orch check-config` |
@@ -259,6 +268,15 @@ Optional:
 
 - `builder.model` and `reviewer.model` as hints. There is no fixed allow-list. `orch check-config` warns on an unknown model name, and the owning bot can refuse (Factory decided (technical), 10:19 AM ET).
 - `ci_runner` — self-hosted runner label for this repo, when Phase 2 self-hosted CI is in use. Runner labels are repo policy, so they live here, not in `orch.yml` (Factory decided (technical), 10:19 AM ET).
+- `hold` — a per-PR human hold before a `ship: merge` (issue #86, T4H). A mapping, every key optional:
+
+  | Key | Type | Default | Meaning |
+  |---|---|---|---|
+  | `hold.label` | GitHub label name | `factory:hold` | A PR carrying this label is held. |
+  | `hold.approver` | GitHub login | `max` | Whose `kind=ok head=<sha>` comment, or removal of the label, clears the hold. It must also be a `trusted_logins` key in `orch.yml`; otherwise the hold never clears. Matched case-insensitively. |
+  | `hold.paths` | list of repo-relative globs | none | A PR whose diff against base touches a matching path is held automatically. `*` and `?` stay inside one directory; `**` spans directories. |
+
+  `hold: {}` turns on the label hold alone. `check-config` refuses an unknown key, a bad label, login or glob, and warns that `hold` has no effect unless `ship` is `merge`; a hold is never applied on `handoff` or `after:` repos. Cleffy's hold (in Cleffy's own `factory.md`): `hold: { paths: ["src/**/*.tsx", "src/**/*.css", "src/view/**", "src/features/**/*.tsx", "public/**", "index.html"] }`.
 
 Free-text sections after the front block:
 
@@ -314,7 +332,9 @@ Fields from the old Aut0 Factory block that this schema drops on purpose: `owner
 Decided content:
 
 ```yaml
-poll_seconds: 60
+# 30 or 60: the sleep after each cycle (GitHub every cycle; Linear
+# keeps its own 60-second cadence and budget).
+poll_seconds: 30
 # Default job timeout. A project may set job_timeout (minutes) to override.
 # job_timeout: 60
 linear:
@@ -386,11 +406,21 @@ depend on full-text `OR` semantics.
 Linear's API-key limits are shared per user: 2,500 requests/hour and
 3,000,000 complexity points/hour. Factory owns the named
 `LINEAR_SHARE = 0.5`; the other half remains available to Max's other API
-keys. For poll interval `P`, one cycle is capped at
+keys. Linear work runs in windows of `P = 60` seconds (`LINEAR_POLL_SECONDS`),
+whatever `poll_seconds` is. One window is capped at
 `floor(2500 × LINEAR_SHARE × P / 3600)` requests and
-`floor(3,000,000 × LINEAR_SHARE × P / 3600)` complexity. At `P = 60`, that
-is 20 requests and 25,000 complexity per cycle, or at most 1,200 requests and
-1,500,000 complexity per hour.
+`floor(3,000,000 × LINEAR_SHARE × P / 3600)` complexity: 20 requests and
+25,000 complexity per window, or at most 1,200 requests and 1,500,000
+complexity per hour. With `poll_seconds: 60` every cycle opens a window, as
+before. With `poll_seconds: 30` only every second cycle does: it runs the
+discovery search, dirty-row reads and tracked Linear reads, and the cycle
+between makes no Linear read for them (tracked Linear tickets wait for the
+next Linear cycle; GitHub tickets are read every cycle). The sleeps alone put
+Linear cycles at least 60 seconds apart. The window's counters reset only
+when a window opens, so a direct read between Linear cycles (the fresh read
+before a ship or T4/T8 write, the Ready for Review move) counts against the
+same window. A 30-second poller therefore makes the same Linear calls per
+hour as a 60-second one.
 
 Brief and go each run a filtered search over configured project IDs and
 workflow states other than `completed` and `canceled`. A page contains 50
@@ -431,8 +461,10 @@ refused); only the listener reads it, once at startup, and the value is never
 logged, printed or put in an error. `check-config` validates the keys and
 does not read the file. `linear_webhook` needs at least one Linear project.
 
-With the webhook configured, each poll cycle reads the dirty rows and the
-tickets with queued or running jobs. Dirty untracked issues are read
+With the webhook configured, each Linear cycle (every cycle at
+`poll_seconds: 60`, every second cycle at 30) reads the dirty rows and the
+tickets with queued or running jobs; a GitHub-only cycle leaves the dirty
+queue untouched. Dirty untracked issues are read
 directly (oldest first, under the same budget) instead of searching; an
 issue outside the configured projects, completed, canceled or deleted is
 dropped quietly. A tracked ticket is reread in full only when it is dirty,
@@ -492,6 +524,7 @@ or `go` on a labelled PR starts tracking.
 - Gate retries (CI red, then fix) do **not** count as review rounds. Three CI-red cycles in a row mark the ticket `stuck`.
 - A second AC-unmet review verdict marks the ticket `capped`, even if rounds remain.
 - **Ship is pinned to the covered head.** `ship: merge` uses `gh pr merge --squash --match-head-commit <sha>`. If the PR head has moved, the approval carries only when `git patch-id --stable` is equal; otherwise the dispatcher queues a re-review.
+- **Human hold (`hold:`, `ship: merge` only).** A PR that carries `hold.label`, or whose diff against base touches a `hold.paths` glob, waits in `orch:state/awaiting-ok` after a covered APPROVE with green CI. Auto-hold is checked again at every new head. It merges only after a trusted `<!-- orch:v1 kind=ok head=<sha> -->` from `hold.approver` whose head covers the current head by the rule above, or, on a label-only hold, after the approver removes the label (a removal by anyone else keeps the hold). Grok Bot may post that `ok` only with Max's own words for that PR. An `ok` from anyone else is refused and wakes Grok Bot once.
 - `ship: handoff` (Aut0): on APPROVE, mark the linked PR ready. The
   per-project `linear_ready_for_review` flag alone controls the Linear Ready
   for Review move; it defaults off and Aut0 enables it. Never merge, request
@@ -626,7 +659,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 #### F1-01 — Repo skeleton
 
 - **Description:** README, `orch.yml` (repos to poll and dispatcher settings), a `factory.md` schema plus `orch check-config`, and example `factory.md` files (Aut0, Cleffy and Tracy as examples only).
-- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds: 60`. The default job timeout is 60 minutes; a project may set `job_timeout` to override. `check-config` warns on an unknown optional model name. No other invented `orch.yml` fields are required to pass.
+- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds` (30 or 60; shipped 30, since Nov 12). The default job timeout is 60 minutes; a project may set `job_timeout` to override. `check-config` warns on an unknown optional model name. No other invented `orch.yml` fields are required to pass.
 - **Depends on:** none.
 - **Size:** S.
 

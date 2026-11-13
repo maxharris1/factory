@@ -409,7 +409,7 @@ def test_job_page_diagram_is_the_real_statechart(tmp_path: Path) -> None:
     states, transitions = _chart_source(CHART)
     assert set(nodes) == states
     assert set(edges) == transitions
-    assert len(states) == 19  # section 4.1
+    assert len(states) == 20  # section 4.1, with awaiting-ok (issue #86)
 
 
 def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> None:
