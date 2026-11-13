@@ -32,8 +32,10 @@ out holds one slot on one device. `orch job run` then:
   device answers that no process carries the start's worker tag and none
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
   dispatcher's DeviceMonitor confirms it on a later poll;
-* for an autostart job, fails the job for T6 (before releasing the slot)
-  when the command ended without `orch job done` (#80).
+* for an autostart job on the box, fails the job for T6 (before releasing
+  the slot) when the command ended without `orch job done` (#80). A remote
+  autostart job is finished by its waiter from the run's exit status and
+  final ORCH-HANDOFF line (lib/waiter.py).
 """
 
 from __future__ import annotations

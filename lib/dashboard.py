@@ -46,6 +46,8 @@ from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
+from lib.feeder import STATES as FEEDER_STATES
+from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.job_state import (
     DEAD,
@@ -95,6 +97,7 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
+ATTENTION_REASONS = ("ship-failed", "dedupe-dropped")
 
 HANDOFF_SAVINGS_DEFINITION = (
     "scripted = jobs for claude, codex or cursor that `orch wait` claimed and "
@@ -646,7 +649,13 @@ def collect_snapshot(
         for value in (log_mtime, db["newest_error_at"], db["newest_deferral_at"])
         if value is not None
     ]
-    machines_state, devices, box_max = _machines(machines_path, db["held"])
+    # One slot count per device (#90): a running harness job with no
+    # placement runs on the box, so it counts in the box's held slots, and
+    # slots.box.running is every running job on the box, placed or not.
+    machines_state, devices, box_max, box_name = _machines(
+        machines_path, db["held"], unplaced=db["box_running"]
+    )
+    box_running = db["box_running"] + db["running_on"].get(box_name, 0)
 
     snapshot = {
         "schema": SCHEMA,
@@ -660,7 +669,7 @@ def collect_snapshot(
         "queued": db["queued"],
         "slots": {
             "machines_yml": machines_state,
-            "box": {"running": db["box_running"], "slot_max": box_max},
+            "box": {"running": box_running, "slot_max": box_max},
             "devices": devices,
         },
         "stuck": {
@@ -694,16 +703,26 @@ def collect_snapshot(
             "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
-        "attention": _attention(db["stuck_tickets"], db["overdue_jobs"], db["paused"]),
+        "attention": _attention(
+            db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"]
+        ),
+        # The backlog feeder at its last poll (issue #85); None when none has run.
+        "feeder": db["feeder"],
         "statechart": chart,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
 
-def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> dict:
+def _attention(
+    stuck: list[dict],
+    overdue: list[dict],
+    paused: list[dict],
+    flags: Sequence[dict] = (),
+) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
-    overdue jobs, then paused tickets that are not already listed as stuck.
-    `count` is the badge on every page."""
+    overdue jobs, tickets flagged needs-attention (a ship that failed and
+    will not be retried, a job dedupe dropped: #83, #84), then paused
+    tickets that are not already listed. `count` is the badge on every page."""
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
@@ -724,7 +743,12 @@ def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> di
             "detail": f"{row['recipient']} {row['action']} {what}, "
                       f"no heartbeat for {_duration(row['age_seconds'])}",
         })
+    for row in flags:
+        detail = row["reason"] + (f": {row['detail']}" if row["detail"] else "")
+        items.append({"kind": "needs-attention", "repo": row["repo"],
+                      "ticket_id": row["ticket_id"], "detail": detail})
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
+    listed |= {(row["repo"], row["ticket_id"]) for row in flags}
     for row in paused:
         if (row["repo"], row["ticket_id"]) in listed:
             continue
@@ -853,7 +877,8 @@ def _read_db(
     overdue: list[dict] = []
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
-    box_running = 0
+    box_running = 0  # running harness jobs with no placement: on the box (#90)
+    running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
             """
@@ -913,10 +938,13 @@ def _read_db(
                 }
                 running.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
-                # Like `orch status` (lib/status.py box_slots), a job holding a
-                # device-pool slot counts on its device, not on the box.
+                # Like `orch status`, a job holding a device-pool slot counts
+                # on its device; a harness job with no placement runs on the
+                # box and counts there (#90; added in collect_snapshot).
                 if row["recipient"] != "grok" and str(row["id"]) not in placed:
                     box_running += 1
+                elif placement is not None:
+                    running_on[placement[0]] = running_on.get(placement[0], 0) + 1
             else:
                 # The poller's queue-wait clock: since it was queued, or
                 # since a claim that never started was released (#77 F1.2).
@@ -1069,6 +1097,49 @@ def _read_db(
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
+    feeder = None
+    if last_feeder_poll(connection) is not None:
+        items = feeder_items(connection)
+        feeder = {
+            **feeder_counts(connection),
+            "items": [
+                {
+                    "repo": _clean(item["repo"], 120),
+                    "issue": _clean(item["issue"], 64),
+                    "state": _enum(item["state"], FEEDER_STATES),
+                    "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
+                }
+                for item in items
+            ],
+        }
+    attention_flags: list[dict] = []
+    if "needs_attention" in tables:
+        finished = (
+            """
+            LEFT JOIN ticket_state AS state
+              ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
+            WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+            """
+            if "ticket_state" in tables
+            else ""
+        )
+        for row in connection.execute(
+            f"""
+            SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
+            FROM needs_attention AS flag
+            {finished}
+            ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
+            """
+        ):
+            attention_flags.append(
+                {
+                    "repo": _clean(row["repo"], 120),
+                    "ticket_id": _clean(row["ticket_id"], 64),
+                    "reason": _enum(row["reason"], ATTENTION_REASONS),
+                    "detail": _clean(row["detail"]) if row["detail"] is not None else "",
+                }
+            )
+
     linear_webhook = None
     health = read_health(connection)
     if health is not None:
@@ -1191,6 +1262,7 @@ def _read_db(
         "running": running,
         "queued": queued,
         "box_running": box_running,
+        "running_on": running_on,
         "overdue_jobs": overdue,
         "tickets": tickets,
         "stuck_tickets": stuck_tickets,
@@ -1200,6 +1272,8 @@ def _read_db(
         "deferrals": deferrals,
         "newest_deferral_at": newest_deferral_at,
         "linear_webhook": linear_webhook,
+        "feeder": feeder,
+        "attention_flags": attention_flags,
         "held": held,
         "verdicts": verdicts,
         "linear_budget": {
@@ -1270,23 +1344,34 @@ def _has_placeholder(value: object) -> bool:
 def _machines(
     path: Path | None,
     held: dict[str, int],
-) -> tuple[str, list[dict], int | None]:
-    """Optional F2-01 inventory. Absent or invalid degrades to no device rows."""
+    *,
+    unplaced: int = 0,
+) -> tuple[str, list[dict], int | None, str]:
+    """Optional F2-01 inventory. Absent or invalid degrades to no device rows.
+
+    Also returns the box's name (the `local: true` device, else "box"); the
+    `unplaced` running jobs are counted in its held slots (#90).
+    """
     if path is None or not path.is_file():
-        return "absent", [], None
+        return "absent", [], None, "box"
     try:
         if path.stat().st_size > MACHINES_MAX_BYTES:
-            return "invalid", [], None
+            return "invalid", [], None, "box"
         data = load_yaml(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return "invalid", [], None
+        return "invalid", [], None, "box"
     if not isinstance(data, dict) or not isinstance(data.get("devices"), list):
-        return "invalid", [], None
+        return "invalid", [], None, "box"
+    items = data["devices"]
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in items):
+        return "invalid", [], None, "box"
+    box_name = next(
+        (item["name"] for item in items if item.get("local") is True),
+        "box",
+    )
     devices: list[dict] = []
     box_max = None
-    for item in data["devices"]:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-            return "invalid", [], None
+    for item in items:
         slot_max = item.get("slot_max")
         slot_max = (
             slot_max
@@ -1302,7 +1387,8 @@ def _machines(
             {
                 "name": _clean(item["name"], 40),
                 "slot_max": slot_max,
-                "held": held.get(item["name"], 0),
+                "held": held.get(item["name"], 0)
+                + (unplaced if item["name"] == box_name else 0),
                 "enabled": enabled is True,
                 "placeholder": _has_placeholder(item),
                 "harnesses": sorted(
@@ -1310,9 +1396,9 @@ def _machines(
                 ),
             }
         )
-        if item.get("local") is True or item["name"] == "box":
+        if item["name"] == box_name:
             box_max = slot_max if box_max is None else box_max
-    return "present", devices, box_max
+    return "present", devices, box_max, box_name
 
 
 # --- writing --------------------------------------------------------------------

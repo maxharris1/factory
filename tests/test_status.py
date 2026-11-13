@@ -115,11 +115,9 @@ def test_status_is_stable_and_summarizes_queue_box_slots_and_paused_items() -> N
         "  a/repo#1 plan -> cursor queued 1h\n"
         "  b/repo#2 build -> claude queued 1h\n"
         "\n"
-        "Slots — box (1 occupied)\n"
-        "  z/repo#9 review -> codex running 50s\n"
-        "\n"
-        "Devices (0)\n"
-        "  none\n"
+        "Devices (1)\n"
+        "  box [?] 1/? slots not-in-machines.yml\n"
+        "    z/repo#9 review -> codex running 50s no-placement\n"
         "\n"
         "Paused (2)\n"
         "  A/repo#10 stuck [github]\n"
@@ -137,9 +135,6 @@ def test_status_empty_state() -> None:
         "\n"
         "Queue (0)\n"
         "  empty\n"
-        "\n"
-        "Slots — box (0 occupied)\n"
-        "  idle\n"
         "\n"
         "Devices (0)\n"
         "  none\n"
@@ -223,7 +218,7 @@ def test_status_command_counts_held_device_slots(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "Devices (3)\n" in result.stdout
-    assert "Slots — box (0 occupied)\n  idle\n" in result.stdout
+    assert "Slots — box" not in result.stdout
     assert "  box [claude,codex,cursor] 1/3 slots\n" in result.stdout
     assert "  pc [claude,codex,cursor] 0/3 slots disabled\n" in result.stdout
     assert "  mac [none] 0/2 slots disabled placeholder\n" in result.stdout
@@ -232,7 +227,8 @@ def test_status_command_counts_held_device_slots(tmp_path: Path) -> None:
 
 def test_pool_placed_job_is_shown_under_its_device_not_as_box_occupancy() -> None:
     """A3: a running job that holds a device_slots row is reported under its
-    device only; `Slots — box` lists only Phase 1 claims with no placement."""
+    device only; a running job with no placement is listed and counted on the
+    box device (issue #90: one slot count per device)."""
     source = FakeStatusSource(
         jobs=(
             job(
@@ -283,11 +279,9 @@ def test_pool_placed_job_is_shown_under_its_device_not_as_box_occupancy() -> Non
     )
 
     assert (
-        "Slots — box (1 occupied)\n"
-        "  o/repo#2 build -> claude running 20s\n"
-        "\n"
         "Devices (2)\n"
-        "  box [claude] 0/3 slots\n"
+        "  box [claude] 1/3 slots\n"
+        "    o/repo#2 build -> claude running 20s no-placement\n"
         "  pc [codex] 1/3 slots\n"
         "    o/repo#1 build -> codex running 10s\n"
         "\n"
@@ -317,7 +311,7 @@ def test_status_command_counts_a_pc_job_once(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Slots — box (0 occupied)\n  idle\n" in result.stdout
+    assert "Slots — box" not in result.stdout
     assert "  box [claude,codex,cursor] 0/3 slots\n" in result.stdout
     assert (
         "  pc [claude,codex,cursor] 1/3 slots disabled\n"
@@ -364,7 +358,7 @@ def test_status_command_changes_no_database_bytes_or_mtimes(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr
     assert "Queue (1)" in result.stdout
-    assert "Slots — box (1 occupied)" in result.stdout
+    assert "  box [claude,codex,cursor] 1/3 slots\n" in result.stdout
     assert "Paused (1)" in result.stdout
     assert directory_snapshot(tmp_path) == before
 
