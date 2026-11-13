@@ -409,6 +409,64 @@ def test_failed_build_with_a_posted_ready_is_done_from_ready(tmp_path: Path) -> 
     assert outcome(flow.queue, ready_id) == "queued-review"
 
 
+def _unvalidated_ready(tmp_path: Path) -> tuple[Flow, Job, TrackedTicket]:
+    """A failed fix whose ready names a head the polled PR head is not."""
+    flow = Flow(tmp_path)
+    fix = _failed_fix(flow)
+    flow.now[0] += 10
+    flow.comments.append(
+        comment("ready-new", READY.format(head=HEADS[2]), author="claude-login", created_at=flow.now[0])
+    )
+    flow.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    return flow, fix, flow.snapshot()
+
+
+def test_t6_waits_while_the_ready_head_is_unread(tmp_path: Path) -> None:
+    flow, fix, cached = _unvalidated_ready(tmp_path)
+    flow.dispatcher.poll_once(FreshSource(cached, RuntimeError("PR read failed")))
+    assert outcome(flow.queue, "ready-new") is None
+    assert _jobs(flow.queue, "fix") == [("failed", 1, None)]
+    assert [job.id for job in flow.queue.unhandled_failures()] == [fix.id]
+    assert [event for event, _detail in _events(flow.queue)] == ["done-deferred"]
+
+
+def test_a_ready_found_stale_after_a_failed_read_does_not_stop_the_retry(
+    tmp_path: Path,
+) -> None:
+    flow, _fix, cached = _unvalidated_ready(tmp_path)
+    flow.dispatcher.poll_once(FreshSource(cached, RuntimeError("PR read failed")))
+    flow.dispatcher.poll_once(FreshSource(cached, cached))
+    assert outcome(flow.queue, "ready-new") == "stale-ready-head"
+    assert _jobs(flow.queue, "fix") == [("failed", 1, None), ("queued", 2, None)]
+
+
+def test_a_ready_found_current_after_a_failed_read_is_done_from_ready(
+    tmp_path: Path,
+) -> None:
+    flow, _fix, cached = _unvalidated_ready(tmp_path)
+    flow.dispatcher.poll_once(FreshSource(cached, RuntimeError("PR read failed")))
+    flow.head = HEADS[2]
+    flow.dispatcher.poll_once(FreshSource(cached, flow.snapshot()))
+    assert outcome(flow.queue, "ready-new") == "queued-review"
+    assert _jobs(flow.queue, "fix") == [("done", 1, "ready-new")]
+
+
+def test_a_ready_at_the_pr_head_with_ci_pending_is_done_from_ready(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    fix = _failed_fix(flow)
+    flow.ci = "pending"
+    flow.head = HEADS[2]
+    flow.now[0] += 10
+    flow.comments.append(
+        comment("ready-new", READY.format(head=HEADS[2]), author="claude-login", created_at=flow.now[0])
+    )
+    flow.dispatcher.process(flow.snapshot())
+    assert outcome(flow.queue, "ready-new") is None
+    flow.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    flow.dispatcher.reconcile_jobs()
+    assert _jobs(flow.queue, "fix") == [("done", 1, "ready-new")]
+
+
 def test_ready_at_the_job_head_does_not_stop_the_retry(tmp_path: Path) -> None:
     flow = Flow(tmp_path)
     fix = _failed_fix(flow)

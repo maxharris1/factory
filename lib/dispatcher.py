@@ -3141,6 +3141,14 @@ class Dispatcher:
         # verdict, a build or fix's ready) and then failed. That handoff
         # stands: done, never retried.
         handoff = self._posted_handoff(job)
+        if handoff is _HANDOFF_UNREAD:
+            self._record_job_event_once(
+                job,
+                "done-deferred",
+                "a posted builder ready's head is not yet checked against the "
+                "PR head; T6 waits for T2 to route it or call it stale",
+            )
+            return
         if handoff is not None:
             self._done_from_handoff(job, handoff)
             return
@@ -3185,7 +3193,7 @@ class Dispatcher:
         )
         self.queue.mark_failure_handled(job.id)
 
-    def _posted_handoff(self, job: Job) -> Comment | None:
+    def _posted_handoff(self, job: Job) -> Comment | object | None:
         """The handoff a failed review, build or fix job already posted.
 
         Read from the ticket this poll fetched (None when it fetched none),
@@ -3197,7 +3205,10 @@ class Dispatcher:
         like every head compare) and round; a review job with no round or no
         head takes none. A build or fix job's is a builder ready from the
         job's recipient at a new head: one other than the job's own, or any
-        head for a job that has none.
+        head for a job that has none. That ready counts once T2 routed it,
+        or while it waits on CI at the polled PR head. One T2 left unhandled
+        at another head (its fresh PR read failed) may yet be stale:
+        _HANDOFF_UNREAD when no counted handoff comes first.
         """
         ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
         if ticket is None:
@@ -3235,6 +3246,12 @@ class Dispatcher:
             outcome = self._handled_outcome(ticket, item.id)
             if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES):
                 continue
+            if (
+                kind == "ready"
+                and outcome is None
+                and _matching_head(head, ticket.current_head) is None
+            ):
+                return _HANDOFF_UNREAD
             return item
         return None
 
@@ -4580,6 +4597,9 @@ def _round_number(value: object) -> int | None:
     head = value.split("/", 1)[0].strip()
     return int(head) if head.isdigit() else None
 
+
+# _posted_handoff: a ready whose head T2 could not yet check against the PR.
+_HANDOFF_UNREAD = object()
 
 # Handled outcomes that rejected a verdict: such a comment is no job's handoff.
 _REJECTED_OUTCOMES = (
