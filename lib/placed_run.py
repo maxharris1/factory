@@ -15,10 +15,16 @@ out holds one slot on one device. `orch job run` then:
 * on the box (the `local: true` device), runs the command as before and
   records its pid as the worker before the command may start
   (lib/job_run.py holds it at a gate until then);
-* on a remote device, runs the command there over the box's SSH alias for
-  this bot (`ssh -l <bot> -- <alias> <start script>`, lib/remote.py) in
-  `<workdir_root>/jobs/<job-id>`, under the bot's login shell (`bash -lc`)
-  and a fresh worker tag recorded on the slot first. A codex command runs
+* on a remote device, launches the command there detached (#128) over the
+  box's SSH alias for this bot (`ssh -l <bot> -- <alias> <launch script>`,
+  lib/remote.py) in `<workdir_root>/jobs/<job-id>`, under the bot's login
+  shell (`bash -lc`) and a fresh worker tag recorded on the slot first, and
+  follows it with short SSH calls (lib/remote_follow.py) through dropped
+  links. The tag names the launch, so a retried launch never starts a
+  second harness. `run-died` is recorded for a remote run only when its
+  device has an exit status for it, confirms the worker gone without one, or
+  answered nothing certain for the follow's grace window (`ended`); a
+  dropped call is never enough. A codex command runs
   by its bare name, found on the device's login PATH, and each of its
   `--add-dir` directories is given only if the device has it (`test -d`,
   lib/codex_sandbox.py `for_device`); box paths never reach the device's
@@ -64,9 +70,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
@@ -84,6 +92,7 @@ from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
     GONE,
     RUNNING,
+    ByteTransport,
     CheckoutError,
     RemoteError,
     RemoteTarget,
@@ -92,13 +101,23 @@ from lib.remote import (
     check_worker,
     checkout,
     harness_launched,
+    launch_script,
     new_tag,
     plain_branch,
     preflight,
-    ssh_argv,
     start_script,
     stop_worker,
 )
+from lib.remote_follow import (
+    FOLLOW_GRACE_SECONDS,
+    LAUNCH_TTL_SECONDS,
+    LOST,
+    REFUSED,
+    Control,
+    FollowEnd,
+    Follower,
+)
+from lib.remote_follow import GONE as WORKER_GONE
 from lib.wait import retry_locked
 from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_start
 
@@ -128,6 +147,8 @@ class PlacedRun:
     requeued: bool = False
     spawned: bool = False
     exec_seen: bool = False
+    grace: float = FOLLOW_GRACE_SECONDS
+    follow_end: FollowEnd | None = None
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
 
     @property
@@ -201,24 +222,59 @@ class PlacedRun:
         self.requeued = bool(requeued)
         return self.requeued
 
-    def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
-        if self.target is None:
-            return list(command)
+    def follow(
+        self,
+        command: Sequence[str],
+        env: Mapping[str, str],
+        brief: bytes,
+        control: Control,
+        *,
+        sink: BinaryIO | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> int:
+        """Launch the command detached on the device and follow it (#128).
+
+        Its output is relayed to sink (stdout: the waiter's run.log). Returns
+        the device's exit status for it; 125 (124 when another run of the job
+        is live there) for a refused launch, which ran nothing; 255 when the
+        worker is gone without a status or the device went quiet for the
+        grace window; for a stop, the status the device recorded.
+        """
+        assert self.target is not None
         # Factory, Nov 13: the waiter config is shared by every device, so a
         # codex command runs by its bare name (the device's login PATH finds
         # it) and keeps each --add-dir only where the device has it.
         device = for_device(command)
-        return ssh_argv(
+        start = start_script(
             self.target,
-            start_script(
-                self.target,
-                device.argv,
-                env,
-                guarded_dirs=device.guarded_dirs,
-                insert_at=device.insert_at,
-                cd=device.cd,
-            ),
+            device.argv,
+            env,
+            guarded_dirs=device.guarded_dirs,
+            insert_at=device.insert_at,
+            cd=device.cd,
         )
+        launch = launch_script(
+            self.target,
+            start,
+            size=len(brief),
+            not_after=int(clock()) + LAUNCH_TTL_SECONDS,
+        )
+        assert isinstance(self.transport, ByteTransport)
+        follower = Follower(
+            self.transport,
+            self.target,
+            sink if sink is not None else sys.stdout.buffer,
+            log=self.log,
+            grace=self.grace,
+        )
+        end = follower.run(launch, brief, control)
+        self.follow_end = end
+        if end.kind in (LOST, WORKER_GONE):
+            self.log(f"job {self.placement.job_id} on {self.device.name}: {end.detail}")
+            return 255
+        if end.kind == REFUSED:
+            self.log(f"job {self.placement.job_id}: {self.device.name} refused the launch: {end.detail}")
+        return end.code if end.code is not None else 255
 
     def before_start(self) -> None:
         """Record a remote start before ssh is spawned (a crash then still checks)."""
@@ -264,6 +320,15 @@ class PlacedRun:
         job_id = self.placement.job_id
         event = RUN_EXITED if code == 0 else RUN_DIED
         detail = f"orch job run's command on {self.device.name}: {exit_reason(code)}"
+        end = self.follow_end
+        if end is not None and end.kind == WORKER_GONE:
+            detail = f"worker gone on {self.device.name} without an exit status"
+        elif end is not None and end.kind == LOST:
+            minutes = f"{self.grace / 60:g} minutes"
+            detail = (
+                f"lost contact with {self.device.name} for {minutes}; "
+                "worker not confirmed gone"
+            )
 
         def write() -> None:
             with self.pool.queue.connect() as connection:

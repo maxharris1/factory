@@ -101,7 +101,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
@@ -409,13 +409,17 @@ def start_script(
 
 def check_script(target: RemoteTarget) -> str:
     """Exit 1 while the job's worker runs, 0 once it is gone, 3 when unsure."""
-    tag = target.require_tag()
+    return _sh(f"t={target.require_tag()}; {_check_body(target)}")
+
+
+def _check_body(target: RemoteTarget) -> str:
+    """check_script's test for the worker whose tag is in $t."""
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
         target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3"
     )
-    return _sh(
-        f"t={tag}; f={pid_file}; "
+    return (
+        f"f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
@@ -457,6 +461,141 @@ def stop_script(target: RemoteTarget) -> str:
         f'case "$3" in {_BAD_GROUP}) ;; *) kill -TERM -"$3" 2>/dev/null;; esac; '
         'kill -TERM "$q" 2>/dev/null; '
         "done; "
+        "exit 0"
+    )
+
+
+# --- #128: a detached start, followed with short calls -----------------------
+#
+# The launch call starts the harness under setsid, apart from its own SSH
+# session, so a dropped link costs the box a retry, not the job. The run's
+# files live in `<workdir>/jobs/<job-id>.run/<tag>/`: `stdin` (the brief),
+# `pid` (`<wrapper pid> <start pid>`), `log` (the harness's output), `handoff`
+# (its last non-blank line when that is an ORCH-HANDOFF line) and `exit`
+# (its exit status, moved into place once it has ended).
+LAUNCH_MARK = "orch-launch:"
+FOLLOW_MARK = "orch-follow:"
+LAUNCH_STARTED = ("started", "already", "pending")
+LAUNCH_BUSY = "busy"
+LAUNCH_SHORT = "short"
+
+# Detach "$@" from the session (setsid, else perl's POSIX::setsid on a Mac
+# without one) with the worker tag in its environment, by exec: the caller
+# runs it as an asynchronous list, so $! is the detached process.
+_DETACH = (
+    'detach() { if [ "$S" = setsid ]; then exec env "ORCH_WORKER_TAG=$t" setsid "$@"; fi; '
+    'exec env "ORCH_WORKER_TAG=$t" perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@"; }; '
+)
+
+# The wrapper: the run's own monitor, detached by the launch. $1 the run's
+# directory, $2 the detacher, $3 the start script. It starts the start
+# (lib/remote.py start_script, which records the worker and execs the
+# harness) in a session of its own with the brief as its stdin and its
+# output in `log`, records both pids, waits for it (again after a SIGTERM,
+# which it catches so the start keeps default handling), then writes
+# `handoff` and `exit`, each through a temporary file.
+_WRAPPER = (
+    'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
+    + _DETACH
+    + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
+    'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
+    'while :; do s=; wait "$c"; r=$?; '
+    'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
+    "awk 'NF { l = $0 } END { if (l ~ /^[ \\t]*ORCH-HANDOFF: /) print l }' "
+    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
+    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+)
+
+
+def run_dir(target: RemoteTarget) -> str:
+    """Beside the job directory: one directory per start, named by its tag."""
+    return f"{target.job_dir}.run"
+
+
+def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int) -> str:
+    """The short call that starts `start` detached, once per tag.
+
+    The brief (exactly `size` bytes) comes on stdin. Prints one
+    `orch-launch: <word>` line: `started` (the wrapper recorded itself),
+    `already` (this tag was launched before: nothing is started twice),
+    `pending` (no record within 10 seconds), `short` (the brief came in
+    short, nothing done: send it again), `busy` (another tag of the job is
+    the current run and not confirmed gone) or `refused <why>` (nothing
+    ran). A launch that reaches the device after not_after (the box's epoch
+    seconds) is refused unless its tag already ran. Like the start, it runs
+    under `exec env ORCH_WORKER_TAG=<tag>`, so a check finds it running.
+    """
+    tag = target.require_tag()
+    if size < 0 or not_after <= 0:
+        raise RemoteError("a launch needs the brief's size and a deadline")
+    mark = LAUNCH_MARK
+    launcher = (
+        f"t={tag}; R={shlex.quote(run_dir(target))}; T=\"$R/$t\"; "
+        f"say() {{ printf '{mark} %s\\n' \"$*\"; }}; "
+        '[ -d "$T" ] && { say already; exit 0; }; '
+        'n=$(date +%s 2>/dev/null); case "$n" in ""|*[!0-9]*) say refused clock; exit 0;; esac; '
+        f'[ "$n" -le {not_after} ] || {{ say refused late; exit 0; }}; '
+        "if command -v setsid >/dev/null 2>&1; then S=setsid; "
+        "elif command -v perl >/dev/null 2>&1; then S=perl; "
+        "else say refused setsid; exit 0; fi; "
+        'mkdir -p -- "$R" || { say refused rundir; exit 0; }; '
+        'i="$R/.$t.$$"; '
+        '(umask 077 && cat > "$i") 2>/dev/null || { rm -f -- "$i"; say short; exit 0; }; '
+        f'w=$(wc -c < "$i"); [ "$((w + 0))" -eq {size} ] || {{ rm -f -- "$i"; say short; exit 0; }}; '
+        'if ! mkdir -- "$T" 2>/dev/null; then rm -f -- "$i"; '
+        '[ -d "$T" ] && { say already; exit 0; }; say refused tagdir; exit 0; fi; '
+        f'mv -f -- "$i" "$T/stdin" || {{ echo {START_REFUSED} > "$T/exit"; say refused stdin; exit 0; }}; '
+        'c="$R/current"; '
+        'if { read -r o < "$c"; } 2>/dev/null && [ -n "$o" ] && [ "$o" != "$t" ] '
+        '&& [ ! -e "$R/$o/exit" ]; then '
+        f'(t=$o; {_check_body(target)}) || {{ echo {START_REFUSED} > "$T/exit"; say busy; exit 0; }}; '
+        "fi; "
+        'printf "%s\\n" "$t" > "$c.$$" && mv -f -- "$c.$$" "$c" '
+        f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
+        + _DETACH
+        + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
+        "< /dev/null > /dev/null 2>&1 & "
+        "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
+        "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "
+        'if [ -e "$T/pid" ]; then say started; '
+        'elif [ -e "$T/exit" ]; then say refused "exit $(cat "$T/exit")"; '
+        "else say pending; fi"
+    )
+    return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(launcher)}"
+
+
+def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
+    """Read-only: the run's state, and up to chunk bytes of its log from offset.
+
+    Prints `orch-follow: <log size> <state> [<exit>]` on stderr, then on
+    stdout exactly min(chunk, size - offset) bytes of the log (none when
+    offset is past it). The state is `exited` (with its status), `running`,
+    `gone` (no exit status and the worker confirmed gone), `unsure` (not
+    yet recorded, or the check cannot tell) or `none` (no such start).
+    `exit` is read before and after the worker check, so a run that ends in
+    between reads as exited. Never starts or signals anything.
+    """
+    tag = target.require_tag()
+    if offset < 0 or chunk <= 0:
+        raise RemoteError("a poll needs an offset and a chunk size")
+    return _sh(
+        f"t={tag}; T={shlex.quote(run_dir(target))}/$t; "
+        f"say() {{ printf '{FOLLOW_MARK} %s\\n' \"$*\" >&2; }}; "
+        '[ -d "$T" ] || { say 0 none; exit 0; }; '
+        'e=; [ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
+        'if [ -n "$e" ]; then st=exited; '
+        'elif [ ! -f "$T/pid" ]; then st=unsure; '
+        f'else ({_check_body(target)}); '
+        'case $? in 0) st=gone;; 1) st=running;; *) st=unsure;; esac; '
+        '[ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
+        'if [ -n "$e" ]; then st=exited; '
+        'elif [ "$st" = gone ] && { read -r w _ < "$T/pid"; } 2>/dev/null '
+        '&& kill -0 "$w" 2>/dev/null; then st=unsure; fi; '
+        "fi; "
+        'z=0; [ -f "$T/log" ] && z=$(wc -c < "$T/log"); z=$((z + 0)); '
+        f"n=$((z - {offset})); [ \"$n\" -gt {chunk} ] && n={chunk}; "
+        'say "$z" "$st" $e; '
+        f'[ "$n" -gt 0 ] && tail -c +{offset + 1} "$T/log" | head -c "$n"; '
         "exit 0"
     )
 
@@ -669,12 +808,40 @@ class CaptureTransport(Transport, Protocol):
     ) -> Called: ...
 
 
-class SshTransport:
-    """The real transport for checks: the `ssh` on PATH, argv only, never a shell.
+@dataclass(frozen=True)
+class Exchanged:
+    """One call's exit status, its stdout as bytes and its stderr as text."""
 
-    The start itself is spawned by `orch job run` (lib/job_run.py) with the
-    argv from `ssh_argv`, so it is heartbeated and gets forwarded signals.
-    """
+    code: int
+    stdout: bytes
+    stderr: str
+
+
+@runtime_checkable
+class ByteTransport(Transport, Protocol):
+    def exchange(
+        self, argv: Sequence[str], *, timeout: float, input: bytes = b""
+    ) -> Exchanged: ...
+
+
+class SshTransport:
+    """The real transport: the `ssh` on PATH, argv only, never a shell."""
+
+    def exchange(
+        self, argv: Sequence[str], *, timeout: float, input: bytes = b""
+    ) -> Exchanged:
+        """Run argv with input on stdin; a timeout or a failed spawn is unreachable."""
+        try:
+            completed = subprocess.run(
+                list(argv), input=input, capture_output=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
+        except OSError as exc:
+            return Exchanged(SSH_UNREACHABLE, b"", type(exc).__name__)
+        return Exchanged(
+            completed.returncode, completed.stdout, completed.stderr.decode("utf-8", "replace")
+        )
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         try:

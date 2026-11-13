@@ -523,8 +523,9 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
         encoding="utf-8"
     )
     assert record.split()[1:3] == [BOOT, tag]
-    # the start, the check that the worker is gone, then (exit 3) whether it ran the harness
-    assert len(calls) == 3 and f"= {tag} ]" in calls[2]["script"]
+    # the launch and its polls (#128), the check that the worker is gone, then
+    # (exit 3) whether it ran the harness
+    assert len(calls) >= 4 and f"= {tag} ]" in calls[-1]["script"]
     assert pool.placement(job_id) is None
     assert state(queue, job_id) == "running"  # it ran: no unstarted requeue
 

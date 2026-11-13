@@ -88,10 +88,13 @@ def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
 
 
 class Heartbeat:
-    def __init__(self, beat: Beat, interval: float, log: Log):
+    def __init__(
+        self, beat: Beat, interval: float, log: Log, on_end: Callable[[], None] | None = None
+    ):
         self._beat = beat
         self._interval = interval
         self._log = log
+        self._on_end = on_end
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="orch-heartbeat", daemon=True)
 
@@ -109,6 +112,8 @@ class Heartbeat:
                 self._beat()
             except QueueError as exc:
                 self._log(f"heartbeat stopped: {_one_line(exc)}")
+                if self._on_end is not None:
+                    self._on_end()
                 return
             except TRANSIENT_ERRORS as exc:
                 self._log(f"heartbeat failed, retrying: {_one_line(exc)}")
@@ -243,6 +248,74 @@ def run(
         if prepared and teardown is not None:
             teardown()
     return code if code >= 0 else 128 - code
+
+
+class Control:
+    """How `follow`'s body learns it must stop: a signal, or the job ended elsewhere."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self.signum: int | None = None
+        self.reason = ""
+
+    def stop(self, signum: int, reason: str) -> None:
+        if self.signum is None:
+            self.signum, self.reason = signum, reason
+        self._event.set()
+
+    def wait(self, seconds: float) -> None:
+        """Sleep up to seconds; return at once when asked to stop."""
+        self._event.wait(seconds)
+
+
+def follow(
+    body: Callable[[Control], int],
+    *,
+    beat: Beat,
+    interval: float,
+    log: Log,
+    setup: Callable[[], object] | None = None,
+    teardown: Callable[[], None] | None = None,
+) -> int:
+    """Beat once, then run body (a remote run's follower) under a heartbeat (#128).
+
+    There is no local child here: the harness runs detached on its device.
+    The heartbeat beats the local database on its own thread whatever the
+    link does. SIGTERM, SIGHUP and SIGINT, and the heartbeat stopping on a
+    QueueError (the job was finished, failed or timed out), set the body's
+    Control, which stops the remote worker. A signal during setup means the
+    body never runs (exit 128 + the signal). `teardown` runs after the
+    heartbeat stops, whenever setup succeeded.
+    """
+    beat()
+    control = Control()
+    heartbeat = Heartbeat(
+        beat, interval, log, on_end=lambda: control.stop(signal.SIGTERM, "the job ended")
+    )
+    previous: dict[int, object] = {}
+
+    def on_signal(signum: int, _frame: FrameType | None) -> None:
+        control.stop(signum, f"got signal {signum}")
+
+    heartbeat.start()
+    prepared = False
+    try:
+        for signum in (*FORWARDED_SIGNALS, signal.SIGINT):
+            if signal.getsignal(signum) is not signal.SIG_IGN:
+                previous[signum] = signal.signal(signum, on_signal)
+        if setup is not None:
+            setup()
+        prepared = True
+        if control.signum is not None:
+            log(f"not starting: {control.reason}")
+            return 128 + control.signum
+        return body(control)
+    finally:
+        heartbeat.stop()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)  # type: ignore[arg-type]
+        if prepared and teardown is not None:
+            teardown()
 
 
 def _one_line(exc: BaseException) -> str:
