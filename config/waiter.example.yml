@@ -1,0 +1,20 @@
+# The harness command for `orch wait <bot> --autostart` (issue #80).
+#
+# Copy to ~/.config/factory/waiter-<bot>.yml in the bot's own home, as that
+# bot's user, and chmod 600: the waiter refuses a file it does not own or one
+# that its group or others can write.
+#
+# `command` is an argv list. It is run with no shell, after
+# `orch job run <bot> <job-id> --worktree --`. Nothing from a job, a PR or a
+# comment is ever added to it: the job's brief arrives on the harness's
+# stdin, and its path is in $ORCH_JOB_BRIEF. The harness runs in the job's
+# worktree ($ORCH_JOB_WORKTREE) with ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB set,
+# and must end with `orch job done` as the brief says.
+#
+# Pick the flags the bot already uses for unattended runs; the lines below
+# are an example shape, not a recommendation. Only `bot` and `command` are
+# accepted.
+bot: claude-bot
+command:
+  - REPLACE_WITH_HARNESS_BINARY
+  - REPLACE_WITH_FLAG_THAT_READS_THE_PROMPT_FROM_STDIN

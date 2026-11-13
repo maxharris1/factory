@@ -23,6 +23,12 @@ hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It only acts on ship: merge; on any
 other ship it is accepted with a warning and never applied.
+
+parse_factory_context keeps the prose after the front block (Review, Ship,
+Context) for the waiter's standard brief (#80): the brief appends it as an
+additional-context section. Project-specific behavior lives there, not in
+shared code. The front matter must still validate, and the prose is capped
+at CONTEXT_LIMIT characters.
 """
 
 from __future__ import annotations
@@ -57,6 +63,9 @@ _GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
 
 DEFAULT_HOLD_LABEL = "factory:hold"
 DEFAULT_HOLD_APPROVER = "max"
+
+# The most factory.md prose a brief carries (about four screens).
+CONTEXT_LIMIT = 16_000
 
 _TOP_KEYS = {
     "base_branch",
@@ -98,6 +107,29 @@ class FactoryConfig:
     github_issues: bool = False
     github_labels: bool = False
     hold: HoldConfig | None = None
+
+
+@dataclass(frozen=True)
+class FactoryContext:
+    """A valid factory.md: its config and the prose after the front block."""
+
+    config: FactoryConfig
+    body: str
+    truncated: bool = False
+
+
+def parse_factory_context(text: str) -> tuple[FactoryContext | None, list[Finding]]:
+    config, findings = parse_factory_md(text)
+    if config is None:
+        return None, findings
+    _raw, body = split_front_matter(text)
+    body = body.strip()
+    truncated = len(body) > CONTEXT_LIMIT
+    if truncated:
+        body = body[:CONTEXT_LIMIT].rstrip() + (
+            f"\n\n[factory.md prose cut to its first {CONTEXT_LIMIT} characters]"
+        )
+    return FactoryContext(config=config, body=body, truncated=truncated), findings
 
 
 def load_factory_md(path: Path) -> tuple[FactoryConfig | None, list[Finding]]:

@@ -890,7 +890,11 @@ def test_three_handoff_skills_document_wait_heartbeat_and_done() -> None:
         assert f"orch job done {bot} <id> --failed" in paragraph
         assert f"`{binary}` harness" in paragraph
         assert "no model tokens" in paragraph
-        assert "never chooses or starts a harness on its own" in paragraph
+        assert "never chooses a harness on its own" in paragraph
+        # #80: the waiter starts claimed jobs itself, from the bot's own config.
+        assert f"orch wait {bot} --autostart" in paragraph
+        assert f"~/.config/factory/waiter-{bot}.yml" in paragraph
+        assert "no message from another bot" in paragraph
         assert "every third of the job's `timeout_seconds`" in paragraph
         assert "Do not hand-roll a heartbeat loop" in paragraph
         assert "worktree" in paragraph and "uncommitted changes" in paragraph
@@ -1101,7 +1105,7 @@ def test_heartbeat_and_done_give_up_after_bounded_lock_retries(
 
 @pytest.mark.parametrize("attempt", [1, 6, 1025, 1026, 10_000])
 def test_lock_backoff_never_exceeds_the_cap(attempt: int) -> None:
-    backoff = wait_module._lock_backoff(attempt)
+    backoff = wait_module.lock_backoff(attempt)
 
     assert 0 < backoff <= LOCK_BACKOFF_MAX_SECONDS
     if attempt >= 6:
