@@ -17,11 +17,17 @@ from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
+    RELEASED_UNSTARTED,
+    RUN_DIED,
+    STALE,
     JobStateConfig,
     Liveness,
     claimed_too_long,
     derive,
+    last_run_end,
     read_placements,
+    requeue_unstarted,
+    unstarted_too_long,
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
@@ -357,6 +363,9 @@ class Dispatcher:
         self.devices = devices
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
+        # #91: the tickets this poll read, so T6 can see a verdict a failed
+        # review job already posted. Cleared at the start of each poll.
+        self._polled: dict[tuple[str, str], TrackedTicket] = {}
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -366,6 +375,7 @@ class Dispatcher:
         end = getattr(source, "end_cycle", None)
         if begin is not None:
             begin()
+        self._polled = {}
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
@@ -434,6 +444,7 @@ class Dispatcher:
             )
 
     def process(self, ticket: TrackedTicket) -> None:
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._redrive_handoffs(ticket)
@@ -585,6 +596,12 @@ class Dispatcher:
     def _check_job_states(self) -> None:
         """#75: requeue jobs claimed but never started; fail dead jobs.
 
+        #91: a placed job whose worker never started and that no live runner
+        holds is requeued the same way (lib/job_state.py unstarted_too_long,
+        within the free-requeue budget), and a job whose `orch job run`
+        recorded that its command died (run-died) and freed its slot is
+        failed for T6 once its heartbeat is stale.
+
         Each running job's state comes from lib/job_state.py. A job claimed
         for more than job_states.release_claimed_seconds goes back to
         queued as the same job row (same round, same T6 attempt). A dead
@@ -629,9 +646,21 @@ class Dispatcher:
                 ):
                     assert placement is not None
                     self._release_claimed(job, placement.placed_at, now)
+                elif unstarted_too_long(
+                    state,
+                    placement,
+                    facts,
+                    last_activity_at=job.last_activity_at,
+                    now=now,
+                    release_claimed_seconds=self.job_states.release_claimed_seconds,
+                ):
+                    assert placement is not None
+                    self._release_unstarted(job, placement.placed_at, placement.runner_pid, now)
                 elif state == DEAD:
                     assert placement is not None
                     self._fail_dead(job, placement.runner_pid, now)
+                elif placement is None and state == STALE:
+                    self._fail_died_run(job, now)
             except Exception as exc:
                 self.record_poll_error(
                     job.request.repo, job.request.ticket_id, f"job-states:{type(exc).__name__}"
@@ -673,6 +702,76 @@ class Dispatcher:
             connection.commit()
         self._log_job_event(job, "released-claimed", detail)
 
+    def _release_unstarted(
+        self, job: Job, placed_at: float, runner_pid: int | None, now: float
+    ) -> None:
+        """#91: requeue a placed job whose worker never started (no round charged).
+
+        Guarded like `_release_claimed`: still running, no heartbeat since it
+        was read, the same placement and runner, and still no worker pid or
+        remote start. Past the free-requeue budget it is failed for T6.
+        """
+        if runner_pid is None:
+            reason = (
+                f"{job.request.recipient}'s run never recorded a runner or started a worker "
+                f"and nothing has heartbeated for {int((now - job.last_activity_at) // 60)} minutes"
+            )
+        else:
+            reason = f"runner pid {runner_pid} is gone and never started a worker"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = requeue_unstarted(
+                connection,
+                job.id,
+                now=now,
+                event=RELEASED_UNSTARTED,
+                reason=reason,
+                slot_guard=(
+                    "placed_at = ? AND runner_pid IS ? AND worker_pid IS NULL "
+                    "AND COALESCE(remote_started, 0) = 0"
+                ),
+                slot_params=(placed_at, runner_pid),
+                last_activity_at=job.last_activity_at,
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+
+    def _fail_died_run(self, job: Job, now: float) -> None:
+        """#91: fail a job whose `orch job run` recorded that its command died.
+
+        The run freed the slot (its worker was confirmed gone) and the job is
+        still running with a stale heartbeat. Only a RUN_DIED recorded at or
+        after the last heartbeat counts: a command that exited 0 is left to
+        its bot's `orch job done` (or the timeout). Guarded: still running,
+        no heartbeat since it was read, and still no slot.
+        """
+        with self._connect() as connection:
+            ended = last_run_end(connection, job.id, job.last_activity_at)
+        if ended is None or ended[0] != RUN_DIED:
+            return  # read only: most stale slotless jobs (Grok wakes) stop here
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs
+                SET state = 'failed', finished_at = ?, last_activity_at = ?
+                WHERE id = ? AND state = 'running' AND last_activity_at = ?
+                  AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ?)
+                """,
+                (now, now, job.id, job.last_activity_at, job.id),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            detail = (
+                f"orch job run's command ended ({ended[1]}) without orch job done "
+                "and its slot is free; failed for T6"
+            )
+            self._record_job_event(connection, job, "dead", detail, now)
+            connection.commit()
+        self._log_job_event(job, "dead", detail)
+
     def _fail_dead(self, job: Job, runner_pid: int | None, now: float) -> None:
         """Fail a job whose runner and worker are gone; T6 takes it from here.
 
@@ -697,6 +796,9 @@ class Dispatcher:
                 connection.commit()
                 return
             detail = f"runner pid {runner_pid} and its worker are gone; failed for T6"
+            ended = last_run_end(connection, job.id, job.last_activity_at)
+            if ended is not None:
+                detail += f" (its command: {ended[1]})"  # #91: the exit reason
             self._record_job_event(connection, job, "dead", detail, now)
             connection.commit()
         self._log_job_event(job, "dead", detail)
@@ -2494,7 +2596,20 @@ class Dispatcher:
             self._ensure_stuck_wake(job.request.repo, job.request.ticket_id)
             self.queue.mark_failure_handled(job.id)
             return
+        if job.request.action == "review":
+            # #91 (PR #88): the review may have posted its verdict and then
+            # failed. That verdict is its handoff: done, never retried.
+            verdict = self._posted_verdict(job)
+            if verdict is not None:
+                self._done_from_verdict(job, verdict)
+                return
         if job.request.attempt == 1:
+            if job.request.action == "review" and self._open_fix_for_head(job):
+                # #91: a fix for this head is queued or running, so this head
+                # is already being replaced; re-reviewing it would run a review
+                # beside that fix. The fix's ready queues the next review.
+                self._skip_review_retry(job)
+                return
             generation = job.request.generation + 1
             request = JobRequest(
                 repo=job.request.repo,
@@ -2532,6 +2647,97 @@ class Dispatcher:
             ),
         )
         self.queue.mark_failure_handled(job.id)
+
+    def _posted_verdict(self, job: Job) -> Comment | None:
+        """A trusted reviewer verdict for this review job's head and round.
+
+        Read from the ticket this poll fetched (None when it fetched none):
+        `from` and `role` as the reviewer, from a login trusted for it, a
+        head matching the job's (as a prefix, like every head compare), and
+        the job's round number when the job has one.
+        """
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if ticket is None or job.request.head is None:
+            return None
+        round_number = _detail_round_number(job.request.detail)
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        for item in sorted(ticket.comments, key=_comment_order):
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if fields.get("kind") != "verdict":
+                continue
+            if not self._trusted(ticket, item, fields, reviewer, role="reviewer"):
+                continue
+            if _matching_head(fields.get("head") or "", job.request.head) is None:
+                continue
+            if round_number is not None and _round_number(fields.get("round")) != round_number:
+                continue
+            return item
+        return None
+
+    def _done_from_verdict(self, job: Job, verdict: Comment) -> None:
+        """Mark a failed review job done with the verdict it already posted."""
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE jobs SET state = 'done', handoff_comment_id = ?, failure_handled = 1
+                WHERE id = ? AND state = 'failed' AND failure_handled = 0
+                """,
+                (verdict.id, job.id),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            detail = (
+                f"verdict comment {verdict.id} for head {(job.request.head or '')[:12]} was "
+                "already posted; marked done with it, no T6 retry"
+            )
+            self._record_job_event(connection, job, "done-from-verdict", detail, now)
+            connection.commit()
+        self._log_job_event(job, "done-from-verdict", detail)
+
+    def _open_fix_for_head(self, job: Job) -> bool:
+        """A queued or running fix job on the same ticket for this job's head."""
+        if job.request.head is None:
+            return False
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'fix'
+                  AND state IN ('queued', 'running') AND head IS NOT NULL
+                """,
+                (job.request.repo.lower(), job.request.ticket_id),
+            ).fetchall()
+        return any(
+            _matching_head(str(row["head"]), job.request.head) is not None for row in rows
+        )
+
+    def _skip_review_retry(self, job: Job) -> None:
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                """
+                UPDATE jobs SET failure_handled = 1
+                WHERE id = ? AND state = 'failed' AND failure_handled = 0
+                """,
+                (job.id,),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return
+            detail = (
+                f"a fix job for head {(job.request.head or '')[:12]} is already open; "
+                "no T6 retry review"
+            )
+            self._record_job_event(connection, job, "retry-skipped", detail, now)
+            connection.commit()
+        self._log_job_event(job, "retry-skipped", detail)
 
     def _mark_stuck_and_wake(
         self,
@@ -3669,6 +3875,25 @@ def _acted_verdict(outcome: str | None) -> bool:
         outcome in ACTED_VERDICT_OUTCOMES
         or outcome.startswith("ship-already-completed-")
     )
+
+
+def _round_number(value: object) -> int | None:
+    """The N of a round field "N/CAP" (or "N"), or None."""
+    if not isinstance(value, str):
+        return None
+    head = value.split("/", 1)[0].strip()
+    return int(head) if head.isdigit() else None
+
+
+def _detail_round_number(detail: str | None) -> int | None:
+    """The round number a job's detail JSON carries ("round": "N/CAP")."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    return _round_number(context.get("round")) if isinstance(context, dict) else None
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

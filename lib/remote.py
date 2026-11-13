@@ -19,7 +19,11 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   and a grep that reads NUL-separated environments; make
   `<workdir>/jobs/<job-id>`, record `<process group> <boot id>` in
   `.orch-worker.pid` there, and exec the harness command with the job's
-  environment. sshd runs the command in a new session, so that process
+  environment through a login shell (#91: `bash -lc`, or the bot's own
+  `$SHELL -lc` when that is bash or zsh), so the bot's profile PATH
+  (~/.local/bin and the like) finds the harness and the tools it runs, as
+  in an interactive login. Every step execs, so the pid and process group
+  stay the start's. sshd runs the command in a new session, so that process
   group is the job's. The record is never removed: deleting bookkeeping
   is not evidence the processes are gone;
 * check: exit 1 while any process of this user carries the job's tag
@@ -155,6 +159,12 @@ _DARWIN_GROUP = (
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
 # refuses (125) without running anything.
 _FENCE = "fenced"
+# #91: the harness runs under a login shell so the bot's profile PATH applies
+# (sshd's `$SHELL -c` is not a login shell, so ~/.local/bin was missing and
+# gh exited 127). The bot's own shell when it is bash or zsh (macOS bots use
+# zsh), else bash. `exec "$@"` keeps the pid, so the record still names it.
+_LOGIN_SHELL = 'case "${SHELL:-}" in */bash|*/zsh) l=$SHELL;; *) l=bash;; esac'
+_LOGIN_EXEC = '"$l" -lc ' + "'exec \"$@\"'" + ' "$l"'
 
 
 def darwin_record(tag: str) -> str:
@@ -305,7 +315,8 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
         f"|| exit {START_REFUSED}; "
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {argv}'
+        f"{_LOGIN_SHELL}; "
+        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {_LOGIN_EXEC} {argv}'
     )
     inner = (
         f"d={directory}; "
@@ -315,7 +326,8 @@ def start_script(
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {argv}'
+        f"{_LOGIN_SHELL}; "
+        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {_LOGIN_EXEC} {argv}'
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
 

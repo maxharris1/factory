@@ -31,6 +31,18 @@ default 5 minutes): the same job row goes back to queued, so the review
 round and the T6 attempt are reused, not charged. A dead job takes the
 existing failure path (failed, then T6).
 
+#91: a job whose recorded runner is confirmed alive is running, never
+stale: `orch job run` beats on its own thread while the command runs,
+silent or not, so a late beat (a busy database) with a live runner is not a
+dead job. A placed job whose worker never started (no worker pid, no remote
+start) and that no live runner holds is released like a claim that never
+started (`unstarted_too_long`), with a free-requeue budget per job row
+(MAX_FREE_REQUEUES, shared with `orch job run`'s early-exit requeue) after
+which it is failed for T6 instead, so a start that can never work does not
+loop. `requeue_unstarted` is that one guarded write: job back to queued (or
+failed once the budget is spent), slot freed and a job_events row, in the
+caller's transaction.
+
 `liveness` gathers the process facts `derive` needs. It only runs checks
 the caller supplies: the dashboard and `orch status` pass the box's pid
 check and no remote check (they never SSH), so a remote job whose runner
@@ -39,6 +51,7 @@ died is stale there rather than dead until the poller confirms it.
 
 from __future__ import annotations
 
+import signal
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -96,6 +109,8 @@ def derive(
     if placement is not None and placement.runner_pid is not None:
         if liveness.runner_alive is False and liveness.worker_gone is True:
             return DEAD
+        if liveness.runner_alive is True:
+            return RUNNING  # #91: a live runner beats while its command runs
     elif placement is not None and last_activity_at <= placement.placed_at:
         return CLAIMED
     if now - last_activity_at > stale_seconds:
@@ -199,3 +214,202 @@ def claimed_too_long(
         and placement is not None
         and now - placement.placed_at > release_claimed_seconds
     )
+
+
+# --- #91: a worker that never started, and the free-requeue budget ------------
+
+# The job_events a free requeue of an unstarted job writes. Each job row gets
+# MAX_FREE_REQUEUES of them; the next unstarted end fails it for T6 instead.
+RELEASED_UNSTARTED = "released-unstarted"
+REQUEUED_EARLY_EXIT = "requeued-early-exit"
+FAILED_UNSTARTED = "failed-unstarted"
+FREE_REQUEUE_EVENTS = (RELEASED_UNSTARTED, REQUEUED_EARLY_EXIT)
+MAX_FREE_REQUEUES = 3
+# `orch job run` records how its command ended while the job still runs:
+# RUN_DIED for a non-zero status or a signal, RUN_EXITED for 0.
+RUN_DIED = "run-died"
+RUN_EXITED = "run-exited"
+JOB_EVENTS_TABLE = "job_events"
+
+
+def never_started(placement: Placement | None) -> bool:
+    """No worker was ever recorded on the slot: no local pid, no remote start.
+
+    A local worker's pid is recorded before its command may run, and a
+    remote start before ssh is spawned (lib/placed_run.py), so a slot with
+    neither never ran the harness.
+    """
+    return (
+        placement is not None
+        and placement.worker_pid is None
+        and not placement.remote_started
+    )
+
+
+def unstarted_too_long(
+    state: str,
+    placement: Placement | None,
+    facts: Liveness,
+    *,
+    last_activity_at: float,
+    now: float,
+    release_claimed_seconds: float,
+) -> bool:
+    """A running job whose worker never started and that no live runner holds.
+
+    Claimed jobs have their own release (`claimed_too_long`). Otherwise: a
+    recorded runner confirmed dead releases it now (it can never start the
+    worker); with no runner recorded (a run refused or killed after its
+    first heartbeat) it is released once nothing has heartbeated for
+    release_claimed_seconds.
+    """
+    if state == CLAIMED or not never_started(placement):
+        return False
+    assert placement is not None
+    if placement.runner_pid is not None:
+        return facts.runner_alive is False
+    return now - last_activity_at > release_claimed_seconds
+
+
+def exit_reason(code: int | None) -> str:
+    """How a command ended, for a job_events detail."""
+    if code is None:
+        return "no exit status (orch job run hit an error)"
+    if code > 128 and code - 128 < 65:
+        number = code - 128
+        try:
+            name = signal.Signals(number).name
+        except ValueError:
+            name = f"signal {number}"
+        return f"killed by {name} (exit {code})"
+    return f"exit {code}"
+
+
+def has_job_events(connection: sqlite3.Connection) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (JOB_EVENTS_TABLE,),
+        ).fetchone()
+        is not None
+    )
+
+
+def record_job_event(
+    connection: sqlite3.Connection,
+    job_id: str,
+    event: str,
+    detail: str,
+    now: float,
+) -> bool:
+    """Add a job_events row for job_id. False (nothing written) when the job
+    or the table (made by the dispatcher) is missing."""
+    if not has_job_events(connection):
+        return False
+    row = connection.execute(
+        "SELECT repo, ticket_id, action, recipient FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    connection.execute(
+        f"""
+        INSERT INTO {JOB_EVENTS_TABLE} (
+            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (job_id, str(row[0]).lower(), row[1], row[2], row[3], event, detail, now),
+    )
+    return True
+
+
+def free_requeues(connection: sqlite3.Connection, job_id: str) -> int:
+    if not has_job_events(connection):
+        return 0
+    marks = ", ".join("?" for _ in FREE_REQUEUE_EVENTS)
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM {JOB_EVENTS_TABLE} WHERE job_id = ? AND event IN ({marks})",
+        (job_id, *FREE_REQUEUE_EVENTS),
+    ).fetchone()
+    return int(row[0])
+
+
+def last_run_end(
+    connection: sqlite3.Connection, job_id: str, since: float
+) -> tuple[str, str] | None:
+    """The latest RUN_DIED / RUN_EXITED (event, detail) recorded at or after since."""
+    if not has_job_events(connection):
+        return None
+    row = connection.execute(
+        f"""
+        SELECT event, detail FROM {JOB_EVENTS_TABLE}
+        WHERE job_id = ? AND event IN (?, ?) AND recorded_at >= ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id, RUN_DIED, RUN_EXITED, since),
+    ).fetchone()
+    return None if row is None else (str(row[0]), str(row[1]))
+
+
+def requeue_unstarted(
+    connection: sqlite3.Connection,
+    job_id: str,
+    *,
+    now: float,
+    event: str,
+    reason: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+    last_activity_at: float | None = None,
+) -> tuple[str, str] | None:
+    """Requeue (or, budget spent, fail) a running job that never started, and
+    free its slot, in the caller's open write transaction.
+
+    Guarded: the job is still running (and, when given, has not heartbeated
+    since last_activity_at), and its slot matches slot_guard (SQL over the
+    slot row, with slot_params). Requeued: the same job row goes back to
+    queued with its queue-wait clock restarted, so no round and no T6
+    attempt is charged. Once the row has used MAX_FREE_REQUEUES it is failed
+    instead, for T6. Returns (event, detail), or None when the guard did not
+    match and nothing changed.
+    """
+    activity = "" if last_activity_at is None else " AND last_activity_at = ?"
+    params: tuple[object, ...] = (job_id,) if last_activity_at is None else (
+        job_id, last_activity_at
+    )
+    running = connection.execute(
+        f"SELECT 1 FROM jobs WHERE id = ? AND state = 'running'{activity}", params
+    ).fetchone()
+    if running is None:
+        return None
+    slot = connection.execute(
+        f"SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ? AND {slot_guard}",
+        (job_id, *slot_params),
+    ).fetchone()
+    if slot is None:
+        return None
+    used = free_requeues(connection, job_id)
+    if used < MAX_FREE_REQUEUES:
+        connection.execute(
+            "UPDATE jobs SET state = 'queued', last_activity_at = ? WHERE id = ?",
+            (now, job_id),
+        )
+        outcome = event
+        detail = (
+            f"{reason}; requeued, no round charged "
+            f"(free requeue {used + 1} of {MAX_FREE_REQUEUES})"
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE jobs SET state = 'failed', finished_at = ?, last_activity_at = ?
+            WHERE id = ?
+            """,
+            (now, now, job_id),
+        )
+        outcome = FAILED_UNSTARTED
+        detail = (
+            f"{reason}; already requeued {used} times without starting, failed for T6"
+        )
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+    record_job_event(connection, job_id, outcome, detail, now)
+    return outcome, detail

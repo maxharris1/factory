@@ -149,6 +149,10 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   --worktree is refused there. When COMMAND ends the slot is released once
   the worker is confirmed gone (a remote worker still running is sent
   SIGTERM first); otherwise it stays held for the poller to confirm.
+  How COMMAND ended is recorded in job_events while the job still runs
+  (#91). If it never started (no worker recorded, or an early 125-127/255
+  remote or 126/127 box exit), the job is requeued, no round charged, in
+  the step that frees the slot; a remote COMMAND runs under a login shell.
   --worktree runs COMMAND in a git worktree of one shared clone per repo
   under --work-root (else $ORCH_WORK_ROOT, else ~/factory-work), at the
   job's head or the default branch, exported as ORCH_JOB_WORKTREE. When
@@ -949,8 +953,9 @@ def _job_run(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
+    code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
-        return job_run.run(
+        code = job_run.run(
             placed.argv(command, remote_env),
             beat=beat,
             interval=interval,
@@ -960,6 +965,7 @@ def _job_run(argv: list[str]) -> int:
             teardown=teardown,
             started=placed.started,
         )
+        return code
     except worktrees.WorktreeError as exc:
         log(str(exc))
         return 1
@@ -967,10 +973,11 @@ def _job_run(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        placed.ended(code)  # #91: the exit reason, while the job still runs
         if placed.autostart:
             _fail_unfinished(queue, args.job_id, owner, log)
         try:
-            placed.finish()
+            placed.finish(code)  # #91: requeues a harness that never started
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
 

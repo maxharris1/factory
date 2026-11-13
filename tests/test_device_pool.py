@@ -258,6 +258,11 @@ def test_device_power_loss_keeps_slot_held_and_goes_stuck_never_done(
     assert claimed is not None
     job, placement = claimed
     assert job.request.timeout_seconds == 3600
+    # Started the way `orch job run` starts a remote job: a runner and a
+    # remote start recorded (#91: a placed job with neither never started).
+    pool.attach_runner(job.id, owner="claude", pid=4242, start=None, alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", remote=True)
+    placement = pool.placement(job.id)
     now[0] = 600
     queue.heartbeat(job.id, owner="claude")
 

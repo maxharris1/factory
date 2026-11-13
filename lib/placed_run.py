@@ -25,18 +25,38 @@ out holds one slot on one device. `orch job run` then:
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
   dispatcher's DeviceMonitor confirms it on a later poll;
 * for an autostart job, fails the job for T6 (before releasing the slot)
-  when the command ended without `orch job done` (#80).
+  when the command ended without `orch job done` (#80);
+* #91: records how the command ended (`ended`: a run-died or run-exited
+  job_events row, with the exit status) while the job is still running, so
+  the poller can fail a job whose harness died and say why;
+* #91: when the harness never started, requeues the job in the same
+  transaction that frees the slot (lib/job_state.py requeue_unstarted, no
+  round charged, within the free-requeue budget), instead of leaving a
+  running job with no slot. Never started means no worker was recorded
+  (setup failed), or the command ended early: a remote start that exited
+  125 (the start script refused), 126 or 127 (the harness could not be
+  run, e.g. not on the login PATH) or 255 (ssh could not connect), or a
+  box command that exited 126 or 127, within EARLY_EXIT_SECONDS of launch.
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
+from lib.job_state import (
+    REQUEUED_EARLY_EXIT,
+    RUN_DIED,
+    RUN_EXITED,
+    exit_reason,
+    record_job_event,
+    requeue_unstarted,
+)
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
@@ -55,6 +75,11 @@ from lib.worktrees import pid_alive, process_start
 
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
+# #91: exit statuses that mean the harness never ran (see the module doc),
+# and how soon after launch they must come to count as an early exit.
+REMOTE_EARLY_EXITS = frozenset({125, 126, 127, 255})
+LOCAL_EARLY_EXITS = frozenset({126, 127})
+EARLY_EXIT_SECONDS = 120.0
 
 Log = Callable[[str], None]
 
@@ -75,7 +100,10 @@ class PlacedRun:
     autostart: bool = False
     sleep: Callable[[float], None] = time.sleep
     alive: Callable[[int | None, str | None], bool] = pid_alive
+    runner: int | None = None
+    clock: Callable[[], float] = time.monotonic
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
+    _launched: list[float] = field(default_factory=list)
 
     @property
     def remote(self) -> bool:
@@ -95,6 +123,7 @@ class PlacedRun:
                     self.placement.job_id, owner=self.owner, remote=True, tag=target.tag
                 )
             )
+            self._launched.append(self.clock())
             self.log(
                 f"starting job {self.placement.job_id} on {self.device.name} "
                 f"over ssh alias {self.target.alias} as {self.target.user}"
@@ -105,6 +134,7 @@ class PlacedRun:
             return  # the local pid is ssh; the worker is on the device
         start = process_start(pid)
         self._worker.append((pid, start))
+        self._launched.append(self.clock())
         retry_locked(
             lambda: self.pool.attach_worker(
                 self.placement.job_id,
@@ -114,8 +144,48 @@ class PlacedRun:
             )
         )
 
-    def finish(self) -> bool:
-        """Release the slot once the worker is confirmed gone. True if released."""
+    def ended(self, code: int | None) -> None:
+        """#91: record how the command ended while the job still runs.
+
+        RUN_EXITED for status 0, RUN_DIED otherwise (with the status or
+        signal). A job already done or failed records nothing. Never raises.
+        """
+        job_id = self.placement.job_id
+        event = RUN_EXITED if code == 0 else RUN_DIED
+        detail = f"orch job run's command on {self.device.name}: {exit_reason(code)}"
+
+        def write() -> None:
+            with self.pool.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                if row is not None and row["state"] == "running":
+                    record_job_event(connection, job_id, event, detail, self.pool.queue.now())
+                connection.commit()
+
+        try:
+            retry_locked(write)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"could not record how job {job_id}'s command ended: {exc}")
+
+    def unstarted(self, code: int | None) -> bool:
+        """#91: the harness never ran (see the module doc)."""
+        placement = self.placement
+        if not self._launched:
+            # Nothing was launched by this run; only a slot no earlier run
+            # left a worker on is unstarted.
+            return placement.worker_pid is None and not placement.remote_started
+        if code is None or self.clock() - self._launched[0] > EARLY_EXIT_SECONDS:
+            return False
+        return code in (REMOTE_EARLY_EXITS if self.target is not None else LOCAL_EARLY_EXITS)
+
+    def finish(self, code: int | None = None) -> bool:
+        """Release the slot once the worker is confirmed gone. True if released.
+
+        #91: with the command's exit status, a job whose harness never
+        started is requeued (or failed, budget spent) in the same step.
+        """
         job_id = self.placement.job_id
         if self.target is None:
             workers = list(self._worker)
@@ -126,7 +196,7 @@ class PlacedRun:
                 if self.alive(pid, start):
                     self.log(f"worker pid {pid} still runs; slot held")
                     return False
-            return self._release()
+            return self._release(code)
         status = check_worker(self.transport, self.target)
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
@@ -137,20 +207,59 @@ class PlacedRun:
             status = check_worker(self.transport, self.target)
             checks += 1
         if status == GONE:
-            return self._release()
+            return self._release(code)
         self.log(
             f"job {job_id} worker on {self.device.name} not confirmed gone ({status}); "
             "slot held until the dispatcher confirms it"
         )
         return False
 
-    def _release(self) -> bool:
+    def _release(self, code: int | None = None) -> bool:
+        if self.unstarted(code) and self._requeue(code):
+            return True
         released = retry_locked(
             lambda: self.pool.release(self.placement.job_id, owner=self.owner)
         )
         if released:
             self.log(f"released {self.device.name} slot of job {self.placement.job_id}")
         return released
+
+    def _requeue(self, code: int | None) -> bool:
+        """Requeue the unstarted job and free its slot in one transaction.
+
+        Guarded on the slot still being this run's (owner and runner pid)
+        and the job still running. False when the guard did not match (the
+        job was finished meanwhile); the caller then frees the slot as usual.
+        """
+        job_id = self.placement.job_id
+        if self._launched:
+            reason = (
+                f"its command on {self.device.name} ended early ({exit_reason(code)}) "
+                "before the harness ran"
+            )
+        else:
+            reason = f"orch job run on {self.device.name} never started its command"
+
+        def write() -> tuple[str, str] | None:
+            with self.pool.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                result = requeue_unstarted(
+                    connection,
+                    job_id,
+                    now=self.pool.queue.now(),
+                    event=REQUEUED_EARLY_EXIT,
+                    reason=reason,
+                    slot_guard="harness = ? AND runner_pid IS ?",
+                    slot_params=(self.owner, self.runner),
+                )
+                connection.commit()
+                return result
+
+        result = retry_locked(write)
+        if result is None:
+            return False
+        self.log(f"released {self.device.name} slot of job {job_id}; {result[0]}: {result[1]}")
+        return True
 
 
 def check_autostart(
@@ -284,6 +393,7 @@ def prepare(
         target=target,
         autostart=placement.autostarted,
         alive=alive,
+        runner=runner,
     )
 
 

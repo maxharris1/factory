@@ -95,10 +95,14 @@ def test_dead_needs_the_runner_gone_and_the_worker_confirmed_gone() -> None:
         last_activity_at=990.0, now=1000.0, placement=started, stale_seconds=120, liveness=gone
     ) == DEAD
     # A worker that may still run is not dead: its heartbeat stopped, so stale.
+    # (#91: a runner confirmed alive keeps it running instead.)
+    assert derive(
+        last_activity_at=500.0, now=1000.0, placement=started, stale_seconds=120,
+        liveness=Liveness(runner_alive=True),
+    ) == RUNNING
     for facts in (
         Liveness(runner_alive=False, worker_gone=False),
         Liveness(runner_alive=False, worker_gone=None),
-        Liveness(runner_alive=True),
         Liveness(),
     ):
         assert derive(
@@ -297,12 +301,15 @@ def test_a_late_orch_job_run_finds_the_released_job_queued_and_starts_nothing(
 
 def test_a_job_that_started_is_never_requeued(tmp_path: Path) -> None:
     # Heartbeat since the claim (orch job run's first beat), no runner yet.
+    # (#91: once nothing has beaten for release_claimed_minutes with no
+    # runner and no worker, it is released as unstarted:
+    # tests/test_liveness_requeue.py.)
     poller = Poller(tmp_path)
     beaten = poller.review()
     poller.claim()
     poller.now[0] = CLAIMED_AT + 1
     poller.queue.heartbeat(beaten, owner="codex")
-    poller.at(10 * 60)
+    poller.at(1 + 5 * 60)
     assert poller.row(beaten)["state"] == "running"
 
     # A recorded runner that is still alive.
@@ -617,7 +624,10 @@ def dashboard_db(tmp_path: Path) -> tuple[Path, Path]:
 def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> None:
     db, log = dashboard_db(tmp_path)
     ids = json.loads((tmp_path / "ids.json").read_text())
-    live = {31, 32, 51, 52}  # the dead job's runner (41) and worker (42) are gone
+    # The dead job's runner (41) and worker (42) are gone. The stale job's
+    # runner (31) is gone too while its worker (32) may still run: a live
+    # runner would keep it running (#91).
+    live = {32, 51, 52}
     snapshot = collect_snapshot(
         db,
         log,
@@ -658,7 +668,7 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
 def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
     db, log = dashboard_db(tmp_path)
     ids = json.loads((tmp_path / "ids.json").read_text())
-    live = {31, 32, 51, 52}
+    live = {32, 51, 52}
     snapshot = collect_snapshot(
         db, log, now=CLAIMED_AT + 12 * 60, alive=lambda pid, _start: pid in live
     )
