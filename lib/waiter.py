@@ -5,18 +5,26 @@ when the bot's model turn notices. A process exit does not wake a bot, so
 claims sat until another bot pinged it. With `--autostart` the waiter, which
 runs as the owning bot's own user and login, starts the job itself:
 
-* it claims through the device pool, box slots only (`local_only`): a job
-  on a remote device could not run `orch job done` on the box, so remote
-  devices stay with a bot that runs plain `orch wait`;
+* it claims through the whole device pool (issue #85), so the least-loaded
+  device takes the job: the box, or a remote device such as the PC or the
+  Mac. A remote job runs over the bot's own SSH alias through `orch job
+  run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
 * it renders the standard brief for the job (lib/brief.py), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
   GitHub token variable unset;
 * it writes the brief to `<state>/jobs/<job-id>/brief.md` (mode 600) and
-  runs `orch job run <bot> <job-id> --db ... --machines ... --worktree --
+  runs `orch job run <bot> <job-id> --db ... --machines ... [--worktree] --
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started.
+
+A remote device has no orch.db, so the harness there cannot run `orch job
+done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
+(or `ORCH-HANDOFF: failed`); that output comes back over SSH into run.log,
+and when the run ends the waiter runs `orch job done` on the box: done with
+that comment id, or failed (for T6) when the line is missing, malformed or
+says failed. A job already finished by then is left alone.
 
 `orch job run` sends the first heartbeat before the harness starts and
 records itself on the job's slot, so the job reads `running` within seconds
@@ -83,6 +91,12 @@ _CONFIG_KEYS = frozenset({"bot", "command"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+# The remote harness's last word: a GitHub comment id, a Linear comment id
+# (a UUID), or failed. Read from the tail of run.log only.
+_MARKER = re.compile(
+    r"^ORCH-HANDOFF: ([0-9]{1,20}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|failed)$"
+)
+MARKER_TAIL_BYTES = 64 * 1024
 
 Log = Callable[[str], None]
 
@@ -170,6 +184,16 @@ def job_run_argv(
     if worktree:
         argv.append("--worktree")
     return [*argv, "--", *command]
+
+
+def handoff_marker(text: str) -> str | None:
+    """The last valid `ORCH-HANDOFF: <id|failed>` line in text, or None."""
+    found = None
+    for line in text.splitlines():
+        match = _MARKER.fullmatch(line.strip())
+        if match is not None:
+            found = match.group(1)
+    return found
 
 
 def local_only(config: MachinesConfig) -> MachinesConfig:
@@ -330,6 +354,8 @@ class Waiter:
         self.log = log
         self.environ = dict(environ if environ is not None else os.environ)
         self._children: dict[str, Child] = {}
+        # job id -> its job directory, for runs placed on a remote device
+        self._remote: dict[str, Path] = {}
         self._locked = 0
 
     def running(self) -> set[str]:
@@ -368,6 +394,10 @@ class Waiter:
     def _start(self, job: Job, placement: Placement | None) -> str | None:
         request = job.request
         label = f"job {job.id} ({request.repo}#{request.ticket_id} {request.action})"
+        device = (
+            self.pool.config.device(placement.device) if placement is not None else None
+        )
+        remote = device is not None and not device.local
         try:
             argv = job_run_argv(
                 self.orch,
@@ -376,8 +406,9 @@ class Waiter:
                 db=self.db,
                 machines=self.machines,
                 command=self.harness.command,
+                worktree=not remote,  # worktrees are box-only
             )
-            brief = self._brief(job)
+            brief = self._brief(job, remote_device=device.name if remote else None)
             job_dir = self._job_dir(job.id)
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
@@ -387,11 +418,13 @@ class Waiter:
             self._fail(job)
             return None
         self._children[job.id] = child
-        device = placement.device if placement is not None else "no device"
-        self.log(f"{label}: started orch job run (pid {child.pid}) on {device}")
+        if remote:
+            self._remote[job.id] = job_dir
+        where = placement.device if placement is not None else "no device"
+        self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
 
-    def _brief(self, job: Job) -> str:
+    def _brief(self, job: Job, *, remote_device: str | None = None) -> str:
         try:
             result = self.context.load(job.request.repo)
         except Exception as exc:  # a context failure never blocks the start
@@ -402,6 +435,7 @@ class Waiter:
             context=result.context,
             context_ref=result.ref,
             context_note=result.note,
+            remote_device=remote_device,
         )
 
     def _job_dir(self, job_id: str) -> Path:
@@ -456,6 +490,34 @@ class Waiter:
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
+                job_dir = self._remote.pop(job_id, None)
+                if job_dir is not None:
+                    self._finish_remote(job_id, job_dir)
+
+    def _finish_remote(self, job_id: str, job_dir: Path) -> None:
+        """`orch job done` on the box for a remote run, from its marker line."""
+        try:
+            with open(job_dir / "run.log", "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - MARKER_TAIL_BYTES))
+                tail = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            tail = ""
+        marker = handoff_marker(tail)
+        handoff = None if marker in (None, "failed") else marker
+        try:
+            job = retry_locked(
+                lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=handoff)
+            )
+        except QueueError as exc:
+            self.log(f"job {job_id}: not finished from the box ({_one_line(exc)})")
+            return
+        except (sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: orch job done failed ({_one_line(exc)}); T6 times it out")
+            return
+        how = f"handoff {handoff}" if handoff else f"failed ({marker or 'no ORCH-HANDOFF line'})"
+        self.log(f"job {job_id}: ran orch job done on the box: {job.state}, {how}")
 
 
 def _write_private(path: Path, data: bytes) -> None:

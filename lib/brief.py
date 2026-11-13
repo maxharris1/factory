@@ -23,6 +23,12 @@ link) appears only inside one fenced "Job data" block, whose fence is longer
 than any backtick run in it. A value shown outside that block (head, round,
 risk, base branch, PR number) is shown only when it matches its strict form.
 The brief is passed to the harness on stdin and as a file, never in an argv.
+
+A job placed on a remote device (issue #85) gets the same brief with two
+differences: its working directory is the job directory on that device
+(`$ORCH_JOB_WORKDIR`), and since the device has no orch.db, the harness does
+not run `orch job done`. It ends its output with `ORCH-HANDOFF: <comment-id>`
+(or `ORCH-HANDOFF: failed`) and the waiter runs `orch job done` on the box.
 """
 
 from __future__ import annotations
@@ -72,8 +78,12 @@ def render_brief(
     context: FactoryContext | None,
     context_ref: str | None = None,
     context_note: str | None = None,
+    remote_device: str | None = None,
 ) -> str:
-    """The brief for job, as `bot` runs it. See the module doc."""
+    """The brief for job, as `bot` runs it. See the module doc.
+
+    remote_device names the remote device the job is placed on, or None on
+    the box."""
     if bot not in _BOTS:
         raise BriefError(f"{bot!r} is not a harness bot")
     if f"{job.request.recipient}-bot" != bot:
@@ -83,10 +93,10 @@ def render_brief(
     facts = _facts(job, detail, context)
     parts = [
         _opening(job, bot, kind),
-        _job_section(job, bot, kind, facts),
+        _job_section(job, bot, kind, facts, remote_device),
         _task_section(job, kind, facts),
         _handoff_section(job, bot, kind, facts),
-        _finish_section(job, bot),
+        _finish_section(job, bot, remote_device),
         _review_rules(),
         _rules(),
         _data_section(job, detail),
@@ -153,7 +163,7 @@ def _opening(job: Job, bot: str, kind: str) -> str:
     )
 
 
-def _job_section(job: Job, bot: str, kind: str, facts: dict) -> str:
+def _job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str | None) -> str:
     request = job.request
     pr = facts["pr"]
     lines = [
@@ -177,10 +187,18 @@ def _job_section(job: Job, bot: str, kind: str, facts: dict) -> str:
     ]
     if facts["skills"]:
         lines.append("- repo skills: " + ", ".join(f"`{item}`" for item in facts["skills"]))
-    lines.append(
-        "- working directory: this job's git worktree (`$ORCH_JOB_WORKTREE`); "
-        "this brief is also at `$ORCH_JOB_BRIEF`"
-    )
+    if remote_device is None:
+        lines.append(
+            "- working directory: this job's git worktree (`$ORCH_JOB_WORKTREE`); "
+            "this brief is also at `$ORCH_JOB_BRIEF`"
+        )
+    else:
+        lines.append(
+            f"- working directory: this job's own directory on device {remote_device} "
+            f"(`$ORCH_JOB_WORKDIR`), empty at the start: clone {request.repo} there with "
+            "`env -u GH_TOKEN gh repo clone` and check out the branch the task names. "
+            "This brief is on your stdin only."
+        )
     return "\n".join(lines)
 
 
@@ -277,7 +295,17 @@ def _handoff_section(job: Job, bot: str, kind: str, facts: dict) -> str:
     )
 
 
-def _finish_section(job: Job, bot: str) -> str:
+def _finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
+    if remote_device is not None:
+        return (
+            "## Finish the job\n"
+            f"- This device ({remote_device}) has no orch database: do not run `orch job done`.\n"
+            "- After the handoff comment is posted, make the very last line of your output exactly "
+            "`ORCH-HANDOFF: <comment-id>`, with the id of the comment you posted.\n"
+            "- If you cannot finish, make the last line `ORCH-HANDOFF: failed` (T6 retries the job once).\n"
+            "- The waiter on the box reads that line when you exit and runs `orch job done` there.\n"
+            "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another harness."
+        )
     return (
         "## Finish the job\n"
         f"- After the handoff comment is posted: `orch job done {bot} {job.id} --handoff <comment-id>`.\n"

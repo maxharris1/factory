@@ -26,6 +26,8 @@ from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
 from lib.device_monitor import DeviceMonitor
+from lib.feeder import Feeder
+from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
@@ -343,10 +345,6 @@ def _wait(argv: list[str]) -> int:
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
-        if args.autostart:
-            machines = waiter.local_only(machines)
-            if not machines.devices:
-                raise waiter.WaiterError("machines.yml has no local device to autostart jobs on")
         pool = _device_pool(queue, machines)
     except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -558,6 +556,7 @@ def _runtime(
     t8 = T8Hook()
     source = LivePollSource(config)
     devices = None
+    machines = None
     if not create:
         machines = _machines_config(machines_path, required=False)
         if machines is not None:
@@ -566,6 +565,9 @@ def _runtime(
                 machines,
                 SshTransport(),
             )
+    feeder = None
+    if not create and any(project.intake is not None for project in config.projects):
+        feeder = _feeder(config, queue, machines, source, cleared)
     dispatcher = Dispatcher(
         path,
         queue,
@@ -576,6 +578,7 @@ def _runtime(
         devices=devices,
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
+        feeder=feeder,
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
@@ -586,6 +589,35 @@ def _runtime(
         source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+def _feeder(
+    config: OrchConfig,
+    queue: SQLiteJobQueue,
+    machines: MachinesConfig | None,
+    source: LivePollSource,
+    cleared: list[str],
+) -> Feeder:
+    """The backlog feeder (issue #85) for projects with an orch.yml intake."""
+    linear = None
+    if config.linear is not None:
+        linear = LinearIntakeClient(
+            source,
+            {
+                project.linear_project_id: project.repo
+                for project in config.projects
+                if project.linear_project_id is not None
+            },
+        )
+    return Feeder(
+        queue,
+        config,
+        machines,
+        github=GitHubIntakeClient(cleared_variables=cleared),
+        linear=linear,
+        factory_for=source.factory_context,
+        log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
+    )
 
 
 def _machines_config(path: Path | None, *, required: bool) -> MachinesConfig | None:
