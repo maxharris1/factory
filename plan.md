@@ -4,14 +4,13 @@ Ticket: https://github.com/maxharris1/factory/issues/106. It folds in #70 and #7
 Branch `factory/issue-106` off `main`. Risk is high: it changes the runner and the remote start.
 Builder: claude-bot. Reviewer: codex-bot.
 
-**Dependency.** The ticket says to start only after PR #100 (job telemetry) and
-PR #104 merge. #104 is merged (`26e2266`, on this branch). **#100 is still open.**
-It touches `lib/job_run.py`, `lib/placed_run.py` and `lib/remote.py` (an `output=`
-stdout consumer that tees the harness stream into `events.jsonl`). This plan is
-built so that hook keeps working: the remote harness's output still reaches
-`orch job run` as the child's stdout. The build step merges `main` once #100
-lands (a merge commit, no rebase) before it touches those three files. Phases
-1, 2, 6 and 7 below do not touch them, so they can start first.
+**Scope after Max's answer.** Max, Nov 13, 1:04 PM ET: "Ship #106 now,
+follow-up after #100". This PR ships phases 1, 2, 5, 6 and 7: criterion 2 for
+#70 F2.1 only, and criteria 3, 4 and 5. Criterion 1 (the detached remote harness
+with follow and reattach) and #70 F2.2 moved to
+https://github.com/maxharris1/factory/issues/117, which waits for PR #100.
+Phases 3 and 4 below, and the F2.2 half of row 2, are kept as the design for
+#117 and are not built here.
 
 ## Architect scaffold
 
@@ -111,7 +110,7 @@ both carry the tag.
 
 | # | Criterion | Work that meets it (phase) | Proof (tests) |
 |---|---|---|---|
-| 1 | Remote harness detached on the device (setsid, pid file and exit file in the job dir); `orch job run` follows over SSH, reattaches after a drop with bounded backoff; fails only past the grace period or on a failing exit file | P3: `lib/remote.py` detached `start_script`, `follow_script`, wrapper, exit, out and stdin files, fence, git-exclude entries, Darwin path. P4: `lib/remote_follow.py` follower and internal `orch job follow`, `placed_run.argv` spawning it, `started()` recording the launcher, exit-code mapping, grace and backoff constants | `tests/test_remote_detached.py`: harness survives the ssh exit; pid and exit records; drop mid-run → reattach, byte-exact run.log, `ORCH-HANDOFF` last line still read by the waiter → job done; outage shorter than grace → success; outage longer than grace → exit 255, slot held, job not failed by the waiter; remote exit 3 → job failed; worker SIGKILLed with no exit record → failure; SIGTERM to `orch job run` → worker stopped, slot released. Existing `test_remote_start.py`, `test_remote_darwin.py`, `test_waiter_remote.py`, `test_timeout_remote_worker.py` and `test_liveness_requeue.py` updated to the detached contract |
+| 1 (moved to #117) | Remote harness detached on the device (setsid, pid file and exit file in the job dir); `orch job run` follows over SSH, reattaches after a drop with bounded backoff; fails only past the grace period or on a failing exit file | P3: `lib/remote.py` detached `start_script`, `follow_script`, wrapper, exit, out and stdin files, fence, git-exclude entries, Darwin path. P4: `lib/remote_follow.py` follower and internal `orch job follow`, `placed_run.argv` spawning it, `started()` recording the launcher, exit-code mapping, grace and backoff constants | `tests/test_remote_detached.py`: harness survives the ssh exit; pid and exit records; drop mid-run → reattach, byte-exact run.log, `ORCH-HANDOFF` last line still read by the waiter → job done; outage shorter than grace → success; outage longer than grace → exit 255, slot held, job not failed by the waiter; remote exit 3 → job failed; worker SIGKILLed with no exit record → failure; SIGTERM to `orch job run` → worker stopped, slot released. Existing `test_remote_start.py`, `test_remote_darwin.py`, `test_waiter_remote.py`, `test_timeout_remote_worker.py` and `test_liveness_requeue.py` updated to the detached contract |
 | 2 | #70 F2.1 and F2.2 fixed, with the deterministic overlap and delayed-delivery tests | P2 (F2.1): `DevicePool.attach_runner` returns the slot row read in its transaction; `prepare` runs `_earlier_worker_gone` and `forget_worker` on that row and keeps it as `PlacedRun.placement`; `attach_worker` guards that `runner_pid` is this run and that no other worker is recorded. P3 and P4 (F2.2): device-side per-tag claim and fence (Linux and Darwin); slot columns `launcher_pid` and `launcher_start` written in `started()` before the gate opens; `DeviceMonitor` and `liveness` treat a live launcher as RUNNING; the follower kills and reaps its start ssh on exit or parent death; `finish()` clears the launcher | `tests/test_claim_placement.py::test_overlapping_runner_refuses_after_worker_recorded`: B's read is paused (an injected `placement` hook), A records W and dies, B resumes; B is refused and W's identity is unchanged (local and remote variants). `tests/test_remote_detached.py::test_delayed_delivery_holds_slot`: fake ssh with detached delayed delivery, SIGKILL the runner, reconcile while delivery is pending → slot held; delivery then refuses on the fence (no harness marker ever appears) → next reconcile releases; the variant where delivery wins → RUNNING → orphan stopped → released only after GONE |
 | 3 | Dashboard push: short connect timeout; on failure skip the cycle and back off; repeated failures shown in Health | P5: `lib/dashboard_push.py` `SSH_OPTIONS` get `ConnectTimeout=5`, `ServerAliveInterval=5` and `ServerAliveCountMax=2`; `SEND_TIMEOUT_SECONDS` 60 → 20; rsync `--timeout` 30 → 10. `PollPusher` and `LivePusher` read the child's exit status and back off after the k-th consecutive failure for `min(30·2^(k-1), 600)` s, with one log line per failure and a reset on success. `lib/health.py` gets a new component `dashboard-push` (local device): `beat` on success, `checked` on failure, written by `orch dashboard push --once` (`lib/dashboard_cli.py`); expected when the push transport is not `none`; stale after one failed push, down when the last success is older than `DOWN_BEATS` intervals, with a "failing since …" line on the Health tab and the needs-attention line | `tests/test_dashboard_push.py`: argv carries the new timeouts. `tests/test_dashboard_poll_push.py` and `test_dashboard_live.py`: a failed child → the next cycles are skipped until the backoff ends; the backoff doubles and is capped; success resets it; the live pusher honors the backoff. `tests/test_health.py`: one failure → stale with detail; repeated failures → down and needs attention; a success clears it |
 | 4 | Re-check #71 on current main; test proves it fixed, or fix it | P6: write the regression tests first against current main. Then, only for the cases that fail: in `_t2`, a ready older than a trusted verdict for the same head → `stale-ready-verdict` (handled, nothing queued); in `_t6`, a failed review whose head is no longer `ticket.current_head` → `retry-skipped` (reuses `_skip_review_retry`), without waiting for a deferred fix | `tests/test_dispatcher.py`: (a) after a poller restart, an unhandled r1 ready for head A, with a REVISE verdict for A posted after it and PR head still A → no review job; (b) the same ready, PR head now B → `stale-ready-head`, no job (expected to pass already); (c) a new ready for A posted after the verdict → round 2 queued (a no-change fix is still reviewed); (d) a failed review for A whose PR head is now B, with no fix job → no T6 retry review. Each test's comment says whether it passed on main before the change |
@@ -125,7 +124,7 @@ both carry the tag.
    Test first. `attach_runner` → `Placement`. `prepare` uses it. `attach_worker`
    gets its guard. Any caller of `attach_runner` that ignores the return value
    keeps working.
-3. **Detached start on the device** (`lib/remote.py`). *(Waits for #100's merge.)*
+3. **Detached start on the device** (`lib/remote.py`). *(Moved to #117.)*
    - `start_script`: per-tag claim (O_EXCL, refuse 125 if the claim is fenced or
      already exists); stdin → `.orch-worker.stdin`; truncate `.orch-worker.out`;
      remove any stale exit record; detach the wrapper (setsid, perl, else 125);
@@ -149,7 +148,7 @@ both carry the tag.
 4. **Follower and runner wiring** (`lib/remote_follow.py` new; `lib/placed_run.py`,
    `lib/cli.py` internal `job follow`, `lib/device_pool.py` launcher columns
    added in place, `lib/device_monitor.py`, `lib/job_state.py` liveness).
-   *(Waits for #100.)*
+   *(Moved to #117.)*
    - The follower is a pure loop over an injected transport, clock, sleep and
      output, so the backoff and grace tests run without real time.
    - It exits when its parent dies (it checks `getppid()` each wait), and it
@@ -185,8 +184,8 @@ both carry the tag.
 - **Large output.** It is streamed in chunks. The byte offset is the only
   state. `.orch-worker.out` stays on the device, mode 600, and is truncated by
   the next start of the same job.
-- **#100 conflicts.** Phases 3 and 4 start only after #100 merges into `main`
-  and `main` is merged here. The follower's stdout is the harness's stream, so
+- **#100 conflicts.** Phases 3 and 4 moved to #117, which starts only after
+  #100 merges into `main`. The follower's stdout is the harness's stream, so
   the telemetry tee needs no change.
 
 ## Verify

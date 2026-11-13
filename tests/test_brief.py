@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -154,9 +155,49 @@ def test_implement_and_fix_briefs_end_in_a_ready_comment() -> None:
     for action in ("build", "fix"):
         text = render_brief(job(action), bot="claude-bot", context=None)
         assert (
-            "<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->"
+            "<!-- orch:v1 kind=ready from=claude-bot role=builder "
+            "head=<pushed-head-sha> risk=high -->"
         ) in text
         assert "poteto-mode" in text
+
+
+@pytest.mark.parametrize("action", ["build", "fix"])
+def test_ready_header_carries_round_and_risk_from_job_facts(action: str) -> None:
+    text = render_brief(job(action, round="4/4"), bot="claude-bot", context=None)
+    header = (
+        "<!-- orch:v1 kind=ready from=claude-bot role=builder round=4/4 "
+        "head=<pushed-head-sha> risk=high -->"
+    )
+    assert header in text
+    fields = parse_header_line(header.replace("<pushed-head-sha>", "abcdef1"))
+    assert (fields["round"], fields["risk"]) == ("4/4", "high")
+    assert "<n>" not in text and "<cap>" not in text
+
+
+def test_ready_header_has_no_round_when_the_job_has_none() -> None:
+    text = render_brief(job("fix", round=None, risk=None), bot="claude-bot", context=None)
+    assert (
+        "<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->"
+    ) in text
+    assert "<n>" not in text and "<low|high>" not in text
+
+
+@pytest.mark.parametrize(
+    ("action", "extra"), [("build", {}), ("fix", {}), ("fix", {"kind": "merge-only"})]
+)
+def test_builder_briefs_say_run_tests_in_the_foreground(action: str, extra: dict) -> None:
+    first = render_brief(job(action, **extra), bot="claude-bot", context=None)
+    assert "in the foreground" in first
+    assert "never in the background" in first
+    assert "git log @{u}.." not in first
+    first_job = job(action, **extra)
+    retry = replace(first_job, request=replace(first_job.request, attempt=2))
+    assert "git log @{u}.." in render_brief(retry, bot="claude-bot", context=None)
+
+
+def test_review_brief_has_no_builder_notes() -> None:
+    text = render_brief(job("review", "codex", round="2/3"), bot="codex-bot", context=None)
+    assert "in the foreground" not in text
 
 
 def test_plan_brief_asks_for_a_plan_comment_with_its_round() -> None:
