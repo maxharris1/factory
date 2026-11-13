@@ -47,6 +47,7 @@ from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
+from lib.status import main as status_main
 from lib.wait import (
     WaitError,
     open_queue,
@@ -82,6 +83,7 @@ commands:
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report, beat or forget (issue #92)
+  status           read-only snapshot of the queue, devices and paused tickets
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -239,6 +241,13 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
+
+status [--db PATH] [--machines PATH] [--orch PATH]
+  Print the queue, each device's slots and running jobs, Grok wakes,
+  paused and stuck tickets, the feeder, the webhook and component health,
+  read-only. A database without the dispatcher tables shows the empty
+  state. --db defaults to ORCH_DB. Exits 1 when the database or a given
+  config file cannot be read, else 0.
 """
 
 
@@ -274,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_linear_webhook, argv[1:])
     if argv[0] == "health":
         return health.main(argv[1:])
+    if argv[0] == "status":
+        return _call(status_main, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
