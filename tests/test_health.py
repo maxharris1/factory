@@ -1265,6 +1265,59 @@ def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: 
     assert "poller" not in down["text"]["attention"] and "waiter" not in down["text"]["attention"]
 
 
+def _overdue_page(tmp_path: Path, *, waiter_seen: float, writer_interval: int,
+                  publish_seconds: int | None, push: bool, advance: int) -> dict:
+    from tests.test_dashboard_layout import BAR, _run_page
+
+    db, queue = make_db(tmp_path, PAGE_NOW)
+    queue.enqueue(request("codex"), dedupe_key="queued")
+    store(db, PAGE_NOW).beat("poller", "box", pid=101)
+    store(db, PAGE_NOW + waiter_seen).beat("waiter", "box", bot="codex-bot", pid=102)
+    store(db, PAGE_NOW).beat("dashboard", "box", pid=103, interval=writer_interval)
+    data = collect_snapshot(db, tmp_path / "poller.log", now=PAGE_NOW,
+                            machines_path=machines_file(tmp_path, ONLY_CODEX), alive=None,
+                            orch=orch(push=push), publish_seconds=publish_seconds)
+    (tmp_path / "page").mkdir()
+    return _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+                     actions=[["advance", advance]])["text"]
+
+
+@pytest.mark.parametrize("waiter_seen, expected", [
+    (0, ["UNKNOWN", "UNKNOWN", "STALE"]),
+    (-60, ["UNKNOWN", "UNKNOWN", "STALE"]),
+    (-100, ["UNKNOWN", "UNKNOWN", "STALE"]),
+])
+def test_an_overdue_snapshot_vouches_for_no_state_past_its_up_window(
+    tmp_path: Path, waiter_seen, expected,
+) -> None:
+    """R3-2: once the next push is overdue, a component the snapshot already
+    showed stale is as unseen as one it showed up: it is unknown, and the
+    no-waiter panel stops claiming a live waiter for its queued job."""
+    from tests.test_dashboard_layout import NODE
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    page = _overdue_page(tmp_path, waiter_seen=waiter_seen, writer_interval=15,
+                         publish_seconds=15, push=True, advance=46)
+    assert _states(page["components"]) == expected
+    assert "every queued job has a live waiter" not in page["no-waiter"]
+    assert "unknown: no snapshot for " in page["no-waiter"]
+
+
+def test_a_retired_writer_row_does_not_hide_an_old_one_off_snapshot(tmp_path: Path) -> None:
+    """R3-3: only a dashboard row that can alert stands in for the old
+    snapshot; a retired (not configured) one still leaves the one
+    needs-attention item."""
+    from tests.test_dashboard_layout import NODE
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    page = _overdue_page(tmp_path, waiter_seen=0, writer_interval=300,
+                         publish_seconds=None, push=False, advance=3000)
+    assert _states(page["components"]) == ["UNKNOWN", "UNKNOWN", "DOWN"]
+    assert page["attention-count"] == "1"
+
+
 @pytest.mark.parametrize(
     "component, device, interval",
     [("device-probe", "pc", health.PROBE_SECONDS), ("tunnel", "box", health.BEAT_SECONDS)],

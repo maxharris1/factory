@@ -419,10 +419,11 @@ SCRIPT = r"""
 
   // #92: a snapshot vouches for the states it observed until its next
   // publication is overdue (stale_beats publication intervals; a one-off
-  // snapshot vouches for none). Past that, a component whose own thresholds
-  // have run out is unknown, not down: the page cannot see it. Only the
-  // dashboard writer, whose beats are the publications, ages to stale and
-  // down; with no writer row, the overdue snapshot is one attention item.
+  // snapshot vouches for none). Past that, a component that is not still
+  // inside its up window is unknown, not down: the page cannot see it. Only
+  // the dashboard writer, whose beats are the publications, ages to stale
+  // and down; with no writer row that can alert, the overdue snapshot is one
+  // attention item.
   function agedHealth(d) {
     var h = d.health || {};
     var t = h.thresholds || {};
@@ -436,18 +437,18 @@ SCRIPT = r"""
     var waiterUnknown = false;
     var rows = (h.components || []).map(function (c) {
       var isWriter = c.component === 'dashboard';
-      writer = writer || isWriter;
+      writer = writer || (isWriter && c.configured !== false);
       var base = c.last_seen_age_seconds;
       if (vouched || c.state === 'down' || base === null || base === undefined) return c;
       var seen = base + age;
       var interval = Math.max(Number(c.interval_seconds) || 15, 1);
       var state = seen > downBeats * interval ? 'down' : seen > staleBeats * interval ? 'stale' : c.state;
-      if (state === c.state) return c;
-      if (!isWriter) {
+      if (!isWriter && (state !== 'up' || c.state !== 'up')) {
         unknown = true;
         waiterUnknown = waiterUnknown || c.component === 'waiter';
         return Object.assign({}, c, {state: 'unknown', reason: 'no snapshot for ' + dur(age)});
       }
+      if (state === c.state) return c;
       var reason = 'no heartbeat for ' + dur(seen);
       if (state === 'down' && c.configured !== false) {
         extra.push({kind: 'down', repo: '', ticket_id: '', component: c.label,
