@@ -7,8 +7,11 @@ of the poller's Linear request path. Nothing reaches a tracker.
 from __future__ import annotations
 
 import json
+import re
 
-from lib.github_actions import GhResult
+import pytest
+
+from lib.github_actions import GhResult, GitHubAdapterError
 from lib.intake_live import (
     LINEAR_COMMENT_MUTATION,
     LINEAR_INTAKE_QUERY,
@@ -85,7 +88,63 @@ class FakeLinearSource:
 
     def _linear_request(self, document: dict) -> dict:
         self.documents.append(document)
+        _check_issue_fields(document["query"])
         return {"data": self.data}
+
+
+# Linear's Issue type has `branchName`; `gitBranchName` is only ever an
+# alias (poll_source.py LINEAR_ISSUE_QUERY). A query that selects a field
+# Issue does not have gets a GraphQL error, which LivePollSource raises.
+LINEAR_ISSUE_FIELDS = frozenset({
+    "id", "identifier", "title", "description", "url", "branchName", "priority",
+    "createdAt", "labels", "history", "project", "state", "team", "comments",
+    "attachments",
+})
+
+
+def _check_issue_fields(query: str) -> None:
+    match = re.search(r"\bnodes \{ (.*?) labels\(", query)
+    if match is None:
+        return
+    for selection in re.findall(r"(?:(\w+): )?(\w+)", match.group(1)):
+        field = selection[1]
+        if field not in LINEAR_ISSUE_FIELDS:
+            raise GitHubAdapterError(
+                f'Linear returned a GraphQL error: Cannot query field "{field}" on type "Issue"'
+            )
+
+
+class PagedLinearSource:
+    """Linear's issues connection, served one page per cursor."""
+
+    def __init__(self, pages: list[list[dict]]):
+        self.pages = pages
+        self.documents: list[dict] = []
+
+    def _linear_request(self, document: dict) -> dict:
+        self.documents.append(document)
+        _check_issue_fields(document["query"])
+        after = document["variables"].get("after")
+        index = 0 if after is None else int(after.removeprefix("cursor-"))
+        last = index + 1 >= len(self.pages)
+        return {"data": {"issues": {
+            "nodes": self.pages[index],
+            "pageInfo": {"hasNextPage": not last,
+                         "endCursor": None if last else f"cursor-{index + 1}"},
+        }}}
+
+
+def linear_node(number: int, *, priority: int = 3) -> dict:
+    return {
+        "id": f"uuid-{number}", "identifier": f"AUT-{number}", "title": f"T{number}",
+        "description": "", "url": f"https://linear.app/x/issue/aut-{number}",
+        "gitBranchName": f"max/aut-{number}", "priority": priority,
+        "createdAt": "2026-11-12T20:00:00Z", "labels": {"nodes": []},
+        "history": {"nodes": [
+            {"createdAt": "2026-11-12T21:00:00Z", "actor": {"id": "max"},
+             "toState": {"name": "In Progress"}},
+        ]},
+    }
 
 
 def test_linear_intake_reads_who_moved_the_issue_to_the_state() -> None:
@@ -105,7 +164,9 @@ def test_linear_intake_reads_who_moved_the_issue_to_the_state() -> None:
     found = client.linear_intake("proj-1", "In Progress")
 
     assert source.documents[0]["query"] == LINEAR_INTAKE_QUERY
-    assert source.documents[0]["variables"] == {"project": "proj-1", "state": "In Progress"}
+    assert source.documents[0]["variables"] == {
+        "project": "proj-1", "state": "In Progress", "after": None,
+    }
     item = found[0]
     assert (item.repo, item.key, item.applied_by, item.urgent, item.bug, item.branch) == (
         "acme/app", "AUT-7", "max", True, True, "max/aut-7-t"
@@ -117,3 +178,67 @@ def test_linear_comment_is_confirmed() -> None:
     client = LinearIntakeClient(source, {})
     assert client.post_linear_comment("uuid-7", "body") == "c-1"
     assert source.documents[0]["query"] == LINEAR_COMMENT_MUTATION
+
+
+# --- #87 review F1.2, F1.6, F1.7 ----------------------------------------------
+
+
+def test_the_linear_intake_query_aliases_branch_name_as_the_poller_does() -> None:
+    assert "gitBranchName: branchName" in LINEAR_INTAKE_QUERY
+    assert re.search(r"\bgitBranchName\b(?!: branchName)", LINEAR_INTAKE_QUERY) is None
+
+
+def test_the_linear_intake_reads_the_branch_from_the_aliased_field() -> None:
+    source = PagedLinearSource([[linear_node(7)]])
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
+    assert [(item.key, item.branch, item.applied_by) for item in found] == [
+        ("AUT-7", "max/aut-7", "max")
+    ]
+
+
+def test_the_linear_intake_reads_every_page() -> None:
+    first = [linear_node(number) for number in range(1, 51)]
+    second = [linear_node(51, priority=1)]  # urgent, past the first page
+    source = PagedLinearSource([first, second])
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
+    assert len(found) == 51
+    assert [doc["variables"]["after"] for doc in source.documents] == [None, "cursor-1"]
+    assert "pageInfo { hasNextPage endCursor }" in source.documents[0]["query"]
+    assert [item.key for item in found if item.urgent] == ["AUT-51"]
+
+
+def test_a_next_page_without_a_cursor_fails_the_read() -> None:
+    class NoCursor(PagedLinearSource):
+        def _linear_request(self, document: dict) -> dict:
+            self.documents.append(document)
+            return {"data": {"issues": {"nodes": [linear_node(1)],
+                                        "pageInfo": {"hasNextPage": True, "endCursor": None}}}}
+
+    with pytest.raises(GitHubAdapterError, match="endCursor"):
+        LinearIntakeClient(NoCursor([]), {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
+
+
+def pull(number: int, state: str, branch: str = "factory/issue-85", merged: bool = False) -> dict:
+    return {"number": number, "state": state, "merged_at": "2026-11-01T00:00:00Z" if merged else None,
+            "head": {"ref": branch}}
+
+
+FIND = (f"{REPO}/pulls?state=all&per_page=100&head=owner:factory/issue-85",)
+
+
+def test_find_pull_prefers_the_open_pr_over_an_older_merged_one() -> None:
+    gh = RecordedGh()
+    gh.route(FIND, ok([pull(90, "open"), pull(12, "closed", merged=True)]))
+    assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") == 90
+
+
+def test_find_pull_ignores_a_branch_whose_only_pr_is_closed_or_merged() -> None:
+    gh = RecordedGh()
+    gh.route(FIND, ok([pull(12, "closed", merged=True), pull(14, "closed")]))
+    assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") is None
+
+
+def test_find_pull_takes_the_oldest_of_two_open_prs() -> None:
+    gh = RecordedGh()
+    gh.route(FIND, ok([pull(95, "open"), pull(90, "open"), pull(3, "closed")]))
+    assert GitHubIntakeClient(gh).find_pull("owner/app", "factory/issue-85") == 90

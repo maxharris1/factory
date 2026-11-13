@@ -13,9 +13,9 @@ Reads:
   each, who applied the label: the actor of the latest `labeled` event for
   that label (`issues/<n>/events`). That lookup is cached on the issue's
   updated_at, which GitHub bumps on every label change;
-* linear_intake: issues in the project and workflow state, and for each, who
-  moved it there: the actor of the latest history entry whose toState is
-  that state.
+* linear_intake: issues in the project and workflow state, every page of
+  them, and for each, who moved it there: the actor of the latest history
+  entry whose toState is that state.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),
@@ -41,13 +41,19 @@ from lib.github_actions import (
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+# Linear's Issue field is branchName; it is read under the alias the poller
+# uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 LINEAR_INTAKE_QUERY = (
-    "query($project: ID!, $state: String!) { issues(first: 50, filter: "
-    "{ project: { id: { eq: $project } }, state: { name: { eq: $state } } }) "
-    "{ nodes { id identifier title description url gitBranchName priority createdAt "
+    "query($project: ID!, $state: String!, $after: String) { issues(first: 50, after: $after, "
+    "filter: { project: { id: { eq: $project } }, state: { name: { eq: $state } } }) "
+    "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
     "labels(first: 20) { nodes { name } } "
-    "history(first: 25) { nodes { createdAt actor { id } toState { name } } } } } }"
+    "history(first: 25) { nodes { createdAt actor { id } toState { name } } } } "
+    "pageInfo { hasNextPage endCursor } } }"
 )
+# 40 pages of 50: past that the read fails, rather than feed from a partial
+# list that could hide an urgent ticket.
+LINEAR_INTAKE_MAX_PAGES = 40
 LINEAR_COMMENTS_QUERY = (
     "query($issue: String!) { issue(id: $issue) { comments(first: 100) "
     "{ nodes { id body createdAt user { id } } } } }"
@@ -177,6 +183,12 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
 
     def find_pull(self, repo: str, branch: str) -> int | None:
+        """The open PR on branch (the oldest, if several), or None.
+
+        A closed or merged PR on the same branch is never reused (#87 F1.6):
+        the poller does not discover it, so its brief and go would go
+        nowhere.
+        """
         owner = repo.split("/", 1)[0]
         endpoint = (
             f"{_repo_path(repo)}/pulls?state=all&per_page=100"
@@ -190,6 +202,9 @@ class GitHubIntakeClient(GitHubReviewActions):
             for item in pulls
             if isinstance(item, dict)
             and isinstance(item.get("number"), int)
+            and not isinstance(item.get("number"), bool)
+            and item.get("state") == "open"
+            and item.get("merged_at") is None
             and ((item.get("head") or {}).get("ref") == branch)
         )
         return numbers[0] if numbers else None
@@ -244,8 +259,27 @@ class LinearIntakeClient:
 
     def linear_intake(self, project_id: str, state: str) -> list[IntakeIssue]:
         repo = self.repo_for_project[project_id]
-        data = self._request(LINEAR_INTAKE_QUERY, {"project": project_id, "state": state})
-        nodes = ((data.get("issues") or {}).get("nodes")) or []
+        nodes: list[object] = []
+        after: str | None = None
+        for _ in range(LINEAR_INTAKE_MAX_PAGES):
+            data = self._request(
+                LINEAR_INTAKE_QUERY, {"project": project_id, "state": state, "after": after}
+            )
+            connection = data.get("issues") or {}
+            if not isinstance(connection, dict):
+                raise GitHubAdapterError("Linear issues is not an object")
+            nodes.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+                break
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubAdapterError("Linear intake has a next page but no endCursor")
+            after = cursor
+        else:
+            raise GitHubAdapterError(
+                f"Linear intake has over {LINEAR_INTAKE_MAX_PAGES} pages; not fed"
+            )
         found: list[IntakeIssue] = []
         for node in nodes:
             if not isinstance(node, dict):

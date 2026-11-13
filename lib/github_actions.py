@@ -610,18 +610,52 @@ class LinearReviewActions(GitHubReviewActions):
 def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Only the latest attempt of each check (issue #84).
 
-    A rerun at the same head adds a new check run with the same name from
-    the same app. The latest is the one that started last (then the higher
-    id); older attempts of that check no longer count.
+    A rerun at the same head adds a new check run with the same name, from
+    the same app, in the same workflow run. Only such a rerun supersedes an
+    earlier attempt; the latest is the one that started last (then the
+    higher id). Two workflows that share a job name are distinct checks
+    (#87 F1.1), and a run with no workflow identity supersedes nothing, so a
+    failure there always keeps the merge gate.
     """
-    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
     for run in runs:
         app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
-        key = (str(app.get("id", app.get("slug", ""))), str(run.get("name")))
+        key = (
+            str(app.get("id", app.get("slug", ""))),
+            _workflow_identity(run),
+            str(run.get("name")),
+        )
         current = latest.get(key)
         if current is None or _attempt_order(run) > _attempt_order(current):
             latest[key] = run
     return list(latest.values())
+
+
+_ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
+
+
+def _workflow_identity(run: dict[str, Any]) -> str:
+    """The workflow run a check run belongs to, stable across its reruns.
+
+    GitHub Actions names the workflow run in details_url
+    (`.../actions/runs/<run id>/job/<job id>`), and a rerun keeps the run id.
+    Any other app's checks are grouped by check suite. With neither, the
+    check run's own id: it is its own check and supersedes nothing.
+    """
+    details = run.get("details_url")
+    if isinstance(details, str):
+        match = _ACTIONS_RUN.search(details)
+        if match is not None:
+            return f"actions-run:{match.group(1)}"
+    suite = run.get("check_suite")
+    if isinstance(suite, dict):
+        suite_id = suite.get("id")
+        if isinstance(suite_id, int) and not isinstance(suite_id, bool):
+            return f"suite:{suite_id}"
+    run_id = run.get("id")
+    if isinstance(run_id, int) and not isinstance(run_id, bool):
+        return f"check-run:{run_id}"
+    return f"unidentified:{id(run)}"
 
 
 def _attempt_order(run: dict[str, Any]) -> tuple[str, int]:

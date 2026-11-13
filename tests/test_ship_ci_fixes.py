@@ -196,7 +196,10 @@ def test_a_merge_retry_finds_the_pr_already_merged_and_completes(tmp_path: Path)
 # --- #84: the latest attempt of each check -----------------------------------
 
 
-def check_runs(*runs: tuple[int, str, str, str]) -> GhResult:
+def check_runs(*runs: tuple[int, str, str, str], workflow_run: int | None = 11) -> GhResult:
+    """Attempts of checks in one workflow run (or, with None, no identity)."""
+    if workflow_run is not None:
+        return workflow_runs(*(run + (workflow_run,) for run in runs))
     body = {
         "total_count": len(runs),
         "check_runs": [
@@ -313,3 +316,65 @@ def test_needs_attention_shows_in_orch_status_and_the_dashboard(tmp_path: Path) 
     snapshot = collect_snapshot(db, tmp_path / "none.log", now=200.0)
     kinds = [(item["kind"], item["ticket_id"]) for item in snapshot["attention"]["items"]]
     assert ("needs-attention", "42") in kinds
+
+
+# --- F1.1 (#87 review): a rerun is the same check in the same workflow run ----
+
+
+def workflow_runs(*runs: tuple[int, str, str, str, int]) -> GhResult:
+    """Check runs as GitHub Actions reports them: each job's check suite and
+    its details_url, which names the workflow run (stable across reruns)."""
+    body = {
+        "total_count": len(runs),
+        "check_runs": [
+            {
+                "id": run_id,
+                "head_sha": HEAD,
+                "name": name,
+                "status": "completed",
+                "conclusion": conclusion,
+                "started_at": started,
+                "completed_at": started,
+                "app": {"slug": "github-actions", "id": 15368},
+                "check_suite": {"id": 900 + workflow_run},
+                "details_url": (
+                    f"https://github.com/owner/repo/actions/runs/{workflow_run}/job/{run_id}"
+                ),
+            }
+            for run_id, name, conclusion, started, workflow_run in runs
+        ],
+    }
+    return GhResult(0, json.dumps(body), "")
+
+
+def test_two_workflows_with_one_job_name_keep_the_failure() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, workflow_runs(
+        (1, "test", "failure", "2026-11-12T19:00:00Z", 11),  # workflow A
+        (2, "test", "success", "2026-11-12T19:30:00Z", 22),  # workflow B, later
+    ))
+    gh.route(STATUS, served("status-empty.json"))
+    result = actions.ci_status("owner/repo", HEAD)
+    assert result.status == "failure" and "test" in (result.log or "")
+
+
+def test_a_rerun_in_the_same_workflow_run_still_supersedes_the_failure() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, workflow_runs(
+        (1, "test", "failure", "2026-11-12T19:00:00Z", 11),
+        (2, "lint", "success", "2026-11-12T19:00:00Z", 11),
+        (3, "test", "success", "2026-11-12T19:30:00Z", 11),  # attempt 2 of run 11
+    ))
+    gh.route(STATUS, served("status-empty.json"))
+    assert actions.ci_status("owner/repo", HEAD).status == "success"
+
+
+def test_runs_with_no_workflow_identity_never_supersede_each_other() -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, check_runs(
+        (1, "test", "failure", "2026-11-12T19:00:00Z"),
+        (3, "test", "success", "2026-11-12T19:30:00Z"),
+        workflow_run=None,
+    ))
+    gh.route(STATUS, served("status-empty.json"))
+    assert actions.ci_status("owner/repo", HEAD).status == "failure"
