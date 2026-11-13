@@ -13,6 +13,7 @@ GitHub App switch is on (#122).
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,21 +43,46 @@ def harness_environ(
     profile, or XDG_CONFIG_HOME whose gh directory is there, is dropped.
     The run is refused when the profile is inside its HOME or its default
     gh directory, $HOME/.config/gh, is the profile. Symlinks and bind mounts
-    count as the profile: paths are resolved and stat'ed, never opened."""
+    count as the profile, and a gh directory holding a symlink or hard link
+    to one of the profile's files counts as the profile: paths are resolved
+    and stat'ed, never opened."""
     env = dict(environ)
     if approvals is None or not approvals.app_trust or approvals.gh_config_dir is None:
         return env
     profile = approvals.gh_config_dir
+    profile_files = _file_ids(profile)
     home = env.get("HOME") or os.path.expanduser("~")
-    if _within(profile, home) or _within(os.path.join(home, ".config", "gh"), profile):
+
+    def exposes(gh_dir: str) -> bool:
+        return _within(gh_dir, profile) or not profile_files.isdisjoint(_file_ids(gh_dir))
+
+    if _within(profile, home) or exposes(os.path.join(home, ".config", "gh")):
         raise ApproverProfileExposed(
             f"the approver gh profile {profile} is reachable from the run's HOME {home}"
         )
-    if "GH_CONFIG_DIR" in env and _within(env["GH_CONFIG_DIR"], profile):
+    if "GH_CONFIG_DIR" in env and exposes(env["GH_CONFIG_DIR"]):
         del env["GH_CONFIG_DIR"]
-    if "XDG_CONFIG_HOME" in env and _within(os.path.join(env["XDG_CONFIG_HOME"], "gh"), profile):
+    if "XDG_CONFIG_HOME" in env and exposes(os.path.join(env["XDG_CONFIG_HOME"], "gh")):
         del env["XDG_CONFIG_HOME"]
     return env
+
+
+def _file_ids(directory: str | os.PathLike[str]) -> set[tuple[int, int]]:
+    """(device, inode) of each regular file directly in directory, through
+    symlinks. Hard links and symlinks to one file share an id."""
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return set()
+    ids = set()
+    for entry in entries:
+        try:
+            info = os.stat(entry.path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            ids.add((info.st_dev, info.st_ino))
+    return ids
 
 
 def _within(path: str | os.PathLike[str], parent: str | os.PathLike[str]) -> bool:

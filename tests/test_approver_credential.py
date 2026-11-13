@@ -664,6 +664,66 @@ def test_waiter_refuses_when_the_run_home_links_to_a_home_holding_the_profile(tm
         harness_environ({"HOME": str(home), "GH_CONFIG_DIR": str(tmp_path / "bot-gh")}, switch_on)
 
 
+# --- AC 5: a file linked to one of the profile's files is the profile --------------
+
+
+def file_alias(kind: str, alias: Path, source: Path) -> None:
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink":
+        alias.symlink_to(source)
+    else:
+        alias.hardlink_to(source)
+
+
+@pytest.fixture
+def approver_profile(tmp_path: Path) -> Path:
+    profile = tmp_path / "approver" / "gh"
+    profile.mkdir(parents=True)
+    for name in ("hosts.yml", "config.yml"):
+        (profile / name).write_text("fake\n")
+    return profile
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+@pytest.mark.parametrize("name", ["hosts.yml", "config.yml"])
+def test_waiter_refuses_when_the_default_gh_directory_links_a_profile_file(
+    tmp_path: Path, approver_profile: Path, kind: str, name: str
+) -> None:
+    home = tmp_path / "bot"
+    file_alias(kind, home / ".config" / "gh" / name, approver_profile / name)
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(approver_profile))
+    for environ in ({"HOME": str(home)}, {"HOME": str(home), "GH_CONFIG_DIR": str(tmp_path / "bot-gh")}):
+        with pytest.raises(ApproverProfileExposed):
+            harness_environ(environ, switch_on)
+    db, queue = make_queue(tmp_path)
+    with pytest.raises(WaiterError, match="approver"):
+        waiter_with(tmp_path, queue, db, switch_on, {"HOME": str(home), "PATH": "/usr/bin:/bin"})
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_waiter_env_drops_a_gh_config_dir_that_links_a_profile_file(
+    tmp_path: Path, approver_profile: Path, kind: str
+) -> None:
+    home = str(tmp_path / "bot")
+    gh_dir = tmp_path / "bot-gh"
+    file_alias(kind, gh_dir / "hosts.yml", approver_profile / "hosts.yml")
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(approver_profile))
+    assert harness_environ({"HOME": home, "GH_CONFIG_DIR": str(gh_dir)}, switch_on) == {"HOME": home}
+    xdg = tmp_path / "xdg"
+    file_alias(kind, xdg / "gh" / "hosts.yml", approver_profile / "hosts.yml")
+    assert harness_environ({"HOME": home, "XDG_CONFIG_HOME": str(xdg)}, switch_on) == {"HOME": home}
+
+
+def test_waiter_env_keeps_a_bot_gh_config_dir_with_its_own_files(tmp_path: Path, approver_profile: Path) -> None:
+    gh_dir = tmp_path / "bot-gh"
+    gh_dir.mkdir()
+    (gh_dir / "hosts.yml").write_text("fake\n")
+    (gh_dir / "profile").symlink_to(approver_profile, target_is_directory=True)
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(approver_profile))
+    environ = {"HOME": str(tmp_path / "bot"), "GH_CONFIG_DIR": str(gh_dir)}
+    assert harness_environ(environ, switch_on) == environ
+
+
 # --- AC 5: an orch.yml error elsewhere never turns the guard off --------------------
 
 
