@@ -71,6 +71,7 @@ commands:
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report or forget (issue #92)
+  heal             restart down or stale-code components (issue #107)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -229,6 +230,17 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   waiter, 1 when orch.health.db cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
+
+heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
+     [--machines PATH] [--orch PATH] [--device NAME] [--dry-run]
+  Read `orch health --json` and restart, through its own deploy/ service
+  script, each component on this device that this account owns
+  (~/.config/factory autostart flags) and that is down, or runs stale code
+  and is idle. Never overrides a *.stopped hold; at most 3 restarts per
+  component in 30 minutes. Logs to self-heal.log in the state directory
+  and escalates to the Factory webhook when a component cannot be fixed or
+  flaps. Never calls an LLM and never signals a job. deploy/self-heal.sh
+  runs it every 2 minutes.
 """
 
 
@@ -264,6 +276,10 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_linear_webhook, argv[1:])
     if argv[0] == "health":
         return health.main(argv[1:])
+    if argv[0] == "heal":
+        from lib import heal
+
+        return heal.main(argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -499,10 +515,11 @@ def _poll(argv: list[str]) -> int:
                 machines_path=args.machines,
             )
             after_poll = _dashboard_pusher(path, args.orch)
-            loop = PollLoop(dispatcher, source)
             if args.once:
-                loop.run(max_polls=1, after_poll=after_poll)
+                PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
             else:
+                stopper = StopAtBoundary()
+                loop = PollLoop(dispatcher, source, sleep=stopper.sleep)
                 # dashboard.push.live: watch orch.db for changes between and
                 # during cycles; stopped on the way out, so a stop starts no push.
                 watcher = after_poll if isinstance(after_poll, LivePusher) else None
@@ -511,6 +528,7 @@ def _poll(argv: list[str]) -> int:
                 # Heartbeats (#92): the poller's own row and the per-device
                 # SSH reachability probe, each in its own daemon thread.
                 beats = health.poller_beats(path, args.machines).start()
+                signal.signal(signal.SIGTERM, stopper.on_term)
                 try:
                     loop.run(
                         on_error=lambda exc: dispatcher.record_poll_error("poll", "-", exc),
@@ -780,6 +798,30 @@ def _runtime_config(path: Path | None) -> OrchConfig:
 
 def _exit_on_term(_signum: int, _frame: FrameType | None) -> None:
     raise SystemExit(143)
+
+
+class StopAtBoundary:
+    """`orch poll`'s SIGTERM (#107): during a cycle it waits for the cycle to
+    end, so no handoff or ship is cut in half; during the sleep between
+    cycles, or a second SIGTERM, exits at once. Either way the exit is 143."""
+
+    def __init__(self, sleep: Callable[[float], None] = time.sleep):
+        self._sleep = sleep
+        self.cycling = True
+        self.requested = False
+
+    def on_term(self, _signum: int, _frame: FrameType | None) -> None:
+        if self.cycling and not self.requested:
+            self.requested = True
+            return
+        raise SystemExit(143)
+
+    def sleep(self, seconds: float) -> None:
+        self.cycling = False
+        if self.requested:
+            raise SystemExit(143)
+        self._sleep(seconds)
+        self.cycling = True
 
 
 def _quiet_stdout() -> None:

@@ -263,7 +263,7 @@ def _run_poll(tmp_path: Path, monkeypatch, orch_text: str) -> dict:
     seen: dict = {}
 
     class Loop:
-        def __init__(self, dispatcher, source) -> None:
+        def __init__(self, dispatcher, source, **_kwargs) -> None:
             pass
 
         def run(self, **kwargs) -> None:

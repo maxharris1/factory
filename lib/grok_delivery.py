@@ -149,23 +149,31 @@ class WebhookGrokDelivery:
         return receipt if receipt else logical_key
 
     def _authorization(self) -> str:
-        """auth_env holds a full Authorization value and wins over key_env."""
-        names = [name for name in (self.auth_env, self.key_env) if name]
-        for name in names:
-            value = self.environ.get(name)
-            if not value:
-                continue
-            if "\r" in value or "\n" in value:
-                raise GrokDeliveryError(
-                    f"{name} must be one line",
-                    detail=f"bad-env:{name}",
-                )
-            return value if name == self.auth_env else BEARER + value
-        joined = " or ".join(names)
-        raise GrokDeliveryError(
-            f"set {joined} for Grok webhook delivery",
-            detail="missing-env:" + "|".join(names),
-        )
+        return authorization(self.environ, auth_env=self.auth_env, key_env=self.key_env)
+
+
+def authorization(
+    environ: Mapping[str, str], *, auth_env: str | None, key_env: str
+) -> str:
+    """The Authorization value from the environment: auth_env holds a full
+    value and wins over key_env, which is sent as a Bearer token. Errors
+    name the variables, never a value."""
+    names = [name for name in (auth_env, key_env) if name]
+    for name in names:
+        value = environ.get(name)
+        if not value:
+            continue
+        if "\r" in value or "\n" in value:
+            raise GrokDeliveryError(
+                f"{name} must be one line",
+                detail=f"bad-env:{name}",
+            )
+        return value if name == auth_env else BEARER + value
+    joined = " or ".join(names)
+    raise GrokDeliveryError(
+        f"set {joined} for Grok webhook delivery",
+        detail="missing-env:" + "|".join(names),
+    )
 
 
 def _exception_detail(exc: BaseException) -> str:

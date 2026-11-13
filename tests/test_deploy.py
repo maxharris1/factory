@@ -103,8 +103,9 @@ python.chmod(0o755)
             "HOME": str(tmp_path),
             "ORCH_CONFIG": str(orch_config),
             "PATH": f"{fake_bin}:/usr/bin:/bin",
-            # Never a real crontab; autostart tests point this at a fake.
+            # Never a real crontab or systemd; autostart tests point these at fakes.
             "ORCH_CRONTAB": str(fake_bin / "no-such-crontab"),
+            "ORCH_SYSTEMCTL": str(fake_bin / "no-such-systemctl"),
         }
     )
     return environment
@@ -390,10 +391,47 @@ def test_run_poller_exports_both_env_files_unbuffered(tmp_path: Path) -> None:
     assert result.stdout == "poll --once|1|set|/tmp/orch.db\n"
 
 
-def test_orch_poll_service_is_unbuffered_and_reads_webhook_env() -> None:
+def test_orch_poll_service_starts_only_through_run_poller() -> None:
+    """#107 f: one launcher; run-poller.sh sources the env and sets PYTHONUNBUFFERED."""
     unit = (ROOT / "deploy/orch-poll.service").read_text(encoding="utf-8")
-    assert "Environment=PYTHONUNBUFFERED=1" in unit
-    assert "EnvironmentFile=-%h/.config/factory/webhook.env" in unit
+    assert "ExecStart=%h/factory/deploy/run-poller.sh\n" in unit
+    assert "EnvironmentFile" not in unit
+    assert "TimeoutStopSec=300" in unit
+    service = (ROOT / "deploy/poller-service.sh").read_text(encoding="utf-8")
+    assert 'RUNNER="${HERE}/run-poller.sh"' in service
+
+
+@pytest.mark.parametrize("missing", ["webhook.env", "orch-poll.env"])
+def test_run_poller_refuses_to_start_without_its_env(tmp_path: Path, missing: str) -> None:
+    config = tmp_path / ".config/factory"
+    config.mkdir(parents=True)
+    for name in ("webhook.env", "orch-poll.env"):
+        if name != missing:
+            (config / name).write_text('FACTORY_WEBHOOK_URL="https://webhook.test/x"\n',
+                                       encoding="utf-8")
+    orch = tmp_path / ".local/bin/orch"
+    orch.parent.mkdir(parents=True)
+    orch.write_text("#!/bin/sh\ntouch \"$HOME/started\"\n", encoding="utf-8")
+    orch.chmod(0o755)
+
+    result = subprocess.run(["bash", "deploy/run-poller.sh"], cwd=ROOT,
+                            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 78
+    assert result.stderr == f"run-poller: missing ~/.config/factory/{missing}\n"
+    assert "webhook.test" not in result.stderr + result.stdout
+    assert not (tmp_path / "started").exists()
+
+
+def test_ci_runs_once_per_push() -> None:
+    """#107 j: push on main only, plus pull_request."""
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    triggers = workflow[True]
+    assert triggers["push"] == {"branches": ["main"]}
+    assert "pull_request" in triggers
 
 
 FAKE_CRONTAB = """#!/usr/bin/python3
@@ -434,7 +472,8 @@ def test_install_does_not_enable_autostart_by_default(tmp_path: Path) -> None:
     result = _install(environment)
 
     assert result.returncode == 0, result.stderr
-    assert not (tmp_path / "crontab.txt").exists()
+    lines = (tmp_path / "crontab.txt").read_text(encoding="utf-8").splitlines()
+    assert lines and all(line.endswith("# factory-self-heal") for line in lines)
     assert not (tmp_path / ".config/factory/poller-autostart").exists()
 
 
@@ -493,6 +532,7 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
     config = tmp_path / ".config/factory"
     (config / "webhook.env").write_text("", encoding="utf-8")
     (config / "orch-poll.env").write_text("", encoding="utf-8")
+    (config / "self-heal-autostart").unlink()
     pidfile = tmp_path / ".local/state/factory/poller.pid"
     source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
 
@@ -523,3 +563,148 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
         time.sleep(0.2)
         if pidfile.exists():
             os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+# --- #107: profile, self-heal and legacy launchers ---------------------------------------------
+
+
+def _fake(tmp_path: Path, name: str, source: str) -> Path:
+    path = tmp_path / "fake-bin" / name
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+FAKE_SYSTEMCTL = """#!/usr/bin/python3
+import os, sys
+from pathlib import Path
+
+with open(Path(os.environ["HOME"]) / "systemctl.log", "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+"""
+
+
+def test_install_puts_self_heal_on_a_systemd_timer_when_there_is_one(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    environment["ORCH_SYSTEMCTL"] = str(_fake(tmp_path, "systemctl", FAKE_SYSTEMCTL))
+
+    result = _install(environment)
+
+    assert result.returncode == 0, result.stderr
+    units = tmp_path / ".config/systemd/user"
+    service = (units / "factory-self-heal.service").read_text(encoding="utf-8")
+    assert f"ExecStart={ROOT}/deploy/self-heal.sh once" in service
+    assert "KillMode=process" in service
+    assert "OnUnitActiveSec=2min" in (units / "factory-self-heal.timer").read_text(encoding="utf-8")
+    calls = (tmp_path / "systemctl.log").read_text(encoding="utf-8").splitlines()
+    assert "--user enable --now factory-self-heal.timer" in calls
+    assert not (tmp_path / ".config/factory/self-heal-autostart").exists()
+
+
+def test_install_falls_back_to_the_profile_loop_and_cron_without_systemd(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    environment["ORCH_CRONTAB"] = str(_fake(tmp_path, "crontab", FAKE_CRONTAB))
+
+    assert _install(environment).returncode == 0
+    assert _install(environment).returncode == 0
+
+    lines = (tmp_path / "crontab.txt").read_text(encoding="utf-8").splitlines()
+    job = (f"{ROOT}/deploy/self-heal.sh ensure >>{tmp_path}/.local/state/factory/"
+           "self-heal-service.log 2>&1 # factory-self-heal")
+    assert lines == [f"@reboot {job}", f"*/5 * * * * {job}"]
+    assert (tmp_path / ".config/factory/self-heal-autostart").is_file()
+    profile = (tmp_path / ".config/factory/profile.sh").read_text(encoding="utf-8")
+    assert f'"{ROOT}/deploy/self-heal.sh" ensure' in profile
+    assert f'"{ROOT}/deploy/linear-webhook-service.sh" ensure' in profile
+
+
+def test_the_profile_is_guarded_and_makes_its_state_dir(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
+    state = tmp_path / ".local/state/factory"
+    for child in state.iterdir():
+        if child.is_file():
+            child.unlink()
+    state.rmdir()
+
+    result = subprocess.run(
+        ["bash", "-c", 'set -e; . deploy/profile.sh; PATH=/x; . deploy/profile.sh; '
+                       'printf "%s" "$PATH"'],
+        cwd=ROOT, env=_profile_env(tmp_path), text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "/x"
+    assert state.is_dir()
+
+
+def test_install_autostart_adds_the_listener_only_with_a_linear_webhook(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    environment["ORCH_CRONTAB"] = str(_fake(tmp_path, "crontab", FAKE_CRONTAB))
+    assert _install(environment, "--autostart").returncode == 0
+    assert not (tmp_path / ".config/factory/linear-webhook-autostart").exists()
+
+    config = Path(environment["ORCH_CONFIG"])
+    config.with_name("orch.local.yml").write_text(
+        "linear_webhook:\n  public_url: https://box.example.ts.net/linear-webhook\n",
+        encoding="utf-8")
+    assert _install(environment, "--autostart").returncode == 0
+
+    assert (tmp_path / ".config/factory/linear-webhook-autostart").is_file()
+    table = (tmp_path / "crontab.txt").read_text(encoding="utf-8")
+    assert table.count("# factory-linear-webhook") == 2
+
+
+def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    environment["ORCH_CRONTAB"] = str(_fake(tmp_path, "crontab", FAKE_CRONTAB))
+    legacy = tmp_path / ".local/share/factory"
+    legacy.mkdir(parents=True)
+    poller = legacy / "run-poller.sh"
+    poller.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+    poller.chmod(0o755)
+    listener = legacy / "linear-webhook-service.sh"
+    listener.write_text('#!/bin/sh\n[ "$1" = stop ] && touch "$HOME/legacy-stopped"\n',
+                        encoding="utf-8")
+    listener.chmod(0o755)
+    (tmp_path / "crontab.txt").write_text(
+        f"*/5 * * * * {poller} >>/tmp/x 2>&1\n"
+        f"@reboot {listener} ensure\n"
+        "0 3 * * * /usr/bin/true # keep\n",
+        encoding="utf-8")
+    running = subprocess.Popen(["/bin/sh", str(poller)])
+    bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"])
+    try:
+        result = _install(environment)
+
+        assert result.returncode == 0, result.stderr
+        assert running.wait(timeout=10) == -signal.SIGTERM
+        assert bystander.poll() is None
+        assert not poller.exists() and not listener.exists()
+        assert (tmp_path / "legacy-stopped").is_file()
+        table = (tmp_path / "crontab.txt").read_text(encoding="utf-8")
+        assert "0 3 * * * /usr/bin/true # keep" in table
+        assert str(legacy) not in table
+        assert f"stopped legacy {poller}" in result.stdout
+    finally:
+        for proc in (running, bystander):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
+def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    environment["ORCH_CRONTAB"] = str(_fake(
+        tmp_path, "crontab", "#!/bin/sh\necho 'permission denied' >&2\nexit 1\n"))
+    legacy = tmp_path / ".local/share/factory/run-poller.sh"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    result = _install(environment)
+
+    assert result.returncode == 1
+    assert "cannot read the crontab" in result.stderr
+    assert legacy.exists()

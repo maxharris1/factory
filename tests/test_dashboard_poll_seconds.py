@@ -172,7 +172,7 @@ def test_orch_poll_hands_its_orch_yml_poll_seconds_to_the_pusher(
     seen: dict = {}
 
     class Loop:
-        def __init__(self, dispatcher, source) -> None:
+        def __init__(self, dispatcher, source, **_kwargs) -> None:
             pass
 
         def run(self, **kwargs) -> None:
