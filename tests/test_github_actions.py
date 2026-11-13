@@ -220,7 +220,7 @@ def test_every_invocation_starts_with_env_u_gh_token_gh() -> None:
     actions.list_comments("owner/repo", "42")
     actions.ci_status("owner/repo", HEAD)
 
-    assert len(gh.calls) == 11
+    assert len(gh.calls) == 12  # merge reads the pull first (#83 mark-ready)
     for argv in gh.calls:
         assert argv[:11] == [*ENV_PREFIX, "api"]
         assert all(isinstance(part, str) for part in argv)
@@ -499,21 +499,24 @@ def test_a_gh_failure_raises_a_typed_adapter_error(
 
 def test_squash_merge_sends_squash_and_the_exact_head_sha() -> None:
     actions, gh = adapter()
+    gh.route(PULL, served("pull-42-open.json"))
     gh.route(MERGE, served("merge-squash-200.json"))
 
     actions.merge(pr("merge"), squash=True, match_head_commit=HEAD)
 
-    assert gh.keys() == [MERGE]
+    # #83: the pull is read first; it is not a draft, so no mark-ready.
+    assert gh.keys() == [PULL, MERGE]
 
 
 def test_squash_merge_raises_when_the_head_does_not_match() -> None:
     actions, gh = adapter()
+    gh.route(PULL, served("pull-42-open.json"))
     gh.route(MERGE, http_error("merge-head-modified-409.json", 409))
 
     with pytest.raises(HeadMismatchError, match=f"PR head is not {HEAD}"):
         actions.merge(pr("merge"), squash=True, match_head_commit=HEAD)
 
-    assert gh.keys() == [MERGE]
+    assert gh.keys() == [PULL, MERGE]
 
 
 @pytest.mark.parametrize("head", [HEAD[:7], HEAD.upper(), HEAD + "a", "-f", ""])
@@ -1488,6 +1491,7 @@ def test_merge_and_fast_forward_wrappers_keep_gh_output_out_of_the_error(
     message: str,
 ) -> None:
     actions, gh = adapter()
+    gh.route(PULL, served("pull-42-open.json"))
     gh.route(MERGE if ship == "merge" else FF, response)
 
     with pytest.raises(error) as raised:
