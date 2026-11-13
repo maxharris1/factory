@@ -94,6 +94,7 @@ def test_canary_asks_for_poteto_mode_and_a_token_from_the_skill() -> None:
     assert "playbooks/orchestrate.md" in prompt
     assert "whole first bold passage" in prompt
     assert "exactly as written" in prompt
+    assert "without the ** markers" in prompt
     assert "claude-bot" in prompt
     assert "codex-bot" in prompt
     assert "cursor-bot" in prompt
@@ -220,6 +221,17 @@ def test_doctor_fails_when_reply_quotes_only_first_sentence(tmp_path: Path) -> N
     assert "claude: did not load the pinned version (token does not match the pin)" in result.stderr
 
 
+def test_doctor_fails_when_reply_keeps_the_bold_markers(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert run(["install-skills", "--home", str(home)]).returncode == 0
+    token = pinned_token(ROOT)
+    replies = tmp_path / "replies"
+    write_replies(replies, token, token_for={"claude": f"**{token}**"})
+    result = run(["doctor", "--home", str(home), "--responses", str(replies)])
+    assert result.returncode == 1
+    assert "claude: did not load the pinned version (token does not match the pin)" in result.stderr
+
+
 def test_doctor_fails_when_the_wrong_bot_starts_the_harness(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert run(["install-skills", "--home", str(home)]).returncode == 0
@@ -315,6 +327,17 @@ def test_bump_pin_does_not_write_a_commit_for_a_different_version(tmp_path: Path
         bump_pin(root, "b" * 40, "9.9.9")
     assert (root / "skills" / "skills.lock").read_text(encoding="utf-8") == before
     assert verify_pin(root) == []
+
+
+def test_bump_pin_refuses_a_wrapped_first_bold_passage(tmp_path: Path) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    playbook = root / "skills" / "pstack" / "skills" / "poteto-mode" / "playbooks" / "orchestrate.md"
+    playbook.write_text("**token\none** then **two**\n", encoding="utf-8")
+    message = "pinned poteto-mode first bold passage is not on one line"
+    with pytest.raises(ValueError, match=message):
+        bump_pin(root, "b" * 40, "0.15.36")
+    assert message in verify_pin(root)
 
 
 TOKEN_0_15_35 = (

@@ -53,7 +53,6 @@ OWNERS = {
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEYS = frozenset({"version", "commit", "token", "files"})
-_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
 _MARKER = ".orch-owned"
 _INSTALLER = "orch-install-skills"
 Mode = Literal["local", "cloud"]
@@ -208,7 +207,8 @@ def canary_prompt() -> str:
     return (
         "Name the skill you loaded: poteto-mode.\n"
         "Quote the whole first bold passage of the pinned poteto-mode playbook "
-        "playbooks/orchestrate.md, exactly as written, on one line.\n"
+        "playbooks/orchestrate.md, exactly as written but without the ** markers, "
+        "on one line.\n"
         "The owning bot starts this harness.\n"
         "Claude Bot writes started-by: claude-bot.\n"
         "Codex Bot writes started-by: codex-bot.\n"
@@ -486,11 +486,15 @@ def _canary_token(root: Path) -> str:
     path = root / SKILL_ROOT / "poteto-mode" / "playbooks" / "orchestrate.md"
     if path.is_symlink() or not path.is_file():
         raise ValueError("pinned poteto-mode playbook is missing")
-    match = _BOLD.search(path.read_text(encoding="utf-8"))
-    if match is None:
+    text = path.read_text(encoding="utf-8")
+    start = text.find("**")
+    if start < 0:
         raise ValueError("pinned poteto-mode has no version token")
-    token = match.group(1).strip()
-    if not token or "\n" in token:
+    end = text.find("**", start + 2)
+    if end < 0 or "\n" in text[start + 2 : end]:
+        raise ValueError("pinned poteto-mode first bold passage is not on one line")
+    token = text[start + 2 : end].strip()
+    if not token:
         raise ValueError("pinned poteto-mode has no version token")
     return token
 
