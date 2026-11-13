@@ -1605,10 +1605,11 @@ class Dispatcher:
         is the first for its round (#71).
 
         A verdict whose round already had one at or before the ready (a late
-        duplicate) answered an earlier ready. One with no round answers none:
-        T3 and T4 act on no such verdict.
+        duplicate) answered an earlier ready. One with no round, or a round
+        above the cap, answers none: T3 and T4 act on no such verdict.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        cap = self._effective_cap(ticket)
         before: set[int] = set()
         after: set[int] = set()
         for item in ticket.comments:
@@ -1619,6 +1620,7 @@ class Dispatcher:
             round_number = _round_number(fields.get("round"))
             if (
                 round_number is not None
+                and round_number <= cap
                 and fields.get("kind") == "verdict"
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None

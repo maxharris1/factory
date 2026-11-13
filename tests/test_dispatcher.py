@@ -5224,17 +5224,31 @@ def test_71_a_late_verdict_for_an_earlier_round_does_not_answer_the_next_ready(
     assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
 
 
-def test_71_a_late_roundless_verdict_does_not_answer_the_next_ready(tmp_path: Path) -> None:
-    """T3 and T4 act on no verdict without a round, so none answers a ready."""
+@pytest.mark.parametrize(
+    ("header", "outcome"),
+    [
+        (f"head={HEAD_71} verdict=REVISE", "stale-revise"),
+        (f"round=4/3 head={HEAD_71} verdict=REVISE", "rejected-over-cap"),
+        (f"round=4/3 head={HEAD_71} verdict=APPROVE", "rejected-over-cap"),
+    ],
+    ids=["roundless", "over-cap-revise", "over-cap-approve"],
+)
+def test_71_a_late_verdict_that_cannot_act_does_not_answer_the_next_ready(
+    tmp_path: Path, header: str, outcome: str
+) -> None:
+    """T3 and T4 act on no verdict without a round or above the cap, so none
+    answers a ready (Codex PR #112 r2 F1)."""
     late = comment(
-        "revise-roundless",
-        "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
-        f"head={HEAD_71} verdict=REVISE risk=high -->\nVerdict.\n",
+        "late",
+        f"<!-- orch:v1 kind=verdict from=codex-bot role=reviewer {header} risk=high -->"
+        "\nVerdict.\n",
         author="codex-login",
         created_at=150,
     )
     queue = _round_two_ready_then(tmp_path, late)
-    assert _outcomes(queue)["ready-2"] == "queued-review"
+    outcomes = _outcomes(queue)
+    assert outcomes["late"] == outcome
+    assert outcomes["ready-2"] == "queued-review"
     assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
 
 
