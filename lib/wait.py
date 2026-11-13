@@ -273,9 +273,13 @@ def claim_once(
     queue: JobQueue,
     recipient: str,
     pool: DevicePool | None,
+    *,
+    autostart: tuple[int, str | None] | None = None,
 ) -> tuple[Job, Placement | None] | None:
     try:
         if pool is not None:
+            if autostart is not None:
+                return pool.claim(recipient, autostart=autostart)
             return pool.claim(recipient)
         job = queue.claim(recipient)
         return None if job is None else (job, None)

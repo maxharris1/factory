@@ -659,9 +659,12 @@ job = os.environ["ORCH_JOB_ID"]
     "db": os.environ.get("ORCH_DB"),
 }))
 go = out / f"{job}.go"
+crash = out / f"{job}.crash"
 deadline = time.time() + 60
-while not go.exists() and time.time() < deadline:
+while not go.exists() and not crash.exists() and time.time() < deadline:
     time.sleep(0.05)
+if crash.exists():
+    sys.exit(1)  # a harness that dies before `orch job done`
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
                 os.environ["ORCH_JOB_BOT"], job, "--handoff", "c-" + job[:6]], check=True)
 """
@@ -948,3 +951,222 @@ def test_autostart_only_flags_need_autostart(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "need --autostart" in result.stderr
+
+
+# --- Codex PR #82 r1 F1.1: one fd, checked with fstat; a safe directory ------
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
+def test_a_harness_config_in_a_directory_others_can_write_is_refused(
+    tmp_path: Path, mode: int
+) -> None:
+    folder = tmp_path / "factory"
+    folder.mkdir()
+    path = write_config(folder / "waiter.yml", "bot: claude-bot\ncommand: [x]\n")
+    folder.chmod(mode)
+    try:
+        with pytest.raises(WaiterError, match="directory .* writable by group or others"):
+            load_harness_command(path, "claude-bot")
+    finally:
+        folder.chmod(0o700)
+
+
+def test_a_harness_config_in_a_private_directory_loads(tmp_path: Path) -> None:
+    folder = tmp_path / "factory"
+    folder.mkdir(mode=0o700)
+    path = write_config(folder / "waiter.yml", "bot: claude-bot\ncommand: [x, -p]\n")
+    assert load_harness_command(path, "claude-bot").command == ("x", "-p")
+
+
+def test_a_fifo_harness_config_is_refused_without_blocking(tmp_path: Path) -> None:
+    path = tmp_path / "waiter.yml"
+    os.mkfifo(path, 0o600)
+    with pytest.raises(WaiterError, match="regular file"):
+        load_harness_command(path, "claude-bot")
+
+
+def test_the_harness_config_is_checked_and_read_through_one_nofollow_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_config(tmp_path / "waiter.yml", "bot: claude-bot\ncommand: [x]\n")
+    opened: list[tuple[str, int, int]] = []
+    checked: list[int] = []
+    real_open, real_fstat = os.open, os.fstat
+
+    def spy_open(target, flags, *args, **kwargs):
+        fd = real_open(target, flags, *args, **kwargs)
+        opened.append((str(target), flags, fd))
+        return fd
+
+    def spy_fstat(fd):
+        checked.append(fd)
+        return real_fstat(fd)
+
+    def no_path_read(*_args, **_kwargs):
+        raise AssertionError("the config must be read from the checked fd")
+
+    monkeypatch.setattr(waiter_module.os, "open", spy_open)
+    monkeypatch.setattr(waiter_module.os, "fstat", spy_fstat)
+    monkeypatch.setattr(waiter_module.os, "lstat", no_path_read)
+    monkeypatch.setattr(Path, "read_text", no_path_read)
+    monkeypatch.setattr(Path, "read_bytes", no_path_read)
+    assert load_harness_command(path, "claude-bot").command == ("x",)
+    [(target, flags, fd)] = [item for item in opened if item[0] == str(path)]
+    assert flags & os.O_NOFOLLOW
+    assert checked == [fd]
+
+
+def test_a_harness_config_swapped_for_a_symlink_is_refused_as_a_symlink(tmp_path: Path) -> None:
+    real = write_config(tmp_path / "other.yml", "bot: claude-bot\ncommand: [evil]\n")
+    path = tmp_path / "waiter.yml"
+    path.symlink_to(real)
+    with pytest.raises(WaiterError, match="symlink"):
+        load_harness_command(path, "claude-bot")
+
+
+# --- Codex PR #82 r1 F1.5: a run that ends unfinished goes to T6 at once ----
+
+
+def _slot(db: Path, job_id: str) -> sqlite3.Row | None:
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        return connection.execute(
+            "SELECT * FROM device_slots WHERE job_id = ?", (job_id,)
+        ).fetchone()
+
+
+def test_a_run_that_exits_without_job_done_fails_the_job_within_one_step(
+    tmp_path: Path,
+) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    log: list[str] = []
+    waiter = make_waiter(tmp_path, queue, db, spawn, log=log)
+    assert waiter.step() == job_id
+    spawn.children[0].returncode = 1  # the harness died before `orch job done`
+
+    waiter.step()
+
+    assert state(db, job_id) == "failed"
+    with sqlite3.connect(db) as connection:
+        handled = connection.execute(
+            "SELECT failure_handled, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert handled == (0, None)  # left for the dispatcher's T6
+    assert _slot(db, job_id) is None
+    assert any("without orch job done" in line and "T6" in line for line in log)
+
+
+def test_a_run_whose_harness_finished_the_job_is_left_alone(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    waiter.step()
+    queue.finish(job_id, owner="claude", handoff_comment_id="c-77")
+    spawn.children[0].returncode = 0
+    waiter.step()
+    with sqlite3.connect(db) as connection:
+        row = connection.execute(
+            "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert row == ("done", "c-77")
+
+
+def test_a_job_another_live_runner_holds_is_not_failed(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = Waiter(
+        bot="claude-bot", queue=queue, pool=local_pool(queue),
+        harness=HarnessCommand(bot="claude-bot", command=("fake-harness",)),
+        context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=MACHINES,
+        orch=("python3", "/factory/bin/orch"), spawn=spawn, log=[].append,
+        environ={}, alive=lambda pid, _start: pid == 4242,
+    )
+    waiter.step()
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE device_slots SET runner_pid = 4242 WHERE job_id = ?", (job_id,))
+    spawn.children[0].returncode = 2  # this run was refused; pid 4242 runs it
+    waiter.step()
+    assert state(db, job_id) == "running"
+    assert _slot(db, job_id) is not None
+
+
+def test_end_to_end_a_harness_that_exits_1_without_done_fails_the_job_at_once(
+    autostart: dict,
+) -> None:
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None, timeout_seconds=3600)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    started = time.monotonic()
+    (autostart["harness_dir"] / f"{job_id}.crash").touch()
+    _wait_for(lambda: state(db, job_id) == "failed", 20, proc)
+    assert time.monotonic() - started < 20  # not the 60-minute timeout
+    _wait_for(lambda: job_id not in slots(db), 20, proc)
+    with sqlite3.connect(db) as connection:
+        assert connection.execute(
+            "SELECT handoff_comment_id, failure_handled FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone() == (None, 0)
+    assert proc.poll() is None  # the waiter keeps waiting
+
+
+# --- Codex PR #82 r1 F1.6: one waiter per bot, for its whole life -----------
+
+
+def _second_waiter(autostart: dict, tmp_path: Path, *extra: str) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
+    config = write_config(
+        tmp_path / "second.yml", f"bot: claude-bot\ncommand: [{autostart['harness']}]\n"
+    )
+    return subprocess.run(
+        [sys.executable, str(ORCH), "wait", "claude-bot", "--db", str(autostart["db"]),
+         "--machines", str(MACHINES), *extra, "--harness-config", str(config)]
+        if "--autostart" in extra else
+        [sys.executable, str(ORCH), "wait", "claude-bot", "--db", str(autostart["db"]),
+         "--machines", str(MACHINES)],
+        env=env, text=True, capture_output=True, timeout=30, check=False,
+    )
+
+
+def test_a_second_autostart_waiter_for_the_bot_is_refused(
+    autostart: dict, tmp_path: Path
+) -> None:
+    proc, db = autostart["proc"], autostart["db"]
+    lock = waiter_module.lock_path(db, "claude-bot")
+    _wait_for(lambda: lock.exists() and lock.read_text().strip() == str(proc.pid), 20, proc)
+    second = _second_waiter(autostart, tmp_path, "--autostart",
+                            "--state-dir", str(tmp_path / "state2"))
+    assert second.returncode == 2
+    assert f"another autostart waiter for claude-bot (pid {proc.pid})" in second.stderr
+    assert proc.poll() is None
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_the_waiter_lock_frees_when_the_waiter_dies_even_with_runs_alive(
+    autostart: dict, tmp_path: Path
+) -> None:
+    # `orch job run` children never inherit the lock (close-on-exec), so a
+    # killed waiter's restart is not blocked by the jobs it left running.
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    proc.kill()
+    proc.wait(10)
+    fd = waiter_module.hold_waiter_lock(db, "claude-bot")
+    os.close(fd)
+    assert state(db, job_id) == "running"
+
+
+def test_hold_waiter_lock_refuses_a_second_holder_in_process(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    fd = waiter_module.hold_waiter_lock(db, "claude-bot")
+    try:
+        with pytest.raises(WaiterError, match="another autostart waiter"):
+            waiter_module.hold_waiter_lock(db, "claude-bot")
+        # Per bot: codex-bot's waiter is unaffected.
+        os.close(waiter_module.hold_waiter_lock(db, "codex-bot"))
+    finally:
+        os.close(fd)
+    os.close(waiter_module.hold_waiter_lock(db, "claude-bot"))

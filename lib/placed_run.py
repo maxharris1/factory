@@ -4,7 +4,8 @@
 out holds one slot on one device. `orch job run` then:
 
 * refuses (exit 2, nothing started, slot kept) a job that holds no slot,
-  whose slot is for another bot user, whose device is no longer in
+  whose slot is for another bot user, that an autostart waiter claimed
+  when this process is not that waiter's own child (#80), whose device is no longer in
   machines.yml, that another live `orch job run` already runs, or whose
   earlier worker (left by a runner that died) is not confirmed gone: a
   live recorded pid on the box, or a remote check that does not answer
@@ -22,7 +23,9 @@ out holds one slot on one device. `orch job run` then:
   once the worker is confirmed gone: a local command has exited; a remote
   device answers that no process carries the start's worker tag and none
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
-  dispatcher's DeviceMonitor confirms it on a later poll.
+  dispatcher's DeviceMonitor confirms it on a later poll;
+* for an autostart job, fails the job for T6 (before releasing the slot)
+  when the command ended without `orch job done` (#80).
 """
 
 from __future__ import annotations
@@ -69,6 +72,7 @@ class PlacedRun:
     log: Log
     transport: Transport
     target: RemoteTarget | None = None
+    autostart: bool = False
     sleep: Callable[[float], None] = time.sleep
     alive: Callable[[int | None, str | None], bool] = pid_alive
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
@@ -161,6 +165,7 @@ def prepare(
     transport: Transport,
     alive: Callable[[int | None, str | None], bool] = pid_alive,
     pid: int | None = None,
+    parent_pid: int | None = None,
 ) -> PlacedRun:
     placement = pool.placement(job_id)
     if placement is None:
@@ -172,6 +177,17 @@ def prepare(
         raise PlacementError(
             f"job {job_id}'s slot is for {placement.os_user}, not {bot}"
         )
+    if placement.autostarted:
+        parent = os.getppid() if parent_pid is None else parent_pid
+        if parent != placement.autostart_pid or (
+            placement.autostart_start is not None
+            and process_start(parent) != placement.autostart_start
+        ):
+            raise PlacementError(
+                f"job {job_id} was claimed by {bot}'s autostart waiter "
+                f"(pid {placement.autostart_pid}), which starts it itself; a bot turn "
+                "must not run it, so nothing was started"
+            )
     device = config.device(placement.device)
     if device is None:
         raise PlacementError(
@@ -215,6 +231,7 @@ def prepare(
         log=log,
         transport=transport,
         target=target,
+        autostart=placement.autostarted,
         alive=alive,
     )
 

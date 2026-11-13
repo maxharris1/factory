@@ -24,7 +24,9 @@ F2-02 records on the slot row who runs the job: `runner_pid` and
 `worker_start` (its local command), `remote_started` (a remote start
 was attempted, so the device must confirm the worker gone) and
 `worker_tag` (the random tag every process of that remote start carries,
-lib/remote.py, so a check never trusts a stored process number). The
+lib/remote.py, so a check never trusts a stored process number). #80 adds
+`autostart_pid` and `autostart_start`: the autostart waiter that claimed
+the job, if one did. The
 `device_health` table holds each remote device's last successful SSH
 contact and when it began failing, for the 60-minute offline check.
 
@@ -51,6 +53,12 @@ _SLOT_COLUMNS = (
     ("worker_start", "TEXT"),
     ("remote_started", "INTEGER NOT NULL DEFAULT 0"),
     ("worker_tag", "TEXT"),
+    # #80: the autostart waiter (`orch wait <bot> --autostart`) that claimed
+    # the job, recorded in the claim's own transaction. Only that waiter's
+    # child may `orch job run` the job, and only that run's process tree
+    # may `orch job done` it, so a bot turn never runs or finishes it too.
+    ("autostart_pid", "INTEGER"),
+    ("autostart_start", "TEXT"),
 )
 
 
@@ -67,6 +75,12 @@ class Placement:
     worker_start: str | None = None
     remote_started: bool = False
     worker_tag: str | None = None
+    autostart_pid: int | None = None
+    autostart_start: str | None = None
+
+    @property
+    def autostarted(self) -> bool:
+        return self.autostart_pid is not None
 
 
 @dataclass(frozen=True)
@@ -159,7 +173,13 @@ class DevicePool:
         harness: str,
         *,
         excluded_job_ids: Collection[str] = (),
+        autostart: tuple[int, str | None] | None = None,
     ) -> tuple[Job, Placement] | None:
+        """Claim the oldest queued job for harness onto a free slot.
+
+        `autostart` is the claiming autostart waiter's (pid, start); it is
+        written on the slot in the same transaction as the claim.
+        """
         if harness not in HARNESSES:
             raise QueueError(f"{harness!r} is not a harness; only harness jobs hold slots")
         excluded = frozenset(excluded_job_ids)
@@ -202,12 +222,16 @@ class DevicePool:
             if changed != 1:
                 raise QueueError(f"job {row['id']} changed during claim")
             os_user = device.harnesses[harness]
+            claimer_pid, claimer_start = autostart if autostart is not None else (None, None)
             connection.execute(
                 f"""
-                INSERT INTO {SLOTS_TABLE} (job_id, device, harness, os_user, placed_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO {SLOTS_TABLE} (
+                    job_id, device, harness, os_user, placed_at,
+                    autostart_pid, autostart_start
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (row["id"], device.name, harness, os_user, now),
+                (row["id"], device.name, harness, os_user, now, claimer_pid, claimer_start),
             )
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
@@ -221,6 +245,8 @@ class DevicePool:
             harness=harness,
             os_user=os_user,
             placed_at=now,
+            autostart_pid=claimer_pid,
+            autostart_start=claimer_start,
         )
 
     def release(self, job_id: str, *, owner: str) -> bool:
@@ -279,7 +305,10 @@ class DevicePool:
                 and int(other) != pid
                 and alive(int(other), _text(row["runner_start"]))
             ):
-                raise QueueError(f"job {job_id} is already run by pid {other}")
+                raise QueueError(
+                    f"job {job_id} is already run by pid {other} (a live orch job run); "
+                    "a second run of a running job is refused and nothing was started"
+                )
 
         self._update_slot(
             job_id,
@@ -447,6 +476,8 @@ def _placement(row: sqlite3.Row) -> Placement:
         worker_start=_text(row["worker_start"]),
         remote_started=bool(row["remote_started"]),
         worker_tag=_text(row["worker_tag"]),
+        autostart_pid=_int(row["autostart_pid"]),
+        autostart_start=_text(row["autostart_start"]),
     )
 
 

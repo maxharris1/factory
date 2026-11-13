@@ -2681,7 +2681,9 @@ def test_t3_duplicate_revise_in_fixing_is_stale(tmp_path: Path) -> None:
             """
         ).fetchone()[0]
     assert tuple(row) == (1, "fixing")
-    assert outcomes["verdict-duplicate"] == "stale-revise"
+    # #80 (one verdict per job): an identical repeat is a duplicate, not a
+    # stale verdict, so it wakes no one either.
+    assert outcomes["verdict-duplicate"] == "duplicate-verdict"
     assert fix_count == 1
 
 
@@ -2723,7 +2725,9 @@ def test_p4b_late_revise_for_the_previous_round_is_stale(tmp_path: Path) -> None
             WHERE repo = 'owner/repo' AND ticket_id = '42' AND action = 'fix'
             """
         ).fetchone()[0]
-    assert outcome == "stale-revise"
+    # The late comment repeats the handled round-1 REVISE word for word, so
+    # since #80 it is recorded as a duplicate (it was "stale-revise").
+    assert outcome == "duplicate-verdict"
     assert fix_count == 1
 
 
