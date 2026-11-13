@@ -1,0 +1,27 @@
+# Factory waiter for one harness bot (issue #80): `orch wait <bot> --autostart`
+# claims that bot's jobs and starts each under `orch job run`, then waits
+# again. Instance name = the bot: orch-waiter@claude-bot, orch-waiter@codex-bot,
+# orch-waiter@cursor-bot. Install it as a user unit of that bot's own user,
+# which holds that bot's harness login; the harness command is in
+# ~/.config/factory/waiter-<bot>.yml (config/waiter.example.yml).
+#
+# Restart=always brings a killed or crashed waiter back by itself.
+# KillMode=process: stopping or restarting the waiter never kills a running
+# job; each `orch job run` runs in its own session and keeps its heartbeat.
+#
+# Nothing in this repository installs, enables or starts this unit.
+[Unit]
+Description=Factory waiter for %i (starts claimed jobs under orch job run)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/factory
+EnvironmentFile=-%h/.config/factory/waiter.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/orch wait %i --autostart
+Restart=always
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=default.target

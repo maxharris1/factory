@@ -496,6 +496,13 @@ class Dispatcher:
                     handled, outcome = self._t2(ticket, comment, fields)
                 elif kind == "verdict":
                     verdict = fields["verdict"]
+                    if verdict in ("REVISE", "APPROVE") and self._duplicate_verdict(
+                        ticket, comment, fields, comments
+                    ):
+                        # One verdict per review job (#80): a repeat of a
+                        # handled verdict starts no job, ship or wake.
+                        self._mark_handled(ticket, comment.id, "duplicate-verdict")
+                        continue
                     if verdict == "REVISE":
                         handled, outcome = self._t3(ticket, comment, fields)
                     elif verdict == "APPROVE":
@@ -2909,6 +2916,57 @@ class Dispatcher:
             head=ticket.current_head,
         )
 
+    def _duplicate_verdict(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+        comments: Sequence[Comment],
+    ) -> bool:
+        """An earlier verdict that was accepted and acted on says the same thing.
+
+        Same author, `from`, `role`, head (as a prefix match, as the rows
+        compare heads), round and verdict. The first one already took its
+        action (a fix job, a ship, a wake); a repeat must take none.
+
+        Codex PR #82 r2 F2.3: only an earlier verdict whose recorded outcome
+        is in ACTED_VERDICT_OUTCOMES counts. A rejected (wrong role or
+        author), stale, refused or failed one took no action, so it never
+        suppresses a later verdict, such as its corrected repost.
+        """
+        head = fields.get("head") or ""
+        for earlier in comments:
+            if earlier.id == comment.id:
+                return False
+            if earlier.author.lower() != comment.author.lower():
+                continue
+            try:
+                other = parse_comment(earlier.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                other.get("kind") == "verdict"
+                and other.get("from") == fields.get("from")
+                and other.get("role") == fields.get("role")
+                and other.get("verdict") == fields.get("verdict")
+                and other.get("round") == fields.get("round")
+                and _matching_head(other.get("head") or "", head) is not None
+                and _acted_verdict(self._handled_outcome(ticket, earlier.id))
+            ):
+                return True
+        return False
+
+    def _handled_outcome(self, ticket: TrackedTicket, comment_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT outcome FROM handled_comments
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id),
+            ).fetchone()
+        return None if row is None else str(row["outcome"])
+
     def _is_handled(self, ticket: TrackedTicket, comment_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -3585,6 +3643,31 @@ def _grok_logical_key(job: Job) -> str:
     return (
         f"{_scope(request.repo, request.ticket_id)}"
         f"\x1f{request.action}\x1f{request.source_comment_id}"
+    )
+
+
+# Verdict outcomes that took the verdict's action (#80, Codex PR #82 r2
+# F2.3): a fix job queued, the review capped, a re-review queued, or a ship
+# begun or done. Only these make a later identical verdict a duplicate.
+ACTED_VERDICT_OUTCOMES = frozenset(
+    {
+        "queued-review-fix",
+        "capped-review",
+        "queued-patch-review",
+        "merged",
+        "merge-confirmed",
+        "handed-off",
+        "waiting-external",
+        "ship-unconfirmed",
+        "ship-failed",
+    }
+)
+
+
+def _acted_verdict(outcome: str | None) -> bool:
+    return outcome is not None and (
+        outcome in ACTED_VERDICT_OUTCOMES
+        or outcome.startswith("ship-already-completed-")
     )
 
 
