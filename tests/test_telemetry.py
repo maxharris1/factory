@@ -96,6 +96,36 @@ def test_codex_exec_gets_json_right_after_exec() -> None:
         assert harness_argv(command) == (command, "codex")
 
 
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        (
+            ["codex", "--profile", "exec", "exec", "--help"],
+            ["codex", "--profile", "exec", "exec", "--json", "--help"],
+        ),
+        (
+            ["codex", "-p", "exec", "-m", "exec", "e", "-"],
+            ["codex", "-p", "exec", "-m", "exec", "e", "--json", "-"],
+        ),
+        (
+            ["codex", "-c", "exec", "--profile=exec", "exec", "-"],
+            ["codex", "-c", "exec", "--profile=exec", "exec", "--json", "-"],
+        ),
+        (
+            ["codex", "exec", "-", "--", "--json"],
+            ["codex", "exec", "--json", "-", "--", "--json"],
+        ),
+        (["codex", "--profile", "exec", "resume"], ["codex", "--profile", "exec", "resume"]),
+        (["codex", "-m", "exec"], ["codex", "-m", "exec"]),
+        (["codex", "review", "exec"], ["codex", "review", "exec"]),
+    ],
+)
+def test_codex_json_goes_after_the_exec_subcommand_never_an_option_value(
+    command: list[str], expected: list[str]
+) -> None:
+    assert harness_argv(command) == (expected, "codex")
+
+
 def test_any_other_command_runs_unchanged() -> None:
     for command in ([sys.executable, "-c", "pass"], ["cursor-agent", "-p"], []):
         assert harness_argv(command) == (command, None)

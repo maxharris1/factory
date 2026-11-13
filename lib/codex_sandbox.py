@@ -108,7 +108,7 @@ def with_state_dir(
     """
     exists = is_dir or _is_dir
     argv = list(command)
-    exec_at = _exec_index(argv)
+    exec_at = exec_index(argv)
     if exec_at is None:
         return argv
     options = _options(argv)
@@ -192,7 +192,7 @@ def for_device(command: Sequence[str]) -> DeviceCommand:
     )
 
 
-def _exec_index(argv: list[str]) -> int | None:
+def exec_index(argv: list[str]) -> int | None:
     """The index of the `exec` subcommand word, if argv is `codex ... exec ...`."""
     if not argv or Path(argv[0]).name != "codex":
         return None

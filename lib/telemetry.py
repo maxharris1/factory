@@ -93,6 +93,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import IO, Any
 
+from lib.codex_sandbox import exec_index
 from lib.job_token import PROOF_ENV
 from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 
@@ -205,8 +206,10 @@ def harness_argv(command: Sequence[str]) -> tuple[list[str], str | None]:
 
     Only constants are added. `claude` with `-p`/`--print` and no
     `--output-format` gets `--output-format stream-json` (and `--verbose`,
-    which stream-json needs with --print); `codex ... exec` with no `--json`
-    gets `--json` right after `exec`. Anything else is returned unchanged.
+    which stream-json needs with --print); `codex ... exec` (or `e`) with no
+    `--json` gets `--json` right after the subcommand word, found by skipping
+    option values (`codex --profile exec exec` names its subcommand second).
+    Anything else is returned unchanged.
     """
     argv = list(command)
     if not argv:
@@ -223,10 +226,9 @@ def harness_argv(command: Sequence[str]) -> tuple[list[str], str | None]:
             extra.append("--verbose")
         return [argv[0], *extra, *rest], "claude"
     if name == "codex":
-        if "exec" not in rest:
-            return argv, "codex"
-        index = argv.index("exec", 1)
-        if "--" in argv[1:index] or "--json" in rest or "--experimental-json" in rest:
+        index = exec_index(argv)
+        options = rest[: rest.index("--")] if "--" in rest else rest
+        if index is None or "--json" in options or "--experimental-json" in options:
             return argv, "codex"
         return [*argv[: index + 1], "--json", *argv[index + 1 :]], "codex"
     return argv, None
