@@ -71,7 +71,28 @@ _PROJECT_KEYS = {
     "grok_bot",
     "linear_ready_for_review",
     "ready_starts_review",
+    "intake",
 }
+_INTAKE_KEYS = {"label", "linear_state", "trusted"}
+DEFAULT_INTAKE_LABEL = "factory:ready"
+_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
+_LINEAR_STATE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}$")
+_TRUSTED_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}(?:\[bot\])?$")
+
+
+@dataclass(frozen=True)
+class Intake:
+    """How a project's tickets enter the factory by themselves (issue #85).
+
+    A GitHub project names the label (default factory:ready); a Linear
+    project names the workflow state. trusted lists who may apply it (GitHub
+    logins or Linear user ids); None means the keys of trusted_logins or
+    trusted_linear_users.
+    """
+
+    label: str | None = None
+    linear_state: str | None = None
+    trusted: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +106,8 @@ class Project:
     # A trusted ready from factory.md's builder starts review even with no
     # factory-queued build job (PRs built outside the queue). Default off.
     ready_starts_review: bool = False
+    # Backlog feeder intake (issue #85). None: the feeder ignores the project.
+    intake: Intake | None = None
 
 
 @dataclass(frozen=True)
@@ -396,6 +419,12 @@ def _projects(
             )
             ok = False
             continue
+        intake = None
+        if "intake" in item:
+            intake = _intake(item["intake"], index, linear_project_id, findings)
+            if intake is None:
+                ok = False
+                continue
         projects.append(
             Project(
                 repo=repo,
@@ -405,11 +434,73 @@ def _projects(
                 grok_bot=grok_bot,
                 linear_ready_for_review=linear_ready,
                 ready_starts_review=ready_starts_review,
+                intake=intake,
             )
         )
     if not ok:
         return None
     return tuple(projects)
+
+
+def _intake(
+    value: object,
+    index: int,
+    linear_project_id: object,
+    findings: list[Finding],
+) -> Intake | None:
+    where = f"projects[{index}].intake"
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        findings.append(Finding("error", f"{where} must be a mapping"))
+        return None
+    ok = True
+    for key in sorted(value, key=str):
+        if key not in _INTAKE_KEYS:
+            findings.append(Finding("error", f"unknown field '{where}.{key}'"))
+            ok = False
+    linear = linear_project_id is not None
+    label = value.get("label")
+    state = value.get("linear_state")
+    if linear:
+        if "label" in value:
+            findings.append(
+                Finding("error", f"{where}.label is for GitHub projects; a Linear project names linear_state")
+            )
+            ok = False
+        if not isinstance(state, str) or _LINEAR_STATE.fullmatch(state) is None:
+            findings.append(
+                Finding("error", f"{where}.linear_state must name the Linear workflow state")
+            )
+            ok = False
+    else:
+        if "linear_state" in value:
+            findings.append(Finding("error", f"{where}.linear_state needs linear_project_id"))
+            ok = False
+        if label is None:
+            label = DEFAULT_INTAKE_LABEL
+        if not isinstance(label, str) or _LABEL.fullmatch(label) is None:
+            findings.append(Finding("error", f"{where}.label must be a GitHub label name"))
+            ok = False
+    trusted: frozenset[str] | None = None
+    if "trusted" in value:
+        raw = value["trusted"]
+        if not isinstance(raw, list) or not raw or not all(
+            isinstance(entry, str) and _TRUSTED_ID.fullmatch(entry) for entry in raw
+        ):
+            findings.append(
+                Finding("error", f"{where}.trusted must be a list of logins or Linear user ids")
+            )
+            ok = False
+        else:
+            trusted = frozenset(raw)
+    if not ok:
+        return None
+    return Intake(
+        label=None if linear else label,
+        linear_state=state if linear else None,
+        trusted=trusted,
+    )
 
 
 def _linear(data: dict, findings: list[Finding]) -> LinearConfig | None:

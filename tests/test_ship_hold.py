@@ -1174,3 +1174,38 @@ def test_a_failed_hold_read_is_recorded_and_left_unread() -> None:
     assert [(repo, ticket_id) for repo, ticket_id, _error in errors] == [
         ("acme/widgets", "12")
     ]
+
+
+# --- #86 with #83: the merge re-drive honours the hold -------------------
+
+
+def test_a_merge_re_drive_waits_while_the_hold_applies_again(tmp_path: Path) -> None:
+    """The OK cleared the hold, the merge failed retryably, then the label
+    came back: the one re-drive must not merge until the hold clears."""
+    from lib.dispatcher import ShipError
+
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    error = ShipError("Pull Request is not mergeable (HTTP 405)")
+    error.retryable = True
+    actions.merge_error = error
+    cleared = (approve(), ok(HEAD))
+    dispatcher.process(snapshot(*cleared))
+    assert actions.merges == []
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT status, redrive FROM ship_intents WHERE ticket_id = '42'"
+        ).fetchone()
+    assert (row["status"], row["redrive"]) == ("failed", "eligible")
+
+    actions.merge_error = None
+    relabeled = (labeled("grok-login", "e5"),)
+    for _ in range(2):
+        dispatcher.process(snapshot(*cleared, labels=("factory:hold",), events=relabeled))
+    assert actions.merges == []
+    unread = snapshot(*cleared, labels=None)
+    dispatcher.process(unread)
+    assert actions.merges == []
+
+    dispatcher.process(snapshot(*cleared))
+    assert actions.merges == [(True, HEAD)]

@@ -11,17 +11,26 @@ Every read goes to GitHub's REST API at call time. There is no local
 clone and no cache.
 
 - is_merged: GET pulls/<n>. head.sha must be a full SHA, open or merged.
+  A 5xx or timeout on the read is raised with retryable=True, as for merge,
+  so a ship's merge preflight gets the same one re-drive.
   True only when merged and head.sha is head.
 - branch_tip: GET git/ref/heads/<branch>. The full lowercase SHA, or raise.
 - fast_forward: PATCH git/refs/heads/<branch> with sha=<head> and
   force=false. GitHub's 422 "not a fast forward" raises
   NotFastForwardError. It never sends force=true, merges or squashes.
-- merge: PUT pulls/<n>/merge with merge_method=squash and sha=<head>,
-  the API form of --squash --match-head-commit. GitHub's 409 head
-  mismatch raises HeadMismatchError.
-- list_comments and ci_status: GET with --paginate. ci_status is success
-  only with at least one successful check run or a success commit
-  status, and nothing failing or pending.
+- merge: first the handoff's mark-ready (GET pulls/<n>, and only for a
+  draft the GraphQL markPullRequestReadyForReview; issue #83: GitHub
+  refuses to merge a draft with HTTP 405), then PUT pulls/<n>/merge with
+  merge_method=squash and sha=<head>, the API form of --squash
+  --match-head-commit. GitHub's 409 head mismatch raises
+  HeadMismatchError. A failure that may pass on a later try (405 not
+  mergeable, a 5xx, a timeout, or a mark-ready that did not land) is
+  raised with retryable=True, so the dispatcher re-drives it once.
+- list_comments and ci_status: GET with --paginate. ci_status counts only
+  the latest attempt of each check (issue #84: a rerun at the same head
+  replaces the attempt it reran) and is success only with at least one
+  successful check run or a success commit status, and nothing failing or
+  pending.
 - set_state: the orch:state/<state> label. Linear and Aut0 get no labels.
 - handoff: GET pulls/<n>, then, only for a draft, the GraphQL mutation
   markPullRequestReadyForReview on the pull's node_id (`gh api -X POST
@@ -197,9 +206,12 @@ class GitHubReviewActions:
 
     def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
         head = _sha(head, "head")
-        pull = _object(
-            self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
-        )
+        try:
+            read = self._json(f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}")
+        except GitHubAdapterError as exc:
+            exc.retryable = _transient(exc)
+            raise
+        pull = _object(read)
         merged = pull.get("merged")
         if not isinstance(merged, bool):
             raise GitHubAdapterError("pull request has no boolean merged field")
@@ -218,6 +230,14 @@ class GitHubReviewActions:
         head = _sha(match_head_commit, "match_head_commit")
         endpoint = f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}/merge"
         try:
+            self._mark_ready(ticket, head)
+        except HeadMismatchError:
+            raise
+        except GitHubAdapterError as exc:
+            # Nothing merged; the mark-ready read or write did not land.
+            exc.retryable = not _refusal(exc)
+            raise
+        try:
             result = _object(
                 self._json(
                     "-X",
@@ -230,10 +250,12 @@ class GitHubReviewActions:
                 )
             )
         except GitHubAdapterError as exc:
-            if _status(exc) == 409:
+            status = _status(exc)
+            if status == 409:
                 raise HeadMismatchError(
                     f"PR head is not {head}: {exc.safe_detail}"
                 ) from exc
+            exc.retryable = status == 405 or _transient(exc)
             raise
         if result.get("merged") is not True:
             raise GitHubAdapterError(f"squash merge of {head} was not confirmed")
@@ -452,6 +474,7 @@ class GitHubReviewActions:
         total = _count(combined.get("total_count"), "combined status")
         if counted != {len(runs)}:
             return CIResult("pending")
+        runs = _latest_attempts(runs)
         failed: list[str] = []
         pending = False
         passed = False
@@ -649,6 +672,72 @@ class LinearReviewActions(GitHubReviewActions):
         return None
 
 
+def _latest_attempts(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only the latest attempt of each check (issue #84).
+
+    A rerun at the same head adds a new check run with the same name, from
+    the same app, in the same workflow run. Only such a rerun supersedes an
+    earlier attempt; the latest is the one that started last (then the
+    higher id). Two workflows that share a job name are distinct checks
+    (#87 F1.1), and a run with no workflow identity supersedes nothing, so a
+    failure there always keeps the merge gate.
+    """
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for run in runs:
+        app = _object(run.get("app")) if isinstance(run.get("app"), dict) else {}
+        key = (
+            str(app.get("id", app.get("slug", ""))),
+            _workflow_identity(run),
+            str(run.get("name")),
+        )
+        current = latest.get(key)
+        if current is None or _attempt_order(run) > _attempt_order(current):
+            latest[key] = run
+    return list(latest.values())
+
+
+_ACTIONS_RUN = re.compile(r"/actions/runs/([0-9]+)(?:/|$)")
+
+
+def _workflow_identity(run: dict[str, Any]) -> str:
+    """The workflow run a check run belongs to, stable across its reruns.
+
+    GitHub Actions names the workflow run in details_url
+    (`.../actions/runs/<run id>/job/<job id>`), and a rerun keeps the run id.
+    Any other app's checks are grouped by check suite. With neither, the
+    check run's own id: it is its own check and supersedes nothing.
+    """
+    details = run.get("details_url")
+    if isinstance(details, str):
+        match = _ACTIONS_RUN.search(details)
+        if match is not None:
+            return f"actions-run:{match.group(1)}"
+    suite = run.get("check_suite")
+    if isinstance(suite, dict):
+        suite_id = suite.get("id")
+        if isinstance(suite_id, int) and not isinstance(suite_id, bool):
+            return f"suite:{suite_id}"
+    run_id = run.get("id")
+    if isinstance(run_id, int) and not isinstance(run_id, bool):
+        return f"check-run:{run_id}"
+    return f"unidentified:{id(run)}"
+
+
+def _attempt_order(run: dict[str, Any]) -> tuple[str, int]:
+    started = run.get("started_at")
+    run_id = run.get("id")
+    return (
+        started if isinstance(started, str) else "",
+        run_id if isinstance(run_id, int) and not isinstance(run_id, bool) else -1,
+    )
+
+
+def _refusal(exc: GitHubAdapterError) -> bool:
+    """A mark-ready failure that a retry cannot fix: merged, or not open."""
+    text = str(exc)
+    return "merged pull request" in text or "not open" in text
+
+
 def _route(args: Sequence[str]) -> str:
     """METHOD and API route for an error detail: no host, query or values."""
     method = "GET"
@@ -790,6 +879,12 @@ def _labels(pages: list[object]) -> list[str]:
                 raise GitHubAdapterError("label has no name")
             names.append(name)
     return names
+
+
+def _transient(exc: GitHubAdapterError) -> bool:
+    """A failure a later try may pass: a 5xx, a timeout, or no HTTP status at all."""
+    status = _status(exc)
+    return status is None or status >= 500
 
 
 def _status(exc: GitHubAdapterError) -> int | None:

@@ -361,9 +361,10 @@ def test_factory_md_context_reaches_the_brief(tmp_path: Path) -> None:
     assert "Never apply migrations" in text
 
 
-def test_the_autostart_waiter_claims_box_slots_only(tmp_path: Path) -> None:
-    # A remote job cannot run `orch job done` on the box, so the autostart
-    # waiter leaves remote devices to a bot running `orch wait` by hand.
+def test_the_autostart_waiter_claims_remote_slots_too(tmp_path: Path) -> None:
+    # Issue #85: a remote job's harness ends with an ORCH-HANDOFF line and the
+    # waiter runs `orch job done` on the box, so remote devices are claimed
+    # too (tests/test_waiter_remote.py covers the remote run itself).
     machines = tmp_path / "machines.yml"
     machines.write_text(
         "devices:\n"
@@ -378,11 +379,13 @@ def test_the_autostart_waiter_claims_box_slots_only(tmp_path: Path) -> None:
     first = enqueue(queue, "a")
     second = enqueue(queue, "b")
     spawn = FakeSpawn()
+    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    assert config is not None, findings
     waiter = make_waiter(tmp_path, queue, db, spawn, machines=machines)
+    waiter.pool = DevicePool(queue, config)
     assert waiter.step() == first
-    assert waiter.step() is None
-    assert state(db, second) == "queued"
-    assert slots(db) == {first: "box"}
+    assert waiter.step() == second
+    assert slots(db) == {first: "pc", second: "pc"}  # least loaded: pc has 3 free
 
 
 def test_serve_runs_until_stopped_and_leaves_running_jobs_alone(tmp_path: Path) -> None:
@@ -440,7 +443,10 @@ def test_no_job_field_reaches_the_argv_or_the_environment(tmp_path: Path) -> Non
         )
         started = waiter.step()
         assert started is not None
-        # What `orch job run` does once its command ends: free the box slot.
+        # The harness runs `orch job done`, then `orch job run` frees the box
+        # slot once its command ends. (A running job with no slot would still
+        # count on the box: issue #90.)
+        queue.finish(started, owner="claude", handoff_comment_id="1")
         waiter.pool.release(started, owner="claude")
     assert len(spawn.calls) == len(HOSTILE)
     for (argv, kwargs), value in zip(spawn.calls, HOSTILE):
@@ -922,7 +928,8 @@ def test_spec_states_the_new_harness_rule_and_keeps_the_poller_rule() -> None:
     assert "The dispatcher and `orch poll` exec no harness" in plan
 
 
-def test_autostart_refuses_machines_without_a_box(tmp_path: Path) -> None:
+def test_autostart_runs_with_only_remote_devices(tmp_path: Path) -> None:
+    # Issue #85: the box is no longer required; a remote-only pool is served.
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=time.time)
     config = write_config(tmp_path / "waiter.yml", "bot: claude-bot\ncommand: [x]\n")
@@ -935,13 +942,25 @@ def test_autostart_refuses_machines_without_a_box(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
-    result = subprocess.run(
+    proc = subprocess.Popen(
         [sys.executable, str(ORCH), "wait", "claude-bot", "--autostart", "--db", str(db),
-         "--machines", str(machines), "--harness-config", str(config)],
-        env=env, text=True, capture_output=True, timeout=30, check=False,
+         "--machines", str(machines), "--harness-config", str(config),
+         "--state-dir", str(tmp_path / "state"), "--orch", str(tmp_path / "missing.yml")],
+        env=env, text=True, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
     )
-    assert result.returncode == 2
-    assert "no local device" in result.stderr
+    try:
+        seen = ""
+        deadline = time.monotonic() + 20
+        while "waiting for claude-bot jobs" not in seen and time.monotonic() < deadline:
+            line = proc.stderr.readline()
+            if not line:
+                break
+            seen += line
+        assert "waiting for claude-bot jobs" in seen, seen
+    finally:
+        proc.terminate()
+        proc.wait(timeout=20)
+    assert proc.returncode == 0
 
 
 def test_autostart_only_flags_need_autostart(tmp_path: Path) -> None:
