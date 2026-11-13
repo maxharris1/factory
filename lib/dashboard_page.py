@@ -417,29 +417,50 @@ SCRIPT = r"""
     if (badge) badge.className = 'badge' + (total ? '' : ' clear');
   }
 
-  // #92: a component's state ages with the snapshot, so a snapshot that
-  // stops changing (its publisher died) never keeps showing UP.
+  // #92: a snapshot vouches for the states it observed until its next
+  // publication is overdue (stale_beats publication intervals; a one-off
+  // snapshot vouches for none). Past that, a component whose own thresholds
+  // have run out is unknown, not down: the page cannot see it. Only the
+  // dashboard writer, whose beats are the publications, ages to stale and
+  // down; with no writer row, the overdue snapshot is one attention item.
   function agedHealth(d) {
     var h = d.health || {};
     var t = h.thresholds || {};
     var staleBeats = t.stale_beats || 3;
     var downBeats = t.down_beats || 8;
+    var age = since();
+    var vouched = age <= staleBeats * (Number(h.publish_seconds) || 0);
     var extra = [];
+    var writer = false;
+    var unknown = false;
+    var waiterUnknown = false;
     var rows = (h.components || []).map(function (c) {
+      var isWriter = c.component === 'dashboard';
+      writer = writer || isWriter;
       var base = c.last_seen_age_seconds;
-      if (c.state === 'down' || base === null || base === undefined) return c;
-      var age = base + since();
+      if (vouched || c.state === 'down' || base === null || base === undefined) return c;
+      var seen = base + age;
       var interval = Math.max(Number(c.interval_seconds) || 15, 1);
-      var state = age > downBeats * interval ? 'down' : age > staleBeats * interval ? 'stale' : c.state;
+      var state = seen > downBeats * interval ? 'down' : seen > staleBeats * interval ? 'stale' : c.state;
       if (state === c.state) return c;
-      var reason = 'no heartbeat for ' + dur(age);
+      if (!isWriter) {
+        unknown = true;
+        waiterUnknown = waiterUnknown || c.component === 'waiter';
+        return Object.assign({}, c, {state: 'unknown', reason: 'no snapshot for ' + dur(age)});
+      }
+      var reason = 'no heartbeat for ' + dur(seen);
       if (state === 'down' && c.configured !== false) {
         extra.push({kind: 'down', repo: '', ticket_id: '', component: c.label,
                     link: 'health.html#' + c.anchor, detail: 'down (' + reason + ')'});
       }
       return Object.assign({}, c, {state: state, reason: reason});
     });
-    return {rows: rows, extra: extra, key: rows.map(function (c) { return c.state; }).join(',')};
+    if (unknown && !writer) {
+      extra.push({kind: 'health', repo: '', ticket_id: '', component: 'health snapshot',
+                  link: 'health.html#components', detail: 'unknown: no snapshot for ' + dur(age)});
+    }
+    return {rows: rows, extra: extra, waiterUnknown: waiterUnknown, age: age,
+            key: rows.map(function (c) { return c.state; }).join(',')};
   }
 
   // --- main page: status, lanes and slots, the queue rail ------------------
@@ -1072,7 +1093,8 @@ SCRIPT = r"""
 
   // --- health page (#92) -------------------------------------------------------
 
-  var HEALTH_STATE = {up: ['UP', 'ok'], stale: ['STALE', 'warn'], down: ['DOWN', 'bad']};
+  var HEALTH_STATE = {up: ['UP', 'ok'], stale: ['STALE', 'warn'], down: ['DOWN', 'bad'],
+                      unknown: ['UNKNOWN', 'muted']};
   function renderComponents(d) {
     var h = d.health || {known: false, components: []};
     var rows = agedHealth(d).rows;
@@ -1105,7 +1127,7 @@ SCRIPT = r"""
     var t = h.thresholds || {};
     add(root, el('p', 'muted', 'up: a beat within ' + (t.stale_beats || 3) + ' intervals (' + (t.beat_seconds || 15) +
       ' s each; device probes every ' + (t.probe_seconds || 60) + ' s) · stale: within ' + (t.down_beats || 8) +
-      ' · down: older, stopped or never seen'));
+      ' · down: older, stopped or never seen · unknown: this snapshot is too old to tell'));
   }
 
   function renderNoWaiter(d) {
@@ -1113,7 +1135,13 @@ SCRIPT = r"""
     var rows = h.no_waiter || [];
     var root = panel('no-waiter', 'Queued jobs with no waiter', rows.length ? rows.length + ' harnesses' : 'none');
     if (!root) return;
-    if (!rows.length) { add(root, el('p', 'empty', h.known ? 'every queued job has a live waiter' : 'unknown until a component heartbeats')); return; }
+    if (!rows.length) {
+      var aged = agedHealth(d);
+      add(root, el('p', 'empty', !h.known ? 'unknown until a component heartbeats'
+        : aged.waiterUnknown ? 'unknown: no snapshot for ' + dur(aged.age)
+        : 'every queued job has a live waiter'));
+      return;
+    }
     var ul = add(root, el('ul', 'feed'));
     rows.forEach(function (n) {
       var li = add(ul, el('li'));

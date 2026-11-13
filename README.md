@@ -871,7 +871,8 @@ autostart waiter, the poller, the listener and its tunnel stopped, which is
 down at once; a plain `orch wait` removes its rows when it exits, since it
 exits by design after a claim. A device or tunnel whose latest check failed
 is at least stale. Each (component, device, bot) shows once, as the best
-of its processes' rows. Once any heartbeat exists, every expected component
+of its processes' rows; a device probe or tunnel check shows its newest
+check, whichever process made it. Once any heartbeat exists, every expected component
 with no row is shown down (`never seen`, or `never reached` for a probe):
 the poller; each bot's waiter on some device `machines.yml` makes eligible
 for its harness, and each probed device; the Linear listener and its tunnel
@@ -881,10 +882,17 @@ device) is listed as `not configured` and needs no attention. A queued
 harness job is flagged **no waiter for <harness>** when no up or stale
 waiter for its bot runs on a device `machines.yml` makes eligible for the
 harness. `orch health forget` removes a retired component's rows (a disabled
-device's probe row goes by itself). The dashboard's page ages each state
-with its snapshot, so a snapshot that stops changing (its publisher died)
-turns its components stale and down on schedule, with the needs-attention
-count.
+device's probe row goes by itself). A pushed snapshot carries how often its
+writer publishes (`health.publish_seconds`: the push loop's interval,
+`every_minutes`, or the poll cycle when the push is live or unscheduled),
+and the page keeps every state the snapshot observed until 3 of those
+intervals pass. After that the page cannot see the components: one past its
+own thresholds shows **unknown**, not down, and the "every queued job has a
+live waiter" line becomes unknown too. Only the dashboard writer's own row
+ages on to stale and down, so a publisher that died is one needs-attention
+item. A one-off snapshot (`orch dashboard snapshot`) vouches for nothing:
+its components turn unknown on their own thresholds, and the old snapshot is
+one needs-attention item.
 
 ## Dashboard
 

@@ -43,16 +43,16 @@ stale after 45 seconds and down after 2 minutes; a probe (60 seconds) is
 stale after 3 minutes and down after 8.
 
 `build_report` shows one entry per (component, device, bot), the best of
-its processes' rows, and adds every expected component (`expected`: the
-poller; each bot's waiter on some eligible device and each probed device
-when machines.yml is known; the Linear listener and its tunnel when
-orch.yml has `linear_webhook`; the dashboard writer when it pushes) that
-has no row as down. A row that the registry does not expect (a retired
-device or bot) is listed but is not down for attention. It flags each
-queued harness job that has no live (up or stale) waiter for its bot on any
-device eligible for its harness as "no waiter for <harness>". The
-dashboard's Health tab, its needs-attention line, `orch status` and
-`orch health` all read the same report.
+its processes' rows (for a device probe or tunnel, its newest check), and
+adds every expected component (`expected`: the poller; each bot's waiter on
+some eligible device and each probed device when machines.yml is known;
+the Linear listener and its tunnel when orch.yml has `linear_webhook`; the
+dashboard writer when it pushes) that has no row as down. A row that the
+registry does not expect (a retired device or bot) is listed but is not
+down for attention. It flags each queued harness job that has no live (up
+or stale) waiter for its bot on any device eligible for its harness as "no
+waiter for <harness>". The dashboard's Health tab, its needs-attention
+line, `orch status` and `orch health` all read the same report.
 """
 
 from __future__ import annotations
@@ -991,6 +991,34 @@ def _better(a: Component, b: Component) -> bool:
     return (_RANK[a.state], a.last_seen or 0.0) > (_RANK[b.state], b.last_seen or 0.0)
 
 
+def _latest_checks(rows: Sequence[Heartbeat]) -> list[Heartbeat]:
+    """A device probe or tunnel check is a fact about its target, not about
+    the process that made it: across processes (a poller or listener that
+    restarted), the newest check decides, with the newest success as its
+    last seen. Every other component keeps one row per process."""
+    merged: dict[tuple[str, str, str], Heartbeat] = {}
+    others = []
+    for row in rows:
+        if row.component not in (DEVICE_PROBE, TUNNEL):
+            others.append(row)
+            continue
+        key = (row.component, row.device, row.bot)
+        held = merged.get(key)
+        if held is None:
+            merged[key] = row
+            continue
+        newer = row if _checked(row) > _checked(held) else held
+        merged[key] = newer._replace(
+            last_seen=max((r.last_seen for r in (row, held) if r.last_seen is not None), default=None),
+            checked_at=max(_checked(row), _checked(held)),
+        )
+    return others + list(merged.values())
+
+
+def _checked(row: Heartbeat) -> float:
+    return max(row.checked_at or 0.0, row.last_seen or 0.0)
+
+
 def build_report(
     rows: Sequence[Heartbeat] | None,
     now: float,
@@ -1010,7 +1038,7 @@ def build_report(
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row in rows:
+    for row in _latest_checks(rows):
         state, reason = classify(row, now)
         item = Component(
             component=row.component,

@@ -18,8 +18,10 @@ last cycle ended, reported as poll health. `--poll-seconds` (30 or 60) is the
 running poller's poll_seconds, which `orch poll` passes so poll health's
 `cycle_seconds` and thresholds match the interval it actually sleeps; without
 it orch.yml's poll_seconds is used (60 when there is no orch.yml). Each push
-snapshot records the `dashboard` heartbeat in orch.health.db (lib/health.py,
-#92); a heartbeat that cannot be written is logged and the push goes on.
+snapshot first records the `dashboard` heartbeat in orch.health.db
+(lib/health.py, #92), at the writer's publication interval, which the
+snapshot also carries as `health.publish_seconds`; a heartbeat that cannot be
+written is logged and the push goes on.
 """
 
 from __future__ import annotations
@@ -101,8 +103,25 @@ def main(argv: list[str]) -> int:
             return 2
 
         cycle = args.poll_seconds if args.poll_seconds is not None else poll_seconds
+        # How often this writer publishes (#92): the push loop's interval, or
+        # the poller's schedule (a live push publishes every poll cycle).
+        every = config.push.every_minutes
+        if not args.once:
+            publish = config.push.interval_seconds
+        elif every and not config.push.live:
+            publish = every * 60
+        else:
+            publish = cycle
 
         def snapshot() -> tuple[Path, ...]:
+            # The writer's heartbeat goes first, so the snapshot shows it.
+            health.beat_once(
+                _db(args),
+                health.DASHBOARD,
+                interval=publish,
+                machines=args.machines,
+                log=lambda line: print(line, file=sys.stderr, flush=True),
+            )
             paths = _snapshot(
                 args,
                 config,
@@ -111,20 +130,7 @@ def main(argv: list[str]) -> int:
                 job_states=job_states,
                 poll_seconds=cycle,
                 orch=orch,
-            )
-            # The dashboard writer's heartbeat (#92), at the cadence it runs:
-            # the push loop's interval, or the poller's push schedule.
-            every = config.push.every_minutes
-            health.beat_once(
-                _db(args),
-                health.DASHBOARD,
-                interval=(
-                    (every * 60 if every else cycle)
-                    if args.once
-                    else config.push.interval_seconds
-                ),
-                machines=args.machines,
-                log=lambda line: print(line, file=sys.stderr, flush=True),
+                publish_seconds=publish,
             )
             # Live pushes send status.json alone; the page polls it.
             return paths[:1] if args.status_only else paths
@@ -183,6 +189,7 @@ def _snapshot(
     job_states: JobStateConfig | None = None,
     poll_seconds: int = POLL_SECONDS,
     orch: OrchConfig | None = None,
+    publish_seconds: float | None = None,
 ) -> tuple[Path, ...]:
     """status.json first, then every page."""
     db = _db(args)
@@ -199,6 +206,7 @@ def _snapshot(
         job_states=job_states,
         poll_seconds=poll_seconds,
         orch=orch,
+        publish_seconds=publish_seconds,
     )
     return write_snapshot_pages(out, snapshot)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -837,39 +838,42 @@ def _page_with_fresh_rows(tmp_path: Path) -> dict:
 
 
 def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Path) -> None:
-    """A3: a snapshot that stops changing never keeps showing UP."""
+    """A3: a snapshot that stops changing never keeps showing UP. A one-off
+    snapshot (no writer, no publication interval) vouches for nothing: a
+    component past its thresholds is unknown, and the old snapshot is one
+    needs-attention item."""
     from tests.test_dashboard_layout import BAR, NODE, _run_page
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _page_with_fresh_rows(tmp_path)
+    assert data["health"]["publish_seconds"] is None
     ids = BAR + ["hud", "components", "no-waiter"]
     (tmp_path / "now").mkdir()
     fresh = _run_page(tmp_path / "now", data, "health", ids)["text"]
-    assert fresh["components"].count("UP") == 2 and "DOWN" not in fresh["components"]
+    assert _states(fresh["components"]) == ["UP", "UP"]
     assert fresh["attention-count"] == "0"
 
-    (tmp_path / "later").mkdir()
-    later = _run_page(tmp_path / "later", data, "health", ids, actions=[["advance", 121]])["text"]
-    assert later["components"].count("DOWN") == 2 and "UP" not in later["components"]
-    assert "no heartbeat for 2m" in later["components"]
-    assert "2 components · 2 down" in later["components"]
-    assert later["attention-count"] == "2"
-
-    (tmp_path / "stale").mkdir()
-    stale = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 50]])["text"]
-    assert stale["components"].count("STALE") == 2
+    for advance in (50, 121):
+        (tmp_path / str(advance)).mkdir()
+        later = _run_page(tmp_path / str(advance), data, "health", ids, actions=[["advance", advance]])["text"]
+        assert _states(later["components"]) == ["UNKNOWN", "UNKNOWN"]
+        assert "no snapshot for " in later["components"]
+        assert "2 components · 0 down" in later["components"]
+        assert later["attention-count"] == "1"
 
 
-def test_the_activity_page_lists_components_that_aged_to_down(tmp_path: Path) -> None:
+def test_the_activity_page_lists_an_old_snapshot_once(tmp_path: Path) -> None:
     from tests.test_dashboard_layout import BAR, NODE, _run_page
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _page_with_fresh_rows(tmp_path)
     page = _run_page(tmp_path, data, "activity", BAR + ["hud", "attention"], actions=[["advance", 121]])
-    assert "poller @ box" in page["text"]["attention"]
-    assert "a.ticket[href=health.html#health-poller-box]" in page["dump"]["attention"]
+    assert "health snapshot" in page["text"]["attention"]
+    assert "unknown: no snapshot for 2m" in page["text"]["attention"]
+    assert "a.ticket[href=health.html#components]" in page["dump"]["attention"]
+    assert "poller @ box" not in page["text"]["attention"]
 
 
 @pytest.mark.parametrize(
@@ -1163,3 +1167,123 @@ def test_a_scheduled_dashboard_push_stays_up_between_pushes(tmp_path: Path, monk
     (dashboard,) = [r for r in health.read_heartbeats(db) or () if r.component == "dashboard"]
     assert dashboard.interval_seconds == every * 60.0
     assert health.classify(dashboard, dashboard.last_seen + every * 60)[0] == "up"
+
+
+# --- review round 2 (PR #98): each class the review named ------------------------------------
+
+
+def _published(tmp_path: Path, monkeypatch, *, every: int | None = None, live: bool = False) -> dict:
+    """status.json as one real `orch dashboard push --once` sends it, with a
+    queued codex job, a live poller and a live codex waiter; dated PAGE_NOW
+    so the page harness's clock is 3 s after it."""
+    from lib import dashboard_cli
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    db, queue = make_db(tmp_path, time.time())
+    queue.enqueue(request("codex"), dedupe_key="queued")
+    health.HealthStore(db, devices={"box"}).beat("poller", "box", pid=101)
+    health.HealthStore(db, devices={"box"}).beat("waiter", "box", bot="codex-bot", pid=102)
+    config = tmp_path / "orch.yml"
+    extra = (f"    every_minutes: {every}\n" if every else "") + ("    live: true\n" if live else "")
+    config.write_text(ORCH_EXAMPLE.read_text().replace("    method: scp\n", "    method: scp\n" + extra))
+    sent: list[dict] = []
+
+    class Sent:
+        def send(self, paths):
+            sent.append(json.loads(paths[0].read_text()))
+
+    monkeypatch.setattr(dashboard_cli, "transport_for", lambda c: Sent())
+    assert dashboard_cli.main(["push", "--once", "--db", str(db), "--out", str(tmp_path / "out"),
+                               "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                               "--log", str(tmp_path / "p.log"), "--orch", str(config)]) == 0
+    (data,) = sent
+    data["generated_at_epoch"] = PAGE_NOW
+    return data
+
+
+def _states(text: str) -> list[str]:
+    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text)
+
+
+@pytest.mark.parametrize("every, live, seconds", [(5, False, 300), (1440, False, 86400),
+                                                  (None, False, 30), (5, True, 30)])
+def test_a_push_publishes_its_own_cadence_and_its_own_heartbeat(
+    tmp_path: Path, monkeypatch, every, live, seconds,
+) -> None:
+    """R2-1/R2-4: the snapshot says how often it is published (a live push
+    publishes every poll cycle), and the first push already shows its writer up."""
+    data = _published(tmp_path, monkeypatch, every=every, live=live)
+    assert data["health"]["publish_seconds"] == seconds
+    rows = {c["component"]: (c["state"], c["reason"], c["interval_seconds"])
+            for c in data["health"]["components"]}
+    assert rows["dashboard"] == ("up", "", seconds)
+    assert rows["poller"][0] == rows["waiter"][0] == "up"
+    assert data["attention"]["count"] == 0
+
+
+@pytest.mark.parametrize("advance", [0, 121, 299, 600, 897])  # the clock starts 3 s in
+def test_healthy_components_stay_up_between_scheduled_pushes(tmp_path: Path, monkeypatch, advance) -> None:
+    """R2-1/R2-2: within its publication window a snapshot keeps every
+    state it observed, and the no-waiter panel agrees with them."""
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _published(tmp_path / "push", monkeypatch, every=5)
+    (tmp_path / "page").mkdir()
+    page = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+                     actions=[["advance", advance]])["text"]
+    assert _states(page["components"]) == ["UP", "UP", "UP"]
+    assert page["attention-count"] == "0"
+    assert "every queued job has a live waiter" in page["no-waiter"]
+
+
+def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: Path, monkeypatch) -> None:
+    """R2-1/R2-2: once the next push is overdue the page cannot see the other
+    components, so they are unknown, not down; the writer itself ages to
+    stale and then down, which is the one needs-attention item, and the
+    no-waiter panel no longer claims every queued job has a waiter."""
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _published(tmp_path / "push", monkeypatch, every=5)
+    ids = BAR + ["hud", "components", "no-waiter"]
+    (tmp_path / "stale").mkdir()
+    stale = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])["text"]
+    assert _states(stale["components"]) == ["UNKNOWN", "UNKNOWN", "STALE"]
+    assert "DOWN" not in stale["components"]
+    assert stale["attention-count"] == "0"
+    assert "every queued job has a live waiter" not in stale["no-waiter"]
+    assert "unknown" in stale["no-waiter"]
+
+    (tmp_path / "down").mkdir()
+    down = _run_page(tmp_path / "down", data, "activity", BAR + ["hud", "attention"],
+                     actions=[["advance", 8 * 300 + 1]])
+    assert down["text"]["attention-count"] == "1"
+    assert "dashboard @ box" in down["text"]["attention"]
+    assert "poller" not in down["text"]["attention"] and "waiter" not in down["text"]["attention"]
+
+
+@pytest.mark.parametrize(
+    "component, device, interval",
+    [("device-probe", "pc", health.PROBE_SECONDS), ("tunnel", "box", health.BEAT_SECONDS)],
+)
+@pytest.mark.parametrize("latest_failed", [True, False])
+def test_a_check_shows_its_latest_result_across_restarts(
+    tmp_path: Path, component, device, interval, latest_failed,
+) -> None:
+    """R2-3: after a poller or listener restart, the newest check decides,
+    whichever process made it; a failure is stale with the last success."""
+    db, _ = make_db(tmp_path)
+    if latest_failed:
+        store(db, NOW - 10).beat(component, device, pid=10, interval=interval)
+        store(db, NOW).checked(component, device, pid=11, interval=interval)
+        expected = [(11, "stale", "unreachable, last reached 10s ago")]
+    else:
+        store(db, NOW - 10).checked(component, device, pid=10, interval=interval)
+        store(db, NOW).beat(component, device, pid=11, interval=interval)
+        expected = [(11, "up", "")]
+    report = health.build_report(health.read_heartbeats(db), NOW,
+                                 expected=health.Expected((), frozenset()))
+    assert [(c.pid, c.state, c.reason) for c in report.components] == expected

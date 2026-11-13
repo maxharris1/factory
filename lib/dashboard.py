@@ -601,6 +601,7 @@ def collect_snapshot(
     alive: Alive | None = pid_alive,
     poll_seconds: int = POLL_SECONDS,
     orch: OrchConfig | None = None,
+    publish_seconds: float | None = None,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
@@ -611,7 +612,10 @@ def collect_snapshot(
     orch.yml's job_states (the stale threshold); `alive` checks a recorded
     runner pid on this host (lib/job_state.py), never over SSH. `orch` is
     the loaded orch.yml, which says whether the Linear listener and the
-    dashboard writer are expected to heartbeat (lib/health.py)."""
+    dashboard writer are expected to heartbeat (lib/health.py).
+    `publish_seconds` is how often a pushing writer publishes the snapshot
+    (None for a one-off snapshot): the page keeps the component states it
+    observed until a newer snapshot is overdue (lib/dashboard_page.py)."""
     if (
         isinstance(refresh_seconds, bool)
         or not isinstance(refresh_seconds, int)
@@ -726,7 +730,8 @@ def collect_snapshot(
         "attention": _attention(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], report
         ),
-        "health": component_health.report_json(report, now),
+        "health": {**component_health.report_json(report, now),
+                   "publish_seconds": publish_seconds},
         "statechart": chart,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
