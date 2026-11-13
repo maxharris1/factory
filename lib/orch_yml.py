@@ -4,8 +4,11 @@ Required: poll_seconds (30 or 60, the GitHub poll interval) and
 projects[].repo. Linear keeps its own LINEAR_POLL_SECONDS cadence whatever
 poll_seconds is (lib/poll_source.py).
 job_timeout is optional and measured in minutes. When the file and the
-project both omit it, the timeout is 60 minutes. Unknown fields are
-refused so v1 stays closed.
+project both omit it, the timeout is 60 minutes. refused_harnesses
+(optional) names harnesses whose jobs are refused, so health expects no
+waiter for them. Unknown fields are refused so v1 stays closed. A
+gitignored orch.local.yml beside the file is merged in before validation
+(lib/config_overlay.py).
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from lib.config_overlay import apply_overlay
 from lib.dashboard_config import DashboardConfig, parse_dashboard
 from lib.job_state import (
     DEFAULT_RELEASE_CLAIMED_MINUTES,
@@ -27,6 +31,7 @@ from lib.job_state import (
     JobStateConfig,
 )
 from lib.load import Finding, is_strict_int, load_yaml
+from lib.schema import HARNESSES
 
 # The seconds `orch poll` sleeps after each cycle. GitHub is read every
 # cycle; a cycle's own work adds to it, so this is the gap between cycles,
@@ -66,6 +71,7 @@ _TOP_KEYS = {
     "dashboard",
     "linear_webhook",
     "job_states",
+    "refused_harnesses",
 }
 _JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
 _LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds", "public_url"}
@@ -164,6 +170,9 @@ class OrchConfig:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     linear_webhook: LinearWebhookConfig | None = None
     job_states: JobStateConfig = field(default_factory=JobStateConfig)
+    # Harnesses whose jobs the factory refuses (issue #107): health expects
+    # no waiter for them.
+    refused_harnesses: tuple[str, ...] = ()
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -186,6 +195,7 @@ def load_orch_yml(
     path: Path,
     *,
     allow_placeholders: bool = False,
+    overlay: bool = True,
 ) -> tuple[OrchConfig | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
@@ -197,6 +207,10 @@ def load_orch_yml(
         return None, [Finding("error", f"invalid YAML: {text or 'invalid YAML'}")]
     if not isinstance(data, dict):
         return None, [Finding("error", "orch.yml must be a mapping")]
+    if overlay:
+        data, findings = apply_overlay(path, data)
+        if data is None:
+            return None, findings
     return _validate(data, allow_placeholders=allow_placeholders)
 
 
@@ -224,6 +238,7 @@ def _validate(
     dashboard = parse_dashboard(data.get("dashboard"), findings)
     linear_webhook = _linear_webhook(data, findings)
     job_states = _job_states(data, findings)
+    refused_harnesses = _refused_harnesses(data, findings)
     if (
         "linear_webhook" in data
         and projects is not None
@@ -261,9 +276,31 @@ def _validate(
             dashboard=dashboard or DashboardConfig(),
             linear_webhook=linear_webhook,
             job_states=job_states or JobStateConfig(),
+            refused_harnesses=refused_harnesses,
         ),
         findings,
     )
+
+
+def _refused_harnesses(data: dict, findings: list[Finding]) -> tuple[str, ...]:
+    value = data.get("refused_harnesses")
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        findings.append(Finding("error", "refused_harnesses must be a list of harness names"))
+        return ()
+    for item in value:
+        if item not in HARNESSES:
+            findings.append(
+                Finding(
+                    "error",
+                    f"refused_harnesses has unknown harness {item!r}; "
+                    f"expected one of {', '.join(HARNESSES)}",
+                )
+            )
+    if len(set(value)) != len(value):
+        findings.append(Finding("error", "refused_harnesses lists a harness twice"))
+    return tuple(value)
 
 
 def _poll_seconds(data: dict, findings: list[Finding]) -> int | None:

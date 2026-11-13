@@ -49,6 +49,9 @@ class FakeDirty:
         self.rows = {row.issue_id: row for row in rows}
         self.acked: list[list[str]] = []
         self.fail = False
+        self.seen: dict[str, float] = {}
+        self.started: float | None = None
+        self.missed: list[tuple] = []
 
     def add(self, issue_id: str, identifier: str | None, at: float) -> None:
         self.rows[issue_id] = DirtyRow(issue_id, identifier, "Issue.update", at)
@@ -67,6 +70,15 @@ class FakeDirty:
 
     def record_polling(self, now):
         del now
+
+    def seen_at(self, issue_id):
+        return self.seen.get(issue_id)
+
+    def listener_started_at(self):
+        return self.started
+
+    def record_missed(self, issue_id, identifier, event_at, found_at):
+        self.missed.append((issue_id, identifier, event_at, found_at))
 
 
 def cycle(source, refs, *, exclude=frozenset()):
@@ -329,7 +341,7 @@ def test_unreadable_dirty_queue_falls_back_to_a_full_cycle_and_is_recorded() -> 
         cycle(source, tracked, exclude=frozenset({"AUT-1"}))
 
     assert linear.take() == SEARCHES + [("issue", "id-AUT-5"), ("issue", "AUT-1")]
-    assert errors == [("linear-webhook", "-", "OperationalError")]
+    assert errors == [("linear-webhook", "-", "OperationalError: database is locked")]
 
 
 def test_webhook_event_to_dirty_row_to_fetch_to_tracking_through_orch_db(
@@ -732,3 +744,58 @@ def test_dirty_row_for_a_ticket_tracked_under_a_removed_repo_drains() -> None:
 
     assert dirty.rows == {}
     assert linear.take() == []
+
+
+def _commented(identifier: str, at: float) -> dict:
+    from datetime import datetime, timezone
+
+    value = issue(identifier)
+    value["comments"]["nodes"][0]["createdAt"] = datetime.fromtimestamp(
+        at, tz=timezone.utc).isoformat()
+    return value
+
+
+@pytest.mark.parametrize(
+    "seen, started, missed",
+    [
+        (None, 0.0, [("id-AUT-1", "AUT-1", 500.0, 1000.0)]),
+        (470.0, 0.0, []),
+        (None, 480.0, []),
+        (None, None, []),
+    ],
+    ids=["missed", "delivered", "listener-started-after", "no-listener"],
+)
+def test_a_reconcile_read_records_a_comment_no_delivery_covered(seen, started, missed) -> None:
+    """#79: the direct read finds the miss; a delivered or pre-start comment is not one."""
+    linear = Linear([_commented("AUT-1", 500.0)], hits=[])
+    source, _gh = source_for(webhook_config(), linear, clock=Clock())
+    dirty = FakeDirty()
+    dirty.started = started
+    if seen is not None:
+        dirty.seen["id-AUT-1"] = seen
+    source.linear_dirty = dirty
+
+    cycle(source, refs("AUT-1"), exclude=frozenset({"AUT-1"}))
+
+    assert dirty.missed == missed
+
+
+def test_a_miss_is_recorded_through_orch_db_and_shown_as_a_warning(tmp_path: Path) -> None:
+    from lib.linear_webhook import read_health
+
+    database = tmp_path / "orch.db"
+    _dispatcher(database)
+    with sqlite3.connect(database) as connection:
+        ensure_tables(connection)
+        connection.execute("INSERT INTO linear_webhook_health VALUES (1, 0, NULL, NULL)")
+    linear = Linear([_commented("AUT-1", 500.0)], hits=[])
+    source, _gh = source_for(webhook_config(), linear, clock=Clock())
+    source.linear_dirty = LinearDirtyQueue(database)
+
+    cycle(source, refs("AUT-1"), exclude=frozenset({"AUT-1"}))
+
+    with sqlite3.connect(database) as connection:
+        health = read_health(connection)
+    assert health is not None and health.missed == (("AUT-1", 1000.0),)
+    assert health.warning(1000.0) == (
+        "Linear webhook missed 1 delivery in 24h (newest AUT-1, found 0s ago)")

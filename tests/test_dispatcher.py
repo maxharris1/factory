@@ -1489,7 +1489,9 @@ def test_invalid_grok_receipt_is_recorded_and_released_for_retry(
             "SELECT attempt, state FROM jobs ORDER BY attempt"
         ).fetchall()
     assert original["state"] == "done"
-    assert [row["error"] for row in errors] == ["grok-delivery:ValueError"]
+    assert [row["error"] for row in errors] == [
+        "grok-delivery:ValueError: Grok delivery receipt must be a non-empty string"
+    ]
     assert len(delivery.jobs) == 2
     assert [(row["attempt"], row["state"]) for row in rows] == [(1, "done")]
 
@@ -1571,7 +1573,7 @@ def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
         (claude.id, 1, "failed"),
         (claude_rows[1]["id"], 2, "queued"),
     ]
-    assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError"]
+    assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError: delivery failed"]
 
 
 def test_failed_grok_job_does_not_block_newer_job_in_same_reconcile(
@@ -4355,7 +4357,7 @@ def test_go_state_write_failure_does_not_stop_other_repos(
             """
             SELECT count(*) FROM poll_errors
             WHERE repo = 'owner/repo' AND ticket_id = '42'
-              AND error = 'RetryableStateError'
+              AND error LIKE 'RetryableStateError%'
             """
         ).fetchone()[0]
     assert good_builds == 1
@@ -5055,3 +5057,65 @@ def test_t5_fenced_block_first_under_questions_queues_clarify(
     queue = _process_t5_questions(tmp_path, header, author, body)
 
     _assert_t5_waiting_max(queue)
+
+
+# --- #107 h: poll_errors keep the message ------------------------------------------------------
+
+
+class _FailingSource:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def github_candidates(self, label_prefix: str):
+        raise self.exc
+
+    def linear_candidates(self, query, *, exclude, reserve):
+        return ()
+
+    def tracked_tickets(self, refs):
+        return ()
+
+
+def _poll_errors(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [row["error"] for row in connection.execute("SELECT error FROM poll_errors ORDER BY id")]
+
+
+def test_a_poll_error_row_holds_the_exception_message(tmp_path: Path) -> None:
+    from lib.github_actions import GitHubAdapterError
+
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
+    assert _poll_errors(queue) == ["GitHubAdapterError: gh pr list exited 1: HTTP 502"]
+
+
+def test_a_poll_cycle_error_names_its_sources(tmp_path: Path) -> None:
+    from lib.poll_source import PollCycleError
+
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error(
+        "poll", "-", PollCycleError("poll cycle recorded 2 source error(s): github x1, linear x1"))
+    assert _poll_errors(queue) == [
+        "PollCycleError: poll cycle recorded 2 source error(s): github x1, linear x1"]
+
+
+def test_a_poll_error_message_is_scrubbed_and_capped(tmp_path: Path) -> None:
+    from lib.dispatcher import POLL_ERROR_LIMIT, poll_error_text
+
+    secret = "ghp_" + "A" * 36
+    text = poll_error_text(RuntimeError(
+        f"call https://api.example.com/x?token=abc failed with {secret} "
+        "FACTORY_WEBHOOK_AUTH=Bearer-value body {\"key\": \"value\"}"))
+    assert text.startswith("RuntimeError: call <url> failed with <secret> <secret>")
+    for leaked in ("https://", "api.example.com", secret, "Bearer-value", '"value"'):
+        assert leaked not in text
+    assert len(poll_error_text(RuntimeError("x" * 2000))) == POLL_ERROR_LIMIT
+    assert poll_error_text(RuntimeError()) == "RuntimeError"
+
+
+def test_poll_error_prefixes_are_kept(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error("o/r", "1", ValueError("bad row"), prefix="job-states:")
+    dispatcher.record_poll_error("o/r", "1", "PollSourceError:Linear returned HTTP 429")
+    assert _poll_errors(queue) == [
+        "job-states:ValueError: bad row", "PollSourceError:Linear returned HTTP 429"]

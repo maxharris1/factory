@@ -70,7 +70,7 @@ commands:
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
-  health           component heartbeats: report, beat or forget (issue #92)
+  health           component heartbeats: report or forget (issue #92)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -223,9 +223,10 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   last-seen in ET, pid and device, and each queued harness job with no
   live waiter on an eligible device ("no waiter for <harness>"). A
   component machines.yml or orch.yml expects that has never beaten is
-  down. Reads orch.health.db beside the database. Exits 3 when a
-  component is down or a queued job has no waiter, 1 when orch.health.db
-  cannot be read, else 0.
+  down. A poller, waiter or listener whose heartbeat names another commit
+  than the checkout shows "stale code". Reads orch.health.db beside the
+  database. Exits 3 when a component is down or a queued job has no
+  waiter, 1 when orch.health.db cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
 """
@@ -315,6 +316,12 @@ def _check_config(argv: list[str]) -> int:
         ) or failed
     for path in factory_paths:
         failed = _report(path, load_factory_md(path)[1]) or failed
+    from lib.config_overlay import describe
+
+    for path in (orch_path, machines_path):
+        line = describe(path) if path is not None else None
+        if line is not None:
+            print(line)
     if failed:
         return 1
     print("ok")
@@ -506,11 +513,7 @@ def _poll(argv: list[str]) -> int:
                 beats = health.poller_beats(path, args.machines).start()
                 try:
                     loop.run(
-                        on_error=lambda exc: dispatcher.record_poll_error(
-                            "poll",
-                            "-",
-                            type(exc).__name__,
-                        ),
+                        on_error=lambda exc: dispatcher.record_poll_error("poll", "-", exc),
                         after_poll=after_poll,
                     )
                 finally:
@@ -1256,7 +1259,7 @@ def _linear_webhook(argv: list[str]) -> int:
             ),
             db_path=path,
             path=webhook.path,
-            log=lambda line: print(line, flush=True),
+            log=linear_webhook.utc_log,
         )
         server = linear_webhook.make_server(app, *bind)
     except (
@@ -1270,7 +1273,7 @@ def _linear_webhook(argv: list[str]) -> int:
         return 1
     host, port = server.server_address[:2]
     shown = f"[{host}]" if ":" in str(host) else str(host)
-    print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
+    linear_webhook.utc_log(f"linear-webhook: listening on {shown}:{port}{webhook.path}")
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         # Heartbeat (#92), and the tunnel probe when public_url is set.

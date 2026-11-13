@@ -161,7 +161,7 @@ def test_orch_status_shows_one_slot_count_per_device() -> None:
 
     assert "Slots — box" not in output
     assert "  box [claude] 4/3 slots\n" in output
-    assert "    o/repo#9 build -> codex running 20s no-placement\n" in output
+    assert "    o/repo#9 build -> codex running 1m (beat 20s ago) no-placement\n" in output
     assert "  pc [codex] 0/3 slots\n" in output
 
 
@@ -174,7 +174,7 @@ def test_orch_status_lists_a_running_grok_wake_without_a_slot() -> None:
                      devices=device_rows(_box_and_pc(), {}), placements={})
     )
     assert "  box [claude] 0/3 slots\n" in output
-    assert "Grok wakes (1)\n  o/repo#1 clarify -> grok running 10s\n" in output
+    assert "Grok wakes (1)\n  o/repo#1 clarify -> grok running 1m (beat 10s ago)\n" in output
 
 
 def test_the_dashboard_counts_an_unplaced_job_on_the_box_device(tmp_path: Path) -> None:

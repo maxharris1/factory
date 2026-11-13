@@ -192,6 +192,10 @@ def factory_version(root: Path = ROOT) -> str:
     return "unknown"
 
 
+LOADED_VERSION = factory_version()
+CODE_COMPONENTS = frozenset({"poller", "waiter", "linear-listener"})
+
+
 # --- writing ---------------------------------------------------------------------------
 
 
@@ -439,7 +443,7 @@ class Beater:
         self.interval = interval
         self.on_exit = on_exit
         self.pid = pid if pid is not None else os.getpid()
-        self.version = version if version is not None else factory_version()
+        self.version = version if version is not None else LOADED_VERSION
         self.log = log
         self.started_at = float(self.store.clock())
         self._lock = threading.Lock()
@@ -504,7 +508,7 @@ def beat_once(
             component,
             local_device(config),
             pid=os.getpid(),
-            version=factory_version(),
+            version=LOADED_VERSION,
             interval=min(max(float(interval), MIN_INTERVAL), MAX_INTERVAL),
         )
         return True
@@ -559,7 +563,7 @@ class DeviceProber:
         self.transport = transport
         self.interval = interval
         self.pid = pid if pid is not None else os.getpid()
-        self.version = version if version is not None else factory_version()
+        self.version = version if version is not None else LOADED_VERSION
         self.log = log
         self.started_at = float(store.clock())
         self._failing: set[str] = set()
@@ -649,7 +653,7 @@ class TunnelProber:
         self.fetch = fetch
         self.interval = interval
         self.pid = pid if pid is not None else os.getpid()
-        self.version = version if version is not None else factory_version()
+        self.version = version if version is not None else LOADED_VERSION
         self.log = log
         self.started_at = float(store.clock())
         self._failing = False
@@ -891,6 +895,7 @@ class Component:
     version: str
     interval: float = BEAT_SECONDS
     configured: bool = True
+    stale_code: bool = False
 
     @property
     def label(self) -> str:
@@ -920,11 +925,17 @@ class HealthReport:
     components: tuple[Component, ...] = ()
     no_waiter: tuple[NoWaiter, ...] = ()
     error: str | None = None
+    code_version: str = "unknown"
 
     @property
     def down(self) -> tuple[Component, ...]:
         """Configured components that are down: what needs attention."""
         return tuple(c for c in self.components if c.state == DOWN and c.configured)
+
+    @property
+    def stale_code(self) -> tuple[Component, ...]:
+        """Configured components running code older than the checkout."""
+        return tuple(c for c in self.components if c.stale_code and c.configured)
 
     def no_waiter_for(self, harness: str) -> NoWaiter | None:
         return next((n for n in self.no_waiter if n.harness == harness), None)
@@ -960,16 +971,20 @@ class Expected:
 
 
 def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None) -> Expected:
-    """The poller always; each bot's waiter on one of its eligible devices and
-    each probed device when machines.yml is known; the Linear listener and its
-    tunnel when orch.yml has `linear_webhook`; the dashboard writer when
-    orch.yml pushes the dashboard."""
+    """The poller always; each bot's waiter on one of its eligible devices
+    (unless orch.yml lists its harness in `refused_harnesses`) and each probed
+    device when machines.yml is known; the Linear listener when orch.yml has
+    `linear_webhook`, and its tunnel when that sets `public_url`; the
+    dashboard writer when orch.yml pushes the dashboard."""
     local = local_device(machines)
     slots = [Slot(POLLER, (local,))]
     covers = {POLLER}
+    refused = frozenset(orch.refused_harnesses) if orch is not None else frozenset()
     if machines is not None:
         covers |= {WAITER, DEVICE_PROBE}
         for bot, harness in OWNING_BOTS.items():
+            if harness in refused:
+                continue
             devices = tuple(d.name for d in machines.devices
                             if d.eligible(harness) and TOKEN.fullmatch(d.name))
             if devices:
@@ -978,7 +993,9 @@ def expected_components(machines: MachinesConfig | None, orch: OrchConfig | None
     if orch is not None:
         covers |= {LISTENER, TUNNEL, DASHBOARD}
         if orch.linear_webhook is not None:
-            slots += [Slot(LISTENER, (local,)), Slot(TUNNEL, (local,))]
+            slots.append(Slot(LISTENER, (local,)))
+            if orch.linear_webhook.public_url:
+                slots.append(Slot(TUNNEL, (local,)))
         if orch.dashboard.push.transport != "none":
             slots.append(Slot(DASHBOARD, (local,)))
     return Expected(tuple(slots), frozenset(covers))
@@ -1026,15 +1043,19 @@ def build_report(
     queued: Iterable[tuple[str, str]] = (),
     eligible: Mapping[str, Collection[str]] | None = None,
     expected: Expected | None = None,
+    checkout_version: str = "unknown",
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
 
     `queued` is (job id, recipient) per queued job; `eligible` maps a harness
     to the devices that may run it (None: any device counts); `expected` is
     the registry of components that should be running (default: the poller
-    on the box)."""
+    on the box); `checkout_version` is the checkout's commit: a poller,
+    waiter or listener whose row names another known commit runs stale
+    code."""
+    checkout = checkout_version
     if rows is None:
-        return HealthReport(known=False)
+        return HealthReport(known=False, code_version=checkout)
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
@@ -1052,6 +1073,7 @@ def build_report(
             version=row.version,
             interval=row.interval_seconds,
             configured=registry.wants(row.component, row.device, row.bot),
+            stale_code=_stale(row.component, row.version, checkout),
         )
         key = (row.component, row.device, row.bot)
         if key not in best or _better(item, best[key]):
@@ -1078,7 +1100,13 @@ def build_report(
         )
         if not live:
             flags.append(NoWaiter(harness, bot, tuple(jobs[harness])))
-    return HealthReport(known=True, components=tuple(components), no_waiter=tuple(flags))
+    return HealthReport(known=True, components=tuple(components), no_waiter=tuple(flags),
+                        code_version=checkout)
+
+
+def _stale(component: str, version: str, checkout: str) -> bool:
+    return (component in CODE_COMPONENTS and "unknown" not in (version, checkout)
+            and version != checkout)
 
 
 def load_report(
@@ -1094,9 +1122,11 @@ def load_report(
     try:
         rows = read_heartbeats(db)
     except (sqlite3.Error, OSError) as exc:
-        return HealthReport(known=False, error=f"cannot read {health_path(db).name}: {type(exc).__name__}")
+        return HealthReport(known=False, error=f"cannot read {health_path(db).name}: {type(exc).__name__}",
+                            code_version=factory_version())
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
-                        expected=expected_components(machines, orch))
+                        expected=expected_components(machines, orch),
+                        checkout_version=factory_version())
 
 
 # --- text ------------------------------------------------------------------------------------
@@ -1140,11 +1170,16 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
         return ["Health", f"  unknown: {report.error}"]
     if not report.known:
         return ["Health", "  no heartbeats recorded yet"]
-    lines = [f"Health ({len(report.components)} components, {len(report.down)} down)"]
+    header = f"{len(report.components)} components, {len(report.down)} down"
+    if report.stale_code:
+        header += f", {len(report.stale_code)} stale code"
+    lines = [f"Health ({header})"]
     for c in report.components:
         reason = f" ({c.reason})" if c.reason else ""
         if not c.configured:
             reason += " (not configured)"
+        if c.stale_code:
+            reason += f", stale code (running {c.version}, checkout {report.code_version})"
         if c.last_seen is None:
             seen = "never seen"
         else:
@@ -1161,6 +1196,7 @@ def report_json(report: HealthReport, now: float) -> dict:
     return {
         "known": report.known,
         "error": report.error,
+        "code_version": report.code_version,
         "components": [
             {
                 "component": c.component,
@@ -1174,7 +1210,9 @@ def report_json(report: HealthReport, now: float) -> dict:
                 "interval_seconds": c.interval,
                 "configured": c.configured,
                 "started_at_et": None if c.started_at is None else et(c.started_at),
+                "started_at": c.started_at,
                 "version": c.version,
+                "stale_code": c.stale_code,
                 "label": c.label,
                 "anchor": c.anchor,
             }
@@ -1186,6 +1224,7 @@ def report_json(report: HealthReport, now: float) -> dict:
             for n in report.no_waiter
         ],
         "down": len(report.down),
+        "stale_code": len(report.stale_code),
         "stale": sum(1 for c in report.components if c.state == STALE and c.configured),
         "thresholds": {
             "beat_seconds": BEAT_SECONDS,

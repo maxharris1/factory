@@ -117,7 +117,7 @@ def test_status_is_stable_and_summarizes_queue_box_slots_and_paused_items() -> N
         "\n"
         "Devices (1)\n"
         "  box [?] 1/? slots not-in-machines.yml\n"
-        "    z/repo#9 review -> codex running 50s no-placement\n"
+        "    z/repo#9 review -> codex running 1h (beat 50s ago) no-placement\n"
         "\n"
         "Paused (2)\n"
         "  A/repo#10 stuck [github]\n"
@@ -281,9 +281,9 @@ def test_pool_placed_job_is_shown_under_its_device_not_as_box_occupancy() -> Non
     assert (
         "Devices (2)\n"
         "  box [claude] 1/3 slots\n"
-        "    o/repo#2 build -> claude running 20s no-placement\n"
+        "    o/repo#2 build -> claude running 1m (beat 20s ago) no-placement\n"
         "  pc [codex] 1/3 slots\n"
-        "    o/repo#1 build -> codex running 10s\n"
+        "    o/repo#1 build -> codex running 1m (beat 10s ago)\n"
         "\n"
     ) in output
 
@@ -518,3 +518,26 @@ def create_database(path: Path) -> None:
                     'running', 20, 30);
             """
         )
+
+
+def test_a_running_job_ages_from_its_claim_and_shows_its_last_beat() -> None:
+    """#107 k: the age counts from the slot's placed_at, not the last heartbeat."""
+    from lib.device_pool import Placement
+
+    source = FakeStatusSource(
+        jobs=(
+            job("placed", repo="o/repo", ticket_id="12", state="running",
+                created_at=0, last_activity_at=9_988, recipient="claude"),
+            job("unplaced", repo="o/repo", ticket_id="13", state="running",
+                created_at=9_000, last_activity_at=9_999, recipient="claude"),
+        ),
+    )
+    placement = Placement(job_id="placed", device="box", harness="claude",
+                          os_user="claude-bot", placed_at=10_000 - 42 * 60)
+
+    output = render(build_status(source, source, clock=lambda: 10_000,
+                                 placements={"placed": "box"}, slots={"placed": placement}))
+
+    assert "    o/repo#12 build -> claude running 42m (beat 12s ago)\n" in output
+    assert "    o/repo#13 build -> claude running 16m (beat 1s ago) no-placement\n" in output
+    assert "running 0s" not in output

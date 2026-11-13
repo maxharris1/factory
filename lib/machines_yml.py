@@ -24,7 +24,9 @@ A device schedules only when it is enabled (the default), has no
 REPLACE_WITH_ placeholder, and lists the harness. check-config refuses
 placeholders unless --allow-placeholders is passed, then names each one;
 it always names a disabled device. Unknown fields are refused so v1
-stays closed. Nothing here checks that a device is reachable.
+stays closed. Nothing here checks that a device is reachable. A gitignored
+machines.local.yml beside the file is merged in before validation
+(lib/config_overlay.py).
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from typing import Mapping, Sequence
 
 import yaml
 
+from lib.config_overlay import apply_overlay
 from lib.load import Finding, is_strict_int, load_yaml
 from lib.schema import HARNESSES
 
@@ -141,6 +144,7 @@ def load_machines_yml(
     path: Path,
     *,
     allow_placeholders: bool = False,
+    overlay: bool = True,
 ) -> tuple[MachinesConfig | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
@@ -152,6 +156,10 @@ def load_machines_yml(
         return None, [Finding("error", f"invalid YAML: {text or 'invalid YAML'}")]
     if not isinstance(data, dict):
         return None, [Finding("error", "machines.yml must be a mapping")]
+    if overlay:
+        data, findings = apply_overlay(path, data)
+        if data is None:
+            return None, findings
     return _validate(data, allow_placeholders=allow_placeholders)
 
 

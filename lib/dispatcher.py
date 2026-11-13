@@ -255,6 +255,7 @@ class ShipError(RuntimeError):
 
 
 SHIP_ERROR_LIMIT = 240
+POLL_ERROR_LIMIT = 500
 _SECRET_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S*")
 _SECRET_HOST_PATH = re.compile(
     r"\b(?:[A-Za-z0-9-]+\.)+(?:com|io|net|org|dev|app)(?:[:/]\S*)?",
@@ -266,7 +267,7 @@ _SECRET_TOKEN = re.compile(
     r"|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*)"
 )
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(?:bearer|basic|token|authorization|password|passwd|secret"
+    r"(?i)(?<!<)\b(?:bearer|basic|token|authorization|password|passwd|secret"
     r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
@@ -279,21 +280,39 @@ def safe_ship_error(exc: BaseException) -> str:
     Either way, URLs, host paths, token shapes, credential assignments and
     everything from the first {, [ or < on are cut, and the text is capped.
     """
-    name = type(exc).__name__
     detail = getattr(exc, "safe_detail", None)
     if not isinstance(detail, str):
         detail = str(exc)
+    return _cap(_named(type(exc).__name__, scrub_detail(detail)), SHIP_ERROR_LIMIT)
+
+
+def poll_error_text(error: str | BaseException) -> str:
+    """A poll_errors row's text (#107), capped at POLL_ERROR_LIMIT: an
+    exception's class and its message, scrubbed as safe_ship_error scrubs,
+    or a text the caller built from safe parts."""
+    if isinstance(error, BaseException):
+        error = _named(type(error).__name__, scrub_detail(str(error)))
+    return _cap(error, POLL_ERROR_LIMIT)
+
+
+def scrub_detail(detail: str) -> str:
+    """`detail` with no URL, host path, token, credential value, body or
+    non-printable character."""
     detail = _SECRET_BODY.sub(" <body omitted>", detail)
     detail = _SECRET_URL.sub("<url>", detail)
     detail = _SECRET_HOST_PATH.sub("<host>", detail)
     detail = _SECRET_TOKEN.sub("<secret>", detail)
     detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
     detail = "".join(char if char.isprintable() else " " for char in detail)
-    detail = " ".join(detail.split())
-    text = f"{name}: {detail}" if detail else name
-    if len(text) > SHIP_ERROR_LIMIT:
-        text = text[: SHIP_ERROR_LIMIT - 3].rstrip() + "..."
-    return text
+    return " ".join(detail.split())
+
+
+def _named(name: str, detail: str) -> str:
+    return f"{name}: {detail}" if detail else name
+
+
+def _cap(text: str, limit: int) -> str:
+    return text[: limit - 3].rstrip() + "..." if len(text) > limit else text
 
 
 @dataclass(frozen=True)
@@ -405,7 +424,7 @@ class Dispatcher:
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
-            self.record_poll_error("github", "-", type(exc).__name__)
+            self.record_poll_error("github", "-", exc)
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -419,19 +438,19 @@ class Dispatcher:
                 ),
             )
         except Exception as exc:
-            self.record_poll_error("linear", "-", type(exc).__name__)
+            self.record_poll_error("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
         try:
             tracked = source.tracked_tickets(self._tracked_refs())
         except Exception as exc:
-            self.record_poll_error("tracked", "-", type(exc).__name__)
+            self.record_poll_error("tracked", "-", exc)
             tracked = ()
         for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
-                self._record_poll_error(ticket, type(exc).__name__)
+                self._record_poll_error(ticket, exc)
         self.reconcile_jobs()
         if end is not None:
             end()
@@ -449,7 +468,7 @@ class Dispatcher:
         try:
             report = self.feeder.feed_once()
         except Exception as exc:
-            self.record_poll_error("feeder", "-", type(exc).__name__)
+            self.record_poll_error("feeder", "-", exc)
             return
         fresh_reader = getattr(source, "fresh_ticket", None)
         if fresh_reader is None:
@@ -458,12 +477,14 @@ class Dispatcher:
             try:
                 ticket = fresh_reader(ref)
             except Exception as exc:
-                self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
+                self.record_poll_error(ref.repo, ref.ticket_id, exc)
                 continue
             if ticket is not None:
                 self._discover((ticket,), tracker=ref.tracker)
 
-    def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+    def record_poll_error(
+        self, repo: str, ticket_id: str, error: str | BaseException, *, prefix: str = ""
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -471,7 +492,7 @@ class Dispatcher:
                     repo, ticket_id, error, recorded_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, error, self.queue.now()),
+                (repo.lower(), ticket_id, prefix + poll_error_text(error), self.queue.now()),
             )
 
     def record_poll_deferral(self, detail: str) -> None:
@@ -682,7 +703,7 @@ class Dispatcher:
                 connection.commit()
         except Exception as exc:
             self.record_poll_error(
-                job.request.repo, job.request.ticket_id, f"timeout-held:{type(exc).__name__}"
+                job.request.repo, job.request.ticket_id, exc, prefix="timeout-held:"
             )
             return
         self._log_job_event(job, "timeout-held", detail)
@@ -699,7 +720,7 @@ class Dispatcher:
         try:
             self.devices.reconcile(self.queue.now(), self._device_offline)
         except Exception as exc:
-            self.record_poll_error("devices", "-", type(exc).__name__)
+            self.record_poll_error("devices", "-", exc)
 
     def _check_job_states(self) -> None:
         """#75: requeue jobs claimed but never started; fail dead jobs.
@@ -728,7 +749,7 @@ class Dispatcher:
                 placements = read_placements(connection)
                 connection.commit()
         except Exception as exc:
-            self.record_poll_error("job-states", "-", type(exc).__name__)
+            self.record_poll_error("job-states", "-", exc)
             return
         check = getattr(self.devices, "liveness", None)
         for row in rows:
@@ -771,7 +792,7 @@ class Dispatcher:
                     self._fail_died_run(job, now)
             except Exception as exc:
                 self.record_poll_error(
-                    job.request.repo, job.request.ticket_id, f"job-states:{type(exc).__name__}"
+                    job.request.repo, job.request.ticket_id, exc, prefix="job-states:"
                 )
 
     def _release_claimed(self, job: Job, placed_at: float, now: float) -> None:
@@ -1018,10 +1039,11 @@ class Dispatcher:
                     handoff_comment_id=receipt,
                 )
             except Exception as exc:
-                reason = type(exc).__name__
                 if isinstance(exc, GrokDeliveryError):
-                    reason = f"{reason}:{exc.detail}"
-                self._record_job_error(job, f"grok-delivery:{reason}")
+                    self._record_job_error(job, f"{type(exc).__name__}:{exc.detail}",
+                                           prefix="grok-delivery:")
+                else:
+                    self._record_job_error(job, exc, prefix="grok-delivery:")
                 try:
                     self.queue.release(
                         job.id,
@@ -1030,8 +1052,7 @@ class Dispatcher:
                     deferred.add(job.id)
                 except Exception as release_exc:
                     self._record_job_error(
-                        job,
-                        f"grok-delivery-release:{type(release_exc).__name__}",
+                        job, release_exc, prefix="grok-delivery-release:"
                     )
 
     def gate_count(self, ticket: TrackedTicket) -> int:
@@ -3652,10 +3673,12 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
+    def _record_poll_error(self, ticket: TrackedTicket, error: str | BaseException) -> None:
         self.record_poll_error(ticket.repo, ticket.ticket_id, error)
 
-    def _record_job_error(self, job: Job, error: str) -> None:
+    def _record_job_error(
+        self, job: Job, error: str | BaseException, *, prefix: str = ""
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -3666,7 +3689,7 @@ class Dispatcher:
                 (
                     job.request.repo.lower(),
                     job.request.ticket_id,
-                    error,
+                    prefix + poll_error_text(error),
                     self.queue.now(),
                 ),
             )

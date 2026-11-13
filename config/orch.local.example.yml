@@ -1,0 +1,20 @@
+# Host-local overlay for orch.yml (README "Local config overlay").
+# Copy to orch.local.yml beside orch.yml; that name is gitignored, so
+# `git pull` never conflicts with it. It is deep-merged into orch.yml at
+# load: mappings merge key by key, projects merge by repo (only the fields
+# listed here change; a repo orch.yml lacks is appended), and any other
+# list or value replaces orch.yml's. `orch check-config` names the keys it
+# sets, never their values. ORCH_NO_LOCAL_OVERLAY=1 ignores it.
+projects:
+  - repo: aut0-code/aut0
+    linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID
+  - repo: maxharris1/Cleffy
+    ready_starts_review: true
+trusted_linear_users:
+  REPLACE_WITH_LINEAR_USER_ID:
+    - grok-bot
+linear_webhook:
+  bind: 127.0.0.1:8787
+  path: /linear-webhook
+  secret_file: ~/.config/factory/linear-webhook.secret
+  public_url: https://box.example.ts.net/linear-webhook

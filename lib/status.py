@@ -118,6 +118,8 @@ class Status:
     unplaced: frozenset[str] = frozenset()
     # Component heartbeats (#92), when build_status was given a reader.
     health: component_health.HealthReport | None = None
+    # When each running job was claimed: its slot's placed_at, else created_at.
+    started: Mapping[str, float] = field(default_factory=dict)
 
 
 class TrackerReader(Protocol):
@@ -481,6 +483,10 @@ def build_status(
         ),
         devices=tuple(device_rows_out),
         device_jobs=device_jobs,
+        started={
+            row.id: held[row.id].placed_at if row.id in held else row.created_at
+            for row in running
+        },
         unplaced=frozenset(unplaced),
         paused=tuple(
             sorted(
@@ -517,7 +523,7 @@ def render(status: Status) -> str:
         lines.append(_device_line(device))
         lines.extend(
             "  "
-            + _job_line(row, status.observed_at, row.last_activity_at)
+            + _running_line(status, row)
             + (" no-placement" if row.id in status.unplaced else "")
             for row in status.device_jobs.get(device.device, ())
         )
@@ -526,10 +532,7 @@ def render(status: Status) -> str:
 
     if status.wakes:
         lines.extend(("", f"Grok wakes ({len(status.wakes)})"))
-        lines.extend(
-            _job_line(row, status.observed_at, row.last_activity_at)
-            for row in status.wakes
-        )
+        lines.extend(_running_line(status, row) for row in status.wakes)
 
     lines.extend(("", f"Paused ({len(status.paused)})"))
     for row in status.paused:
@@ -570,9 +573,12 @@ def render(status: Status) -> str:
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
-        warning = status.webhook.silence_warning(status.observed_at)
+        warning = status.webhook.warning(status.observed_at)
         if warning is not None:
             lines.append(f"  warning: {warning}")
+        note = status.webhook.quiet_note(status.observed_at)
+        if note is not None:
+            lines.append(f"  note: {note}")
     if status.health is not None:
         lines.append("")
         lines.extend(component_health.render_lines(status.health, status.observed_at))
@@ -671,6 +677,12 @@ def _job_line(row: JobRow, observed_at: float, since: float) -> str:
         f"  {row.repo}#{row.ticket_id} {row.action} -> {row.recipient} "
         f"{row.job_state or row.state} {_age(observed_at, since)}"
     )
+
+
+def _running_line(status: Status, row: JobRow) -> str:
+    since = status.started.get(row.id, row.created_at)
+    beat = _age(status.observed_at, row.last_activity_at)
+    return f"{_job_line(row, status.observed_at, since)} (beat {beat} ago)"
 
 
 def _device_line(row: DeviceRow) -> str:

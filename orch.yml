@@ -12,6 +12,9 @@ grok:
   webhook_url_env: FACTORY_WEBHOOK_URL
   webhook_auth_env: FACTORY_WEBHOOK_AUTH
   webhook_key_env: FACTORY_WEBHOOK_KEY
+# Cursor jobs are refused, so health expects no cursor-bot waiter.
+refused_harnesses:
+  - cursor
 trusted_logins:
   maxharris1:
     - grok-bot
@@ -50,6 +53,9 @@ projects:
     ready_starts_review: true
     intake:
       label: factory:ready
+# Host-specific values (the Linear project id, trusted_linear_users,
+# linear_webhook, a device's slots) go in the gitignored orch.local.yml
+# beside this file, merged in at load (config/orch.local.example.yml).
 # Optional Linear webhook listener (README "Linear webhook"). Off unless
 # this section is present; the poller then behaves exactly as without it.
 # Max saves the Linear signing secret to secret_file (chmod 600).
