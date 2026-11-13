@@ -5873,6 +5873,106 @@ def test_handoffs_after_an_accepted_abandonment_do_nothing(
     }
 
 
+def _go_poll(dispatcher: Dispatcher, queue: SQLiteJobQueue) -> Comment:
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    go = comment("go", GO.format(state="building"), author="grok-login", created_at=1)
+    dispatcher.poll_once(FakeSource(ticket(go)))
+    return go
+
+
+def _drop_poll(dispatcher: Dispatcher, *before: Comment) -> None:
+    drop = comment("drop", ABANDONED, author="grok-login", created_at=9)
+    dispatcher.poll_once(FakeSource(ticket(*before, drop)))
+
+
+def _abandon_while_attempt_1_runs(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    running = queue.claim("claude")
+    assert running is not None
+    _drop_poll(dispatcher, go)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+
+
+def _abandon_while_attempt_2_runs(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    first = queue.claim("claude")
+    assert first is not None
+    queue.finish(first.id, owner="claude", handoff_comment_id=None)
+    dispatcher.poll_once(FakeSource(ticket(go)))
+    second = queue.claim("claude")
+    assert second is not None and second.request.attempt == 2
+    _drop_poll(dispatcher, go)
+    queue.finish(second.id, owner="claude", handoff_comment_id=None)
+
+
+def _abandon_with_a_build_still_queued(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    _drop_poll(dispatcher, go)
+
+
+def _abandon_with_a_failing_stuck_wake(dispatcher, queue, delivery) -> None:
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    for fix in iter(lambda: queue.claim("claude"), None):
+        queue.finish(fix.id, owner="claude", handoff_comment_id=f"ready-{fix.id}")
+    dispatcher.reconcile_jobs()
+    assert delivery.jobs
+    dispatcher.process(
+        ticket(comment("drop", ABANDONED, author="grok-login", created_at=9))
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _abandon_while_attempt_1_runs,
+        _abandon_while_attempt_2_runs,
+        _abandon_with_a_build_still_queued,
+        _abandon_with_a_failing_stuck_wake,
+    ],
+    ids=["attempt-1-fails", "attempt-2-fails", "queued-build", "failing-stuck-wake"],
+)
+def test_reconciliation_starts_no_work_on_an_abandoned_ticket(
+    tmp_path: Path, scenario
+) -> None:
+    now = [100.0]
+    delivery = RaisingGrokDelivery(RuntimeError("delivery unavailable"))
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    scenario(dispatcher, queue, delivery)
+    with queue.connect() as connection:
+        known = {row[0] for row in connection.execute("SELECT id FROM jobs")}
+    delivered = len(delivery.jobs)
+
+    for window in range(6):
+        now[0] = 100.0 + window * 7200
+        dispatcher.poll_once(FakeSource())
+        assert all(
+            queue.claim(recipient) is None for recipient in ("claude", "codex", "grok")
+        )
+
+    with queue.connect() as connection:
+        workflow = connection.execute(
+            "SELECT workflow_state, stuck FROM ticket_state"
+        ).fetchone()
+        new = [
+            tuple(row)
+            for row in connection.execute("SELECT id, action, state FROM jobs")
+            if row["id"] not in known
+        ]
+        live = connection.execute(
+            "SELECT action, state FROM jobs WHERE state IN ('queued', 'running')"
+        ).fetchall()
+    assert workflow["workflow_state"] == "abandoned"
+    assert new == []
+    assert [tuple(row) for row in live] == []
+    assert len(delivery.jobs) == delivered
+    if scenario is _abandon_while_attempt_2_runs:
+        assert not workflow["stuck"]
+
+
 def test_answers_abandoned_from_an_untrusted_login_is_ignored(
     tmp_path: Path,
 ) -> None:

@@ -34,6 +34,7 @@ from lib.job_state import (
 )
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
+    ABANDONED,
     READY,
     TRUSTED_LOGINS,
     VERDICT,
@@ -269,6 +270,31 @@ def test_a_dead_runner_that_never_started_its_worker_is_released_not_failed(
     poller.at(90)  # runner gone, no worker pid, no remote start
     assert poller.row(job_id)["state"] == "queued"
     assert poller.events() == [(job_id, RELEASED_UNSTARTED)]
+
+
+def test_an_unstarted_job_on_an_abandoned_ticket_is_closed_not_requeued(
+    tmp_path: Path,
+) -> None:
+    poller = Poller(tmp_path, box=False)
+    job_id = poller.review()
+    poller.claim()
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: False)
+    poller.now[0] = CLAIMED_AT + 20
+    poller.queue.heartbeat(job_id, owner="codex")
+    poller.dispatcher.process(
+        ticket(
+            comment("drop", ABANDONED, author="grok-login"),
+            repo="maxharris1/factory",
+            ticket_id="72",
+        )
+    )
+
+    poller.at(90)
+
+    assert poller.jobs() == [(job_id, "failed", 1)]
+    assert poller.row(job_id)["failure_handled"] == 1
+    assert poller.events() == [(job_id, RELEASED_UNSTARTED), (job_id, "abandoned")]
+    assert poller.pool.claim("codex") is None
 
 
 def test_a_started_remote_worker_is_never_released_as_unstarted(tmp_path: Path) -> None:

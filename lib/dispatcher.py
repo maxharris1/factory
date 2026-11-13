@@ -271,6 +271,7 @@ _UNVERIFIED_HANDOFF = """
           AND event.event IN ('handoff-verified', 'handoff-unverified')
     )
 """
+_ABANDONED_JOB_DETAIL = "the ticket is abandoned; nothing more starts for it"
 # #109: tickets out of the poll loop read per poll to verify a late handoff.
 OFF_LOOP_VERIFY_READS = 5
 _SECRET_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S*")
@@ -651,7 +652,7 @@ class Dispatcher:
             ticket = self._polled.get(key, ticket)
             if self._is_handled(ticket, comment.id):
                 continue
-            if self._workflow_state(ticket) == "abandoned":
+            if self._is_abandoned(ticket.repo, ticket.ticket_id):
                 self._mark_handled(ticket, comment.id, "ticket-abandoned")
                 continue
             fields: dict[str, str] | None
@@ -844,9 +845,11 @@ class Dispatcher:
 
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
+        self._close_abandoned_jobs()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._check_devices()
         self._check_job_states()
+        self._close_abandoned_jobs()
         now = self.queue.now()
         busy = self._busy_recipients()
         for job in self.queue.outstanding():
@@ -864,6 +867,43 @@ class Dispatcher:
             self._t6(job)
         self._ensure_all_stuck_wakes()
         self._deliver_grok_jobs(deferred_grok_jobs)
+
+    def _close_abandoned_jobs(self) -> None:
+        """#109: a queued job on an abandoned ticket never starts.
+
+        It is failed with its failure already handled, so T6 neither retries
+        it nor marks the ticket stuck. Runs before Grok delivery and again
+        after the job-state checks, which may requeue a claimed job.
+        """
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT jobs.* FROM jobs
+                JOIN ticket_state AS ticket
+                  ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
+                WHERE jobs.state = 'queued' AND ticket.workflow_state = 'abandoned'
+                ORDER BY jobs.created_at, jobs.id
+                """
+            ).fetchall()
+            closed = [_job(row) for row in rows]
+            for job in closed:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'failed', failure_handled = 1,
+                        finished_at = ?, last_activity_at = ?
+                    WHERE id = ? AND state = 'queued'
+                    """,
+                    (now, now, job.id),
+                )
+                self._record_job_event(
+                    connection, job, "abandoned", _ABANDONED_JOB_DETAIL, now
+                )
+            connection.commit()
+        for job in closed:
+            self._log_job_event(job, "abandoned", _ABANDONED_JOB_DETAIL)
 
     def _note_timeout_held(self, job: Job, now: float) -> None:
         """#87 r3 F2.1: a timed-out job whose worker may still run stays running.
@@ -3400,6 +3440,10 @@ class Dispatcher:
         if job.request.action == "stuck":
             self.queue.mark_failure_handled(job.id)
             return
+        if self._is_abandoned(job.request.repo, job.request.ticket_id):
+            self._record_job_event_once(job, "abandoned", _ABANDONED_JOB_DETAIL)
+            self.queue.mark_failure_handled(job.id)
+            return
         if self._is_stuck_identity(job.request.repo, job.request.ticket_id):
             self._ensure_stuck_wake(job.request.repo, job.request.ticket_id)
             self.queue.mark_failure_handled(job.id)
@@ -4164,13 +4208,13 @@ class Dispatcher:
                 ),
             )
 
-    def _workflow_state(self, ticket: TrackedTicket) -> str | None:
+    def _is_abandoned(self, repo: str, ticket_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
-                (ticket.repo.lower(), ticket.ticket_id),
+                (repo.lower(), ticket_id),
             ).fetchone()
-        return None if row is None else row["workflow_state"]
+        return row is not None and row["workflow_state"] == "abandoned"
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)
@@ -4239,13 +4283,17 @@ class Dispatcher:
         state = connection.execute(
             """
             SELECT stuck, stuck_reason, stuck_source_comment_id,
-                   timeout_seconds, generation, stuck_wake_job_id
+                   timeout_seconds, generation, stuck_wake_job_id, workflow_state
             FROM ticket_state
             WHERE repo = ? AND ticket_id = ?
             """,
             (repo.lower(), ticket_id),
         ).fetchone()
-        if state is None or not bool(state["stuck"]):
+        if (
+            state is None
+            or not bool(state["stuck"])
+            or state["workflow_state"] == "abandoned"
+        ):
             return
         wake_job_id = state["stuck_wake_job_id"]
         previous_detail: str | None = None
