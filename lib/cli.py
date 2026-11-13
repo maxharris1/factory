@@ -992,6 +992,7 @@ def _job_run(argv: list[str]) -> int:
             setup=setup,
             teardown=teardown,
             started=placed.started,
+            execed=placed.execed,
         )
         return code
     except placed_run.CheckoutError as exc:
@@ -1018,12 +1019,15 @@ def _job_run(argv: list[str]) -> int:
         return 1
     finally:
         placed.ended(code)  # #91: the exit reason, while the job still runs
-        if placed.autostart:
-            _fail_unfinished(queue, args.job_id, owner, log)
         try:
             placed.finish(code)  # #91: requeues a harness that never started
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
+        if placed.autostart:
+            # #99 A1: after the slot step, so an autostart run that never
+            # started gets its free requeue first; a requeued job is no
+            # longer running and is left alone.
+            _fail_unfinished(queue, args.job_id, owner, log)
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:

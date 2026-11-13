@@ -31,19 +31,23 @@ out holds one slot on one device. `orch job run` then:
   device answers that no process carries the start's worker tag and none
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
   dispatcher's DeviceMonitor confirms it on a later poll;
-* for an autostart job, fails the job for T6 (before releasing the slot)
-  when the command ended without `orch job done` (#80);
+* for an autostart job, fails the job for T6 (after the slot step, so a
+  harness that never started is requeued instead) when the command ended
+  without `orch job done` (#80);
 * #91: records how the command ended (`ended`: a run-died or run-exited
   job_events row, with the exit status) while the job is still running, so
   the poller can fail a job whose harness died and say why;
 * #91: when the harness never started, requeues the job in the same
   transaction that frees the slot (lib/job_state.py requeue_unstarted, no
   round charged, within the free-requeue budget), instead of leaving a
-  running job with no slot. Never started means no worker was recorded
-  (setup failed), or the command ended early: a remote start that exited
-  125 (the start script refused), 126 or 127 (the harness could not be
-  run, e.g. not on the login PATH) or 255 (ssh could not connect), or a
-  box command that exited 126 or 127, within EARLY_EXIT_SECONDS of launch.
+  running job with no slot. An exit status never proves that (#99 A2): a
+  harness that ran may exit 127 too. Never started means no earlier run
+  left a worker and this run has evidence it reached no harness: nothing
+  was spawned (setup failed), the box command was never exec'd
+  (lib/job_run.py's gate reports the exec), or the device answers that
+  this start wrote no launch record (lib/remote.py `harness_launched`:
+  the start refused, or the harness was not on the login PATH). A device
+  that cannot answer counts as started.
 """
 
 from __future__ import annotations
@@ -77,6 +81,7 @@ from lib.remote import (
     brief_path,
     check_worker,
     checkout,
+    harness_launched,
     new_tag,
     plain_branch,
     preflight,
@@ -89,11 +94,6 @@ from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_st
 
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
-# #91: exit statuses that mean the harness never ran (see the module doc),
-# and how soon after launch they must come to count as an early exit.
-REMOTE_EARLY_EXITS = frozenset({125, 126, 127, 255})
-LOCAL_EARLY_EXITS = frozenset({126, 127})
-EARLY_EXIT_SECONDS = 120.0
 
 Log = Callable[[str], None]
 
@@ -115,10 +115,10 @@ class PlacedRun:
     sleep: Callable[[float], None] = time.sleep
     alive: Callable[[int | None, str | None], bool] = pid_alive
     runner: int | None = None
-    clock: Callable[[], float] = time.monotonic
     requeued: bool = False
+    spawned: bool = False
+    exec_seen: bool = False
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
-    _launched: list[float] = field(default_factory=list)
 
     @property
     def remote(self) -> bool:
@@ -204,7 +204,7 @@ class PlacedRun:
                     self.placement.job_id, owner=self.owner, remote=True, tag=target.tag
                 )
             )
-            self._launched.append(self.clock())
+            self.spawned = True
             self.log(
                 f"starting job {self.placement.job_id} on {self.device.name} "
                 f"over ssh alias {self.target.alias} as {self.target.user}"
@@ -215,7 +215,7 @@ class PlacedRun:
             return  # the local pid is ssh; the worker is on the device
         start = process_start(pid)
         self._worker.append((pid, start))
-        self._launched.append(self.clock())
+        self.spawned = True
         retry_locked(
             lambda: self.pool.attach_worker(
                 self.placement.job_id,
@@ -250,16 +250,25 @@ class PlacedRun:
         except (QueueError, sqlite3.Error, OSError) as exc:
             self.log(f"could not record how job {job_id}'s command ended: {exc}")
 
+    def execed(self) -> None:
+        """lib/job_run.py: the box command was exec'd, so the harness ran."""
+        self.exec_seen = True
+
     def unstarted(self, code: int | None) -> bool:
-        """#91: the harness never ran (see the module doc)."""
+        """#91: the harness never ran, by evidence, not by status (see the module doc).
+
+        Remote, asks the device; call only once its worker is confirmed gone.
+        """
         placement = self.placement
-        if not self._launched:
-            # Nothing was launched by this run; only a slot no earlier run
-            # left a worker on is unstarted.
-            return placement.worker_pid is None and not placement.remote_started
-        if code is None or self.clock() - self._launched[0] > EARLY_EXIT_SECONDS:
+        if placement.worker_pid is not None or placement.remote_started:
+            return False  # an earlier run's worker ran this job
+        if not self.spawned:
+            return True
+        if self.target is None:
+            return not self.exec_seen
+        if code == 0:
             return False
-        return code in (REMOTE_EARLY_EXITS if self.target is not None else LOCAL_EARLY_EXITS)
+        return harness_launched(self.transport, self.target) is False
 
     def finish(self, code: int | None = None) -> bool:
         """Release the slot once the worker is confirmed gone. True if released.
@@ -315,10 +324,10 @@ class PlacedRun:
         job was finished meanwhile); the caller then frees the slot as usual.
         """
         job_id = self.placement.job_id
-        if self._launched:
+        if self.spawned:
             reason = (
-                f"its command on {self.device.name} ended early ({exit_reason(code)}) "
-                "before the harness ran"
+                f"its command on {self.device.name} ended ({exit_reason(code)}) "
+                "without reaching the harness"
             )
         else:
             reason = f"orch job run on {self.device.name} never started its command"

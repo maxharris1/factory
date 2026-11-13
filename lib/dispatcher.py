@@ -1972,6 +1972,9 @@ class Dispatcher:
                         if paused["paused_head"] is not None
                         else None
                     ),
+                    round_number=(
+                        self._review_context(ticket)[1] + 1 if action == "review" else None
+                    ),
                     instruction=_comment_link(comment),
                 ),
             ),
@@ -2792,11 +2795,7 @@ class Dispatcher:
                 self._done_from_verdict(job, verdict)
                 return
         if job.request.attempt == 1:
-            if job.request.action == "review" and self._open_fix_for_head(job):
-                # #91: a fix for this head is queued or running, so this head
-                # is already being replaced; re-reviewing it would run a review
-                # beside that fix. The fix's ready queues the next review.
-                self._skip_review_retry(job)
+            if job.request.action == "review" and self._review_retry_waits(job):
                 return
             generation = job.request.generation + 1
             request = JobRequest(
@@ -2841,15 +2840,19 @@ class Dispatcher:
 
         Read from the ticket this poll fetched (None when it fetched none):
         `from` and `role` as the reviewer, from a login trusted for it, a
-        head matching the job's (as a prefix, like every head compare), and
-        the job's round number when the job has one.
+        head matching the job's (as a prefix, like every head compare), the
+        job's round number, posted no earlier than the job was queued, and
+        not already rejected when it was handled (stale, superseded, ...).
+        A job with no round, or no head, takes no verdict: it is retried.
         """
         ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
-        if ticket is None or job.request.head is None:
-            return None
         round_number = _detail_round_number(job.request.detail)
+        if ticket is None or job.request.head is None or round_number is None:
+            return None
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         for item in sorted(ticket.comments, key=_comment_order):
+            if item.created_at < job.created_at:
+                continue
             try:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
@@ -2860,7 +2863,10 @@ class Dispatcher:
                 continue
             if _matching_head(fields.get("head") or "", job.request.head) is None:
                 continue
-            if round_number is not None and _round_number(fields.get("round")) != round_number:
+            if _round_number(fields.get("round")) != round_number:
+                continue
+            outcome = self._handled_outcome(ticket, item.id)
+            if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES):
                 continue
             return item
         return None
@@ -2905,7 +2911,57 @@ class Dispatcher:
             _matching_head(str(row["head"]), job.request.head) is not None for row in rows
         )
 
-    def _skip_review_retry(self, job: Job) -> None:
+    def _review_retry_waits(self, job: Job) -> bool:
+        """#91: hold a failed review's T6 retry while a fix for its head is open.
+
+        The retry is deferred, not dropped: the failure stays unhandled and
+        is looked at again every poll. Once no fix is open, the retry goes
+        ahead if the ticket still has this head (a fix that changed nothing
+        and readied the same head needs it: that ready's review dedupes onto
+        this failed job), and is dropped for good once the head was replaced.
+        True when the retry is not queued now.
+        """
+        if self._open_fix_for_head(job):
+            self._record_job_event_once(
+                job,
+                "retry-deferred",
+                f"a fix job for head {(job.request.head or '')[:12]} is open; "
+                "T6 retry review waits for it",
+            )
+            return True
+        if not self._job_event_recorded(job, "retry-deferred"):
+            return False
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if ticket is None:
+            return True  # the head is not known this poll; look again next poll
+        if _matching_head(job.request.head or "", ticket.current_head) is not None:
+            return False
+        self._skip_review_retry(job, ticket.current_head)
+        return True
+
+    def _job_event_recorded(self, job: Job, event: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM job_events WHERE job_id = ? AND event = ? LIMIT 1",
+                (job.id, event),
+            ).fetchone()
+        return row is not None
+
+    def _record_job_event_once(self, job: Job, event: str, detail: str) -> None:
+        now = self.queue.now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            seen = connection.execute(
+                "SELECT 1 FROM job_events WHERE job_id = ? AND event = ? LIMIT 1",
+                (job.id, event),
+            ).fetchone()
+            if seen is None:
+                self._record_job_event(connection, job, event, detail, now)
+            connection.commit()
+        if seen is None:
+            self._log_job_event(job, event, detail)
+
+    def _skip_review_retry(self, job: Job, current_head: str | None) -> None:
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2920,8 +2976,8 @@ class Dispatcher:
                 connection.commit()
                 return
             detail = (
-                f"a fix job for head {(job.request.head or '')[:12]} is already open; "
-                "no T6 retry review"
+                f"head {(job.request.head or '')[:12]} was replaced by "
+                f"{(current_head or 'none')[:12]} while its fix ran; no T6 retry review"
             )
             self._record_job_event(connection, job, "retry-skipped", detail, now)
             connection.commit()
@@ -4095,6 +4151,18 @@ def _round_number(value: object) -> int | None:
         return None
     head = value.split("/", 1)[0].strip()
     return int(head) if head.isdigit() else None
+
+
+# Handled outcomes that rejected a verdict: such a comment is no job's handoff.
+_REJECTED_OUTCOMES = (
+    "rejected-",
+    "stale-",
+    "superseded-",
+    "duplicate-",
+    "refused-",
+    "failed-",
+    "ticket-stuck",
+)
 
 
 def _detail_round_number(detail: str | None) -> int | None:

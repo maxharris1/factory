@@ -37,7 +37,7 @@ silent or not, so a late beat (a busy database) with a live runner is not a
 dead job. A placed job whose worker never started (no worker pid, no remote
 start) and that no live runner holds is released like a claim that never
 started (`unstarted_too_long`), with a free-requeue budget per job row
-(MAX_FREE_REQUEUES, shared with `orch job run`'s early-exit requeue) after
+(MAX_FREE_REQUEUES, shared with `orch job run`'s requeue of a harness that never started) after
 which it is failed for T6 instead, so a start that can never work does not
 loop. `requeue_unstarted` is that one guarded write: job back to queued (or
 failed once the budget is spent), slot freed and a job_events row, in the

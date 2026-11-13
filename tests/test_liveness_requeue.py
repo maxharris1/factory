@@ -9,6 +9,7 @@ Nothing reaches a real host, a real harness CLI or the live orch.db.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -342,17 +343,6 @@ def test_044db50d_a_remote_harness_not_on_path_is_requeued_as_its_slot_is_freed(
     assert poller.jobs() == [(job_id, "queued", 1)]
 
 
-def test_a_remote_start_the_device_refuses_is_requeued(tmp_path: Path) -> None:
-    poller, job_id, ssh = _remote(tmp_path)
-    code, err = _job_run(
-        poller, job_id, sys.executable, "-c", f"import sys; sys.exit({remote.START_REFUSED})",
-        env=ssh.env(),
-    )
-    assert code == remote.START_REFUSED, err
-    assert poller.row(job_id)["state"] == "queued"
-    assert poller.events()[-1] == (job_id, REQUEUED_EARLY_EXIT)
-
-
 def test_a_remote_harness_that_ran_and_failed_is_not_requeued(tmp_path: Path) -> None:
     poller, job_id, ssh = _remote(tmp_path)
     code, err = _job_run(poller, job_id, sys.executable, "-c", "import sys; sys.exit(1)", env=ssh.env())
@@ -541,8 +531,10 @@ def test_no_retry_review_is_queued_while_a_fix_for_that_head_is_open(tmp_path: P
     fresh.reconcile_jobs()
     reviews = [row[:2] for row in _rows(queue) if row[0] == "review"]
     assert reviews == [("review", "failed")]
-    assert [event for event, _d in _events(queue)] == ["retry-skipped"]
-    assert queue.unhandled_failures() == ()
+    assert [event for event, _d in _events(queue)] == ["retry-deferred"]
+    assert [job.id for job in queue.unhandled_failures()] == [_review.id]  # deferred, not dropped
+    fresh.reconcile_jobs()
+    assert [event for event, _d in _events(queue)] == ["retry-deferred"]  # recorded once
 
 
 def test_a_failed_review_with_no_verdict_and_no_fix_is_still_retried_once(
@@ -569,3 +561,300 @@ def test_dead_and_stale_states_are_unchanged_for_jobs_without_a_runner_check() -
     assert derive(
         last_activity_at=990.0, now=1000.0, placement=started, stale_seconds=120, liveness=gone
     ) == DEAD
+
+
+# --- PR #99 round 1 (Codex REVISE) ---------------------------------------------------
+
+
+def _autostart_box(tmp_path: Path) -> tuple[Poller, str]:
+    """A box job claimed by an autostart waiter: this test process, the run's parent."""
+    from lib.worktrees import process_start
+
+    poller = Poller(tmp_path, now=time.time())
+    poller.queue.clock = time.time
+    job_id = poller.review(timeout=3600)
+    me = os.getpid()
+    assert poller.pool.claim("codex", autostart=(me, process_start(me))) is not None
+    return poller, job_id
+
+
+def test_r1_a1_an_autostart_run_whose_harness_never_started_gets_the_free_requeue(
+    tmp_path: Path,
+) -> None:
+    poller, job_id = _autostart_box(tmp_path)
+    code, err = _job_run(poller, job_id, "orch-test-no-such-harness")
+    assert code == 127, err
+    row = poller.row(job_id)
+    assert (row["state"], row["attempt"], row["generation"]) == ("queued", 1, 1), err
+    assert poller.pool.placement(job_id) is None
+    assert poller.events()[-1] == (job_id, REQUEUED_EARLY_EXIT)
+
+
+def test_r1_a1_an_autostart_run_whose_setup_failed_gets_the_free_requeue(
+    tmp_path: Path,
+) -> None:
+    poller, job_id = _autostart_box(tmp_path)
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("", encoding="utf-8")
+    code, err = _job_run(
+        poller, job_id, "--worktree", "--work-root", str(blocked / "work"), "true"
+    )
+    assert code != 0, err
+    assert poller.row(job_id)["state"] == "queued", err
+    assert poller.events()[-1] == (job_id, REQUEUED_EARLY_EXIT)
+
+
+def test_r1_a1_an_autostart_run_whose_harness_ran_and_failed_still_goes_to_t6(
+    tmp_path: Path,
+) -> None:
+    poller, job_id = _autostart_box(tmp_path)
+    code, err = _job_run(poller, job_id, sys.executable, "-c", "import sys; sys.exit(1)")
+    assert code == 1, err
+    assert poller.row(job_id)["state"] == "failed"
+    assert REQUEUED_EARLY_EXIT not in [event for _j, event in poller.events()]
+
+
+def _side_effect_then(code: int, marker: Path) -> list[str]:
+    return [sys.executable, "-c", f"import pathlib, sys; pathlib.Path({str(marker)!r}).touch(); sys.exit({code})"]
+
+
+def test_r1_a2_a_box_harness_that_ran_is_never_unstarted_whatever_its_status(
+    tmp_path: Path,
+) -> None:
+    for code in (126, 127):
+        poller, job_id = _box_poller(tmp_path / str(code))
+        marker = tmp_path / f"ran-{code}"
+        got, err = _job_run(poller, job_id, *_side_effect_then(code, marker))
+        assert got == code and marker.exists(), err
+        assert poller.row(job_id)["state"] == "running", code  # normal failure handling
+        assert [event for event, _d in _details(poller)] == [RUN_DIED], code
+
+
+def test_r1_a2_a_remote_harness_that_ran_is_never_unstarted_whatever_its_status(
+    tmp_path: Path,
+) -> None:
+    for code in (remote.START_REFUSED, 126, 127, 255):
+        poller, job_id, ssh = _remote(tmp_path / str(code))
+        marker = tmp_path / f"ran-{code}"
+        got, err = _job_run(poller, job_id, *_side_effect_then(code, marker), env=ssh.env())
+        assert got == code and marker.exists(), err
+        assert poller.row(job_id)["state"] == "running", code
+        assert poller.pool.placement(job_id) is None
+        assert [event for event, _d in _details(poller)] == [RUN_DIED], code
+
+
+def test_r1_a2_a_remote_start_refused_before_the_harness_is_requeued(tmp_path: Path) -> None:
+    poller, job_id, ssh = _remote(tmp_path)
+    work = tmp_path / "remote" / "codex-bot" / "work"
+    work.mkdir(parents=True)
+    (work / "jobs").write_text("", encoding="utf-8")  # the job directory cannot be made
+    marker = tmp_path / "ran"
+    code, err = _job_run(poller, job_id, *_side_effect_then(0, marker), env=ssh.env())
+    assert code == remote.START_REFUSED, err
+    assert not marker.exists()
+    assert poller.row(job_id)["state"] == "queued"
+    assert poller.events()[-1] == (job_id, REQUEUED_EARLY_EXIT)
+
+
+def test_r1_a3_a_review_job_with_no_round_never_takes_a_posted_verdict(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, review, ready, verdict, now = _review_failed_after_its_verdict(
+        tmp_path, verdict_round="1/3", author="codex-login"
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE jobs SET detail = ? WHERE id = ?",
+            (json.dumps({"action": "review", "round": None}), review.id),
+        )
+    now[0] = 160
+    dispatcher._polled[("owner/repo", "42")] = ticket(
+        ready, verdict, head=HEAD, ci={HEAD: CIResult("success")}
+    )
+    dispatcher.reconcile_jobs()
+    reviews = [row[:3] for row in _rows(queue) if row[0] == "review"]
+    assert reviews == [("review", "failed", 1), ("review", "queued", 2)]
+    assert "done-from-verdict" not in [event for event, _d in _events(queue)]
+
+
+def test_r1_a3_a_review_resumed_by_t5_keeps_its_round(tmp_path: Path) -> None:
+    from tests.test_dispatcher import ANSWERS
+
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    ci = {HEAD: CIResult("success")}
+    ready = comment(f"ready-{HEAD}", READY.format(head=HEAD), author="claude-login")
+    dispatcher.process(ticket(ready, head=HEAD, ci=ci))
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    queue.finish(review.id, owner="codex", handoff_comment_id="questions-1")
+    asked = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nQuestions.\n",
+        author="codex-login",
+        created_at=120,
+    )
+    dispatcher.process(ticket(ready, asked, head=HEAD, ci=ci))
+    wake = queue.claim("grok")
+    assert wake is not None
+    queue.finish(wake.id, owner="grok", handoff_comment_id="answers-1")
+    answered = comment("answers-1", ANSWERS, author="grok-login", created_at=130)
+    dispatcher.process(ticket(ready, asked, answered, head=HEAD, ci=ci))
+    resumed = queue.claim("codex")
+    assert resumed is not None and resumed.request.action == "review"
+    assert json.loads(resumed.request.detail or "{}")["round"] == "1/3"
+
+
+def test_r1_a4_a_verdict_already_rejected_as_stale_never_finishes_a_later_review(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    early = comment(
+        "verdict-early",
+        VERDICT.format(round="1/3", head=HEAD[:7], verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=90,
+    )
+    ci = {HEAD: CIResult("success")}
+    dispatcher.process(ticket(early, head=HEAD, ci=ci))  # no review yet: stale
+    now[0] = 110
+    ready = comment(f"ready-{HEAD}", READY.format(head=HEAD), author="claude-login", created_at=105)
+    dispatcher.process(ticket(early, ready, head=HEAD, ci=ci))
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    now[0] = 150
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    dispatcher.process(ticket(early, ready, head=HEAD, ci=ci))
+    dispatcher.reconcile_jobs()
+    reviews = [row[:3] for row in _rows(queue) if row[0] == "review"]
+    assert reviews == [("review", "failed", 1), ("review", "queued", 2)]
+    assert "done-from-verdict" not in [event for event, _d in _events(queue)]
+
+
+def test_r1_a4_a_verdict_handled_as_stale_never_finishes_a_review_whatever_its_time(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, _review, ready, verdict, now = _review_failed_after_its_verdict(
+        tmp_path, verdict_round="1/3", author="codex-login"
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) "
+            "VALUES ('owner/repo', '42', ?, 'stale-revise')",
+            (verdict.id,),
+        )
+    now[0] = 160
+    dispatcher._polled[("owner/repo", "42")] = ticket(
+        ready, verdict, head=HEAD, ci={HEAD: CIResult("success")}
+    )
+    dispatcher.reconcile_jobs()
+    reviews = [row[:3] for row in _rows(queue) if row[0] == "review"]
+    assert reviews == [("review", "failed", 1), ("review", "queued", 2)]
+
+
+def _review_failed_beside_an_open_fix(tmp_path: Path):
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    ci = {HEAD: CIResult("success")}
+    ready = comment(f"ready-{HEAD}", READY.format(head=HEAD), author="claude-login")
+    dispatcher.process(ticket(ready, head=HEAD, ci=ci))
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    fix = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="fix",
+            recipient="claude",
+            source_comment_id="ci-red",
+            timeout_seconds=3600,
+            head=HEAD,
+        ),
+        dedupe_key="ci-fix:owner/repo#42:1",
+    )
+    now[0] = 150
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    dispatcher.process(ticket(ready, head=HEAD, ci=ci))
+    dispatcher.reconcile_jobs()
+    assert [row[:2] for row in _rows(queue) if row[0] == "review"] == [("review", "failed")]
+    return dispatcher, queue, fix, ready, now
+
+
+def test_r1_a5_a_fix_that_readies_the_same_head_gets_the_review_it_waited_for(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, fix, ready, now = _review_failed_beside_an_open_fix(tmp_path)
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.id == fix.id
+    now[0] = 200
+    again = comment("ready-again", READY.format(head=HEAD), author="claude-login", created_at=190)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    dispatcher.process(ticket(ready, again, head=HEAD, ci={HEAD: CIResult("success")}))
+    dispatcher.reconcile_jobs()
+    reviews = [row[:3] for row in _rows(queue) if row[0] == "review"]
+    assert reviews[-1] == ("review", "queued", 2)  # a runnable review of that head
+
+
+def test_r1_a5_a_fix_that_pushed_a_new_head_ends_the_old_heads_retry(tmp_path: Path) -> None:
+    dispatcher, queue, fix, ready, now = _review_failed_beside_an_open_fix(tmp_path)
+    claimed = queue.claim("claude")
+    assert claimed is not None and claimed.id == fix.id
+    now[0] = 200
+    new_head = "f00dfee" + "1" * 33
+    again = comment(f"ready-{new_head}", READY.format(head=new_head), author="claude-login", created_at=190)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    dispatcher.process(ticket(ready, again, head=new_head, ci={new_head: CIResult("success")}))
+    dispatcher.reconcile_jobs()
+    with queue.connect() as connection:
+        reviews = [
+            (str(row["head"]), str(row["state"]), int(row["attempt"]))
+            for row in connection.execute(
+                "SELECT * FROM jobs WHERE action = 'review' ORDER BY created_at, rowid"
+            )
+        ]
+    assert reviews == [(HEAD, "failed", 1), (new_head, "queued", 1)]
+    assert queue.unhandled_failures() == ()
+
+
+def test_r1_a6_the_bots_login_profile_cannot_change_orchs_env_or_directory(
+    tmp_path: Path,
+) -> None:
+    poller, job_id, ssh = _remote(tmp_path)
+    home = tmp_path / "device-home"
+    home.mkdir()
+    (home / ".bash_profile").write_text(
+        "export ORCH_JOB_ID=profile ORCH_JOB_BOT=profile ORCH_JOB_DEVICE=profile\n"
+        "export ORCH_JOB_WORKDIR=/profile ORCH_WORKER_TAG=profile\n"
+        "cd /\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "seen.json"
+    keys = ("ORCH_JOB_ID", "ORCH_JOB_BOT", "ORCH_JOB_DEVICE", "ORCH_JOB_WORKDIR", remote.TAG_ENV)
+    script = (
+        "import json, os\n"
+        f"json.dump({{'cwd': os.getcwd(), **{{k: os.environ.get(k) for k in {keys!r}}}}}, "
+        f"open({str(report)!r}, 'w'))\n"
+    )
+    code, err = _job_run(
+        poller, job_id, sys.executable, "-c", script,
+        env={**ssh.env(), "FAKE_SSH_HOME": str(home)},
+    )
+    assert code == 0, err
+    start = next(
+        call for call in ssh.calls()
+        if (call["script"] or "").startswith(f"exec env {remote.TAG_ENV}=")
+    )
+    tag = start["script"].split()[2].removeprefix(f"{remote.TAG_ENV}=")
+    workdir = f"{tmp_path}/remote/codex-bot/work/jobs/{job_id}"
+    assert json.loads(report.read_text(encoding="utf-8")) == {
+        "cwd": workdir,
+        "ORCH_JOB_ID": job_id,
+        "ORCH_JOB_BOT": "codex-bot",
+        "ORCH_JOB_DEVICE": "pc",
+        "ORCH_JOB_WORKDIR": workdir,
+        remote.TAG_ENV: tag,
+    }

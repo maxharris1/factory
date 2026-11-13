@@ -382,7 +382,8 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
         "ORCH_DB": None,
     }
     calls = ssh.calls()
-    assert len(calls) == 2  # the start, then the check that the worker is gone
+    # the start, the check that the worker is gone, then (exit 3) whether it ran the harness
+    assert len(calls) == 3
     for call in calls:
         assert (call["user"], call["alias"]) == (bot, f"fakepc-{bot}")
         assert "BatchMode=yes" in call["options"]
@@ -390,7 +391,8 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
     tag = calls[0]["script"].split()[2].removeprefix("ORCH_WORKER_TAG=")
     assert len(tag) == 32  # the start runs under a fresh worker tag ...
     assert f"t={tag};" in calls[1]["script"]  # ... and the check looks for that tag
-    assert [call["words"] for call in calls] == [1, 1]  # one remote command string each
+    assert f"= {tag} ]" in calls[2]["script"]  # ... as does the launch record probe
+    assert [call["words"] for call in calls] == [1, 1, 1]  # one remote command string each
     assert pool.placement(job_id) is None  # released: the worker is gone
     assert state(queue, job_id) == "running"  # job run never finishes the job
 

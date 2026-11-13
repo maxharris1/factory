@@ -47,11 +47,13 @@ Log = Callable[[str], None]
 # a runner that dies, or cannot record it, closes the pipe first and the
 # command never runs. Before the exec it puts back the signal dispositions
 # Python changed at its own start-up, as Popen does for a direct command.
+# argv[2] is a close-on-exec report pipe: EOF with no byte means the exec
+# happened (#99 A2), a byte means the command could not be exec'd.
 _GATE = """\
 import os, signal, sys
 if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-fd = int(sys.argv[1])
+fd, report = int(sys.argv[1]), int(sys.argv[2])
 go = os.read(fd, 3) == b"go\\n"
 os.close(fd)
 if not go:
@@ -59,10 +61,12 @@ if not go:
 for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.set_inheritable(report, False)
 try:
-    os.execvp(sys.argv[2], sys.argv[2:])
+    os.execvp(sys.argv[3], sys.argv[3:])
 except OSError as exc:
-    print(f"orch job run: cannot start {sys.argv[2]}: {exc}", file=sys.stderr)
+    os.write(report, b"x")
+    print(f"orch job run: cannot start {sys.argv[3]}: {exc}", file=sys.stderr)
     sys.exit(127)
 """
 
@@ -121,6 +125,7 @@ def run(
     setup: Callable[[], Path | None] | None = None,
     teardown: Callable[[], None] | None = None,
     started: Callable[[int], None] | None = None,
+    execed: Callable[[], None] | None = None,
 ) -> int:
     """Beat once, run argv with a heartbeat, and return its exit status.
 
@@ -142,7 +147,9 @@ def run(
     command may run (the device pool records it as the job's worker): the
     process waits at a gate until `started` returns, so a command never runs
     unrecorded. If `started` raises, the gate is closed, the command never
-    runs, and 127 is returned.
+    runs, and 127 is returned. `execed` is called once the gated command was
+    exec'd (or the gate ended without saying it could not exec), never for
+    a command that did not start: its status alone cannot say (#99 A2).
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
@@ -171,16 +178,19 @@ def run(
             log(f"not starting {argv[0]}: got signal {pending[0]}")
             return 128 + pending[0]
         spawn = list(argv)
-        read_end = write_end = -1
+        read_end = write_end = report_read = report_write = -1
         if started is not None:
             read_end, write_end = os.pipe()
-            spawn = [sys.executable, "-I", "-S", "-c", _GATE, str(read_end), *spawn]
+            report_read, report_write = os.pipe()
+            spawn = [
+                sys.executable, "-I", "-S", "-c", _GATE, str(read_end), str(report_write), *spawn
+            ]
         try:
             child = subprocess.Popen(
                 spawn,
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
-                pass_fds=(read_end,) if started is not None else (),
+                pass_fds=(read_end, report_write) if started is not None else (),
             )
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
@@ -188,13 +198,16 @@ def run(
         finally:
             if started is not None:
                 os.close(read_end)
+                os.close(report_write)
                 if child is None:
                     os.close(write_end)
+                    os.close(report_read)
         if started is not None:
             try:
                 started(child.pid)
             except Exception as exc:
                 os.close(write_end)  # the gate reads EOF: the command never runs
+                os.close(report_read)
                 log(
                     f"not starting {argv[0]}: could not record worker pid "
                     f"{child.pid}: {_one_line(exc)}"
@@ -203,6 +216,7 @@ def run(
                 return 127
             except BaseException:
                 os.close(write_end)
+                os.close(report_read)
                 raise
             try:
                 os.write(write_end, b"go\n")
@@ -210,6 +224,14 @@ def run(
                 pass  # the gate already died (a forwarded signal); its status says so
             finally:
                 os.close(write_end)
+            try:
+                failed = os.read(report_read, 1) != b""
+            finally:
+                os.close(report_read)
+            if not failed and execed is not None:
+                execed()
+        elif execed is not None:
+            execed()
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
