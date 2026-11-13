@@ -171,9 +171,13 @@ def test_successors_and_finished_states_come_from_the_chart() -> None:
             assert set(flow.successors(chart, state)) == _successors(path, state), (path.name, state)
     chart = flow.load_chart(CHART)
     # Finished: the chart has no way back to work from there.
-    for state in ("done", "merged", "post-merge", "handed-off", "abandoned", "refused"):
+    for state in ("done", "merged", "post-merge", "abandoned", "refused"):
         assert flow.is_terminal(chart, state), state
-    for state in ("intake", "building", "review", "fixing", "ship", "waiting-external", "capped"):
+    # #108: a trusted ready after handoff re-enters review.
+    for state in (
+        "intake", "building", "review", "fixing", "ship", "waiting-external", "capped",
+        "handed-off",
+    ):
         assert not flow.is_terminal(chart, state), state
     assert not flow.is_terminal(chart, None)
     mini = flow.load_chart(MINI)

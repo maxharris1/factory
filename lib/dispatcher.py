@@ -3951,8 +3951,8 @@ class Dispatcher:
     def unpolled_linear_tickets(self) -> frozenset[str]:
         """Tracked Linear tickets that poll_once no longer reads.
 
-        Merged, handed off, done or abandoned with nothing left to settle
-        (_tracked_refs). Only the Linear webhook poller reads this, to ack
+        Merged, done or abandoned with nothing left to replay or settle
+        (_tracked_refs); a handed-off ticket is still polled (#108). Only the Linear webhook poller reads this, to ack
         their dirty rows unread (docs/SPEC.md section 7).
         """
         polled = {

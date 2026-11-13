@@ -556,8 +556,8 @@ or error cutoff, so a missed webhook costs at most one reconcile interval.
 A dirty row is deleted only after its issue was read in that cycle and only
 if no newer event arrived meanwhile; an unread row (budget deferral, error)
 waits for the next cycle. A tracked ticket the dispatcher no longer polls
-(merged, handed off, done or abandoned) is not read with or without a
-webhook, so its row is deleted unread. A read that finds the issue gone
+(merged, done or abandoned; a handed-off one is still polled, issue #108)
+is not read with or without a webhook, so its row is deleted unread. A read that finds the issue gone
 also drops its reused read, so the ticket is never rebuilt from it. If the dirty queue cannot be read, the cycle
 records a `linear-webhook` poll error and runs as a full cycle. With no
 `linear_webhook`, the poller never reads the dirty queue or the job list
