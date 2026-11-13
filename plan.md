@@ -1,283 +1,167 @@
-# Plan for #105, rounds, caps and retries
+# Plan for #119, skill-loading and helper-agent probe
 
-Max approves extra review rounds, and the factory loses track of them. Verdict headers like `round=4/3` fail to parse, `review_round` sticks at 3, a second extra round is deduped away, and a trusted `ready` after the cap queues a round nobody approved. Separately, T6 retries fix jobs that already posted their `ready`, and Claude print mode kills a run whose tests ran in the background.
+Factory briefs tell jobs to "Run as poteto-mode", and the jobs often never read the skill. Max wants to know, from evidence and not from what a model says, which way of asking actually makes each harness read a pstack `SKILL.md`, on each device. He also wants to know whether a CLI job can start a helper agent. This probe answers both, and T06 and T09 build on whatever loading style it shows works.
 
-This plan fixes both in one PR (#110, branch `factory/issue-105`). The rule it enforces is that the round cap is a recorded fact on the ticket and every builder handoff copies it from the job. Nothing a bot writes into a header can move it. Max's extra round, relayed by the trusted Grok go, is the only thing that raises it.
+The smallest change that meets the ticket is one read-only script. It starts each harness with the waiter's own command, then reads the transcript that the harness itself writes. It writes one table to `docs/skill-loading.md`. One PR (#123, branch `factory/issue-119`). Risk low, one review round with Codex Bot. Grok Bot merges on `ship: handoff`.
 
-Folds in #102, #61, #53, #67, #68 and #42 N2.
+## Grounding (what the probe has to fit)
 
-## How to read this
+These facts were checked in this plan job. Each one shapes a choice below.
 
-One box is one unit of work. Every box names the evidence that checks it. Check a box only when its evidence exists, a test run, a log line or a SHA.
+- **The waiter's launch.** `lib/waiter.py` `load_harness_command` reads the bot's argv from `~/.config/factory/waiter-<bot>.yml` (an owner-only file). The brief goes on stdin. `lib/harness_env.py` adds `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for Claude. A remote device runs `lib/remote.py` `start_script` over `ssh -l <bot> <alias>` under the bot's login shell, and `lib/codex_sandbox.py` `for_device` makes a codex argv device-neutral.
+- **poteto-mode cannot be model-invoked.** The pinned `skills/pstack/skills/poteto-mode/SKILL.md` has `disable-model-invocation: true`. The pstack Claude adapter (`skills/pstack/docs/harness/claude-code.md`) says the `Skill` tool "refuses most pstack skills" and says to `Read <pstack>/skills/<name>/SKILL.md and follow it` instead. So style 1 probably does not read the skill. That is a guess, and the probe is how we find out.
+- **Claude writes its own transcript in `-p` mode.** It goes to `~/.claude/projects/<slug>/<session>.jsonl`, and the slug is the cwd with each `/` and `.` changed to `-`. This plan job's own transcript has that shape (measured). Each record has `type`, `cwd`, `version` (the harness version) and `message.content` blocks. `tool_use` blocks carry `name` and `input`, and `tool_result` blocks carry `tool_use_id`, `content` and `is_error`. Subagent transcripts go in `<session>/subagents/`.
+- **Codex writes its own rollout.** It goes to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` by default), with a `session_meta` record that has `cwd` and `cli_version`. Codex reads files through shell calls. The names of its function calls and of its sub-agent tool are not verified here, because codex is not on this Mac's claude-bot PATH. Unit 1 captures them from a real run before the parser is written.
+- **The Mac today.** There is no `~/.claude/skills` and no `~/.agents/skills` for claude-bot, so pstack is not installed there (measured). The probe must not install it. It records what happens.
 
-This is a factory plan job, so the execution is the factory build job for #105 under `pstack/skills/poteto-mode/playbooks/feature.md`, not an autopilot program. There is one PR. Codex Bot reviews it (risk high, up to three rounds). Grok Bot merges it on `ship: handoff`. The poteto multi-phase skeleton's ten cloud lanes do not apply to a single backend PR with no UI. Its verification rule does, adapted in **Verify** below.
+## Design (architect scaffold)
 
-Tests alone are not sufficient verification. The PR is verified only when its unit, replay and CI boxes are all checked.
+### Candidates
 
-## The data shape
-
-The change hangs on three facts. The builder names them before writing code.
-
-| Fact | Where it lives | Who writes it | Who reads it |
+| | A. Waiter argv, harness's own transcript file | B. Add JSON output flags, parse stdout | C. Go through `orch job run` with a synthetic job |
 | --- | --- | --- | --- |
-| `cap_extra` | New `ticket_state.cap_extra INTEGER NOT NULL DEFAULT 0`, added by the existing `PRAGMA table_info` migration in `Dispatcher._initialize` | T1, in the same transaction that resumes a capped ticket | `Dispatcher._effective_cap(ticket, connection=None)`, which returns `rounds_low` or `rounds_high` plus `cap_extra` |
-| Next round | Job `detail["round"]` as `"<n>/<effective cap>"`. For a review job, `n` is the round under review. For a build or fix job, `n` is the review round its `ready` will start | `Dispatcher._job_detail`, which takes the effective cap instead of recomputing the config cap | `lib/brief.py` `_facts`, the ready and verdict headers, `_posted_verdict` |
-| Trusted risk | `TrackedTicket.risk`, as today | `lib/poll_source.py` `_risk`, now reading only comments whose author is trusted for the `from` bot | Every cap computation |
+| Launch | Exactly the configured argv, prompt on stdin | Configured argv plus `--output-format stream-json --verbose` or `--json` | The real runner |
+| Meets "only the waiter's normal launch" | Yes | No, it changes the flags | Yes |
+| Side effects | A probe directory and the harness's normal session file | Same | Writes orch.db rows, takes a device slot, heartbeats, can be retried by T6 |
+| Evidence source | The harness's transcript | The harness's stream | The harness's transcript |
+| Failure mode | Transcript persistence turned off, recorded as `unknown` | None new | Queue interference |
 
-`review_round` keeps its meaning, the number of REVISE rounds completed. It already advances in T3. It stopped at 3 only because the round-4 verdict never parsed.
+**Synthesis decision: A.** B breaks the criterion and the out-of-scope rule on launch flags. C puts a probe into the live queue. A's only risk is a config that turns off session persistence, and the probe reports that as `unknown` rather than guessing. Two shapes for the read check were also compared. One branched per tool (`Read`, `Skill`, `Bash cat`, slash expansion). The other asks one question: did a line from the skill's body reach the model's context from a source other than the model? The single question wins. It covers every path, including ones not thought of yet, and it never counts the model's own claim.
+
+Arena runners skipped. The fork was settled by the acceptance criteria, and the remaining shape is small. Codex's review and `interrogate` give the adversarial pass.
+
+### Data shape
+
+```python
+# lib/skill_probe.py
+
+Harness = Literal["claude", "codex"]          # Cursor stays off; not in the table
+Outcome = Literal["yes", "no", "missing", "n/a", "unknown"]
+# yes/no: transcript shows it. missing: the helper agent type is not installed.
+# n/a: the style does not apply to this harness. unknown: no transcript found.
+
+class Style(Enum):
+    RUN_AS = "run-as"            # 1. "Run as poteto-mode"
+    READ_PATH = "read-path"      # 2. "Read <abs>/poteto-mode/SKILL.md and follow it"
+    SLASH = "slash"              # 3. "/poteto-mode" at the top of the prompt
+    CODEX_MENTION = "codex-skill"  # 4. "$poteto-mode", resolved from $HOME/.agents/skills
+
+@dataclass(frozen=True)
+class StyleSpec:
+    style: Style
+    harnesses: frozenset[Harness]           # where the style applies; elsewhere n/a
+    opening: Callable[[str], str]           # skill_md abs path -> first prompt line
+
+STYLES: tuple[StyleSpec, ...]               # the registry; the only place a style is defined
+
+@dataclass(frozen=True)
+class Evidence:
+    read: Outcome
+    read_via: str | None                    # "Read", "Skill", "shell", "injected"
+    helper: Outcome                         # Claude general-purpose, or Codex sub-agent
+    poteto_agent: Outcome                   # Claude only; codex rows are n/a
+    harness_version: str | None             # from the transcript, not from --version
+
+@dataclass(frozen=True)
+class Launch:
+    device: str
+    harness: Harness
+    style: Style
+    argv: tuple[str, ...]                   # from load_harness_command, unchanged
+    env: Mapping[str, str]                  # harness_env(harness) only
+    run_dir: str                            # fresh, empty, under the device's workdir
+    remote: RemoteTarget | None             # None on the local device
+
+@dataclass(frozen=True)
+class ProbeResult:
+    date: str                               # ISO date of the run, UTC
+    device: str
+    harness: Harness
+    style: Style
+    evidence: Evidence
+    note: str                               # one line, such as "no transcript" or a timeout
+
+# Pure core: the unit-tested part
+def skill_canary(skill_md: str) -> str: ...                   # first body line after the H1, never frontmatter
+def claude_evidence(records: Iterable[Mapping], canary: str) -> Evidence: ...
+def codex_evidence(records: Iterable[Mapping], canary: str) -> Evidence: ...
+PARSERS: Mapping[Harness, Callable[[Iterable[Mapping], str], Evidence]]
+def prompt_for(spec: StyleSpec, harness: Harness, skill_md: str) -> str: ...
+def plan_launches(machines: MachinesConfig, bot: str, command: HarnessCommand,
+                  run_id: str) -> list[Launch]: ...
+def render(results: Sequence[ProbeResult]) -> str: ...       # docs/skill-loading.md
+
+# Edge: the only code that touches processes and files
+def run_launch(launch: Launch, prompt: str, timeout: float) -> str: ...  # returns transcript JSONL text, "" if none
+def claude_transcript(home: Path, run_dir: str) -> Path | None: ...      # ~/.claude/projects/<slug>/*.jsonl only
+def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | None: ...  # sessions/**/rollout-*.jsonl only
+```
+
+`bin/skill-probe` mirrors `bin/orch` and has these subcommands:
+
+- `skill-probe run --bot <bot> [--machines PATH] [--device NAME] [--out DIR] [--dry-run] [--timeout SEC]`. Run it as that bot's own user on the box. It covers every enabled device that lists the bot's harness, locally on the box and over SSH elsewhere. It writes `<out>/<device>-<harness>-<style>.json` (a `ProbeResult`) and a copy of each transcript beside it. `--dry-run` prints each `Launch` and its prompt and starts nothing.
+- `skill-probe render <result.json>... > docs/skill-loading.md`.
+
+### The rules the parsers enforce
+
+- **Read = yes** only when the canary line from the skill's body shows up in a record that the model did not write. That means a `tool_result` (Claude `Read`, `Skill` or `Bash`) that is not `is_error`, an injected user or system record (a slash expansion), or a Codex function-call output. Assistant text and reasoning never count, so a model that says "loaded poteto-mode" without reading it scores `no`. The canary comes from the pinned `SKILL.md` body, never from its frontmatter `description`, because Claude lists that without opening the file.
+- **Helper = yes** when the transcript has a spawn call with a non-error result. For Claude that is an `Agent` (or legacy `Task`) `tool_use` with `subagent_type: general-purpose`. For Codex it is the sub-agent tool call that Unit 1 names from a real rollout, kept in a one-line table so a renamed tool is one edit. `poteto_agent` checks `poteto-agent` and `pstack:poteto-agent`. An "agent type not found" style error scores `missing`, as the ticket asks while T07 is pending.
+- **Applicability.** Styles 1 and 2 run on both harnesses. Style 3 is Claude only, because `codex exec` has no slash commands. Style 4 is Codex only. A cell that does not apply renders as `n/a`. Changing that is one `StyleSpec` edit.
+- **Prompt.** The style's opening line, then fixed text. It asks the harness to start one helper that replies `ok` (and, on Claude, a second of type `poteto-agent`), then to stop. It also tells the harness to read no other file, write no file and make no network or GitHub call. The prompt never contains the canary.
+
+### Credential guard
+
+The probe opens only these paths:
+
+- the pinned `SKILL.md`
+- the bot's waiter config, through `load_harness_command`
+- `machines.yml`
+- its own run directory
+- the two transcript locations above
+
+The transcript locators resolve every candidate path and refuse anything outside `~/.claude/projects/<slug>/` or `$CODEX_HOME/sessions/`. They never touch `~/.codex/auth.json`, `~/.claude/.credentials*`, `.env`, `.runner` or the SSH config. Remote transcripts come back through one fixed `sh` script that `cat`s the single located file. Every ssh call goes through `remote.ssh_argv` with the bot's own alias and `-l <bot>`, as the waiter does.
 
 ## Criterion-to-work map
 
-| # | Acceptance criterion | Work that meets it | Tests that fail on revert |
+| # | Acceptance criterion | Work that meets it | Evidence |
 | --- | --- | --- | --- |
-| 1 | Build and fix ready headers carry `round=<next>/<cap>` and `risk=<risk>` from the job facts. The builder never invents a denominator. A trusted ready naming a newer head re-reads the PR head uncached before calling it stale. | Unit 4 | `test_build_and_fix_jobs_carry_next_round_and_cap`, `test_ready_header_carries_round_and_risk_from_job_facts`, `test_ready_header_has_no_round_when_the_job_has_none`, `test_ready_naming_a_newer_head_rereads_the_pr_head` |
-| 2 | Extra round is a recorded fact raising the cap by 1 (`cap_extra`), set by the trusted Grok go on a capped ticket. `round=4/4` parses. Over-cap verdict rejected, not unparsed. `review_round` advances every round. REVISE at the effective cap moves to `capped`. | Units 1 and 2 | `test_extra_round_raises_the_cap_once_per_go`, `test_round_over_its_denominator_parses`, `test_verdict_over_the_effective_cap_is_rejected_over_cap`, `test_untrusted_go_on_a_capped_ticket_records_no_extra_round` |
-| 3 | A ready after the cap, with no recorded extra round, queues nothing and marks the ticket needs-attention (#53, #67). | Unit 3 | `test_ready_after_the_cap_queues_nothing_and_flags_attention`, `test_ready_after_an_extra_round_queues_the_next_review` |
-| 4 | `risk=` is read only from trusted authors (#68). | Unit 5 | `test_untrusted_risk_comment_leaves_the_ticket_low`, `test_later_trusted_risk_still_applies` |
-| 5 | The resume-fix dedupe key includes the go comment id, so every extra round queues exactly one fix (#42 N2). | Unit 1 | `test_extra_round_raises_the_cap_once_per_go` (two caps, two gos, two fixes), `test_replayed_resume_go_queues_no_second_fix` |
-| 6 | Before T6 retries a failed fix or build, a trusted builder ready at a new head posted after the job started marks the job done (`done-from-ready`) and routes the ready. No duplicate fix. | Unit 6 | `test_failed_fix_with_a_posted_ready_is_done_from_ready`, `test_failed_build_with_a_posted_ready_is_done_from_ready`, `test_ready_at_the_job_head_does_not_stop_the_retry`, `test_untrusted_ready_does_not_stop_the_retry` |
-| 7 | The brief says to run long test suites in the foreground. The runner sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for Claude print mode. A run that ends with unpushed commits has its kept worktree reused by the T6 retry. | Unit 7 | `test_builder_briefs_say_run_tests_in_the_foreground`, `test_claude_print_mode_gets_the_bg_wait_ceiling`, `test_other_harnesses_get_no_bg_wait_ceiling`, `test_retry_adopts_the_kept_worktree_with_unpushed_commits`, `test_retry_does_not_adopt_a_clean_or_live_worktree` |
-| 8 | Tests for each item that fail on revert. SPEC updated (T1, T2, T6, cap rows). | Every unit names its tests. Unit 8 updates SPEC and the TLA+ model | `pytest`, `bash model/check.sh` |
+| 1 | The probe runs on the box and the Mac for both harnesses (Claude and Codex). | Units 3 and 5. `plan_launches` covers every enabled device whose `harnesses` lists the bot's harness: local on the box, `remote.start_script` over SSH to the Mac. Unit 5 is the live run as claude-bot and as codex-bot. | `test_plan_launches_covers_local_and_remote_devices`, `test_disabled_or_placeholder_device_is_skipped`, and the run's result files for `box` and `mac` × `claude` and `codex`, committed through the rendered doc |
+| 2 | `docs/skill-loading.md` has a table of device × harness × style → read yes/no and helper yes/no, with date and harness version. | Unit 4 `render`, then Unit 5 renders the live results into the doc | `test_render_has_one_row_per_device_harness_style`, `test_render_shows_date_and_harness_version`, and the committed `docs/skill-loading.md` |
+| 3 | The probe reads no credential files and uses only the waiter's normal launch. | Unit 3. The argv comes only from `load_harness_command` (and `for_device` remotely), the env only from `harness_env`, and the prompt only on stdin. The transcript locators are path-confined. | `test_local_launch_argv_is_the_waiter_command_unchanged`, `test_remote_launch_uses_start_script_and_bot_alias`, `test_prompt_goes_on_stdin_only`, `test_transcript_locator_refuses_paths_outside_the_transcript_dirs`, `test_probe_run_opens_no_credential_path` (it records every `open` during a dry run and a faked run and asserts none matches `auth.json`, `.credentials*`, `.env`, `.runner`, `id_*`, `FACTORY_WEBHOOK`) |
+| 4 | A unit test covers the transcript parser with fixture logs. | Units 1 and 2. Fixtures go in `tests/fixtures/skill_probe/`, trimmed from real transcripts. | `test_claude_read_tool_counts_as_read`, `test_claude_slash_expansion_counts_as_read`, `test_claude_claim_without_read_is_no`, `test_claude_refused_skill_tool_is_no`, `test_claude_general_purpose_helper_yes_poteto_agent_missing`, `test_codex_shell_read_counts_as_read`, `test_codex_subagent_spawn_counts_as_helper`, `test_missing_transcript_is_unknown`, `test_canary_is_body_not_frontmatter` |
 
-Every criterion is mapped.
+All four rows are mapped. Row 1 and the data in row 2 depend on Unit 5, a live run that starts harnesses. See the open decision below.
 
-## Work units
+## Units
 
-Each unit is one commit that ends green under `env -u ORCH_DB pytest`. The order lets each unit build on a verified base. Test first in every unit.
+Each unit ends in a check and gets its own commit. Tests go only in `tests/test_skill_probe.py`, with fixtures in `tests/fixtures/skill_probe/`.
 
-### Unit 1. Record the extra round and key the resume fix on the go (AC 2, AC 5)
+1. **Fixtures from real transcripts.** Claude fixtures are cut from real `-p` transcripts. That includes a `Read` of a `SKILL.md`, an `Agent` spawn, and a refused or not-found agent type. Codex fixtures are cut from real `codex exec` rollouts on the box, read by codex-bot. That covers a shell read and the sub-agent call, which also pins its real tool name. Trim each file to the records the parser reads. Drop prompts and any env-looking text. *Check:* each fixture is valid JSONL, and a grep for `ghp_`, `gho_`, `sk-`, `Bearer `, `BEGIN .* PRIVATE KEY` finds nothing. Until real Codex rollouts exist (Unit 5 makes them), the Codex fixtures follow the documented rollout shape and are marked provisional in a module docstring. Unit 5 replaces them.
+2. **Pure core.** This covers `skill_canary`, `STYLES`, `prompt_for`, `claude_evidence`, `codex_evidence`, `PARSERS` and `render`. *Check:* the row 4 and row 2 tests above pass and fail on revert.
+3. **Launch plan and edges.** This covers `plan_launches`, `run_launch` (local `subprocess` with no shell, prompt on stdin, the timeout killing the process group; remote through `remote.start_script`, `remote.ssh_argv` and `remote.new_tag`, with the run id `skill-probe-<hex>` as the plain-token job id), the two transcript locators, and the remote fetch script. *Check:* the row 1 and row 3 tests pass with fake subprocess and SSH (reusing `tests/fake_ssh.py` and `tests/procs.py`), and `bin/skill-probe run --bot claude-bot --dry-run` prints the box and Mac launches.
+4. **CLI.** `bin/skill-probe` with `run` and `render`. *Check:* `env -u ORCH_DB pytest`, the `check-config` steps and `bash model/check.sh` are green locally and in CI.
+5. **Live run and doc.** As claude-bot on the box, run `bin/skill-probe run --bot claude-bot --out /tmp/skill-probe-<date>`. Then as codex-bot, run `bin/skill-probe run --bot codex-bot --out ...`. That makes 2 devices × 2 harnesses × 3 applicable styles, so 12 short runs. Render all the result files into `docs/skill-loading.md`, with a short prose lead naming the winning style per harness and any `unknown`. Swap the provisional Codex fixtures for trimmed real ones. *Check:* the doc has all 12 rows plus `n/a` cells, each with a date and harness version. The `read=yes` rows have a matching transcript copy in the out dir.
 
-**Files.**
+## Throughput checkpoint
 
-- [ ] Edit `lib/dispatcher.py`.
-- [ ] Edit `tests/test_dispatcher.py`.
-
-**Build.**
-
-- [ ] Add `cap_extra` to the `ticket_state` DDL and to the column migration list in `Dispatcher._initialize`.
-- [ ] Add `Dispatcher._effective_cap(ticket, connection=None)`. It returns the config cap for `ticket.risk` plus `cap_extra`. Replace the three inline cap computations in `_t3`, `_job_detail` and anything else that reads `rounds_low` or `rounds_high` directly.
-- [ ] Rework the capped branch of `_t1` into one `BEGIN IMMEDIATE` transaction, the way `_t3` works. Read `workflow_state`. When it is `capped`, increment `cap_extra`, set `workflow_state = 'fixing'` and `enqueue_in_transaction` the fix with dedupe key `t1:{scope}:fix:{comment.id}`. The fix detail carries `round = review_round + 1` over the new effective cap and `resume = True`. The non-capped go path keeps its `g{generation}` key.
-- [ ] Trust is unchanged. `_t1` already returns `rejected-go-author` before any write, so an untrusted go never touches `cap_extra`.
-
-**You see.**
-
-- [ ] After three REVISE verdicts and one trusted go, `ticket_state` reads `review_round=3, cap_extra=1, workflow_state='fixing'`, and the queued fix's detail has `"round":"4/4"`.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_dispatcher.py -k "extra_round or resume_go or capped"`.
-
-- [ ] `test_extra_round_raises_the_cap_once_per_go` drives cap 3 to capped, go, ready, REVISE `4/4`, capped again, a second go, ready, REVISE `5/5`. It asserts `review_round` reads 4 then 5, `cap_extra` reads 1 then 2, two distinct fix jobs exist, and the state ends `capped`. With the old `g{generation}` key the second fix is dropped and the test fails.
-- [ ] `test_replayed_resume_go_queues_no_second_fix` processes the same go twice (handled-comments row deleted between passes). One fix job, `cap_extra` stays 1.
-- [ ] `test_untrusted_go_on_a_capped_ticket_records_no_extra_round`.
-- [ ] Update `test_capped_ticket_accepts_trusted_go_as_one_more_fix` for the new key and detail.
-
-### Unit 2. Parse any round and judge it against the effective cap (AC 2)
-
-**Files.**
-
-- [ ] Edit `lib/handoff.py`.
-- [ ] Edit `lib/dispatcher.py`.
-- [ ] Edit `tests/test_handoff.py` and `tests/test_dispatcher.py`.
-
-**Build.**
-
-- [ ] In `handoff._check_value`, keep the `N` or `N/CAP` form check and drop the `N > CAP` rejection. The header is syntax. The cap is the dispatcher's fact.
-- [ ] In `_t3` and `_t4`, before the stale check, return `rejected-over-cap` when the reported round is above `_effective_cap`. The `rejected-` prefix already wakes the project bot through `_wake_comment_problem`, and `_REJECTED_OUTCOMES` already keeps it from counting as a job's handoff.
-- [ ] `_t3` caps at `round_number >= _effective_cap(ticket, connection)`, read inside its transaction.
-- [ ] `_t_plan` keeps checking the plan round against `plan_gap_count`, so a `round=3/2` plan, which now parses, is still stale. Add a test that says so.
-
-**You see.**
-
-- [ ] `parse_comment("<!-- orch:v1 kind=verdict ... round=4/3 ... -->")` returns fields instead of raising `bad round '4/3'`. The dispatcher records it as `rejected-over-cap` when no extra round is recorded.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_handoff.py tests/test_dispatcher.py -k "round or cap"`.
-
-- [ ] `test_round_over_its_denominator_parses` covers `4/4`, `4/3` and `round=4`.
-- [ ] `test_verdict_over_the_effective_cap_is_rejected_over_cap` covers REVISE and APPROVE at `4/3` with `cap_extra=0`. Outcome `rejected-over-cap`, no job, one wake.
-- [ ] `test_plan_round_over_two_is_still_stale`.
-
-### Unit 3. Hold the cap at review intake (AC 3)
-
-**Files.**
-
-- [ ] Edit `lib/dispatcher.py`.
-- [ ] Edit `tests/test_dispatcher.py`.
-
-**Build.**
-
-- [ ] In `_t2`, after the trust and planning checks, when `workflow_state` is `capped`, return `capped-ready` and call `flag_attention(repo, ticket, "ready-after-cap", ...)` naming the ready comment and head. Queue nothing and leave the state alone. This also closes the second-AC-unmet cap, where `review_round` is below the cap but the ticket is `capped`.
-- [ ] `_queue_review` returns whether it queued. When the next round is above `_effective_cap`, it queues nothing and flags `ready-after-cap`. `_t2` and `_queue_patch_review` set `review` state only when it queued. This is the backstop for any other path into a review.
-- [ ] Clear `ready-after-cap` in Unit 1's resume transaction, so the flag does not outlive Max's OK.
-
-**You see.**
-
-- [ ] `orch status` shows the ticket under needs-attention with reason `ready-after-cap`. `jobs` has no new review row.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_dispatcher.py -k "after_the_cap or after_an_extra_round"`.
-
-- [ ] `test_ready_after_the_cap_queues_nothing_and_flags_attention` covers both a REVISE at the cap and a capped state with `review_round` under the cap.
-- [ ] `test_ready_after_an_extra_round_queues_the_next_review` checks the review detail reads `"round":"4/4"`.
-
-### Unit 4. Builder handoffs copy the round and risk from the job (AC 1)
-
-**Files.**
-
-- [ ] Edit `lib/dispatcher.py`.
-- [ ] Edit `lib/brief.py`.
-- [ ] Edit `tests/test_dispatcher.py`, `tests/test_brief.py`, `tests/test_live_poll.py` or `tests/test_dispatcher.py` for the fresh read.
-
-**Build.**
-
-- [ ] `_job_detail` fills `round` for `build` and `fix` jobs too. T1 build and T1P build carry `1/<cap>`. T2 CI fix carries `review_round + 1` (a gate retry is not a round). T3 fix carries `round_number + 1`. The Unit 1 resume fix carries `review_round + 1` over the raised cap. Plan jobs keep no review round, since their header uses the plan round.
-- [ ] In `lib/brief.py` `_handoff_section`, the ready header for implement, fix and merge-only becomes `kind=ready from=<bot> role=builder round=<facts.round> head=<pushed-head-sha> risk=<facts.risk>`, in the canonical key order. When the job has no round or no risk, the key is left out. The brief never writes a `<n>/<cap>` placeholder for a builder, so the builder has nothing to invent.
-- [ ] In `_t2`, when the reported head does not match `ticket.current_head`, read the ticket again uncached before returning `stale-ready-head`. `poll_once` keeps `getattr(source, "fresh_ticket", None)` on the dispatcher for the cycle. `_t2` builds the `TicketRef` from `_tracker(repo, ticket_id)`. When the fresh head matches, `_t2` continues with the fresh ticket and its CI, and stores it in `_polled`. When the fresh read raises, `_t2` returns `(False, "pr-head-unavailable")` so the next poll tries again instead of dropping the ready for good.
-
-**You see.**
-
-- [ ] A fix brief for round 4 of a high-risk ticket with one extra round ends with `<!-- orch:v1 kind=ready from=claude-bot role=builder round=4/4 head=<pushed-head-sha> risk=high -->`.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_brief.py tests/test_dispatcher.py -k "round or ready_header or newer_head"`.
-
-- [ ] `test_build_and_fix_jobs_carry_next_round_and_cap` covers T1 build, T1P build, T2 CI fix, T3 fix and the resume fix.
-- [ ] `test_ready_header_carries_round_and_risk_from_job_facts` for build and fix.
-- [ ] `test_ready_header_has_no_round_when_the_job_has_none`.
-- [ ] `test_ready_naming_a_newer_head_rereads_the_pr_head`. `FakeSource.fresh_ticket` returns the new head with green CI. Outcome `queued-review`. Without the fresh read the outcome is `stale-ready-head` and the test fails.
-
-### Unit 5. Read risk only from trusted authors (AC 4)
-
-**Files.**
-
-- [ ] Edit `lib/poll_source.py`.
-- [ ] Edit `lib/dispatcher.py` if the trust lookup moves to a shared helper.
-- [ ] Edit `tests/test_live_poll.py`.
-
-**Build.**
-
-- [ ] `_risk(comments, trusted)` skips a comment unless its `from` bot is in the set its author is trusted for. The author lookup is the dispatcher's own rule (`Dispatcher._trusted_bots`), with GitHub logins from `config.trusted_logins` and Linear authors from `config.trusted_linear_users`. Move that lookup into one module-level function both files call, so the two rules cannot drift.
-- [ ] Both `_github_ticket` and `_linear_ticket` pass the trust map.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_live_poll.py -k risk`.
-
-- [ ] `test_untrusted_risk_comment_leaves_the_ticket_low`. A trusted go says `risk=low`, then an untrusted comment says `risk=high`. Ticket risk is `low`.
-- [ ] `test_later_trusted_risk_still_applies`.
-
-### Unit 6. Do not retry a builder job whose ready is already posted (AC 6)
-
-**Files.**
-
-- [ ] Edit `lib/dispatcher.py`.
-- [ ] Edit `tests/test_liveness_requeue.py` or `tests/test_dispatcher.py`, next to the existing `done-from-verdict` tests.
-
-**Build.**
-
-- [ ] Generalize `_posted_verdict` and `_done_from_verdict` into `_posted_handoff(job)` and `_done_from_handoff(job, comment, event)`. One lookup, one done-marking path, two callers. Migrate the review caller in the same commit.
-- [ ] For a failed `fix` or `build` job, `_posted_handoff` returns the first comment from the polled ticket that is a `kind=ready` from `<recipient>-bot` with `role=builder` by a trusted login, posted at or after `job.created_at`, whose head differs from `job.request.head` (any head for a build job with none), and whose handled outcome is not in `_REJECTED_OUTCOMES`.
-- [ ] `_t6` checks it before the attempt-1 retry. A hit marks the job `done` with that comment as `handoff_comment_id` and records the `done-from-ready` job event. The ready routes through T2 as any ready does. It was either handled already or is picked up in the next comment pass, so T6 queues nothing itself.
-
-**You see.**
-
-- [ ] `job_events` shows `done-from-ready` with the ready comment id. `jobs` has no `t6-retry:<id>` row.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest -k "done_from_ready or done_from_verdict"`.
-
-- [ ] `test_failed_fix_with_a_posted_ready_is_done_from_ready`, the #99 dac3fbfe case.
-- [ ] `test_failed_build_with_a_posted_ready_is_done_from_ready`.
-- [ ] `test_ready_at_the_job_head_does_not_stop_the_retry`.
-- [ ] `test_untrusted_ready_does_not_stop_the_retry`.
-- [ ] The existing `done-from-verdict` tests still pass unchanged.
-
-### Unit 7. Keep a builder's work across print-mode exits and retries (AC 7)
-
-**Files.**
-
-- [ ] Edit `lib/brief.py`.
-- [ ] Edit `lib/job_run.py`, the env helper only, to stay clear of PR #100 and PR #104.
-- [ ] Edit `lib/cli.py` (`orch job run`).
-- [ ] Edit `lib/worktrees.py`.
-- [ ] Edit `lib/dispatcher.py` (`_t6` retry detail).
-- [ ] Edit `tests/test_brief.py`, `tests/test_job_run.py` or `tests/test_cli.py`, `tests/test_worktrees.py`, `tests/test_dispatcher.py`.
-
-**Build.**
-
-- [ ] Brief. Fix and implement steps say to run the test suite in the foreground and never put it in the background, because print mode stops background tasks after the last turn. On attempt 2, they say the worktree may hold attempt 1's unpushed commits, so check `git status` and `git log @{u}..` before starting.
-- [ ] Env. Add `harness_env(command)` to `lib/job_run.py`. It returns `{"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}` when `command[0]`'s basename is `claude` and the argv has `-p` or `--print`, else `{}`. `orch job run` merges it into the box `environment` and into `remote_env`, so both box and remote runs get it. `remote.start_script` already accepts any plain name.
-- [ ] Retry detail. `_t6` adds `"retry_of": <failed job id>` to the retry's detail JSON.
-- [ ] Worktree adoption. `worktrees.prepare(..., adopt=<job id or None>)`. Under the clone lock, when the new job has no worktree yet and `jobs/<adopt>` is a worktree of the same clone whose owner is not alive and whose `keep_reason` is not None, run `git worktree move` to `jobs/<new id>`, rewrite the record, and log `reusing kept worktree of job <adopt> (<reason>)`. Otherwise prepare as today. `orch job run` passes `retry_of` from the job detail.
-- [ ] Remote autostart runs are started without `--worktree` (`waiter._start` passes `worktree=not remote`), so no kept worktree exists there to adopt. Record that in SPEC and leave remote dirs alone.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_brief.py tests/test_job_run.py tests/test_cli.py tests/test_worktrees.py -k "foreground or bg_wait or adopt or retry_of"`.
-
-- [ ] `test_builder_briefs_say_run_tests_in_the_foreground`.
-- [ ] `test_claude_print_mode_gets_the_bg_wait_ceiling` checks both the box env and the remote start script.
-- [ ] `test_other_harnesses_get_no_bg_wait_ceiling` covers codex and claude without `-p`.
-- [ ] `test_t6_retry_detail_names_the_failed_job`.
-- [ ] `test_retry_adopts_the_kept_worktree_with_unpushed_commits` uses a real git clone in `tmp_path`, as `tests/test_worktrees.py` does. It asserts the commit is present in the new worktree.
-- [ ] `test_retry_does_not_adopt_a_clean_or_live_worktree`.
-
-### Unit 8. SPEC and model (AC 8)
-
-**Files.**
-
-- [ ] Edit `docs/SPEC.md`.
-- [ ] Edit `model/Orchestrator.tla` and its `.cfg` files if the invariant needs a bound.
-
-**Build.**
-
-- [ ] Add a decision-log row dated Nov 13 for #105.
-- [ ] Update the section 4.2 rows. T1 records `cap_extra` on a go to a capped ticket and keys the fix on the go comment. T2 re-reads a newer head uncached and turns a ready on a capped ticket into needs-attention with no job. T3 caps at the effective cap and rejects an over-cap round as `rejected-over-cap`. T6 adds `done-from-ready` and the kept-worktree retry.
-- [ ] Section 4.2 brief paragraph. Builder readies carry `round` and `risk` from the job.
-- [ ] Section 5. `round=<n>/<cap>` names the effective cap. A round over its denominator parses, and the dispatcher judges it.
-- [ ] Section 8 and the section 9 cap row. Max's OK is recorded as `cap_extra`, one per trusted go, and nothing else raises the cap. `risk=` comes only from trusted authors.
-- [ ] Model. `MaxOkAnotherRound` raises an `extra` counter (bounded at 1 for TLC). T3 compares to `cap + extra`. Add the invariant `counts.round <= cap + extra`. Run `bash model/check.sh`.
-
-**Verify, unit.**
-
-- [ ] `bash model/check.sh` passes locally or in the `statechart` CI job.
+- **Blocking first steps.** Unit 1 fixtures pin the transcript shapes. Write no parser before them.
+- **Independent workstreams.** The pure core (Unit 2) and the launch edges (Unit 3) touch disjoint functions and can be written in parallel. The CLI waits for both.
+- **Shared mutable state.** n/a in code. At run time each launch gets its own fresh run directory, so no two launches share a transcript slug or a rollout cwd. Runs go one at a time, so the probe never holds more than one slot's worth of load on a device.
+- **Smallest safe decomposition.** One builder owns it. The code is about 400 lines in one module, and splitting it would cost more review than it saves.
 
 ## Verify
 
-Tests alone are not sufficient verification. The PR is verified only when its unit, replay and CI boxes are all checked.
+- `env -u ORCH_DB pytest`, CI green (pytest, `check-config`, statechart).
+- A dry run on the box prints the exact waiter argv per device, unchanged.
+- The live run's `read=yes` cells each point to a transcript record that is not an assistant record. A reviewer can check that against the saved copies.
+- `blast-radius`: only new files. No change to the waiter, `orch.yml`, `machines.yml`, the vendored pstack or the briefs.
 
-- [ ] Unit. `env -u ORCH_DB pytest` passes at the PR head, in the foreground.
-- [ ] Unit, revert check. For each test named in the map, revert its unit's production change on a scratch branch and record that the test fails. Note the result per criterion in the ready comment.
-- [ ] Replay. A scratch script, kept out of the PR, feeds the real comment bodies from PR #100 (rounds 3 to 5) and the #99 fix job through `Dispatcher` with `FakeSource` and a fresh `orch.db`. Pass when the round-4 and round-5 verdicts parse, `review_round` reaches 5, the state ends `capped` with no hand edit, the second extra round queues one fix, and the #99 failed fix is `done-from-ready` with no retry. Paste the script's final `ticket_state` row and `job_events` into the ready comment.
-- [ ] CI. `.github/workflows/ci.yml` is green at the head, covering `pytest`, the `check-config` steps, `eval-report` and `statechart`.
-- [ ] Perf. None. The change adds one uncached PR read per non-matching ready (each ready is handled once) and one SQLite column. There is no metric to move.
-- [ ] Review gate. None. #105 changes no interaction. Codex Bot's round-1 review on the ready head is the gate.
+## Out of scope (from the ticket, held)
 
-## Close
+No waiter flag changes. No skill installs. No pstack edits. No Cursor. No `poteto-agent` vendoring (T07). No brief wiring (T09). No model map (T10). Any model the launch uses is whatever the bot's waiter config already sets.
 
-- [ ] Every box above is checked with its evidence.
-- [ ] Post the ready handoff with the pushed head, the per-criterion test list, the revert results and the replay output.
+## Open decision for Max
 
-## Appendix A. Questions settled without a prototype
+**Who may run Unit 5's live harness launches.** Each factory brief says "Never start another harness", and Unit 5 starts twelve short ones. This ticket's whole scope is to start them, and you approved it. One builder login also cannot run both halves, since the codex half must run as codex-bot. Two parts of the box's own state also have to hold: the box's SSH aliases must reach the Mac, and the live `machines.yml` must enable the Mac for both harnesses (the copy on `main` still has it disabled with placeholders).
 
-No product question blocks this. Each call below follows from the ticket's own words or from existing code.
-
-- Which go raises the cap? The ticket says the trusted Grok go on a capped ticket. `_t1` already turns that go into a resume fix, so the record goes in the same transaction.
-- Should the parser still reject `N > CAP`? No. The ticket asks for over-cap rejection, not "left unparsed". Only the dispatcher knows the effective cap.
-- Ready on a capped ticket with rounds left (second AC-unmet)? It is "a ready after the cap" by state, so Unit 3 checks the state as well as the number.
-- Remote worktree reuse? Remote autostart runs have no `--worktree`, so there is nothing kept to reuse. Box worktrees are the ones `worktrees.finish` keeps.
-
-## Appendix B. Alternatives rejected
-
-- Raising the cap from the header denominator (`round=4/4` means cap 4). Rejected because any trusted bot could then raise the cap, which is the #53 bypass in another form.
-- Reading `risk=` only from Grok's orchestrator comments. Safer still, but it changes which comments set risk on `ready_starts_review` repos that have no Grok brief. The ticket asks for trusted authors, so that is the rule. The default stays `high`.
-- Retrying a ready whose head is not yet visible by leaving it unhandled. Rejected because a truly stale ready would then be retried forever. One uncached read settles it.
-- Pushing unpushed commits at the end of a failed run. Rejected because the run may have stopped mid-change, and pushing starts CI and review on half-done work.
-
-## Appendix C. Risks
-
-- `_t1` capped path moves into a transaction (Unit 1). A crash between the enqueue and `_mark_handled` replays the go. The comment-id dedupe key and the state check make the replay a no-op. The replay test covers it.
-- `harness_env` and `orch job run` edits sit beside PR #100 and PR #104, which also touch `lib/cli.py` and `lib/job_run.py`. Keep the edit to one helper and two merge lines. Bring `main` in by a merge commit if either lands first.
-- Adopting a worktree must never take one a live run still owns. `prepare` checks the owner pid and start time under the clone lock, the same check `gc` uses.
-- #108 (ticket lifecycle) touches the same dispatcher code and waits on this PR.
-
-## Appendix D. Reading list
-
-- `docs/SPEC.md` sections 4.2, 5, 8 and 9.
-- `lib/dispatcher.py` `_t1`, `_t2`, `_t3`, `_t4`, `_queue_review`, `_job_detail`, `_t6`, `_posted_verdict`, `_done_from_verdict`, `_initialize`.
-- `lib/handoff.py` `_check_value`.
-- `lib/poll_source.py` `_risk`, `_github_ticket`, `_linear_ticket`, `fresh_ticket`.
-- `lib/brief.py` `_facts`, `_task_section`, `_handoff_section`.
-- `lib/worktrees.py` `prepare`, `finish`, `keep_reason`. `lib/cli.py` `orch job run`.
-- Issues #102, #61, #53, #67, #68 and #42 (N2).
+**Default.** The build job builds and tests Units 1 to 4 and does not start a harness. It puts the two `run` commands, with `--dry-run` output, in the PR body. You (or a session you start as each bot) run them on the box. The builder then renders the doc, swaps in the real Codex fixtures, and posts `ready`. If you would rather the Claude build job run the claude-bot half itself, say so in the go, and it will.
