@@ -69,6 +69,7 @@ from lib.load import load_yaml
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig
 from lib.queue import Job, QueueError, SQLiteJobQueue
+from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
     POLL_SECONDS,
@@ -468,6 +469,7 @@ class Waiter:
     def _spawn(self, argv: list[str], job_dir: Path, brief_path: Path) -> Child:
         env = dict(self.environ)
         env[BRIEF_ENV] = str(brief_path)
+        env[STATE_DIR_ENV] = str(job_dir)  # the run's raw telemetry log goes here (#93)
         log_fd = os.open(
             job_dir / "run.log",
             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,

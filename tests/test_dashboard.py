@@ -519,6 +519,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "handoff_savings",
         "attention",
         "statechart",
+        "telemetry",
     }
     json.dumps(snapshot)
 

@@ -31,11 +31,15 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
+from typing import IO
 
 from lib.job_state import HEARTBEAT_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.queue import QueueError
 
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+# How long run waits, once the command has exited, for `output` to drain the
+# rest of its stdout (a process the command left behind may hold the pipe).
+OUTPUT_GRACE_SECONDS = 5.0
 TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 
 Beat = Callable[[], object]
@@ -121,6 +125,7 @@ def run(
     setup: Callable[[], Path | None] | None = None,
     teardown: Callable[[], None] | None = None,
     started: Callable[[int], None] | None = None,
+    output: Callable[[IO[bytes]], None] | None = None,
 ) -> int:
     """Beat once, run argv with a heartbeat, and return its exit status.
 
@@ -143,10 +148,16 @@ def run(
     process waits at a gate until `started` returns, so a command never runs
     unrecorded. If `started` raises, the gate is closed, the command never
     runs, and 127 is returned.
+
+    `output` (issue #93, lib/telemetry.py) takes the command's stdout: when
+    given, stdout is a pipe and `output(pipe)` runs on a daemon thread until
+    the pipe closes. After the command exits run waits up to
+    OUTPUT_GRACE_SECONDS for it, then returns either way.
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
     child: subprocess.Popen[bytes] | None = None
+    reader: threading.Thread | None = None
     pending: list[int] = []
     previous: dict[int, object] = {}
 
@@ -181,6 +192,7 @@ def run(
                 cwd=cwd,
                 env=dict(env) if env is not None else None,
                 pass_fds=(read_end,) if started is not None else (),
+                stdout=subprocess.PIPE if output is not None else None,
             )
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
@@ -190,6 +202,11 @@ def run(
                 os.close(read_end)
                 if child is None:
                     os.close(write_end)
+        if output is not None and child.stdout is not None:
+            reader = threading.Thread(
+                target=output, args=(child.stdout,), name="orch-output", daemon=True
+            )
+            reader.start()
         if started is not None:
             try:
                 started(child.pid)
@@ -215,6 +232,8 @@ def run(
                 child.send_signal(signum)
         code = child.wait()
     finally:
+        if reader is not None:
+            reader.join(OUTPUT_GRACE_SECONDS)
         heartbeat.stop()
         for signum, handler in previous.items():
             signal.signal(signum, handler)  # type: ignore[arg-type]

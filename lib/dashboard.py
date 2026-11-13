@@ -44,6 +44,8 @@ import yaml
 
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.handoff import STATES as WORKFLOW_STATES
@@ -611,6 +613,7 @@ def collect_snapshot(
             job_states if job_states is not None else JobStateConfig(),
             alive,
         )
+        telemetry = read_telemetry(connection, now)  # issue #93
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -630,6 +633,7 @@ def collect_snapshot(
         if value is not None
     ]
     machines_state, devices, box_max = _machines(machines_path, db["held"])
+    attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
 
     snapshot = {
         "schema": SCHEMA,
@@ -678,6 +682,7 @@ def collect_snapshot(
         "handoff_savings": db["handoff_savings"],
         "attention": _attention(db["stuck_tickets"], db["overdue_jobs"], db["paused"]),
         "statechart": chart,
+        "telemetry": telemetry["rollup"],
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 

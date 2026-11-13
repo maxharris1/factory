@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import job_run, linear_webhook, placed_run, waiter, worktrees
+from lib import job_run, linear_webhook, placed_run, telemetry, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -142,6 +142,12 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
   status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  Telemetry (issue #93): `claude -p` gets --output-format stream-json
+  --verbose and `codex exec` gets --json; COMMAND's stdout is logged to
+  events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
+  beside the database), capped at 20 MB and rotated,
+  and a scrubbed summary goes to the job_telemetry table with each
+  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), in <workdir_root>/jobs/<job-id>,
@@ -871,8 +877,13 @@ def _job_run(argv: list[str]) -> int:
     if args.interval is not None and interval < args.interval:
         log(f"--interval {args.interval:g} capped to {interval:g} seconds")
 
+    sessions: list[telemetry.Session] = []  # issue #93: the run's telemetry, once it starts
+
     def beat() -> object:
-        return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        result = retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        for session in sessions:
+            session.flush()  # the summary moves with each heartbeat
+        return result
 
     try:
         # Codex PR #82 r2 F2.2: an autostart claim is checked before the
@@ -911,6 +922,18 @@ def _job_run(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
+    session = telemetry.start_session(
+        connect=queue.connect,
+        database=database,
+        job_id=args.job_id,
+        bot=args.bot,
+        repo=repo,
+        command=command,
+        log=log,
+    )
+    if session is not None:
+        sessions.append(session)
+        command = session.argv
     environment = dict(os.environ)
     environment.update(
         {
@@ -949,8 +972,9 @@ def _job_run(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
+    code: int | None = None
     try:
-        return job_run.run(
+        code = job_run.run(
             placed.argv(command, remote_env),
             beat=beat,
             interval=interval,
@@ -959,7 +983,9 @@ def _job_run(argv: list[str]) -> int:
             setup=setup,
             teardown=teardown,
             started=placed.started,
+            output=session.consume if session is not None else None,
         )
+        return code
     except worktrees.WorktreeError as exc:
         log(str(exc))
         return 1
@@ -967,6 +993,8 @@ def _job_run(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if session is not None:
+            session.finish(code)
         if placed.autostart:
             _fail_unfinished(queue, args.job_id, owner, log)
         try:
