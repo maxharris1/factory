@@ -5533,6 +5533,133 @@ def test_handoff_finished_after_the_read_waits_for_the_next_poll(
     assert _attention(queue) == []
 
 
+def test_a_job_finished_after_its_ticket_shipped_is_still_verified(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    head = "a" * 40
+    snapshot = ticket(
+        comment("ready", READY.format(head=head), author="claude-login", created_at=1),
+        comment(
+            "approve",
+            VERDICT.format(round="1/3", head=head, verdict="APPROVE", risk="high"),
+            author="codex-login",
+            created_at=2,
+        ),
+        head=head,
+        ci={head: CIResult("success")},
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    dispatcher.process(replace(snapshot, comments=snapshot.comments[:1]))
+    review = queue.claim("codex")
+    assert review is not None
+    dispatcher.process(snapshot)
+    assert dispatcher._tracked_refs() == ()
+    now[0] = 200
+    queue.finish(review.id, owner="codex", handoff_comment_id="nonexistent")
+    now[0] = 300
+    source = FakeSource(snapshot)
+
+    dispatcher.poll_once(source)
+    assert [ref.allow_merged for ref in source.last_refs] == [True]
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    with queue.connect() as connection:
+        events = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event FROM job_events WHERE job_id = ? AND event LIKE 'handoff-%'",
+                (review.id,),
+            )
+        ]
+    assert events == ["handoff-unverified"]
+    assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_a_shipped_ticket_with_nothing_to_verify_is_not_read(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
+    now[0] = 200.0
+    _poll_with(
+        dispatcher,
+        comment("ready-x", READY.format(head="a" * 40), author="claude-login", created_at=150),
+    )
+    dispatcher.record_terminal("owner/repo", "42", "merged")
+    source = FakeSource(ticket())
+
+    dispatcher.poll_once(source)
+
+    assert source.calls == 1
+    assert source.last_refs == ()
+    assert _handoff_events(queue) == ["handoff-verified"]
+
+
+def test_off_loop_verification_reads_the_newest_tickets_first_and_is_capped(
+    tmp_path: Path,
+) -> None:
+    from lib.dispatcher import OFF_LOOP_VERIFY_READS
+
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    numbers = [str(50 + index) for index in range(OFF_LOOP_VERIFY_READS + 2)]
+    for number in numbers:
+        queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id=number,
+                action="build",
+                recipient="claude",
+                source_comment_id=f"go-{number}",
+                timeout_seconds=3600,
+            ),
+            dedupe_key=f"build:{number}",
+        )
+        job = queue.claim("claude")
+        now[0] += 1
+        queue.finish(job.id, owner="claude", handoff_comment_id=f"ready-{number}")
+        dispatcher.record_terminal("owner/repo", number, "merged")
+        with queue.connect() as connection:
+            connection.execute(
+                "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+                "VALUES ('owner/repo', ?, 'github', 0)",
+                (number,),
+            )
+    now[0] += 1
+    source = FakeSource(
+        *(
+            ticket(
+                comment(
+                    f"ready-{number}",
+                    READY.format(head="a" * 40),
+                    author="claude-login",
+                ),
+                ticket_id=number,
+            )
+            for number in numbers
+        )
+    )
+
+    dispatcher.poll_once(source)
+    assert [ref.ticket_id for ref in source.last_refs] == numbers[::-1][
+        :OFF_LOOP_VERIFY_READS
+    ]
+    dispatcher.poll_once(source)
+    assert [ref.ticket_id for ref in source.last_refs] == numbers[:2][::-1]
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    assert _handoff_events(queue) == ["handoff-verified"] * len(numbers)
+    assert _attention(queue) == []
+
+
 @pytest.mark.parametrize(
     ("author", "attention"),
     [("grok-login", ["edited-comment"]), ("someone-else", [])],
@@ -5687,6 +5814,63 @@ def test_answers_abandoned_from_grok_ends_the_ticket(tmp_path: Path) -> None:
     assert (state, outcome) == ("abandoned", "abandoned")
     assert actions.states[-1] == "abandoned"
     assert dispatcher._tracked_refs() == ()
+
+
+@pytest.mark.parametrize("with_approve", [True, False], ids=["approve", "ready-only"])
+def test_handoffs_after_an_accepted_abandonment_do_nothing(
+    tmp_path: Path, with_approve: bool
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    seed_builder_job(queue)
+    head = "a" * 40
+    later = [
+        comment("ready", READY.format(head=head), author="claude-login", created_at=2),
+    ]
+    if with_approve:
+        later.append(
+            comment(
+                "approve",
+                VERDICT.format(round="1/3", head=head, verdict="APPROVE", risk="high"),
+                author="codex-login",
+                created_at=3,
+            )
+        )
+
+    dispatcher.process(
+        ticket(
+            comment("drop", ABANDONED, author="grok-login", created_at=1),
+            *later,
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    dispatcher.process(
+        ticket(
+            comment("go-2", GO.format(state="building"), author="grok-login", created_at=4),
+            head=head,
+        )
+    )
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state"
+        ).fetchone()[0]
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+    assert state == "abandoned"
+    assert actions.merges == []
+    assert actions.states[-1] == "abandoned"
+    assert queue.claim("codex") is None
+    assert queue.claim("claude") is None
+    assert outcomes == {
+        "drop": "abandoned",
+        **{item.id: "ticket-abandoned" for item in later},
+        "go-2": "ticket-abandoned",
+    }
 
 
 def test_answers_abandoned_from_an_untrusted_login_is_ignored(

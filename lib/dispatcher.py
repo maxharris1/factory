@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
@@ -260,6 +261,18 @@ class ShipError(RuntimeError):
 
 SHIP_ERROR_LIMIT = 240
 POLL_ERROR_STREAK = 3
+_UNVERIFIED_HANDOFF = """
+    jobs.state = 'done' AND jobs.recipient != 'grok'
+    AND jobs.handoff_comment_id IS NOT NULL
+    AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?
+    AND NOT EXISTS (
+        SELECT 1 FROM job_events AS event
+        WHERE event.job_id = jobs.id
+          AND event.event IN ('handoff-verified', 'handoff-unverified')
+    )
+"""
+# #109: tickets out of the poll loop read per poll to verify a late handoff.
+OFF_LOOP_VERIFY_READS = 5
 _SECRET_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S*")
 _SECRET_HOST_PATH = re.compile(
     r"\b(?:[A-Za-z0-9-]+\.)+(?:com|io|net|org|dev|app)(?:[:/]\S*)?",
@@ -396,6 +409,8 @@ class Dispatcher:
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
+        # #109: tickets whose read the source reported failed, by error.
+        self._source_errors: dict[tuple[str, str], str] = {}
         # #105: the source's uncached read, for a ready naming a newer head.
         self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
         self._initialize()
@@ -431,11 +446,19 @@ class Dispatcher:
             self.record_poll_error("linear", "-", type(exc).__name__)
             linear = ()
         self._discover(linear, tracker="linear")
+        refs = self._tracked_refs()
+        self._source_errors = {}
         try:
-            tracked = source.tracked_tickets(self._tracked_refs())
+            tracked = source.tracked_tickets(refs)
         except Exception as exc:
             self.record_poll_error("tracked", "-", type(exc).__name__)
             tracked = ()
+        read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
+        for ref in refs:
+            identity = (ref.repo.lower(), ref.ticket_id)
+            error = self._source_errors.get(identity)
+            if error is not None and identity not in read:
+                self._advance_poll_error_streak(*identity, error)
         for ticket in tracked:
             try:
                 self.process(ticket)
@@ -443,32 +466,35 @@ class Dispatcher:
                 self._record_poll_error(ticket, type(exc).__name__)
             else:
                 self._clear_poll_error_streak(ticket)
-        self._verify_handoffs(read_from)
+        self._verify_handoffs(source, read_from)
         self.reconcile_jobs()
         if end is not None:
             end()
 
-    def _verify_handoffs(self, read_from: float) -> None:
+    def _verify_handoffs(self, source: PollSource, read_from: float) -> None:
         """#18: check each done job's handoff comment once, on the ticket read.
 
         Only jobs finished before this poll read its tickets: the handoff
         must be one of the comments read, carry an orch:v1 header, and come
         from a login trusted for the job's recipient. Otherwise the ticket
-        is flagged unverified-handoff. The job stays done either way.
+        is flagged unverified-handoff. The job stays done either way. A
+        ticket that left the poll loop (shipped, abandoned) is read here,
+        newest job first, only while it has a job to verify.
         """
-        for (repo, ticket_id), ticket in self._polled.items():
+        tickets = dict(self._polled)
+        unread = self._unpolled_handoff_refs(read_from)
+        if unread:
+            try:
+                for ticket in source.tracked_tickets(unread):
+                    tickets[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+            except Exception as exc:
+                self.record_poll_error("verify", "-", type(exc).__name__)
+        for (repo, ticket_id), ticket in tickets.items():
             with self._connect() as connection:
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT * FROM jobs
-                    WHERE lower(repo) = ? AND ticket_id = ? AND state = 'done'
-                      AND recipient != 'grok' AND handoff_comment_id IS NOT NULL
-                      AND finished_at IS NOT NULL AND finished_at < ?
-                      AND NOT EXISTS (
-                          SELECT 1 FROM job_events AS event
-                          WHERE event.job_id = jobs.id
-                            AND event.event IN ('handoff-verified', 'handoff-unverified')
-                      )
+                    WHERE lower(repo) = ? AND ticket_id = ? AND {_UNVERIFIED_HANDOFF}
                     ORDER BY finished_at, id
                     """,
                     (repo, ticket_id, read_from),
@@ -490,6 +516,33 @@ class Dispatcher:
                         "unverified-handoff",
                         f"job {job.id[:8]} {job.request.action}: {problem}",
                     )
+
+    def _unpolled_handoff_refs(self, read_from: float) -> tuple[TicketRef, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT tracked.repo, tracked.ticket_id, tracked.tracker
+                FROM jobs
+                JOIN tracked_tickets AS tracked
+                  ON tracked.repo = lower(jobs.repo)
+                 AND tracked.ticket_id = jobs.ticket_id
+                WHERE {_UNVERIFIED_HANDOFF}
+                GROUP BY tracked.repo, tracked.ticket_id, tracked.tracker
+                ORDER BY max(jobs.finished_at) DESC, tracked.repo, tracked.ticket_id
+                """,
+                (read_from,),
+            ).fetchall()
+        refs = (
+            TicketRef(
+                repo=str(row["repo"]),
+                ticket_id=str(row["ticket_id"]),
+                tracker=str(row["tracker"]),
+                allow_merged=True,
+            )
+            for row in rows
+            if (str(row["repo"]), str(row["ticket_id"])) not in self._polled
+        )
+        return tuple(islice(refs, OFF_LOOP_VERIFY_READS))
 
     def _handoff_problem(self, ticket: TrackedTicket, job: Job) -> str | None:
         found = next(
@@ -537,6 +590,7 @@ class Dispatcher:
                 self._discover((ticket,), tracker=ref.tracker)
 
     def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+        self._source_errors[(repo.lower(), ticket_id)] = error
         with self._connect() as connection:
             connection.execute(
                 """
@@ -596,6 +650,9 @@ class Dispatcher:
             # then see the fresh head.
             ticket = self._polled.get(key, ticket)
             if self._is_handled(ticket, comment.id):
+                continue
+            if self._workflow_state(ticket) == "abandoned":
+                self._mark_handled(ticket, comment.id, "ticket-abandoned")
                 continue
             fields: dict[str, str] | None
             try:
@@ -4056,7 +4113,10 @@ class Dispatcher:
         """Record a ticket's failed poll; the POLL_ERROR_STREAK-th failure
         in a row flags poll-errors attention."""
         self.record_poll_error(ticket.repo, ticket.ticket_id, error)
-        identity = (ticket.repo.lower(), ticket.ticket_id)
+        self._advance_poll_error_streak(ticket.repo.lower(), ticket.ticket_id, error)
+
+    def _advance_poll_error_streak(self, repo: str, ticket_id: str, error: str) -> None:
+        identity = (repo, ticket_id)
         with self._connect() as connection:
             count = connection.execute(
                 """
@@ -4103,6 +4163,14 @@ class Dispatcher:
                     self.queue.now(),
                 ),
             )
+
+    def _workflow_state(self, ticket: TrackedTicket) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return None if row is None else row["workflow_state"]
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)
@@ -4867,6 +4935,7 @@ _REJECTED_OUTCOMES = (
     "refused-",
     "failed-",
     "ticket-stuck",
+    "ticket-abandoned",
 )
 
 
