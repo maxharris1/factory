@@ -65,6 +65,7 @@ from lib.factory_md import FactoryContext
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project
+from lib.pr_title import prefixed
 from lib.queue import (
     PRIORITY_TABLE,
     SQLiteJobQueue,
@@ -644,8 +645,7 @@ def _ticket_name(issue: IntakeIssue) -> str:
 
 
 def _pull_title(issue: IntakeIssue) -> str:
-    title = " ".join(issue.title.split())[:180]
-    return f"{issue.key}: {title}" if issue.tracker == "linear" else title
+    return prefixed(_ticket_name(issue), " ".join(issue.title.split())[:180])
 
 
 def _pull_body(issue: IntakeIssue) -> str:

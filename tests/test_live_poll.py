@@ -94,6 +94,7 @@ class FakeGh:
         self.search_items: list[dict] = []
         self.calls: list[list[str]] = []
         self.fail_factory = False
+        self.pull: dict = {}
 
     def __call__(self, argv, timeout):
         del timeout
@@ -111,7 +112,7 @@ class FakeGh:
         elif endpoint.endswith("/issues?state=open&per_page=100"):
             value = self.issues
         elif "/pulls/" in endpoint:
-            value = {"head": {"sha": self.head}}
+            value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):
             value = self.comments
         elif endpoint.endswith("/check-runs?per_page=100"):
@@ -2480,3 +2481,49 @@ def test_linear_ticket_carries_the_issue_state_phase() -> None:
 
     assert ticket.linear_state_phase == "moved-on"
     assert ticket.linear_ready_state_id == "rfr"
+
+
+def test_a_github_ticket_carries_its_source_issue_and_open_title() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "open", "title": "Do it", "body": "Fixes #11", "head": {"ref": "x"}}
+    source = LivePollSource(config(), gh_runner=gh)
+    source.begin_cycle()
+
+    (found,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
+
+    assert (found.source_issue, found.pr_title) == ("#11", "Do it")
+
+
+def test_a_closed_prs_title_is_not_offered_for_a_rename() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "closed", "title": "Do it", "head": {"ref": "factory/issue-11"}}
+    source = LivePollSource(config(), gh_runner=gh)
+    source.begin_cycle()
+
+    (found,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
+
+    assert (found.source_issue, found.pr_title) == ("#11", None)
+
+
+def test_a_linear_ticket_with_a_linked_pr_has_its_key_as_source() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.pull = {"state": "open", "title": "Fix login"}
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        if json.loads(body)["query"].startswith("query FactoryPoll"):
+            return linear_search_page(
+                [{"id": "issue-id", "identifier": "AUT-42", "project": {"id": "project-1"}}]
+            )
+        return HTTPResult(200, json.dumps({"data": {"issue": linear_issue()}}))
+
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "secret-linear-key"},
+        gh_runner=gh,
+        linear_transport=transport,
+    )
+
+    (found,) = source.linear_candidates(LINEAR_HANDOFF_QUERY)
+
+    assert (found.pr_number, found.source_issue, found.pr_title) == ("12", "AUT-42", "Fix login")

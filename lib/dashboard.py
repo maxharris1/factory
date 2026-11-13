@@ -72,6 +72,7 @@ from lib.job_state import (
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
+from lib.pr_title import read_sources
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -746,7 +747,22 @@ def collect_snapshot(
         "feeder": db["feeder"],
         "statechart": chart,
     }
+    _add_sources(snapshot, db["sources"])
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+def _add_sources(value: object, sources: dict[tuple[str, str], tuple[str, str | None]]) -> None:
+    """Issue #115: each ticket row gets its source issue and PR, shown issue first."""
+    if isinstance(value, list):
+        for item in value:
+            _add_sources(item, sources)
+    elif isinstance(value, dict):
+        found = sources.get((str(value.get("repo")).casefold(), str(value.get("ticket_id"))))
+        if found is not None:
+            value["source"] = _clean(found[0], 16)
+            value["pr"] = _clean(found[1], 16) if found[1] is not None else None
+        for item in value.values():
+            _add_sources(item, sources)
 
 
 def _attention(
@@ -1330,6 +1346,7 @@ def _read_db(
         "linear_webhook": linear_webhook,
         "feeder": feeder,
         "attention_flags": attention_flags,
+        "sources": read_sources(connection),
         "held": held,
         "verdicts": verdicts,
         "linear_budget": {

@@ -39,6 +39,7 @@ import re
 from dataclasses import asdict
 
 from lib.factory_md import FactoryContext
+from lib.pr_title import SOURCE
 from lib.queue import Job
 
 KINDS = ("implement", "fix", "review", "merge-only")
@@ -141,6 +142,9 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
     reviewer = detail.get("reviewer_harness")
     url = detail.get("linear_url")
     skills = detail.get("repo_skill_paths")
+    source = detail.get("source_issue")
+    if not (isinstance(source, str) and SOURCE.fullmatch(source)):
+        source = job.request.ticket_id if SOURCE.fullmatch(job.request.ticket_id) else None
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -157,6 +161,7 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
             item for item in skills
             if isinstance(item, str) and re.fullmatch(r"^\.claude/skills/[a-z0-9-]+/SKILL\.md$", item)
         ] if isinstance(skills, list) else [],
+        "source": source,
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
     }
 
@@ -257,6 +262,7 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "Test first.",
             "3. Before `ready`, self-check: prove-it-works, deslop, no-comments.",
             "4. Push, then post the ready handoff below with the head you pushed.",
+            _title_line(facts),
         ]
     elif kind == "fix":
         body = [
@@ -293,6 +299,23 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "4. Push, then post the ready handoff below with the head you pushed.",
         ]
     return "## What to do\n" + "\n".join(body)
+
+
+def _title_line(facts: dict) -> str:
+    source = facts["source"]
+    if source is None:
+        title = (
+            "`#<issue>: <issue title>`, with the source issue's number (not the PR's); "
+            "for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`)"
+        )
+    elif source.startswith("#"):
+        title = f"`{source}: <issue title>`"
+    else:
+        title = f"`{source}: <title>`"
+    return (
+        f"The PR's title starts with its source issue: {title}. If you open the PR, title it so; "
+        "if its title lacks the prefix, fix it with `env -u GH_TOKEN gh pr edit --title`."
+    )
 
 
 def _handoff_section(job: Job, bot: str, kind: str, facts: dict) -> str:

@@ -31,6 +31,7 @@ from lib.job_state import (
     unstarted_too_long,
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
+from lib.pr_title import SOURCES_TABLE, TITLE_LIMIT, prefixed
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -123,6 +124,10 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #115: the source issue (`#115`, or a Linear key) and the open
+    # PR's title, so the poller can prefix a title that lacks it.
+    source_issue: str | None = None
+    pr_title: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -217,6 +222,10 @@ class ReviewActions(Protocol):
         head: str,
         approver: str,
     ) -> None: ...
+
+    def set_title(self, ticket: TrackedTicket, title: str) -> None:
+        """Rename the ticket's PR (issue #115)."""
+        ...
 
 
 class GrokDelivery(Protocol):
@@ -498,6 +507,10 @@ class Dispatcher:
 
     def process(self, ticket: TrackedTicket) -> None:
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        try:
+            self._title_pull(ticket)
+        except Exception as exc:
+            self._record_poll_error(ticket, type(exc).__name__)
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._redrive_handoffs(ticket)
@@ -511,6 +524,53 @@ class Dispatcher:
                 )
             raise
         self._settle_external_ships(ticket)
+
+    def _title_pull(self, ticket: TrackedTicket) -> None:
+        """Record the ticket's source issue and, once per PR, prefix its title.
+
+        Issue #115: the first time the poller sees an open PR, a title that
+        does not start with the source (`#115: ` or `AUT-2284: `) is renamed.
+        The rename is recorded, so a title a person edits later is left
+        alone; a failed rename is retried on the next poll.
+        """
+        if ticket.source_issue is None or ticket.pr_number is None:
+            return
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT pr_number, titled_at FROM {SOURCES_TABLE} "
+                "WHERE repo = ? AND ticket_id = ?",
+                key,
+            ).fetchone()
+            titled = (
+                row is not None
+                and row["pr_number"] == ticket.pr_number
+                and row["titled_at"] is not None
+            )
+            connection.execute(
+                f"""
+                INSERT INTO {SOURCES_TABLE} (repo, ticket_id, source, pr_number, titled_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(repo, ticket_id) DO UPDATE SET
+                    source = excluded.source,
+                    pr_number = excluded.pr_number,
+                    titled_at = CASE
+                        WHEN {SOURCES_TABLE}.pr_number = excluded.pr_number
+                        THEN {SOURCES_TABLE}.titled_at
+                    END
+                """,
+                (*key, ticket.source_issue, ticket.pr_number),
+            )
+        if titled or ticket.pr_title is None:
+            return
+        wanted = prefixed(ticket.source_issue, ticket.pr_title)[:TITLE_LIMIT]
+        if wanted != ticket.pr_title:
+            self._review_actions(ticket).set_title(ticket, wanted)
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE {SOURCES_TABLE} SET titled_at = ? WHERE repo = ? AND ticket_id = ?",
+                (self.queue.now(), *key),
+            )
 
     def _process_comments(
         self,
@@ -3477,6 +3537,7 @@ class Dispatcher:
             "gitBranchName": ticket.git_branch_name,
             "base_branch": ticket.factory.base_branch,
             "pr_number": ticket.pr_number,
+            "source_issue": ticket.source_issue,
             "brief": ticket.brief or ticket.ticket_url,
             "risk": ticket.risk,
             "round": f"{round_number}/{cap}" if round_number is not None else None,
@@ -3969,6 +4030,18 @@ class Dispatcher:
                     ticket_id TEXT NOT NULL,
                     tracker TEXT NOT NULL,
                     tracked_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            connection.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {SOURCES_TABLE} (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    pr_number TEXT,
+                    titled_at REAL,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
