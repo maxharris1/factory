@@ -50,12 +50,13 @@ TypeOK ==
   /\ configOk \in BOOLEAN
   /\ flags \in [covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN]
   /\ counts \in [
-       round: 0..3,
+       round: 0..4,
        acUnmet: 0..2,
        gate: 0..3,
        planGaps: 0..2,
        deaths: 0..2,
-       declines: 0..3
+       declines: 0..3,
+       extra: 0..1
      ]
 
 Init ==
@@ -66,7 +67,8 @@ Init ==
   /\ flags = [covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE]
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
-       planGaps |-> 0, deaths |-> 0, declines |-> 0
+       planGaps |-> 0, deaths |-> 0, declines |-> 0,
+       extra |-> 0
      ]
 
 \* Valid config: brief posted, questions step starts. Invalid config: refused.
@@ -260,7 +262,8 @@ T6DeviceOffline ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 2, !.gate = 0]
 
-\* T3. REVISE under the cap queues fix. At the cap, or a second AC-unmet verdict: capped.
+\* T3. REVISE under the effective cap (cap plus Max's extra rounds) queues fix.
+\* At it, or a second AC-unmet verdict: capped.
 \* A REVISE also replaces a held APPROVE (T4H, issue #86).
 T3Revise ==
   /\ "T3" \notin Omit
@@ -270,20 +273,20 @@ T3Revise ==
   /\ \/ /\ counts.acUnmet = 1
         /\ state' = "capped"
         /\ counts' = [counts EXCEPT !.acUnmet = 2, !.deaths = 0]
-     \/ /\ counts.round + 1 < cap
+     \/ /\ counts.round + 1 < cap + counts.extra
         /\ state' = "fixing"
         /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0]
-     \/ /\ counts.round + 1 >= cap
+     \/ /\ counts.round + 1 >= cap + counts.extra
         /\ state' = "capped"
-        /\ counts' = [counts EXCEPT !.round = cap, !.deaths = 0]
+        /\ counts' = [counts EXCEPT !.round = cap + counts.extra, !.deaths = 0]
      \/ /\ counts.acUnmet = 0
-        /\ counts.round + 1 < cap
+        /\ counts.round + 1 < cap + counts.extra
         /\ state' = "fixing"
         /\ counts' = [counts EXCEPT !.acUnmet = 1, !.round = @ + 1, !.deaths = 0]
      \/ /\ counts.acUnmet = 0
-        /\ counts.round + 1 >= cap
+        /\ counts.round + 1 >= cap + counts.extra
         /\ state' = "capped"
-        /\ counts' = [counts EXCEPT !.acUnmet = 1, !.round = cap, !.deaths = 0]
+        /\ counts' = [counts EXCEPT !.acUnmet = 1, !.round = cap + counts.extra, !.deaths = 0]
 
 \* T7. BLOCKED. No known answer. Wake Grok Bot once.
 T7Blocked ==
@@ -429,12 +432,14 @@ T9Fail ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
+\* Max's extra round is recorded on the ticket (cap_extra, issue #105) and
+\* raises the effective cap by one. Bounded at 1 for TLC: a later OK keeps it.
 MaxOkAnotherRound ==
   /\ state = "capped"
   /\ state' = "fixing"
   /\ keep
   /\ flags' = flags
-  /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0]
+  /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0, !.extra = 1]
 
 End ==
   /\ state \in Terminal
@@ -471,8 +476,8 @@ MappedBeforeBuilding ==
   /\ flags.planOk => state \notin {"intake", "refused", "questions", "planning", "plan-check"}
 
 CountersBounded ==
-  /\ cap = 0 => counts.round = 0
-  /\ cap \in {1, 3} => counts.round <= cap
+  /\ cap = 0 => counts.round = 0 /\ counts.extra = 0
+  /\ cap \in {1, 3} => counts.round <= cap + counts.extra
   /\ counts.gate = 3 => state = "stuck"
   /\ counts.declines = 3 => state = "stuck"
   /\ counts.planGaps = 2 => state = "stuck"
@@ -564,9 +569,11 @@ ChartEdges ==
 \* This keeps TLC under statechart's 500-state drawing limit and still reaches
 \* every section 4.1 name. T1PPlanMapped is in the picture: a mapped plan may
 \* enter building. One risk cap. A CI-red streak and a job-death streak are
-\* not stacked, and the mapped plan does not replay those streaks.
+\* not stacked, and the mapped plan does not replay those streaks. Max's extra
+\* round is drawn up to the fixing it starts.
 ChartSlice ==
   /\ counts.acUnmet = 0
+  /\ counts.extra = 0 \/ state = "fixing"
   /\ cap \in {0, 3}
   /\ counts.deaths = 0 \/ counts.gate = 0
   /\ \/ ~flags.planOk
