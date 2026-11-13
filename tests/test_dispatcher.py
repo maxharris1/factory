@@ -5113,6 +5113,35 @@ def test_a_poll_error_message_is_scrubbed_and_capped(tmp_path: Path) -> None:
     assert poll_error_text(RuntimeError()) == "RuntimeError"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Authorization: Bearer synthetic-review-secret",
+        "authorization=Basic synthetic-review-secret",
+        "Authorization: token synthetic-review-secret",
+        "Proxy-Authorization: Bearer synthetic-review-secret",
+        'Authorization: "Bearer synthetic-review-secret"',
+        "header Authorization:Bearer synthetic-review-secret rejected",
+        "FACTORY_WEBHOOK_AUTH=Bearer synthetic-review-secret",
+        "token: bearer synthetic-review-secret",
+        "Bearer synthetic-review-secret",
+        "password = 'synthetic-review-secret'",
+        "X-Api-Key: synthetic-review-secret",
+    ],
+)
+def test_no_credential_value_reaches_a_poll_error_row(tmp_path: Path, message: str) -> None:
+    from lib.dispatcher import poll_error_text, safe_ship_error
+    from lib.poll_source import _safe_reason
+
+    error = RuntimeError(message)
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error("o/r", "1", error)
+    for text in (*_poll_errors(queue), poll_error_text(error), safe_ship_error(error),
+                 _safe_reason(error)):
+        assert "synthetic-review-secret" not in text
+        assert text.startswith("RuntimeError")
+
+
 def test_poll_error_prefixes_are_kept(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path, [0.0])
     dispatcher.record_poll_error("o/r", "1", ValueError("bad row"), prefix="job-states:")

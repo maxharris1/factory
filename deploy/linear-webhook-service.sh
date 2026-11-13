@@ -31,6 +31,12 @@
 # (default 127.0.0.1:8787, linear_webhook.bind's usual value). Without them
 # only the listener runs. No value from that file is ever printed.
 #
+# The supervisor leads its own process group, which its child loops, the
+# listener and the tunnel share. If the supervisor alone is killed
+# (SIGKILL), stop, start, restart and ensure first end that group (the
+# pidfile's pid, while a process in it is still this script's supervisor
+# argv), so no listener or tunnel outlives it on old code or the old bind.
+#
 # Each child that exits is started again after ORCH_LINEAR_RESTART_SEC
 # (default 5) seconds; when it keeps exiting within 30 seconds the pause
 # doubles, up to 60 seconds. ORCH_DB defaults to the shared state database,
@@ -106,6 +112,50 @@ running_pid() {
         is_supervisor_argv "${argv[@]}" || return 1
     fi
     printf '%s\n' "$pid"
+}
+
+# Print the pids of the live (not zombie) processes in process group $1.
+group_members() {
+    ps -A -o pid= -o pgid= -o stat= 2>/dev/null |
+        awk -v group="$1" '$2 == group && $3 !~ /^Z/ { print $1 }'
+}
+
+# Print the process group a killed supervisor left running, or fail.
+lost_group() {
+    local group pid
+    local -a argv=()
+    [[ -r "$PIDFILE" ]] || return 1
+    group="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
+    [[ "$group" =~ ^[1-9][0-9]*$ ]] || return 1
+    for pid in $(group_members "$group"); do
+        if [[ -d "$PROC" ]]; then
+            [[ -r "${PROC}/${pid}/cmdline" ]] || continue
+            mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || continue
+        else
+            read -r -a argv <<<"$(ps -p "$pid" -o command= 2>/dev/null)" || continue
+        fi
+        if is_supervisor_argv "${argv[@]}"; then
+            printf '%s\n' "$group"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# End the group a killed supervisor left running, if there is one.
+stop_lost() {
+    local group i
+    group="$(lost_group)" || return 0
+    kill -TERM -- "-${group}" 2>/dev/null || return 0
+    for ((i = 0; i < STOP_WAIT * 10; i++)); do
+        if [[ -z "$(group_members "$group")" ]]; then
+            say "stopped the children of a lost supervisor (process group ${group})"
+            return 0
+        fi
+        sleep 0.1
+    done
+    say "the children of a lost supervisor (process group ${group}) did not stop within ${STOP_WAIT}s" >&2
+    return 1
 }
 
 service_lock() {
@@ -204,8 +254,12 @@ launch() {
         say "linear webhook supervisor already running (pid ${pid})"
         return 0
     fi
+    stop_lost || return 1
+    # Job control puts the supervisor in a process group of its own.
+    set -m
     nohup bash "$SELF" _supervise >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
+    set +m
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
             say "started linear webhook supervisor (pid ${pid})"
@@ -227,7 +281,8 @@ stop() {
     : >"$STOPPED"
     if ! pid="$(running_pid)"; then
         say "linear webhook supervisor is not running"
-        return 0
+        stop_lost
+        return
     fi
     kill -TERM "$pid"
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
@@ -238,6 +293,17 @@ stop() {
         sleep 0.1
     done
     say "linear webhook supervisor (pid ${pid}) did not stop within ${STOP_WAIT}s" >&2
+    return 1
+}
+
+# A restart whose stop times out drops the hold that stop just wrote, so
+# ensure and self-heal still see a service to recover; a hold that was
+# already there (an operator's stop) stays.
+restart() {
+    local held=""
+    [[ -e "$STOPPED" ]] && held=1
+    stop && start && return 0
+    [[ -n "$held" ]] || rm -f "$STOPPED"
     return 1
 }
 
@@ -335,7 +401,7 @@ case "$COMMAND" in
     _supervise) supervise ;;
     start) service_lock && start ;;
     stop) service_lock && stop ;;
-    restart) service_lock && stop && start ;;
+    restart) service_lock && restart ;;
     status) status ;;
     ensure) service_lock && ensure ;;
     install-autostart) install_autostart ;;

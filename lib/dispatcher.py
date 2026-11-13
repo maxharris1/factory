@@ -266,9 +266,12 @@ _SECRET_TOKEN = re.compile(
     r"|lin_(?:api|oauth)_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}"
     r"|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*)"
 )
+_SECRET_NAME = (
+    r"(?:bearer|basic|token|authorization|password|passwd|secret"
+    r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))"
+)
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(?<!<)\b(?:bearer|basic|token|authorization|password|passwd|secret"
-    r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
+    rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
 

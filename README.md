@@ -562,7 +562,9 @@ systemd user session, with the same commands as `poller-service.sh`:
 `127.0.0.1:8787`), it also supervises the reverse tunnel `ssh -N -o
 ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R <port>:<bind>
 <alias>`. Everything it writes to `linear-webhook.log` carries a UTC
-timestamp.
+timestamp. The supervisor leads its own process group; if it alone is
+killed, the next `stop`, `start`, `restart` or `ensure` first ends the
+listener and tunnel it left behind.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
 tickets with queued or running jobs each Linear cycle (every cycle at
@@ -1074,7 +1076,9 @@ service script and never sends a signal itself:
 The rules for each component:
 
 - A component held by its `*.stopped` marker is skipped. Self-heal never
-  overrides an operator's stop.
+  overrides an operator's stop. A `restart` whose stop times out removes
+  the marker its own stop wrote, so the next pass retries and, after 3
+  failures, escalates.
 - A component restarted less than a minute ago is left to come up.
 - A component gets at most 3 restarts in 30 minutes. After that it is
   skipped until the oldest restart leaves the window.

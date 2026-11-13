@@ -183,6 +183,58 @@ def test_ensure_is_silent_when_running_and_starts_it_when_not(home: Path) -> Non
     _wait_for(lambda: _supervisor(home) != supervisor and alive(_supervisor(home)))
 
 
+def _lose_the_supervisor(home: Path) -> tuple[int, int]:
+    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\nLINEAR_TUNNEL_REMOTE_PORT=9443\n")
+    before = len(_starts(home))
+    assert _service(home, "start").returncode == 0
+    listener = _wait_for(lambda: _starts(home)[before:])[0]
+    tunnel = _wait_for(lambda: _starts(home, "ssh"))[0]
+    supervisor = _supervisor(home)
+    os.kill(supervisor, signal.SIGKILL)
+    _wait_for(lambda: not alive(supervisor))
+    return listener, tunnel
+
+
+@pytest.fixture
+def bystander(home: Path):
+    """A listener this service did not start, in a process group of its own."""
+    proc = subprocess.Popen([str(home / ".local/bin/orch"), "linear-webhook", "serve"],
+                            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                            start_new_session=True)
+    _wait_for(lambda: proc.pid in _starts(home))
+    yield proc.pid
+    proc.kill()
+    proc.wait()
+
+
+@pytest.mark.parametrize("command", ["ensure", "start", "restart"])
+def test_a_lost_supervisors_children_are_replaced_not_doubled(
+    home: Path, bystander: int, command: str
+) -> None:
+    listener, tunnel = _lose_the_supervisor(home)
+
+    replaced = _service(home, command)
+
+    assert replaced.returncode == 0, replaced.stderr
+    assert not alive(listener) and not alive(tunnel)
+    _wait_for(lambda: len(_starts(home, "ssh")) == 2)
+    live = [pid for pid in _starts(home) if alive(pid)]
+    assert sorted(live) == sorted([bystander, _starts(home)[-1]])
+    assert alive(bystander)
+
+
+def test_stop_ends_a_lost_supervisors_children(home: Path, bystander: int) -> None:
+    listener, tunnel = _lose_the_supervisor(home)
+
+    stopped = _service(home, "stop")
+
+    assert stopped.returncode == 0, stopped.stderr
+    assert not alive(listener) and not alive(tunnel)
+    time.sleep(0.6)
+    assert [pid for pid in _starts(home) if alive(pid)] == [bystander]
+    assert _starts(home, "ssh") == [tunnel]
+
+
 def test_no_tunnel_without_both_settings(home: Path) -> None:
     _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\n")
     assert _service(home, "start").returncode == 0
