@@ -1086,9 +1086,7 @@ class LivePollSource:
             if self.terminal_sink is not None:
                 self.terminal_sink(project.repo, number, "merged")
             raise _TerminalTicket()
-        head = _object(pull.get("head"), "GitHub pull request head").get("sha")
-        if not isinstance(head, str):
-            raise PollSourceError(f"{project.repo}#{number} has no head")
+        head = _pr_head(pull, project.repo, number)
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
@@ -1191,15 +1189,7 @@ class LivePollSource:
         )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
-            pr_head = _object(
-                pull.get("head"),
-                "GitHub pull request head",
-            ).get("sha")
-            if not isinstance(pr_head, str):
-                raise PollSourceError(
-                    f"{project.repo}#{pr_number} has no head"
-                )
-            head = pr_head
+            head = _pr_head(pull, project.repo, pr_number)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
@@ -1711,6 +1701,15 @@ def _brief(comments: Sequence[Comment]) -> str | None:
         if fields["kind"] == "brief":
             return comment.url or comment.body.strip()
     return None
+
+
+def _pr_head(pull: Mapping[str, Any], repo: str, number: str) -> str:
+    head = _object(pull.get("head"), "GitHub pull request head").get("sha")
+    if not isinstance(head, str):
+        raise PollSourceError(f"{repo}#{number} has no head")
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise PollSourceError(f"{repo}#{number} head {head[:40]!r} is not a full SHA")
+    return head
 
 
 def _latest_head(comments: Sequence[Comment]) -> str | None:

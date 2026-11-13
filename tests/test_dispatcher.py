@@ -21,7 +21,7 @@ from lib.dispatcher import (
 from lib.factory_md import FactoryConfig
 from lib.handoff import parse_comment
 from lib.orch_yml import load_orch_yml
-from lib.queue import Job, JobRequest, SQLiteJobQueue
+from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
 GO = (
     "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
@@ -2191,6 +2191,7 @@ def test_t2_refuses_ready_without_a_builder_job(tmp_path: Path) -> None:
     [
         ("codex-login", "claude-bot"),
         ("claude-login", "codex-bot"),
+        ("claude-bot", "claude-bot"),
     ],
 )
 def test_t2_refuses_wrong_sender_and_spoofed_from_field(
@@ -2381,7 +2382,15 @@ def test_stuck_short_circuit_does_not_requeue_completed_wake(
         count = connection.execute(
             "SELECT count(*) FROM jobs WHERE action = 'stuck'"
         ).fetchone()[0]
+        from_go = connection.execute(
+            "SELECT count(*) FROM jobs WHERE source_comment_id = 'go-after-stuck'"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'go-after-stuck'"
+        ).fetchone()[0]
     assert count == 1
+    assert from_go == 0
+    assert outcome == "ticket-stuck"
 
 
 def test_reconciles_do_not_requeue_completed_stuck_wake(tmp_path: Path) -> None:
@@ -5107,3 +5116,212 @@ def test_t5_fenced_block_first_under_questions_queues_clarify(
     queue = _process_t5_questions(tmp_path, header, author, body)
 
     _assert_t5_waiting_max(queue)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "<!-- orch:v1 kind=go from=claude-bot role=orchestrator state=building -->",
+        "<!-- orch:v1 kind=go from=grok-bot role=builder state=building -->",
+    ],
+    ids=["wrong-from", "wrong-role"],
+)
+def test_t1_rejects_a_go_whose_from_or_role_is_wrong(
+    tmp_path: Path,
+    header: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.process(
+        ticket(comment("go-1", f"{header}\nGo.\n", author="grok-login"))
+    )
+
+    assert queue.claim("claude") is None
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'go-1'"
+        ).fetchone()[0]
+    assert outcome == "rejected-go-author"
+
+
+def test_discover_ignores_a_ticket_from_the_wrong_tracker(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    candidate = ticket(
+        comment("go-1", GO.format(state="building"), author="grok-login"),
+        tickets="linear",
+    )
+    source = FakeSource(candidate, github=(candidate,))
+
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    assert queue.claim("claude") is None
+
+
+def test_t2_does_not_match_a_six_char_pr_head(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "abcdef"
+    dispatcher.process(
+        ticket(
+            comment("ready-1", READY.format(head=head + "1"), author="claude-login"),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+
+    assert queue.claim("codex") is None
+
+
+def test_failed_stuck_job_is_not_retried(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="stuck",
+            recipient="grok",
+            source_comment_id="stuck-source",
+            timeout_seconds=60,
+        ),
+        dedupe_key="stuck:direct",
+    )
+    wake = queue.claim("grok")
+    assert wake is not None
+    queue.finish(wake.id, owner="grok", handoff_comment_id=None)
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT attempt, state, failure_handled FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [(1, "failed", 1)]
+
+
+def test_t1_same_action_twice_is_deduped(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    body = GO.format(state="building")
+    dispatcher.process(
+        ticket(
+            comment("go-1", body, author="grok-login", created_at=1),
+            comment("go-2", body, author="grok-login", created_at=2),
+        )
+    )
+
+    with queue.connect() as connection:
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+        builds = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert outcomes == {"go-1": "queued-build", "go-2": "deduped-build"}
+    assert builds == 1
+
+
+def _failed_job(queue: SQLiteJobQueue) -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:g1",
+    )
+    job = queue.claim("claude")
+    assert job is not None
+    queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    return job
+
+
+def _retry_of(job: Job) -> JobRequest:
+    return replace(job.request, generation=2, attempt=2)
+
+
+def test_enqueue_retry_refuses_an_already_handled_failure(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    job = _failed_job(queue)
+    queue.mark_failure_handled(job.id)
+
+    with pytest.raises(QueueError, match="one unhandled failed job"):
+        queue.enqueue_retry(job.id, _retry_of(job), dedupe_key="retry:1")
+
+    with queue.connect() as connection:
+        rows = connection.execute("SELECT attempt FROM jobs").fetchall()
+    assert [row["attempt"] for row in rows] == [1]
+
+
+def test_enqueue_retry_runs_in_one_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    job = _failed_job(queue)
+    statements: list[str] = []
+    original = queue._connect
+
+    def traced() -> sqlite3.Connection:
+        connection = original()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(queue, "_connect", traced)
+    retry, inserted = queue.enqueue_retry(
+        job.id, _retry_of(job), dedupe_key="retry:1"
+    )
+
+    assert inserted and retry.request.attempt == 2
+    writes = [
+        index
+        for index, statement in enumerate(statements)
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE"))
+    ]
+    assert statements[0] == "BEGIN IMMEDIATE"
+    assert "COMMIT" not in statements[: writes[-1]]
+
+
+def test_stuck_wake_column_migrates_an_old_schema(tmp_path: Path) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE ticket_state (
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                gate_count INTEGER NOT NULL DEFAULT 0,
+                stuck INTEGER NOT NULL DEFAULT 0,
+                stuck_reason TEXT,
+                stuck_source_comment_id TEXT,
+                timeout_seconds INTEGER,
+                generation INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (repo, ticket_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds
+            ) VALUES ('owner/repo', '42', 1, 'job-failed-2', 'go-1', 60)
+            """
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ticket_state)")
+        }
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state"
+        ).fetchone()[0]
+    assert "stuck_wake_job_id" in columns
+    assert wake is not None

@@ -759,7 +759,9 @@ and at a third of the timeout, so a live job never shows as stale; see "Job
 states"). The heartbeat stops when
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
-locked or failed writes are logged and retried at the next beat. SIGTERM and
+locked or failed writes are logged and retried at the next beat. A heartbeat
+error never aborts the command: it runs on, and if the job then times out, T6
+retries it once (see "Job states"). SIGTERM and
 SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
 reaches the command directly, and the exit status is the command's; a signal
 that arrives before the command starts means it never runs.

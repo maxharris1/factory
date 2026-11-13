@@ -770,6 +770,39 @@ def test_github_ticket_is_fetched_once_per_cycle() -> None:
     )
 
 
+@pytest.mark.parametrize("tracker", ["github", "linear"])
+def test_live_source_refuses_a_short_head(tracker: str) -> None:
+    gh = FakeGh(FACTORY.format(tickets=tracker, ship="handoff"))
+    gh.head = "abcdef1"
+    errors: list[tuple[str, str, str]] = []
+
+    def transport(url, headers, body, timeout):
+        del url, headers, body, timeout
+        return HTTPResult(200, json.dumps({"data": {"issue": linear_issue()}}))
+
+    source = LivePollSource(
+        config(linear=tracker == "linear"),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh,
+        linear_transport=transport,
+        error_sink=lambda repo, ticket_id, error: errors.append(
+            (repo, ticket_id, error)
+        ),
+    )
+    ticket_id = "12" if tracker == "github" else "AUT-42"
+
+    tickets = source.tracked_tickets((TicketRef("acme/widgets", ticket_id, tracker),))
+
+    assert tickets == ()
+    assert errors == [
+        (
+            "acme/widgets",
+            ticket_id,
+            "PollSourceError:acme/widgets#12 head 'abcdef1' is not a full SHA",
+        )
+    ]
+
+
 def test_already_merged_tracked_pr_is_marked_terminal_without_detail_reads() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
     terminals: list[tuple[str, str, str]] = []

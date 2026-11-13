@@ -1163,7 +1163,7 @@ class Dispatcher:
                 ),
             )
             return True, "queued-go-clarification"
-        self._enqueue_or_flag(
+        job = self._enqueue_or_flag(
             ticket,
             JobRequest(
                 repo=ticket.repo,
@@ -1188,6 +1188,8 @@ class Dispatcher:
                 f"g{generation}"
             ),
         )
+        if job.request.source_comment_id != comment.id:
+            return True, f"deduped-{action}"
         self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
 
@@ -3164,6 +3166,8 @@ class Dispatcher:
         return str(row["recipient"]), int(row["generation"])
 
     def _t6(self, job: Job) -> None:
+        # One dispatcher runs T6 at a time: orch poll holds the single-poller
+        # flock (lib/cli.py _poll_lock), so these reads and writes do not race.
         if job.request.action == "stuck":
             self.queue.mark_failure_handled(job.id)
             return
