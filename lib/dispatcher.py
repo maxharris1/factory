@@ -3221,7 +3221,8 @@ class Dispatcher:
         Read from the ticket this poll fetched (None when it fetched none),
         posted no earlier than the job was queued, from a login trusted for
         its `from` and `role`, and not already rejected when it was handled
-        (stale, superseded, ...).
+        (stale, superseded, ...). A ready stale only because its review
+        already answered (#71 stale-ready-verdict) still counts.
 
         A review's is a reviewer verdict for the job's head (as a prefix,
         like every head compare) and round; a review job with no round or no
@@ -3266,7 +3267,11 @@ class Dispatcher:
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
             outcome = self._handled_outcome(ticket, item.id)
-            if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES):
+            if (
+                outcome is not None
+                and outcome != "stale-ready-verdict"
+                and outcome.startswith(_REJECTED_OUTCOMES)
+            ):
                 continue
             if (
                 kind == "ready"
