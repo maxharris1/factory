@@ -18,6 +18,11 @@ family rule, also in the README, is fail closed:
 
 review.rounds.low is at most 1 and review.rounds.high is at most 3
 (SPEC section 8).
+
+hold is optional (issue #86): a mapping with label (default
+factory:hold), approver (default max, a GitHub login) and paths (a list
+of repo-relative globs, default none). It only acts on ship: merge; on any
+other ship it is accepted with a warning and never applied.
 """
 
 from __future__ import annotations
@@ -46,6 +51,12 @@ _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _APPROVER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+_LABEL = re.compile(r"^(?=.{1,50}$)[^\s,](?:[^,\x00-\x1f\x7f]*[^\s,])?$")
+_GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
+
+DEFAULT_HOLD_LABEL = "factory:hold"
+DEFAULT_HOLD_APPROVER = "max"
 
 _TOP_KEYS = {
     "base_branch",
@@ -58,7 +69,16 @@ _TOP_KEYS = {
     "ci_runner",
     "github_issues",
     "github_labels",
+    "hold",
 }
+_HOLD_KEYS = {"label", "approver", "paths"}
+
+
+@dataclass(frozen=True)
+class HoldConfig:
+    label: str = DEFAULT_HOLD_LABEL
+    approver: str = DEFAULT_HOLD_APPROVER
+    paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,6 +97,7 @@ class FactoryConfig:
     ci_runner: str | None = None
     github_issues: bool = False
     github_labels: bool = False
+    hold: HoldConfig | None = None
 
 
 def load_factory_md(path: Path) -> tuple[FactoryConfig | None, list[Finding]]:
@@ -110,6 +131,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     ci_runner = _optional_token(data, "ci_runner", findings)
     github_issues = _optional_bool(data, "github_issues", findings)
     github_labels = _optional_bool(data, "github_labels", findings)
+    hold = _hold(data, findings)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -127,6 +149,11 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     if tickets == "linear" and github_labels is True:
         findings.append(
             Finding("error", "tickets is linear and github_labels is true")
+        )
+
+    if hold is not None and ship is not None and ship != "merge":
+        findings.append(
+            Finding("warning", "hold has no effect unless ship is merge")
         )
 
     if any(item.severity == "error" for item in findings):
@@ -157,6 +184,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
         ci_runner=ci_runner,
         github_issues=github_issues,
         github_labels=github_labels,
+        hold=hold,
     )
     return config, findings
 
@@ -397,6 +425,53 @@ def _ship(data: dict, findings: list[Finding]) -> str | None:
         Finding("error", "ship must be merge, handoff, or after:<approver>")
     )
     return None
+
+
+def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:
+    if "hold" not in data:
+        return None
+    value = data["hold"]
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "hold must be a mapping"))
+        return None
+    errors = len(findings)
+    findings.extend(_unknown(value, _HOLD_KEYS, "hold"))
+    label = value.get("label", DEFAULT_HOLD_LABEL)
+    if not isinstance(label, str) or _LABEL.fullmatch(label) is None:
+        findings.append(Finding("error", "hold.label must be a GitHub label name"))
+    approver = value.get("approver", DEFAULT_HOLD_APPROVER)
+    if not isinstance(approver, str) or _LOGIN.fullmatch(approver) is None:
+        findings.append(Finding("error", "hold.approver must be a GitHub login"))
+    raw_paths = value.get("paths", [])
+    paths: list[str] = []
+    if not isinstance(raw_paths, list):
+        findings.append(Finding("error", "hold.paths must be a list"))
+    else:
+        for index, item in enumerate(raw_paths):
+            if not _is_glob(item):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"hold.paths[{index}] must be a repo-relative glob",
+                    )
+                )
+            else:
+                paths.append(item)
+    if len(findings) != errors:
+        return None
+    return HoldConfig(label=label, approver=approver, paths=tuple(paths))
+
+
+def _is_glob(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _GLOB.fullmatch(value) is not None
+        and not value.startswith("/")
+        and ".." not in value.split("/")
+        and "" not in value.split("/")
+    )
 
 
 def _skills(data: dict, findings: list[Finding]) -> tuple[str, ...] | None:
