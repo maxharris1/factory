@@ -104,3 +104,22 @@ def test_a_ready_at_the_approved_head_is_already_shipped(tmp_path: Path) -> None
     board.poll()
     assert board.outcome(ready) == "ready-already-shipped"
     assert board.state("42")["workflow_state"] == "merge-queue"
+
+
+def test_go_on_an_approved_after_ticket_in_the_queue_is_honored(tmp_path: Path) -> None:
+    board, pr = queued(tmp_path, ship="after:tracy-site")
+    assert board.state("42")["workflow_state"] == "waiting-external"
+    board.go(pr, "go-again")
+    board.poll()
+    assert board.outcome("go-again") == "queued-build"
+    assert board.state("42")["approved_head"] is None
+
+
+def test_go_on_a_ready_for_review_after_ticket_keeps_its_generation_key(tmp_path: Path) -> None:
+    board, pr = queued(tmp_path, ship="after:tracy-site", finish_line="ready-for-review")
+    assert board.state("42")["workflow_state"] == "waiting-external"
+    builds = len(board.jobs("build"))
+    board.go(pr, "go-again")
+    board.poll()
+    assert board.outcome("go-again") == "queued-build"
+    assert len(board.jobs("build")) == builds

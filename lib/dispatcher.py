@@ -1333,7 +1333,10 @@ class Dispatcher:
             )
             return True, "queued-go-clarification"
         once = f"g{generation}"
-        if current in (*WATCHED_STATES, "waiting-external"):
+        if current in WATCHED_STATES or (
+            current == "waiting-external"
+            and self._queue_row(ticket)["approved_head"] is not None
+        ):
             # #130: a go on a watched ticket is honored; the ticket leaves
             # the merge queue and ship waits for a new APPROVE. Keyed on the
             # go, since the build that got it approved holds this generation.
