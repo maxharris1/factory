@@ -113,6 +113,12 @@ class Ssh:
     def offline(self, alias: str) -> Path:
         return self.hosts / f"{alias}.offline"
 
+    def fault(self, alias: str, kind: str, seconds: float) -> Path:
+        """Set a link fault (tests/fake_ssh.py: delay, delay-detached, drop-after)."""
+        path = self.hosts / f"{alias}.{kind}"
+        path.write_text(str(seconds), encoding="utf-8")
+        return path
+
 
 def enqueue(queue: SQLiteJobQueue, recipient: str, key: str, *, timeout: int = 60) -> str:
     return queue.enqueue(
