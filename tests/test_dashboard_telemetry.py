@@ -1,0 +1,414 @@
+"""Job telemetry on the dashboard (issue #93, lib/dashboard_telemetry.py).
+
+The job modal's feed and counters, "no telemetry" for a job without a row
+(or a database without the table), the Efficiency rollup per harness, repo
+and job, value checks and redaction, and the page script drawing the same.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import re
+import sqlite3
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from lib import telemetry
+from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
+from tests.test_dashboard import GH_CLASSIC, NOW, seeded
+from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
+from tests.test_telemetry import readable
+
+STEPS = [
+    {"at": NOW - 50, "kind": "tool", "status": "ok", "label": "edit 2 files"},
+    {"at": NOW - 40, "kind": "command", "status": "error", "label": "command"},
+    {"at": NOW - 5, "kind": "tool", "status": "running", "label": "mcp:github.get_pr"},
+]
+
+
+def add_telemetry(db: Path, job_id: str, **values) -> None:
+    row = {
+        "job_id": job_id,
+        "bot": "codex-bot",
+        "harness": "codex",
+        "repo": "maxharris1/cleffy",
+        "started_at": NOW - 300,
+        "updated_at": NOW - 10,
+        "last_event_at": NOW - 5,
+        "finished_at": None,
+        "elapsed_seconds": 290.4,
+        "events": 42,
+        "turns": 3,
+        "tool_calls": json.dumps({"shell": 7, "file_change": 2}),
+        "files_touched": 2,
+        "commands": 7,
+        "test_runs": 2,
+        "tests_passed": 40,
+        "tests_failed": 1,
+        "tokens_in": 24763,
+        "tokens_cached": 24448,
+        "tokens_out": 1220,
+        "cost_usd": None,
+        "exit_code": None,
+        "exit_reason": None,
+        "steps": json.dumps(STEPS),
+    }
+    row.update(values)
+    with sqlite3.connect(db) as connection:
+        telemetry.ensure_table(connection)
+        connection.execute(
+            f"INSERT OR REPLACE INTO job_telemetry ({', '.join(row)}) "
+            f"VALUES ({', '.join('?' for _ in row)})",
+            tuple(row.values()),
+        )
+
+
+def _running(snapshot: dict) -> dict:
+    return {row["ticket_id"]: row for row in snapshot["running"]}
+
+
+def test_a_database_without_the_table_shows_no_telemetry(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert all(row["telemetry"] is None for row in snapshot["running"] + snapshot["queued"])
+    assert snapshot["telemetry"]["state"] == "none"
+    assert snapshot["telemetry"]["totals"]["jobs"] == 0
+    pages = render_pages(snapshot)
+    job = _no_script(pages["job.html"])
+    article = _section(job, "job-r-codex-")
+    assert '<h3 class="tele-head">telemetry</h3><p class="empty">no telemetry</p>' in article
+    tokens = _section(_no_script(pages["efficiency.html"]), "tokens")
+    assert "Tokens and cost" in tokens and "no telemetry" in tokens
+
+
+def test_a_running_job_gets_its_counters_and_recent_steps(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    item = _running(snapshot)["13"]["telemetry"]
+    assert _running(snapshot)["14"]["telemetry"] is None  # a job without a row
+    assert item["job"] == "r-codex-" and item["harness"] == "codex"
+    assert (item["turns"], item["commands"], item["files_touched"]) == (3, 7, 2)
+    assert item["tool_calls"] == [{"name": "shell", "count": 7}, {"name": "file_change", "count": 2}]
+    assert item["tool_calls_total"] == 9
+    assert (item["tests_passed"], item["tests_failed"]) == (40, 1)
+    assert (item["tokens_in"], item["tokens_cached"], item["tokens_out"]) == (24763, 24448, 1220)
+    assert item["cost_usd"] is None
+    assert item["elapsed_seconds"] == 290
+    assert item["last_activity_age_seconds"] == 5 and item["updated_age_seconds"] == 10
+    assert item["finished"] is False and item["exit_reason"] is None
+    assert [(s["status"], s["label"], s["age_seconds"]) for s in item["steps"]] == [
+        ("ok", "edit 2 files", 50),
+        ("error", "command", 40),
+        ("running", "mcp:github.get_pr", 5),
+    ]
+    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
+    for needle in ("codex · last activity 5s ago", "<b>3</b><span>turns</span>",
+                   '<b class="bad">40 / 1</b><span>tests pass / fail</span>',
+                   "<b>24,763 / 1,220</b><span>tokens in / out</span>", "shell ×7",
+                   "mcp:github.get_pr", "4m 50s"):
+        assert needle in article, needle
+    # The newest step first.
+    assert article.index("mcp:github.get_pr") < article.index("edit 2 files")
+
+
+def test_a_job_with_a_row_but_no_events_says_no_telemetry_yet(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review", events=0, last_event_at=None, steps="[]")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert _running(snapshot)["13"]["telemetry"]["events"] == 0
+    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
+    assert "codex · no events yet" in article and "no telemetry yet" in article
+
+
+def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(
+        db,
+        "r-codex-review",
+        tool_calls="{not json",
+        steps=json.dumps([
+            {"at": NOW - 1, "kind": "evil", "status": "pwned", "label": f"echo {GH_CLASSIC}\n<script>",
+             "title": f"$ echo {GH_CLASSIC}"},
+            {"at": NOW - 1, "kind": "command", "status": "ok", "label": "deploy --pin $'walr''us'"},
+            "not a step",
+        ]),
+        finished_at=NOW - 2,
+        exit_reason=f"error: {GH_CLASSIC}",
+        turns=-4,
+        tokens_in="many",
+        cost_usd=-1,
+        harness="gemini",
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    text = json.dumps(snapshot)
+    assert GH_CLASSIC not in text
+    item = _running(snapshot)["13"]["telemetry"]
+    assert item["tool_calls"] == [] and item["turns"] == 0 and item["tokens_in"] == 0
+    assert item["cost_usd"] is None and item["harness"] == "other"
+    assert item["steps"] == [
+        {"kind": "tool", "status": "running", "label": "tool", "age_seconds": 1},
+        {"kind": "command", "status": "ok", "label": "command", "age_seconds": 1},
+    ]
+    assert item["exit_reason"] == "finished"
+    assert "walr" not in text
+    html = render_pages(snapshot)["job.html"]
+    assert GH_CLASSIC not in html and "<script>" not in _no_script(html).split("<body", 1)[1]
+
+
+def _strict(text: str) -> object:
+    def refuse(name: str) -> object:
+        raise ValueError(f"nonstandard JSON number {name}")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf")])
+def test_nonfinite_numbers_in_the_table_never_reach_published_json(tmp_path: Path, bad: float) -> None:
+    db, log = seeded(tmp_path)
+    numbers = ("cost_usd", "tokens_in", "tokens_cached", "tokens_out", "turns", "events",
+               "elapsed_seconds", "tests_passed", "last_event_at", "updated_at")
+    add_telemetry(db, "r-codex-review", **{name: bad for name in numbers if name != "updated_at"})
+    add_telemetry(
+        db, "d-claude-build-1", harness="claude", cost_usd=bad,
+        finished_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
+        steps=json.dumps([{"at": bad, "kind": "tool", "label": "x", "status": "ok"}]),
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
+    data = _strict(status.read_text())
+    rollup = data["telemetry"]
+    assert rollup["totals"]["cost_usd"] == 0.0 and rollup["totals"]["priced_jobs"] == 0
+    assert rollup["totals"]["tokens_in"] == 24763
+    item = _running(data)["13"]["telemetry"]
+    assert item["cost_usd"] is None and item["tokens_in"] == 0
+
+
+def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review")  # running codex job, no cost
+    add_telemetry(
+        db, "d-claude-build-1", bot="claude-bot", harness="claude", repo="maxharris1/factory",
+        tokens_in=5460, tokens_cached=5000, tokens_out=300, cost_usd=0.4213,
+        finished_at=NOW - 100, updated_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
+    )
+    add_telemetry(
+        db, "f-claude-build", bot="claude-bot", harness="claude", repo="maxharris1/cleffy",
+        tokens_in=1000, tokens_cached=0, tokens_out=100, cost_usd=0.05,
+        finished_at=NOW - 50, updated_at=NOW - 50, exit_code=1, exit_reason="max turns reached; exit 1",
+    )
+    add_telemetry(  # older than the window: left out
+        db, "d-codex-review-1", tokens_in=10**9, finished_at=NOW - 8 * 86400,
+        updated_at=NOW - 8 * 86400, exit_code=0, exit_reason="completed; exit 0",
+    )
+    rollup = collect_snapshot(db, log, now=NOW)["telemetry"]
+    assert rollup["state"] == "ok" and rollup["window_days"] == 7
+    assert rollup["totals"] == {
+        "jobs": 3, "tokens_in": 24763 + 5460 + 1000, "tokens_cached": 24448 + 5000,
+        "tokens_out": 1220 + 300 + 100, "cost_usd": 0.4713, "priced_jobs": 2,
+    }
+    harness = {row["name"]: row for row in rollup["by_harness"]}
+    assert harness["codex"]["jobs"] == 1 and harness["codex"]["priced_jobs"] == 0
+    assert harness["claude"]["cost_usd"] == 0.4713 and harness["claude"]["tokens_in"] == 6460
+    repo = {row["name"]: row for row in rollup["by_repo"]}
+    assert repo["maxharris1/cleffy"]["jobs"] == 2 and repo["maxharris1/factory"]["jobs"] == 1
+    assert [row["job"] for row in rollup["recent"]] == ["f-claude", "d-claude"]  # newest first
+    assert rollup["recent"][0]["exit_reason"] == "max turns reached; exit 1"
+    page = _section(_no_script(render_pages(collect_snapshot(db, log, now=NOW))["efficiency.html"]), "tokens")
+    for needle in ("last 7 days", "$0.47", "1 jobs report no cost", "per harness", "per repo",
+                   "recent jobs", '<td class="bad">max turns reached; exit 1</td>',
+                   "<td>success; exit 0</td>", "maxharris1/factory"):
+        assert needle in page, needle
+
+
+def test_an_older_or_odd_table_reads_as_unreadable_not_an_error(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE job_telemetry (job_id TEXT, updated_at REAL)")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert snapshot["telemetry"]["state"] == "unreadable"
+    assert _running(snapshot)["13"]["telemetry"] is None
+
+
+# --- the page script draws the same ---------------------------------------------------------
+
+
+@needs_node
+def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review")
+    add_telemetry(
+        db, "d-claude-build-1", harness="claude", cost_usd=0.4213, finished_at=NOW - 100,
+        updated_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
+                    hash_="#job-r-codex-")
+    view = out["text"]["jobview"]
+    for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220",
+                   "shell ×7", "command", "mcp:github.get_pr"):
+        assert needle in view, needle
+    dump = out["dump"]["jobview"]
+    assert re.search(r'section\.telemetry', dump) and "span.chip.bad" in dump
+    assert view.index("mcp:github.get_pr") < view.index("edit 2 files")
+    eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
+    tokens = eff["text"]["tokens"]
+    for needle in ("Tokens and cost", "last 7 days", "per harness", "per repo", "recent jobs",
+                   "$0.42", "success; exit 0", "1 jobs report no cost"):
+        assert needle in tokens, needle
+
+
+@needs_node
+def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
+                    hash_="#job-r-codex-")
+    assert "no telemetry" in out["text"]["jobview"]
+    eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
+    assert "no telemetry" in eff["text"]["tokens"]
+
+
+# --- no command or argument text is stored or published (#100 r10) ---------------------------
+
+# Max, on the round-9 REVISE: "Hide those fields in the job modal instead". A
+# step keeps a fixed label; no command line, argument, pattern, path, query or
+# error message is stored, so no quoting of a secret can be read back from it.
+DIGITLESS_PROOF = "walrusHarborQuietLanternMeadow-Copper_Fjord"  # a valid mint() shape
+LONG_SECRET = "walrusharbor" * 200
+ESC_SECRET = "walrus\x1bharbor-pin"
+
+
+def _ansi_c_chunks(value: str) -> str:
+    return "".join("$'" + value[i : i + 4] + "'" for i in range(0, len(value), 4))
+
+
+def _locale_chunks(value: str) -> str:
+    return "".join('$"' + value[i : i + 4] + '"' for i in range(0, len(value), 4))
+
+
+def _printf_q(value: str) -> str:
+    return subprocess.check_output(
+        ["/bin/bash", "--noprofile", "--norc", "-c", 'printf %q "$1"', "_", value], env={}
+    ).decode()
+
+
+def _bash_reads(word: str) -> str:
+    return subprocess.check_output(
+        ["/bin/bash", "--noprofile", "--norc", "-c", "printf %s " + word], env={}
+    ).decode()
+
+
+SHELL_FORMS = {
+    "plain": lambda value: value,
+    "ansi-c-chunks": _ansi_c_chunks,
+    "locale-chunks": _locale_chunks,
+    "printf-q": _printf_q,
+    "quote-chunks": lambda value: "''".join(value[i : i + 8] for i in range(0, len(value), 8)),
+    "json": json.dumps,
+}
+SECRETS = {
+    "proof": ("ORCH_JOB_PROOF", DIGITLESS_PROOF),
+    "worker-tag": ("ORCH_WORKER_TAG", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"),
+    "registered": ("DEPLOY_PASSWORD", "otter" + "lantern-key"),
+    "esc": ("DEPLOY_PASSWORD", ESC_SECRET),
+    "long": ("DEPLOY_PASSWORD", LONG_SECRET),
+}
+
+
+def _events(harness: str, word: str) -> list[dict]:
+    """One event for every field a harness can put free text in, each carrying `word`."""
+    if harness == "claude":
+        uses = [
+            ("Bash", {"command": f"env ORCH_JOB_PROOF={word} orch job done", "description": word}),
+            ("Edit", {"file_path": f"/work/{word}/app.py", "old_string": word, "new_string": word}),
+            ("Grep", {"pattern": word, "path": f"/work/{word}"}),
+            ("Read", {"file_path": f"src/{word}.py"}),
+            ("Task", {"description": word, "prompt": word}),
+        ]
+        return [
+            {"type": "system", "subtype": "init", "cwd": f"/work/{word}"},
+            {"type": "assistant", "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": f"t{n}", "name": name, "input": data}
+                for n, (name, data) in enumerate(uses)]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t0", "is_error": True, "content": word}]}},
+            {"type": "result", "subtype": "error_during_execution", "is_error": True, "result": word},
+        ]
+    items = [
+        {"type": "command_execution", "command": f"env ORCH_JOB_PROOF={word} orch job done",
+         "aggregated_output": word, "exit_code": 1, "status": "failed"},
+        {"type": "file_change", "changes": [{"path": f"/work/{word}/a.py"}, {"path": f"{word}.py"}],
+         "status": "completed"},
+        {"type": "web_search", "query": word},
+        {"type": "mcp_tool_call", "server": "github", "tool": "get_pr", "arguments": {"q": word},
+         "status": "completed"},
+        {"type": "error", "message": word},
+    ]
+    return [
+        {"type": "turn.started"},
+        *({"type": "item.completed", "item": {"id": f"i{n}", **item}} for n, item in enumerate(items)),
+        {"type": "turn.failed", "error": {"message": word}},
+        {"type": "error", "message": word},
+    ]
+
+
+LABELS = {
+    "claude": ["command", "Edit", "Grep", "Read", "Task", "error during execution"],
+    "codex": ["command", "edit 2 files", "web_search", "mcp:github.get_pr", "error", "turn failed", "error"],
+}
+EXIT_REASONS = {"claude": "error during execution; exit 0", "codex": "error; exit 0"}
+
+
+def _fragments(secret: str) -> set[str]:
+    return {secret[i : i + 4] for i in range(len(secret) - 3)}
+
+
+@pytest.mark.parametrize("form", sorted(SHELL_FORMS))
+@pytest.mark.parametrize("which", sorted(SECRETS))
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_no_command_or_argument_text_reaches_the_row_status_json_or_the_job_modal(
+    tmp_path: Path, harness: str, which: str, form: str
+) -> None:
+    name, secret = SECRETS[which]
+    word = SHELL_FORMS[form](secret)
+    if form != "json":
+        assert _bash_reads(word) == secret  # the form really is the secret, as the shell reads it
+    db, log = seeded(tmp_path)
+    session = telemetry.Session(
+        connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
+        repo="maxharris1/cleffy", harness=harness, argv=[harness], raw_log=None,
+        scrub=telemetry.Scrubber({name: secret}), log=lambda _: None,
+        stdout=io.BytesIO(), clock=lambda: NOW - 5,
+    )
+    session.consume(io.BytesIO("".join(json.dumps(e) + "\n" for e in _events(harness, word)).encode()))
+    session.flush()
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        row = dict(connection.execute("SELECT * FROM job_telemetry").fetchone())
+    stored = json.loads(row["steps"])
+    assert "files" not in row
+    assert [set(step) for step in stored] == [{"at", "kind", "status", "label"}] * len(stored)
+    assert [step["label"] for step in stored] == LABELS[harness]
+
+    snapshot = collect_snapshot(db, log, now=NOW)
+    status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
+    item = _running(_strict(status.read_text()))["13"]["telemetry"]
+    assert "files" not in item
+    assert [step["label"] for step in item["steps"]] == LABELS[harness][-12:]
+    assert [set(step) for step in item["steps"]] == [{"kind", "status", "label", "age_seconds"}] * len(item["steps"])
+    session.finish(0)
+    with sqlite3.connect(db) as connection:
+        reason = connection.execute("SELECT exit_reason FROM job_telemetry").fetchone()[0]
+    assert reason == EXIT_REASONS[harness]
+
+    own = [json.dumps(row), json.dumps(item), reason]
+    published = [status.read_text(), render_pages(snapshot)["job.html"]]
+    for text in own:
+        assert not any(piece in text for piece in _fragments(secret)), text
+    for text in own + published:
+        assert secret not in text and word not in text
+        assert not readable(secret, text)
