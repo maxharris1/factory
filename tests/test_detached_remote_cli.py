@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from lib import placed_run, remote
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
@@ -26,6 +28,7 @@ from lib.waiter import HarnessCommand, Waiter
 from tests.test_detached_remote import HARNESS
 from tests.test_job_state import Poller
 from tests.test_liveness_requeue import _remote
+from tests.test_remote_darwin import Mac, mac_env
 from tests.test_remote_start import (
     Ssh,
     gone,
@@ -257,6 +260,46 @@ def test_a_cancel_kills_a_remote_worker_that_ignores_sigterm(tmp_path: Path) -> 
         kill_quietly(worker)
         if proc.poll() is None:
             proc.kill()
+
+
+@pytest.mark.parametrize("darwin", [False, True], ids=["linux", "darwin"])
+def test_a_cancel_stops_the_whole_unit_when_only_a_child_ignores_sigterm(
+    tmp_path: Path, darwin: bool
+) -> None:
+    """Codex PR #129 r2: SIGTERM ends the harness (the group leader) but not its
+    child; the cancel still kills the child, then frees the slot."""
+    poller, db, job_id, ssh = setup(tmp_path)
+    env = mac_env(ssh, Mac(tmp_path)) if darwin else {}
+    child_file, parent_file = tmp_path / "child.pid", tmp_path / "parent.pid"
+    child_command = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(child_file)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(600)"
+    )
+    parent_command = (
+        "import os, subprocess, sys; "
+        f"open({str(parent_file)!r}, 'w').write(str(os.getpid())); "
+        f"subprocess.Popen([sys.executable, '-c', {child_command!r}]).wait()"
+    )
+    proc = run(poller, job_id, ssh, "--", sys.executable, "-c", parent_command, env=env)
+    parent = child = None
+    try:
+        parent = int(wait_file(parent_file, proc))
+        child = int(wait_file(child_file, proc))
+        assert os.getpgid(child) == os.getpgid(parent) == parent
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=KILL_AFTER_SECONDS + 60)
+        assert proc.returncode == 128 + signal.SIGTERM, err
+        assert wait_gone(child), err
+        assert gone(parent)
+        assert poller.pool.placement(job_id) is None, err
+    finally:
+        kill_quietly(child)
+        kill_quietly(parent)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
 
 class StopsOnlyOnKill:

@@ -80,18 +80,25 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   0 too for a record from an earlier boot session or no process left in the
   recorded group, read from a `ps -A -o pgid=,pid=,uid=` that exited 0; 1
   while the group holds only this user's processes and is led by the
-  recorded leader (same start time); 3 for a malformed record or one naming
+  recorded leader (same start time), or (Codex PR #129 r2) its leader has
+  exited but it still holds a process from the stop's snapshot with that
+  process's recorded start time; 3 for a malformed record or one naming
   another tag, a group holding another user's process, a group whose leader
-  has exited (nothing ties the processes left to this start: the number may
-  have been reused while the group was empty), a leader whose start time
-  differs (the number was reused), a fence that could not be written, and
-  when there is no boot session id or ps fails or lists nothing;
+  has exited and holds no snapshot process (nothing ties the processes left
+  to this start: the number may have been reused while the group was
+  empty), a leader whose start time differs (the number was reused), a
+  fence that could not be written, and when there is no boot session id or
+  ps fails or lists nothing;
 * stop: SIGTERM (SIGKILL when asked to kill) to the recorded group exactly
   when the check would exit 1; nothing else is signalled (with no record it
-  writes the fence as well). A process that left the job's group (setsid),
-  or that stays in it after the leader exits, is never signalled here:
-  macOS gives no way to find it by its tag. A group left without its leader
-  keeps the slot until it is empty;
+  writes the fence as well). While the leader is verified, it first writes
+  the snapshot `.orch-worker-<tag>.members.pid` (`<pid> <start time>` per
+  member of the group, from one listing, kept only when the leader is
+  verified again after it), so a cancel that kills the leader but not a
+  child still finds and kills the child. A process that left the job's
+  group (setsid), or that stays in it after the leader exits with no stop
+  before, is never signalled here: macOS gives no way to find it by its
+  tag. Such a group keeps the slot until it is empty;
 * poll (#128): the check without the fence. The wrapper writes `pid` before
   its start writes the record, so no record is only unsure: a poll never
   fences the start it follows.
@@ -218,6 +225,29 @@ _DARWIN_GROUP = (
     "$1 == p { n = 1; if ($3 != u) x = 1; if ($2 == p) k = 1 } "
     "END { if (e || NR != w) exit 1; print n + 0, x + 0, k + 0 }'"
 )
+# The stop's snapshot of the recorded group, in $m: one `<pid> <start time>`
+# line per member, from one listing taken while the leader is verified
+# alive, kept only when the leader is verified again after it (so the group
+# was the start's for the whole listing).
+_DARWIN_SNAPSHOT = (
+    'LC_ALL=C TZ=UTC0 ps -A -o pgid= -o pid= -o lstart= 2>/dev/null | awk -v p="$p" '
+    "'$1 == p && $2 ~ /^[0-9]+$/ { l = $2; for (i = 3; i <= NF; i++) l = l \" \" $i; print l }' "
+    '> "$m.$$" 2>/dev/null; '
+    f'{_LSTART}; if [ "$*" = "$s" ]; then mv -f -- "$m.$$" "$m"; else rm -f -- "$m.$$"; fi'
+)
+# Whether a member of the snapshot in $m is still in group $p with its
+# recorded start time: then the group has not been empty since the snapshot,
+# so its number was never reused and every process in it is the start's.
+# Sets v=1 when one is.
+_DARWIN_MEMBER = (
+    'v=; if [ -f "$m" ]; then while read -r q a; do '
+    'case "$q" in ""|*[!0-9]*) continue;; esac; '
+    'y=$(LC_ALL=C TZ=UTC0 ps -o pgid= -o lstart= -p "$q" 2>/dev/null); '
+    'set -f; set -- $y; set +f; '
+    '[ "$#" -gt 1 ] && [ "$1" = "$p" ] || continue; shift; '
+    '[ "$*" = "$a" ] && { v=1; break; }; '
+    'done < "$m"; fi'
+)
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
 # refuses (125) without running anything.
@@ -237,6 +267,7 @@ def _darwin_worker(
     running: str,
     blind: str,
     fence: bool = True,
+    snapshot: bool = False,
 ) -> str:
     """Darwin: decide whether the record of tag $t names a live worker.
 
@@ -253,12 +284,16 @@ def _darwin_worker(
     ps that exited 0. unsure: no record yet (fence just written), a fence
     that could not be written, a malformed record or one naming another tag,
     a group holding another user's process, a group whose leader has exited
-    (nothing ties the members left to this start: the number may have been
-    reused while the group was empty), or a leader whose start time is not
-    the recorded one, or a record whose boot session is not a UUID.
-    running: the recorded group holds only this user's processes and is led
-    by the recorded leader. blind: the device cannot tell (no boot session
-    id, a user id that is not a number, ps failed or listed nothing, a
+    and that holds no snapshot member (nothing ties the members left to
+    this start: the number may have been reused while the group was empty),
+    or a leader whose start time is not the recorded one, or a record whose
+    boot session is not a UUID.
+    running: the recorded group holds only this user's processes and is
+    either led by the recorded leader or (#129 r2) still holds a member of
+    the stop's snapshot `$d/.orch-worker-$t.members.pid` with its recorded
+    start time. With snapshot (a stop), a group led by its leader is
+    snapshotted before running. blind: the device cannot tell (no boot
+    session id, a user id that is not a number, ps failed or listed nothing, a
     listing line that is not three numbers, awk read less than the whole
     listing, failed, or printed anything but three fields of 0 or 1).
     """
@@ -274,6 +309,7 @@ def _darwin_worker(
     )
     return (
         f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
+        'm="$d/.orch-worker-$t.members.pid"; '
         f"{_DARWIN_BOOT} || {blind}; "
         f"u=$(id -u) || {blind}; "
         f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
@@ -292,8 +328,10 @@ def _darwin_worker(
         f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
         f'[ "$1" = 1 ] || {gone}; '
         f'[ "$2" = 0 ] || {unsure}; '
-        f'[ "$3" = 1 ] || {unsure}; '
+        f'if [ "$3" = 1 ]; then '
         f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
+        f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}"
+        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {unsure}; fi; "
         f"{running}"
     )
 
@@ -473,6 +511,7 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
         unsure="exit 0",
         running=f'{{ kill -{sig} -"$p" 2>/dev/null; exit 0; }}',
         blind="exit 3",
+        snapshot=True,
     )
     return _sh(
         f"t={tag}; f={pid_file}; "

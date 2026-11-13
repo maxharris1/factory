@@ -729,6 +729,96 @@ def test_r1_f12_darwin_reused_leaderless_group_is_unknown_and_never_signalled(
         kill_quietly(child)
 
 
+# Codex PR #129 r2: a stop snapshots the group it signals, so a member
+# that outlives the leader is still known to be the start's.
+
+# A leader that starts a child ignoring SIGTERM in its own group, writes both
+# pids, and waits for the child.
+WAITS_ON_STUBBORN_CHILD = (
+    "import os, subprocess, sys, time\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)'])\n"
+    "open(sys.argv[1] + '.tmp', 'w').write(f'{os.getpid()} {child.pid}')\n"
+    "os.rename(sys.argv[1] + '.tmp', sys.argv[1])\n"
+    "child.wait()\n"
+)
+
+
+def members_of(t: remote.RemoteTarget) -> Path:
+    return Path(t.job_dir) / f".orch-worker-{t.require_tag()}.members.pid"
+
+
+def test_r2_darwin_member_left_after_a_stop_killed_the_leader_is_running_until_killed(
+    tmp_path: Path, mac_ssh
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    pids = tmp_path / "pids"
+    transport = remote.SshTransport()
+    proc = start(t, [sys.executable, "-c", WAITS_ON_STUBBORN_CHILD, str(pids)])
+    leader = child = None
+    try:
+        leader, child = map(int, wait_file(pids, proc).split())
+        assert os.getpgid(child) == leader
+        assert remote.check_worker(transport, t) == remote.RUNNING
+        assert remote.stop_worker(transport, t) is True
+        assert wait_gone(leader)
+        assert not gone(child)
+        assert f"{child} {lstart(child)}" in members_of(t).read_text().splitlines()
+
+        assert remote.check_worker(transport, t) == remote.RUNNING
+        assert remote.stop_worker(transport, t) is True
+        time.sleep(0.2)
+        assert not gone(child)  # SIGTERM again: ignored
+        assert remote.stop_worker(transport, t, kill=True) is True
+        assert wait_gone(child)
+        assert remote.check_worker(transport, t) == remote.GONE
+    finally:
+        kill_quietly(child)
+        kill_quietly(leader)
+        if proc.poll() is None:
+            proc.kill()
+
+
+@pytest.mark.parametrize("member", ["wrong-start", "other-group"])
+def test_r2_darwin_snapshot_member_that_does_not_match_proves_nothing(
+    tmp_path: Path, mac_ssh, member: str
+) -> None:
+    """A leaderless group stays unknown unless a snapshot member is in it
+    with its recorded start time."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    child_pid = tmp_path / "child.pid"
+    leader = subprocess.Popen(
+        leave_child_command(child_pid, stubborn=False), start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    other = stranger()
+    child: int | None = None
+    try:
+        leader.wait(timeout=30)
+        child = int(wait_file(child_pid))
+        assert os.getpgid(child) == leader.pid
+        write_record(t, f"{leader.pid} {BOOT} {TAG} Mon Jan 1 00:00:00 2001\n")
+        line = {
+            "wrong-start": f"{child} Mon Jan 1 00:00:00 2001",
+            "other-group": f"{other.pid} {lstart(other.pid)}",
+        }[member]
+        members_of(t).write_text(line + "\n", encoding="utf-8")
+        transport = remote.SshTransport()
+        assert remote.check_worker(transport, t) == remote.UNKNOWN
+        assert remote.stop_worker(transport, t, kill=True) is True  # signalled nothing
+        time.sleep(0.2)
+        assert not gone(child) and other.poll() is None
+
+        members_of(t).write_text(f"{child} {lstart(child)}\n", encoding="utf-8")
+        assert remote.check_worker(transport, t) == remote.RUNNING
+    finally:
+        kill_quietly(child)
+        other.kill()
+        other.wait()
+
+
 # F1.3: GONE from the process listing needs ps to have succeeded.
 
 

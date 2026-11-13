@@ -239,15 +239,25 @@ every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
 three 0/1 answers. Then a record from an earlier boot session or an empty group
 is gone; a group holding only the bot's own processes and led by the recorded
-leader is running; a malformed record, another tag, another user's process in the group,
-a group whose leader has exited (nothing ties the processes left to this start),
+leader is running, and so is one whose leader has exited while it still holds
+a process from the last stop's snapshot (below) with its recorded start time;
+a malformed record, another tag, another user's process in the group,
+a group whose leader has exited with no such process (nothing ties the
+processes left to this start),
 a leader with a different start time (the number was reused), or any failed or
 malformed step (no boot session UUID, a user id that is not a number, ps, awk)
 cannot tell. The stop sends SIGTERM (SIGKILL when a cancel escalates) to the
-recorded group only when the check would say running. A process that leaves the job's group (`setsid`), or stays in
-it after its leader exits, is never signalled on macOS; the latter keeps the
-slot until it ends. Every script runs under POSIX `sh` whatever the login shell
-(the Mac bots use zsh).
+recorded group only when the check would say running. While the leader is
+verified alive, the stop first writes a snapshot of the group
+(`.orch-worker-<tag>.members.pid`: each member's pid and start time, from one
+`ps -A -o pgid=,pid=,lstart=` listing, kept only when the leader is verified
+again after it). A snapshot member still in the group with the same start time
+proves the group was never empty since, so its number was never reused: a
+cancelled run whose harness dies on SIGTERM but leaves a child that ignores it
+is still killed (Codex PR #129 round 2). A process that leaves the job's group
+(`setsid`), or stays in it after its leader exits with no stop before, is never
+signalled on macOS; the latter keeps the slot until it ends. Every script runs
+under POSIX `sh` whatever the login shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
