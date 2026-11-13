@@ -5,6 +5,7 @@ Status: **draft specification** for [maxharris1/factory](https://github.com/maxh
 Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEANUP.md](AUT0-CLEANUP.md).
 
 ## Decisions on 2026-11-10 (ET)
+New decisions go in `docs/decisions/`, one file per decision.
 
 | When | Decision | Source |
 |---|---|---|
