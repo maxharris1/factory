@@ -24,7 +24,7 @@ from lib.dispatcher import (
     TicketRef,
     TrackedTicket,
 )
-from lib.factory_md import FactoryConfig, parse_factory_md
+from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
 from lib.github_actions import (
     GhResult,
     GitHubReviewActions,
@@ -959,6 +959,47 @@ class LivePollSource:
             )
         self._factory_cache[identity] = factory
         return factory
+
+    def factory_context(self, project: Project) -> FactoryContext:
+        """factory.md (front block and prose) from the project's factory_ref.
+
+        For the backlog feeder's brief (issue #85). The same trusted ref and
+        base_branch check as _factory; never a PR head.
+        """
+        if project.factory_ref is None:
+            raise PollSourceError(f"{project.repo} has no projects[].factory_ref in orch.yml")
+        text = self._factory_text(project.repo, project.factory_ref)
+        context, findings = parse_factory_context(text)
+        if context is None:
+            errors = [item.message for item in findings if item.severity == "error"]
+            raise PollSourceError(
+                f"{project.repo} factory.md: {errors[0] if errors else 'invalid factory.md'}"
+            )
+        if context.config.base_branch != project.factory_ref:
+            raise PollSourceError(
+                f"{project.repo} factory.md base_branch is {context.config.base_branch}, "
+                f"not configured factory_ref {project.factory_ref}"
+            )
+        return context
+
+    def _factory_text(self, repo: str, branch: str) -> str:
+        content = _json_object(
+            self._gh_call(
+                "-X",
+                "GET",
+                f"repos/{repo}/contents/factory.md",
+                "-f",
+                f"ref={branch}",
+            ),
+            "GitHub factory.md",
+        )
+        encoded = content.get("content")
+        if content.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise PollSourceError(f"{repo} factory.md is not base64 content")
+        try:
+            return base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
+        except (ValueError, UnicodeError) as exc:
+            raise PollSourceError(f"{repo} factory.md content is invalid") from exc
 
     def _factory_at(self, repo: str, branch: str) -> FactoryConfig:
         content = _json_object(

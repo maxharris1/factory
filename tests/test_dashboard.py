@@ -518,8 +518,10 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "poller",
         "handoff_savings",
         "attention",
+        "feeder",
         "statechart",
     }
+    assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)
 
 

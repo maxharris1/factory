@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from lib.device_pool import SLOTS_TABLE, Placement
+from lib.feeder import feeder_counts, feeder_items
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
@@ -73,6 +74,24 @@ class DeviceRow:
 
 
 @dataclass(frozen=True)
+class FeederState:
+    """The backlog feeder at its last poll (issue #85)."""
+
+    eligible: int
+    fed: int
+    waiting_capacity: int
+    items: tuple[tuple[str, str, str, str | None], ...] = ()  # repo, issue, state, PR
+
+
+@dataclass(frozen=True)
+class AttentionRow:
+    repo: str
+    ticket_id: str
+    reason: str
+    detail: str | None
+
+
+@dataclass(frozen=True)
 class Status:
     observed_at: float
     queued: tuple[JobRow, ...]
@@ -83,6 +102,8 @@ class Status:
     # Only when a Linear webhook listener or webhook-mode poller has run on
     # this database (#55).
     webhook: WebhookHealth | None = None
+    feeder: FeederState | None = None
+    attention: tuple[AttentionRow, ...] = ()
 
 
 class TrackerReader(Protocol):
@@ -123,6 +144,62 @@ class SQLiteStatusReader:
         for device in self.placements().values():
             counts[device] = counts.get(device, 0) + 1
         return counts
+
+    def feeder(self) -> FeederState | None:
+        """The feeder's last poll, or None when no feeder has run here."""
+        connection = self._connect()
+        try:
+            items = feeder_items(connection)
+            if not items:
+                return None
+            counts = feeder_counts(connection)
+        finally:
+            connection.close()
+        return FeederState(
+            eligible=counts["eligible"],
+            fed=counts["fed"],
+            waiting_capacity=counts["waiting_capacity"],
+            items=tuple(
+                (
+                    str(item["repo"]),
+                    str(item["issue"]),
+                    str(item["state"]),
+                    str(item["pr_number"]) if item["pr_number"] is not None else None,
+                )
+                for item in items
+            ),
+        )
+
+    def attention(self) -> tuple[AttentionRow, ...]:
+        """Tickets flagged needs-attention (#83, #84) that are not finished."""
+        connection = self._connect()
+        try:
+            present = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'needs_attention'"
+            ).fetchone()
+            if present is None:
+                return ()
+            rows = connection.execute(
+                """
+                SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
+                FROM needs_attention AS flag
+                LEFT JOIN ticket_state AS state
+                  ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
+                WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+                ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        return tuple(
+            AttentionRow(
+                repo=str(row["repo"]),
+                ticket_id=str(row["ticket_id"]),
+                reason=str(row["reason"]),
+                detail=str(row["detail"]) if row["detail"] is not None else None,
+            )
+            for row in rows
+        )
 
     def webhook_health(self) -> WebhookHealth | None:
         connection = self._connect()
@@ -275,6 +352,8 @@ def build_status(
     slots: Mapping[str, Placement] | None = None,
     job_states: JobStateConfig | None = None,
     alive: Alive | None = None,
+    feeder: FeederState | None = None,
+    attention: Sequence[AttentionRow] = (),
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device; only running
@@ -324,6 +403,8 @@ def build_status(
             )
         ),
         webhook=webhook,
+        feeder=feeder,
+        attention=tuple(attention),
         box_slots=tuple(row for row in running if row.id not in placed),
         devices=tuple(devices),
         device_jobs=device_jobs,
@@ -386,6 +467,27 @@ def render(status: Status) -> str:
         )
     if not status.paused:
         lines.append("  empty")
+    if status.attention:
+        lines.extend(("", f"Needs attention ({len(status.attention)})"))
+        for flag in status.attention:
+            detail = f": {flag.detail}" if flag.detail else ""
+            lines.append(f"  {flag.repo}#{flag.ticket_id} {flag.reason}{detail}")
+    if status.feeder is not None:
+        feeder = status.feeder
+        lines.extend(
+            (
+                "",
+                f"Feeder — eligible {feeder.eligible}, fed {feeder.fed}, "
+                f"waiting for capacity {feeder.waiting_capacity}",
+            )
+        )
+        for repo, issue, state, pr in feeder.items:
+            label = {
+                "waiting-capacity": "waiting for capacity",
+                "done": "fed, job queued",
+            }.get(state, state)
+            where = f" -> PR #{pr}" if pr else ""
+            lines.append(f"  {repo}#{issue} {label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
@@ -462,6 +564,8 @@ def main(
                 slots=reader.slots(),
                 job_states=job_states,
                 alive=pid_alive,
+                feeder=reader.feeder(),
+                attention=reader.attention(),
             )
         )
     except (sqlite3.Error, StatusError) as exc:

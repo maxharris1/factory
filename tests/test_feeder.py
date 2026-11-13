@@ -621,6 +621,18 @@ def test_linear_urgent_priority_counts_as_urgent(tmp_path: Path) -> None:
 # --- feeder state for orch status and the dashboard -------------------------
 
 
+def dispatcher_for(tmp_path: Path, queue: SQLiteJobQueue, feeder=None) -> Dispatcher:
+    return Dispatcher(
+        tmp_path / "orch.db",
+        queue,
+        trusted_logins={"github": {"maxharris1": {"grok-bot", "claude-bot", "codex-bot"}},
+                        "linear": {}},
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        feeder=feeder,
+    )
+
+
 def test_feeder_counts_eligible_fed_and_waiting(tmp_path: Path) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, box=1)
     github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
@@ -633,7 +645,8 @@ def test_feeder_counts_eligible_fed_and_waiting(tmp_path: Path) -> None:
 def test_orch_status_shows_feeder_state(tmp_path: Path) -> None:
     from lib.status import SQLiteStatusReader, build_status, render
 
-    feeder, _, github, _ = make_feeder(tmp_path, box=1)
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    dispatcher_for(tmp_path, queue)  # the poller's tables, as on a live database
     github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
     feeder.feed_once()
     reader = SQLiteStatusReader(tmp_path / "orch.db")
@@ -646,7 +659,8 @@ def test_orch_status_shows_feeder_state(tmp_path: Path) -> None:
 def test_dashboard_snapshot_shows_feeder_state(tmp_path: Path) -> None:
     from lib.dashboard import collect_snapshot, render_pages
 
-    feeder, _, github, _ = make_feeder(tmp_path, box=1)
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    dispatcher_for(tmp_path, queue)
     github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
     feeder.feed_once()
     snapshot = collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=20_000.0)

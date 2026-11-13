@@ -46,6 +46,8 @@ from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
+from lib.feeder import STATES as FEEDER_STATES
+from lib.feeder import feeder_counts, feeder_items
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.job_state import (
     DEAD,
@@ -87,6 +89,7 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
+ATTENTION_REASONS = ("ship-failed", "dedupe-dropped")
 
 HANDOFF_SAVINGS_DEFINITION = (
     "scripted = jobs for claude, codex or cursor that `orch wait` claimed and "
@@ -676,16 +679,26 @@ def collect_snapshot(
             "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
-        "attention": _attention(db["stuck_tickets"], db["overdue_jobs"], db["paused"]),
+        "attention": _attention(
+            db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"]
+        ),
+        # The backlog feeder at its last poll (issue #85); None when none has run.
+        "feeder": db["feeder"],
         "statechart": chart,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
 
-def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> dict:
+def _attention(
+    stuck: list[dict],
+    overdue: list[dict],
+    paused: list[dict],
+    flags: Sequence[dict] = (),
+) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
-    overdue jobs, then paused tickets that are not already listed as stuck.
-    `count` is the badge on every page."""
+    overdue jobs, tickets flagged needs-attention (a ship that failed and
+    will not be retried, a job dedupe dropped: #83, #84), then paused
+    tickets that are not already listed. `count` is the badge on every page."""
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
@@ -706,7 +719,12 @@ def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> di
             "detail": f"{row['recipient']} {row['action']} {what}, "
                       f"no heartbeat for {_duration(row['age_seconds'])}",
         })
+    for row in flags:
+        detail = row["reason"] + (f": {row['detail']}" if row["detail"] else "")
+        items.append({"kind": "needs-attention", "repo": row["repo"],
+                      "ticket_id": row["ticket_id"], "detail": detail})
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
+    listed |= {(row["repo"], row["ticket_id"]) for row in flags}
     for row in paused:
         if (row["repo"], row["ticket_id"]) in listed:
             continue
@@ -1036,6 +1054,49 @@ def _read_db(
         }
         newest_deferral_at = rows[0]["recorded_at"] if rows else None
 
+    feeder = None
+    items = feeder_items(connection)
+    if items:
+        feeder = {
+            **feeder_counts(connection),
+            "items": [
+                {
+                    "repo": _clean(item["repo"], 120),
+                    "issue": _clean(item["issue"], 64),
+                    "state": _enum(item["state"], FEEDER_STATES),
+                    "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
+                }
+                for item in items
+            ],
+        }
+    attention_flags: list[dict] = []
+    if "needs_attention" in tables:
+        finished = (
+            """
+            LEFT JOIN ticket_state AS state
+              ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
+            WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+            """
+            if "ticket_state" in tables
+            else ""
+        )
+        for row in connection.execute(
+            f"""
+            SELECT flag.repo, flag.ticket_id, flag.reason, flag.detail
+            FROM needs_attention AS flag
+            {finished}
+            ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
+            """
+        ):
+            attention_flags.append(
+                {
+                    "repo": _clean(row["repo"], 120),
+                    "ticket_id": _clean(row["ticket_id"], 64),
+                    "reason": _enum(row["reason"], ATTENTION_REASONS),
+                    "detail": _clean(row["detail"]) if row["detail"] is not None else "",
+                }
+            )
+
     linear_webhook = None
     health = read_health(connection)
     if health is not None:
@@ -1167,6 +1228,8 @@ def _read_db(
         "deferrals": deferrals,
         "newest_deferral_at": newest_deferral_at,
         "linear_webhook": linear_webhook,
+        "feeder": feeder,
+        "attention_flags": attention_flags,
         "held": held,
         "verdicts": verdicts,
         "linear_budget": {
