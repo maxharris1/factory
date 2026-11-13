@@ -107,10 +107,20 @@ def prepare(
     *,
     url_template: str = DEFAULT_URL_TEMPLATE,
     pid: int | None = None,
+    adopt: str | None = None,
+    log: Log | None = None,
 ) -> JobCheckout:
-    """Create (or reuse) the job's worktree at head, else the default branch."""
+    """Create (or reuse) the job's worktree at head, else the default branch.
+
+    `adopt` names the failed job a T6 retry repeats (#105). When that job's
+    worktree was kept for its work (uncommitted changes or unpushed commits)
+    and no live run owns it, it is moved to this job instead of starting
+    from head, so the retry picks up where the first attempt stopped.
+    """
     if not _JOB_ID.match(job_id):
         raise WorktreeError(f"unsafe job id {job_id!r}")
+    if adopt is not None and (not _JOB_ID.match(adopt) or adopt == job_id):
+        adopt = None
     if head is not None and not _SHA.match(head):
         raise WorktreeError(f"head {head!r} is not a commit SHA")
     root = root.absolute()
@@ -134,6 +144,10 @@ def prepare(
             reused = replace(checkout, start=_recorded_start(checkout.record))
             _write_record(reused, pid)
             return reused
+        if adopt is not None:
+            adopted = _adopt_kept(root, adopt, checkout, pid, log)
+            if adopted is not None:
+                return adopted
         target = _target(clone, head)
         start = _git(clone, "rev-parse", "--verify", f"{target}^{{commit}}").strip()
         checkout = replace(checkout, start=start)
@@ -144,6 +158,48 @@ def prepare(
             checkout.record.unlink(missing_ok=True)
             raise
     return checkout
+
+
+def _adopt_kept(
+    root: Path,
+    adopt: str,
+    checkout: JobCheckout,
+    pid: int | None,
+    log: Log | None,
+) -> JobCheckout | None:
+    """Move a kept, ownerless worktree of the same clone to checkout's path.
+
+    The caller holds the clone lock. None when there is nothing to adopt.
+    """
+    record = checkout.record.with_name(f"{adopt}.json")
+    loaded = _load_record(root, record)
+    if loaded is None:
+        return None
+    previous, data, _created = loaded
+    if previous.job_id != adopt or previous.clone != checkout.clone:
+        return None
+    if previous.path.is_symlink() or not previous.path.is_dir():
+        return None
+    if _live_owner(data) is not None:
+        return None
+    try:
+        _require_worktree_of(previous.path, checkout.clone)
+    except WorktreeError:
+        return None
+    reason = keep_reason(previous.path, previous.start)
+    if reason is None:
+        return None
+    moved = replace(checkout, start=previous.start)
+    _write_record(moved, pid)
+    try:
+        _git(checkout.clone, "worktree", "move", str(previous.path), str(moved.path))
+    except WorktreeError:
+        moved.record.unlink(missing_ok=True)
+        raise
+    record.unlink(missing_ok=True)
+    if log is not None:
+        log(f"reusing kept worktree of job {adopt} ({reason})")
+    return moved
 
 
 def finish(checkout: JobCheckout, log: Log) -> bool:

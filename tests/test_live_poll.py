@@ -56,6 +56,7 @@ from lib.poll_source import (
     PollSourceError,
     TIMEOUT_SECONDS,
     _linear_ready_state_id,
+    _risk,
     _linear_state_phase,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -372,6 +373,56 @@ def linear_transport_for(issue: dict):
         raise AssertionError(request)
 
     return transport
+
+
+def _risk_after(*comments: tuple[str, str]) -> str:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    gh.comments = [
+        {
+            "id": number,
+            "user": {"login": login},
+            "body": body,
+            "created_at": f"2026-11-11T12:00:{number:02d}Z",
+            "html_url": f"https://github.test/comment/{number}",
+        }
+        for number, (login, body) in enumerate(comments, start=1)
+    ]
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    (ticket,) = LivePollSource(config(), gh_runner=gh).github_candidates("orch:state/")
+    return ticket.risk
+
+
+GROK_LOW = "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=low -->\n"
+GROK_HIGH = "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building risk=high -->\n"
+
+
+@pytest.mark.parametrize(
+    ("login", "body"),
+    [
+        ("stranger", GROK_HIGH),
+        (
+            "grok-login",
+            "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer verdict=REVISE risk=high -->\n",
+        ),
+    ],
+)
+def test_untrusted_risk_comment_leaves_the_ticket_low(login: str, body: str) -> None:
+    # #68: risk= counts only from a login trusted for the comment's `from`.
+    assert _risk_after(("grok-login", GROK_LOW), (login, body)) == "low"
+
+
+def test_later_trusted_risk_still_applies() -> None:
+    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "high"
+
+
+def test_linear_risk_counts_only_from_trusted_linear_users() -> None:
+    trusted = {"github": {}, "linear": {"linear:user-1": frozenset({"grok-bot"})}}
+
+    def said(author: str) -> Comment:
+        return Comment(id=author, author=author, body=GROK_LOW, created_at=1)
+
+    assert _risk((said("linear:user-2"),), trusted) == "high"
+    assert _risk((said("linear:user-1"),), trusted) == "low"
 
 
 def test_github_candidate_parsing_uses_gh_without_network() -> None:
