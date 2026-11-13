@@ -488,6 +488,36 @@ def test_github_candidate_parsing_uses_gh_without_network() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("updated_at", "edited_at"),
+    [
+        (None, None),
+        ("2026-11-11T12:00:00Z", None),
+        ("2026-11-11T12:05:00Z", 1_794_398_700.0),
+    ],
+    ids=["no-updated-at", "never-edited", "edited"],
+)
+def test_github_comment_carries_when_it_was_edited(
+    updated_at: str | None,
+    edited_at: float | None,
+) -> None:
+    raw = {
+        "id": 7,
+        "user": {"login": "grok-login"},
+        "body": "<!-- orch:v1 kind=brief from=grok-bot role=orchestrator -->\n",
+        "created_at": "2026-11-11T12:00:00Z",
+    }
+    if updated_at is not None:
+        raw["updated_at"] = updated_at
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    gh.comments = [raw]
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+
+    (candidate,) = LivePollSource(config(), gh_runner=gh).github_candidates("orch:state/")
+
+    assert candidate.comments[0].edited_at == edited_at
+
+
 def test_failing_project_does_not_stop_healthy_project() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
     errors: list[tuple[str, str, str]] = []

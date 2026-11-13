@@ -178,13 +178,17 @@ Call `StopLedger.report` for that ticket and stop. A second report of the same s
 - `stuck` — also post `stuck_comment` when this ticket has no `kind=stuck` comment yet.
 - `blocked` — a `verdict=BLOCKED`, a `RouteError`, or anything unparsed. Evidence is the verdict or the text that did not parse.
 - `capped` — revise at the cap, or a second acceptance-criterion-unmet verdict.
-- `abandoned` — Max dropped the ticket.
+- `abandoned` — Max dropped the ticket. Also post the `kind=answers` comment below with `state=abandoned`, quoting Max's words, so the dispatcher records the ticket as abandoned and stops reading it.
 
 ```
 <!-- orch:v1 kind=stuck from=grok-bot role=orchestrator state=stuck -->
 ```
 
-Do not invent a comment kind for refused, blocked, capped, or abandoned. Those four are chat reports. Apart from the initial `orch:state/intake` discovery label above, this skill does not apply GitHub labels. On a GitHub-issue repo the dispatcher applies later `orch:state`, `orch:round`, `orch:risk`, and `orch:builder` values from the header. On Linear and on Aut0 the header carries those facts and no label is written.
+```
+<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->
+```
+
+Do not invent a comment kind for refused, blocked or capped. Those three are chat reports. Apart from the initial `orch:state/intake` discovery label above, this skill does not apply GitHub labels. On a GitHub-issue repo the dispatcher applies later `orch:state`, `orch:round`, `orch:risk`, and `orch:builder` values from the header. On Linear and on Aut0 the header carries those facts and no label is written.
 
 Recommended next steps:
 

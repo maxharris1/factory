@@ -928,10 +928,14 @@ def _comment(item: object) -> Comment:
     url = raw.get("html_url")
     if url is not None and not isinstance(url, str):
         raise GitHubAdapterError(f"comment {comment_id} has a bad html_url")
+    created_at = _created_at(raw.get("created_at"))
+    updated = raw.get("updated_at")
+    updated_at = created_at if updated is None else _created_at(updated)
     return Comment(
         id=str(comment_id),
         author=login,
         body=body,
-        created_at=_created_at(raw.get("created_at")),
+        created_at=created_at,
         url=url,
+        edited_at=updated_at if updated_at > created_at else None,
     )

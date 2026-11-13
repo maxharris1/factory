@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib.device_pool import free_slots, used_slots
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -32,6 +33,7 @@ from lib.job_state import (
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
+from lib.schema import HARNESSES
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
@@ -66,6 +68,7 @@ class Comment:
     body: str
     created_at: float
     url: str | None = None
+    edited_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -406,6 +409,7 @@ class Dispatcher:
             begin()
         self._polled = {}
         self._fresh_reader = getattr(source, "fresh_ticket", None)
+        read_from = self.queue.now()
         self._feed(source)
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
@@ -439,9 +443,71 @@ class Dispatcher:
                 self._record_poll_error(ticket, type(exc).__name__)
             else:
                 self._clear_poll_error_streak(ticket)
+        self._verify_handoffs(read_from)
         self.reconcile_jobs()
         if end is not None:
             end()
+
+    def _verify_handoffs(self, read_from: float) -> None:
+        """#18: check each done job's handoff comment once, on the ticket read.
+
+        Only jobs finished before this poll read its tickets: the handoff
+        must be one of the comments read, carry an orch:v1 header, and come
+        from a login trusted for the job's recipient. Otherwise the ticket
+        is flagged unverified-handoff. The job stays done either way.
+        """
+        for (repo, ticket_id), ticket in self._polled.items():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND state = 'done'
+                      AND recipient != 'grok' AND handoff_comment_id IS NOT NULL
+                      AND finished_at IS NOT NULL AND finished_at < ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM job_events AS event
+                          WHERE event.job_id = jobs.id
+                            AND event.event IN ('handoff-verified', 'handoff-unverified')
+                      )
+                    ORDER BY finished_at, id
+                    """,
+                    (repo, ticket_id, read_from),
+                ).fetchall()
+            for row in rows:
+                job = _job(row)
+                problem = self._handoff_problem(ticket, job)
+                event = "handoff-unverified" if problem else "handoff-verified"
+                detail = problem or f"comment {job.handoff_comment_id} checked"
+                with self._connect() as connection:
+                    self._record_job_event(
+                        connection, job, event, detail, self.queue.now()
+                    )
+                self._log_job_event(job, event, detail)
+                if problem:
+                    self.flag_attention(
+                        ticket.repo,
+                        ticket.ticket_id,
+                        "unverified-handoff",
+                        f"job {job.id[:8]} {job.request.action}: {problem}",
+                    )
+
+    def _handoff_problem(self, ticket: TrackedTicket, job: Job) -> str | None:
+        found = next(
+            (item for item in ticket.comments if item.id == job.handoff_comment_id),
+            None,
+        )
+        if found is None:
+            return f"handoff comment {job.handoff_comment_id} is not on the ticket"
+        try:
+            parse_comment(found.body)
+        except HandoffError:
+            return f"handoff comment {found.id} has no orch:v1 header"
+        if f"{job.request.recipient}-bot" not in self._trusted_bots(found):
+            return (
+                f"handoff comment {found.id} is not from a login trusted for "
+                f"{job.request.recipient}-bot"
+            )
+        return None
 
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -536,6 +602,23 @@ class Dispatcher:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 fields = None
+            if (
+                fields is not None
+                and fields["kind"] != "brief"
+                and comment.edited_at is not None
+            ):
+                self._reject_edited(ticket, comment)
+                continue
+            if (
+                fields is not None
+                and fields["kind"] == "answers"
+                and fields.get("state") == "abandoned"
+            ):
+                outcome = self._t5_abandoned(ticket, comment, fields)
+                if outcome.startswith("rejected-"):
+                    self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                self._mark_handled(ticket, comment.id, outcome)
+                continue
             hooked = self._run_hooks(ticket, comment, fields)
             if hooked is not None:
                 handled, outcome = hooked
@@ -637,18 +720,87 @@ class Dispatcher:
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
 
+    def _reject_edited(self, ticket: TrackedTicket, comment: Comment) -> None:
+        """#18: an orch:v1 comment edited before it was handled is refused."""
+        if self._trusted_bots(comment):
+            self.flag_attention(
+                ticket.repo,
+                ticket.ticket_id,
+                "edited-comment",
+                f"orch:v1 comment {comment.id} was edited before it was handled; "
+                "post a new comment instead",
+            )
+            self._wake_comment_problem(ticket, comment, "rejected", "rejected-edited")
+        self._mark_handled(ticket, comment.id, "rejected-edited")
+
+    def _t5_abandoned(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> str:
+        """#19 FU4: Grok's answers state=abandoned records Max dropping the ticket."""
+        if not self._trusted(
+            ticket, comment, fields, "grok-bot", role="orchestrator"
+        ):
+            return "rejected-answers-author"
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ticket_state (
+                    repo, ticket_id, gate_count, stuck, generation, workflow_state
+                ) VALUES (?, ?, 0, 0, 1, 'abandoned')
+                ON CONFLICT(repo, ticket_id)
+                DO UPDATE SET workflow_state = 'abandoned'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            )
+        self._write_state_label(ticket, "abandoned")
+        return "abandoned"
+
+    def _busy_recipients(self) -> frozenset[str]:
+        """#18: harnesses whose every schedulable slot is in use.
+
+        Read from the device monitor's machines.yml. With none, or for a
+        harness no schedulable device lists, nothing counts as busy.
+        """
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return frozenset()
+        used = used_slots(self.queue, config)
+        return frozenset(
+            harness
+            for harness in HARNESSES
+            if any(device.eligible(harness) for device in config.devices)
+            and free_slots(config, harness, used) == 0
+        )
+
+    def _restart_queue_wait(self, job: Job, now: float) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs SET last_activity_at = ?
+                WHERE id = ? AND state = 'queued'
+                """,
+                (now, job.id),
+            )
+
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
         self._deliver_grok_jobs(deferred_grok_jobs)
         self._check_devices()
         self._check_job_states()
         now = self.queue.now()
+        busy = self._busy_recipients()
         for job in self.queue.outstanding():
             # A queued job's last_activity_at is its queue-wait start: when
             # it was queued, or when a claim that never started was released
             # (#77 F1.2), so a release never times out a job for the wait
             # before its claim. A running job's is its last heartbeat.
             if now - job.last_activity_at >= job.request.timeout_seconds:
+                if job.state == "queued" and job.request.recipient in busy:
+                    self._restart_queue_wait(job, now)
+                    continue
                 if not self.queue.mark_timed_out(job) and job.state == "running":
                     self._note_timeout_held(job, now)
         for job in self.queue.unhandled_failures():
