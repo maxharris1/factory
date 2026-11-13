@@ -232,7 +232,9 @@ UTC). A check that finds no record cannot tell whether the start is still on
 its way, so it creates the record itself as a fence (`fenced`) and cannot tell
 this time; the fenced start then refuses, and later checks read the fence as
 gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+later. The poll that follows a detached start (issue #128) never writes the
+fence: with no record it cannot tell, and the start it follows records itself.
+The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
 every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
 three 0/1 answers. Then a record from an earlier boot session or an empty group
@@ -241,8 +243,8 @@ leader is running; a malformed record, another tag, another user's process in th
 a group whose leader has exited (nothing ties the processes left to this start),
 a leader with a different start time (the number was reused), or any failed or
 malformed step (no boot session UUID, a user id that is not a number, ps, awk)
-cannot tell. The stop sends SIGTERM to the recorded group only when the check
-would say running. A process that leaves the job's group (`setsid`), or stays in
+cannot tell. The stop sends SIGTERM (SIGKILL when a cancel escalates) to the
+recorded group only when the check would say running. A process that leaves the job's group (`setsid`), or stays in
 it after its leader exits, is never signalled on macOS; the latter keeps the
 slot until it ends. Every script runs under POSIX `sh` whatever the login shell
 (the Mac bots use zsh).
@@ -257,7 +259,12 @@ device one SSH check looks for the tag: any process of the bot user carrying it
 still in the recorded group from this boot means it cannot tell; otherwise the
 worker is gone. A worker still running is sent SIGTERM (every tagged process
 and each group holding one; a stored number alone is never signalled) and
-checked again for up to 10 seconds. An unreachable device, a check that cannot
+checked again for up to 10 seconds. A cancelled run (a signal to `orch job
+run`, or its job ended elsewhere) is not left running: the follow sends
+SIGTERM, then SIGKILL to the same processes from 60 seconds on, and follows
+the worker until it is gone, for up to two minutes; if it is still not
+confirmed gone, the final check sends SIGKILL after its SIGTERM too (issue
+#128). An unreachable device, a check that cannot
 tell, or a worker that will not stop keeps the slot and is logged. A new
 `orch job run` for a job whose runner died is refused (exit 2, nothing started)
 while that runner's worker is not confirmed gone, so its identity is never

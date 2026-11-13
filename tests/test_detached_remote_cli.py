@@ -17,9 +17,11 @@ import sys
 import time
 from pathlib import Path
 
+from lib import placed_run, remote
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
+from lib.remote_follow import EXITED, KILL_AFTER_SECONDS, STOPPED, FollowEnd
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_detached_remote import HARNESS
 from tests.test_job_state import Poller
@@ -229,6 +231,82 @@ def test_a_signal_to_the_runner_stops_the_remote_worker(tmp_path: Path) -> None:
         kill_quietly(worker)
         if proc.poll() is None:
             proc.kill()
+
+
+def test_a_cancel_kills_a_remote_worker_that_ignores_sigterm(tmp_path: Path) -> None:
+    """Codex PR #129 r1 F2, with the real timings: SIGTERM, then SIGKILL; gone, slot freed."""
+    poller, db, job_id, ssh = setup(tmp_path)
+    count = tmp_path / "count"
+    command = (
+        "import os, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(count)!r}, 'w').write(str(os.getpid())); "
+        "time.sleep(600)"
+    )
+    proc = run(poller, job_id, ssh, "--", sys.executable, "-c", command)
+    worker = None
+    try:
+        worker = started_harness(count, proc)
+        proc.send_signal(signal.SIGTERM)
+        _, err = proc.communicate(timeout=KILL_AFTER_SECONDS + 60)
+        assert proc.returncode == 128 + signal.SIGTERM, err
+        assert "stopping it" in err and "killing it" in err, err
+        assert gone(worker)
+        assert poller.pool.placement(job_id) is None
+    finally:
+        kill_quietly(worker)
+        if proc.poll() is None:
+            proc.kill()
+
+
+class StopsOnlyOnKill:
+    """The device: the worker runs on until a SIGKILL stop; records each stop sent."""
+
+    def __init__(self) -> None:
+        self.stops: list[str] = []
+        self.check = ""
+
+    def run(self, argv, *, timeout: float) -> int:
+        script = argv[-1]
+        for sig in ("TERM", "KILL"):
+            if f"kill -{sig}" in script:
+                self.stops.append(sig)
+                return 0
+        if script == self.check:
+            return 0 if "KILL" in self.stops else 1
+        return 0
+
+
+def placed_for_finish(tmp_path: Path, end: FollowEnd):
+    poller, _, job_id, _ = setup(tmp_path)
+    transport = StopsOnlyOnKill()
+    placed = placed_run.prepare(
+        poller.pool, poller.config, job_id=job_id, bot="codex-bot", owner="codex",
+        worktree=False, log=lambda _: None, transport=transport, alive=lambda *_: True,
+    )
+    assert placed.target is not None
+    transport.check = remote.check_script(placed.target)
+    placed.before_start()
+    placed.follow_end = end
+    placed.sleep = lambda _: None
+    return poller, job_id, placed, transport
+
+
+def test_finish_kills_a_cancelled_worker_that_ignores_sigterm(tmp_path: Path) -> None:
+    """Codex PR #129 r1 F2: the follower gave up unconfirmed; finish escalates too."""
+    poller, job_id, placed, transport = placed_for_finish(
+        tmp_path, FollowEnd(STOPPED, 143, "not confirmed stopped")
+    )
+    assert placed.finish(143) is True
+    assert transport.stops == ["TERM", "KILL"]
+    assert poller.pool.placement(job_id) is None
+
+
+def test_finish_never_kills_a_leftover_of_a_run_that_was_not_cancelled(tmp_path: Path) -> None:
+    poller, job_id, placed, transport = placed_for_finish(tmp_path, FollowEnd(EXITED, 0))
+    assert placed.finish(0) is False
+    assert transport.stops == ["TERM"]
+    assert poller.pool.placement(job_id) is not None
 
 
 def test_a_job_ended_elsewhere_stops_its_remote_worker(tmp_path: Path) -> None:

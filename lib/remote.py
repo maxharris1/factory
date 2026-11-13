@@ -60,7 +60,8 @@ the bot's login shell is (bash on Linux, zsh on macOS).
 (`launch_script`) starts it detached under setsid, with a wrapper that
 keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
 it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
-they find the detached start by its tag or record as before.
+they find the detached start by its tag or record as before; the stop of
+a cancelled run escalates to SIGKILL.
 
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
 another process's environment) the same contract holds through the record,
@@ -85,12 +86,15 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   have been reused while the group was empty), a leader whose start time
   differs (the number was reused), a fence that could not be written, and
   when there is no boot session id or ps fails or lists nothing;
-* stop: SIGTERM to the recorded group exactly when the check would exit 1;
-  nothing else is signalled (with no record it writes the fence as well).
-  A process that left the job's group (setsid), or that stays in it after
-  the leader exits, is never signalled here: macOS gives no way to find it
-  by its tag. A group left without its leader keeps the slot until it is
-  empty.
+* stop: SIGTERM (SIGKILL when asked to kill) to the recorded group exactly
+  when the check would exit 1; nothing else is signalled (with no record it
+  writes the fence as well). A process that left the job's group (setsid),
+  or that stays in it after the leader exits, is never signalled here:
+  macOS gives no way to find it by its tag. A group left without its leader
+  keeps the slot until it is empty;
+* poll (#128): the check without the fence. The wrapper writes `pid` before
+  its start writes the record, so no record is only unsure: a poll never
+  fences the start it follows.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
 password prompt), a connect timeout and server keepalives. Tests replace
@@ -226,7 +230,13 @@ def darwin_record(tag: str) -> str:
 
 
 def _darwin_worker(
-    target: RemoteTarget, *, gone: str, unsure: str, running: str, blind: str
+    target: RemoteTarget,
+    *,
+    gone: str,
+    unsure: str,
+    running: str,
+    blind: str,
+    fence: bool = True,
 ) -> str:
     """Darwin: decide whether the record of tag $t names a live worker.
 
@@ -234,7 +244,9 @@ def _darwin_worker(
     noclobber (O_EXCL) before it runs anything. With no record the start may
     still be on its way, so the check writes the fence record in its place
     (also O_EXCL: exactly one of the two creates the file) and is unsure this
-    time; the start then cannot record itself and refuses.
+    time; the start then cannot record itself and refuses. Without fence (a
+    poll following that start, #128) no record is only unsure: nothing is
+    written, so the start it follows still records itself.
 
     gone: the fence (that start can never run), a record from an earlier
     boot session, or no process left in the recorded group, all read from a
@@ -251,16 +263,21 @@ def _darwin_worker(
     listing, failed, or printed anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
-    return (
-        f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
-        f"{_DARWIN_BOOT} || {blind}; "
-        f"u=$(id -u) || {blind}; "
-        f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
+    no_record = (
         'if [ ! -e "$f" ]; then '
         'mkdir -p -- "$d" 2>/dev/null; '
         f'if (set -C; echo {_FENCE} > "$f") 2>/dev/null; then {unsure}; fi; '
         f'[ -e "$f" ] || {unsure}; '
         "fi; "
+        if fence
+        else f'[ -e "$f" ] || {unsure}; '
+    )
+    return (
+        f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
+        f"{_DARWIN_BOOT} || {blind}; "
+        f"u=$(id -u) || {blind}; "
+        f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
+        f"{no_record}"
         f'{{ read -r p b g s < "$f"; }} 2>/dev/null || {unsure}; '
         f'if [ "$p" = {_FENCE} ]; then {gone}; fi; '
         f'case "$p" in {_BAD_GROUP}) {unsure};; esac; '
@@ -418,11 +435,11 @@ def check_script(target: RemoteTarget) -> str:
     return _sh(f"t={target.require_tag()}; {_check_body(target)}")
 
 
-def _check_body(target: RemoteTarget) -> str:
-    """check_script's test for the worker whose tag is in $t."""
+def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
+    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker)."""
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
-        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3"
+        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
     return (
         f"f={pid_file}; "
@@ -445,15 +462,16 @@ def _check_body(target: RemoteTarget) -> str:
     )
 
 
-def stop_script(target: RemoteTarget) -> str:
-    """SIGTERM every process carrying the job's tag, and each group holding one."""
+def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
+    """SIGTERM (SIGKILL with kill) each process carrying the job's tag, and its group."""
     tag = target.require_tag()
+    sig = "KILL" if kill else "TERM"
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
         target,
         gone="exit 0",
         unsure="exit 0",
-        running='{ kill -TERM -"$p" 2>/dev/null; exit 0; }',
+        running=f'{{ kill -{sig} -"$p" 2>/dev/null; exit 0; }}',
         blind="exit 3",
     )
     return _sh(
@@ -464,8 +482,8 @@ def stop_script(target: RemoteTarget) -> str:
         "q=${e#/proc/}; q=${q%/environ}; "
         '{ read -r s < "/proc/$q/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
-        f'case "$3" in {_BAD_GROUP}) ;; *) kill -TERM -"$3" 2>/dev/null;; esac; '
-        'kill -TERM "$q" 2>/dev/null; '
+        f'case "$3" in {_BAD_GROUP}) ;; *) kill -{sig} -"$3" 2>/dev/null;; esac; '
+        f'kill -{sig} "$q" 2>/dev/null; '
         "done; "
         "exit 0"
     )
@@ -579,7 +597,8 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
     `gone` (no exit status and the worker confirmed gone), `unsure` (not
     yet recorded, or the check cannot tell) or `none` (no such start).
     `exit` is read before and after the worker check, so a run that ends in
-    between reads as exited. Never starts or signals anything.
+    between reads as exited. Never starts or signals anything, and never
+    writes: on Darwin a start not yet recorded is unsure, never fenced.
     """
     tag = target.require_tag()
     if offset < 0 or chunk <= 0:
@@ -591,7 +610,7 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
         'e=; [ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
         'if [ -n "$e" ]; then st=exited; '
         'elif [ ! -f "$T/pid" ]; then st=unsure; '
-        f'else ({_check_body(target)}); '
+        f'else ({_check_body(target, fence=False)}); '
         'case $? in 0) st=gone;; 1) st=running;; *) st=unsure;; esac; '
         '[ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
         'if [ -n "$e" ]; then st=exited; '
@@ -928,9 +947,11 @@ def check_worker(transport: Transport, target: RemoteTarget) -> str:
     return UNKNOWN
 
 
-def stop_worker(transport: Transport, target: RemoteTarget) -> bool:
-    """Ask the device to SIGTERM the worker. True when the device answered."""
-    code = transport.run(ssh_argv(target, stop_script(target)), timeout=PROBE_TIMEOUT_SECONDS)
+def stop_worker(transport: Transport, target: RemoteTarget, *, kill: bool = False) -> bool:
+    """Ask the device to SIGTERM (SIGKILL with kill) the worker. True when it answered."""
+    code = transport.run(
+        ssh_argv(target, stop_script(target, kill=kill)), timeout=PROBE_TIMEOUT_SECONDS
+    )
     return code == 0
 
 

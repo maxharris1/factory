@@ -112,6 +112,7 @@ from lib.remote_follow import (
     LAUNCH_TTL_SECONDS,
     LOST,
     REFUSED,
+    STOPPED,
     Control,
     FollowEnd,
     Follower,
@@ -122,6 +123,7 @@ from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_st
 
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
+KILL_CHECK = 2
 
 Log = Callable[[str], None]
 
@@ -387,11 +389,15 @@ class PlacedRun:
                     return _held(settle)
             return self._release(code, settle)
         status = check_worker(self.transport, self.target)
+        cancelled = self.follow_end is not None and self.follow_end.kind == STOPPED
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
             if checks == 0:
                 self.log(f"job {job_id} worker still runs on {self.device.name}; stopping it")
                 stop_worker(self.transport, self.target)
+            elif cancelled and checks == KILL_CHECK:
+                self.log(f"job {job_id} worker ignored SIGTERM on {self.device.name}; killing it")
+                stop_worker(self.transport, self.target, kill=True)
             self.sleep(STOP_PAUSE_SECONDS)
             status = check_worker(self.transport, self.target)
             checks += 1

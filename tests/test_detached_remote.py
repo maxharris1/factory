@@ -23,6 +23,8 @@ from lib.remote_follow import (
     REFUSED,
     STOPPED,
     CHUNK_BYTES,
+    KILL_AFTER_SECONDS,
+    STOP_GRACE_SECONDS,
     Follower,
     backoff,
 )
@@ -250,6 +252,32 @@ def test_darwin_launch_records_the_start_and_polls_it(
     assert head[1:] == ["exited", "0"] and data.endswith(b"ORCH-HANDOFF: 123456\n")
 
 
+def test_a_poll_never_fences_the_darwin_start_it_follows(
+    box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex PR #129 r1 F1: the wrapper wrote `pid` before the start wrote its record."""
+    mac = Mac(tmp_path)
+    monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
+    gate, paused = tmp_path / "gate", tmp_path / "paused"
+    gate.touch()
+    mac.pause_starts(gate, paused)
+    record = Path(box.target.job_dir) / remote.darwin_record(box.target.require_tag())
+    try:
+        assert word(box.send(box.launch(lines=1, pause=0))) == "started"
+        deadline = time.monotonic() + 10
+        while not paused.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        assert box.poll()[0][1] == "unsure"
+        assert box.poll()[0][1] == "unsure"
+        assert not record.exists()
+    finally:
+        gate.unlink(missing_ok=True)
+    assert box.wait_exit() == "0"
+    assert len(box.starts()) == 1
+    assert record.read_text().split()[2] == box.target.tag
+
+
 # --- the poll ---------------------------------------------------------------
 
 
@@ -441,7 +469,42 @@ def test_a_cancel_stops_the_worker_and_follows_it_until_it_exits(tmp_path: Path)
     assert any("kill -TERM" in call for call in transport.calls)
 
 
-def test_a_worker_that_ignores_the_stop_is_left_to_finish_after_two_minutes(
+class IgnoresTerm(Script):
+    """A worker that runs on until a SIGKILL stop reaches it; when, on the clock."""
+
+    def __init__(self, clock: Clock):
+        super().__init__([launched(), polled(0, "running")])
+        self.clock = clock
+        self.killed_at: float | None = None
+
+    def exchange(self, argv, *, timeout, input=b""):
+        answer = super().exchange(argv, timeout=timeout, input=input)
+        return polled(0, "gone") if self.killed_at is not None else answer
+
+    def run(self, argv, *, timeout):
+        if "kill -KILL" in argv[-1] and self.killed_at is None:
+            self.killed_at = self.clock.now
+        return super().run(argv, timeout=timeout)
+
+
+def test_a_worker_that_ignores_sigterm_is_killed_and_followed_until_gone(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #129 r1 F2: a cancel ends only once the worker is gone."""
+    clock = Clock()
+    control = Stop()
+    control.signum = signal.SIGTERM
+    transport = IgnoresTerm(clock)
+    end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", control)
+    assert (end.kind, end.code, end.detail) == (STOPPED, 143, "")
+    stops = [call for call in transport.calls if "kill -" in call and "kill -0" not in call]
+    assert "kill -TERM" in stops[0]
+    assert transport.killed_at is not None
+    assert KILL_AFTER_SECONDS <= transport.killed_at - 1000 < KILL_AFTER_SECONDS + 10
+    assert clock.now < transport.killed_at + 10
+
+
+def test_a_worker_alive_after_sigkill_is_not_confirmed_stopped_after_two_minutes(
     tmp_path: Path,
 ) -> None:
     clock = Clock()
@@ -449,8 +512,9 @@ def test_a_worker_that_ignores_the_stop_is_left_to_finish_after_two_minutes(
     control.signum = signal.SIGTERM
     transport = Script([launched(), polled(0, "running")])
     end = follower(transport, clock, (tmp_path / "out").open("wb")).run("LAUNCH", b"", control)
-    assert (end.kind, end.code) == (STOPPED, 143)
-    assert 120 <= clock.now - 1000 < 130
+    assert (end.kind, end.code, end.detail) == (STOPPED, 143, "not confirmed stopped")
+    assert any("kill -KILL" in call for call in transport.calls)
+    assert STOP_GRACE_SECONDS <= clock.now - 1000 < STOP_GRACE_SECONDS + 10
 
 
 # --- the follower over the fake ssh: drops and late delivery ----------------

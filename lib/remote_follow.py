@@ -14,7 +14,8 @@ harness detached on the device, and a `Follower` on the box:
   with no exit status, or `grace` seconds without one certain answer. A
   dropped call is never an end;
 * on a cancel (a signal, or the job ended elsewhere: `Control`), stops the
-  worker on the device and follows it until it is gone.
+  worker on the device (SIGTERM, then SIGKILL from `KILL_AFTER_SECONDS` on)
+  and follows it until it is gone, for at most `STOP_GRACE_SECONDS`.
 
 It never touches the job's state: lib/placed_run.py maps the `FollowEnd`.
 """
@@ -43,6 +44,7 @@ from lib.remote import (
 )
 
 FOLLOW_GRACE_SECONDS = 30 * 60.0
+KILL_AFTER_SECONDS = 60.0
 STOP_GRACE_SECONDS = 120.0
 LAUNCH_TTL_SECONDS = 10 * 60
 CALL_TIMEOUT_SECONDS = 60.0
@@ -113,7 +115,7 @@ class Follower:
         self.clock = clock
         self._sleep = sleep
         self.offset = 0
-        self._stopping_logged = False
+        self._logged: set[bool] = set()
 
     def run(self, launch: str, brief: bytes, control: Control) -> FollowEnd:
         """Launch (lib/remote.py launch_script) and follow until the run ends."""
@@ -168,7 +170,7 @@ class Follower:
             if stopping and stopped_at is None:
                 stopped_at = self.clock()
             elif stopped_at is not None and self.clock() - stopped_at >= STOP_GRACE_SECONDS:
-                # lib/placed_run.py finish checks it again and holds the slot.
+                # lib/placed_run.py finish stops it again; the slot stays held until it is gone.
                 return FollowEnd(STOPPED, 128 + (control.signum or 15), "not confirmed stopped")
             poll = self._poll()
             if poll is not None and poll.state in (EXITED, GONE, "none", "running"):
@@ -199,17 +201,23 @@ class Follower:
             if self.clock() - contact >= self.grace:
                 return FollowEnd(LOST, None, f"no certain answer for {self.grace:g} seconds")
             if stopping and poll.state == "running":
-                self._stop()
+                assert stopped_at is not None
+                self._stop(kill=self.clock() - stopped_at >= KILL_AFTER_SECONDS)
             sleep(pause)
             pause = min(pause * 2, POLL_SECONDS)
 
-    def _stop(self) -> None:
-        if not self._stopping_logged:
-            self._stopping_logged = True
-            self.log(
-                f"job {self.target.job_id} worker still runs on {self.target.device}; stopping it"
+    def _stop(self, *, kill: bool) -> None:
+        if kill not in self._logged:
+            self._logged.add(kill)
+            action = (
+                f"killing it: still running {KILL_AFTER_SECONDS:g}s after SIGTERM"
+                if kill
+                else "stopping it"
             )
-        self.transport.run(ssh_argv(self.target, stop_script(self.target)), timeout=self.call_timeout)
+            self.log(f"job {self.target.job_id} worker still runs on {self.target.device}; {action}")
+        self.transport.run(
+            ssh_argv(self.target, stop_script(self.target, kill=kill)), timeout=self.call_timeout
+        )
 
     def _poll(self) -> _Poll | None:
         """One poll from the current offset; None unless the whole answer came."""
