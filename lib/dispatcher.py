@@ -34,6 +34,9 @@ from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
+# merged and done are absorbing (#108): no later write moves a ticket out.
+FINISHED_STATES = ("merged", "done")
+_NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
 GROK_WAKE_REASONS = (
     "blocked",
@@ -484,20 +487,105 @@ class Dispatcher:
                 (detail, self.queue.now()),
             )
 
-    def record_terminal(self, repo: str, ticket_id: str, state: str) -> None:
+    def record_terminal(
+        self,
+        repo: str,
+        ticket_id: str,
+        state: str,
+        ticket: TrackedTicket | None = None,
+    ) -> None:
+        """The poll saw a terminal ticket: for a merged PR, _enter_merged.
+
+        ticket, when the source could build it, gets the orch:state/merged
+        label, best effort: a failed write is a poll_errors row and never
+        undoes the state.
+        """
         if state not in ("merged", "handed-off", "done"):
             raise ValueError(f"{state!r} is not a completed terminal state")
         with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, workflow_state
-                ) VALUES (?, ?, 0, 0, ?)
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET workflow_state = excluded.workflow_state
-                """,
-                (repo.lower(), ticket_id, state),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            if state == "merged":
+                entered = self._enter_merged(connection, repo, ticket_id, "observed")
+            else:
+                entered = False
+                connection.execute(
+                    """
+                    INSERT INTO ticket_state (
+                        repo, ticket_id, gate_count, stuck, workflow_state
+                    ) VALUES (?, ?, 0, 0, ?)
+                    ON CONFLICT(repo, ticket_id)
+                    DO UPDATE SET workflow_state = excluded.workflow_state
+                    WHERE COALESCE(ticket_state.workflow_state, '')
+                          NOT IN ('merged', 'done')
+                    """,
+                    (repo.lower(), ticket_id, state),
+                )
+            connection.commit()
+        if not entered:
+            return
+        if self.log is not None:
+            self.log(f"merged: {repo}#{ticket_id} (merge observed by the poll)")
+        if ticket is None:
+            return
+        try:
+            self._review_actions(ticket).set_state(ticket, "merged")
+        except Exception as exc:
+            self.record_poll_error(repo, ticket_id, f"merged-label:{type(exc).__name__}")
+
+    def _enter_merged(
+        self,
+        connection: sqlite3.Connection,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+    ) -> bool:
+        """The one merged transition, inside the caller's transaction.
+
+        merged is absorbing, and nothing that keeps a ticket on a person's
+        screen survives it: stuck, the paused step and every needs-attention
+        flag are cleared, and the ticket's queued harness jobs are
+        cancelled. Grok wakes (a ship's done wake) and running jobs are
+        left alone. True when the ticket was not already merged.
+        """
+        key = (repo.lower(), ticket_id)
+        prior = connection.execute(
+            "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+            key,
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, workflow_state
+            ) VALUES (?, ?, 0, 0, 'merged')
+            ON CONFLICT(repo, ticket_id) DO UPDATE SET
+                workflow_state = 'merged',
+                stuck = 0,
+                stuck_reason = NULL,
+                stuck_source_comment_id = NULL,
+                stuck_wake_job_id = NULL,
+                paused_action = NULL,
+                paused_recipient = NULL,
+                paused_head = NULL,
+                paused_generation = NULL,
+                paused_question_id = NULL
+            """,
+            key,
+        )
+        connection.execute(
+            "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ?", key
+        )
+        queued = connection.execute(
+            """
+            SELECT id FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+              AND recipient != 'grok'
+            ORDER BY created_at, id
+            """,
+            key,
+        ).fetchall()
+        for row in queued:
+            self.queue.cancel(str(row["id"]), f"merged:{reason}", connection=connection)
+        return prior is None or prior["workflow_state"] != "merged"
 
     def process(self, ticket: TrackedTicket) -> None:
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
@@ -564,6 +652,8 @@ class Dispatcher:
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
                 self._mark_handled(ticket, comment.id, "ticket-stuck")
                 continue
+            if kind != "verdict" and self._after_finish(ticket, comment):
+                continue
             try:
                 if kind == "go":
                     handled, outcome = self._t1(ticket, comment, fields)
@@ -579,6 +669,8 @@ class Dispatcher:
                         # One verdict per review job (#80): a repeat of a
                         # handled verdict starts no job, ship or wake.
                         self._mark_handled(ticket, comment.id, "duplicate-verdict")
+                        continue
+                    if self._after_finish(ticket, comment):
                         continue
                     if verdict == "REVISE":
                         handled, outcome = self._t3(ticket, comment, fields)
@@ -632,6 +724,18 @@ class Dispatcher:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
+
+    def _after_finish(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        """merged and done are absorbing (#108): on a finished ticket only a
+        ship intent's replay acts; any other comment is handled with no
+        job, state write or wake."""
+        if (
+            self._review_context(ticket)[0] not in FINISHED_STATES
+            or self._ship_intent(ticket, comment.id) is not None
+        ):
+            return False
+        self._mark_handled(ticket, comment.id, "after-merge")
+        return True
 
     def reconcile_jobs(self) -> None:
         deferred_grok_jobs: set[str] = set()
@@ -2475,7 +2579,8 @@ class Dispatcher:
         if intent_head != current_head or intent_policy != policy:
             raise RuntimeError("ship intent does not match approval")
         if status == "completed":
-            self._write_state_label(ticket, _ship_state(policy))
+            merged = self._review_context(ticket)[0] == "merged"
+            self._write_state_label(ticket, "merged" if merged else _ship_state(policy))
             return True, f"ship-already-completed-{policy}"
         if status == "pending":
             if policy == "merge" and self._review_actions(ticket).is_merged(
@@ -2557,9 +2662,9 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
             connection.execute(
-                """
+                f"""
                 UPDATE ticket_state SET workflow_state = 'ship'
-                WHERE repo = ? AND ticket_id = ?
+                WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             )
@@ -2581,13 +2686,7 @@ class Dispatcher:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
-            connection.execute(
-                """
-                UPDATE ticket_state SET workflow_state = ?
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (state, ticket.repo.lower(), ticket.ticket_id),
-            )
+            self._enter_ship_state(connection, ticket.repo, ticket.ticket_id, state)
             connection.commit()
         self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
@@ -2798,13 +2897,7 @@ class Dispatcher:
                 """,
                 (*scope, comment_id),
             )
-            connection.execute(
-                """
-                UPDATE ticket_state SET workflow_state = ?
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (state, *scope),
-            )
+            self._enter_ship_state(connection, ticket.repo, ticket.ticket_id, state)
             connection.execute(
                 """
                 DELETE FROM handled_comments
@@ -2814,6 +2907,26 @@ class Dispatcher:
             )
             connection.commit()
         self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
+
+    def _enter_ship_state(
+        self,
+        connection: sqlite3.Connection,
+        repo: str,
+        ticket_id: str,
+        state: str,
+    ) -> None:
+        """A completed ship's state: merged goes through _enter_merged; any
+        other ship state never overwrites merged or done."""
+        if state == "merged":
+            self._enter_merged(connection, repo, ticket_id, "shipped")
+            return
+        connection.execute(
+            f"""
+            UPDATE ticket_state SET workflow_state = ?
+            WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
+            """,
+            (state, repo.lower(), ticket_id),
+        )
 
     def _has_completed_ship_at(
         self,
@@ -3002,13 +3115,9 @@ class Dispatcher:
         source_comment_id: str,
     ) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE ticket_state SET workflow_state = 'merged'
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            self._enter_merged(connection, ticket.repo, ticket.ticket_id, "shipped")
+            connection.commit()
         self._write_state_label(ticket, "merged")
         with self._connect() as connection:
             connection.execute(
@@ -3085,15 +3194,18 @@ class Dispatcher:
         ticket: TrackedTicket,
         state: str,
     ) -> None:
+        if self._review_context(ticket)[0] in FINISHED_STATES:
+            return
         self._write_state_label(ticket, state)
         with self._connect() as connection:
             connection.execute(
-                """
+                f"""
                 INSERT INTO ticket_state (
                     repo, ticket_id, gate_count, stuck, workflow_state
                 ) VALUES (?, ?, 0, 0, ?)
                 ON CONFLICT(repo, ticket_id)
                 DO UPDATE SET workflow_state = excluded.workflow_state
+                WHERE {_NOT_FINISHED.replace("workflow_state", "ticket_state.workflow_state")}
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, state),
             )

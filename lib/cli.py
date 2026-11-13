@@ -77,7 +77,7 @@ commands:
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
   wait             block until the dispatcher queues a job for a bot
-  job              run, heartbeat or finish a job that wait returned
+  job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
@@ -190,6 +190,11 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   --status-file PATH: when this exits, its exit status is written to PATH
   (mode 600); the autostart waiter uses it to finish a remote run after a
   waiter restart.
+job cancel <job-id> [--db PATH] [--reason TEXT]
+  Cancel a queued job (an operator command, not a bot's): it never runs,
+  T6 never retries it, and its dedupe key stays, so the comment that
+  queued it queues nothing again. Exits 1 for a running or finished job
+  (a running one's worker must be stopped first) and 2 for an unknown one.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
@@ -803,6 +808,8 @@ def _quiet_stdout() -> None:
 def _job(argv: list[str]) -> int:
     if argv[:1] == ["run"]:
         return _job_run(argv[1:])
+    if argv[:1] == ["cancel"]:
+        return _job_cancel(argv[1:])
     parser = _Parser(prog="orch job", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     heartbeat = commands.add_parser("heartbeat")
@@ -853,6 +860,45 @@ def _job(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{job.state} {job.id}")
+    return 0
+
+
+def _job_cancel(argv: list[str]) -> int:
+    """`orch job cancel`: an operator's cancel of a queued job (#66).
+
+    Not bot-owned, so it does not go through owned_job.
+    """
+    parser = _Parser(prog="orch job cancel", add_help=True)
+    parser.add_argument("job_id")
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--reason", default="operator")
+    args = parser.parse_args(argv)
+    prog = "orch job cancel"
+    try:
+        queue = open_queue(_db_path(args.db))
+    except WaitError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        with queue.connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM jobs WHERE id = ?", (args.job_id,)
+            ).fetchone()
+        if row is None:
+            print(f"{prog}: unknown job {args.job_id}", file=sys.stderr)
+            return 2
+        if row["state"] == "running":
+            print(f"{prog}: job is running; stop its worker first", file=sys.stderr)
+            return 1
+        job = retry_locked(lambda: queue.cancel(args.job_id, args.reason))
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    request = job.request
+    print(
+        f"cancelled {job.id} ({request.repo}#{request.ticket_id} "
+        f"{request.action} -> {request.recipient})"
+    )
     return 0
 
 

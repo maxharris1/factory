@@ -39,7 +39,7 @@ ACTIONS = (
     "awaiting-ok",
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
-STATES = ("queued", "running", "done", "failed")
+STATES = ("queued", "running", "done", "failed", "cancelled")
 # Device-pool placements (lib/device_pool.py). The table exists once a
 # DevicePool has opened this database; a queued job never holds a row.
 SLOTS_TABLE = "device_slots"
@@ -378,6 +378,66 @@ class SQLiteJobQueue:
                 raise QueueError("finish requires a running job")
             connection.commit()
         return _job(updated)
+
+    def cancel(
+        self,
+        job_id: str,
+        reason: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> Job:
+        """queued -> cancelled, with a job_events row naming the reason.
+
+        Only a queued job may be cancelled: a claimed or running one has a
+        worker to stop first. The dedupe key stays, so the comment that
+        queued the job never queues it again. With a connection the write
+        joins the caller's transaction.
+        """
+        if not reason:
+            raise QueueError("cancel needs a reason")
+        if connection is not None:
+            return self._cancel(connection, job_id, reason)
+        with self._connect() as own:
+            own.execute("BEGIN IMMEDIATE")
+            job = self._cancel(own, job_id, reason)
+            own.commit()
+        return job
+
+    def _cancel(
+        self, connection: sqlite3.Connection, job_id: str, reason: str
+    ) -> Job:
+        now = self.now()
+        changed = connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'cancelled', finished_at = ?, last_activity_at = ?
+            WHERE id = ? AND state = 'queued'
+            """,
+            (now, now, job_id),
+        ).rowcount
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise QueueError(f"unknown job {job_id!r}")
+        if changed != 1:
+            raise QueueError(f"job {job_id} is {row['state']}; only a queued job can be cancelled")
+        if _has_table(connection, "job_events"):
+            connection.execute(
+                """
+                INSERT INTO job_events (
+                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, 'cancelled', ?, ?)
+                """,
+                (
+                    job_id,
+                    str(row["repo"]).lower(),
+                    row["ticket_id"],
+                    row["action"],
+                    row["recipient"],
+                    reason,
+                    now,
+                ),
+            )
+        return _job(row)
 
     def outstanding(self) -> tuple[Job, ...]:
         with self._connect() as connection:
