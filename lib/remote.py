@@ -129,6 +129,8 @@ TAG_ENV = "ORCH_WORKER_TAG"
 # WORKER_ENV_MARK, a space, then hex of NUL-separated NAME=value entries
 # ending with WORKER_ENV_END. lib/telemetry.py scrubs that environment's
 # secret values from a remote run's summary and never stores the line.
+# The login profile's stdout goes to stderr (#100 r6), so the report is the
+# first thing on stdout whatever the profile prints.
 WORKER_ENV_MARK = "ORCH-WORKER-ENV"
 WORKER_ENV_END = "ORCH-WORKER-ENV-END"
 # The start script's own exit status when it cannot make or enter the job
@@ -153,7 +155,7 @@ _REPORT_ENV = (
     "echo; "
 )
 _START_HARNESS = _LAUNCH + 'exec "$@"'
-_START_REPORTING = _LAUNCH + _REPORT_ENV + 'exec "$@"'
+_START_REPORTING = "exec 1>&3 3>&-; " + _LAUNCH + _REPORT_ENV + 'exec "$@"'
 SSH_UNREACHABLE = 255
 
 GONE = "gone"
@@ -359,6 +361,7 @@ def start_script(
         f"exec {LOGIN_SHELL} -lc {shlex.quote(start)} {LOGIN_NAME} "
         f'"$d" {shlex.quote(launch_record(target))} {assignments} '
         f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {argv}'
+        + (" 3>&1 1>&2" if report_env else "")
     )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)

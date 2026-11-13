@@ -902,16 +902,22 @@ _REMOTE_EVENTS = {
         "'command': cmd, 'status': 'completed', 'exit_code': 0}}",
     ),
 }
-_PROFILE = f"echo welcome\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n"
+_PROFILES = {
+    "newline": "echo welcome",
+    "no-newline": "printf welcome",
+    "background": "(sleep 0.2; printf late) &",
+}
 
 
-def _remote_run(tmp_path: Path, harness: str, env: dict | None = None):
+def _remote_run(tmp_path: Path, harness: str, env: dict | None = None, *, profile: str = "newline"):
     from tests.test_remote_start import remote_setup
 
     machines, queue, _, job_id, ssh = remote_setup(tmp_path, harness)
     home = tmp_path / "worker-home"
     home.mkdir()
-    (home / ".bash_profile").write_text(_PROFILE, encoding="utf-8")
+    (home / ".bash_profile").write_text(
+        f"{_PROFILES[profile]}\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n", encoding="utf-8"
+    )
     args, event = _REMOTE_EVENTS[harness]
     cli = tmp_path / harness
     cli.write_text(
@@ -930,13 +936,14 @@ def _remote_run(tmp_path: Path, harness: str, env: dict | None = None):
     return run, queue.path, job_id
 
 
+@pytest.mark.parametrize("profile", sorted(_PROFILES))
 @pytest.mark.parametrize("harness", ["claude", "codex"])
 def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
-    tmp_path: Path, harness: str
+    tmp_path: Path, harness: str, profile: str
 ) -> None:
     from lib.dashboard import collect_snapshot, write_snapshot_pages
 
-    run, db, job_id = _remote_run(tmp_path, harness)
+    run, db, job_id = _remote_run(tmp_path, harness, profile=profile)
     assert run.returncode == 0, run.stderr
     row = _row(db, job_id)
     stored = [step["title"] for step in json.loads(row["steps"])]
@@ -945,11 +952,13 @@ def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
     )[0]
     published = json.loads(status.read_text())["telemetry"]["recent"][0]["steps"]
     assert stored == [step["title"] for step in published] == ["$ deploy --pin [redacted-env]"]
-    assert run.stdout == "welcome\nplain worker line\n"
+    raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
+    assert run.stdout == "plain worker line\n" and raw.endswith(run.stdout)
+    assert "welcome" not in raw and "late" not in raw
+    for text in (run.stdout, run.stderr, raw):
+        assert "ORCH-WORKER-ENV" not in text and WORKER_SECRET.encode().hex() not in text
     for text in (run.stdout, run.stderr, json.dumps(row), status.read_text()):
         assert WORKER_SECRET not in text
-    raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
-    assert "ORCH-WORKER-ENV" not in raw and raw.startswith("welcome\n")
 
 
 def test_with_telemetry_off_a_remote_start_reports_no_environment(tmp_path: Path) -> None:
@@ -984,6 +993,14 @@ def test_a_remote_session_scrubs_the_reported_environment_and_never_keeps_the_re
     assert row["exit_reason"] == "exit 3"
     assert out.getvalue() == b"hi\n" and messages == []
     assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"hi\n" + _bash(f"deploy {WORKER_SECRET}")
+
+
+def test_a_report_that_does_not_start_its_line_is_still_never_kept(tmp_path: Path) -> None:
+    report = _report({"DEPLOY_PASSWORD": WORKER_SECRET})
+    row, out, messages = _remote_session(tmp_path, b"welcome" + report + _bash(f"deploy {WORKER_SECRET}"))
+    assert [step["title"] for step in json.loads(row["steps"])] == ["$ deploy [redacted-env]"]
+    assert out.getvalue() == b"welcome" and messages == []
+    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"welcome" + _bash(f"deploy {WORKER_SECRET}")
 
 
 @pytest.mark.parametrize(

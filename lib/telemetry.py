@@ -52,8 +52,10 @@ assignments, URLs and email addresses, and the text is cut to one short
 line. A remote run's text comes from the worker, so its scrubber also
 learns the harness's own environment there (after the login profile): the
 start prints it as one report line before the harness (lib/remote.py
-WORKER_ENV_MARK), which is never logged or copied. Until a whole report is
-read the scrubber is blind and every text is stored as `[redacted-env]`.
+WORKER_ENV_MARK), which is never logged or copied. The profile's own stdout
+goes to stderr, so the report starts the stream; text before the mark on
+its line is kept, the report itself never. Until a whole report is read
+the scrubber is blind and every text is stored as `[redacted-env]`.
 Assistant text and tool output are never stored; tool output is only
 read for test counts. The dashboard (lib/dashboard_telemetry.py) shows
 only these summaries and scrubbed step titles.
@@ -974,9 +976,13 @@ class Session:
             if dropping:  # the rest of an oversized environment report: never kept
                 dropping = not complete
                 continue
-            if self._worker_env and chunk.startswith(WORKER_ENV_MARK.encode() + b" "):
+            at = chunk.find(WORKER_ENV_MARK.encode() + b" ") if self._worker_env else -1
+            if at >= 0:  # text before the mark on its line is kept; the report never is
+                if self.raw_log is not None:
+                    self.raw_log.write(chunk[:at])
+                self._passthrough(chunk[:at])
                 self._worker_env = False
-                self._learn(chunk if complete else b"")
+                self._learn(chunk[at:] if complete else b"")
                 dropping = not complete
                 continue
             if self.raw_log is not None:
