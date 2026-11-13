@@ -47,13 +47,23 @@ be a plain token. Everything else goes into the brief, on stdin.
 
 A job that has no standard brief, or whose start fails, is failed at once
 (T6 retries it) and its slot is freed, as `orch wait` does for a job it
-could not print. A waiter that dies between a claim and the start leaves a
+could not print. A run that ends while its job is still running (the
+harness exited without `orch job done`) hands the job to T6 at once too.
+
+Each job gets exactly one handoff: the claim records this waiter on the
+job's slot (DevicePool.claim `autostart`), so only this waiter's own `orch
+job run` may run the job and only that run may `orch job done` it (lib/cli.py,
+lib/placed_run.py). One waiter runs per bot: it holds the bot's waiter lock
+for its whole life (`hold_waiter_lock`), and a plain `orch wait` for the bot
+is refused while it does. A waiter that dies between a claim and the start leaves a
 claimed job, which the poller requeues after release_claimed_minutes (#77).
 """
 
 from __future__ import annotations
 
 import base64
+import errno
+import fcntl
 import json
 import os
 import re
@@ -96,6 +106,7 @@ GH_TOKEN_VARIABLES = (
 )
 BRIEF_ENV = "ORCH_JOB_BRIEF"
 MAX_COMMAND_PARTS = 64
+MAX_CONFIG_BYTES = 64 * 1024
 
 _CONFIG_KEYS = frozenset({"bot", "command"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -136,22 +147,58 @@ def default_state_dir(bot: str) -> Path:
 
 
 def load_harness_command(path: Path, bot: str) -> HarnessCommand:
-    """The bot's own harness argv, from a file only that bot's user can write."""
+    """The bot's own harness argv, from a file only that bot's user can write.
+
+    The file is opened once with O_NOFOLLOW and every check is made on that
+    open descriptor (fstat), so the file read is the file checked. Its
+    directory must be this user's (or root's) and writable by no one else,
+    so nobody else can swap the file between runs.
+    """
     try:
-        info = os.lstat(path)
+        parent = os.stat(path.parent)
+    except OSError as exc:
+        raise WaiterError(
+            f"cannot read harness config directory {path.parent}: {_one_line(exc)}"
+        ) from exc
+    if not stat.S_ISDIR(parent.st_mode):
+        raise WaiterError(f"harness config directory {path.parent} is not a directory")
+    if parent.st_uid not in (os.getuid(), 0):
+        raise WaiterError(f"harness config directory {path.parent} is not owned by this user")
+    if parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise WaiterError(
+            f"harness config directory {path.parent} is writable by group or others"
+        )
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         raise WaiterError(f"harness config {path} not found") from None
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise WaiterError(f"harness config {path} is a symlink, not a regular file") from None
         raise WaiterError(f"cannot read harness config {path}: {_one_line(exc)}") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise WaiterError(f"harness config {path} is not a regular file")
-    if info.st_uid != os.getuid():
-        raise WaiterError(f"harness config {path} is not owned by this user")
-    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise WaiterError(f"harness config {path} is writable by group or others")
     try:
-        data = load_yaml(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise WaiterError(f"harness config {path} is not a regular file")
+        if info.st_uid != os.getuid():
+            raise WaiterError(f"harness config {path} is not owned by this user")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise WaiterError(f"harness config {path} is writable by group or others")
+        if info.st_size > MAX_CONFIG_BYTES:
+            raise WaiterError(f"harness config {path} is over {MAX_CONFIG_BYTES} bytes")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(MAX_CONFIG_BYTES + 1)
+    except OSError as exc:
+        raise WaiterError(f"cannot read harness config {path}: {_one_line(exc)}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise WaiterError(f"harness config {path} is over {MAX_CONFIG_BYTES} bytes")
+    try:
+        data = load_yaml(raw.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError) as exc:
         raise WaiterError(f"harness config {path}: invalid YAML: {_one_line(exc)}") from exc
     if not isinstance(data, dict):
         raise WaiterError(f"harness config {path} must be a mapping")
@@ -406,7 +453,7 @@ class Waiter:
         spawn: Callable[..., Child] = subprocess.Popen,
         log: Log = lambda line: print(line, file=sys.stderr, flush=True),
         environ: Mapping[str, str] | None = None,
-        alive: Callable[[int, str | None], bool] = pid_alive,
+        alive: Callable[[int | None, str | None], bool] = pid_alive,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -432,6 +479,7 @@ class Waiter:
         self._remote: dict[str, tuple[Path, int]] = {}
         self._locked = 0
         self._recovered = False
+        self._claimer = (os.getpid(), process_start(os.getpid()))
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -442,7 +490,9 @@ class Waiter:
             self._recover()
         self._reap()
         try:
-            claimed = claim_once(self.queue, self.recipient, self.pool)
+            claimed = claim_once(
+                self.queue, self.recipient, self.pool, autostart=self._claimer
+            )
         except Locked:
             self._locked += 1
             return None
@@ -656,6 +706,8 @@ class Waiter:
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
                     self._finish_remote(job_id, remote[0], code, offset=remote[1])
+                else:
+                    self._settle(job_id, child.pid, code)
 
     def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
         """`orch job done` on the box for a remote run, from its marker line.
@@ -701,12 +753,161 @@ class Waiter:
         except OSError as exc:
             self.log(f"could not remove {job_dir / REMOTE_RECORD}: {_one_line(exc)}")
 
+    def _settle(self, job_id: str, runner: int, code: int) -> None:
+        """A run that ended while its job still runs hands the job to T6 now.
+
+        `orch job run` does this itself when its command exits without `orch
+        job done`; this catches a runner that died first (killed, crashed).
+        A job that another live runner still runs is left to it.
+
+        Codex PR #82 r2 F2.1: the job becomes retryable only once its runner
+        and its worker are both gone. A runner SIGKILLed while its harness
+        still runs leaves the job running: failing it now would let T6 start
+        attempt 2 beside the live harness. The poller's DEAD path (runner
+        gone and worker confirmed gone, lib/job_state.py) fails it once the
+        harness ends, so the retry comes then, exactly once.
+        """
+        try:
+            with self.queue.connect() as connection:
+                row = connection.execute(
+                    "SELECT state, recipient FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+            placement = self.pool.placement(job_id)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: could not read it after its run ({_one_line(exc)})")
+            return
+        if row is None or row["state"] != "running" or row["recipient"] != self.recipient:
+            return
+        if (
+            placement is not None
+            and placement.runner_pid is not None
+            and placement.runner_pid != runner
+            and self.alive(placement.runner_pid, placement.runner_start)
+        ):
+            self.log(f"job {job_id}: still run by pid {placement.runner_pid}; left to it")
+            return
+        if placement is not None and placement.remote_started:
+            self.log(
+                f"job {job_id}: orch job run exited {code}; its remote worker may still "
+                "run, so the poller fails it once the device confirms it gone"
+            )
+            return
+        if (
+            placement is not None
+            and placement.worker_pid is not None
+            and self.alive(placement.worker_pid, placement.worker_start)
+        ):
+            self.log(
+                f"job {job_id}: orch job run exited {code} but its worker (pid "
+                f"{placement.worker_pid}) still runs; not failed while it runs, "
+                "the poller's dead-job check fails it for T6 once both are gone"
+            )
+            return
+        try:
+            retry_locked(
+                lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=None)
+            )
+        except QueueError:
+            return  # it was finished between the read and the write
+        except (sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: could not fail it ({_one_line(exc)})")
+            return
+        self.log(
+            f"job {job_id}: orch job run exited {code} without orch job done; "
+            "failed it for T6"
+        )
+        if placement is None:
+            return
+        workers = (
+            (placement.runner_pid, placement.runner_start),
+            (placement.worker_pid, placement.worker_start),
+        )
+        if any(pid is not None and self.alive(pid, start) for pid, start in workers):
+            return  # the DeviceMonitor frees it once the worker is gone
+        try:
+            retry_locked(lambda: self.pool.release(job_id, owner=self.recipient))
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: could not free its slot ({_one_line(exc)})")
+
 
 def _size(path: Path) -> int:
     try:
         return os.stat(path).st_size
     except FileNotFoundError:
         return 0
+
+
+def lock_path(db: Path, bot: str) -> Path:
+    """The bot's waiter lock, beside the queue it claims from."""
+    return Path(db).absolute().parent / f"waiter-{bot}.lock"
+
+
+def hold_waiter_lock(db: Path, bot: str) -> int:
+    """Take the bot's waiter lock for this process's whole life; return its fd.
+
+    One autostart waiter per bot and queue: a second one (say, left by a
+    supervisor that was SIGKILLed while its waiter lived on) is refused
+    here. A plain `orch wait` for the bot holds the lock shared, so the two
+    never claim the same bot's jobs at once. The fd is close-on-exec, so no
+    `orch job run` child inherits it.
+    """
+    path = lock_path(db, bot)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise WaiterError(_lock_holder(fd, path, bot)) from None
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def share_waiter_lock(db: Path, bot: str) -> int:
+    """Plain `orch wait`: hold the bot's waiter lock shared, or refuse.
+
+    Refused while the bot's autostart waiter runs: it claims and starts the
+    bot's jobs itself, so a bot turn must not claim them too.
+    """
+    path = lock_path(db, bot)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = _pid_in(fd)
+        os.close(fd)
+        raise WaiterError(
+            f"{bot}'s autostart waiter (pid {holder or 'unknown'}) holds {path}: it claims "
+            f"and starts {bot}'s jobs itself, so a second claim is refused"
+        ) from None
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _lock_holder(fd: int, path: Path, bot: str) -> str:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = _pid_in(fd)
+        return (
+            f"another autostart waiter for {bot} (pid {holder or 'unknown'}) holds {path}; "
+            "refusing to start a second one"
+        )
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    return f"a plain orch wait for {bot} holds {path}; refusing to autostart beside it"
+
+
+def _pid_in(fd: int) -> int | None:
+    try:
+        text = os.pread(fd, 32, 0).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+    return int(text) if text.isdigit() else None
 
 
 def _write_private(path: Path, data: bytes) -> None:

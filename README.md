@@ -550,7 +550,7 @@ A process exit does not wake a bot, so a plain `orch wait` claim used to sit
 until another bot pinged its owner (#74 r2 and #77 r2 each waited 12 to 57
 minutes). [`lib/waiter.py`](lib/waiter.py) (issue #80) removes that hand-off:
 `orch wait <bot> --autostart`, run as the bot's own user and login, claims
-the bot's next job on a box slot, renders its standard brief and starts it
+the bot's next job on the least-loaded device (issue #85), renders its standard brief and starts it
 itself as `orch job run <bot> <job-id> --worktree -- <command>`, then goes
 straight back to waiting. `orch job run` heartbeats before the harness starts
 and records itself on the slot, so the job reads `running` within seconds of
@@ -573,7 +573,10 @@ the claim, with no model turn and no message to any bot. The harness posts its
 - **Command.** The harness command is the bot's own config,
   `~/.config/factory/waiter-<bot>.yml` (`--harness-config`): `bot` and
   `command`, an argv list run with no shell. The file must be a regular file
-  owned by the bot's user and writable by no one else.
+  owned by the bot's user and writable by no one else, in a directory owned
+  by that user (or root) that is not group- or world-writable. It is opened
+  once with `O_NOFOLLOW` and every check is made on that open file (`fstat`),
+  so the file read is the file checked.
   [`config/waiter.example.yml`](config/waiter.example.yml) shows the shape.
   Nothing from a job row, a PR or a comment reaches an argv: the only job
   value in the `orch job run` argv is the job id, which must be a plain
@@ -601,11 +604,27 @@ the claim, with no model turn and no message to any bot. The harness posts its
   so no run is finished twice.
 - **Failures.** A job with no standard brief (an action other than build,
   plan, fix or review), a job id that is not a plain token, or a start that
-  fails is failed at once for T6 and its slot is freed. A waiter that dies
-  between a claim and the start leaves a claimed job, which the poller
-  requeues after `release_claimed_minutes`.
+  fails is failed at once for T6 and its slot is freed. When the harness
+  exits without `orch job done` (a missing binary, an expired login, a
+  crash), `orch job run` fails the job for T6 before it frees the slot, and
+  the waiter does the same for a run that died first, so the job never waits
+  out its timeout. A waiter that dies between a claim and the start leaves a
+  claimed job, which the poller requeues after `release_claimed_minutes`.
+- **One handoff per job.** The claim records the waiter on the job's slot.
+  From then on only that waiter's own `orch job run` may run the job, and
+  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  run` or `orch job done` is refused (exit 2, nothing changed), and a plain
+  `orch wait <bot>` is refused while the bot's autostart waiter runs. A
+  second `orch job run` of a running job is refused. `orch job done` with the
+  outcome already recorded is a no-op success; a different outcome is refused
+  (exit 1) and changes nothing. The dispatcher records a verdict that repeats
+  an already handled one (same author, head, round and verdict) as
+  `duplicate-verdict` and takes no action for it: no job, no ship, no wake.
 - **Restarts.** Each `orch job run` runs in its own session, so stopping or
-  restarting a waiter never stops a running job. SIGTERM exits 0.
+  restarting a waiter never stops a running job. SIGTERM exits 0. The
+  waiter holds `waiter-<bot>.lock` beside the database (with its pid) for its
+  whole life, so a second waiter for the bot exits 2; a plain `orch wait`
+  holds it shared.
   [`deploy/waiter-service.sh <bot>`](deploy/waiter-service.sh) runs the
   waiter under a supervisor loop (like the poller and Linear webhook
   services) with `start`, `stop`, `restart`, `status`, `ensure`,
@@ -614,7 +633,8 @@ the claim, with no model turn and no message to any bot. The harness posts its
   exiting within 30 seconds). It reads `~/.config/factory/waiter.env` for
   `ORCH_DB` and other `ORCH_*` paths (default `ORCH_DB` is
   `~/.local/state/factory/orch.db`), logs to
-  `~/.local/state/factory/waiter-<bot>.log`, and its autostart flag
+  `~/.local/state/factory/waiter-<bot>.log`, and `stop` also stops a waiter
+  left holding the lock by a supervisor that was SIGKILLed. Its autostart flag
   `waiter-autostart-<bot>` is picked up by the profile `deploy/install.sh`
   writes; with `crontab` it also adds `@reboot` and 5-minute `ensure` lines
   tagged `# factory-orch-waiter-<bot>`.
@@ -639,7 +659,9 @@ locked or failed writes are logged and retried at the next beat. SIGTERM and
 SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
 reaches the command directly, and the exit status is the command's; a signal
 that arrives before the command starts means it never runs.
-`orch job run` never finishes the job: `orch job done` stays the bot's call.
+`orch job run` never finishes the job: `orch job done` stays the bot's call
+(except that an autostart run fails a job its command left running; see
+"Autostart waiter").
 The command gets `ORCH_JOB_ID`, `ORCH_JOB_BOT` and `ORCH_DB`. Bots do not
 hand-roll heartbeat loops; `orch job heartbeat` is a single manual beat.
 
@@ -791,8 +813,8 @@ changes neither. Run `poller-service.sh stop` before re-running
 bin/orch status --db "$ORCH_DB"
 ```
 
-`orch status` prints a read-only summary of queued jobs, occupied box slots,
-devices, and paused tracker items. It opens the dispatcher database read-only and does
+`orch status` prints a read-only summary of queued jobs, devices with one
+slot count each and their running jobs, and paused tracker items. It opens the dispatcher database read-only and does
 not claim, release, lease, wake, or update anything. `--machines` defaults to
 the checkout's `machines.yml`, read with placeholders accepted; an invalid
 file exits 1. Each device row shows the device, its eligible harnesses (`?`
@@ -937,9 +959,10 @@ database; `--machines`, else the checkout's `machines.yml` when present.
 
 The snapshot shows the queue (queued, running, done and failed jobs by
 recipient and action), running jobs with the age of their last heartbeat,
-queued jobs with their wait, box slots (running harness jobs that hold no
-device-pool slot, as in `orch status`; a job placed on a device counts on
-that device's row) and, when `machines.yml` (F2-01) is
+queued jobs with their wait, box slots (every running harness job on the
+box: placed there, or holding no device-pool slot, which counts in the box
+row's held slots as in `orch status`, issue #90; a job placed on another
+device counts on that device's row) and, when `machines.yml` (F2-01) is
 present, device rows (enabled, placeholder, harnesses, slots held from
 `device_slots` when that table exists; absent or invalid files show no
 device rows), stuck tickets and overdue jobs (a heartbeat or queue wait

@@ -169,7 +169,10 @@ def test_box_jobs_still_finish_themselves(tmp_path: Path) -> None:
     waiter.step()
     _finish_run(tmp_path, job_id, spawn, "ORCH-HANDOFF: 4242\n")
     waiter.step()
-    assert state(db, job_id) == "running"  # the box harness runs orch job done itself
+    # The box harness runs orch job done itself; the marker is never read for
+    # a box run. One that ended without it is failed for T6 (#80, PR #82).
+    assert _done_row(db, job_id) == ("failed", None)
+    assert not (tmp_path / "state" / "jobs" / job_id / "remote.json").exists()
 
 
 def test_handoff_marker_accepts_only_comment_ids() -> None:

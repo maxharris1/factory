@@ -23,8 +23,10 @@ UNIT = ROOT / "deploy" / "orch-waiter@.service"
 
 FAKE_ORCH = """#!/usr/bin/env python3
 # Stands in for `orch wait <bot> --autostart`: records each start, runs until
-# SIGTERM (exit 0, like the real waiter).
-import os, signal, sys, time
+# SIGTERM (exit 0, like the real waiter). Like the real waiter
+# (lib/waiter.py hold_waiter_lock) it holds waiter-<bot>.lock beside ORCH_DB
+# for its whole life, with its pid in it, and exits 2 if another holds it.
+import fcntl, os, signal, sys, time
 from pathlib import Path
 
 args = sys.argv[1:]
@@ -34,6 +36,17 @@ with starts.open("a") as handle:
     handle.write(f"{os.getpid()} {os.environ.get('ORCH_DB', '')}\\n")
 if os.environ.get("FAKE_WAITER_FAIL"):
     raise SystemExit(2)
+db = Path(os.environ["ORCH_DB"])
+if db.parent.is_dir():
+    lock = os.open(db.parent / f"waiter-{args[1]}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        with (Path(os.environ["HOME"]) / f"refused-{args[1]}").open("a") as handle:
+            handle.write(f"{os.getpid()}\\n")
+        raise SystemExit(2)
+    os.ftruncate(lock, 0)
+    os.write(lock, f"{os.getpid()}\\n".encode())
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(0.2)
@@ -176,6 +189,52 @@ def test_ensure_brings_back_a_killed_supervisor(home: Path) -> None:
     assert _service(home, "claude-bot", "status").returncode == 3
     assert _service(home, "claude-bot", "ensure").returncode == 0
     _wait_for(lambda: len(_starts(home)) == 2)
+
+
+def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
+    home: Path,
+) -> None:
+    # Codex PR #82 r1 F1.6: SIGKILL only the supervisor. Its waiter lives on
+    # holding the bot's lock; the next supervisor's waiter is refused (there
+    # is never a second running waiter), and stop still stops the orphan.
+    assert _service(home, "claude-bot", "start").returncode == 0
+    orphan = _wait_for(lambda: _starts(home))[0]
+    supervisor = _supervisor(home)
+    os.kill(supervisor, signal.SIGKILL)
+    _wait_for(lambda: not _alive(supervisor))
+    assert _alive(orphan)
+
+    assert _service(home, "claude-bot", "ensure").returncode == 0
+    _wait_for(lambda: len(_starts(home)) >= 2)
+    refused = home / "refused-claude-bot"
+    _wait_for(lambda: refused.exists() and refused.read_text().strip())
+    time.sleep(0.5)
+    live = [pid for pid in _starts(home) if _alive(pid)]
+    assert live == [orphan]
+    lock = home / ".local/state/factory/waiter-claude-bot.lock"
+    assert lock.read_text().strip() == str(orphan)
+
+    stopped = _service(home, "claude-bot", "stop")
+    assert stopped.returncode == 0, stopped.stderr
+    assert "stopped orphaned waiter" in stopped.stdout
+    _wait_for(lambda: not _alive(orphan))
+    time.sleep(0.6)
+    assert [pid for pid in _starts(home) if _alive(pid)] == []
+
+
+def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) -> None:
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True)
+    (state / "waiter-claude-bot.db").write_text(f"{state}/orch.db\n", encoding="utf-8")
+    bystander = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "waiter-claude-bot.lock").write_text(f"{bystander.pid}\n", encoding="utf-8")
+        assert _service(home, "claude-bot", "stop").returncode == 0
+        time.sleep(0.3)
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
 
 
 def test_a_waiter_that_keeps_failing_is_retried_with_backoff(home: Path) -> None:

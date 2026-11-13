@@ -275,6 +275,8 @@ def claim_once(
     queue: JobQueue,
     recipient: str,
     pool: DevicePool | None,
+    *,
+    autostart: tuple[int, str | None] | None = None,
 ) -> tuple[Job, Placement | None] | None:
     if pool is None and recipient in HARNESSES:
         # Issue #90: a harness job always runs on a device and holds its
@@ -285,6 +287,8 @@ def claim_once(
         )
     try:
         if pool is not None:
+            if autostart is not None:
+                return pool.claim(recipient, autostart=autostart)
             return pool.claim(recipient)
         job = queue.claim(recipient)
         return None if job is None else (job, None)

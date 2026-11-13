@@ -4,7 +4,8 @@
 out holds one slot on one device. `orch job run` then:
 
 * refuses (exit 2, nothing started, slot kept) a job that holds no slot,
-  whose slot is for another bot user, whose device is no longer in
+  whose slot is for another bot user, that an autostart waiter claimed
+  when this process is not that waiter's own child (#80), whose device is no longer in
   machines.yml, that another live `orch job run` already runs, or whose
   earlier worker (left by a runner that died) is not confirmed gone: a
   live recorded pid on the box, or a remote check that does not answer
@@ -22,7 +23,11 @@ out holds one slot on one device. `orch job run` then:
   once the worker is confirmed gone: a local command has exited; a remote
   device answers that no process carries the start's worker tag and none
   is left in its recorded group, after a SIGTERM if it was left running. Otherwise the slot stays held and the
-  dispatcher's DeviceMonitor confirms it on a later poll.
+  dispatcher's DeviceMonitor confirms it on a later poll;
+* for an autostart job on the box, fails the job for T6 (before releasing
+  the slot) when the command ended without `orch job done` (#80). A remote
+  autostart job is finished by its waiter from the run's exit status and
+  final ORCH-HANDOFF line (lib/waiter.py).
 """
 
 from __future__ import annotations
@@ -33,9 +38,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from lib.device_monitor import remote_target
-from lib.device_pool import DevicePool, Placement
+from lib.device_pool import DevicePool, Placement, read_autostart
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import QueueError
+from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
     GONE,
     RUNNING,
@@ -69,6 +74,7 @@ class PlacedRun:
     log: Log
     transport: Transport
     target: RemoteTarget | None = None
+    autostart: bool = False
     sleep: Callable[[float], None] = time.sleep
     alive: Callable[[int | None, str | None], bool] = pid_alive
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
@@ -149,6 +155,48 @@ class PlacedRun:
         return released
 
 
+def check_autostart(
+    queue: SQLiteJobQueue,
+    *,
+    job_id: str,
+    bot: str,
+    parent_pid: int | None = None,
+) -> tuple[int, str | None] | None:
+    """Refuse a run of an autostart claim unless its parent is the claiming waiter.
+
+    Codex PR #82 r2 F2.2: `orch job run` calls this before its first
+    heartbeat, and it only reads. A run refused here leaves the job exactly
+    as claimed (no heartbeat since the claim, no runner), so the poller's
+    claimed-job release requeues it (lib/job_state.py) instead of it
+    waiting out the full timeout. That covers a bot turn's run and a
+    waiter's own child orphaned before this check (the waiter exited
+    between spawning it and here). Returns the claiming waiter, for
+    prepare(checked_autostart=...), or None for a job no autostart waiter
+    claimed.
+    """
+    with queue.connect() as connection:
+        claimer = read_autostart(connection, job_id)
+    if claimer is not None:
+        _refuse_unless_child(job_id, bot, claimer, parent_pid)
+    return claimer
+
+
+def _refuse_unless_child(
+    job_id: str,
+    bot: str,
+    claimer: tuple[int, str | None],
+    parent_pid: int | None,
+) -> None:
+    pid, start = claimer
+    parent = os.getppid() if parent_pid is None else parent_pid
+    if parent != pid or (start is not None and process_start(parent) != start):
+        raise PlacementError(
+            f"job {job_id} was claimed by {bot}'s autostart waiter "
+            f"(pid {pid}), which starts it itself; a bot turn "
+            "must not run it, so nothing was started"
+        )
+
+
 def prepare(
     pool: DevicePool,
     config: MachinesConfig,
@@ -161,7 +209,17 @@ def prepare(
     transport: Transport,
     alive: Callable[[int | None, str | None], bool] = pid_alive,
     pid: int | None = None,
+    parent_pid: int | None = None,
+    checked_autostart: tuple[int, str | None] | None = None,
 ) -> PlacedRun:
+    """Record this process as the job's runner on its slot.
+
+    checked_autostart is what check_autostart returned before the run's
+    first heartbeat: this run's parent was then the claiming waiter. The
+    slot must still name that waiter; the parent is not looked at again, so
+    a waiter that exits in between (this run is reparented) does not strand
+    the job it already started.
+    """
     placement = pool.placement(job_id)
     if placement is None:
         raise PlacementError(
@@ -172,6 +230,17 @@ def prepare(
         raise PlacementError(
             f"job {job_id}'s slot is for {placement.os_user}, not {bot}"
         )
+    if placement.autostarted:
+        assert placement.autostart_pid is not None
+        claimer = (placement.autostart_pid, placement.autostart_start)
+        if checked_autostart is None:
+            _refuse_unless_child(job_id, bot, claimer, parent_pid)
+        elif checked_autostart != claimer:
+            raise PlacementError(
+                f"job {job_id} was claimed again by {bot}'s autostart waiter "
+                f"(pid {placement.autostart_pid}) after this run checked its parent; "
+                "nothing was started"
+            )
     device = config.device(placement.device)
     if device is None:
         raise PlacementError(
@@ -215,6 +284,7 @@ def prepare(
         log=log,
         transport=transport,
         target=target,
+        autostart=placement.autostarted,
         alive=alive,
     )
 

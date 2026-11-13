@@ -20,8 +20,9 @@ project-specific behavior stays in each repo's factory.md.
 
 Job text is data. Free text from the row (the brief, a CI log, a verdict
 link) appears only inside one fenced "Job data" block, whose fence is longer
-than any backtick run in it. A value shown outside that block (head, round,
-risk, base branch, PR number) is shown only when it matches its strict form.
+than any backtick run in it. A value shown outside that block (repo, ticket,
+head, round, risk, base branch, PR number) is shown only when it matches its
+strict form; otherwise the brief says it is missing and points at the data.
 The brief is passed to the harness on stdin and as a file, never in an argv.
 
 A job placed on a remote device (issue #85) gets the same brief with two
@@ -55,6 +56,11 @@ _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _HARNESS = re.compile(r"^(claude|codex|cursor)$")
 _URL = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
+# A PR number as the producers write it: a decimal string (TrackedTicket.pr_number).
+_NUMBER = re.compile(r"^[1-9][0-9]{0,9}$")
+_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_.-]{1,100}$")
+# A GitHub issue or PR number, or a Linear identifier such as MAX-123.
+_TICKET = re.compile(r"^(?:[1-9][0-9]{0,9}|[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,9})$")
 
 
 class BriefError(ValueError):
@@ -129,7 +135,7 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
     else:
         cap = None
     head = job.request.head if isinstance(job.request.head, str) else detail.get("head")
-    pr = detail.get("pr_number")
+    pr = _pr_number(detail.get("pr_number"))
     base = detail.get("base_branch")
     verify = detail.get("verify_skill")
     reviewer = detail.get("reviewer_harness")
@@ -140,7 +146,9 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
         "round": round_text if round_match is not None else None,
         "cap": cap,
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,
-        "pr": pr if isinstance(pr, int) and not isinstance(pr, bool) and pr > 0 else None,
+        "pr": pr,
+        "repo": _plain_repo(job.request.repo),
+        "ticket": job.request.ticket_id if _TICKET.fullmatch(job.request.ticket_id) else None,
         "base": base if isinstance(base, str) and _BRANCH.fullmatch(base) else None,
         "verify": verify if isinstance(verify, str) and (verify == "none" or _SKILL.fullmatch(verify)) else None,
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
@@ -151,6 +159,25 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
         ] if isinstance(skills, list) else [],
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
     }
+
+
+def _pr_number(value: object) -> int | None:
+    """The PR number as an int or a strict decimal string; anything else is unknown."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 < value < 10**10 else None
+    if isinstance(value, str) and _NUMBER.fullmatch(value):
+        return int(value)
+    return None
+
+
+def _plain_repo(repo: str) -> str | None:
+    if not _REPO.fullmatch(repo):
+        return None
+    if repo.partition("/")[2] in (".", ".."):
+        return None
+    return repo
 
 
 def _opening(job: Job, bot: str, kind: str) -> str:
@@ -166,15 +193,23 @@ def _opening(job: Job, bot: str, kind: str) -> str:
 def _job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str | None) -> str:
     request = job.request
     pr = facts["pr"]
+    repo = facts["repo"]
+    if pr and repo:
+        pr_line = f"- PR: #{pr} (https://github.com/{repo}/pull/{pr})"
+    elif pr:
+        pr_line = f"- PR: #{pr}"
+    else:
+        pr_line = "- PR: unknown"
     lines = [
         "## Job",
         f"- kind: {kind}",
         f"- action: {request.action}",
         f"- job id: {job.id}",
         f"- bot: {bot}",
-        f"- repo: {request.repo}",
-        f"- PR: #{pr} (https://github.com/{request.repo}/pull/{pr})" if pr else "- PR: unknown",
-        f"- ticket: {request.ticket_id}" + (f" ({facts['url']})" if facts["url"] else ""),
+        f"- repo: {repo}" if repo else "- repo: not a plain owner/name (see `repo` in Job data)",
+        pr_line,
+        (f"- ticket: {facts['ticket']}" if facts["ticket"] else "- ticket: not a plain id (see `ticket_id` in Job data)")
+        + (f" ({facts['url']})" if facts["url"] else ""),
         f"- head: {facts['head']}" if facts["head"] else "- head: none given (see the PR or the base branch)",
         f"- base branch: {facts['base']}" if facts["base"] else "- base branch: see factory.md",
         f"- risk: {facts['risk']}" if facts["risk"] else "- risk: unknown (ask in a questions comment)",
@@ -376,8 +411,9 @@ def _context_section(
     note: str | None,
 ) -> str:
     heading = "## Additional context from factory.md"
+    repo = facts["repo"] or "the job's repo (see Job data)"
     if context is not None:
-        where = f"{job.request.repo} factory.md at {ref}" if ref else f"{job.request.repo} factory.md"
+        where = f"{repo} factory.md at {ref}" if ref else f"{repo} factory.md"
         return (
             f"{heading}\n"
             f"From {where}. It adds repo-specific facts to this brief; where it is more specific, follow it.\n\n"
@@ -388,6 +424,6 @@ def _context_section(
     return (
         f"{heading}\n"
         f"factory.md was not loaded{reason}. Before you start, read `factory.md` from the base branch "
-        f"{base} of {job.request.repo} yourself (not from the PR head) and follow its Review, Ship "
+        f"{base} of {repo} yourself (not from the PR head) and follow its Review, Ship "
         "and Context sections."
     )

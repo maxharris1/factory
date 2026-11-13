@@ -19,7 +19,13 @@
 # command in ~/.config/factory/waiter-<bot>.yml (config/waiter.example.yml).
 #
 # The waiter starts each job's `orch job run` in its own session, so stopping
-# or restarting the waiter never stops a running job. A waiter that exits is
+# or restarting the waiter never stops a running job. The waiter holds a
+# per-bot lock beside the database (waiter-<bot>.lock, holding its pid) for
+# its whole life, so a second waiter for the bot refuses to start. If only
+# the supervisor is killed (SIGKILL), its waiter lives on holding the lock:
+# a new supervisor's waiter then refuses and is retried with backoff, and
+# stop also stops that waiter (the lock's pid, checked to be this bot's
+# `orch wait <bot> --autostart`). A waiter that exits is
 # started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
 # keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
 #
@@ -58,6 +64,7 @@ LOG="${STATE}/waiter-${BOT}.log"
 SERVICE_LOG="${STATE}/waiter-${BOT}-service.log"
 SERVICE_LOCK="${STATE}/waiter-${BOT}-service.lock"
 STOPPED="${STATE}/waiter-${BOT}.stopped"
+DBFILE="${STATE}/waiter-${BOT}.db"
 AUTOSTART="${CONFIG}/waiter-autostart-${BOT}"
 ENV_FILE="${CONFIG}/waiter.env"
 ORCH="${HOME}/.local/bin/orch"
@@ -105,6 +112,60 @@ running_pid() {
     printf '%s\n' "$pid"
 }
 
+# Is this argv this bot's autostart waiter (`... orch wait <bot> --autostart ...`)?
+is_waiter_argv() {
+    local i n=$#
+    local -a argv=("$@")
+    for ((i = 0; i + 1 < n; i++)); do
+        if [[ "${argv[i]}" == wait && "${argv[i + 1]}" == "$BOT" ]]; then
+            local rest
+            for rest in "${argv[@]:i+2}"; do
+                [[ "$rest" == --autostart ]] && return 0
+            done
+        fi
+    done
+    return 1
+}
+
+# Print the pid of the waiter holding this bot's lock (one a SIGKILLed
+# supervisor left behind), or fail.
+waiter_pid() {
+    local db lock pid command
+    local -a argv=()
+    [[ -r "$DBFILE" ]] || return 1
+    db="$(head -n 1 "$DBFILE" 2>/dev/null || true)"
+    [[ "$db" == /* ]] || return 1
+    lock="$(dirname "$db")/waiter-${BOT}.lock"
+    [[ -r "$lock" ]] || return 1
+    pid="$(head -n 1 "$lock" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [[ -d "$PROC" ]]; then
+        [[ -r "${PROC}/${pid}/cmdline" ]] || return 1
+        mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
+    else
+        command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        read -r -a argv <<<"$command"
+    fi
+    is_waiter_argv "${argv[@]}" || return 1
+    printf '%s\n' "$pid"
+}
+
+stop_waiter() {
+    local pid i
+    pid="$(waiter_pid)" || return 0
+    kill -TERM "$pid" 2>/dev/null || return 0
+    for ((i = 0; i < STOP_WAIT * 10; i++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            say "stopped orphaned waiter (pid ${pid})"
+            return 0
+        fi
+        sleep 0.1
+    done
+    say "orphaned waiter (pid ${pid}) did not stop within ${STOP_WAIT}s" >&2
+    return 1
+}
+
 service_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
@@ -125,6 +186,8 @@ supervise() {
         set +a
     fi
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
+    [[ "$ORCH_DB" == /* ]] || ORCH_DB="${PWD}/${ORCH_DB}"
+    printf '%s\n' "$ORCH_DB" >"$DBFILE"
     export PYTHONUNBUFFERED=1
     while [[ -z "$stopping" && ! -e "$STOPPED" ]]; do
         started="$SECONDS"
@@ -190,13 +253,15 @@ stop() {
     : >"$STOPPED"
     if ! pid="$(running_pid)"; then
         say "waiter supervisor is not running"
-        return 0
+        stop_waiter
+        return
     fi
     kill -TERM "$pid"
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
             say "stopped waiter supervisor (pid ${pid})"
-            return 0
+            stop_waiter
+            return
         fi
         sleep 0.1
     done
