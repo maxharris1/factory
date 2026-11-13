@@ -12,10 +12,16 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 BACKUP_ENV = "ORCH_DB_BACKUP"
+# The job_events detail of a step restore() holds; the dispatcher's first
+# pass over the ticket queues it again unless the thread answered it (#108).
+RESTORED = "restored"
+STEPS = ("plan", "build", "fix", "review")
 
 
 class BackupError(RuntimeError):
@@ -38,8 +44,13 @@ def _check_apart(db: Path, backup: Path) -> None:
         )
 
 
-def _copy(source: Path, target: Path) -> None:
-    """source -> target.tmp with the backup API, fsync, then rename."""
+def _copy(
+    source: Path,
+    target: Path,
+    prepare: Callable[[sqlite3.Connection], None] | None = None,
+) -> None:
+    """source -> target.tmp with the backup API, prepare(copy), fsync, then
+    rename."""
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
     temporary.unlink(missing_ok=True)
@@ -48,6 +59,8 @@ def _copy(source: Path, target: Path) -> None:
         writer = sqlite3.connect(temporary)
         try:
             reader.backup(writer)
+            if prepare is not None:
+                prepare(writer)
             writer.execute("PRAGMA journal_mode = DELETE")
         finally:
             writer.close()
@@ -75,7 +88,8 @@ def restore(backup_path: Path, db: Path) -> datetime:
     """Restore a missing db from backup_path; returns when the backup was taken.
 
     Refuses an existing db, a missing backup (FileNotFoundError) and a
-    backup that fails PRAGMA integrity_check.
+    backup that fails PRAGMA integrity_check. Queued harness steps arrive
+    held (_hold_steps).
     """
     if db.exists():
         raise BackupError(f"database {db} exists; refusing to overwrite it")
@@ -91,8 +105,45 @@ def restore(backup_path: Path, db: Path) -> datetime:
         raise BackupError(f"backup {backup_path} is not a valid database: {exc}") from exc
     if check is None or check[0] != "ok":
         raise BackupError(f"backup {backup_path} failed integrity_check")
-    _copy(backup_path, db)
+    _copy(backup_path, db, _hold_steps)
     return datetime.fromtimestamp(backup_path.stat().st_mtime, UTC)
+
+
+def _hold_steps(connection: sqlite3.Connection) -> None:
+    """Cancel the copy's queued plan, build, fix and review jobs as RESTORED,
+    before the copy is renamed into place (#108).
+
+    The backup is up to a cycle old: such a step may since have run and been
+    answered. Restored queued, an `orch wait` could claim it before the
+    poller reads its thread. Held, it waits for the dispatcher's next pass
+    over the ticket, which queues it again unless the thread answered it.
+    """
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if not {"jobs", "job_events"} <= tables:
+        return
+    now = time.time()
+    held = f"""
+        FROM jobs WHERE state = 'queued' AND recipient != 'grok'
+          AND action IN ({", ".join("?" for _ in STEPS)})
+    """
+    connection.execute(
+        f"""
+        INSERT INTO job_events (
+            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+        )
+        SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ? {held}
+        """,
+        (RESTORED, now, *STEPS),
+    )
+    connection.execute(
+        f"UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ? "
+        f"WHERE id IN (SELECT id {held})",
+        (now, now, *STEPS),
+    )
+    connection.commit()
 
 
 class CycleBackup:

@@ -47,7 +47,15 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
-from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job, claim_order
+from lib.queue import (
+    SLOTS_TABLE,
+    Job,
+    QueueError,
+    SQLiteJobQueue,
+    _job,
+    claim_order,
+    retire_if_finished,
+)
 from lib.remote import new_tag
 from lib.schema import HARNESSES
 
@@ -307,8 +315,9 @@ class DevicePool:
         its queue-wait clock restarted (created_at is kept, so it keeps its
         place in line), its slot is freed, and nothing else changes: no
         round, no attempt, no failure. Records a `requeued-unstarted` job
-        event when the dispatcher's job_events table exists. False (nothing
-        changed) when the guard does not hold.
+        event when the dispatcher's job_events table exists. On a finished
+        ticket the job is cancelled instead (#108). False (nothing changed)
+        when the guard does not hold.
         """
         if owner not in HARNESSES:
             raise QueueError(f"unknown owner {owner!r}")
@@ -331,7 +340,9 @@ class DevicePool:
                 connection.commit()
                 return False
             connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
-            if _has_table(connection, "job_events"):
+            if not retire_if_finished(connection, job_id, reason, now=now) and _has_table(
+                connection, "job_events"
+            ):
                 job = connection.execute(
                     "SELECT repo, ticket_id, action, recipient FROM jobs WHERE id = ?",
                     (job_id,),

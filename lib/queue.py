@@ -447,7 +447,8 @@ class SQLiteJobQueue:
 
         Only for the dispatcher's answered-by cancel (#108), when the answer
         it relied on was then rejected: the step was never done. The write
-        joins the caller's transaction.
+        joins the caller's transaction. A finished ticket's job is cancelled
+        again instead (retire_if_finished) and this returns False.
         """
         now = self.now()
         changed = connection.execute(
@@ -458,7 +459,7 @@ class SQLiteJobQueue:
             """,
             (now, job_id),
         ).rowcount
-        if changed != 1:
+        if changed != 1 or retire_if_finished(connection, job_id, reason, now=now):
             return False
         connection.execute(
             """
@@ -684,6 +685,47 @@ def _no_remote_start(connection: sqlite3.Connection) -> str:
         f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"
         " WHERE slot.job_id = jobs.id AND slot.remote_started = 1)"
     )
+
+
+def retire_if_finished(
+    connection: sqlite3.Connection, job_id: str, reason: str, *, now: float
+) -> bool:
+    """Cancel job_id, just put back in the queue in the caller's open
+    transaction, when it is harness work on a merged or done ticket (#108).
+
+    Every write that returns a job to queued (a released claim, an unstarted
+    requeue, a step whose answer was rejected) calls this before it commits,
+    so a finished ticket never regains claimable work. True when cancelled.
+    """
+    if not _has_table(connection, "ticket_state"):
+        return False
+    changed = connection.execute(
+        """
+        UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ?
+        WHERE id = ? AND state = 'queued' AND recipient != 'grok'
+          AND EXISTS (
+            SELECT 1 FROM ticket_state
+            WHERE ticket_state.repo = lower(jobs.repo)
+              AND ticket_state.ticket_id = jobs.ticket_id
+              AND ticket_state.workflow_state IN ('merged', 'done')
+          )
+        """,
+        (now, now, job_id),
+    ).rowcount
+    if changed != 1:
+        return False
+    if _has_table(connection, "job_events"):
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            )
+            SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ?
+            FROM jobs WHERE id = ?
+            """,
+            (f"finished:{reason}", now, job_id),
+        )
+    return True
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

@@ -17,11 +17,14 @@ from pathlib import Path
 import pytest
 
 from lib.dispatcher import CIResult, Comment, TrackedTicket
+from lib.job_state import REQUEUED_EARLY_EXIT, requeue_unstarted
 from lib.queue import Job, JobRequest
 from lib.state_backup import backup, restore
 from tests.test_dispatcher import (
+    ANSWERS,
     GO,
     PLAN,
+    QUESTIONS,
     READY,
     VERDICT,
     FakeGrokDelivery,
@@ -33,6 +36,7 @@ from tests.test_dispatcher import (
     ticket,
     track,
 )
+from tests.test_job_state import Poller
 
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
@@ -883,3 +887,187 @@ def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
 
     assert state_row(queue)["stuck"] == 0
     assert wakes(queue, "stuck") == 0
+
+
+# --- Round 4: no claimable work after the merge, none for an answered step ---------
+
+
+def _released_claim(poller: Poller, job_id: str) -> None:
+    poller.at(5 * 60 + 1)
+
+
+def _released_unstarted(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: False)
+    poller.at(5 * 60 + 1)
+
+
+def _early_exit(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    with poller.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        requeue_unstarted(
+            connection,
+            job_id,
+            now=poller.now[0],
+            event=REQUEUED_EARLY_EXIT,
+            reason="its command ended without reaching the harness",
+            slot_guard="harness = ? AND runner_pid IS ?",
+            slot_params=("codex", 11),
+        )
+        connection.commit()
+
+
+def _start_failed(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    assert poller.pool.requeue_unstarted(
+        job_id, owner="codex", runner=11, reason="the checkout failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "recover", [_released_claim, _released_unstarted, _early_exit, _start_failed]
+)
+def test_recovering_a_job_after_the_merge_retires_it(tmp_path: Path, recover) -> None:
+    """The merge leaves a claimed job alone. Every path that would put it
+    back in the queue once its worker is known absent cancels it instead:
+    a finished ticket has no claimable harness work."""
+    poller = Poller(tmp_path)
+    job_id = poller.review()
+    poller.claim()
+    poller.dispatcher.record_terminal("maxharris1/factory", "72", "merged")
+
+    recover(poller, job_id)
+
+    assert poller.row(job_id)["state"] == "cancelled"
+    assert poller.pool.placement(job_id) is None
+    assert poller.pool.claim("codex") is None
+    assert poller.events()[-1] == (job_id, "cancelled")
+
+
+def test_an_answer_rejected_after_the_merge_requeues_nothing(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+    (build,) = jobs(flow.queue, "build")
+    flow.dispatcher.record_terminal(REPO, TICKET, "merged")
+
+    with flow.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        assert not flow.queue.requeue(build["id"], "answer-rejected:ready-1", connection=connection)
+        connection.commit()
+
+    assert _harness_jobs(flow.queue) == [("build", "cancelled")]
+    assert flow.queue.claim("claude") is None
+
+
+class _Waiter:
+    """`orch wait` for every harness, claiming at each label write of a pass."""
+
+    def __init__(self, flow: Flow):
+        self.claimed: list[str] = []
+        write = flow.actions.set_state
+
+        def set_state(ticket: TrackedTicket, state: str) -> None:
+            write(ticket, state)
+            for harness in ("claude", "codex"):
+                job = flow.queue.claim(harness)
+                if job is not None:
+                    self.claimed.append(job.request.action)
+
+        flow.actions.set_state = set_state
+
+
+def _restored(tmp_path: Path) -> Flow:
+    """A cycle backup holds the build queued; the builder then finished it,
+    and the state directory was lost and restored from that backup."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    assert flow.go() == "queued-build"
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.finish("claude")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    return flow
+
+
+def test_a_restored_job_is_unclaimable_until_a_pass_reads_its_thread(
+    tmp_path: Path,
+) -> None:
+    flow = _restored(tmp_path)
+
+    assert flow.queue.claim("claude") is None
+
+
+def test_a_restored_answered_build_is_never_claimable_during_the_pass(
+    tmp_path: Path,
+) -> None:
+    flow = _restored(tmp_path)
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert "build" not in waiter.claimed
+    assert outcome(flow.queue, "ready-1") == "queued-review"
+    assert ("build", "cancelled") in _harness_jobs(flow.queue)
+
+
+def test_a_restored_unanswered_build_is_queued_again_by_the_pass(tmp_path: Path) -> None:
+    flow = _restored(tmp_path)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert _harness_jobs(flow.queue) == [("build", "queued")]
+    rerun = flow.queue.claim("claude")
+    assert rerun is not None and rerun.request.action == "build"
+
+
+def test_a_replayed_plan_gap_is_never_claimable_once_answered(tmp_path: Path) -> None:
+    """A fresh database replays go, a round-1 plan with gaps, the round-2
+    plan and the ready. Plan round 2 and the build are answered in the read,
+    so no label write of the pass exposes either to a waiter."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="planning"), "grok-login")
+    flow.add("plan-1", PLAN.format(round=1, ac="unmet"), "claude-login")
+    flow.add("plan-2", PLAN.format(round=2, ac="met"), "claude-login")
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert [outcome(flow.queue, c) for c in ("plan-1", "plan-2", "ready-1")] == [
+        "queued-plan-gap",
+        "queued-plan-build",
+        "queued-review",
+    ]
+    assert not {"plan", "build"} & set(waiter.claimed)
+    assert [job for job in _harness_jobs(flow.queue) if job[0] != "review"] == [
+        ("plan", "cancelled"),
+        ("plan", "cancelled"),
+        ("build", "cancelled"),
+    ]
+
+
+def test_a_replayed_answers_resume_is_never_claimable_once_answered(
+    tmp_path: Path,
+) -> None:
+    """The builder asked, Grok answered and the builder's ready came after:
+    replaying the answers resumes a build the ready already answered."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("questions-1", QUESTIONS, "claude-login")
+    flow.add("answers-1", ANSWERS, "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert "build" not in waiter.claimed
+    assert {state for action, state in _harness_jobs(flow.queue)} == {"cancelled"}
