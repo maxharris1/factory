@@ -24,6 +24,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE
 from lib.status import main as status_main
+from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
 MACHINES = """\
@@ -621,7 +622,29 @@ class Recorder:
         return False
 
 
-def test_plain_orch_wait_beats_as_a_waiter_while_it_blocks(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_the_beat_thread_blocks_the_signals_orch_wait_guards(tmp_path: Path) -> None:
+    import signal
+    import threading
+
+    db, _ = make_db(tmp_path)
+    seen: list[set] = []
+    done = threading.Event()
+
+    class Probe(health.HealthStore):
+        def beat(self, *args, **kwargs):
+            seen.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+            done.set()
+
+    with health.Beater(db, "waiter", devices=["box"], bot="codex-bot", store=Probe(db),
+                       interval=60.0, log=lambda line: None):
+        assert done.wait(5)
+    assert {signal.SIGINT, signal.SIGTERM, signal.SIGHUP} <= set(seen[0])
+    assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, [])  # main thread untouched
+
+
+def test_plain_orch_wait_beats_as_a_waiter_while_it_blocks(
+    tmp_path: Path, monkeypatch, capsys, restore_signals
+) -> None:
     db, queue = make_db(tmp_path)
     queue.enqueue(request("codex"), dedupe_key="a")
     Recorder.entered = []

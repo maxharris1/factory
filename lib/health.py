@@ -47,6 +47,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sqlite3
 import stat
 import sys
@@ -334,12 +335,21 @@ def _real(value: float | None, default: float) -> float:
     return float(default if value is None else value)
 
 
+# Signals a heartbeat thread never takes, so the kernel delivers them to the
+# main thread: `orch wait` blocks SIGINT and SIGTERM there while it claims a
+# job (lib/wait.py), and a signal taken by an unblocked heartbeat thread
+# would still run its handler in the main thread mid-claim.
+BLOCKED_SIGNALS = frozenset({signal.SIGINT, signal.SIGTERM, signal.SIGHUP})
+
+
 class _Loop:
     """A daemon thread that calls `step` now and then every `interval` seconds."""
 
-    def __init__(self, name: str, interval: float, step: Callable[[], None]):
+    def __init__(self, name: str, interval: float, step: Callable[[], None], *,
+                 block_signals: bool = True):
         self._interval = interval
         self._step = step
+        self._block = block_signals
         self._halt = threading.Event()
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
@@ -352,6 +362,8 @@ class _Loop:
             self._thread.join(timeout=BUSY_SECONDS + 1)
 
     def _run(self) -> None:
+        if self._block:
+            signal.pthread_sigmask(signal.SIG_BLOCK, BLOCKED_SIGNALS)
         while not self._halt.is_set():
             self._step()
             self._halt.wait(self._interval)
@@ -507,7 +519,10 @@ class DeviceProber:
         self.log = log
         self.started_at = float(store.clock())
         self._failing = False
-        self._loop = _Loop("health-device-probe", interval, self.probe_once)
+        # Not blocked: its ssh children would inherit the mask. It runs only
+        # in `orch poll`, which has no claim guard.
+        self._loop = _Loop("health-device-probe", interval, self.probe_once,
+                           block_signals=False)
 
     def forget_others(self) -> None:
         try:
