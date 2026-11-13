@@ -915,11 +915,15 @@ def _remote_run(tmp_path: Path, harness: str, env: dict | None = None, *, profil
     machines, queue, _, job_id, ssh = remote_setup(tmp_path, harness)
     home = tmp_path / "worker-home"
     home.mkdir()
+    worker_bin = tmp_path / "worker-bin"
+    worker_bin.mkdir()
     (home / ".bash_profile").write_text(
-        f"{_PROFILES[profile]}\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n", encoding="utf-8"
+        f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n"
+        f"{_PROFILES[profile]}\nexport DEPLOY_PASSWORD={shlex.quote(WORKER_SECRET)}\n",
+        encoding="utf-8",
     )
     args, event = _REMOTE_EVENTS[harness]
-    cli = tmp_path / harness
+    cli = worker_bin / harness
     cli.write_text(
         f"#!{sys.executable}\nimport json, os\n"
         "cmd = 'deploy --pin ' + os.environ['DEPLOY_PASSWORD']\n"

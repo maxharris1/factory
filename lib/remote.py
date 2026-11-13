@@ -94,6 +94,7 @@ on its own.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import secrets
 import shlex
@@ -140,10 +141,12 @@ START_REFUSED = 125
 # The start writes its worker tag to the launch record (`launch_record`)
 # just before the exec into the harness, once the harness is found under
 # the login PATH; a start with no record of its tag never ran the harness.
-_LAUNCH = (
+_START_ENTER = (
     f'cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
+)
+_START_EXEC = (
     'command -v "$1" >/dev/null 2>&1 '
     '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
     f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
@@ -154,8 +157,19 @@ _REPORT_ENV = (
     f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
     "echo; "
 )
-_START_HARNESS = _LAUNCH + 'exec "$@"'
-_START_REPORTING = "exec 1>&3 3>&-; " + _LAUNCH + _REPORT_ENV + 'exec "$@"'
+# Factory, Nov 13: a harness's `--add-dir` directories are given only where
+# the device has them. After `--` come k (where the kept `--add-dir <dir>`
+# pairs go in the command), n, then n pairs of (path to test, directory as
+# given), then the command. Each path is tested with `test -d` on the device
+# at start time, after the profile ran; the command (still "$1") is then
+# found and exec'd as above. Paths and directories are positional
+# arguments, never spliced into the script text.
+_GUARD_DIRS = (
+    'k=$1; n=$2; shift 2; a=(); '
+    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$2"); fi; '
+    'shift 2; n=$((n-1)); done; '
+    'c=("$@"); set -- "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"; '
+)
 SSH_UNREACHABLE = 255
 
 GONE = "gone"
@@ -338,13 +352,25 @@ def start_script(
     command: Sequence[str],
     env: Mapping[str, str],
     *,
+    guarded_dirs: Sequence[str] = (),
+    insert_at: int = 0,
+    cd: str | None = None,
     report_env: bool = False,
 ) -> str:
-    """The remote script that runs command as the job's tagged worker;
-    with report_env, it first prints the WORKER_ENV_MARK line."""
+    """The remote script that runs command as the job's tagged worker.
+
+    guarded_dirs (Factory, Nov 13): each is passed to the command as
+    `--add-dir <dir>`, at index insert_at, only if `test -d` holds for it on
+    the device when the job starts. A relative dir is tested under cd (the
+    directory the command resolves it against, itself relative to the job
+    directory) when one is given. With none, the command runs as given.
+    With report_env, the start first prints the WORKER_ENV_MARK line.
+    """
     tag = target.require_tag()
     if not command:
         raise RemoteError("no command to run")
+    if guarded_dirs and not 1 <= insert_at <= len(command):
+        raise RemoteError(f"cannot add directories at argument {insert_at}")
     for name in env:
         if not _ENV_NAME.fullmatch(name) or name == TAG_ENV:
             raise RemoteError(f"environment name {name!r} is not plain")
@@ -356,11 +382,26 @@ def start_script(
     # claude, codex) is loaded. #99 A6: the job's environment and directory
     # are applied after the profile ran, so a profile can change neither.
     # Every step execs, so the start's pid and group are the harness's.
-    start = _START_REPORTING if report_env else _START_HARNESS
+    guard = ""
+    if guarded_dirs:
+        # Factory, Nov 13: each --add-dir only where the device has it.
+        pairs = " ".join(
+            f"{shlex.quote(posixpath.join(cd or '', path))} {shlex.quote(path)}"
+            for path in guarded_dirs
+        )
+        guard = f"{insert_at} {len(guarded_dirs)} {pairs} "
+    script = (
+        ("exec 1>&3 3>&-; " if report_env else "")
+        + _START_ENTER
+        + (_GUARD_DIRS if guarded_dirs else "")
+        + _START_EXEC
+        + (_REPORT_ENV if report_env else "")
+        + 'exec "$@"'
+    )
     login = (
-        f"exec {LOGIN_SHELL} -lc {shlex.quote(start)} {LOGIN_NAME} "
+        f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {shlex.quote(launch_record(target))} {assignments} '
-        f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {argv}'
+        f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {guard}{argv}'
         + (" 3>&1 1>&2" if report_env else "")
     )
     directory = shlex.quote(target.job_dir)

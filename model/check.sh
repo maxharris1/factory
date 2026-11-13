@@ -10,7 +10,7 @@ view=$root/model/view.mjs
 pin=de8ee15dd1194627d21eb5fcd41cb1873208dabb
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
-# GitHub rate-limits CI runners now and then. A 429 should not fail the check.
+# GitHub sometimes answers 429 or 5xx. Try each download a few times.
 retry() {
   tries=1
   until "$@"; do
