@@ -355,8 +355,20 @@ of the poller merging.
 
 `orch poll` opens an initialized database without creating it and holds
 `<db>.lock`, so a second poller is refused. Source failures are recorded per
-project or ticket and the long-running loop continues after the 60-second
-interval; `--once` reports a cycle-level failure with a nonzero exit.
+project or ticket and the long-running loop continues after the
+`poll_seconds` interval; `--once` reports a cycle-level failure with a
+nonzero exit.
+
+*Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
+every cycle. Linear keeps its own 60-second cadence and budget: the
+discovery search, dirty-row reads (with `linear_webhook`) and tracked Linear
+reads run only on every second cycle at 30 seconds (every cycle at 60), and
+the per-window Linear budget (20 requests, 25,000 complexity) still covers 60
+seconds. A direct Linear read between those cycles (the fresh read before a
+ship or write) counts against the same window, so a 30-second poller makes
+no more Linear calls per hour than a 60-second one, and the webhook's
+`reconcile_seconds` fallback is unchanged (docs/SPEC.md section 7).
+
 Each polling `gh api` read, including PR comments, check runs and commit
 status, has a 20-second timeout and is tried three times with 2- and 4-second
 backoff (writes are never retried); a ref that still times out records a retryable
@@ -437,7 +449,8 @@ owns the Funnel that exposes only the listener path. This repository
 installs no service for the listener and changes no network configuration.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
-tickets with queued or running jobs each cycle. Dirty untracked issues are
+tickets with queued or running jobs each Linear cycle (every cycle at
+`poll_seconds: 60`, every second cycle at 30). Dirty untracked issues are
 read directly, oldest first, under the same Linear budget; one outside the
 configured projects, completed, canceled or deleted is dropped quietly.
 A tracked ticket is reread in full only when it is dirty, has an active job,
@@ -906,10 +919,13 @@ handoff comment id itself is never copied); `poller.verdicts`, the newest
 `outcome` (a dispatcher outcome such as `queued-review-fix`, anything else
 `other`) and `kind` (`routed`, `shipped`, `stale`, `rejected`, `stuck`,
 `blocked`, `waiting`, `other`), `null` without that table;
-`poller.health`, `ok` while the last poll cycle ended at most 150 s ago,
-`late` to 300 s, then `stale`, and `unknown` when the snapshot was not
-told when the last cycle ended (only live pushes pass `--last-cycle`;
-`main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
+`poller.health`, with `cycle_seconds` set to the poller's `poll_seconds`
+(`P`, 30 or 60; `orch poll` passes it to each push as `--poll-seconds`,
+otherwise orch.yml's value is used): `ok` while the last poll cycle ended
+at most `2P + 30` seconds ago (90 s at 30, 150 s at 60), `late` to `5P`
+(150 s at 30, 300 s at 60), then `stale`, and `unknown` when the snapshot
+was not told when the last cycle ended (only live pushes pass
+`--last-cycle`; `main` records no per-cycle row); and `poller.linear_budget`, `rate_limited`
 (Linear 429 or `RATELIMITED` errors in the last hour), `exhausted` (`Linear
 poll budget is exhausted` errors), `deferring` (`Linear poll budget`
 deferrals) or `ok`, with those hourly counts and the poller's Linear share
@@ -1011,7 +1027,7 @@ it commented out, so nothing pushes until Max turns it on.
 
 *When it runs.* `orch poll`, which
 [`deploy/poller-service.sh`](deploy/poller-service.sh) runs, pushes after
-every poll cycle (60 seconds), or at most every `every_minutes` (1 to 1440)
+every poll cycle (`poll_seconds`, 30 as shipped), or at most every `every_minutes` (1 to 1440)
 when that is set. After a cycle it starts `orch dashboard push --once --db
 <db> [--orch <orch.yml>]` as a separate process and does not wait for it;
 if the previous push is still running it skips that cycle and logs so. The
