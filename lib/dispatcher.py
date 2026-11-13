@@ -49,6 +49,7 @@ GROK_WAKE_REASONS = (
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
+STUCK_WAKE_FAILURE_LIMIT = 2
 _QUESTIONS_HEADING = re.compile(
     r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
     re.IGNORECASE,
@@ -2405,6 +2406,25 @@ class Dispatcher:
         if self.log is not None:
             self.log(f"needs attention: {repo}#{ticket_id} {reason}")
 
+    def _flag_attention_once(
+        self,
+        connection: sqlite3.Connection,
+        repo: str,
+        ticket_id: str,
+        reason: str,
+        detail: str,
+    ) -> None:
+        added = connection.execute(
+            """
+            INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(repo, ticket_id, reason) DO NOTHING
+            """,
+            (repo.lower(), ticket_id, reason, detail[:SHIP_ERROR_LIMIT], self.queue.now()),
+        ).rowcount
+        if added and self.log is not None:
+            self.log(f"needs attention: {repo}#{ticket_id} {reason}")
+
     def clear_attention(self, repo: str, ticket_id: str, reason: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -4014,10 +4034,27 @@ class Dispatcher:
                 "SELECT state, detail FROM jobs WHERE id = ?",
                 (wake_job_id,),
             ).fetchone()
-            if wake is None or str(wake["state"]) != "failed":
+            if wake is not None and str(wake["state"]) != "failed":
                 return
-            if isinstance(wake["detail"], str):
+            if wake is not None and isinstance(wake["detail"], str):
                 previous_detail = str(wake["detail"])
+            failed = connection.execute(
+                """
+                SELECT count(*) FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'stuck'
+                  AND source_comment_id = ? AND state = 'failed'
+                """,
+                (repo.lower(), ticket_id, state["stuck_source_comment_id"]),
+            ).fetchone()[0]
+            if failed >= STUCK_WAKE_FAILURE_LIMIT:
+                self._flag_attention_once(
+                    connection,
+                    repo,
+                    ticket_id,
+                    "stuck-wake-failing",
+                    f"{failed} stuck wakes to Grok failed; no further wake is queued",
+                )
+                return
         generation = int(state["generation"]) + 1
         reason = (
             detail

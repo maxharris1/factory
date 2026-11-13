@@ -5325,3 +5325,64 @@ def test_stuck_wake_column_migrates_an_old_schema(tmp_path: Path) -> None:
         ).fetchone()[0]
     assert "stuck_wake_job_id" in columns
     assert wake is not None
+
+
+def _stuck_by_three_reds(dispatcher: Dispatcher) -> None:
+    for number in range(1, 4):
+        head = str(number) * 7
+        dispatcher.process(
+            ticket(
+                comment(
+                    f"ready-{number}",
+                    READY.format(head=head),
+                    author="claude-login",
+                ),
+                head=head,
+                ci={head: CIResult("failure")},
+            )
+        )
+
+
+def test_failing_stuck_wake_stops_after_two_and_flags_attention(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    delivery = RaisingGrokDelivery(RuntimeError("delivery unavailable"))
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    for fix in iter(lambda: queue.claim("claude"), None):
+        queue.finish(fix.id, owner="claude", handoff_comment_id=f"ready-{fix.id}")
+
+    for window in range(1, 6):
+        now[0] = 100.0 + window * 3600
+        dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        stuck = connection.execute(
+            "SELECT state FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+        attention = connection.execute(
+            "SELECT reason FROM needs_attention"
+        ).fetchall()
+    assert [row["state"] for row in stuck] == ["failed", "failed"]
+    assert [row["reason"] for row in attention] == ["stuck-wake-failing"]
+
+
+def test_missing_stuck_wake_row_is_regenerated(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM jobs WHERE action = 'stuck'")
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT id FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state"
+        ).fetchone()[0]
+    assert [row["id"] for row in rows] == [wake]
