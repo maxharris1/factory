@@ -31,6 +31,11 @@
 # ORCH_CRONTAB names the crontab command (default: crontab on PATH). If the
 # current crontab cannot be read (anything but "no crontab for <user>"),
 # install-autostart and remove-autostart change nothing and exit 1.
+#
+# State loss (#66): before a start, a missing ${ORCH_DB:-<state>/orch.db} is
+# restored from the backup `orch poll` takes every cycle (`orch restore-db`),
+# logging RESTORED. With no backup it is created empty (`orch init-db`) with a
+# WARNING; any other restore failure starts nothing.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +46,7 @@ PIDFILE="${STATE}/poller.pid"
 LOG="${ORCH_POLL_LOG:-${STATE}/poller.log}"
 SERVICE_LOG="${STATE}/poller-service.log"
 SERVICE_LOCK="${STATE}/poller-service.lock"
+DB="${ORCH_DB:-${STATE}/orch.db}"
 STOPPED="${STATE}/poller.stopped"
 AUTOSTART="${CONFIG}/poller-autostart"
 RUNNER="${HERE}/run-poller.sh"
@@ -107,6 +113,30 @@ start() {
     launch
 }
 
+# Both to stderr (the service log under cron) and to the poller log.
+loud() {
+    say "$@" | tee -a "$LOG" >&2
+}
+
+# #66: never start the poller on a silently empty database.
+ensure_db() {
+    local status=0
+    mkdir -p "$STATE" "$(dirname "$DB")"
+    [[ -e "$DB" ]] && return 0
+    orch restore-db --db "$DB" >&2 || status=$?
+    case "$status" in
+        0) loud "RESTORED orch.db from backup" ;;
+        3)
+            orch init-db --db "$DB" >&2 || return 1
+            loud "WARNING orch.db was missing and no backup exists; created an empty database (dedupe now relies on thread markers)"
+            ;;
+        *)
+            loud "orch.db is missing and orch restore-db exited ${status}; not starting the poller"
+            return 1
+            ;;
+    esac
+}
+
 # Start the poller unless it is running. Only `start` clears a stop.
 launch() {
     local pid child i
@@ -115,6 +145,7 @@ launch() {
         say "orch poll already running (pid ${pid})"
         return 0
     fi
+    ensure_db || return 1
     # fd 9 is the service lock; the poller must not inherit it.
     nohup "$RUNNER" --pidfile "$PIDFILE" >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
