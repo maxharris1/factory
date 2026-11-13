@@ -30,7 +30,7 @@ from lib.job_state import (
     requeue_unstarted,
     unstarted_too_long,
 )
-from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS, Approvals
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -46,6 +46,7 @@ GROK_WAKE_REASONS = (
     "stale",
     "done",
     "awaiting-ok",
+    "go-not-from-approver",
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
@@ -367,6 +368,7 @@ class Dispatcher:
         job_states: JobStateConfig | None = None,
         log: Callable[[str], None] | None = None,
         feeder: Feeder | None = None,
+        approvals: Approvals | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -388,6 +390,7 @@ class Dispatcher:
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
         self.feeder = feeder
+        self.approvals = approvals if approvals is not None else Approvals()
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
@@ -1069,12 +1072,13 @@ class Dispatcher:
         """T7: one Grok wake per stop, across restarts.
 
         refused wakes once per ticket. blocked and capped wake once per
-        ticket and head. unparsed and ship-failed wake once per comment.
+        ticket and head. unparsed, ship-failed and go-not-from-approver wake
+        once per comment.
         stuck goes through the ticket's stuck flag, which wakes once.
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
-        if reason in ("unparsed", "ship-failed", "rejected", "stale"):
+        if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
             once_key = source_comment_id
         elif reason in ("blocked", "capped", "done", "awaiting-ok"):
             once_key = head or "-"
@@ -1197,7 +1201,9 @@ class Dispatcher:
 
         One transaction raises cap_extra by 1, moves the ticket to fixing
         and queues the fix, keyed on the go comment so every go Max relays
-        queues exactly one fix. None when the ticket is not capped.
+        queues exactly one fix. None when the ticket is not capped. With the
+        GitHub App switch on, only an approver's go counts; any other wakes
+        Grok once with go-not-from-approver and changes nothing (#122).
         """
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
@@ -1224,6 +1230,12 @@ class Dispatcher:
             if row is None or row["workflow_state"] != "capped":
                 connection.commit()
                 return None
+            if not self._may_approve_go(comment.author):
+                connection.commit()
+                self._wake_comment_problem(
+                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
+                )
+                return True, "go-not-from-approver"
             cap_extra = int(row["cap_extra"]) + 1
             self.queue.enqueue_in_transaction(
                 connection,
@@ -1989,7 +2001,7 @@ class Dispatcher:
             changed_files=ticket.changed_files,
             label_events=ticket.label_events,
             comments=ticket.comments,
-            approver_trusted=self._trusted_login(hold.approver),
+            approver_allowed=self._may_approve(hold.approver),
             covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
         )
 
@@ -2004,10 +2016,24 @@ class Dispatcher:
         assert hold is not None
         if (
             comment.author.casefold() == hold.approver.casefold()
-            and self._trusted_login(hold.approver)
+            and self._may_approve(hold.approver)
         ):
             return "hold-ok"
         return "rejected-hold-ok-author"
+
+    def _may_approve(self, login: str) -> bool:
+        """A Max-only approval (#122): a trusted_logins key while the
+        GitHub App switch is off, else a login in approver_logins."""
+        if self.approvals.app_trust:
+            return self.approvals.may_approve(login)
+        return self._trusted_login(login)
+
+    def _may_approve_go(self, author: str) -> bool:
+        """A Linear author keeps today's rule: the app changes GitHub
+        identity only."""
+        if author.startswith("linear:") or not self.approvals.app_trust:
+            return True
+        return self.approvals.may_approve(author)
 
     def _trusted_login(self, login: str) -> bool:
         wanted = login.casefold()

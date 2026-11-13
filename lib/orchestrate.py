@@ -540,6 +540,36 @@ def go_comment(
     )
 
 
+APPROVAL_TOKEN_VARIABLES = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
+
+def approval_post_env(
+    environ: Mapping[str, str],
+    *,
+    app_trust: bool,
+    gh_config_dir: Path | None,
+) -> dict[str, str]:
+    """The environment for the gh call that posts a capped-ticket go or a
+    hold ok (#122), from orch.yml's approvals (lib.orch_yml.approvals).
+    Token variables are always dropped. With the app switch on, gh reads
+    only Max's approver profile; with none configured this refuses, so
+    those two kinds are never posted as the app bot."""
+    env = {key: value for key, value in environ.items() if key not in APPROVAL_TOKEN_VARIABLES}
+    if not app_trust:
+        return env
+    if gh_config_dir is None:
+        raise OrchestrateError(
+            "no approver_gh_config_dir in orch.yml: post it from maxharris1 by hand"
+        )
+    env["GH_CONFIG_DIR"] = str(gh_config_dir)
+    return env
+
+
 def format_stop_report(report: StopReport) -> str:
     return (
         f"**Stop**\n{report.stop}\n\n"
