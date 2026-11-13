@@ -404,6 +404,108 @@ def test_interrupted_install_leaves_the_old_copy(tmp_path: Path, monkeypatch: py
     assert (dest / ".orch-owned").is_file()
 
 
+def _orch_leftovers(home: Path) -> list[Path]:
+    return sorted(path for path in home.rglob(".orch-*") if path.name != ".orch-owned")
+
+
+def _is_publish(src: object, dst: object) -> bool:
+    src_path, dst_path = Path(str(src)), Path(str(dst))
+    return src_path.parent.name.startswith(".orch-staging-") and src_path.name == dst_path.name
+
+
+def test_cloud_install_replaces_owned_local_links(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    assert install_skills(ROOT, project, "local") == []
+    assert install_skills(ROOT, project, "cloud") == []
+    replies = tmp_path / "replies"
+    write_replies(replies, pinned_token(ROOT))
+    code, _prompt, errors = doctor(ROOT, project, "cloud", replies, print_canary=False)
+    assert code == 0, errors
+    assert _orch_leftovers(project) == []
+
+
+def test_crash_between_renames_is_recovered_on_next_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    home = tmp_path / "home"
+    assert install_skills(root, home, "cloud") == []
+    dest = home / ".claude" / "skills" / "poteto-mode"
+    (dest / "SKILL.md").write_text("owned-old\n", encoding="utf-8")
+    real_rename = os.rename
+    dead: list[bool] = []
+
+    def dying_rename(src: object, dst: object) -> None:
+        if dead or _is_publish(src, dst):
+            dead.append(True)
+            raise KeyboardInterrupt
+        real_rename(src, dst)
+
+    monkeypatch.setattr("lib.pstack_pin.os.rename", dying_rename)
+    monkeypatch.setattr("lib.pstack_pin._discard", lambda _path: None)
+    with pytest.raises(KeyboardInterrupt):
+        install_skills(root, home, "cloud")
+    monkeypatch.undo()
+    assert not dest.exists()
+    assert _orch_leftovers(home)
+
+    user = home / ".cursor" / "skills" / "poteto-mode"
+    shutil.rmtree(user)
+    user.mkdir()
+    (user / "notes.md").write_text("keep", encoding="utf-8")
+    refused = install_skills(root, home, "cloud")
+    assert any("refusing to replace unowned path" in error for error in refused)
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") == "owned-old\n"
+
+    shutil.rmtree(user)
+    assert install_skills(root, home, "cloud") == []
+    assert _orch_leftovers(home) == []
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") != "owned-old\n"
+
+
+def test_legacy_backup_leftover_is_restored_then_discarded(tmp_path: Path) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    home = tmp_path / "home"
+    assert install_skills(root, home, "cloud") == []
+    dest = home / ".claude" / "skills" / "poteto-mode"
+    (dest / "SKILL.md").write_text("owned-old\n", encoding="utf-8")
+    os.rename(dest, dest.parent / ".orch-backup-poteto-mode-ab12_cd3")
+    stray = home / ".agents" / "skills" / ".orch-backup-poteto-mode-zz99"
+    shutil.copytree(home / ".agents" / "skills" / "poteto-mode", stray)
+    user = home / ".cursor" / "skills" / "poteto-mode"
+    shutil.rmtree(user)
+    user.mkdir()
+    assert install_skills(root, home, "cloud")
+    assert (dest / "SKILL.md").read_text(encoding="utf-8") == "owned-old\n"
+    assert not stray.exists()
+    user.rmdir()
+    assert install_skills(root, home, "cloud") == []
+    assert _orch_leftovers(home) == []
+
+
+def test_failed_publish_rolls_back_the_old_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tiny_tree(tmp_path)
+    bump_pin(root, "a" * 40, "0.15.36")
+    home = tmp_path / "home"
+    assert install_skills(root, home, "cloud") == []
+    skill = home / ".claude" / "skills" / "poteto-mode" / "SKILL.md"
+    skill.write_text("owned-old\n", encoding="utf-8")
+    real_rename = os.rename
+
+    def failing_rename(src: object, dst: object) -> None:
+        if _is_publish(src, dst):
+            raise OSError("publish failed")
+        real_rename(src, dst)
+
+    monkeypatch.setattr("lib.pstack_pin.os.rename", failing_rename)
+    errors = install_skills(root, home, "cloud")
+    assert errors and "publish failed" in errors[0]
+    assert skill.read_text(encoding="utf-8") == "owned-old\n"
+    assert _orch_leftovers(home) == []
+
+
 def test_pin_rejects_a_symlink_and_a_non_regular_file(tmp_path: Path) -> None:
     root = tiny_tree(tmp_path)
     bump_pin(root, "a" * 40, "0.15.36")

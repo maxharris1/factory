@@ -54,6 +54,8 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _LOCK_KEYS = frozenset({"version", "commit", "token", "files"})
 _MARKER = ".orch-owned"
+_STAGING_PREFIX = ".orch-staging-"
+_LEGACY_BACKUP_PREFIX = ".orch-backup-"
 _INSTALLER = "orch-install-skills"
 Mode = Literal["local", "cloud"]
 
@@ -178,6 +180,7 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
         return [str(exc)]
     planned: list[tuple[Path, Path, str]] = []
     dir_errors: dict[Path, str] = {}
+    recovered: set[Path] = set()
     for name, src in skills:
         for dest in _destinations(anchor, name, mode):
             skills_dir = dest.parent
@@ -185,6 +188,9 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
                 dir_errors[skills_dir] = _symlink_skills_dir_error(anchor, skills_dir) or ""
             if dir_errors[skills_dir]:
                 continue
+            if skills_dir not in recovered:
+                recovered.add(skills_dir)
+                _recover_leftovers(skills_dir)
             refusal = _unowned_error(dest, name)
             if refusal:
                 errors.append(refusal)
@@ -395,7 +401,7 @@ def _place_owned(src: Path, dest: Path, mode: Mode, commit: str) -> None:
     skills_dir.mkdir(parents=True, exist_ok=True)
     if skills_dir.is_symlink() or not skills_dir.is_dir():
         raise OSError(f"refusing to follow symlinked skills dir {skills_dir}")
-    stage_root = Path(tempfile.mkdtemp(prefix=".orch-staging-", dir=skills_dir))
+    stage_root = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=skills_dir))
     staged = stage_root / dest.name
     try:
         if mode == "local":
@@ -405,31 +411,70 @@ def _place_owned(src: Path, dest: Path, mode: Mode, commit: str) -> None:
             _write_marker(staged, commit)
         else:
             _exhaustive(mode)
-        _swap_in(staged, dest)
+        _swap_in(staged, dest, stage_root / "backup" / dest.name)
     finally:
         _discard(stage_root)
 
 
-def _swap_in(staged: Path, dest: Path) -> None:
+def _swap_in(staged: Path, dest: Path, backup: Path) -> None:
     if dest.exists() or dest.is_symlink():
         if not _installer_owns(dest, dest.name):
             raise OSError(f"refusing to replace unowned path {dest}")
     if not dest.exists() and not dest.is_symlink():
         os.rename(staged, dest)
         return
-    if dest.is_symlink() or dest.is_file():
+    if _is_non_dir(staged) and _is_non_dir(dest):
         os.replace(staged, dest)
         return
-    backup_name = tempfile.mkdtemp(prefix=f".orch-backup-{dest.name}-", dir=dest.parent)
-    os.rmdir(backup_name)
-    backup = Path(backup_name)
+    backup.parent.mkdir()
     os.rename(dest, backup)
     try:
         os.rename(staged, dest)
-    except OSError:
+    except BaseException:
         os.rename(backup, dest)
         raise
-    _discard(backup)
+
+
+def _is_non_dir(path: Path) -> bool:
+    return path.is_symlink() or not path.is_dir()
+
+
+def _recover_leftovers(skills_dir: Path) -> None:
+    if skills_dir.is_symlink() or not skills_dir.is_dir():
+        return
+    for entry in sorted(skills_dir.iterdir()):
+        if entry.name.startswith(_STAGING_PREFIX) and not entry.is_symlink() and entry.is_dir():
+            backups = entry / "backup"
+            if not backups.is_symlink() and backups.is_dir():
+                for backup in sorted(backups.iterdir()):
+                    _restore_backup(backup, skills_dir / backup.name)
+            if _owned_leftover(entry):
+                _discard(entry)
+        elif entry.name.startswith(_LEGACY_BACKUP_PREFIX):
+            name = entry.name.removeprefix(_LEGACY_BACKUP_PREFIX).rsplit("-", 1)[0]
+            dest = skills_dir / name
+            if name and _installer_owns(entry, name):
+                if dest.exists() or dest.is_symlink():
+                    _discard(entry)
+                else:
+                    os.rename(entry, dest)
+
+
+def _restore_backup(backup: Path, dest: Path) -> None:
+    if dest.exists() or dest.is_symlink():
+        return
+    if _installer_owns(backup, backup.name):
+        os.rename(backup, dest)
+
+
+def _owned_leftover(stage_root: Path) -> bool:
+    for entry in stage_root.iterdir():
+        if entry.name == "backup" and not entry.is_symlink() and entry.is_dir():
+            if not all(_installer_owns(item, item.name) for item in entry.iterdir()):
+                return False
+        elif not _installer_owns(entry, entry.name):
+            return False
+    return True
 
 
 def _copy_tree(src: Path, dest: Path) -> None:
