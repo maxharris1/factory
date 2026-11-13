@@ -258,7 +258,7 @@ class Scrubber:
             and _SECRET_NAME.search(name)
             and not _NOT_SECRET_NAME.fullmatch(name)
         }
-        lines = {line.strip() for value in values for line in value.splitlines()}
+        lines = {line.strip() for value in values for line in value.splitlines() if line.strip()}
         unquoted = {_unquoted(value)[0] for value in values | lines}
         self._values = sorted(unquoted, key=len, reverse=True)
 

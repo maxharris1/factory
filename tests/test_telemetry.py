@@ -444,6 +444,12 @@ def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str
         assert not readable(secret, title), title
 
 
+def test_a_blank_line_in_a_secret_does_not_strip_quoting_from_every_title() -> None:
+    scrub = Scrubber({"DEPLOY_KEY": "first-key-line\n\n  \nsecond-key-line"})
+    assert scrub("echo 'hi' \"there\"") == "echo 'hi' \"there\""
+    assert scrub("cat 'first-key-line'") == "cat [redacted-env]"
+
+
 def test_flags_and_system_session_variables_are_not_treated_as_secrets() -> None:
     scrub = Scrubber({
         "XDG_SESSION_ID": "3", "XDG_SESSION_TYPE": "tty", "XDG_SESSION_CLASS": "user",
