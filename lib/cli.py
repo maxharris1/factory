@@ -17,7 +17,16 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import health, job_run, job_token, linear_webhook, placed_run, waiter, worktrees
+from lib import (
+    codex_sandbox,
+    health,
+    job_run,
+    job_token,
+    linear_webhook,
+    placed_run,
+    waiter,
+    worktrees,
+)
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -1114,10 +1123,32 @@ def _job_run_command(argv: list[str]) -> int:
     if token is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = token
+    harness = command
+    if placed.remote:
+        # A remote device has no orch.db (the waiter finishes its job on the
+        # box), so no box state dir is added; placed.argv runs a codex
+        # command by its bare name on the device's login PATH and keeps
+        # each --add-dir only where the device has it (Factory, Nov 13).
+        device = codex_sandbox.for_device(command)
+        if list(device.argv) != list(command) or device.guarded_dirs:
+            guarded = " ".join(device.guarded_dirs)
+            log(f"codex on {placed.device.name}: runs as {device.argv[0]!r} from its "
+                "login PATH" + (f"; --add-dir {guarded} only if it exists there"
+                                if guarded else ""))
+    else:
+        # #103: a sandboxed `codex exec` may write only its worktree, so its
+        # `orch job done` could not write orch.db (or -wal/-shm). Add the
+        # state dir, where it exists, as a writable root.
+        harness = codex_sandbox.with_state_dir(command, database)
+        if harness != command:
+            dirs = " ".join(str(path) for path in codex_sandbox.state_dirs(database)
+                            if str(path) in harness and str(path) not in command)
+            log(f"sandboxed codex exec: added --add-dir {dirs} (the orch state dir) "
+                f"so orch job done can write {database.name}")
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
         code = job_run.run(
-            placed.argv(command, remote_env),
+            placed.argv(harness, remote_env),
             beat=beat,
             interval=interval,
             log=log,
