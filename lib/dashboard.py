@@ -3,7 +3,8 @@
 `orch dashboard snapshot` opens the dispatcher database with a SQLite
 `mode=ro` URI and reads the tail of poller.log. It never writes either.
 It writes status.json and the self-contained pages (PAGES: index.html,
-job.html, activity.html, efficiency.html; see lib/dashboard_page.py) to an
+job.html, activity.html, efficiency.html, health.html; see
+lib/dashboard_page.py) to an
 output directory, each atomically (temp file in the same directory, fsync,
 then rename). Each page's inline script fetches status.json every 1 to 2
 seconds and updates in place. Without script (or when status.json cannot
@@ -25,6 +26,12 @@ markers matched in decoded form. The finished snapshot is walked once more so ev
 string in it has been through `redact` before it is written. Enumerated
 fields (including ticket workflow states) outside their known values are
 shown as "other".
+
+Health (#92): the component heartbeats in orch.health.db beside the
+database (lib/health.py, also opened read-only) become `health`; each
+down component and each harness with queued jobs but no live waiter is a
+needs-attention item linked to the Health tab, and such a queued job
+carries `no_waiter`. With no orch.health.db nothing is flagged.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from pathlib import Path
 
 import yaml
 
+from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_page import PAGES, render_pages
@@ -630,6 +638,21 @@ def collect_snapshot(
         if value is not None
     ]
     machines_state, devices, box_max = _machines(machines_path, db["held"])
+    report = component_health.load_report(
+        db_path,
+        now,
+        queued=[(item["job"], item["recipient"]) for item in db["queued"]],
+        machines=(
+            component_health.load_machines(machines_path)
+            if machines_path is not None
+            else None
+        ),
+    )
+    for item in db["queued"]:
+        flag = report.no_waiter_for(item["recipient"])
+        if flag is not None:
+            item["no_waiter"] = flag.harness
+            item["no_waiter_link"] = f"health.html#{flag.anchor}"
 
     snapshot = {
         "schema": SCHEMA,
@@ -676,16 +699,26 @@ def collect_snapshot(
             "verdicts": db["verdicts"],
         },
         "handoff_savings": db["handoff_savings"],
-        "attention": _attention(db["stuck_tickets"], db["overdue_jobs"], db["paused"]),
+        "attention": _attention(
+            db["stuck_tickets"], db["overdue_jobs"], db["paused"], report
+        ),
+        "health": component_health.report_json(report, now),
         "statechart": chart,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
 
-def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> dict:
+def _attention(
+    stuck: list[dict],
+    overdue: list[dict],
+    paused: list[dict],
+    health: component_health.HealthReport | None = None,
+) -> dict:
     """Everything that needs Max, each ticket or job once: stuck tickets,
-    overdue jobs, then paused tickets that are not already listed as stuck.
-    `count` is the badge on every page."""
+    overdue jobs, paused tickets that are not already listed as stuck, then
+    (#92) down components and harnesses whose queued jobs have no live
+    waiter, each linked to its Health tab row. `count` is the badge on
+    every page."""
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
@@ -713,6 +746,19 @@ def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> di
         detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
         items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
                       "detail": detail})
+    for component in health.down if health is not None else ():
+        reason = f" ({component.reason})" if component.reason else ""
+        items.append({"kind": "down", "repo": "", "ticket_id": "",
+                      "component": component.label,
+                      "link": f"health.html#{component.anchor}",
+                      "detail": f"down{reason}"})
+    for flag in health.no_waiter if health is not None else ():
+        count = len(flag.jobs)
+        items.append({"kind": "no-waiter", "repo": "", "ticket_id": "",
+                      "component": f"waiter {flag.bot}",
+                      "link": f"health.html#{flag.anchor}",
+                      "detail": f"no waiter for {flag.harness} "
+                                f"({count} queued job{'' if count == 1 else 's'})"})
     return {"count": len(items), "items": items}
 
 

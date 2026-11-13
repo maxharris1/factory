@@ -518,6 +518,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "poller",
         "handoff_savings",
         "attention",
+        "health",  # component heartbeats (#92)
         "statechart",
     }
     json.dumps(snapshot)
@@ -1276,7 +1277,8 @@ def test_write_snapshot_is_atomic_and_leaves_no_temp_files(
 
     monkeypatch.setattr(dashboard.os, "replace", spy)
     paths = dashboard.write_snapshot_pages(out, snapshot)
-    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html"]
+    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
+             "health.html"]
     assert [target for _, target in replaced] == names
     assert all(source.startswith(".") for source, _ in replaced)
     assert paths == tuple(out / name for name in names)
@@ -1386,7 +1388,8 @@ def test_cli_snapshot_writes_both_files(tmp_path: Path) -> None:
         "dashboard", "snapshot", "--db", str(db), "--log", str(log), "--out", str(out)
     )
     assert result.returncode == 0, result.stderr
-    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html"]
+    names = ["status.json", "index.html", "job.html", "activity.html", "efficiency.html",
+             "health.html"]
     assert sorted(path.name for path in out.iterdir()) == sorted(names)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["queue"]["totals"]["queued"] == 2

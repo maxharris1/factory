@@ -3,6 +3,8 @@
 A running job is shown with its lib/job_state.py state (claimed, running,
 stale or dead) instead of the queue's plain `running` (#75), so a job a bot
 claimed and never started, or whose heartbeat stopped, reads as such.
+The Health section (#92) lists each component heartbeat (lib/health.py) and
+marks a queued job with no live waiter for its harness.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, TextIO
 
+from lib import health as component_health
 from lib.device_pool import SLOTS_TABLE, Placement
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
 from lib.linear_webhook import WebhookHealth, read_health
@@ -83,6 +86,8 @@ class Status:
     # Only when a Linear webhook listener or webhook-mode poller has run on
     # this database (#55).
     webhook: WebhookHealth | None = None
+    # Component heartbeats (#92), when build_status was given a reader.
+    health: component_health.HealthReport | None = None
 
 
 class TrackerReader(Protocol):
@@ -275,12 +280,16 @@ def build_status(
     slots: Mapping[str, Placement] | None = None,
     job_states: JobStateConfig | None = None,
     alive: Alive | None = None,
+    health: Callable[[float, list[tuple[str, str]]], component_health.HealthReport]
+    | None = None,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device; only running
     jobs without one (Phase 1 claims) occupy `Slots — box`. Each running
     job gets its job_state from `slots` (the full placements), the stale
-    threshold in `job_states`, and `alive` (a local pid check, or None)."""
+    threshold in `job_states`, and `alive` (a local pid check, or None).
+    `health(now, queued)` builds the Health section from (job id,
+    recipient) for each queued job."""
     observed_at = clock()
     config = job_states if job_states is not None else JobStateConfig()
     held = slots or {}
@@ -310,6 +319,14 @@ def build_status(
             row.id,
         ),
     )
+    report = (
+        health(
+            observed_at,
+            [(row.id, row.recipient) for row in job_rows if row.state == "queued"],
+        )
+        if health is not None
+        else None
+    )
     device_jobs: dict[str, tuple[JobRow, ...]] = {}
     for row in running:
         if row.id in placed:
@@ -324,6 +341,7 @@ def build_status(
             )
         ),
         webhook=webhook,
+        health=report,
         box_slots=tuple(row for row in running if row.id not in placed),
         devices=tuple(devices),
         device_jobs=device_jobs,
@@ -351,7 +369,8 @@ def render(status: Status) -> str:
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [f"orch status {timestamp}", "", f"Queue ({len(status.queued)})"]
     lines.extend(
-        _job_line(row, status.observed_at, row.created_at) for row in status.queued
+        _job_line(row, status.observed_at, row.created_at) + _no_waiter(status, row)
+        for row in status.queued
     )
     if not status.queued:
         lines.append("  empty")
@@ -392,7 +411,15 @@ def render(status: Status) -> str:
         warning = status.webhook.silence_warning(status.observed_at)
         if warning is not None:
             lines.append(f"  warning: {warning}")
+    if status.health is not None:
+        lines.append("")
+        lines.extend(component_health.render_lines(status.health, status.observed_at))
     return "\n".join(lines) + "\n"
+
+
+def _no_waiter(status: Status, row: JobRow) -> str:
+    flag = status.health.no_waiter_for(row.recipient) if status.health else None
+    return f" [no waiter for {flag.harness}]" if flag is not None else ""
 
 
 def _webhook_line(health: WebhookHealth, observed_at: float) -> str:
@@ -462,6 +489,9 @@ def main(
                 slots=reader.slots(),
                 job_states=job_states,
                 alive=pid_alive,
+                health=lambda now, queued: component_health.load_report(
+                    path, now, queued=queued, machines=machines
+                ),
             )
         )
     except (sqlite3.Error, StatusError) as exc:

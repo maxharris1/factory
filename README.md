@@ -766,6 +766,51 @@ section shows the last delivery (or `never` and the listener's age, or
 `never (listener has not started)`) and the
 dirty-queue depth, plus a warning after more than an hour with no delivery
 while any tracked Linear ticket is not merged, handed off, done or abandoned.
+The last section is `Health` (next section), and a queued job that no live
+waiter can take ends with `[no waiter for <harness>]`.
+
+## Health
+
+```sh
+bin/orch health --db "$ORCH_DB"            # exit 3 when something needs attention
+bin/orch health --db "$ORCH_DB" --json     # what the hourly momentum check reads
+bin/orch health beat tunnel --db "$ORCH_DB" --pid "$TUNNEL_PID"
+bin/orch health forget waiter --db "$ORCH_DB" --bot cursor-bot
+```
+
+Every long-running part of the factory writes a heartbeat row every 15
+seconds (issue #92; `lib/health.py`): `orch poll` (`poller`, not with
+`--once`), each bot's `orch wait` (`waiter`, one row per device it claims
+on), `orch linear-webhook serve` (`linear-listener`), and the dashboard
+writer (`dashboard`, once per `orch dashboard push` snapshot). The poller
+also probes each enabled, non-placeholder remote device in `machines.yml`
+over SSH every 60 seconds (`device-probe`, through the device's first bot
+alias, `ssh -o BatchMode=yes ... exit 0`); only a device that answered
+counts as seen. The tunnel in front of the Linear listener is not an `orch`
+process, so whatever supervises it runs `orch health beat tunnel --pid
+<tunnel pid>` every 15 seconds (nothing is recorded if that pid is not
+running); until it first does, no tunnel row exists.
+
+A row is `(component, device, bot, pid, started_at, last_seen, version,
+interval_seconds, stopped_at, checked_at)`, where version is the checkout's
+commit (12 hex digits, read from `.git`) or `unknown`. Each value must be an
+allowlisted name, number or SHA, so nothing else can be written. Rows live
+in `orch.health.db` beside `orch.db` (created with `orch.db`'s permission
+bits and group), so the heartbeats never wake the live dashboard push,
+which watches `orch.db`. A beat that cannot be written logs one line
+naming the exception class and never stops its component.
+
+A component is **up** while its last beat is at most 3 intervals old,
+**stale** up to 8 intervals, then **down** (45 seconds and 2 minutes at the
+15-second beat; 3 and 8 minutes for a device probe). A clean exit marks an
+autostart waiter, the poller and the listener stopped, which is down at
+once; a plain `orch wait` removes its rows when it exits, since it exits
+by design after a claim. A device whose latest probe failed is at least
+stale. Once any heartbeat exists, a poller with no row is shown down
+(`never seen`). A queued harness job is flagged **no waiter for
+<harness>** when no up or stale waiter for its bot runs on a device
+`machines.yml` makes eligible for the harness. `orch health forget` removes
+a retired component's rows (a disabled device's probe row goes by itself).
 
 ## Dashboard
 
@@ -778,8 +823,8 @@ The box cannot take inbound tailnet connections, so there is no live
 server on it. `orch dashboard snapshot` opens the dispatcher database
 read-only (a SQLite `mode=ro` URI with `query_only`; a missing file is
 refused, never created), reads the last 50 lines of `poller.log`, and
-writes `status.json` and four self-contained pages (`index.html`,
-`job.html`, `activity.html`, `efficiency.html`) to `--out`.
+writes `status.json` and five self-contained pages (`index.html`,
+`job.html`, `activity.html`, `efficiency.html`, `health.html`) to `--out`.
 The database path is resolved through symlinks first, and the dashboard
 never uses `immutable=1`: SQLite takes its normal shared locks and reads
 the WAL, so a read stays consistent while the poller commits or
@@ -848,6 +893,13 @@ already listed as stuck, each once).
   comments by outcome), every tracked ticket and the redacted log tail.
 - **Efficiency** (`efficiency.html`): poll health and Linear-budget health,
   and handoff savings with a one-line definition of scripted share.
+- **Health** (`health.html`, issue #92): every component heartbeat as up,
+  stale or down, with last seen in ET, its age, pid, device, version and
+  start time, and each harness whose queued jobs have no live waiter (see
+  "Health"). A down component and a harness with no waiter are
+  needs-attention items on every page, linked to their Health row, and a
+  queued job with no waiter carries a `no waiter for <harness>` link in the
+  queue rail. With no `orch.health.db` nothing is flagged.
 
 Each page is rendered in full on the box, so it reads without script; it
 then reloads every `dashboard.refresh_seconds` (15 to 30, default 20;
@@ -1004,7 +1056,7 @@ dashboard:
 That is the confirmed target: the files land in
 `/home/cursor-bot/factory-dashboard` on pc-wsl-bots (the same upload by hand
 is `scp -F /home/box/.ssh/config status.json index.html activity.html
-efficiency.html job.html pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
+efficiency.html job.html health.html pc-wsl-cursor-bot:factory-dashboard/`), and the static server below serves
 them tailnet-only at <http://pc-wsl-bots.tail68624b.ts.net:8090/>.
 `config/orch.example.yml` carries this section; the shipped `orch.yml` has
 it commented out, so nothing pushes until Max turns it on.
@@ -1079,8 +1131,8 @@ small standard-library server, instead of `python3 -m http.server` (which
 follows symlinks out of its directory, lists directories, and serves the
 home directory when `--directory` is empty). It answers GET and HEAD only,
 and only for `/`, `/status.json` and the four pages (`/index.html`,
-`/job.html`, `/activity.html`, `/efficiency.html`; an older copy of the
-server answers 404 for the last three until it is replaced): every other path, dot-
+`/job.html`, `/activity.html`, `/efficiency.html`, `/health.html`; an older
+copy of the server answers 404 for the last four until it is replaced): every other path, dot-
 file, `..` or encoded slash is a 404, and no directory is ever listed. Each
 file is opened, with `O_NOFOLLOW`, relative to a descriptor for the
 directory that the server opens once at startup (so swapping the directory

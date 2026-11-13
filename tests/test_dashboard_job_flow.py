@@ -42,6 +42,7 @@ NAV = [
     ("job.html", "Jobs"),
     ("activity.html", "Activity"),
     ("efficiency.html", "Efficiency"),
+    ("health.html", "Health"),  # #92
 ]
 # Ticket 40 (tests/test_dashboard_layout.py _history): built, reviewed,
 # revised once, now in its second review.

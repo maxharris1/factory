@@ -10,11 +10,12 @@ when configured, pushes it out. Paths:
          sections are used)
   --machines else the checkout's machines.yml, when present
 
-`snapshot` writes status.json and the four pages (index.html, job.html,
-activity.html, efficiency.html); `push` sends them all. `push --status-only`
-sends status.json alone (the live pushes `orch poll`
+`snapshot` writes status.json and the five pages (index.html, job.html,
+activity.html, efficiency.html, health.html); `push` sends them all.
+`push --status-only` sends status.json alone (the live pushes `orch poll`
 starts on every orch.db change); `--last-cycle EPOCH` is when the poller's
-last cycle ended, reported as poll health.
+last cycle ended, reported as poll health. Each push snapshot records the
+`dashboard` heartbeat in orch.health.db (lib/health.py, #92).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 
+from lib import health
 from lib.dashboard import (
     DashboardError,
     collect_snapshot,
@@ -34,7 +36,7 @@ from lib.dashboard import (
 from lib.dashboard_config import DashboardConfig, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_push import NoopTransport, run_push, transport_for
 from lib.job_state import JobStateConfig
-from lib.orch_yml import load_orch_yml
+from lib.orch_yml import POLL_SECONDS, load_orch_yml
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -97,6 +99,19 @@ def main(argv: list[str]) -> int:
             paths = _snapshot(
                 args, config, None, last_cycle_at=args.last_cycle, job_states=job_states
             )
+            # The dashboard writer's heartbeat (#92), at the cadence it runs:
+            # the push loop's interval, or the poller's push schedule.
+            every = config.push.every_minutes
+            health.beat_once(
+                _db(args),
+                health.DASHBOARD,
+                interval=(
+                    (every * 60 if every else POLL_SECONDS)
+                    if args.once
+                    else config.push.interval_seconds
+                ),
+                machines=args.machines,
+            )
             # Live pushes send status.json alone; the page polls it.
             return paths[:1] if args.status_only else paths
 
@@ -151,7 +166,7 @@ def _snapshot(
     job_states: JobStateConfig | None = None,
 ) -> tuple[Path, ...]:
     """status.json first, then every page."""
-    db = args.db if args.db is not None else Path(os.environ["ORCH_DB"])
+    db = _db(args)
     log = args.log or _env_path("ORCH_POLL_LOG") or db.parent / "poller.log"
     out = args.out or _env_path("ORCH_DASHBOARD_DIR") or db.parent / "dashboard"
     machines = args.machines if args.machines is not None else ROOT / "machines.yml"
@@ -165,6 +180,10 @@ def _snapshot(
         job_states=job_states,
     )
     return write_snapshot_pages(out, snapshot)
+
+
+def _db(args: argparse.Namespace) -> Path:
+    return args.db if args.db is not None else Path(os.environ["ORCH_DB"])
 
 
 def _env_path(name: str) -> Path | None:

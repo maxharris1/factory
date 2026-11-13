@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import job_run, linear_webhook, placed_run, waiter, worktrees
+from lib import health, job_run, linear_webhook, placed_run, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -64,6 +64,7 @@ commands:
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
+  health           component heartbeats: report, beat or forget (issue #92)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -193,6 +194,20 @@ linear-webhook serve [--db PATH] [--orch PATH] [--bind HOST:PORT]
   A signed Issue or Comment for a configured Linear project upserts one
   linear_dirty row in the existing database; nothing else is done. --bind
   overrides linear_webhook.bind. Exits 2 when no webhook is configured.
+
+health [--db PATH] [--machines PATH] [--json]
+  Print each component's heartbeat (poller, waiters, Linear listener,
+  tunnel, dashboard writer, device probes) as up, stale or down, with
+  last-seen in ET, pid and device, and each queued harness job with no
+  live waiter on an eligible device ("no waiter for <harness>"). Reads
+  orch.health.db beside the database. Exits 3 when a component is down
+  or a queued job has no waiter, else 0.
+health beat <component> [--db PATH] [--device NAME] [--bot BOT] [--pid PID]
+            [--interval SECONDS]
+  Record one heartbeat for a component orch does not run itself (the
+  tunnel). With --pid, nothing is recorded unless that pid is running.
+health forget <component> [--db PATH] [--device NAME] [--bot BOT]
+  Remove a retired component's rows.
 """
 
 
@@ -226,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_gc, argv[1:])
     if argv[0] == "linear-webhook":
         return _call(_linear_webhook, argv[1:])
+    if argv[0] == "health":
+        return health.main(argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -364,11 +381,23 @@ def _wait(argv: list[str]) -> int:
     except (waiter.WaiterError, OSError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    # Heartbeats (#92): one waiter row per device this waiter claims on.
+    # An autostart waiter marks its rows stopped on exit; a plain wait,
+    # which exits by design once it claims, removes them.
+    beats = health.Beater(
+        database,
+        health.WAITER,
+        devices=health.waiter_devices(machines, args.bot),
+        bot=args.bot,
+        on_exit="stop" if harness is not None else "delete",
+    )
     if harness is not None:
-        return _wait_autostart(args, queue, pool, harness)
+        with beats:
+            return _wait_autostart(args, queue, pool, harness)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        wait_for_job(queue, recipient, sys.stdout, pool=pool)
+        with beats:
+            wait_for_job(queue, recipient, sys.stdout, pool=pool)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -456,6 +485,9 @@ def _poll(argv: list[str]) -> int:
                 watcher = after_poll if isinstance(after_poll, LivePusher) else None
                 if watcher is not None:
                     watcher.start()
+                # Heartbeats (#92): the poller's own row and the per-device
+                # SSH reachability probe, each in its own daemon thread.
+                beats = health.poller_beats(path, args.machines).start()
                 try:
                     loop.run(
                         on_error=lambda exc: dispatcher.record_poll_error(
@@ -468,6 +500,7 @@ def _poll(argv: list[str]) -> int:
                 finally:
                     if watcher is not None:
                         watcher.stop()
+                    beats.stop()
     except (
         GrokDeliveryError,
         PollSourceError,
@@ -1068,7 +1101,8 @@ def _linear_webhook(argv: list[str]) -> int:
     print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
-        server.serve_forever()
+        with health.beating(path, health.LISTENER):  # heartbeat (#92)
+            server.serve_forever()
     except KeyboardInterrupt:
         return 130
     finally:
