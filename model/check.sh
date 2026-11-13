@@ -10,14 +10,13 @@ view=$root/model/view.mjs
 pin=de8ee15dd1194627d21eb5fcd41cb1873208dabb
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
-# GitHub answers 429 to busy CI runners. Try a download five times, waiting
-# longer each time, before the check fails.
+# GitHub sometimes answers 429 or 5xx. Try each download a few times.
 retry() {
-  try=1
+  tries=1
   until "$@"; do
-    [ "$try" -lt 5 ] || return 1
-    sleep $((try * 15))
-    try=$((try + 1))
+    [ "$tries" -lt 5 ] || return 1
+    sleep $((tries * 15))
+    tries=$((tries + 1))
   done
 }
 

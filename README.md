@@ -660,6 +660,39 @@ the claim, with no model turn and no message to any bot. The harness posts its
   `<state>/jobs/<job-id>/brief.md` (mode 600, path in `$ORCH_JOB_BRIEF`);
   `orch job run`'s output goes to `run.log` beside it. `--state-dir`
   defaults to `~/.local/state/factory/waiter-<bot>`.
+- **Sandboxed Codex (issue #103).** `codex exec --sandbox workspace-write`
+  lets the model's commands write only the job worktree, so the harness's own
+  `orch job done` used to fail with "attempt to write a readonly database"
+  and every Codex job ended failed (`job-failed-2`). On the box, `orch job
+  run` ([`lib/codex_sandbox.py`](lib/codex_sandbox.py)) now adds
+  `--add-dir <state dir>` right after `exec`, where the state dir is the
+  directory of the resolved `--db`/`$ORCH_DB` (it holds `orch.db`, its
+  `-wal`/`-shm` and the waiter lock; for a symlinked database, the real
+  file's directory too). It does so only for a sandboxed `codex exec`:
+  `argv[0]` named `codex`, the `exec` (or `e`) subcommand, and an effective
+  workspace-write sandbox (`-s`/`--sandbox workspace-write`, `-c
+  sandbox_mode=workspace-write`, or `--full-auto`; not with
+  `--dangerously-bypass-approvals-and-sandbox`). Claude, Cursor, an
+  unsandboxed or read-only Codex, and a wrapper such as `env codex` run
+  exactly as configured. A directory already given with an absolute
+  `--add-dir` is not added again, so a box-local `waiter-codex-bot.yml` that
+  carries the manual stopgap (`--add-dir /home/box/.local/state/factory`, an
+  absolute path) keeps working unchanged. The directory is added only if
+  it exists. The sandboxed harness can then write anything in the state
+  dir, the database included, as the bot's own user already can outside
+  the sandbox.
+- **One harness command for every device.** A bot's waiter config is
+  shared by the box and its remote devices, so a codex review placed on the
+  PC used to fail with exit 127 on the box path `/home/box/.local/bin/codex`.
+  For a remote run, `orch job run` runs a codex command by its bare name
+  `codex`, found on the device's own login PATH (`bash -lc`, as every placed
+  command already runs), and takes each `--add-dir` out of the argv: the
+  start script gives `--add-dir <dir>` back only if `test -d <dir>` holds on
+  the device; a relative `<dir>` is tested under codex's `-C`/`--cd`
+  directory, where codex resolves it. No box state dir is sent (the device
+  has no `orch.db`; the waiter runs `orch job done` on the box), and no
+  device path is made up.
+  Claude and Cursor commands run exactly as configured.
 - **Every device (issue #85).** The autostart waiter claims through the whole
   device pool, so the least-loaded device takes the job. On a remote device
   it runs `orch job run` without `--worktree` (the harness starts over the
