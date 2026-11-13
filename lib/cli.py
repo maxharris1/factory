@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
 
-from lib import job_run, linear_webhook, placed_run, worktrees
+from lib import job_run, linear_webhook, placed_run, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -111,8 +111,23 @@ wait <bot> [--db PATH] [--machines PATH]
   dispatcher database has a queued job for that bot and a device in
   machines.yml (--machines, default the checkout's) has a free slot for
   its harness, claims both, prints one JSON line (with "device" and
-  "remote"; a remote job also has "workdir"), and exits 0. It never
-  starts a harness. --db defaults to $ORCH_DB.
+  "remote"; a remote job also has "workdir"), and exits 0. Without
+  --autostart it never starts a harness. --db defaults to $ORCH_DB.
+wait <bot> --autostart [--db PATH] [--machines PATH] [--harness-config PATH]
+                       [--orch PATH] [--state-dir DIR]
+  Run as the bot's own user. Loops: claims the bot's next job on a box
+  slot, writes its standard brief (with the repo's factory.md prose, read
+  from orch.yml's factory_ref with gh) to DIR/jobs/<job-id>/brief.md, runs
+  `orch job run <bot> <job-id> --worktree -- COMMAND` in its own session
+  with the brief on stdin and in ORCH_JOB_BRIEF, and waits again. COMMAND
+  is the argv in --harness-config (default
+  ~/.config/factory/waiter-<bot>.yml: `bot` and `command`, owned by this
+  user, writable by no one else); nothing from a job is added to it.
+  --orch defaults to the checkout's orch.yml; --state-dir to
+  ~/.local/state/factory/waiter-<bot>. A job with no standard brief, or
+  whose start fails, is failed for T6. SIGTERM exits 0 and leaves running
+  jobs alone. Run it under deploy/waiter-service.sh or
+  deploy/orch-waiter@.service so it restarts by itself.
 
 job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         [--worktree] [--work-root DIR] [--git-url-template URL]
@@ -306,16 +321,38 @@ def _wait(argv: list[str]) -> int:
     parser.add_argument("bot")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--machines", type=Path)
+    parser.add_argument("--autostart", action="store_true")
+    parser.add_argument("--harness-config", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--state-dir", type=Path)
     args = parser.parse_args(argv)
+    if not args.autostart and (
+        args.harness_config is not None or args.orch is not None or args.state_dir is not None
+    ):
+        print("orch wait: --harness-config, --orch and --state-dir need --autostart", file=sys.stderr)
+        return 2
     try:
         recipient = recipient_for(args.bot)
+        harness = (
+            waiter.load_harness_command(
+                args.harness_config or waiter.default_harness_config(args.bot), args.bot
+            )
+            if args.autostart
+            else None
+        )
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
+        if args.autostart:
+            machines = waiter.local_only(machines)
+            if not machines.devices:
+                raise waiter.WaiterError("machines.yml has no local device to autostart jobs on")
         pool = _device_pool(queue, machines)
-    except (WaitError, ValueError) as exc:
+    except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    if harness is not None:
+        return _wait_autostart(args, queue, pool, harness)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         wait_for_job(queue, recipient, sys.stdout, pool=pool)
@@ -326,6 +363,52 @@ def _wait(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     return 0
+
+
+def _wait_autostart(
+    args: argparse.Namespace,
+    queue: SQLiteJobQueue,
+    pool: DevicePool,
+    harness: waiter.HarnessCommand,
+) -> int:
+    """Claim, start the bot's harness under `orch job run`, wait again (#80)."""
+    orch_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+    config, findings = load_orch_yml(orch_path, allow_placeholders=True)
+    errors = [item.message for item in findings if item.severity == "error"]
+    note = None
+    if config is None or errors:
+        config = None
+        note = f"{orch_path}: {errors[0] if errors else 'not loaded'}"
+
+    def log(message: str) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        print(f"{stamp} orch wait {args.bot}: {message}", file=sys.stderr, flush=True)
+
+    if note is not None:
+        log(f"factory.md context is off: {note}")
+    try:
+        run = waiter.Waiter(
+            bot=args.bot,
+            queue=queue,
+            pool=pool,
+            harness=harness,
+            context=waiter.GhContextSource(config, note=note),
+            state_dir=args.state_dir or waiter.default_state_dir(args.bot),
+            db=_db_path(args.db),
+            machines=args.machines if args.machines is not None else ROOT / "machines.yml",
+            log=log,
+        )
+    except (WaitError, waiter.WaiterError) as exc:
+        print(f"orch wait: {exc}", file=sys.stderr)
+        return 2
+    stop = waiter.StopFlag()
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, stop.set)
+    try:
+        return run.serve(stop)
+    except WaitError as exc:
+        log(str(exc))
+        return 1
 
 
 def _poll(argv: list[str]) -> int:

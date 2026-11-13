@@ -3,6 +3,9 @@
 The waiter sleeps on F1-04's queue (lib/queue.py) until a claim returns a
 job, prints it, and exits. It calls no model and never execs a process:
 the owning bot that ran the shell call starts its own harness afterwards.
+`orch wait <bot> --autostart` (lib/waiter.py, #80) reuses `claim_once` here
+and starts the claimed job under `orch job run` itself; this module still
+starts nothing.
 
 Since F2-02 the claim goes through the device pool (lib/device_pool.py):
 the job moves to running and holds a slot on the first eligible device
@@ -135,8 +138,8 @@ def wait_for_job(
         leaving = True
         try:
             try:
-                claimed = _claim(queue, recipient, pool)
-            except _Locked:
+                claimed = claim_once(queue, recipient, pool)
+            except Locked:
                 claimed = None
                 locked += 1
             else:
@@ -151,7 +154,7 @@ def wait_for_job(
                 for signum in GUARDED_SIGNALS:
                     signal.signal(signum, signal.SIG_IGN)
             signal.pthread_sigmask(signal.SIG_UNBLOCK, GUARDED_SIGNALS)
-        sleep(_lock_backoff(locked) if locked else POLL_SECONDS)
+        sleep(lock_backoff(locked) if locked else POLL_SECONDS)
 
 
 def retry_locked(
@@ -168,7 +171,7 @@ def retry_locked(
         except sqlite3.OperationalError as exc:
             if not is_locked(exc) or attempt >= LOCK_ATTEMPTS:
                 raise
-        pause(_lock_backoff(attempt))
+        pause(lock_backoff(attempt))
         attempt += 1
 
 
@@ -183,7 +186,7 @@ def is_locked(exc: BaseException) -> bool:
     return "database is locked" in text or "database is busy" in text
 
 
-def _lock_backoff(attempt: int) -> float:
+def lock_backoff(attempt: int) -> float:
     """Doubling from LOCK_BACKOFF_SECONDS, capped; never computes past the cap."""
     delay = LOCK_BACKOFF_SECONDS
     for _ in range(max(0, attempt - 1)):
@@ -262,11 +265,11 @@ def owned_job(queue: SQLiteJobQueue, bot: str, job_id: str) -> None:
         raise WaitError(f"job {job_id} belongs to {row['recipient']}-bot, not {bot}")
 
 
-class _Locked(Exception):
-    pass
+class Locked(Exception):
+    """The poller holds a write: try the claim again after a backoff."""
 
 
-def _claim(
+def claim_once(
     queue: JobQueue,
     recipient: str,
     pool: DevicePool | None,
@@ -278,7 +281,7 @@ def _claim(
         return None if job is None else (job, None)
     except (*STORAGE_ERRORS, TypeError, ValueError) as exc:
         if is_locked(exc):
-            raise _Locked from exc
+            raise Locked from exc
         raise WaitError(f"claim failed: {_one_line(exc)}") from exc
 
 

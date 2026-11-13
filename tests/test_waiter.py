@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import re
 import json
 import os
 import sqlite3
@@ -437,13 +438,16 @@ def test_no_job_field_reaches_the_argv_or_the_environment(tmp_path: Path) -> Non
             detail=json.dumps({"brief": value, "instruction": value, "pr_number": value,
                                "risk": value, "round": value, "base_branch": value}),
         )
-        assert waiter.step() is not None
+        started = waiter.step()
+        assert started is not None
+        # What `orch job run` does once its command ends: free the box slot.
+        waiter.pool.release(started, owner="claude")
     assert len(spawn.calls) == len(HOSTILE)
     for (argv, kwargs), value in zip(spawn.calls, HOSTILE):
         assert argv[:5] == ["python3", "/factory/bin/orch", "job", "run", "claude-bot"]
         assert argv[6:] == ["--db", str(db), "--machines", str(MACHINES), "--worktree",
                             "--", "fake-harness", "-p"]
-        assert all(value not in part for part in argv)
+        assert re.fullmatch(r"[0-9a-f]{32}", argv[5])  # the job id, a plain token
         assert all(value not in item for item in kwargs["env"].values())
         assert kwargs.get("shell", False) is False
     # The text is in the brief, as data.
@@ -628,7 +632,7 @@ def test_the_dispatcher_queues_a_harness_job_and_starts_nothing(
     db = tmp_path / "orch.db"
     SQLiteJobQueue(db, clock=time.time)
     dispatcher = dispatcher_for(db)
-    dispatcher.process(tracked(Comment(id="go-1", author="grok-login", body=GO)))
+    dispatcher.process(tracked(Comment(id="go-1", author="grok-login", body=GO, created_at=1)))
     dispatcher.reconcile_jobs()
     with sqlite3.connect(db) as connection:
         rows = connection.execute("SELECT recipient, action, state FROM jobs").fetchall()
@@ -639,8 +643,7 @@ def test_the_dispatcher_queues_a_harness_job_and_starts_nothing(
 
 # --- end to end: `orch wait <bot> --autostart`, a fake harness, no messages --
 
-FAKE_HARNESS = """#!/usr/bin/env python3
-# Stands in for the bot's harness: records what it was given, then waits for
+FAKE_HARNESS = f"#!{sys.executable}\n" + """# Stands in for the bot's harness: records what it was given, then waits for
 # the test to let it finish the job the way the brief says.
 import json, os, subprocess, sys, time
 from pathlib import Path
@@ -663,8 +666,7 @@ subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
                 os.environ["ORCH_JOB_BOT"], job, "--handoff", "c-" + job[:6]], check=True)
 """
 
-FAKE_GH = """#!/usr/bin/env python3
-import base64, json, os, sys
+FAKE_GH = f"#!{sys.executable}\n" + """import base64, json, os, sys
 from pathlib import Path
 log = Path(os.environ["FAKE_GH_LOG"])
 with log.open("a") as handle:
@@ -894,3 +896,55 @@ def test_waiter_module_spawns_only_orch_job_run(tmp_path: Path) -> None:
     ]
     assert sorted(f"{c.value.id}.{c.attr}" for c in calls) == ["subprocess.Popen", "subprocess.run"]
     assert waiter_module.GH_ARGV_PREFIX == ("gh", "api", "-X", "GET")
+
+
+def test_spec_states_the_new_harness_rule_and_keeps_the_poller_rule() -> None:
+    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    row = next(line for line in spec.splitlines()
+               if line.startswith("| Only the owning harness bot starts that harness |"))
+    assert "The dispatcher and `orch poll` exec no harness" in row
+    assert "running as the owning bot's own user and login, may start that bot's harness" in row
+    assert "under `orch job run` from the standard brief plus `factory.md`" in row
+    assert "no job, PR or comment text reaches a command line" in row
+    security = spec[spec.index("## 10. Security"):spec.index("## 11.")]
+    assert "The dispatcher and `orch poll` never exec `claude`, `codex`, or `cursor-agent`" in security
+    assert "`orch wait <bot> --autostart`" in security
+    assert "The dispatcher, `orch poll` and `orch wait` never exec" not in spec
+    assert "Let the waiter start the harness itself".lower() in spec.lower()
+    plan = (ROOT / "docs" / "PLAN.md").read_text(encoding="utf-8")
+    assert "The dispatcher and `orch poll` exec no harness" in plan
+
+
+def test_autostart_refuses_machines_without_a_box(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    SQLiteJobQueue(db, clock=time.time)
+    config = write_config(tmp_path / "waiter.yml", "bot: claude-bot\ncommand: [x]\n")
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "devices:\n"
+        "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
+        "    harnesses: {claude: claude-bot}\n"
+        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n",
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
+    result = subprocess.run(
+        [sys.executable, str(ORCH), "wait", "claude-bot", "--autostart", "--db", str(db),
+         "--machines", str(machines), "--harness-config", str(config)],
+        env=env, text=True, capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 2
+    assert "no local device" in result.stderr
+
+
+def test_autostart_only_flags_need_autostart(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    SQLiteJobQueue(db, clock=time.time)
+    env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
+    result = subprocess.run(
+        [sys.executable, str(ORCH), "wait", "claude-bot", "--db", str(db),
+         "--harness-config", str(tmp_path / "x.yml")],
+        env=env, text=True, capture_output=True, timeout=30, check=False,
+    )
+    assert result.returncode == 2
+    assert "need --autostart" in result.stderr

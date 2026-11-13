@@ -54,6 +54,16 @@ export PATH="\${HOME}/.local/bin:\${PATH}"
 if [ -f "\${HOME}/.config/factory/poller-autostart" ] && [ -x "${ROOT}/deploy/poller-service.sh" ]; then
     ("${ROOT}/deploy/poller-service.sh" ensure >>"$(dirname "$DB")/poller-service.log" 2>&1 &)
 fi
+# Waiter autostart (deploy/waiter-service.sh <bot> install-autostart, #80):
+# each bot shell makes sure that bot's waiter supervisor is up.
+for factory_waiter_flag in "\${HOME}/.config/factory"/waiter-autostart-*; do
+    [ -f "\$factory_waiter_flag" ] || continue
+    factory_waiter_bot="\${factory_waiter_flag##*/waiter-autostart-}"
+    case "\$factory_waiter_bot" in claude-bot | codex-bot | cursor-bot) ;; *) continue ;; esac
+    [ -x "${ROOT}/deploy/waiter-service.sh" ] || continue
+    ("${ROOT}/deploy/waiter-service.sh" "\$factory_waiter_bot" ensure >>"$(dirname "$DB")/waiter-\${factory_waiter_bot}-service.log" 2>&1 &)
+done
+unset factory_waiter_flag factory_waiter_bot
 EOF
 ORCH_DB="$DB" "$WRAPPER" init-db --orch "$ORCH_CONFIG"
 if [[ "$AUTOSTART" == 1 ]]; then
