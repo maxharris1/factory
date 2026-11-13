@@ -39,11 +39,14 @@ stdout on a pipe and hands the pipe to a `Session` here:
 Secrets: every string that goes into the table (step titles, file paths,
 exit reasons, tool names) is scrubbed first (`Scrubber`): the values of this
 process's environment variables whose names look secret are replaced,
-whatever their length and however the text quotes or escapes them (quote
-and backslash characters are ignored when matching, so a shell-quoted
-`'walrus'"'"'harbor'` goes like `walrus'harbor`; each line of a multi-line
-value is matched on its own), keeping only boolean flag values such as `1`
-or `true` and the XDG_SESSION_* and DESKTOP_SESSION descriptors; then
+whatever their length and however the text quotes or escapes them (each
+value is matched against the text as written and as read after up to three
+rounds of shell unquoting or JSON, Python and C string-escape decoding, with
+quote and backslash characters ignored, so a shell-quoted
+`'walrus'"'"'harbor'` and the JSON `"walrus\\u00e9harbor"` go like the plain
+value; each line of a multi-line value is matched on its own), keeping
+only boolean flag values such as `1` or `true` and the XDG_SESSION_* and
+DESKTOP_SESSION descriptors; then
 the dashboard's `redact` removes token-shaped strings, auth headers, key
 assignments, URLs and email addresses, and the text is cut to one short
 line. Assistant text and tool output are never stored; tool output is only
@@ -235,12 +238,108 @@ _SECRET_NAME = re.compile(
 _NOT_SECRET_NAME = re.compile(r"XDG_SESSION_\w+|DESKTOP_SESSION")
 _FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 _QUOTING = frozenset("'\"\\")
+_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "a": "\a",
+    "/": "/", "\\": "\\", "'": "'", '"': '"',
+}
+_HEX_WIDTH = {"x": 2, "u": 4, "U": 8}
+_OCTAL = frozenset("01234567")
+_HEX = frozenset("0123456789abcdefABCDEF")
+_DECODE_ROUNDS = 3
+
+Reading = list[tuple[str, int, int]]
 
 
-def _unquoted(text: str) -> tuple[str, list[int]]:
-    """`text` without shell and JSON quoting characters, and where each kept one was."""
-    kept = [(index, char) for index, char in enumerate(text) if char not in _QUOTING]
-    return "".join(char for _, char in kept), [index for index, _ in kept]
+def _escape(reading: Reading, at: int) -> tuple[str, int] | None:
+    """The character the escape after a backslash, from reading[at], stands
+    for and where it ends; None when it is not a string escape."""
+    kind = reading[at][0]
+    if kind in _ESCAPES:
+        return _ESCAPES[kind], at + 1
+    if kind in _OCTAL:
+        end = at + 1
+        while end < min(at + 3, len(reading)) and reading[end][0] in _OCTAL:
+            end += 1
+        return chr(int("".join(char for char, _, _ in reading[at:end]), 8)), end
+    width = _HEX_WIDTH.get(kind)
+    digits = "".join(char for char, _, _ in reading[at + 1 : at + 1 + (width or 0)])
+    if width is None or len(digits) < width or not set(digits) <= _HEX:
+        return None
+    code, end = int(digits, 16), at + 1 + width
+    if 0xD800 <= code < 0xDC00 and end + 1 < len(reading) and reading[end][0] == "\\":
+        low = _escape(reading, end + 1)
+        if low is not None and 0xDC00 <= ord(low[0]) < 0xE000:
+            return chr(0x10000 + ((code - 0xD800) << 10) + ord(low[0]) - 0xDC00), low[1]
+    return (chr(code), end) if code <= 0x10FFFF else None
+
+
+def _unescape(reading: Reading) -> Reading:
+    """`reading` with JSON, Python and C string escapes (`\\t`, `\\u00e9`,
+    surrogate pairs, `\\x41`, octal) decoded."""
+    out: Reading = []
+    index = 0
+    while index < len(reading):
+        char, start, _ = reading[index]
+        escape = _escape(reading, index + 1) if char == "\\" and index + 1 < len(reading) else None
+        if escape is None:
+            out.append(reading[index])
+            index += 1
+        else:
+            out.append((escape[0], start, reading[escape[1] - 1][2]))
+            index = escape[1]
+    return out
+
+
+def _unshell(reading: Reading) -> Reading:
+    """`reading` as the shell reads its words: quotes dropped, single-quoted
+    text literal, and backslash escapes read as the character they escape."""
+    out: Reading = []
+    quote = None
+    index = 0
+    while index < len(reading):
+        char, start, _ = reading[index]
+        escaped = index + 1 < len(reading) and (quote is None or reading[index + 1][0] in '"\\$`')
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                out.append(reading[index])
+        elif char == "\\" and escaped:
+            out.append((reading[index + 1][0], start, reading[index + 1][2]))
+            index += 1
+        elif char == quote:
+            quote = None
+        elif quote is None and char in "'\"":
+            quote = char
+        else:
+            out.append(reading[index])
+        index += 1
+    return out
+
+
+def _unquote(reading: Reading) -> Reading:
+    """`reading` without quote characters, so an escape split by quoting (`\\''t`) reads whole."""
+    return [item for item in reading if item[0] not in "'\""]
+
+
+def _readings(text: str) -> list[Reading]:
+    """`text` as written, and as read after each mix of up to _DECODE_ROUNDS
+    rounds of string-escape decoding, shell unquoting and dropping quotes: one (character,
+    start, end) per character read, with the run of `text` it came from."""
+    written: Reading = [(char, index, index + 1) for index, char in enumerate(text)]
+    readings, frontier, seen = [written], [written], {text}
+    for _ in range(_DECODE_ROUNDS):
+        decoded = []
+        for reading in frontier:
+            for step in (_unescape, _unshell, _unquote):
+                read = step(reading)
+                key = "".join(char for char, _, _ in read)
+                if key not in seen:
+                    seen.add(key)
+                    decoded.append(read)
+        readings += decoded
+        frontier = decoded
+    return readings
 
 
 class Scrubber:
@@ -259,33 +358,37 @@ class Scrubber:
             and not _NOT_SECRET_NAME.fullmatch(name)
         }
         lines = {line.strip() for value in values for line in value.splitlines() if line.strip()}
-        unquoted = {_unquoted(value)[0] for value in values | lines}
+        unquoted = {"".join(char for char in value if char not in _QUOTING) for value in values | lines}
         self._values = sorted(unquoted, key=len, reverse=True)
 
     def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
-        text = str(value)[: limit * 16]
-        for secret in self._values:
-            text = self._cut(text, secret)
+        text = self._cut(str(value)[: limit * 16])
         text = self._redact(" ".join(text.split()))
         if len(text) > limit:
             text = text[: limit - 1] + "…"
         return text
 
-    @staticmethod
-    def _cut(text: str, secret: str) -> str:
-        """Replace every run of `text` that reads as `secret` once quoting is
-        ignored, with the quoting around it, so `'walrus'"'"'harbor'` goes as
-        surely as `walrus'harbor`. A secret made only of quoting (`\\`) reads
-        as the empty string, so it takes every run of quoting with it."""
-        bare, where = _unquoted(text)
-        kept = [-1, *where, len(text)]
+    def _cut(self, text: str) -> str:
+        """Replace every run of `text` that reads as a secret, as written or
+        decoded (`_readings`) and with quoting ignored, together with the
+        quoting around it: `'walrus'"'"'harbor'` and the JSON
+        `"walrus\\u00e9harbor"` go as surely as `walrus'harbor`. A secret made
+        only of quoting (`\\`) reads as the empty string, so it takes every
+        run of quoting with it."""
+        if not self._values:
+            return text
         hidden = [False] * len(text)
-        start = bare.find(secret)
-        while start >= 0:
-            end = start + len(secret)
-            first, last = kept[start] + 1, kept[end + 1]
-            hidden[first:last] = [True] * (last - first)
-            start = bare.find(secret, max(end, start + 1))
+        for reading in _readings(text):
+            kept = [(start, end) for char, start, end in reading if char not in _QUOTING]
+            bare = "".join(char for char, _, _ in reading if char not in _QUOTING)
+            for secret in self._values:
+                found = bare.find(secret)
+                while found >= 0:
+                    after = found + len(secret)
+                    first = kept[found - 1][1] if found else 0
+                    last = kept[after][0] if after < len(kept) else len(text)
+                    hidden[first:last] = [True] * (last - first)
+                    found = bare.find(secret, max(after, found + 1))
         return "".join(
             "[redacted-env]" if gone else "".join(char for char, _ in run)
             for gone, run in itertools.groupby(zip(text, hidden), key=lambda pair: pair[1])

@@ -7,9 +7,11 @@ No real CLI, network or ssh: the harness is a script in tmp_path.
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
+import warnings
 import shlex
 import sqlite3
 import stat
@@ -401,18 +403,55 @@ def _unquoted(text: str) -> str:
     return "".join(char for char in text if char not in "'\"\\")
 
 
+def _strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for pair in value.items() for item in pair for text in _strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
+def _decoded_once(text: str) -> set[str]:
+    """What `text` reads as after one round of shell, JSON or Python string decoding."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        found = {text.encode("latin-1", "backslashreplace").decode("unicode_escape", "replace")}
+    try:
+        found.update(shlex.split(text))
+    except ValueError:
+        pass
+    for candidate in (text, f'"{text}"'):
+        try:
+            found.update(_strings(json.loads(candidate)))
+        except ValueError:
+            pass
+    try:
+        found.update(_strings(ast.literal_eval(text)))
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        pass
+    return found
+
+
+def _readings(title: str, rounds: int = 3) -> set[str]:
+    readings = frontier = {title}
+    for _ in range(rounds):
+        frontier = {text for item in frontier for text in _decoded_once(item)} - readings
+        readings = readings | frontier
+    return readings
+
+
 def readable(secret: str, title: str) -> bool:
     """Whether `secret`, or a line of it, reads back from `title` as written,
-    through the shell, or with quoting ignored."""
-    try:
-        words = shlex.split(title)
-    except ValueError:
-        words = []
-    for line in {secret, *secret.splitlines()}:
-        if line in title or any(line in word for word in words):
-            return True
-        if _unquoted(line) and _unquoted(line) in _unquoted(title):
-            return True
+    with quoting ignored, or after up to three rounds of shell, JSON or Python
+    string decoding."""
+    for reading in _readings(title):
+        for line in {secret, *secret.splitlines()}:
+            if line in reading:
+                return True
+            if _unquoted(line) and _unquoted(line) in _unquoted(reading):
+                return True
     return not _unquoted(secret) and any(char in title for char in "'\"\\")
 
 
@@ -442,6 +481,67 @@ def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str
     for title in titles:
         assert "[redacted-env]" in title, title
         assert not readable(secret, title), title
+
+
+ESCAPED_SECRETS = [
+    "walrus\tharbor",
+    "walrus\u00e9harbor",
+    "walrus\U0001f600harbor",
+    "walrus\x01harbor\x7f",
+    "wal/rus\u2028harbor",
+    "walrus\\u00e9harbor",
+    "walrus\\tharbor",
+    QUOTED_SECRET + "\t\u00e9",
+]
+STRING_ENCODINGS = {
+    "json": json.dumps,
+    "json-utf8": lambda text: json.dumps(text, ensure_ascii=False),
+    "json-object": lambda text: json.dumps({"pin": text}),
+    "json-twice": lambda text: json.dumps(json.dumps({"pin": text})),
+    "python": repr,
+    "python-ascii": ascii,
+}
+SHELL_ENCODINGS = {
+    "as-is": lambda text: text,
+    "quoted": shlex.quote,
+    "backslashed": lambda text: "".join("\\" + char for char in text),
+    "per-character": lambda text: "".join(shlex.quote(char) for char in text),
+    "nested": lambda text: shlex.quote("deploy --pin " + shlex.quote(text)),
+}
+
+
+def _command_event(harness: str, index: int, command: str) -> dict:
+    if harness == "claude":
+        return {"type": "assistant", "message": {"id": f"m{index}", "content": [
+            {"type": "tool_use", "id": f"t{index}", "name": "Bash", "input": {"command": command}}]}}
+    return {"type": "item.completed", "item": {
+        "id": f"t{index}", "type": "command_execution", "command": command,
+        "exit_code": 0, "status": "completed"}}
+
+
+@pytest.mark.parametrize("secret", ESCAPED_SECRETS)
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_an_escaped_env_secret_cannot_be_recovered_from_a_title(harness: str, secret: str) -> None:
+    commands = [
+        "deploy --pin " + shell(string(secret))
+        for string in STRING_ENCODINGS.values()
+        for shell in SHELL_ENCODINGS.values()
+    ]
+    commands.append(shlex.join(["deploy", "--json", json.dumps({"pin": secret})]))
+    scrub = Scrubber({"DEPLOY_PASSWORD": secret})
+    for command in commands:
+        summary = Summary(harness, scrub)
+        summary.feed(_command_event(harness, 0, command), 1.0)
+        [step] = json.loads(summary.row()["steps"])
+        title = step["title"]
+        assert "[redacted-env]" in title, (command, title)
+        assert not readable(secret, title), (command, title)
+
+
+def test_escape_decoding_keeps_text_that_holds_no_secret() -> None:
+    scrub = Scrubber({"DEPLOY_PASSWORD": "walrus\u00e9harbor"})
+    command = 'printf "a\\tb\\u00e9" --json \'{"k": "v\\n"}\''
+    assert scrub(command) == command
 
 
 def test_a_blank_line_in_a_secret_does_not_strip_quoting_from_every_title() -> None:

@@ -20,7 +20,7 @@ from lib import telemetry
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
-from tests.test_telemetry import QUOTING_ONLY_SECRETS, readable
+from tests.test_telemetry import ESCAPED_SECRETS, QUOTING_ONLY_SECRETS, readable
 
 STEPS = [
     {"at": NOW - 50, "kind": "tool", "title": "Read lib/app.py", "status": "ok"},
@@ -268,10 +268,15 @@ def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> No
     assert "no telemetry" in eff["text"]["tokens"]
 
 
-@pytest.mark.parametrize("secret", ["walrus'" + "harbor", *QUOTING_ONLY_SECRETS])
+@pytest.mark.parametrize(
+    "secret, command",
+    [(secret, shlex.join(["deploy", "--pin", secret])) for secret in ["walrus'" + "harbor", *QUOTING_ONLY_SECRETS]]
+    + [(secret, shlex.join(["deploy", "--pin", json.dumps({"pin": secret})])) for secret in ESCAPED_SECRETS],
+)
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_shell_quoted_env_secret_never_reaches_status_json(tmp_path: Path, harness: str, secret: str) -> None:
-    command = shlex.join(["deploy", "--pin", secret])
+def test_a_quoted_or_escaped_env_secret_never_reaches_status_json(
+    tmp_path: Path, harness: str, secret: str, command: str
+) -> None:
     if harness == "claude":
         event = {"type": "assistant", "message": {"id": "m", "content": [
             {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}
