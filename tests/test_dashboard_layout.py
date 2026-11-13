@@ -42,7 +42,7 @@ from tests.test_dashboard import (
 ROOT = Path(__file__).resolve().parents[1]
 CHART = ROOT / "model" / "chart.mmd"
 MINI = ROOT / "tests" / "fixtures" / "statechart" / "mini.mmd"
-PAGES = ("index.html", "activity.html", "efficiency.html", "job.html")
+PAGES = ("index.html", "job.html", "activity.html", "efficiency.html")  # nav order (#78)
 
 
 def _slots_table(connection: sqlite3.Connection) -> None:
@@ -167,7 +167,7 @@ def test_every_page_links_every_other_page(tmp_path: Path) -> None:
     pages = _pages(tmp_path)
     for name, html in pages.items():
         nav = _section(html, "nav")
-        for target in ("index.html", "activity.html", "efficiency.html"):
+        for target in PAGES:
             assert f'href="{target}"' in nav, (name, target)
 
 
@@ -461,6 +461,9 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         "state": "review",
         "path": ["intake", "questions", "building", "review", "fixing", "review"],
         "state_age_seconds": 2000,
+        # #78: the chart's direct successors of review, and review is not finished.
+        "next": ["blocked", "ship", "stuck", "fixing", "capped"],
+        "terminal": False,
     }
 
 
@@ -559,33 +562,38 @@ def test_no_secret_reaches_any_page(tmp_path: Path) -> None:
 
 HARNESS = r"""
 const fs = require('fs');
-const [script, statusText, page, hash, idsText] = [2, 3, 4, 5, 6].map(i => {
+const [script, statusText, page, hash, idsText, actionsText] = [2, 3, 4, 5, 6, 7].map(i => {
   const v = process.argv[i]; return i <= 3 ? fs.readFileSync(v, 'utf8') : v; });
 const status = JSON.parse(statusText);
 const ids = {};
 class Node {
   constructor(tag) { this.tagName = tag; this.children = []; this._text = ''; this.attrs = {};
     this.className = ''; this.hidden = false; this.title = ''; this.style = {setProperty: (k, v) => { this.style[k] = v; }};
+    this.listeners = {}; this.parentNode = null;
     const self = this;
     this.classList = {add: (...c) => { self.className = (self.className + ' ' + c.join(' ')).trim(); },
       remove: (...c) => { self.className = self.className.split(' ').filter(x => !c.includes(x)).join(' '); },
       toggle: (c, on) => { if (on === undefined) on = !self.className.split(' ').includes(c);
         if (on) self.classList.add(c); else self.classList.remove(c); return on; },
       contains: (c) => self.className.split(' ').includes(c)}; }
-  appendChild(child) { this.children.push(child); return child; }
-  replaceChildren(...kids) { this.children = kids; this._text = ''; }
+  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+  removeChild(child) { this.children = this.children.filter(c => c !== child); child.parentNode = null; return child; }
+  replaceChildren(...kids) { this.children.forEach(c => { c.parentNode = null; });
+    this.children = kids; kids.forEach(c => { c.parentNode = this; }); this._text = ''; }
+  get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === body; }
+  focus() { global.document.activeElement = this; }
   setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
   removeAttribute(k) { delete this.attrs[k]; }
-  addEventListener() {}
+  addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   cloneNode(deep) { const n = new Node(this.tagName); n.className = this.className;
     n.attrs = Object.assign({}, this.attrs); n._text = this._text;
-    if (deep) n.children = this.children.map(c => c.cloneNode(true)); return n; }
+    if (deep) this.children.forEach(c => n.appendChild(c.cloneNode(true))); return n; }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   dump(depth) { const pad = ' '.repeat(depth || 0);
-    const attrs = ['href', 'data-device', 'data-state', 'data-from', 'data-to']
+    const attrs = ['href', 'data-device', 'data-state', 'data-from', 'data-to', 'data-step', 'role']
       .filter(k => k in this.attrs).map(k => '[' + k + '=' + this.attrs[k] + ']').join('');
     return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') + attrs +
       (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
@@ -608,8 +616,47 @@ if (ids['flow-template'] && status.statechart) {
 }
 global.window = global;
 global.addEventListener = () => {};
-global.document = {body, hidden: false, getElementById: (id) => ids[id] || null,
-  createElement: (tag) => new Node(tag), addEventListener: () => {}};
+const docListeners = {};
+global.document = {body, hidden: false, activeElement: null, getElementById: (id) => ids[id] || null,
+  createElement: (tag) => new Node(tag),
+  createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
+  addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
+// Scripted user actions, run after the first render: click a node (by href,
+// id or class), press a key, or record what the body holds.
+function find(node, pred) {
+  if (pred(node)) return node;
+  for (const c of node.children) { const f = find(c, pred); if (f) return f; }
+  return null;
+}
+function fire(target, type, extra) {
+  const ev = Object.assign({type, target, button: 0, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}}, extra || {});
+  for (let n = target; n; n = n.parentNode) (n.listeners[type] || []).forEach(fn => fn.call(n, ev));
+  (docListeners[type] || []).forEach(fn => fn(ev));
+  return ev;
+}
+function pick(spec) {
+  return find(body, n => (spec.href === undefined || n.attrs.href === spec.href) &&
+    (spec.id === undefined || n.attrs.id === spec.id) &&
+    (spec.cls === undefined || n.className.split(' ').includes(spec.cls)));
+}
+const steps = [];
+function act(actions) {
+  for (const [kind, arg] of actions) {
+    if (kind === 'click') {
+      const node = pick(arg);
+      if (!node) throw new Error('nothing to click: ' + JSON.stringify(arg));
+      steps.push({click: arg, prevented: fire(node, 'click').defaultPrevented});
+    } else if (kind === 'key') {
+      steps.push({key: arg, prevented: fire(body, 'keydown', {key: arg}).defaultPrevented});
+    } else if (kind === 'record') {
+      const modal = find(body, n => n.attrs.id === 'job-modal');
+      steps.push({record: arg, kids: body.children.map(c => c.attrs.id || c.tagName),
+        modal: modal ? modal.dump(0) : null, text: modal ? modal.textContent : null,
+        focus: document.activeElement ? (document.activeElement.attrs.href || document.activeElement.className) : null});
+    }
+  }
+}
 global.location = {hash, reload: () => { console.log('RELOAD'); }};
 let fetches = 0;
 global.fetch = (url, opts) => { fetches += 1;
@@ -618,7 +665,8 @@ global.fetch = (url, opts) => { fetches += 1;
 Date.now = () => 1800000003000;
 eval(script);
 setTimeout(() => {
-  process.stdout.write(JSON.stringify({fetches,
+  act(JSON.parse(actionsText || '[]'));
+  process.stdout.write(JSON.stringify({fetches, steps,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
     dump: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.dump(0)]))}));
   process.exit(0);
@@ -629,7 +677,10 @@ NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
-def _run_page(tmp_path: Path, snapshot: dict, page: str, ids: list[str], hash_: str = "") -> dict:
+def _run_page(
+    tmp_path: Path, snapshot: dict, page: str, ids: list[str], hash_: str = "",
+    actions: list | None = None,
+) -> dict:
     name = {"main": "index.html"}.get(page, f"{page}.html")
     html = render_pages(snapshot)[name]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
@@ -639,7 +690,7 @@ def _run_page(tmp_path: Path, snapshot: dict, page: str, ids: list[str], hash_: 
     (tmp_path / "harness.js").write_text(HARNESS, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(tmp_path / "harness.js"), str(tmp_path / "page.js"),
-         str(tmp_path / "status.json"), page, hash_, json.dumps(ids)],
+         str(tmp_path / "status.json"), page, hash_, json.dumps(ids), json.dumps(actions or [])],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr
