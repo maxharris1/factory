@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -33,6 +34,7 @@ from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.harness_env import harness_env
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
@@ -1080,6 +1082,7 @@ def _job_run_command(argv: list[str]) -> int:
             "ORCH_JOB_ID": args.job_id,
             "ORCH_JOB_BOT": args.bot,
             DB_ENV: str(database),
+            **harness_env(owner),
         }
     )
     if token is not None and not placed.remote:
@@ -1109,6 +1112,7 @@ def _job_run_command(argv: list[str]) -> int:
         "ORCH_JOB_DEVICE": placed.device.name,
         # #94: with --worktree, the checkout's and the brief's remote paths
         **placed.remote_env(worktree=args.worktree, brief=box_brief is not None),
+        **harness_env(owner),
     }
 
     def setup() -> Path | None:
@@ -1132,6 +1136,8 @@ def _job_run_command(argv: list[str]) -> int:
             repo,
             head,
             url_template=worktrees.url_template(args.git_url_template),
+            adopt=_retry_of(detail),
+            log=log,
         )
         checkout.append(made)
         environment["ORCH_JOB_WORKTREE"] = str(made.path)
@@ -1254,6 +1260,16 @@ def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, 
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
     return str(row["repo"]), row["head"], int(row["timeout_seconds"]), row["detail"]
+
+
+def _retry_of(detail: str | None) -> str | None:
+    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
+    try:
+        value = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    retry_of = value.get("retry_of") if isinstance(value, dict) else None
+    return retry_of if isinstance(retry_of, str) else None
 
 
 def _read_brief(path: str | None) -> bytes | None:
