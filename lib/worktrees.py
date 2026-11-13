@@ -452,6 +452,28 @@ def pid_alive(pid: int | None, start: str | None) -> bool:
     return _live_owner(data) is not None
 
 
+def parent_pid(pid: int) -> int | None:
+    """A pid's parent, from /proc/<pid>/stat (field 4); None if unknown."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    fields = text.rpartition(")")[2].split()
+    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+
+
+def descends_from(pid: int, ancestor: int, *, parent=parent_pid, limit: int = 64) -> bool:
+    """True when ancestor is pid itself or one of its parents (at most limit up)."""
+    current: int | None = pid
+    for _ in range(limit):
+        if current is None or current <= 1:
+            return False
+        if current == ancestor:
+            return True
+        current = parent(current)
+    return False
+
+
 def _process_start(pid: int) -> str | None:
     """Field 22 of /proc/<pid>/stat, so a reused pid is not mistaken for the owner."""
     try:

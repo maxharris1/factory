@@ -491,11 +491,100 @@ slot on an eligible device the job stays queued and the waiter keeps waiting. Wh
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
 If that line cannot be printed, the job is finished as
-failed so T6 retries it at once, and its slot is released (no bot got it). `orch` never chooses or starts a harness on
-its own: the bot that ran the shell call starts its own, through `orch job run`. `job heartbeat` and `job done` refuse a job that
+failed so T6 retries it at once, and its slot is released (no bot got it). Plain `orch wait` never starts a harness:
+the bot that ran the shell call starts its own, through `orch job run`, or its autostart waiter does (below). `orch` never chooses a harness on its own. `job heartbeat` and `job done` refuse a job that
 belongs to another bot. The database is `--db`, else `$ORCH_DB`; a missing file
 is refused. Each bot's "orch jobs" paragraph is under [`bots/`](bots/).
 Running timeouts use last activity.
+
+### Autostart waiter
+
+```sh
+bin/orch wait claude-bot --autostart          # loops; run it as claude-bot
+deploy/waiter-service.sh claude-bot start     # the same, under a restart supervisor
+```
+
+A process exit does not wake a bot, so a plain `orch wait` claim used to sit
+until another bot pinged its owner (#74 r2 and #77 r2 each waited 12 to 57
+minutes). [`lib/waiter.py`](lib/waiter.py) (issue #80) removes that hand-off:
+`orch wait <bot> --autostart`, run as the bot's own user and login, claims
+the bot's next job on a box slot, renders its standard brief and starts it
+itself as `orch job run <bot> <job-id> --worktree -- <command>`, then goes
+straight back to waiting. `orch job run` heartbeats before the harness starts
+and records itself on the slot, so the job reads `running` within seconds of
+the claim, with no model turn and no message to any bot. The harness posts its
+`orch:v1` handoff and runs `orch job done` as the brief says.
+
+- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+  job kind from the job row: implement (`build`, `plan`), fix, review, and
+  merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
+  repo, PR or ticket, head, round and cap, risk, the section 8 review rules
+  (the `factory-review-rules` contract), the `orch:v1` header the job ends
+  with, and the `orch job done` lines. The repo's `factory.md` prose (Review,
+  Ship, Context; `parse_factory_context` in
+  [`lib/factory_md.py`](lib/factory_md.py)) is appended as "Additional
+  context from factory.md", read with `gh api` from the repo's `factory_ref`
+  in `orch.yml` (never a PR head) with every GitHub token variable unset. If
+  it cannot be read, the brief says why and tells the harness to read it
+  from the base branch itself. Job text (the brief, a CI log) only appears
+  inside one fenced "Job data" block, marked as input, not instructions.
+- **Command.** The harness command is the bot's own config,
+  `~/.config/factory/waiter-<bot>.yml` (`--harness-config`): `bot` and
+  `command`, an argv list run with no shell. The file must be a regular file
+  owned by the bot's user and writable by no one else, in a directory owned
+  by that user (or root) that is not group- or world-writable. It is opened
+  once with `O_NOFOLLOW` and every check is made on that open file (`fstat`),
+  so the file read is the file checked.
+  [`config/waiter.example.yml`](config/waiter.example.yml) shows the shape.
+  Nothing from a job row, a PR or a comment reaches an argv: the only job
+  value in the `orch job run` argv is the job id, which must be a plain
+  token. The brief goes to the harness on stdin and as
+  `<state>/jobs/<job-id>/brief.md` (mode 600, path in `$ORCH_JOB_BRIEF`);
+  `orch job run`'s output goes to `run.log` beside it. `--state-dir`
+  defaults to `~/.local/state/factory/waiter-<bot>`.
+- **Box only.** The autostart waiter claims box slots only: a harness on a
+  remote device cannot run `orch job done` on the box. Remote devices stay
+  with a bot running plain `orch wait`.
+- **Failures.** A job with no standard brief (an action other than build,
+  plan, fix or review), a job id that is not a plain token, or a start that
+  fails is failed at once for T6 and its slot is freed. When the harness
+  exits without `orch job done` (a missing binary, an expired login, a
+  crash), `orch job run` fails the job for T6 before it frees the slot, and
+  the waiter does the same for a run that died first, so the job never waits
+  out its timeout. A waiter that dies between a claim and the start leaves a
+  claimed job, which the poller requeues after `release_claimed_minutes`.
+- **One handoff per job.** The claim records the waiter on the job's slot.
+  From then on only that waiter's own `orch job run` may run the job, and
+  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  run` or `orch job done` is refused (exit 2, nothing changed), and a plain
+  `orch wait <bot>` is refused while the bot's autostart waiter runs. A
+  second `orch job run` of a running job is refused. `orch job done` with the
+  outcome already recorded is a no-op success; a different outcome is refused
+  (exit 1) and changes nothing. The dispatcher records a verdict that repeats
+  an already handled one (same author, head, round and verdict) as
+  `duplicate-verdict` and takes no action for it: no job, no ship, no wake.
+- **Restarts.** Each `orch job run` runs in its own session, so stopping or
+  restarting a waiter never stops a running job. SIGTERM exits 0. The
+  waiter holds `waiter-<bot>.lock` beside the database (with its pid) for its
+  whole life, so a second waiter for the bot exits 2; a plain `orch wait`
+  holds it shared.
+  [`deploy/waiter-service.sh <bot>`](deploy/waiter-service.sh) runs the
+  waiter under a supervisor loop (like the poller and Linear webhook
+  services) with `start`, `stop`, `restart`, `status`, `ensure`,
+  `install-autostart` and `remove-autostart`; a waiter that exits or is
+  killed is started again after 5 seconds (doubling to 60 while it keeps
+  exiting within 30 seconds). It reads `~/.config/factory/waiter.env` for
+  `ORCH_DB` and other `ORCH_*` paths (default `ORCH_DB` is
+  `~/.local/state/factory/orch.db`), logs to
+  `~/.local/state/factory/waiter-<bot>.log`, and `stop` also stops a waiter
+  left holding the lock by a supervisor that was SIGKILLed. Its autostart flag
+  `waiter-autostart-<bot>` is picked up by the profile `deploy/install.sh`
+  writes; with `crontab` it also adds `@reboot` and 5-minute `ensure` lines
+  tagged `# factory-orch-waiter-<bot>`.
+  [`deploy/orch-waiter@.service`](deploy/orch-waiter@.service) is the
+  systemd user template unit (`orch-waiter@claude-bot`): `Restart=always`,
+  `KillMode=process`. Nothing in this repository installs, enables or
+  starts either.
 
 ### Job heartbeat and worktrees
 
@@ -513,7 +602,9 @@ locked or failed writes are logged and retried at the next beat. SIGTERM and
 SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
 reaches the command directly, and the exit status is the command's; a signal
 that arrives before the command starts means it never runs.
-`orch job run` never finishes the job: `orch job done` stays the bot's call.
+`orch job run` never finishes the job: `orch job done` stays the bot's call
+(except that an autostart run fails a job its command left running; see
+"Autostart waiter").
 The command gets `ORCH_JOB_ID`, `ORCH_JOB_BOT` and `ORCH_DB`. Bots do not
 hand-roll heartbeat loops; `orch job heartbeat` is a single manual beat.
 

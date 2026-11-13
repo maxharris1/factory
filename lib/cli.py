@@ -14,8 +14,9 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
-from lib import job_run, linear_webhook, placed_run, worktrees
+from lib import job_run, linear_webhook, placed_run, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -31,7 +32,7 @@ from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
-from lib.queue import QueueError, SQLiteJobQueue
+from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.wait import (
     WaitError,
@@ -111,8 +112,23 @@ wait <bot> [--db PATH] [--machines PATH]
   dispatcher database has a queued job for that bot and a device in
   machines.yml (--machines, default the checkout's) has a free slot for
   its harness, claims both, prints one JSON line (with "device" and
-  "remote"; a remote job also has "workdir"), and exits 0. It never
-  starts a harness. --db defaults to $ORCH_DB.
+  "remote"; a remote job also has "workdir"), and exits 0. Without
+  --autostart it never starts a harness. --db defaults to $ORCH_DB.
+wait <bot> --autostart [--db PATH] [--machines PATH] [--harness-config PATH]
+                       [--orch PATH] [--state-dir DIR]
+  Run as the bot's own user. Loops: claims the bot's next job on a box
+  slot, writes its standard brief (with the repo's factory.md prose, read
+  from orch.yml's factory_ref with gh) to DIR/jobs/<job-id>/brief.md, runs
+  `orch job run <bot> <job-id> --worktree -- COMMAND` in its own session
+  with the brief on stdin and in ORCH_JOB_BRIEF, and waits again. COMMAND
+  is the argv in --harness-config (default
+  ~/.config/factory/waiter-<bot>.yml: `bot` and `command`, owned by this
+  user, writable by no one else); nothing from a job is added to it.
+  --orch defaults to the checkout's orch.yml; --state-dir to
+  ~/.local/state/factory/waiter-<bot>. A job with no standard brief, or
+  whose start fails, is failed for T6. SIGTERM exits 0 and leaves running
+  jobs alone. Run it under deploy/waiter-service.sh or
+  deploy/orch-waiter@.service so it restarts by itself.
 
 job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         [--worktree] [--work-root DIR] [--git-url-template URL]
@@ -306,16 +322,50 @@ def _wait(argv: list[str]) -> int:
     parser.add_argument("bot")
     parser.add_argument("--db", type=Path)
     parser.add_argument("--machines", type=Path)
+    parser.add_argument("--autostart", action="store_true")
+    parser.add_argument("--harness-config", type=Path)
+    parser.add_argument("--orch", type=Path)
+    parser.add_argument("--state-dir", type=Path)
     args = parser.parse_args(argv)
+    if not args.autostart and (
+        args.harness_config is not None or args.orch is not None or args.state_dir is not None
+    ):
+        print("orch wait: --harness-config, --orch and --state-dir need --autostart", file=sys.stderr)
+        return 2
     try:
         recipient = recipient_for(args.bot)
+        harness = (
+            waiter.load_harness_command(
+                args.harness_config or waiter.default_harness_config(args.bot), args.bot
+            )
+            if args.autostart
+            else None
+        )
         queue = open_queue(_db_path(args.db))
         machines = _machines_config(args.machines, required=True)
         assert machines is not None
+        if args.autostart:
+            machines = waiter.local_only(machines)
+            if not machines.devices:
+                raise waiter.WaiterError("machines.yml has no local device to autostart jobs on")
         pool = _device_pool(queue, machines)
-    except (WaitError, ValueError) as exc:
+    except (WaitError, waiter.WaiterError, ValueError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
         return 2
+    database = _db_path(args.db)
+    try:
+        # Held for this process's life (the fd is never closed): one
+        # autostart waiter per bot, and no plain claim beside it (#80).
+        _lock = (
+            waiter.hold_waiter_lock(database, args.bot)
+            if harness is not None
+            else waiter.share_waiter_lock(database, args.bot)
+        )
+    except (waiter.WaiterError, OSError) as exc:
+        print(f"orch wait: {exc}", file=sys.stderr)
+        return 2
+    if harness is not None:
+        return _wait_autostart(args, queue, pool, harness)
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         wait_for_job(queue, recipient, sys.stdout, pool=pool)
@@ -326,6 +376,52 @@ def _wait(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     return 0
+
+
+def _wait_autostart(
+    args: argparse.Namespace,
+    queue: SQLiteJobQueue,
+    pool: DevicePool,
+    harness: waiter.HarnessCommand,
+) -> int:
+    """Claim, start the bot's harness under `orch job run`, wait again (#80)."""
+    orch_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+    config, findings = load_orch_yml(orch_path, allow_placeholders=True)
+    errors = [item.message for item in findings if item.severity == "error"]
+    note = None
+    if config is None or errors:
+        config = None
+        note = f"{orch_path}: {errors[0] if errors else 'not loaded'}"
+
+    def log(message: str) -> None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        print(f"{stamp} orch wait {args.bot}: {message}", file=sys.stderr, flush=True)
+
+    if note is not None:
+        log(f"factory.md context is off: {note}")
+    try:
+        run = waiter.Waiter(
+            bot=args.bot,
+            queue=queue,
+            pool=pool,
+            harness=harness,
+            context=waiter.GhContextSource(config, note=note),
+            state_dir=args.state_dir or waiter.default_state_dir(args.bot),
+            db=_db_path(args.db),
+            machines=args.machines if args.machines is not None else ROOT / "machines.yml",
+            log=log,
+        )
+    except (WaitError, waiter.WaiterError) as exc:
+        print(f"orch wait: {exc}", file=sys.stderr)
+        return 2
+    stop = waiter.StopFlag()
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, stop.set)
+    try:
+        return run.serve(stop)
+    except WaitError as exc:
+        log(str(exc))
+        return 1
 
 
 def _poll(argv: list[str]) -> int:
@@ -631,6 +727,16 @@ def _job(argv: list[str]) -> int:
     except WaitError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
+    if args.command == "done" and args.handoff != "":
+        try:
+            settled = _done_settled(queue, args.job_id, args.handoff)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+            return 1
+        if settled is not None:
+            code, message = settled
+            print(f"{prog}: {message}" if code else message, file=sys.stderr if code else sys.stdout)
+            return code
     try:
         if args.command == "heartbeat":
             retry_locked(
@@ -653,6 +759,75 @@ def _job(argv: list[str]) -> int:
         return 1
     print(f"{job.state} {job.id}")
     return 0
+
+
+def _done_settled(
+    queue: SQLiteJobQueue, job_id: str, handoff: str | None
+) -> tuple[int, str] | None:
+    """`orch job done` on a job that may already be settled (#80, one handoff per job).
+
+    (0, line) when the same outcome is already recorded: a repeat is a no-op.
+    (1, error) when a different outcome is recorded: nothing changes.
+    (2, error) when the job is an autostart waiter's and this process is not
+    in its `orch job run`'s process tree: a bot turn must not finish it.
+    None when the job may be finished here.
+    """
+    target = "done" if handoff is not None else "failed"
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        slot = (
+            connection.execute(
+                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if _has_slots(connection)
+            else None
+        )
+    if row is None:
+        raise QueueError(f"unknown job {job_id!r}")
+    state, recorded = str(row["state"]), row["handoff_comment_id"]
+    if state == target and recorded == handoff:
+        return 0, f"{state} {job_id} (already recorded; nothing changed)"
+    if state in ("done", "failed"):
+        already = f"{state} with handoff {recorded}" if recorded else state
+        return 1, (
+            f"job {job_id} is already {already}; refusing a different outcome, "
+            "nothing changed"
+        )
+    # Codex PR #82 r2 F2.4: this path never opens a DevicePool, so the slots
+    # table may predate the autostart columns (an update while a job runs).
+    # A missing column reads as NULL: no autostart waiter can have claimed a
+    # job in a table it could not record itself in.
+    autostart = _slot_value(slot, "autostart_pid")
+    if state != "running" or autostart is None:
+        return None
+    runner = _slot_value(slot, "runner_pid")
+    if runner is not None and worktrees.pid_alive(
+        int(runner), _slot_value(slot, "runner_start")
+    ) and worktrees.descends_from(os.getpid(), int(runner)):
+        return None
+    return 2, (
+        f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
+        "whose harness run finishes it; only that run may call orch job done, so a bot "
+        "turn must not run or post for it. Nothing changed"
+    )
+
+
+def _slot_value(slot: sqlite3.Row | None, name: str) -> Any:
+    """A slot column, or None when there is no slot or the column predates it."""
+    if slot is None or name not in slot.keys():
+        return None
+    return slot[name]
+
+
+def _has_slots(connection: sqlite3.Connection) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (SLOTS_TABLE,)
+        ).fetchone()
+        is not None
+    )
 
 
 def _job_run(argv: list[str]) -> int:
@@ -700,6 +875,17 @@ def _job_run(argv: list[str]) -> int:
         return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
 
     try:
+        # Codex PR #82 r2 F2.2: an autostart claim is checked before the
+        # first heartbeat, read only, so a refused run leaves the job claimed
+        # (and the poller's claimed-job release requeues it).
+        checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
+    except placed_run.PlacementError as exc:
+        print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
@@ -716,6 +902,7 @@ def _job_run(argv: list[str]) -> int:
             worktree=args.worktree,
             log=log,
             transport=SshTransport(),
+            checked_autostart=checked_autostart,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -780,10 +967,28 @@ def _job_run(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if placed.autostart:
+            _fail_unfinished(queue, args.job_id, owner, log)
         try:
             placed.finish()
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
+
+
+def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
+    """An autostart run whose command ended without `orch job done` goes to T6 now (#80)."""
+    try:
+        with queue.connect() as connection:
+            row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None or row["state"] != "running":
+            return
+        retry_locked(lambda: queue.finish(job_id, owner=owner, handoff_comment_id=None))
+    except QueueError:
+        return  # finished between the read and the write
+    except (sqlite3.Error, OSError) as exc:
+        log(f"could not fail job {job_id}: {' '.join(str(exc).split())}")
+        return
+    log(f"the command ended without orch job done; failed job {job_id} for T6")
 
 
 def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int]:
