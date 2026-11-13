@@ -391,6 +391,17 @@ class SQLiteJobQueue:
         return tuple(_job(row) for row in rows)
 
     def mark_timed_out(self, job: Job) -> bool:
+        """Fail a job the timeout sweep read, unless it changed or may run.
+
+        A running job whose device slot records a remote start is never
+        timed out (#87 r3 F2.1): failing it would let T6 start attempt 2
+        beside a remote worker that may still run. It leaves running only
+        through the poller's dead path, once its runner is gone and the
+        device confirms its worker gone (lib/job_state.py), or as stuck when
+        the device stays offline for an hour. The check is in the same
+        UPDATE, so a start recorded after the sweep read the job wins. A box
+        job keeps the plain timeout.
+        """
         now = self.now()
         # Guarded on the clock the sweep read: a queued job's last_activity_at
         # is its queue-wait start and changes when a claim is released, so a
@@ -404,6 +415,8 @@ class SQLiteJobQueue:
         else:
             return False
         with self._connect() as connection:
+            if job.state == "running":
+                predicate += _no_remote_start(connection)
             changed = connection.execute(
                 f"""
                 UPDATE jobs
@@ -559,6 +572,25 @@ def claim_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.
         return rank, float(row["created_at"]), str(row["id"])
 
     return sorted(rows, key=key)
+
+
+def _no_remote_start(connection: sqlite3.Connection) -> str:
+    """SQL that holds when the job's slot records no remote start.
+
+    Empty when there is no slot table, or one from before F2-02 with no
+    remote_started column (no remote start was ever recorded in it).
+    """
+    if not _has_table(connection, SLOTS_TABLE):
+        return ""
+    columns = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
+    }
+    if not {"job_id", "remote_started"} <= columns:
+        return ""
+    return (
+        f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"
+        " WHERE slot.job_id = jobs.id AND slot.remote_started = 1)"
+    )
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

@@ -115,7 +115,7 @@ The comment kinds are `brief`, `questions`, `answers`, `plan`, `ready`, `verdict
 ## 6. Grok Bot orchestration skill (`orchestrate-project`)
 
 1. **Intake.** It reads the project's `factory.md`, then writes the ticket `brief`: goal, acceptance criteria, files likely touched, a risk class, and done-evidence (pstack orchestrate kickoff rules).
-2. **Questions (D31, always).** It posts the restatement (in-your-own-words) and the open questions. Each question gets classified:
+2. **Questions (D31, every ticket).** It posts the restatement (in-your-own-words) and the open questions. The one exception is a ticket the backlog feeder took in (issue #85): the chat in which it was filed was its questions step, and the feeder posts its brief and `orch:go`, so the skill posts no brief, questions or `orch:go` for it. Each question gets classified:
    - Observable: settled with a prototype.
    - Default-able: decided by the bot and recorded.
    - Product call: asked of Max, one at a time, in chat. The answers get posted as an `answers` comment.
