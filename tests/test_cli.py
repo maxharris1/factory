@@ -80,7 +80,7 @@ def test_allow_placeholders_still_runs_other_orch_validation(
 ) -> None:
     path = tmp_path / "orch.yml"
     path.write_text(
-        "poll_seconds: 30\nprojects:\n"
+        "poll_seconds: 45\nprojects:\n"
         "  - repo: owner/name\n"
         "    linear_project_id: REPLACE_WITH_LINEAR_PROJECT_ID\n",
         encoding="utf-8",
@@ -96,7 +96,7 @@ def test_allow_placeholders_still_runs_other_orch_validation(
     )
 
     assert result.returncode == 1
-    assert "poll_seconds must be 60" in result.stderr
+    assert "poll_seconds must be 30 or 60" in result.stderr
 
 
 def test_check_config_accepts_the_minimal_orch_example() -> None:

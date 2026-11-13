@@ -2,7 +2,10 @@
 # Required: poll_seconds, projects[].repo.
 # Optional: job_timeout and projects[].job_timeout, in minutes.
 # When both are omitted the job timeout is 60 minutes.
-poll_seconds: 60
+# poll_seconds is 30 or 60: the sleep after each cycle, so a cycle's own work
+# adds to it. GitHub is read every cycle; Linear keeps its own 60-second
+# cadence and budget (README "Poll").
+poll_seconds: 30
 linear:
   api_key_env: LINEAR_API_KEY
 grok:

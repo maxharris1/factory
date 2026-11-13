@@ -12,7 +12,7 @@ from lib.orch_yml import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
+def test_repo_orch_yml_lists_projects_and_polls_github_every_30_seconds(
     tmp_path: Path,
 ) -> None:
     configured = tmp_path / "orch.yml"
@@ -26,7 +26,8 @@ def test_repo_orch_yml_lists_projects_and_polls_every_60_seconds(
     config, findings = load_orch_yml(configured)
     assert findings == []
     assert config is not None
-    assert config.poll_seconds == POLL_SECONDS == 60
+    assert config.poll_seconds == 30
+    assert POLL_SECONDS == 60
     assert config.job_timeout is None
     assert config.linear is not None
     assert config.linear.api_key_env == "LINEAR_API_KEY"
@@ -87,7 +88,7 @@ def test_minimal_example_has_no_extra_required_fields() -> None:
     config, findings = load_orch_yml(ROOT / "config/orch.example.yml")
     assert findings == []
     assert config is not None
-    assert config.poll_seconds == 60
+    assert config.poll_seconds == 30
     assert config.job_timeout is None
     assert config.projects[0].repo == "owner/name"
     assert config.projects[0].job_timeout is None
@@ -191,12 +192,12 @@ def test_default_job_timeout_is_60_minutes_everywhere_it_is_stated() -> None:
     assert "60 minutes" in (ROOT / "config/orch.example.yml").read_text(encoding="utf-8")
 
 
-def test_poll_seconds_must_be_60(tmp_path: Path) -> None:
+def test_poll_seconds_must_be_30_or_60(tmp_path: Path) -> None:
     path = tmp_path / "orch.yml"
-    path.write_text("poll_seconds: 30\nprojects:\n  - repo: acme/widgets\n", encoding="utf-8")
+    path.write_text("poll_seconds: 45\nprojects:\n  - repo: acme/widgets\n", encoding="utf-8")
     config, findings = load_orch_yml(path)
     assert config is None
-    assert any("poll_seconds must be 60" in finding.message for finding in findings)
+    assert any("poll_seconds must be 30 or 60" in finding.message for finding in findings)
 
 
 def test_unknown_field_is_not_required_and_is_refused(tmp_path: Path) -> None:

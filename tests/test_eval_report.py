@@ -34,6 +34,7 @@ SPEC_STATE = {
     "Merged": "merged",
     "HandedOff": "handed-off",
     "WaitingExternal": "waiting-external",
+    "AwaitingOk": "awaiting-ok",
     "PostMerge": "post-merge",
     "Done": "done",
     "Stuck": "stuck",
