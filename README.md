@@ -70,7 +70,7 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
 | `merge` | `GET pulls/<n>` (and for a draft the GraphQL `markPullRequestReadyForReview`), then `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | Marks a draft ready first (issue #83: GitHub refuses to merge a draft with 405). The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError`. A 405, a 5xx, a timeout or a mark-ready that did not land raises with `retryable=True`, so the dispatcher re-drives the ship once; anything else, or a failed re-drive, flags the ticket needs-attention |
 | `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
-| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or runs received that do not match `total_count` on every page is `pending`. A short read is `pending` even with a failure in view, since a rerun on an unread page may supersede it |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
@@ -83,8 +83,11 @@ fails closed: `ship-failed` and one Grok wake. `ship_intents.error` records
 the class and a safe detail, such as `GitHubAdapterError: gh api POST graphql
 exited 1 (HTTP 403) graphql errors: FORBIDDEN`. It never holds gh's output, a
 URL, a token or a body; the merge 409 and fast-forward 422 errors carry only
-the inner safe detail. A `handoff` that failed before any write was confirmed
-is re-driven once on a later poll, and only while its APPROVE is still the
+the inner safe detail. A target repo's branch protection or ruleset can
+reject the `fast_forward` ref update; that rejection is a
+`GitHubAdapterError` too, so the ship fails closed as `ship-failed`, and the
+factory never bypasses the protection. A `handoff` that failed before any
+write was confirmed is re-driven once on a later poll, and only while its APPROVE is still the
 latest trusted reviewer verdict on the ticket (a newer REVISE or APPROVE spends
 it with no write), the PR is still at the intent's head with green CI, and the
 ticket has not already been handed off, merged or finished, nor completed a

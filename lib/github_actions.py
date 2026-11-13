@@ -457,8 +457,12 @@ class GitHubReviewActions:
 
         success needs at least one check run that concluded success, or a
         success combined status, and nothing failing or pending. All
-        neutral or skipped, nothing reported, or fewer runs received than
-        total_count is pending.
+        neutral or skipped, nothing reported, or runs received that do not
+        match total_count on every page is pending.
+
+        A short read is pending even when a run in view failed: a rerun on
+        an unread page may supersede that failure, so pending is the safe
+        answer, at the cost of one poll.
         """
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"

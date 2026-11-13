@@ -1515,6 +1515,58 @@ def test_reconcile_does_not_pick_up_non_grok_jobs(tmp_path: Path) -> None:
     assert queue.outstanding() == (queued,)
 
 
+class RaisingSource(FakeSource):
+    def __init__(self, failing: str):
+        super().__init__()
+        self.failing = failing
+
+    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+        if self.failing == "github_candidates":
+            raise RuntimeError("listing failed")
+        return super().github_candidates(label_prefix)
+
+    def tracked_tickets(
+        self,
+        refs: tuple[TicketRef, ...],
+    ) -> tuple[TrackedTicket, ...]:
+        if self.failing == "tracked_tickets":
+            raise RuntimeError("listing failed")
+        return super().tracked_tickets(refs)
+
+
+@pytest.mark.parametrize(
+    ("failing", "component"),
+    [("github_candidates", "github"), ("tracked_tickets", "tracked")],
+)
+def test_poll_records_an_error_when_listing_candidates_raises(
+    tmp_path: Path,
+    failing: str,
+    component: str,
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    grok = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify:g1",
+    )
+
+    dispatcher.poll_once(RaisingSource(failing))
+
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error FROM poll_errors"
+        ).fetchall()
+    assert [tuple(row) for row in errors] == [(component, "-", "RuntimeError")]
+    assert [job.id for job in delivery.jobs] == [grok.id]
+
+
 def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
     tmp_path: Path,
 ) -> None:
