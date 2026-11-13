@@ -22,6 +22,10 @@
 # Without dashboard.push nothing is pushed and nothing changes here.
 # start, stop, restart and ensure take poller-service.lock (flock(1), where
 # installed), so a stop cannot interleave with an ensure about to launch.
+# Before launching, start and ensure also probe orch.db.lock, the lock
+# `orch poll` holds (beside ORCH_DB, default ~/.local/state/factory/orch.db):
+# while it is held, a poller runs even if its pid is not visible from here
+# (another PID namespace), so nothing is launched (issue #134).
 #
 # Autostart: install-autostart writes ~/.config/factory/poller-autostart, which
 # makes the profile written by deploy/install.sh run `ensure` in the
@@ -42,6 +46,7 @@ LOG="${ORCH_POLL_LOG:-${STATE}/poller.log}"
 SERVICE_LOG="${STATE}/poller-service.log"
 SERVICE_LOCK="${STATE}/poller-service.lock"
 STOPPED="${STATE}/poller.stopped"
+POLL_LOCK="${ORCH_DB:-${STATE}/orch.db}.lock"
 AUTOSTART="${CONFIG}/poller-autostart"
 RUNNER="${HERE}/run-poller.sh"
 MARKER="# factory-orch-poll"
@@ -92,6 +97,14 @@ running_pid() {
     printf '%s\n' "$pid"
 }
 
+# Is orch poll's own lock held? Without flock(1) or the lock file, no.
+poll_lock_held() {
+    local status=0
+    command -v flock >/dev/null 2>&1 && [[ -e "$POLL_LOCK" ]] || return 1
+    flock -n -E 75 "$POLL_LOCK" true 9>&- || status=$?
+    ((status == 75))
+}
+
 # Serialize start/stop/restart/ensure. Without flock(1) (macOS) this is a
 # no-op and ensure's re-check of the stop marker is the only guard.
 service_lock() {
@@ -113,6 +126,10 @@ launch() {
     mkdir -p "$STATE"
     if pid="$(running_pid)"; then
         say "orch poll already running (pid ${pid})"
+        return 0
+    fi
+    if poll_lock_held; then
+        say "orch poll already running (poll lock held)"
         return 0
     fi
     # fd 9 is the service lock; the poller must not inherit it.
@@ -170,6 +187,7 @@ status() {
 ensure() {
     [[ -e "$STOPPED" ]] && return 0
     running_pid >/dev/null && return 0
+    poll_lock_held && return 0
     # Re-check right before launching: a stop may have just landed.
     [[ -e "$STOPPED" ]] && return 0
     launch
