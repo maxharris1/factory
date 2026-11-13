@@ -12,8 +12,10 @@ import re
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from lib import telemetry
-from lib.dashboard import collect_snapshot, render_pages
+from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
 
@@ -148,6 +150,34 @@ def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: 
     assert "\n" not in item["steps"][0]["title"]
     html = render_pages(snapshot)["job.html"]
     assert GH_CLASSIC not in html and "<script>" not in _no_script(html).split("<body", 1)[1]
+
+
+def _strict(text: str) -> object:
+    def refuse(name: str) -> object:
+        raise ValueError(f"nonstandard JSON number {name}")
+
+    return json.loads(text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf")])
+def test_nonfinite_numbers_in_the_table_never_reach_published_json(tmp_path: Path, bad: float) -> None:
+    db, log = seeded(tmp_path)
+    numbers = ("cost_usd", "tokens_in", "tokens_cached", "tokens_out", "turns", "events",
+               "elapsed_seconds", "tests_passed", "last_event_at", "updated_at")
+    add_telemetry(db, "r-codex-review", **{name: bad for name in numbers if name != "updated_at"})
+    add_telemetry(
+        db, "d-claude-build-1", harness="claude", cost_usd=bad,
+        finished_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
+        steps=json.dumps([{"at": bad, "kind": "tool", "title": "x", "status": "ok"}]),
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
+    data = _strict(status.read_text())
+    rollup = data["telemetry"]
+    assert rollup["totals"]["cost_usd"] == 0.0 and rollup["totals"]["priced_jobs"] == 0
+    assert rollup["totals"]["tokens_in"] == 24763
+    item = _running(data)["13"]["telemetry"]
+    assert item["cost_usd"] is None and item["tokens_in"] == 0
 
 
 def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: Path) -> None:

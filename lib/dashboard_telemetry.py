@@ -3,11 +3,12 @@
 `read_telemetry` reads the `job_telemetry` table (written by `orch job run`,
 lib/telemetry.py) inside the dashboard's read-only transaction. A database
 without the table, or a job without a row, reads as "no telemetry", never an
-error. Only allowlisted columns are read and every value is checked: counts
-are non-negative integers, text is one line of at most a fixed length, and
-step kinds and statuses are enumerated. The snapshot is then walked by
-lib/dashboard.py's `_scrub`, so every string here also goes through `redact`
-before it is written. Raw event logs are never read: they stay on the
+error. Only allowlisted columns are read and every value is checked: numbers
+must be finite, counts are non-negative integers, text is one line of at
+most a fixed length, and step kinds and statuses are enumerated. The
+snapshot is then walked by lib/dashboard.py's `_scrub`, so every string here
+also goes through `redact` (and any non-finite float becomes null) before it
+is written. Raw event logs are never read: they stay on the
 machine that ran the job.
 
 Snapshot shape:
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import sqlite3
 from collections.abc import Iterable
@@ -59,22 +61,28 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # --- reading -------------------------------------------------------------------
 
 
-def _count(value: object) -> int:
+def _number(value: object) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
-    return max(0, int(value))
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _count(value: object) -> int:
+    return _maybe_count(value) or 0
 
 
 def _maybe_count(value: object) -> int | None:
-    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return max(0, int(value))
+    number = _number(value)
+    return None if number is None else max(0, int(number))
 
 
 def _money(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value >= 0:
+    number = _number(value)
+    if number is None or number < 0:
         return None
-    return round(float(value), 4)
+    return round(float(number), 4)
 
 
 def _text(value: object, limit: int = TEXT_LIMIT) -> str:
@@ -83,9 +91,8 @@ def _text(value: object, limit: int = TEXT_LIMIT) -> str:
 
 
 def _age(now: float, then: object) -> int | None:
-    if isinstance(then, bool) or not isinstance(then, (int, float)):
-        return None
-    return int(max(0.0, now - float(then)))
+    number = _number(then)
+    return None if number is None else int(max(0.0, now - float(number)))
 
 
 def _json(value: object, kind: type) -> object:

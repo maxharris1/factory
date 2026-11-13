@@ -481,6 +481,8 @@ def _scrub(value: object) -> object:
         return {key: _scrub(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_scrub(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 
@@ -1312,7 +1314,7 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     pages in PAGES order.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True) + "\n"}
+    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_pages(snapshot))
     targets = [out_dir / name for name in texts]
     temps: list[str] = []

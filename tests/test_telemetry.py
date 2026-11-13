@@ -219,7 +219,7 @@ def test_scrubber_removes_env_values_token_shapes_and_auth_headers() -> None:
     assert "[redacted-env]" in text
     assert scrub(f"export OPENAI_API_KEY={API_KEY}").startswith("export OPENAI_API_KEY=[redacted")
     assert scrub("cat /home/claude-bot/notes") == "cat /home/claude-bot/notes"  # HOME is not secret
-    assert scrub("abc") == "abc"  # a value under MIN_SECRET_VALUE is left alone
+    assert "abc" not in scrub("echo abc")  # a short secret is scrubbed too
     assert scrub("a\nb\tc") == "a b c"
     long = scrub("x " * 400)
     assert len(long) == telemetry.TITLE_LIMIT and long.endswith("…")
@@ -371,6 +371,97 @@ def test_env_secrets_are_scrubbed_from_titles_and_reasons(tmp_path: Path) -> Non
     row = _row(db)
     no_secret(row)
     assert "[redacted-env]" in row["steps"]
+
+
+@pytest.mark.parametrize("secret", ["7", "42", "4821", "pw!"])
+def test_a_short_env_secret_never_reaches_the_table(tmp_path: Path, secret: str) -> None:
+    session, db, _, _ = _session(tmp_path, environ={"DEPLOY_PASSWORD": secret + "\n"})
+    command = f"deploy -p{secret} --pin={secret}"
+    events = [
+        {"type": "assistant", "message": {"id": "m", "content": [
+            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}},
+            {"type": "tool_use", "id": "u", "name": "Edit", "input": {"file_path": f"/w/{secret}.txt"}}]}},
+        {"type": "turn.failed", "error": {"message": f"bad pin {secret}"}},
+    ]
+    session.consume(io.BytesIO("".join(json.dumps(e) + "\n" for e in events).encode()))
+    session.finish(0)
+    row = _row(db)
+    titles = [step["title"] for step in json.loads(row["steps"])]
+    assert len(titles) == 3 and all("[redacted-env]" in title for title in titles)
+    for text in (*titles, row["files"], row["exit_reason"], row["tool_calls"]):
+        assert secret not in text, text
+
+
+def test_flags_and_system_session_variables_are_not_treated_as_secrets() -> None:
+    scrub = Scrubber({
+        "XDG_SESSION_ID": "3", "XDG_SESSION_TYPE": "tty", "XDG_SESSION_CLASS": "user",
+        "CLAUDE_CODE_CHILD_SESSION": "1", "USE_KEYRING": "true", "AUTH_DISABLED": "0",
+    })
+    assert scrub("pytest -n 3 tests/user_tty.py; exit 1 0 true") == "pytest -n 3 tests/user_tty.py; exit 1 0 true"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "turn.completed", "usage": {"input_tokens": 2**63, "output_tokens": 10**30}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1e309, "cached_input_tokens": float("nan")}},
+        {"type": "assistant", "message": {"id": "m", "usage": {"input_tokens": 2**64, "output_tokens": 1e309}}},
+        {"type": "result", "subtype": "success", "num_turns": 2**70,
+         "usage": {"input_tokens": 2**63, "cache_read_input_tokens": 2**63}, "total_cost_usd": 1e309},
+        {"type": "result", "subtype": "success", "total_cost_usd": float("nan")},
+    ],
+)
+def test_out_of_range_numbers_are_bounded_and_the_row_is_written(tmp_path: Path, event: dict) -> None:
+    session, db, _, messages = _session(tmp_path)
+    stream = json.dumps(event) + "\n" + json.dumps(event) + "\n"
+    session.consume(io.BytesIO(stream.encode()))
+    session.flush()
+    session.finish(0)
+    row = _row(db)
+    assert messages == []
+    for name in ("events", "turns", "tokens_in", "tokens_cached", "tokens_out"):
+        assert isinstance(row[name], int) and 0 <= row[name] <= telemetry.MAX_COUNT, name
+    assert row["cost_usd"] is None
+    assert row["events"] == 2
+
+
+@pytest.mark.parametrize("error", [OverflowError, RecursionError, RuntimeError, KeyError])
+def test_flush_and_finish_never_raise_whatever_the_write_raises(tmp_path: Path, error) -> None:
+    def broken() -> sqlite3.Connection:
+        raise error("boom")
+
+    session, _, _, messages = _session(tmp_path, connect=broken)
+    session.consume(io.BytesIO(b'{"type":"turn.started"}\n'))
+    session.flush()
+    session.flush()
+    session.finish(0)
+    assert len(messages) == 1 and messages[0].startswith("telemetry: summary not written")
+    assert session.raw_log._fd < 0
+
+
+@pytest.mark.parametrize("opener", ["[", '{"a":'])
+def test_a_deeply_nested_line_never_stops_the_drain(tmp_path: Path, opener: str) -> None:
+    session, db, out, messages = _session(tmp_path)
+    closer = "]" if opener == "[" else "}"
+    nested = opener * 100_000 + "1" + closer * 100_000
+    stream = "\n".join([nested, '{"type":"turn.started"}', "after"]) + "\n"
+    session.consume(io.BytesIO(stream.encode()))
+    session.finish(0)
+    assert _row(db)["turns"] == 1
+    assert out.getvalue().endswith(b"after\n")
+
+
+def test_session_entry_points_never_raise_from_a_broken_summary(tmp_path: Path, monkeypatch) -> None:
+    session, db, _, messages = _session(tmp_path)
+
+    def boom(self):
+        raise OverflowError("int too large")
+
+    monkeypatch.setattr(Summary, "row", boom)
+    session.consume(io.BytesIO(b'{"type":"turn.started"}\n'))
+    session.flush()
+    session.finish(0)
+    assert messages == ["telemetry: summary not written (OverflowError: int too large)"]
 
 
 def test_last_seen_reads_the_summary_time_or_none(tmp_path: Path) -> None:

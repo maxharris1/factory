@@ -32,21 +32,26 @@ stdout on a pipe and hands the pipe to a `Session` here:
 
 Secrets: every string that goes into the table (step titles, file paths,
 exit reasons, tool names) is scrubbed first (`Scrubber`): the values of this
-process's environment variables whose names look secret are replaced, then
+process's environment variables whose names look secret are replaced,
+whatever their length (only boolean flag values such as `1` or `true`, and
+the XDG_SESSION_* and DESKTOP_SESSION descriptors, are kept), then
 the dashboard's `redact` removes token-shaped strings, auth headers, key
 assignments, URLs and email addresses, and the text is cut to one short
 line. Assistant text and tool output are never stored; tool output is only
 read for test counts. The dashboard (lib/dashboard_telemetry.py) shows
 only these summaries and scrubbed step titles.
 
-A telemetry failure (an unwritable log, a locked database, a malformed
-event) is one log line and never stops the job or its heartbeat.
+Counters are clamped to 0..MAX_COUNT and a cost must be finite, so every
+value fits a SQLite INTEGER and standard JSON. A telemetry failure (an
+unwritable log, a locked database, a malformed or deeply nested event) is
+one log line and never stops the job, its heartbeat or its cleanup.
 `ORCH_TELEMETRY=off` turns it off: the command then runs exactly as before.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -72,7 +77,7 @@ MAX_TOOL_TYPES = 40
 TITLE_LIMIT = 120
 REASON_LIMIT = 100
 SCAN_BYTES = 64 * 1024
-MIN_SECRET_VALUE = 6
+MAX_COUNT = 2**53 - 1
 
 HARNESS_BY_BOT = {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor"}
 _OFF = frozenset({"0", "off", "no", "false"})
@@ -217,6 +222,8 @@ def state_dir(job_id: str, bot: str, database: Path, environ: Mapping[str, str])
 _SECRET_NAME = re.compile(
     r"(?i)(token|secret|passw|pwd|key|auth|credential|cookie|session|webhook|private|signature)"
 )
+_NOT_SECRET_NAME = re.compile(r"XDG_SESSION_\w+|DESKTOP_SESSION")
+_FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 
 
 class Scrubber:
@@ -227,9 +234,12 @@ class Scrubber:
 
         self._redact = redact
         values = {
-            value
+            value.strip()
             for name, value in environ.items()
-            if _SECRET_NAME.search(name) and len(value.strip()) >= MIN_SECRET_VALUE
+            if value.strip()
+            and value.strip().lower() not in _FLAG_VALUES
+            and _SECRET_NAME.search(name)
+            and not _NOT_SECRET_NAME.fullmatch(name)
         }
         self._values = sorted(values, key=len, reverse=True)
 
@@ -359,7 +369,13 @@ def count_tests(command: str, output: str) -> tuple[int, int] | None:
 def _int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
-    return max(0, int(value))
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0
+    return min(MAX_COUNT, max(0, int(value)))
+
+
+def _maybe_int(value: int | None) -> int | None:
+    return None if value is None else _int(value)
 
 
 def _text_of(content: object) -> str:
@@ -555,8 +571,10 @@ class Summary:
         if isinstance(usage, dict):
             self.tokens_in, self.tokens_cached, self.tokens_out = self._claude_usage(usage)
         cost = event.get("total_cost_usd", event.get("cost_usd"))
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
-            self.cost_usd = float(cost)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            cost = float(cost)
+            if math.isfinite(cost) and cost >= 0:
+                self.cost_usd = cost
         subtype = str(event.get("subtype") or "")
         reason = _CLAUDE_REASONS.get(subtype, subtype or "finished")
         if event.get("is_error") and subtype == "success":
@@ -640,18 +658,18 @@ class Summary:
 
     def row(self) -> dict[str, Any]:
         return {
-            "events": self.events,
-            "turns": self.turns,
+            "events": _int(self.events),
+            "turns": _int(self.turns),
             "tool_calls": json.dumps(dict(self.tool_calls.most_common()), sort_keys=False),
-            "files_touched": self.files_touched,
+            "files_touched": _int(self.files_touched),
             "files": json.dumps(self.files),
-            "commands": self.commands,
-            "test_runs": self.test_runs,
-            "tests_passed": self.tests_passed,
-            "tests_failed": self.tests_failed,
-            "tokens_in": self.tokens_in,
-            "tokens_cached": self.tokens_cached,
-            "tokens_out": self.tokens_out,
+            "commands": _int(self.commands),
+            "test_runs": _int(self.test_runs),
+            "tests_passed": _maybe_int(self.tests_passed),
+            "tests_failed": _maybe_int(self.tests_failed),
+            "tokens_in": _int(self.tokens_in),
+            "tokens_cached": _int(self.tokens_cached),
+            "tokens_out": _int(self.tokens_out),
             "cost_usd": self.cost_usd,
             "last_event_at": self.last_event_at,
             "steps": json.dumps(list(self.steps)),
@@ -739,7 +757,7 @@ class Session:
                 continue
             try:
                 event = json.loads(chunk)
-            except ValueError:
+            except (ValueError, RecursionError):
                 event = None
             if not isinstance(event, dict):
                 self._passthrough(chunk)
@@ -801,7 +819,7 @@ class Session:
                         f"INSERT OR REPLACE INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({marks})",
                         tuple(data[name] for name in COLUMNS),
                     )
-        except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+        except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
 
     def _passthrough(self, chunk: bytes) -> None:
