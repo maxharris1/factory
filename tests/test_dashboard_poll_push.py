@@ -282,7 +282,7 @@ def _run_poll(tmp_path: Path, monkeypatch, orch_text: str) -> dict:
 
 def test_orch_poll_without_dashboard_push_passes_no_hook(tmp_path: Path, monkeypatch) -> None:
     seen = _run_poll(tmp_path, monkeypatch, POLL_ORCH)
-    assert seen.get("after_poll") is None
+    assert seen["after_poll"].pusher is None
 
 
 def test_orch_poll_with_dashboard_push_passes_the_pusher(tmp_path: Path, monkeypatch) -> None:
@@ -300,7 +300,7 @@ dashboard:
     every_minutes: 2
 """,
     )
-    push = seen["after_poll"]
+    push = seen["after_poll"].pusher
     assert isinstance(push, PollPusher)
     assert push.every_seconds == 120
     assert push.argv[-6:] == [

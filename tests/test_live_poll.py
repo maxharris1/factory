@@ -3,6 +3,8 @@ import io
 import json
 import subprocess
 import time
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -16,6 +18,7 @@ from lib.dispatcher import (
     RetryableStateError,
     TicketRef,
     TrackedTicket,
+    _spread,
 )
 from lib.factory_md import FactoryConfig
 from lib.github_actions import (
@@ -60,6 +63,7 @@ from lib.poll_source import (
     _linear_state_phase,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
+from tests.test_dispatcher import setup
 
 FACTORY = """---
 base_branch: main
@@ -792,7 +796,7 @@ def test_already_merged_tracked_pr_is_marked_terminal_without_detail_reads() -> 
     source = LivePollSource(
         config(),
         gh_runner=runner,
-        terminal_sink=lambda repo, ticket, state: terminals.append(
+        terminal_sink=lambda repo, ticket, state, _merged: terminals.append(
             (repo, ticket, state)
         ),
     )
@@ -2201,7 +2205,7 @@ def test_real_dispatcher_is_idempotent_across_two_once_runs(
     )
 
     class Source:
-        def github_candidates(self, label_prefix):
+        def github_candidates(self, label_prefix, *, exclude=frozenset()):
             del label_prefix
             return (ticket,)
 
@@ -2531,3 +2535,209 @@ def test_linear_ticket_carries_the_issue_state_phase() -> None:
 
     assert ticket.linear_state_phase == "moved-on"
     assert ticket.linear_ready_state_id == "rfr"
+
+
+# --- #108 Unit 3: every tracked ticket's merge is seen ------------------------
+
+
+def _merged_runner(gh: FakeGh):
+    def runner(argv, timeout):
+        endpoint = next(part for part in argv if part.startswith(("repos/", "search/")))
+        if endpoint == "repos/acme/widgets/pulls/12":
+            gh.calls.append(list(argv))
+            return GhResult(
+                0,
+                json.dumps({"merged": True, "head": {"sha": gh.head}, "html_url": "u"}),
+                "",
+            )
+        return gh(argv, timeout)
+
+    return runner
+
+
+def test_merged_github_pr_passes_a_label_ticket_to_the_sink() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    sunk: list = []
+    source = LivePollSource(
+        config(),
+        gh_runner=_merged_runner(gh),
+        terminal_sink=lambda *args: sunk.append(args),
+    )
+
+    assert source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),)) == ()
+
+    [(repo, number, state, merged)] = sunk
+    assert (repo, number, state) == ("acme/widgets", "12", "merged")
+    assert (merged.pr_number, merged.current_head, merged.merged) == ("12", gh.head, True)
+
+
+def test_merged_pr_with_a_replay_is_recorded_and_still_returned() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    sunk: list = []
+    source = LivePollSource(
+        config(),
+        gh_runner=_merged_runner(gh),
+        terminal_sink=lambda *args: sunk.append(args[:3]),
+    )
+
+    found = source.tracked_tickets(
+        (TicketRef("acme/widgets", "12", "github", allow_merged=True),)
+    )
+
+    assert [ticket.ticket_id for ticket in found] == ["12"]
+    assert sunk == [("acme/widgets", "12", "merged")]
+
+
+def test_fresh_read_of_a_merged_pr_records_nothing() -> None:
+    """#42 N3: the fresh read is a caller's mid-step read; it decides."""
+    gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
+    sunk: list = []
+    source = LivePollSource(
+        config(),
+        gh_runner=_merged_runner(gh),
+        terminal_sink=lambda *args: sunk.append(args),
+    )
+
+    fresh = source.fresh_ticket(TicketRef("acme/widgets", "12", "github"))
+
+    assert fresh is not None and fresh.merged is True
+    assert sunk == []
+
+
+def test_linear_ticket_with_merged_pr_moves_to_merged() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+
+    def transport(url, headers, body, timeout):
+        del url, headers, body, timeout
+        return HTTPResult(200, json.dumps({"data": {"issue": linear_issue()}}))
+
+    sunk: list = []
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=_merged_runner(gh),
+        linear_transport=transport,
+        terminal_sink=lambda *args: sunk.append(args),
+    )
+
+    found = source.tracked_tickets((TicketRef("acme/widgets", "AUT-42", "linear"),))
+
+    assert found == ()
+    assert sunk == [("acme/widgets", "AUT-42", "merged", None)]
+    assert not any("/comments" in part for call in gh.calls for part in call)
+
+
+# --- #108 r1: stopped tickets on the live source's own cadence ---------------
+
+
+def _one_linear_ticket_per_phase() -> list[str]:
+    """Ten identifiers whose stopped-read turns cover every cycle mod 10."""
+    by_phase: dict[int, str] = {}
+    number = 0
+    while len(by_phase) < 10:
+        number += 1
+        by_phase.setdefault(_spread("acme/widgets", f"AUT-{number}") % 10, f"AUT-{number}")
+    return sorted(by_phase.values())
+
+
+def _handed_off(queue, tracker: str, ticket_ids: list[str]) -> None:
+    with queue.connect() as connection:
+        for ticket_id in ticket_ids:
+            connection.execute(
+                "INSERT INTO tracked_tickets VALUES ('acme/widgets', ?, ?, 0)",
+                (ticket_id, tracker),
+            )
+            connection.execute(
+                "INSERT INTO ticket_state (repo, ticket_id, workflow_state) "
+                "VALUES ('acme/widgets', ?, 'handed-off')",
+                (ticket_id,),
+            )
+
+
+def _stopped_linear_poll(tmp_path: Path, gh_runner):
+    dispatcher, queue = setup(tmp_path)
+    identifiers = _one_linear_ticket_per_phase()
+    _handed_off(queue, "linear", identifiers)
+    reads: Counter[str] = Counter()
+
+    def transport(url, headers, body, timeout):
+        del url, headers, timeout
+        request = json.loads(body)
+        if request["query"].startswith("query FactoryPoll"):
+            return linear_search_page([])
+        identifier = request["variables"]["id"]
+        reads[identifier] += 1
+        issue = linear_issue(identifier=identifier)
+        return HTTPResult(200, json.dumps({"data": {"issue": issue}}))
+
+    source = LivePollSource(
+        replace(config(linear=True), poll_seconds=30),
+        environ={"LINEAR_KEY": "key"},
+        gh_runner=gh_runner,
+        linear_transport=transport,
+        terminal_sink=dispatcher.record_terminal,
+        error_sink=dispatcher.record_poll_error,
+        sleep=lambda _: None,
+    )
+    return dispatcher, queue, source, identifiers, reads
+
+
+def test_a_stopped_linear_ticket_is_read_within_ten_cycles_at_every_phase(
+    tmp_path: Path,
+) -> None:
+    """At poll_seconds 30 Linear is read every other cycle. A stopped
+    ticket whose turn fell on a GitHub-only cycle was never read, so its
+    merge was never seen."""
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    dispatcher, queue, source, identifiers, _ = _stopped_linear_poll(
+        tmp_path, _merged_runner(gh)
+    )
+
+    for _ in range(11):
+        dispatcher.poll_once(source)
+
+    with queue.connect() as connection:
+        states = dict(
+            connection.execute("SELECT ticket_id, workflow_state FROM ticket_state")
+        )
+    assert states == {identifier: "merged" for identifier in identifiers}
+
+
+def test_a_stopped_linear_ticket_is_still_read_once_per_300_seconds(
+    tmp_path: Path,
+) -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    dispatcher, _, source, identifiers, reads = _stopped_linear_poll(tmp_path, gh)
+
+    for _ in range(100):
+        dispatcher.poll_once(source)
+
+    assert set(reads) == set(identifiers)
+    assert set(reads.values()) <= {9, 10}
+
+
+def test_github_discovery_does_not_read_a_tracked_pr(tmp_path: Path) -> None:
+    """A tracked PR is read by tracked_tickets on its own cadence; discovery
+    reading every labelled PR made a handed-off PR's 300-second budget a
+    per-cycle one."""
+    dispatcher, queue = setup(tmp_path)
+    _handed_off(queue, "github", ["12"])
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.issues = [
+        {"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/handed-off"}]}
+    ]
+    source = LivePollSource(
+        replace(config(), poll_seconds=30),
+        gh_runner=gh,
+        terminal_sink=dispatcher.record_terminal,
+    )
+
+    reads = []
+    for _ in range(10):
+        before = len(gh.calls)
+        dispatcher.poll_once(source)
+        reads.append(
+            sum("/comments?" in part for call in gh.calls[before:] for part in call)
+        )
+
+    assert sum(reads) == 1

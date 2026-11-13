@@ -917,7 +917,7 @@ class GitHubFixtureSource:
             risk="high",
         )
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         del label_prefix
         return (self._ticket(),)
 
@@ -1582,3 +1582,20 @@ def test_e2e_unreadable_tip_after_fast_forward_records_no_gh_output(
     # Codex r1 F1.2: all() over an empty drain is vacuous, so pin the wake.
     assert [job.request.action for job in grok] == ["ship-failed"]
     assert all(marker not in str(job.request.detail) for job in grok)
+
+
+def test_handoff_of_a_merged_pr_raises_the_typed_already_merged_error() -> None:
+    """#108 (#42 N3): the dispatcher ends the ship as merged on this error."""
+    from lib.dispatcher import AlreadyMergedShip
+    from lib.github_actions import AlreadyMergedError
+
+    actions, gh = adapter()
+    pull = served("pull-42-open.json")
+    gh.route(PULL, GhResult(0, pull.stdout.replace('"merged": false', '"merged": true'), ""))
+
+    with pytest.raises(AlreadyMergedError) as raised:
+        actions.handoff(pr("handoff"), HEAD)
+
+    assert isinstance(raised.value, AlreadyMergedShip)
+    assert raised.value.write_confirmed is False
+    assert gh.keys() == [PULL]

@@ -61,6 +61,7 @@ from urllib.parse import quote
 
 from lib.dispatcher import (
     LINEAR_STATE_PHASES,
+    AlreadyMergedShip,
     CIResult,
     Comment,
     ReviewActions,
@@ -134,6 +135,10 @@ class NotFastForwardError(GitHubAdapterError):
 
 
 class HeadMismatchError(GitHubAdapterError):
+    pass
+
+
+class AlreadyMergedError(GitHubAdapterError, AlreadyMergedShip):
     pass
 
 
@@ -315,7 +320,7 @@ class GitHubReviewActions:
             if current != head:
                 raise HeadMismatchError(f"PR head is {current}, not {head}")
             if pull.get("merged") is True:
-                raise GitHubAdapterError("cannot hand off a merged pull request")
+                raise AlreadyMergedError("cannot hand off a merged pull request")
             if pull.get("state") != "open":
                 raise GitHubAdapterError(
                     "cannot hand off a pull request that is not open"

@@ -523,3 +523,13 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
         time.sleep(0.2)
         if pidfile.exists():
             os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def test_profile_makes_the_state_dir_before_logging(tmp_path: Path) -> None:
+    """#66 fix 3: the profile redirects into the state dir, which a reboot lost."""
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    profile = (tmp_path / ".config/factory/profile.sh").read_text(encoding="utf-8")
+    state = f"{tmp_path}/.local/state/factory"
+
+    assert profile.index(f'mkdir -p "{state}"') < profile.index(f'>>"{state}/poller-service.log"')

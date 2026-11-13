@@ -818,7 +818,7 @@ class FakeSource:
     def __init__(self, *tickets: TrackedTicket):
         self.tickets = tickets
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         return self.tickets
 
     def linear_candidates(
