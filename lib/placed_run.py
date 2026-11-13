@@ -16,9 +16,16 @@ out holds one slot on one device. `orch job run` then:
   (lib/job_run.py holds it at a gate until then);
 * on a remote device, runs the command there over the box's SSH alias for
   this bot (`ssh -l <bot> -- <alias> <start script>`, lib/remote.py) in
-  `<workdir_root>/jobs/<job-id>`, under a fresh worker tag recorded on the
-  slot first. `--worktree` is refused for a remote job: worktrees are made
-  on the box only;
+  `<workdir_root>/jobs/<job-id>`, under the bot's login shell (`bash -lc`)
+  and a fresh worker tag recorded on the slot first;
+* with `--worktree` on a remote device (#94), first checks over the same
+  alias that git, gh and the harness binary exist under `bash -lc`, then
+  clones or fetches the job's checkout into that directory at the job's
+  head (and branch), copying the brief beside it. Any failure there
+  (a missing tool, an unreachable device, a failed clone) starts nothing:
+  the job is requeued and its slot freed in one transaction, with no round
+  or attempt charged (`requeue`). The box keeps its git worktrees
+  (lib/worktrees.py). Harnesses never build a remote command themselves;
 * when the command ends (done, failed or killed), releases the slot only
   once the worker is confirmed gone: a local command has exited; a remote
   device answers that no process carries the start's worker tag and none
@@ -41,6 +48,7 @@ out holds one slot on one device. `orch job run` then:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -62,16 +70,22 @@ from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
     GONE,
     RUNNING,
+    CheckoutError,
+    RemoteError,
     RemoteTarget,
     Transport,
+    brief_path,
     check_worker,
+    checkout,
     new_tag,
+    plain_branch,
+    preflight,
     ssh_argv,
     start_script,
     stop_worker,
 )
 from lib.wait import retry_locked
-from lib.worktrees import pid_alive, process_start
+from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_start
 
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
@@ -102,12 +116,79 @@ class PlacedRun:
     alive: Callable[[int | None, str | None], bool] = pid_alive
     runner: int | None = None
     clock: Callable[[], float] = time.monotonic
+    requeued: bool = False
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
     _launched: list[float] = field(default_factory=list)
 
     @property
     def remote(self) -> bool:
         return self.target is not None
+
+    def remote_env(self, *, worktree: bool, brief: bool) -> dict[str, str]:
+        """The checkout's remote paths for the harness (#94); empty on the box."""
+        if self.target is None or not worktree:
+            return {}
+        env = {"ORCH_JOB_WORKTREE": self.target.job_dir}
+        if brief:
+            env["ORCH_JOB_BRIEF"] = brief_path(self.target)
+        return env
+
+    def remote_checkout(
+        self,
+        *,
+        harness: str,
+        repo: str,
+        head: str | None,
+        detail: str | None,
+        url_template: str,
+        brief: bytes | None,
+    ) -> None:
+        """Preflight, then make the job's checkout on its remote device (#94).
+
+        Raises CheckoutError (one line) when the job cannot start there;
+        nothing has been started and no worker recorded, so `requeue` may
+        put it back.
+        """
+        assert self.target is not None
+        try:
+            url = url_template.format(repo=repo)
+            check_remote_url(url)
+        except (WorktreeError, KeyError, IndexError, ValueError) as exc:
+            raise CheckoutError(_line(exc)) from exc
+        base, branch = _branches(detail)
+        preflight(self.transport, self.target, harness)
+        try:
+            sha, reused = checkout(
+                self.transport,
+                self.target,
+                url=url,
+                head=head,
+                base_branch=base,
+                branch=branch,
+                brief=brief,
+            )
+        except RemoteError as exc:
+            raise CheckoutError(_line(exc)) from exc
+        self.log(
+            f"job checkout {self.target.job_dir} on {self.device.name} at {sha}"
+            f"{' (reused)' if reused else ''}"
+        )
+
+    def requeue(self, reason: str) -> bool:
+        """Put a job whose start failed back in the queue; free its slot (#94).
+
+        Nothing ran and no worker was recorded, so no round or attempt is
+        charged. True when requeued; False if the job or slot changed first
+        (then `finish` handles the slot as usual).
+        """
+        assert self.runner is not None
+        requeued = retry_locked(
+            lambda: self.pool.requeue_unstarted(
+                self.placement.job_id, owner=self.owner, runner=self.runner, reason=reason
+            )
+        )
+        self.requeued = bool(requeued)
+        return self.requeued
 
     def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
         if self.target is None:
@@ -187,6 +268,8 @@ class PlacedRun:
         started is requeued (or failed, budget spent) in the same step.
         """
         job_id = self.placement.job_id
+        if self.requeued:
+            return True  # the requeue freed the slot; nothing was started
         if self.target is None:
             workers = list(self._worker)
             if self.placement.worker_pid is not None:
@@ -356,11 +439,6 @@ def prepare(
         )
     target: RemoteTarget | None = None
     if not device.local:
-        if worktree:
-            raise PlacementError(
-                f"job {job_id} is placed on remote device {device.name}; "
-                "--worktree is box-only, run it without --worktree"
-            )
         target = remote_target(device, placement.harness, job_id, new_tag())
         if target is None:
             raise PlacementError(
@@ -383,6 +461,15 @@ def prepare(
     except QueueError as exc:
         raise PlacementError(str(exc)) from exc
     _earlier_worker_gone(placement, device, transport, alive)
+    if placement.worker_pid is not None or placement.remote_started:
+        try:
+            retry_locked(
+                lambda: pool.forget_worker(
+                    job_id, owner=owner, runner=runner, earlier=placement
+                )
+            )
+        except QueueError as exc:
+            raise PlacementError(str(exc)) from exc
     return PlacedRun(
         pool=pool,
         placement=placement,
@@ -395,6 +482,31 @@ def prepare(
         alive=alive,
         runner=runner,
     )
+
+
+def _branches(detail: str | None) -> tuple[str | None, str | None]:
+    """The job's base branch and its own branch from its detail JSON, if named."""
+    try:
+        data = json.loads(detail) if detail else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return _plain_branch(data.get("base_branch")), _plain_branch(data.get("gitBranchName"))
+
+
+def _plain_branch(value: object) -> str | None:
+    """A branch name safe to pass to git, else None (an odd name is ignored)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return plain_branch(value) or None
+    except RemoteError:
+        return None
+
+
+def _line(exc: BaseException) -> str:
+    return " ".join(str(exc).split()) or type(exc).__name__
 
 
 def _earlier_worker_gone(

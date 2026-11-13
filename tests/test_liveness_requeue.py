@@ -375,7 +375,7 @@ def test_remote_harness_runs_under_a_login_shell_so_profile_path_applies(
     tool.chmod(0o755)
     (home / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\nexport PATH\n', encoding="utf-8")
     (home / ".bash_profile").write_text(". \"$HOME/.profile\"\n", encoding="utf-8")
-    env = {**ssh.env(), "HOME": str(home)}
+    env = {**ssh.env(), "FAKE_SSH_HOME": str(home)}
     code, err = _job_run(poller, job_id, "orch-test-gh", env=env)
     assert code == 0, err
     assert report.read_text(encoding="utf-8").strip() == job_id

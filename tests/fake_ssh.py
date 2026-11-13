@@ -11,7 +11,11 @@ appends one JSON line per call to $FAKE_SSH_LOG, and then plays the device:
 * otherwise SCRIPT runs under `sh -c` in a new session with a fresh
   environment (PATH and HOME only: ssh forwards no variables), as sshd
   runs a command, so killing this process leaves the "remote" worker
-  running.
+  running. $FAKE_SSH_PATH, when set, is the device's non-login PATH.
+  HOME is $FAKE_SSH_HOME, else an empty `fake-ssh-home` beside the log,
+  never the real HOME: a `bash -lc` on the device reads that HOME's
+  ~/.bash_profile, so a test can tell a login shell's PATH from a bare one.
+  Standard input is passed through, as ssh forwards it.
 """
 
 import json
@@ -62,10 +66,19 @@ def main(argv: list[str]) -> int:
             return 255
     if os.path.exists(known + ".offline"):
         return 255
+    home = os.environ.get("FAKE_SSH_HOME")
+    if not home:
+        # Never the real user's HOME: a login shell on the "device" would
+        # read the real ~/.profile. An empty one beside the log instead.
+        home = os.path.join(os.path.dirname(os.path.abspath(os.environ["FAKE_SSH_LOG"])), "fake-ssh-home")
+        os.makedirs(home, exist_ok=True)
     child = subprocess.Popen(
         ["sh", "-c", script],
         start_new_session=True,
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/")},
+        env={
+            "PATH": os.environ.get("FAKE_SSH_PATH") or os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home,
+        },
     )
     return child.wait()
 
