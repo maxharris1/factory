@@ -20,6 +20,7 @@ export const group = (v) => {
   if (
     name === "ship" ||
     name === "waiting-external" ||
+    name === "awaiting-ok" ||
     name === "merged" ||
     name === "handed-off" ||
     name === "post-merge" ||
@@ -61,6 +62,9 @@ export const step = (action, from, to) => {
   if (action === "T4ShipMerge") return "ship = merge";
   if (action === "T4ShipHandoff") return "ship = handoff";
   if (action === "T4ShipAfter") return "ship = after an approver";
+  if (action === "T4Hold") return "ship = merge and the PR is held";
+  if (action === "T4HoldOk") return "approver's OK at the head, or approver removes a label-only hold";
+  if (action === "T4HoldPatchDiffers") return "head changed and the patch differs";
   if (action === "T8Ok") return "OK names the previewed SHA";
   if (action === "T8Decline") return "declined";
   if (action === "T8DeclineStuck") return "3rd decline";

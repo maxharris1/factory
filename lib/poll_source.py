@@ -1046,6 +1046,7 @@ class LivePollSource:
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
+            **self._hold_inputs(project.repo, number, factory),
             repo=project.repo,
             ticket_id=number,
             factory=factory,
@@ -1065,6 +1066,35 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _hold_inputs(
+        self,
+        repo: str,
+        number: str,
+        factory: FactoryConfig,
+    ) -> dict[str, Any]:
+        """Issue #86: labels, diff paths and label events for a hold.
+
+        Read only on a ship: merge repo with hold: in factory.md, uncached,
+        so a label or push from the last minute is seen. A read that fails
+        is recorded and left None, which T4 treats as held (no merge) while
+        every other row still runs.
+        """
+        if factory.ship != "merge" or factory.hold is None:
+            return {}
+        reads = {
+            "labels": self.github.pull_labels,
+            "changed_files": self.github.pull_files,
+            "label_events": self.github.label_events,
+        }
+        found: dict[str, Any] = {}
+        for name, read in reads.items():
+            try:
+                found[name] = read(repo, number)
+            except Exception as exc:
+                self._record(repo, number, exc)
+                found[name] = None
+        return found
 
     def _github_pull(
         self,
@@ -1138,10 +1168,16 @@ class LivePollSource:
                 identifier,
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
+        factory = self._factory(project)
         ticket = TrackedTicket(
+            **(
+                self._hold_inputs(project.repo, pr_number, factory)
+                if pr_number is not None
+                else {}
+            ),
             repo=project.repo,
             ticket_id=identifier,
-            factory=self._factory(project),
+            factory=factory,
             comments=comments,
             current_head=head,
             ci=ci,

@@ -38,6 +38,15 @@ still ship `enabled: false` until Max turns them on.
   merged some other way is refused and wakes Grok Bot. `ship: merge` repos
   still squash-merge with `--match-head-commit`; `ship: handoff` repos are
   never merged by the factory.
+- A `ship: merge` repo may add `hold:` to `factory.md` (issue #86,
+  [`lib/hold.py`](lib/hold.py)). A PR carrying `hold.label` (default
+  `factory:hold`), or whose diff touches a `hold.paths` glob, is not merged on
+  APPROVE: it waits in `orch:state/awaiting-ok` ("waiting on <approver>" in
+  `orch status` and the dashboard) until `hold.approver` posts
+  `<!-- orch:v1 kind=ok head=<sha> -->` for the current head, or removes the
+  label on a label-only hold. Grok Bot is woken once per held head. The OK
+  carries to a moved head only on an equal patch-id, and `stable_patch_id` is
+  not built (below), so today a moved head needs a new OK.
   Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter

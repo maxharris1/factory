@@ -29,12 +29,13 @@ stateDiagram-v2
   s10: blocked
   s11: ship
   s12: fixing
-  s13: handed-off
-  s14: merged
-  s15: waiting-external
-  s16: done
-  s17: post-merge
-  s18: capped
+  s13: awaiting-ok
+  s14: handed-off
+  s15: merged
+  s16: waiting-external
+  s17: done
+  s18: post-merge
+  s19: capped
   [*] --> s0
   s0 --> s2: project config invalid
   s0 --> s1: brief and acceptance criteria posted
@@ -56,22 +57,27 @@ stateDiagram-v2
   s8 --> s9: device offline 60 minutes or job dies twice (T6)
   s8 --> s12: REVISE, under the round cap
   s11 --> s8: head changed and the patch differs
-  s11 --> s13: ship = handoff
-  s11 --> s14: ship = merge
-  s11 --> s15: ship = after an approver
+  s11 --> s13: ship = merge and the PR is held
+  s11 --> s14: ship = handoff
+  s11 --> s15: ship = merge
+  s11 --> s16: ship = after an approver
   s12 --> s5: a product question
   s12 --> s8: ready, CI green
   s12 --> s9: device offline 60 minutes or job dies twice (T6) or CI red three times
   s5 --> s12: answer, same step resumes
-  s14 --> s16: merged
-  s14 --> s17: project has a post-merge check
-  s15 --> s14: OK names the previewed SHA
-  s15 --> s12: declined
+  s13 --> s8: head changed and the patch differs
+  s13 --> s15: approver's OK at the head, or approver removes a label-only hold
+  s13 --> s12: REVISE, under the round cap
+  s15 --> s17: merged
+  s15 --> s18: project has a post-merge check
+  s16 --> s15: OK names the previewed SHA
+  s16 --> s12: declined
   s7 --> s9: gaps a second time
-  s17 --> s16: post-merge fails, follow-up filed or post-merge passes
-  s8 --> s18: REVISE at the cap
-  s18 --> s12: Max okays one more round
-  s15 --> s9: 3rd decline
+  s18 --> s17: post-merge fails, follow-up filed or post-merge passes
+  s8 --> s19: REVISE at the cap
+  s19 --> s12: Max okays one more round
+  s13 --> s19: REVISE at the cap
+  s16 --> s9: 3rd decline
   s3 --> s3: CI red, fix
   class s0 blue
   class s1 blue
@@ -91,4 +97,5 @@ stateDiagram-v2
   class s15 teal
   class s16 teal
   class s17 teal
-  class s18 yellow
+  class s18 teal
+  class s19 yellow

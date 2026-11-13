@@ -15,6 +15,7 @@ from typing import Protocol
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
+from lib.hold import HoldDecision, LabelEvent, decide
 from lib.job_state import (
     DEAD,
     JobStateConfig,
@@ -38,6 +39,7 @@ GROK_WAKE_REASONS = (
     "rejected",
     "stale",
     "done",
+    "awaiting-ok",
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
@@ -107,6 +109,14 @@ class TrackedTicket:
     # because it carries a parseable ready. Only a trusted builder ready
     # naming the PR head may then start tracking (Codex PR #64 r1 F1.1).
     admitted_by_ready: bool = False
+    # Issue #86: read only when factory.md has hold: on a ship: merge repo.
+    # None means not read; the hold then fails closed (no merge, retry).
+    # labels are the PR's labels, changed_files the paths its diff against
+    # base touches at current_head, label_events its labeled / unlabeled
+    # events.
+    labels: tuple[str, ...] | None = None
+    changed_files: tuple[str, ...] | None = None
+    label_events: tuple[LabelEvent, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -473,6 +483,12 @@ class Dispatcher:
             if fields is None:
                 continue
             kind = fields["kind"]
+            if kind == "ok" and _holds(ticket):
+                outcome = self._hold_ok_outcome(ticket, comment)
+                if outcome.startswith("rejected-"):
+                    self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                self._mark_handled(ticket, comment.id, outcome)
+                continue
             if kind not in (
                 "go",
                 "plan",
@@ -858,7 +874,7 @@ class Dispatcher:
             raise ValueError(f"unknown wake reason {reason!r}")
         if reason in ("unparsed", "ship-failed", "rejected", "stale"):
             once_key = source_comment_id
-        elif reason in ("blocked", "capped", "done"):
+        elif reason in ("blocked", "capped", "done", "awaiting-ok"):
             once_key = head or "-"
         else:
             once_key = "-"
@@ -1315,7 +1331,7 @@ class Dispatcher:
             assert state is not None
             round_number = int(state["review_round"]) + 1
             if (
-                state["workflow_state"] != "review"
+                state["workflow_state"] not in ("review", "awaiting-ok")
                 or reported_round != round_number
             ):
                 connection.commit()
@@ -1425,8 +1441,12 @@ class Dispatcher:
         reported_round = (
             int(round_field.split("/", 1)[0]) if round_field is not None else None
         )
+        if _holds(ticket) and self._superseded_by_revise(
+            ticket, comment, reported_round
+        ):
+            return True, "superseded-approve"
         review_head = self._latest_review_head(ticket)
-        if state != "review" or reported_round != review_round + 1:
+        if state not in ("review", "awaiting-ok") or reported_round != review_round + 1:
             self._wake_comment_problem(
                 ticket, comment, "stale", "stale-approve"
             )
@@ -1444,7 +1464,8 @@ class Dispatcher:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            return True, "approve-ci-red"
+            held = state == "awaiting-ok" or self._held(ticket, current_head)
+            return not held, "approve-ci-red"
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -1466,6 +1487,10 @@ class Dispatcher:
             )
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
+        if ship == "merge" and ticket.factory.hold is not None:
+            held = self._hold_gate(ticket, comment, current_head)
+            if held is not None:
+                return held
         intent_status, replay = self._prepare_ship_intent(
             ticket,
             comment.id,
@@ -1506,6 +1531,170 @@ class Dispatcher:
         self._complete_ship_intent(ticket, comment.id, "waiting-external")
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _superseded_by_revise(
+        self,
+        ticket: TrackedTicket,
+        approve: Comment,
+        reported_round: int | None,
+    ) -> bool:
+        """Issue #86: a held APPROVE can wait long enough for the reviewer
+        to post a REVISE for the same round at the current head. That
+        REVISE replaces the APPROVE; T3 acts on it in the same pass."""
+        for item in ticket.comments:
+            if _comment_order(item) <= _comment_order(approve):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            round_field = fields.get("round")
+            if (
+                fields["kind"] == "verdict"
+                and fields.get("verdict") == "REVISE"
+                and round_field is not None
+                and int(round_field.split("/", 1)[0]) == reported_round
+                and _matching_head(fields.get("head") or "", ticket.current_head)
+                is not None
+                and self._trusted_reviewer(ticket, item, fields)
+            ):
+                return True
+        return False
+
+    def _hold_gate(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+    ) -> tuple[bool, str] | None:
+        """Issue #86: None lets T4 merge; otherwise the APPROVE stays
+        unhandled and T4 re-checks it on every poll, at whatever the head
+        then is. A held PR moves to awaiting-ok once per head and wakes
+        Grok Bot once per head with the PR and head."""
+        hold = ticket.factory.hold
+        assert hold is not None
+        decision = self._hold_decision(ticket, head)
+        if decision.unread is not None:
+            return False, "hold-unread"
+        if not decision.blocks:
+            return None
+        scope = (ticket.repo.lower(), ticket.ticket_id)
+        reasons = ",".join(decision.reasons)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT head, approver, reasons FROM ship_holds
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                scope,
+            ).fetchone()
+        state, _round = self._review_context(ticket)
+        stored = None if row is None else (row["head"], row["approver"], row["reasons"])
+        if state != "awaiting-ok" or stored != (head, hold.approver, reasons):
+            if state != "awaiting-ok":
+                self._write_state_label(ticket, "awaiting-ok")
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT INTO ship_holds (
+                        repo, ticket_id, head, approver, reasons,
+                        approve_comment_id, held_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(repo, ticket_id) DO UPDATE SET
+                        head = excluded.head,
+                        approver = excluded.approver,
+                        reasons = excluded.reasons,
+                        approve_comment_id = excluded.approve_comment_id,
+                        held_at = CASE WHEN ship_holds.head = excluded.head
+                            THEN ship_holds.held_at ELSE excluded.held_at END
+                    """,
+                    (
+                        *scope,
+                        head,
+                        hold.approver,
+                        reasons,
+                        comment.id,
+                        self.queue.now(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE ticket_state SET workflow_state = 'awaiting-ok'
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    scope,
+                )
+                connection.commit()
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="awaiting-ok",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            head=head,
+            detail=json.dumps(
+                {
+                    "project_bot": ticket.grok_bot,
+                    "outcome": "awaiting-ok",
+                    "pr": ticket.ticket_url or ticket.pr_number,
+                    "pr_number": ticket.pr_number,
+                    "post_to": ticket.ticket_url,
+                    "head": head,
+                    "approver": hold.approver,
+                    "reasons": list(decision.reasons),
+                    "held_paths": list(decision.paths),
+                    "label": hold.label,
+                    "clears_with": (
+                        f"<!-- orch:v1 kind=ok head={head} --> from "
+                        f"{hold.approver}"
+                        + (
+                            f", or {hold.approver} removing {hold.label}"
+                            if decision.reasons == ("label",)
+                            else ""
+                        )
+                    ),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        return False, "awaiting-ok"
+
+    def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
+        hold = ticket.factory.hold
+        assert hold is not None
+        return decide(
+            hold,
+            labels=ticket.labels,
+            changed_files=ticket.changed_files,
+            label_events=ticket.label_events,
+            comments=ticket.comments,
+            approver_trusted=self._trusted_login(hold.approver),
+            covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
+        )
+
+    def _held(self, ticket: TrackedTicket, head: str) -> bool:
+        if ticket.factory.ship != "merge" or ticket.factory.hold is None:
+            return False
+        decision = self._hold_decision(ticket, head)
+        return decision.unread is not None or bool(decision.reasons)
+
+    def _hold_ok_outcome(self, ticket: TrackedTicket, comment: Comment) -> str:
+        hold = ticket.factory.hold
+        assert hold is not None
+        if (
+            comment.author.casefold() == hold.approver.casefold()
+            and self._trusted_login(hold.approver)
+        ):
+            return "hold-ok"
+        return "rejected-hold-ok-author"
+
+    def _trusted_login(self, login: str) -> bool:
+        wanted = login.casefold()
+        return any(
+            key.casefold() == wanted for key in self.trusted_logins.get("github", {})
+        )
 
     def _ship_head(self, ticket: TrackedTicket, head: str) -> None:
         """Ship exactly head in the repo's ship_mode, or raise. No fallback."""
@@ -3296,6 +3485,20 @@ class Dispatcher:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ship_holds (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    approver TEXT NOT NULL,
+                    reasons TEXT NOT NULL,
+                    approve_comment_id TEXT NOT NULL,
+                    held_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ship_intents (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
@@ -3686,6 +3889,11 @@ def _matching_head(reported: str, current: str | None) -> str | None:
     if current.startswith(reported) or reported.startswith(current):
         return current
     return None
+
+
+def _holds(ticket: TrackedTicket) -> bool:
+    """Issue #86: the hold applies only on a ship: merge repo."""
+    return ticket.factory.ship == "merge" and ticket.factory.hold is not None
 
 
 def ship_mode(policy: str) -> str:

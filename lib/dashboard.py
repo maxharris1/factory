@@ -61,7 +61,7 @@ from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED
 from lib.queue import ACTIONS, RECIPIENTS, STATES
-from lib.status import PAUSED_STATES
+from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
@@ -729,6 +729,8 @@ def _attention(stuck: list[dict], overdue: list[dict], paused: list[dict]) -> di
         if (row["repo"], row["ticket_id"]) in listed:
             continue
         detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
+        if row.get("waiting_on"):
+            detail += f" (waiting on {row['waiting_on']})"
         items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
                       "detail": detail})
     return {"count": len(items), "items": items}
@@ -940,6 +942,7 @@ def _read_db(
     # (repo casefolded, ticket id) as stored -> tracker, round, state.
     ticket_info: dict[tuple[str, str], tuple[str, int, str]] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
+        approvers = _hold_approvers(connection)
         for row in connection.execute(
             """
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -962,6 +965,13 @@ def _read_db(
                 else None
             )
             stuck = bool(row["stuck"])
+            # Issue #86: who a held PR waits on, only while awaiting-ok.
+            approver = (
+                approvers.get((str(row["repo"]), str(row["ticket_id"])))
+                if str(row["workflow_state"]) == "awaiting-ok"
+                else None
+            )
+            waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
             ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = (
                 _enum(row["tracker"], TRACKERS),
                 int(row["review_round"]),
@@ -977,6 +987,7 @@ def _read_db(
                     "gate_count": int(row["gate_count"]),
                     "stuck": stuck,
                     "paused_action": paused_action,
+                    **waiting,
                 }
             )
             if stuck:
@@ -999,6 +1010,7 @@ def _read_db(
                         "ticket_id": ticket_id,
                         "state": state,
                         "paused_action": paused_action,
+                        **waiting,
                     }
                 )
     _add_job_tickets(connection, active, ticket_info, chart, now)
