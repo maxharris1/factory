@@ -61,7 +61,7 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
 | `merge` | `GET pulls/<n>` (and for a draft the GraphQL `markPullRequestReadyForReview`), then `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | Marks a draft ready first (issue #83: GitHub refuses to merge a draft with 405). The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError`. A 405, a 5xx, a timeout or a mark-ready that did not land raises with `retryable=True`, so the dispatcher re-drives the ship once; anything else, or a failed re-drive, flags the ticket needs-attention |
 | `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
-| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app and name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
@@ -411,7 +411,10 @@ new PR fresh and starts tracking it, so T1 queues its job in the same poll.
 
 Every step is recorded in `feeder_items` before the next, keyed on (repo,
 ticket): a re-poll never opens a second PR, a PR already open on the branch
-is reused, and a brief or go already posted is not posted again. A fed
+is reused (the open one, never an older merged or closed PR on the same
+branch), and a brief or go the orchestrator already posted is not posted
+again. Only a brief or go whose author orch.yml trusts as `grok-bot` counts as
+already posted, so a forged one never stands in for the real go. A fed
 ticket is never fed again. Room for a harness is the free slots on every
 schedulable device that lists it, minus its queued jobs, minus tickets fed
 for it in the last 10 minutes whose job is not queued yet (so a go the
@@ -421,7 +424,8 @@ records those marks in `ticket_priority`, which the queue's claim order
 reads (urgent, then a resumed paused step, then bug, then oldest). The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
-Linear request path and budget. A feeder error is recorded in `poll_errors`
+Linear request path and budget (every page of the intake state, read with
+the same `gitBranchName: branchName` alias the poller uses). A feeder error is recorded in `poll_errors`
 (`feeder`) and never stops the poll.
 
 ## Linear webhook
@@ -585,8 +589,16 @@ the claim, with no model turn and no message to any bot. The harness posts its
   harness ends its output with `ORCH-HANDOFF: <comment-id>` (or
   `ORCH-HANDOFF: failed`); the output returns over SSH into `run.log`, and
   when the run ends the waiter runs `orch job done` on the box: done with
-  that id, or failed for T6 when the line is missing, malformed or says
-  failed. A job already finished by then is left alone.
+  that id only when `orch job run` exited 0 and the marker is the last line
+  of this run's output (`run.log` from where this run began; the runner's
+  own `orch job run:` lines are skipped), else failed for T6 (a nonzero
+  exit, or a last line that is missing, malformed or says failed). A job
+  already finished by then is left alone. The waiter records each remote
+  run in `<job-dir>/remote.json` and starts it with `orch job run
+  --status-file <job-dir>/exit`, so a restarted waiter adopts the remote runs
+  still running for its bot and finishes each once it ends (a runner gone
+  with no status file: failed). The record goes once the job is finished,
+  so no run is finished twice.
 - **Failures.** A job with no standard brief (an action other than build,
   plan, fix or review), a job id that is not a plain token, or a start that
   fails is failed at once for T6 and its slot is freed. A waiter that dies
@@ -799,8 +811,13 @@ A `Needs attention` section lists tickets the poller flagged (a ship that
 failed and will not be retried, a job dedupe dropped: issues #83 and #84)
 until the ticket is merged, handed off or done. Once a backlog feeder has run,
 a `Feeder — eligible N, fed N, waiting for capacity N` section lists each
-ticket eligible at its last poll with its state and PR. A running job that holds no slot (claimed before F2-02, or
-whose worker already ended) is a `Slots — box` line.
+ticket eligible at its last poll with its state and PR. Each device has one
+slot count (issue #90): a running harness job that holds no slot (claimed
+with no device by an older `orch wait`, or whose worker already ended) runs
+on the box, so it is listed under the box device, marked `no-placement`, and
+counted in the box's slots; the device pool counts it too, so the box never
+starts more than `slot_max`. A running grok wake holds no slot and is listed
+under `Grok wakes`.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
 section shows the last delivery (or `never` and the listener's age, or

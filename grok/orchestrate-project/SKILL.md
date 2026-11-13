@@ -58,7 +58,7 @@ Question classes: `observable`, `default-able`, `product`
 
 ## Intake
 
-1. Take the ticket Max handed over (a GitHub issue, a Linear issue, or a description that will become one on that project's tracker).
+1. Take the ticket Max handed over (a GitHub issue, a Linear issue, or a description that will become one on that project's tracker). A ticket the backlog feeder took in (it has the feeder's brief and `orch:go` already) needs no intake from you; see Brief.
 2. Resolve `factory.md` from the project's `base_branch`, not from a pull request head. In a checkout of that branch, the path is the repo-root `factory.md`. Otherwise fetch that file with `env -u GH_TOKEN gh` from `base_branch`.
 3. Call `read_factory(path)`. The path's filename must be `factory.md`.
 4. If the result has a stop, the config is refused. Report that stop once (below) and stop. Do not post a brief, questions, or `orch:go`.
@@ -81,10 +81,22 @@ Header shape:
 <!-- orch:v1 kind=brief from=grok-bot role=orchestrator risk=low -->
 ```
 
-Where to post: on the GitHub pull request when `tickets` is `github`. Phase 1
-polling does not discover issue-only GitHub tickets. On the Linear ticket when
-`tickets` is `linear`; pass `visible=True` to every `lib.orchestrate` writer so
-Linear gets the supported visible marker. Never on a new GitHub issue.
+Where to post: on the GitHub pull request when `tickets` is `github`. Polling
+discovers pull requests; a GitHub issue with no pull request enters only
+through the backlog feeder (below), which opens the pull request itself. On the
+Linear ticket when `tickets` is `linear`; pass `visible=True` to every
+`lib.orchestrate` writer so Linear gets the supported visible marker. Never on
+a new GitHub issue.
+
+Backlog feeder tickets (issue #85): when the project has an `intake` in
+`orch.yml` and Max (or a bot with him) files the ticket with the intake signal
+(the `factory:ready` label, or the Linear intake state, set by a trusted login),
+the feeder does intake by itself. It opens the branch and one draft pull
+request, posts the brief and the `orch:go` as the orchestrator, and the
+dispatcher queues the builder. Do not post a brief, questions, or `orch:go` for
+such a ticket, and do not open a second pull request: the chat in which the
+ticket was filed was its questions step. Act on it only when it wakes you
+(a question, a stop, or a `done`), as for any other ticket.
 
 For `tickets: github`, apply `orch:state/intake` to the pull request when the
 brief is posted. That initial label is how the dispatcher discovers the
@@ -92,7 +104,7 @@ handoff. For `tickets: linear`, never apply a GitHub label.
 
 ## Questions
 
-Always run this step, including when no question is open. Call `TicketFlow.post_questions` with a restatement in your own words and the classified questions. An empty list still posts the comment.
+Run this step for every ticket you take in, including when no question is open. Call `TicketFlow.post_questions` with a restatement in your own words and the classified questions. An empty list still posts the comment. The one exception is a backlog feeder ticket (above): the chat that filed it was its questions step, so post no questions comment for it. If a product call is still open on a fed ticket, post a questions handoff on it as the feeder's brief asks.
 
 Classify every question as one of:
 
