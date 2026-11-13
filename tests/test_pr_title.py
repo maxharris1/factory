@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard import collect_snapshot, render_pages
+from lib.dashboard import _add_sources, collect_snapshot, render_pages
+from lib.dashboard_page import _ticket
 from lib.github_actions import GhResult, GitHubAdapterError, LinearReviewActions
 from lib.pr_title import SOURCES_TABLE, github_source, label, prefixed
 from lib.queue import JobRequest
@@ -30,6 +31,15 @@ def pull(*, body: str | None = None, branch: str = "feature/x", title: str = "Do
         (pull(body="Fixes #115", branch="factory/issue-99"), "#115"),
         (pull(title="#107: Kept", body="Fixes #115"), "#107"),
         (pull(body="Fixes owner/other#5, see #3"), None),
+        (pull(body="Fixes owner/repo#11"), "#11"),
+        (pull(body="closes Owner/Repo#11"), "#11"),
+        (pull(body="Fixes owner/other#5 and fixes owner/repo#6"), "#6"),
+        (pull(body="Resolves https://github.com/owner/repo/issues/11"), "#11"),
+        (pull(body="Fixes https://github.com/owner/other/issues/5"), None),
+        (pull(body="Fixes https://github.com/owner/repo/pull/5"), None),
+        (pull(body="Fixes owner/repo.js#5"), None),
+        (pull(body="Fixes xowner/repo#5"), None),
+        (pull(body="Fixes owner/repo#116"), None),
         (pull(body="prefixes #9"), None),
         (pull(body="Fixes #116"), None),  # the PR itself is not its source
         (pull(), None),
@@ -37,7 +47,7 @@ def pull(*, body: str | None = None, branch: str = "feature/x", title: str = "Do
     ],
 )
 def test_a_github_prs_source_issue(given: dict, source: str | None) -> None:
-    assert github_source(given, "116") == source
+    assert github_source(given, "owner/repo", "116") == source
 
 
 @pytest.mark.parametrize(
@@ -255,6 +265,25 @@ def test_the_dashboard_shows_the_issue_first_and_the_pr_second(tmp_path: Path) -
     assert ">repo#115 (PR #116)<" in pages["index.html"]
     assert ">repo#115 (PR #116)<" in pages["job.html"]
     assert ">owner/repo#115 (PR #116)<" in pages["activity.html"]
+
+
+@pytest.mark.parametrize("source", ["ABCDEFGHIJ-1234567890", "#1234567890"])
+def test_the_dashboard_keeps_every_accepted_source_whole(source: str) -> None:
+    row = {"repo": "owner/repo", "ticket_id": "1234567891"}
+
+    _add_sources(row, {("owner/repo", "1234567891"): (source, "1234567891")})
+
+    assert (row["source"], row["pr"]) == (source, "1234567891")
+    assert _ticket(row, full=True) == f"owner/repo#{source.removeprefix('#')} (PR #1234567891)"
+
+
+def test_the_dashboard_drops_a_stored_source_that_is_not_an_issue_or_key() -> None:
+    row = {"repo": "owner/repo", "ticket_id": "116"}
+
+    _add_sources(row, {("owner/repo", "116"): ("<script>", "116")})
+
+    assert (row["source"], row["pr"]) == (None, "116")
+    assert _ticket(row, full=True) == "owner/repo#116"
 
 
 @needs_node

@@ -1105,7 +1105,7 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
-            source_issue=github_source(pull, number),
+            source_issue=github_source(pull, project.repo, number),
             pr_title=_open_title(pull),
         )
         self._ticket_cache[cache_key] = ticket

@@ -72,7 +72,7 @@ from lib.job_state import (
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
-from lib.pr_title import read_sources
+from lib.pr_title import SOURCE, read_sources
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -759,7 +759,7 @@ def _add_sources(value: object, sources: dict[tuple[str, str], tuple[str, str | 
     elif isinstance(value, dict):
         found = sources.get((str(value.get("repo")).casefold(), str(value.get("ticket_id"))))
         if found is not None:
-            value["source"] = _clean(found[0], 16)
+            value["source"] = found[0] if SOURCE.fullmatch(found[0]) else None
             value["pr"] = _clean(found[1], 16) if found[1] is not None else None
         for item in value.values():
             _add_sources(item, sources)

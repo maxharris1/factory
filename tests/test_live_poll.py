@@ -59,6 +59,7 @@ from lib.poll_source import (
     _linear_state_phase,
 )
 from lib.queue import Job, JobRequest, SQLiteJobQueue
+from tests.test_dispatcher import FakeReviewActions, setup
 
 FACTORY = """---
 base_branch: main
@@ -2492,6 +2493,33 @@ def test_a_github_ticket_carries_its_source_issue_and_open_title() -> None:
     (found,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
 
     assert (found.source_issue, found.pr_title) == ("#11", "Do it")
+
+
+@pytest.mark.parametrize(
+    ("body", "wanted"),
+    [
+        ("Fixes #11", "#11"),
+        ("Fixes acme/widgets#11", "#11"),
+        ("Fixes ACME/Widgets#11", "#11"),
+        ("Fixes https://github.com/acme/widgets/issues/11", "#11"),
+        ("Fixes acme/other#11", None),
+    ],
+)
+def test_a_closing_reference_to_the_prs_own_repo_names_its_source(
+    tmp_path: Path, body: str, wanted: str | None
+) -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.pull = {"state": "open", "title": "Do it", "body": body, "head": {"ref": "feature/x"}}
+    source = LivePollSource(config(), gh_runner=gh)
+    source.begin_cycle()
+    (found,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
+    actions = FakeReviewActions()
+    dispatcher, _ = setup(tmp_path, review_actions=actions)
+
+    dispatcher.process(found)
+
+    assert found.source_issue == wanted
+    assert actions.titles == ([("12", f"{wanted}: Do it")] if wanted else [])
 
 
 def test_a_closed_prs_title_is_not_offered_for_a_rename() -> None:

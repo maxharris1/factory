@@ -7,7 +7,8 @@ ticket (for example `AUT-2284: <title>`). The source is written as that
 prefix (`#115` or `AUT-2284`) everywhere it is stored or shown.
 
 A GitHub PR's source issue is a `#115:` prefix its title already has, else
-the first same-repo closing reference in its body (`Fixes #115`), else the
+the first closing reference in its body to an issue in the PR's own repo
+(`Fixes #115`, `Fixes owner/repo#115` or the issue's URL), else the
 feeder's branch name (`factory/issue-115`). A Linear ticket's source is its
 identifier.
 """
@@ -19,7 +20,9 @@ import sqlite3
 from collections.abc import Mapping
 
 _CLOSING = re.compile(
-    r"(?<![\w/])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#([1-9][0-9]{0,9})\b",
+    r"(?<![\w/])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+"
+    r"(?:https://github\.com/([\w.-]+/[\w.-]+)/issues/|([\w.-]+/[\w.-]+)?#)"
+    r"([1-9][0-9]{0,9})\b",
     re.IGNORECASE,
 )
 _FEEDER_BRANCH = re.compile(r"^factory/issue-([1-9][0-9]{0,9})$")
@@ -31,15 +34,21 @@ TITLE_LIMIT = 256  # GitHub's longest PR title
 SOURCE = re.compile(r"^(?:#[1-9][0-9]{0,9}|[A-Z][A-Z0-9]{0,9}-[1-9][0-9]{0,9})$")
 
 
-def github_source(pull: Mapping[str, object], number: str) -> str | None:
-    """`#<issue>` for a GitHub PR, or None when it names no source issue."""
+def github_source(pull: Mapping[str, object], repo: str, number: str) -> str | None:
+    """`#<issue>` for a GitHub PR in repo, or None when it names no source issue."""
     body = pull.get("body")
     head = pull.get("head")
     branch = head.get("ref") if isinstance(head, Mapping) else None
     title = pull.get("title")
     found = [
         *(_TITLE_ISSUE.findall(title) if isinstance(title, str) else ()),
-        *(_CLOSING.findall(body) if isinstance(body, str) else ()),
+        *(
+            issue
+            for url_repo, named_repo, issue in (
+                _CLOSING.findall(body) if isinstance(body, str) else ()
+            )
+            if (url_repo or named_repo or repo).casefold() == repo.casefold()
+        ),
         *(_FEEDER_BRANCH.findall(branch) if isinstance(branch, str) else ()),
     ]
     for issue in found:
