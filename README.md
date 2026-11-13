@@ -656,7 +656,19 @@ the claim, with no model turn and no message to any bot. The harness posts its
   claimed job, which the poller requeues after `release_claimed_minutes`.
 - **One handoff per job.** The claim records the waiter on the job's slot.
   From then on only that waiter's own `orch job run` may run the job, and
-  only that run's process tree may `orch job done` it; a bot turn's `orch job
+  only that run may `orch job done` it. The run proves it with a secret
+  token (issue #96): `orch job run` mints one per run, records only its
+  SHA-256 on the slot, and gives the harness the token only in
+  `$ORCH_JOB_PROOF`, never on disk: the waiter and the bot's other sessions
+  run as one Unix user, so a file could be found and presented by any of
+  them. The name has no `KEY`, `SECRET` or `TOKEN` in it, so Codex's default
+  `shell_environment_policy` passes it to the commands the harness runs.
+  There is no process-tree check, so a harness sandbox with its own PID
+  namespace (Codex) can finish its job, as long as it can write the orch
+  database's directory. The known limit: a process of the same Unix user
+  that reads the run's `/proc/<pid>/environ` can take the token; the check
+  stops bot turns that were never handed it, not a hostile same-user
+  process. A bot turn's `orch job
   run` or `orch job done` is refused (exit 2, nothing changed), and a plain
   `orch wait <bot>` is refused while the bot's autostart waiter runs. A
   second `orch job run` of a running job is refused. `orch job done` with the

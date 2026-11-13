@@ -16,7 +16,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from lib import job_run, linear_webhook, placed_run, waiter, worktrees
+from lib import job_run, job_token, linear_webhook, placed_run, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
@@ -817,8 +817,12 @@ def _done_settled(
 
     (0, line) when the same outcome is already recorded: a repeat is a no-op.
     (1, error) when a different outcome is recorded: nothing changes.
-    (2, error) when the job is an autostart waiter's and this process is not
-    in its `orch job run`'s process tree: a bot turn must not finish it.
+    (2, error) when the job is an autostart waiter's and this process does
+    not hold its current `orch job run`'s secret token (#96): a bot turn
+    must not finish it. The token comes from ORCH_JOB_PROOF
+    (lib/job_token.py), and only its hash is compared. There is no
+    process-tree check: a sandbox in its own PID namespace (Codex) cannot
+    see the run, but it inherits the token.
     None when the job may be finished here.
     """
     target = "done" if handoff is not None else "failed"
@@ -848,18 +852,28 @@ def _done_settled(
     # table may predate the autostart columns (an update while a job runs).
     # A missing column reads as NULL: no autostart waiter can have claimed a
     # job in a table it could not record itself in.
+    # The same holds for run_token_hash (#96): a slot without the column has
+    # no token, and its autostart claim (if any) is refused below.
     autostart = _slot_value(slot, "autostart_pid")
-    if state != "running" or autostart is None:
+    stored = _slot_value(slot, "run_token_hash")
+    if state != "running" or (autostart is None and stored is None):
         return None
-    runner = _slot_value(slot, "runner_pid")
-    if runner is not None and worktrees.pid_alive(
-        int(runner), _slot_value(slot, "runner_start")
-    ) and worktrees.descends_from(os.getpid(), int(runner)):
+    token = job_token.presented(os.environ)
+    if job_token.matches(token, stored):
         return None
+    if stored is None:
+        why = (
+            "its claim has no run token (claimed before run tokens, #96, or its "
+            "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+        )
+    elif token is None:
+        why = "this process has no ORCH_JOB_PROOF from that run"
+    else:
+        why = "the ORCH_JOB_PROOF this process holds is not that run's"
     return 2, (
         f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
         "whose harness run finishes it; only that run may call orch job done, so a bot "
-        "turn must not run or post for it. Nothing changed"
+        f"turn must not run or post for it; {why}. Nothing changed"
     )
 
 
@@ -966,6 +980,9 @@ def _job_run_command(argv: list[str]) -> int:
         # first heartbeat, read only, so a refused run leaves the job claimed
         # (and the poller's claimed-job release requeues it).
         checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
+        # #96: an autostart run proves itself to `orch job done` with a
+        # fresh secret token; only its hash goes on the slot (in prepare).
+        token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
@@ -990,6 +1007,7 @@ def _job_run_command(argv: list[str]) -> int:
             log=log,
             transport=SshTransport(),
             checked_autostart=checked_autostart,
+            token_hash=token_hash,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -999,6 +1017,8 @@ def _job_run_command(argv: list[str]) -> int:
         return 1
 
     environment = dict(os.environ)
+    # Never pass on a token this process inherited (another job's run).
+    environment.pop(job_token.PROOF_ENV, None)
     environment.update(
         {
             "ORCH_JOB_ID": args.job_id,
@@ -1050,6 +1070,9 @@ def _job_run_command(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
     try:
         return job_run.run(
             placed.argv(command, remote_env),
