@@ -24,6 +24,7 @@ from lib import (
     job_token,
     linear_webhook,
     placed_run,
+    telemetry,
     waiter,
     worktrees,
 )
@@ -167,6 +168,12 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
   status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  Telemetry (issue #93): `claude -p` gets --output-format stream-json
+  --verbose and `codex exec` gets --json; COMMAND's stdout is logged to
+  events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
+  beside the database), capped at 20 MB and rotated,
+  and a scrubbed summary goes to the job_telemetry table with each
+  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
@@ -1038,8 +1045,13 @@ def _job_run_command(argv: list[str]) -> int:
     if args.interval is not None and interval < args.interval:
         log(f"--interval {args.interval:g} capped to {interval:g} seconds")
 
+    sessions: list[telemetry.Session] = []  # issue #93: the run's telemetry, once it starts
+
     def beat() -> object:
-        return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        result = retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        for session in sessions:
+            session.flush()  # the summary moves with each heartbeat
+        return result
 
     try:
         # Codex PR #82 r2 F2.2: an autostart claim is checked before the
@@ -1093,6 +1105,25 @@ def _job_run_command(argv: list[str]) -> int:
             **harness_env(owner),
         }
     )
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
+    # #100 r8: the summary's scrubber knows the harness's own environment,
+    # the proof included.
+    session = telemetry.start_session(
+        connect=queue.connect,
+        database=database,
+        job_id=args.job_id,
+        bot=args.bot,
+        repo=repo,
+        command=command,
+        log=log,
+        environ=environment,
+        worker_env=placed.remote,
+    )
+    if session is not None:
+        sessions.append(session)
+        command = session.argv
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
     remote_env = {
@@ -1140,9 +1171,6 @@ def _job_run_command(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
-    if token is not None and not placed.remote:
-        # Not sent to a remote device: it would be on the ssh command line.
-        environment[job_token.PROOF_ENV] = token
     harness = command
     if placed.remote:
         # A remote device has no orch.db (the waiter finishes its job on the
@@ -1168,7 +1196,7 @@ def _job_run_command(argv: list[str]) -> int:
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
         code = job_run.run(
-            placed.argv(harness, remote_env),
+            placed.argv(harness, remote_env, report_env=session is not None),
             beat=beat,
             interval=interval,
             log=log,
@@ -1176,6 +1204,7 @@ def _job_run_command(argv: list[str]) -> int:
             setup=setup,
             teardown=teardown,
             started=placed.started,
+            output=session.consume if session is not None else None,
             execed=placed.execed,
         )
         return code
@@ -1202,6 +1231,8 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if session is not None:
+            session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
