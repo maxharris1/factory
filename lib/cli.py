@@ -44,7 +44,7 @@ from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
 from lib.poll_source import LivePollSource, PollSourceError
-from lib.pstack_pin import Mode, doctor, install_skills
+from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.status import main as status_main
@@ -93,7 +93,7 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
-install-skills [--home PATH] [--project PATH] [--cloud]
+install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checkout]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
   and ~/.cursor/skills. --cloud copies them into the project at
   .claude/skills, .agents/skills, and .cursor/skills.
@@ -1383,12 +1383,17 @@ def _install_skills(argv: list[str]) -> int:
     parser.add_argument("--home", type=Path)
     parser.add_argument("--project", type=Path)
     parser.add_argument("--cloud", action="store_true")
+    parser.add_argument("--allow-unstable-checkout", action="store_true")
     args = parser.parse_args(argv)
     try:
         anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
+    unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
+    if unstable:
+        print(f"orch install-skills: {unstable}", file=sys.stderr)
+        return 1
     errors = install_skills(ROOT, anchor, mode)
     if errors:
         for message in errors:

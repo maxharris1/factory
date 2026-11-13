@@ -1413,7 +1413,7 @@ bin/orch doctor --print-canary
 bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
+`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A dangling link into a removed checkout's `skills/pstack/skills/` is replaced. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
 `doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
 
