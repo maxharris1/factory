@@ -35,8 +35,9 @@ ticket that was fed is never fed again, so a re-poll never opens a second PR.
 
 Room for a harness h is the free slots on every schedulable device that
 lists h (machines.yml, minus held slots), minus the jobs queued for h,
-minus the tickets this feeder fed for h whose job is not queued yet. So the
-queue never holds more work for a harness than it has free slots.
+minus the tickets this feeder fed for h in the last FED_PENDING_SECONDS
+whose job is not queued yet, minus tickets still being fed. So the queue
+never holds more work for a harness than it has free slots.
 
 The feeder starts no harness and runs no job. It writes only through the
 GitHub and Linear clients it is given; tests pass fakes.
@@ -79,6 +80,10 @@ BUG_LABELS = frozenset({"bug"})
 RISK_HIGH_LABEL = "risk:high"
 LINEAR_URGENT_PRIORITY = 1
 PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a plan
+# A fed ticket holds room until its job is queued, at most this long: a go
+# the poller never acts on (say, an untrusted author) must not stall the
+# feeder for its harness forever.
+FED_PENDING_SECONDS = 600
 BODY_LIMIT = 20_000
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -311,7 +316,7 @@ class Feeder:
         candidates, read_errors = self._candidates()
         self._record_seen(candidates, now)
         self._mark_done()
-        room = self._room({candidate.harness for candidate in candidates})
+        room = self._room({candidate.harness for candidate in candidates}, now)
         fed: list[TicketRef] = []
         waiting = 0
         errors = read_errors
@@ -374,7 +379,7 @@ class Feeder:
 
     # -- capacity --------------------------------------------------------------
 
-    def _room(self, harnesses: set[str]) -> dict[str, int]:
+    def _room(self, harnesses: set[str], now: float) -> dict[str, int]:
         room: dict[str, int] = {}
         with self.queue.connect() as connection:
             used: dict[str, int] = {}
@@ -394,14 +399,18 @@ class Feeder:
                 pending = connection.execute(
                     f"""
                     SELECT COUNT(*) FROM {FEEDER_TABLE} AS item
-                    WHERE item.harness = ? AND item.state IN ('feeding', 'error', 'fed')
+                    WHERE item.harness = ?
+                      AND (
+                        (item.state = 'fed' AND item.fed_at > ?)
+                        OR (item.state IN ('feeding', 'error') AND item.seen_at = ?)
+                      )
                       AND NOT EXISTS (
                         SELECT 1 FROM jobs
                         WHERE lower(jobs.repo) = item.repo
                           AND jobs.ticket_id = item.ticket_id
                       )
                     """,
-                    (harness,),
+                    (harness, now - FED_PENDING_SECONDS, now),
                 ).fetchone()[0]
                 room[harness] = free - int(queued) - int(pending)
         return room

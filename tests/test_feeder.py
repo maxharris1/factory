@@ -584,6 +584,29 @@ def test_waiting_items_are_fed_once_a_slot_frees(tmp_path: Path) -> None:
     assert [r.ticket_id for r in feeder.feed_once().fed] == ["502"]
 
 
+def test_a_fed_ticket_whose_job_never_comes_stops_holding_room(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, box=1, now=now)
+    github.issues["owner/app"] = [issue(1, created_at=1.0), issue(2, created_at=2.0)]
+    assert len(feeder.feed_once().fed) == 1
+    now[0] += 60
+    assert feeder.feed_once().fed == ()  # issue 1's job may still be on its way
+    now[0] += 600
+    assert len(feeder.feed_once().fed) == 1  # no job after 10 minutes: room is back
+
+
+def test_a_ticket_that_lost_its_label_mid_feed_holds_no_room(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, box=1, now=now)
+    github.issues["owner/app"] = [issue(1, created_at=1.0)]
+    github.fail["pull"] = 1
+    assert feeder.feed_once().fed == ()  # stuck in error after the branch
+    github.issues["owner/app"] = [issue(2, created_at=2.0)]  # 1 lost its label
+    now[0] += 60
+    assert [r.ticket_id for r in feeder.feed_once().fed] == ["501"]
+    assert github.pulls[("owner/app", 501)]["head"] == "factory/issue-2"
+
+
 # --- B. priority: urgent, then bug, then oldest ------------------------------
 
 

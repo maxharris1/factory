@@ -414,7 +414,8 @@ ticket): a re-poll never opens a second PR, a PR already open on the branch
 is reused, and a brief or go already posted is not posted again. A fed
 ticket is never fed again. Room for a harness is the free slots on every
 schedulable device that lists it, minus its queued jobs, minus tickets fed
-for it whose job is not queued yet. Tickets are fed urgent first (an `urgent`
+for it in the last 10 minutes whose job is not queued yet (so a go the
+poller never acts on cannot stall the feeder). Tickets are fed urgent first (an `urgent`
 label or Linear priority Urgent), then `bug`, then oldest; the feeder also
 records those marks in `ticket_priority`, which the queue's claim order
 reads (urgent, then a resumed paused step, then bug, then oldest). The live

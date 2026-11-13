@@ -480,8 +480,8 @@ GitHub logins or Linear user IDs who may apply the signal; it defaults to
 the keys of `trusted_logins` or `trusted_linear_users`. The feeder reads who
 applied it (the actor of the latest `labeled` event, or of the latest move
 to the state) and ignores anyone else. It feeds a ticket for harness h only
-while the jobs queued for h, plus tickets it fed for h whose job is not
-queued yet, are fewer than the free slots on enabled devices that list h,
+while the jobs queued for h, plus tickets it fed for h in the last 10
+minutes whose job is not queued yet, are fewer than the free slots on enabled devices that list h,
 so the queue never floods; it feeds urgent tickets (an `urgent` label or
 Linear priority Urgent) first, then `bug`, then the oldest. `orch status`
 and the dashboard show the feeder's last poll: eligible, fed and waiting
