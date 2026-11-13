@@ -273,6 +273,65 @@ class DevicePool:
             connection.commit()
         return True
 
+    def requeue_unstarted(
+        self, job_id: str, *, owner: str, runner: int, reason: str
+    ) -> bool:
+        """Requeue a placed job whose start failed before any worker (#94).
+
+        One transaction, guarded: the job is still running for owner, and
+        its slot is still run by `runner` (this `orch job run`) with no
+        worker recorded, local or remote. The job goes back to queued with
+        its queue-wait clock restarted (created_at is kept, so it keeps its
+        place in line), its slot is freed, and nothing else changes: no
+        round, no attempt, no failure. Records a `requeued-unstarted` job
+        event when the dispatcher's job_events table exists. False (nothing
+        changed) when the guard does not hold.
+        """
+        if owner not in HARNESSES:
+            raise QueueError(f"unknown owner {owner!r}")
+        now = self.queue.now()
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = connection.execute(
+                f"""
+                UPDATE jobs SET state = 'queued', last_activity_at = ?
+                WHERE id = ? AND state = 'running' AND recipient = ?
+                  AND EXISTS (
+                    SELECT 1 FROM {SLOTS_TABLE}
+                    WHERE job_id = ? AND harness = ? AND runner_pid = ?
+                      AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0
+                  )
+                """,
+                (now, job_id, owner, job_id, owner, runner),
+            ).rowcount
+            if changed != 1:
+                connection.commit()
+                return False
+            connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+            if _has_table(connection, "job_events"):
+                job = connection.execute(
+                    "SELECT repo, ticket_id, action, recipient FROM jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()
+                connection.execute(
+                    """
+                    INSERT INTO job_events (
+                        job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, 'requeued-unstarted', ?, ?)
+                    """,
+                    (
+                        job_id,
+                        str(job["repo"]).lower(),
+                        job["ticket_id"],
+                        job["action"],
+                        job["recipient"],
+                        f"{reason}; requeued, no round charged",
+                        now,
+                    ),
+                )
+            connection.commit()
+        return True
+
     def placement(self, job_id: str) -> Placement | None:
         with self.queue.connect() as connection:
             row = connection.execute(
@@ -461,6 +520,15 @@ class DevicePool:
     def used(self) -> dict[str, int]:
         with self.queue.connect() as connection:
             return _used(connection)
+
+
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
 
 
 def read_autostart(

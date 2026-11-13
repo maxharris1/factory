@@ -3382,7 +3382,7 @@ class Dispatcher:
                 """
             )
             # #75: what the poller did to a job because of its state
-            # (released-claimed, dead), one row each, for the log and audit.
+            # (released-claimed, dead; #94 requeued-unstarted from orch job run), one row each, for the log and audit.
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS job_events (
