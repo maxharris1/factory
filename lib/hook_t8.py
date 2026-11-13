@@ -94,6 +94,12 @@ class T8Hook:
         if fields is None or fields["kind"] not in ("ok", "decline"):
             return None
         kind = fields["kind"]
+        if (
+            kind == "ok"
+            and ticket.factory.ship == "merge"
+            and ticket.factory.hold is not None
+        ):
+            return None  # issue #86: a hold OK, read by T4 (lib/hold.py)
         if not ticket.factory.ship.startswith("after:"):
             return True, f"rejected-{kind}-not-after-ship"
         approver = ticket.factory.ship[len("after:") :]

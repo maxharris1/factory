@@ -470,3 +470,25 @@ def test_pool_refuses_two_devices_on_one_tailscale_host(tmp_path: Path) -> None:
 
     with pytest.raises(QueueError, match="pc-a, pc-b"):
         DevicePool(queue, MachinesConfig(devices=(a, b)))
+
+
+def test_forget_worker_drops_only_the_worker_that_was_confirmed_gone(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("pc", 1, "codex"))
+    enqueue(queue, "codex", "1")
+    job, _ = pool.claim("codex")
+    pool.attach_worker(job.id, owner="codex", remote=True, tag="old")
+    pool.attach_runner(job.id, owner="codex", pid=11, start=None, alive=lambda *_: False)
+    confirmed = pool.placement(job.id)
+    pool.attach_worker(job.id, owner="codex", remote=True, tag="newer")
+
+    with pytest.raises(QueueError, match="changed while its earlier worker was checked"):
+        pool.forget_worker(job.id, owner="codex", runner=11, earlier=confirmed)
+    assert pool.placement(job.id).worker_tag == "newer"
+    with pytest.raises(QueueError, match="changed"):
+        pool.forget_worker(job.id, owner="codex", runner=12, earlier=pool.placement(job.id))
+
+    pool.forget_worker(job.id, owner="codex", runner=11, earlier=pool.placement(job.id))
+    slot = pool.placement(job.id)
+    assert (slot.worker_pid, slot.remote_started, slot.worker_tag) == (None, False, None)
+    assert pool.requeue_unstarted(job.id, owner="codex", runner=11, reason="preflight")
+    assert job_state(queue, job.id) == "queued"

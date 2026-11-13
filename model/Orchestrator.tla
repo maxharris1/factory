@@ -14,7 +14,8 @@ vars == <<state, paused, cap, configOk, flags, counts>>
 States == {
   "intake", "refused", "questions", "waiting-max", "planning", "plan-check",
   "building", "review", "fixing", "stuck", "capped", "blocked", "ship",
-  "merged", "handed-off", "waiting-external", "post-merge", "done", "abandoned"
+  "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge", "done",
+  "abandoned"
 }
 
 Terminal == {"refused", "stuck", "blocked", "abandoned", "done", "handed-off"}
@@ -25,12 +26,13 @@ JobStates == {"planning", "building", "review", "fixing"}
 
 AfterGo == {
   "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
-  "ship", "merged", "handed-off", "waiting-external", "post-merge", "done", "stuck"
+  "ship", "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge",
+  "done", "stuck"
 }
 
 ReviewAndAfter == {
   "review", "fixing", "capped", "blocked", "ship", "merged", "handed-off",
-  "waiting-external", "post-merge", "done"
+  "waiting-external", "awaiting-ok", "post-merge", "done"
 }
 
 Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
@@ -259,9 +261,10 @@ T6DeviceOffline ==
   /\ counts' = [counts EXCEPT !.deaths = 2, !.gate = 0]
 
 \* T3. REVISE under the cap queues fix. At the cap, or a second AC-unmet verdict: capped.
+\* A REVISE also replaces a held APPROVE (T4H, issue #86).
 T3Revise ==
   /\ "T3" \notin Omit
-  /\ state = "review"
+  /\ state \in {"review", "awaiting-ok"}
   /\ keep
   /\ flags' = flags
   /\ \/ /\ counts.acUnmet = 1
@@ -333,6 +336,35 @@ T4ShipAfter ==
   /\ state' = "waiting-external"
   /\ keep
   /\ flags' = flags
+  /\ counts' = counts
+
+\* T4H (issue #86). ship = merge and the PR is held (hold label or hold.paths):
+\* no merge until the approver's OK at the covered head, or the approver
+\* removes a label-only hold. A head whose patch differs goes back to review.
+T4Hold ==
+  /\ "T4" \notin Omit
+  /\ state = "ship"
+  /\ flags.covered
+  /\ state' = "awaiting-ok"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+T4HoldOk ==
+  /\ "T4" \notin Omit
+  /\ state = "awaiting-ok"
+  /\ flags.covered
+  /\ state' = "merged"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+T4HoldPatchDiffers ==
+  /\ "T4" \notin Omit
+  /\ state = "awaiting-ok"
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = counts
 
 \* T8. ok head=<sha> on the previewed SHA ships. Decline fixes.
@@ -417,6 +449,7 @@ Next ==
   \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
   \/ T3Revise \/ T7Blocked
   \/ T4Approve \/ T4PatchDiffers \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
+  \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ End
@@ -450,8 +483,10 @@ ContradictoryConfigNeverRuns ==
   ~configOk => state \in {"intake", "refused"}
 
 ShipPinnedToCoveredHead ==
-  state \in {"ship", "merged", "handed-off", "waiting-external", "post-merge", "done"}
-    => flags.covered
+  state \in {
+    "ship", "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge",
+    "done"
+  } => flags.covered
 
 CapAtReview ==
   /\ state \in {"intake", "refused", "questions", "planning", "plan-check", "building"}
@@ -483,13 +518,15 @@ T2Decided ==
   /\ state \in {"building", "fixing"} /\ counts.gate = 2 => ENABLED T2CiRedStuck
 
 T3Decided ==
-  state = "review" => ENABLED T3Revise
+  state \in {"review", "awaiting-ok"} => ENABLED T3Revise
 
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve
   /\ state = "ship" =>
        ENABLED T4PatchDiffers /\ ENABLED T4ShipMerge
-         /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter
+         /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter /\ ENABLED T4Hold
+  /\ state = "awaiting-ok" =>
+       ENABLED T4HoldOk /\ ENABLED T4HoldPatchDiffers
 
 T5Decided ==
   /\ state \in {"questions", "building", "fixing"} => ENABLED T5Ask
