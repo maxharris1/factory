@@ -955,7 +955,11 @@ interval or `every_minutes`, up to a day). The poller also probes each
 enabled, non-placeholder remote device in `machines.yml` over SSH every 60
 seconds (`device-probe`, through the device's first bot alias, `ssh -o
 BatchMode=yes ... exit 0`), each device in its own thread so one that hangs
-never delays another; only a device that answered counts as seen. The
+never delays another; only a device that answered counts as seen. `orch
+poll` also records whether each dashboard push it started succeeded
+(`dashboard-push`, issue #106): stale after one failed push ("push
+failing, last pushed … ago"), down once no push has succeeded for 8 push
+intervals. It is listed once a push has finished. The
 listener checks its tunnel (`tunnel`) every 15 seconds by a GET of
 `linear_webhook.public_url`, its Funnel URL: only the listener's own 405
 for its path counts as seen, so a Funnel that is off, a gateway error or a
@@ -1302,21 +1306,22 @@ sends it); with an older copy of that server the browser blocks the poll
 and the page falls back to reloading.
 
 *How it publishes.* Each file is first uploaded to a dot-prefixed temp name
-in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
-ConnectTimeout=10 -- status.json
+in the served directory (`scp -q -B [-F ssh_config] <options> -- status.json
 pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
-for each page; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
-"ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
-temp names). Only after every upload succeeds does one `ssh [-F ssh_config]
--o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
+for each page; with `rsync`, `rsync --quiet --timeout=10 --chmod=F644 -e
+"ssh [-F ssh_config] <options>" --` to the same temp names). Only after
+every upload succeeds does one `ssh [-F ssh_config] <options> --
+pc-wsl-cursor-bot 'cd --
 factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
 .index.html.push-tmp index.html && ...'` rename them all over the live
 names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
 mismatched for at most the instants between local `rename(2)` calls. The static server
-never serves the temp names. Every command is an argv list (no local shell)
-with a 60-second timeout; the remote shell sees only the validated
+never serves the temp names. `<options>` are `-o BatchMode=yes -o
+ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`, so a
+dead link fails in seconds (issue #106). Every command is an argv list (no
+local shell) with a 20-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
 bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
 path, absolute or relative to the remote login's home, with no leading `-`,
@@ -1324,7 +1329,15 @@ path, absolute or relative to the remote login's home, with no leading `-`,
 ssh_config file, and a name that looks like a key (`id_*`, `*.pem`,
 `*.key`, `*.pub`, `*.ppk`) is refused. SSH uses the login Max provisions;
 the factory never reads, names or passes a key, and never reads the
-ssh_config file itself. `check-config` validates the section. Tests use a
+ssh_config file itself. `check-config` validates the section.
+
+*When a push fails* (issue #106), `orch poll` reads the push child's exit
+status. After the k-th failure in a row it starts no push until
+min(30·2^(k-1), 600) seconds after the failed one started, with one
+`dashboard push: failed (exit N), k in a row; pushes paused for Ss` line;
+a success clears the backoff. A live push's pending change waits and goes
+out when the backoff ends. Each push's outcome is the `dashboard-push`
+Health component (below). Tests use a
 fake transport and a fake spawn; nothing in this repository runs ssh, scp
 or rsync against a real host.
 
