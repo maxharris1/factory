@@ -46,6 +46,7 @@ from lib.orch_yml import (
     OrchConfig,
     approvals,
     hold_approver_findings,
+    load_approvals,
     load_orch_yml,
     parse_bind,
 )
@@ -462,6 +463,16 @@ def _wait_autostart(
 
     if note is not None:
         log(f"factory.md context is off: {note}")
+    if config is not None:
+        policy = approvals(config)
+    else:
+        policy, approval_findings = load_approvals(orch_path)
+        if policy is None:
+            print(
+                f"orch wait: {orch_path}: approval settings: {approval_findings[0].message}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         run = waiter.Waiter(
             bot=args.bot,
@@ -473,7 +484,7 @@ def _wait_autostart(
             db=_db_path(args.db),
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
-            approvals=approvals(config) if config is not None else None,
+            approvals=policy,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)

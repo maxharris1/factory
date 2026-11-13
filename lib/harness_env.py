@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from pathlib import PurePath
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,27 +40,39 @@ def harness_environ(
     """The environment a harness run inherits (#122). With the app switch on
     it never names Max's approver gh profile: GH_CONFIG_DIR at or inside the
     profile, or XDG_CONFIG_HOME whose gh directory is there, is dropped.
-    A profile inside the run's HOME is refused, since gh finds
-    $HOME/.config/gh by itself. Paths are compared, never opened."""
+    The run is refused when the profile is inside its HOME or its default
+    gh directory, $HOME/.config/gh, is the profile. Symlinks and bind mounts
+    count as the profile: paths are resolved and stat'ed, never opened."""
     env = dict(environ)
     if approvals is None or not approvals.app_trust or approvals.gh_config_dir is None:
         return env
-    profile = _normal(approvals.gh_config_dir)
+    profile = approvals.gh_config_dir
     home = env.get("HOME") or os.path.expanduser("~")
-    if _within(profile, _normal(home)):
+    if _within(profile, home) or _within(os.path.join(home, ".config", "gh"), profile):
         raise ApproverProfileExposed(
-            f"the approver gh profile {profile} is inside the run's HOME {home}"
+            f"the approver gh profile {profile} is reachable from the run's HOME {home}"
         )
-    if "GH_CONFIG_DIR" in env and _within(_normal(env["GH_CONFIG_DIR"]), profile):
+    if "GH_CONFIG_DIR" in env and _within(env["GH_CONFIG_DIR"], profile):
         del env["GH_CONFIG_DIR"]
-    if "XDG_CONFIG_HOME" in env and _within(_normal(env["XDG_CONFIG_HOME"]) / "gh", profile):
+    if "XDG_CONFIG_HOME" in env and _within(os.path.join(env["XDG_CONFIG_HOME"], "gh"), profile):
         del env["XDG_CONFIG_HOME"]
     return env
 
 
-def _normal(path: str | os.PathLike[str]) -> PurePath:
-    return PurePath(os.path.abspath(os.fspath(path)))
-
-
-def _within(path: PurePath, parent: PurePath) -> bool:
-    return path == parent or parent in path.parents
+def _within(path: str | os.PathLike[str], parent: str | os.PathLike[str]) -> bool:
+    """path is parent or below it, through any symlink or bind mount."""
+    resolved = Path(os.path.realpath(path))
+    target = Path(os.path.realpath(parent))
+    if resolved == target or target in resolved.parents:
+        return True
+    try:
+        mark = os.stat(target)
+    except OSError:
+        return False
+    for candidate in (resolved, *resolved.parents):
+        try:
+            if os.path.samestat(os.stat(candidate), mark):
+                return True
+        except OSError:
+            continue
+    return False

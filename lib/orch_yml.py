@@ -203,12 +203,38 @@ class OrchConfig:
 
 
 def approvals(config: OrchConfig) -> Approvals:
-    app = config.github_app
+    return _approvals(
+        config.github_app, config.approver_logins, config.approver_gh_config_dir
+    )
+
+
+def _approvals(
+    app: GitHubApp | None,
+    approver_logins: frozenset[str] | None,
+    gh_config_dir: Path | None,
+) -> Approvals:
     return Approvals(
         app_trust=app is not None and app.enabled,
-        logins=frozenset(login.casefold() for login in config.approver_logins or ()),
-        gh_config_dir=config.approver_gh_config_dir,
+        logins=frozenset(login.casefold() for login in approver_logins or ()),
+        gh_config_dir=gh_config_dir,
     )
+
+
+def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
+    """The approval settings alone (#122), for a waiter whose orch.yml has
+    an error elsewhere: that error must not turn the approver-profile guard
+    off. None when the file or these settings do not load."""
+    data, findings = _read(path)
+    if data is None:
+        return None, findings
+    approver_logins = _approver_logins(data, findings)
+    gh_config_dir = _absolute_path(
+        data, "approver_gh_config_dir", "approver_gh_config_dir", findings
+    )
+    app = _github_app(data, findings)
+    if findings:
+        return None, findings
+    return _approvals(app, approver_logins, gh_config_dir), findings
 
 
 def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]:
@@ -254,6 +280,13 @@ def load_orch_yml(
     *,
     allow_placeholders: bool = False,
 ) -> tuple[OrchConfig | None, list[Finding]]:
+    data, findings = _read(path)
+    if data is None:
+        return None, findings
+    return _validate(data, allow_placeholders=allow_placeholders)
+
+
+def _read(path: Path) -> tuple[dict | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
@@ -264,7 +297,7 @@ def load_orch_yml(
         return None, [Finding("error", f"invalid YAML: {text or 'invalid YAML'}")]
     if not isinstance(data, dict):
         return None, [Finding("error", "orch.yml must be a mapping")]
-    return _validate(data, allow_placeholders=allow_placeholders)
+    return data, []
 
 
 def _validate(

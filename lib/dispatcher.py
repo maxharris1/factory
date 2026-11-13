@@ -1129,9 +1129,10 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted(
+        trusted = self._trusted(
             ticket, comment, fields, "grok-bot", role="orchestrator"
-        ):
+        )
+        if not trusted and not self._approver_go(comment, fields):
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
@@ -1139,6 +1140,8 @@ class Dispatcher:
             resumed = self._resume_after_cap(ticket, comment)
             if resumed is not None:
                 return resumed
+        if not trusted:
+            return True, "rejected-go-author"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -2027,6 +2030,16 @@ class Dispatcher:
         if self.approvals.app_trust:
             return self.approvals.may_approve(login)
         return self._trusted_login(login)
+
+    def _approver_go(self, comment: Comment, fields: Mapping[str, str]) -> bool:
+        """With the switch on, an approver's go may lift a cap even when the
+        approver is not trusted for grok-bot; it starts nothing else (#122)."""
+        return (
+            self.approvals.app_trust
+            and fields.get("from") == "grok-bot"
+            and fields.get("role") == "orchestrator"
+            and self.approvals.may_approve(comment.author)
+        )
 
     def _may_approve_go(self, author: str) -> bool:
         """A Linear author keeps today's rule: the app changes GitHub

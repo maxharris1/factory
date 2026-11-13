@@ -6,7 +6,9 @@ path here is fake; no key is read.
 
 from __future__ import annotations
 
+import argparse
 import builtins
+import functools
 import io
 import os
 import sqlite3
@@ -19,7 +21,7 @@ from lib.dispatcher import Comment, Dispatcher
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.orch_yml import Approvals, approvals, load_orch_yml
 from lib.orchestrate import OrchestrateError, approval_post_env
-from lib.waiter import WaiterError
+from lib.waiter import HarnessCommand, Waiter, WaiterError
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, comment, handled_outcome, job_count
 from tests.test_rounds_and_caps import Flow
 from tests.test_ship_hold import (
@@ -32,7 +34,7 @@ from tests.test_ship_hold import (
     snapshot,
     workflow_state,
 )
-from tests.test_waiter import FakeSpawn, enqueue, make_queue, make_waiter
+from tests.test_waiter import MACHINES, FakeContext, FakeSpawn, enqueue, local_pool, make_queue, make_waiter
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_BOT = "fake-factory-bots[bot]"
@@ -247,9 +249,9 @@ def test_example_configs_carry_the_github_app_block(
 class AppFlow(Flow):
     """Flow (test_rounds_and_caps) with orch.yml's trust and switch."""
 
-    def __init__(self, tmp_path: Path, *, enabled: bool | None):
+    def __init__(self, tmp_path: Path, *, enabled: bool | None, text: str | None = None):
         super().__init__(tmp_path)
-        config, findings = load(tmp_path, orch_text(enabled=enabled))
+        config, findings = load(tmp_path, text if text is not None else orch_text(enabled=enabled))
         assert config is not None, findings
         self.dispatcher = Dispatcher(
             self.queue.path,
@@ -312,6 +314,26 @@ def test_switch_on_go_on_an_uncapped_ticket_keeps_todays_trust(tmp_path: Path) -
     flow = AppFlow(tmp_path, enabled=True)
     assert flow.go("go-1", author=APP_BOT) == "queued-build"
     assert flow.go("go-forged", author="claude-login") == "rejected-go-author"
+
+
+WITHOUT_MAX_GROK_TRUST = orch_text(enabled=True).replace("  maxharris1: [grok-bot]\n", "")
+
+
+def test_switch_on_an_approver_without_grok_trust_lifts_a_cap(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True, text=WITHOUT_MAX_GROK_TRUST)
+    assert cli._check_config(["--orch", str(tmp_path / "orch.yml")]) == 0
+    flow.to_cap()
+
+    assert flow.go("go-2", author=MAX) == "queued-fix"
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("fixing", 1)
+
+
+def test_switch_on_go_from_an_approver_on_an_uncapped_ticket_needs_grok_trust(
+    tmp_path: Path,
+) -> None:
+    flow = AppFlow(tmp_path, enabled=True, text=WITHOUT_MAX_GROK_TRUST)
+    assert flow.go("go-1", author=MAX) == "rejected-go-author"
+    assert job_count(flow.queue, "build") == 0
 
 
 # --- AC 2, 3c, 3d: a hold ok ------------------------------------------------------
@@ -583,3 +605,123 @@ def test_approval_post_env_with_the_switch_off_only_drops_tokens(tmp_path: Path,
     environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": "/home/grok/.config/gh", **FAKE_TOKENS}
 
     assert post_env(switch_off, environ) == {"PATH": "/usr/bin", "GH_CONFIG_DIR": "/home/grok/.config/gh"}
+
+
+# --- AC 5: a symlink to the approver profile is the profile ------------------------
+
+
+def linked(link: Path, target: Path) -> Path:
+    target.mkdir(parents=True, exist_ok=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
+    return link
+
+
+def test_waiter_env_drops_a_symlink_to_the_approver_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "grok" / "gh-approver"
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(profile))
+    home = str(tmp_path / "claude-bot")
+    alias = linked(tmp_path / "elsewhere" / "gh", profile)
+    environ = {"HOME": home, "GH_CONFIG_DIR": str(alias)}
+    assert harness_environ(environ, switch_on) == {"HOME": home}
+    xdg = linked(tmp_path / "xdg-alias", tmp_path / "grok")
+    xdg_profile = approvals_for(tmp_path, enabled=True, profile=str(tmp_path / "grok" / "gh"))
+    assert harness_environ({"HOME": home, "XDG_CONFIG_HOME": str(xdg)}, xdg_profile) == {"HOME": home}
+
+
+def test_waiter_env_drops_the_real_profile_named_through_a_configured_symlink(tmp_path: Path) -> None:
+    real = tmp_path / "grok" / "gh-approver"
+    configured = linked(tmp_path / "profile-link", real)
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(configured))
+    home = str(tmp_path / "claude-bot")
+    assert harness_environ({"HOME": home, "GH_CONFIG_DIR": str(real / "hosts")}, switch_on) == {"HOME": home}
+
+
+def test_waiter_refuses_when_the_default_gh_directory_links_to_the_profile(tmp_path: Path) -> None:
+    profile = tmp_path / "approver" / "gh"
+    home = tmp_path / "bot"
+    alias = linked(home / ".config" / "gh", profile)
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(profile))
+    for environ in (
+        {"HOME": str(home)},
+        {"HOME": str(home), "GH_CONFIG_DIR": str(alias)},
+        {"HOME": str(home), "GH_CONFIG_DIR": str(tmp_path / "bot-gh")},
+    ):
+        with pytest.raises(ApproverProfileExposed):
+            harness_environ(environ, switch_on)
+    db, queue = make_queue(tmp_path)
+    with pytest.raises(WaiterError, match="approver"):
+        waiter_with(tmp_path, queue, db, switch_on, {"HOME": str(home), "GH_CONFIG_DIR": str(alias)})
+
+
+def test_waiter_refuses_when_the_run_home_links_to_a_home_holding_the_profile(tmp_path: Path) -> None:
+    real_home = tmp_path / "real-home"
+    profile = real_home / "approver" / "gh"
+    profile.mkdir(parents=True)
+    home = linked(tmp_path / "bot-home", real_home)
+    switch_on = approvals_for(tmp_path, enabled=True, profile=str(profile))
+    with pytest.raises(ApproverProfileExposed):
+        harness_environ({"HOME": str(home), "GH_CONFIG_DIR": str(tmp_path / "bot-gh")}, switch_on)
+
+
+# --- AC 5: an orch.yml error elsewhere never turns the guard off --------------------
+
+
+def autostart_once(tmp_path: Path, monkeypatch, text: str | None, environ: dict[str, str]):
+    """orch wait --autostart for one step, with a job already queued."""
+    orch = tmp_path / "orch.yml"
+    if text is not None:
+        orch.write_text(text, encoding="utf-8")
+    db, queue = make_queue(tmp_path)
+    enqueue(queue, "already-queued")
+    spawn = FakeSpawn()
+    monkeypatch.setattr(cli.waiter, "GhContextSource", lambda *args, **kwargs: FakeContext())
+    monkeypatch.setattr(cli.waiter, "Waiter", functools.partial(Waiter, spawn=spawn, environ=environ))
+    monkeypatch.setattr(Waiter, "serve", lambda self, stop: (self.step(), 0)[1])
+    monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
+    args = argparse.Namespace(
+        orch=orch, bot="claude-bot", state_dir=tmp_path / "state", db=db, machines=MACHINES
+    )
+    harness = HarnessCommand(bot="claude-bot", command=("fake-harness",))
+    return cli._wait_autostart(args, queue, local_pool(queue), harness), spawn
+
+
+def test_autostart_keeps_the_guard_when_orch_yml_has_another_error(tmp_path: Path, monkeypatch) -> None:
+    profile = tmp_path / "grok" / "gh-approver"
+    text = orch_text(enabled=True, profile=str(profile)).replace("poll_seconds: 30", "poll_seconds: 45")
+    environ = {"PATH": "/usr/bin", "HOME": str(tmp_path / "bot"), "GH_CONFIG_DIR": str(profile)}
+    code, spawn = autostart_once(tmp_path, monkeypatch, text, environ)
+    assert code == 0
+    assert len(spawn.calls) == 1
+    assert "GH_CONFIG_DIR" not in spawn.calls[0][1]["env"]
+
+
+def test_autostart_refuses_a_profile_in_home_when_orch_yml_has_another_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "bot"
+    profile = home / ".config" / "gh"
+    text = orch_text(enabled=True, profile=str(profile)).replace("poll_seconds: 30", "poll_seconds: 45")
+    code, spawn = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(profile)})
+    assert code == 2
+    assert spawn.calls == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "poll_seconds: [30\n",
+        orch_text(enabled=True).replace("  enabled: true", "  enabled: yes-please"),
+        orch_text(enabled=True, profile="relative/gh"),
+        orch_text(enabled=True).replace("approver_logins:\n  - maxharris1", "approver_logins: []"),
+    ],
+    ids=["missing", "bad-yaml", "bad-switch", "relative-profile", "empty-approvers"],
+)
+def test_autostart_refuses_when_the_approval_settings_cannot_load(
+    tmp_path: Path, monkeypatch, text: str | None
+) -> None:
+    home = tmp_path / "bot"
+    code, spawn = autostart_once(tmp_path, monkeypatch, text, {"HOME": str(home), "GH_CONFIG_DIR": str(home / "gh")})
+    assert code == 2
+    assert spawn.calls == []
