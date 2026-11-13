@@ -517,6 +517,13 @@ class Waiter:
         `orch job run` does this itself when its command exits without `orch
         job done`; this catches a runner that died first (killed, crashed).
         A job that another live runner still runs is left to it.
+
+        Codex PR #82 r2 F2.1: the job becomes retryable only once its runner
+        and its worker are both gone. A runner SIGKILLed while its harness
+        still runs leaves the job running: failing it now would let T6 start
+        attempt 2 beside the live harness. The poller's DEAD path (runner
+        gone and worker confirmed gone, lib/job_state.py) fails it once the
+        harness ends, so the retry comes then, exactly once.
         """
         try:
             with self.queue.connect() as connection:
@@ -536,6 +543,23 @@ class Waiter:
             and self.alive(placement.runner_pid, placement.runner_start)
         ):
             self.log(f"job {job_id}: still run by pid {placement.runner_pid}; left to it")
+            return
+        if placement is not None and placement.remote_started:
+            self.log(
+                f"job {job_id}: orch job run exited {code}; its remote worker may still "
+                "run, so the poller fails it once the device confirms it gone"
+            )
+            return
+        if (
+            placement is not None
+            and placement.worker_pid is not None
+            and self.alive(placement.worker_pid, placement.worker_start)
+        ):
+            self.log(
+                f"job {job_id}: orch job run exited {code} but its worker (pid "
+                f"{placement.worker_pid}) still runs; not failed while it runs, "
+                "the poller's dead-job check fails it for T6 once both are gone"
+            )
             return
         try:
             retry_locked(

@@ -1094,6 +1094,93 @@ def test_a_job_another_live_runner_holds_is_not_failed(tmp_path: Path) -> None:
     assert _slot(db, job_id) is not None
 
 
+def test_r2_f2_1_a_runner_killed_while_its_harness_lives_gets_no_attempt_2_until_both_are_gone(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #82 r2 F2.1: SIGKILL hits only `orch job run`; the harness lives.
+
+    The waiter must not fail the job then: T6 would queue attempt 2 and,
+    with a second free box slot, run it beside the live harness. The job
+    stays running until the runner and the worker are both gone; then the
+    poller's DEAD path fails it and T6 queues exactly one attempt 2.
+    """
+    from tests.test_job_state import Poller
+
+    poller = Poller(tmp_path / "poller", box_slots=3)
+    job_id = enqueue(poller.queue, "f21", timeout_seconds=3600)
+    spawn = FakeSpawn()
+    log: list[str] = []
+    waiter = Waiter(
+        bot="claude-bot", queue=poller.queue,
+        pool=DevicePool(poller.queue, local_only(poller.config)),
+        harness=HarnessCommand(bot="claude-bot", command=("fake-harness",)),
+        context=FakeContext(), state_dir=tmp_path / "state", db=poller.path,
+        machines=poller.machines, orch=("python3", "/factory/bin/orch"), spawn=spawn,
+        log=log.append, environ={}, alive=lambda pid, _start: pid in poller.live,
+    )
+    assert waiter.step() == job_id
+    runner, worker = spawn.children[0].pid, 20_001
+    # `orch job run` beats, records itself, then starts the harness.
+    poller.queue.heartbeat(job_id, owner="claude")
+    poller.pool.attach_runner(job_id, owner="claude", pid=runner, start=None,
+                              alive=lambda *_: False)
+    poller.pool.attach_worker(job_id, owner="claude", pid=worker, start=None)
+    poller.live |= {runner, worker}
+
+    # SIGKILL (or the OOM killer) takes only the runner.
+    poller.live.discard(runner)
+    spawn.children[0].returncode = -9
+    assert waiter.step() is None  # reaps the runner; nothing else to claim
+
+    assert state(poller.path, job_id) == "running"
+    assert _slot(poller.path, job_id) is not None
+    poller.at(30)  # the poller reconciles: the worker still runs
+    poller.at(60)
+    assert poller.jobs() == [(job_id, "running", 1)]  # no failed row, no attempt 2
+    assert waiter.step() is None  # nothing for a second box slot to start
+    assert len(spawn.children) == 1
+    assert any("still runs" in line and str(worker) in line for line in log)
+
+    # The harness ends too: now the job is retryable, exactly once.
+    poller.live.discard(worker)
+    poller.at(90)
+    jobs = poller.jobs()
+    assert (job_id, "failed", 1) in jobs
+    retries = [job for job in jobs if job[2] == 2]
+    assert len(retries) == 1 and retries[0][1] == "queued"
+    poller.at(120)
+    assert len([job for job in poller.jobs() if job[2] == 2]) == 1
+    assert waiter.step() == retries[0][0]  # attempt 2 starts only now
+    assert len(spawn.children) == 2
+
+
+def test_r2_f2_1_a_runner_killed_after_its_harness_ended_fails_the_job_at_once(
+    tmp_path: Path,
+) -> None:
+    """Both gone when the waiter reaps the runner: fail it now, free the slot."""
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    live: set[int] = set()
+    waiter = Waiter(
+        bot="claude-bot", queue=queue, pool=local_pool(queue),
+        harness=HarnessCommand(bot="claude-bot", command=("fake-harness",)),
+        context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=MACHINES,
+        orch=("python3", "/factory/bin/orch"), spawn=spawn, log=[].append,
+        environ={}, alive=lambda pid, _start: pid in live,
+    )
+    waiter.step()
+    runner = spawn.children[0].pid
+    queue.heartbeat(job_id, owner="claude")
+    waiter.pool.attach_runner(job_id, owner="claude", pid=runner, start=None,
+                              alive=lambda *_: False)
+    waiter.pool.attach_worker(job_id, owner="claude", pid=20_002, start=None)
+    spawn.children[0].returncode = -9  # neither pid is in `live`
+    waiter.step()
+    assert state(db, job_id) == "failed"
+    assert _slot(db, job_id) is None
+
+
 def test_end_to_end_a_harness_that_exits_1_without_done_fails_the_job_at_once(
     autostart: dict,
 ) -> None:

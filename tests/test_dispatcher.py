@@ -3011,6 +3011,35 @@ def test_t4_rejects_forged_approve_author_fields(
         ).fetchone()[0]
     assert outcome == "rejected-approve-author"
 
+    # Codex PR #82 r2 F2.3: the reviewer reposts the corrected verdict (the
+    # trusted login, from=codex-bot, role=reviewer). A rejected comment never
+    # makes its correction a duplicate: the correction ships, exactly once.
+    corrected = (
+        f"<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+        f"round=1 head={head} verdict=APPROVE risk=high -->\nApprove.\n"
+    )
+    snapshot = ticket(
+        comment("approve-forged", body, author=author),
+        comment("approve-corrected", corrected, author="codex-login", created_at=2),
+        head=head,
+        ci={head: CIResult("success")},
+    )
+    dispatcher.process(snapshot)
+    dispatcher.process(snapshot)
+
+    assert len(actions.merges) == 1
+    with queue.connect() as connection:
+        outcomes = dict(
+            connection.execute(
+                """
+                SELECT comment_id, outcome FROM handled_comments
+                WHERE repo = 'owner/repo' AND ticket_id = '42'
+                """
+            ).fetchall()
+        )
+    assert outcomes["approve-forged"] == "rejected-approve-author"
+    assert outcomes["approve-corrected"] == "merged"
+
 
 @pytest.mark.parametrize(
     ("approved_head", "current_head", "patch_ids", "expected"),

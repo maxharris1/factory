@@ -333,3 +333,52 @@ def test_a_different_verdict_at_the_same_head_is_not_a_duplicate(tmp_path: Path)
     outcomes = _outcomes(queue)
     assert outcomes["v-1"] == "queued-review-fix"
     assert outcomes["v-2"] == "stale-approve"  # the existing rule, unchanged
+
+
+# --- Codex PR #82 r2 F2.3: only an acted-on verdict makes a duplicate ----------
+
+
+def test_a_rejected_wrong_role_revise_does_not_suppress_its_correction(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    head = "e" * 40
+    seed_review_job(dispatcher, queue, head)
+    revise = VERDICT.format(round="1/3", head=head, verdict="REVISE", risk="high")
+    wrong = comment(
+        "v-wrong", revise.replace("role=reviewer", "role=builder"),
+        author="codex-login", created_at=1,
+    )
+    dispatcher.process(ticket(wrong, head=head))
+    assert _outcomes(queue)["v-wrong"] == "rejected-revise-author"
+    assert [job[0] for job in _jobs(queue)].count("fix") == 0
+
+    corrected = comment("v-right", revise, author="codex-login", created_at=2)
+    dispatcher.process(ticket(wrong, corrected, head=head))
+    dispatcher.process(ticket(wrong, corrected, head=head))  # and on a later poll
+    assert _outcomes(queue)["v-right"] == "queued-review-fix"
+    assert [job[0] for job in _jobs(queue)].count("fix") == 1
+
+    # A repeat of the accepted correction is still a duplicate (one job).
+    again = comment("v-again", revise, author="codex-login", created_at=3)
+    dispatcher.process(ticket(wrong, corrected, again, head=head))
+    assert _outcomes(queue)["v-again"] == "duplicate-verdict"
+    assert [job[0] for job in _jobs(queue)].count("fix") == 1
+
+
+def test_a_stale_verdict_does_not_make_a_later_one_a_duplicate(tmp_path: Path) -> None:
+    """A verdict that took no action (stale, CI red) is no dedupe anchor."""
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "f" * 40
+    seed_review_job(dispatcher, queue, head)
+    approve = VERDICT.format(round="1/3", head=head, verdict="APPROVE", risk="high")
+    first = comment("a-red", approve, author="codex-login", created_at=1)
+    dispatcher.process(ticket(first, head=head, ci={head: CIResult("failure")}))
+    assert _outcomes(queue)["a-red"] == "approve-ci-red"
+    assert actions.merges == []
+
+    second = comment("a-green", approve, author="codex-login", created_at=2)
+    green = {head: CIResult("success")}
+    dispatcher.process(ticket(first, second, head=head, ci=green))
+    dispatcher.process(ticket(first, second, head=head, ci=green))
+    assert _outcomes(queue)["a-green"] == "merged"
+    assert actions.merges == [(True, head)]
