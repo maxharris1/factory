@@ -201,7 +201,7 @@ class PlacedRun:
         self.requeued = bool(requeued)
         return self.requeued
 
-    def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    def argv(self, command: Sequence[str], env: Mapping[str, str], *, report_env: bool = False) -> list[str]:
         if self.target is None:
             return list(command)
         # Factory, Nov 13: the waiter config is shared by every device, so a
@@ -217,6 +217,7 @@ class PlacedRun:
                 guarded_dirs=device.guarded_dirs,
                 insert_at=device.insert_at,
                 cd=device.cd,
+                report_env=report_env,
             ),
         )
 

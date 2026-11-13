@@ -311,7 +311,7 @@ def test_a_sandboxed_codex_job_finishes_done_because_the_state_dir_was_added(
         tmp_path, [str(codex), "exec", "--sandbox", "workspace-write", "-"]
     )
 
-    assert record["argv"] == ["exec", "--add-dir", str(tmp_path), "--sandbox",
+    assert record["argv"] == ["exec", "--add-dir", str(tmp_path), "--json", "--sandbox",
                               "workspace-write", "-"], stderr
     assert record["writable"] is True
     assert Path(record["cwd"]).is_relative_to(tmp_path / "work")  # the job worktree
@@ -326,7 +326,7 @@ def test_a_box_local_manual_add_dir_stopgap_still_works_and_is_not_doubled(
     command = [str(codex), "exec", "--add-dir", str(tmp_path), "--sandbox", "workspace-write", "-"]
     db, job_id, record, stderr = _run_codex_job(tmp_path, command)
 
-    assert record["argv"] == command[1:], stderr
+    assert record["argv"] == ["exec", "--json", *command[2:]], stderr
     assert _add_dirs(record["argv"]) == [str(tmp_path)]
     assert _job_row(db, job_id) == ("done", f"c-{job_id[:6]}")
 
@@ -459,7 +459,7 @@ def test_a_placed_codex_review_resolves_codex_by_name_with_no_box_path(
         [BOX_CODEX, "exec", "--add-dir", box_state, "--sandbox", "workspace-write", "-"],
     )
 
-    assert argv == ["exec", "--sandbox", "workspace-write", "-"], err
+    assert argv == ["exec", "--json", "--sandbox", "workspace-write", "-"], err
     script = calls[0]["script"]
     assert BOX_CODEX not in script
     assert "/home/box/.local/bin" not in script
@@ -479,7 +479,7 @@ def test_a_placed_codex_gets_an_add_dir_only_where_the_device_has_it(tmp_path: P
         home_dirs=("device-state",),
     )
 
-    assert argv == ["exec", "--add-dir", present, "--sandbox", "workspace-write", "-"], err
+    assert argv == ["exec", "--json", "--add-dir", present, "--sandbox", "workspace-write", "-"], err
     assert argv.count("--add-dir") == 1
     assert absent not in argv
 
@@ -489,7 +489,7 @@ def test_a_placed_codex_with_no_add_dir_gets_none(tmp_path: Path) -> None:
         tmp_path, ["codex", "exec", "--sandbox", "workspace-write", "-"]
     )
 
-    assert argv == ["exec", "--sandbox", "workspace-write", "-"], err
+    assert argv == ["exec", "--json", "--sandbox", "workspace-write", "-"], err
     assert "--add-dir" not in calls[0]["script"]
     assert "test -d" not in calls[0]["script"]
     assert "added --add-dir" not in err
@@ -517,7 +517,7 @@ def test_a_relative_add_dir_is_checked_where_codex_resolves_it(
         [BOX_CODEX, "exec", *flags, "--add-dir", "../shared", "-s", "workspace-write", "-"],
     )
 
-    assert argv == ["exec", *flags, "--add-dir", "../shared", "-s", "workspace-write", "-"], err
+    assert argv == ["exec", "--json", *flags, "--add-dir", "../shared", "-s", "workspace-write", "-"], err
 
 
 def test_a_relative_add_dir_beside_only_the_job_directory_is_not_given(
@@ -532,7 +532,7 @@ def test_a_relative_add_dir_beside_only_the_job_directory_is_not_given(
          "-s", "workspace-write", "-"],
     )
 
-    assert argv == ["exec", "-C", str(project), "-s", "workspace-write", "-"], err
+    assert argv == ["exec", "--json", "-C", str(project), "-s", "workspace-write", "-"], err
 
 
 def test_a_relative_cd_and_add_dir_resolve_from_the_job_directory(tmp_path: Path) -> None:
@@ -544,5 +544,5 @@ def test_a_relative_cd_and_add_dir_resolve_from_the_job_directory(tmp_path: Path
          "-s", "workspace-write", "-"],
     )
 
-    assert argv == ["exec", "--cd", "..", "--add-dir", "shared",
+    assert argv == ["exec", "--json", "--cd", "..", "--add-dir", "shared",
                     "-s", "workspace-write", "-"], err

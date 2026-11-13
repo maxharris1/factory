@@ -125,6 +125,15 @@ PREFLIGHT_TOOLS = ("git", "gh")
 _PREFLIGHT_MARK = "orch-preflight: missing"
 _CHECKOUT_MARK = "orch-checkout:"
 TAG_ENV = "ORCH_WORKER_TAG"
+# #100 r5: with telemetry on, the start reports the harness's own
+# environment (after the login profile) as one line just before the exec:
+# WORKER_ENV_MARK, a space, then hex of NUL-separated NAME=value entries
+# ending with WORKER_ENV_END. lib/telemetry.py scrubs that environment's
+# secret values from a remote run's summary and never stores the line.
+# The login profile's stdout goes to stderr (#100 r6), so the report is the
+# first thing on stdout whatever the profile prints.
+WORKER_ENV_MARK = "ORCH-WORKER-ENV"
+WORKER_ENV_END = "ORCH-WORKER-ENV-END"
 # The start script's own exit status when it cannot make or enter the job
 # directory, or record the worker: the harness never ran.
 START_REFUSED = 125
@@ -132,8 +141,12 @@ START_REFUSED = 125
 # The start writes its worker tag to the launch record (`launch_record`)
 # just before the exec into the harness, once the harness is found under
 # the login PATH; a start with no record of its tag never ran the harness.
+# A login profile's tracing (set -x or -v, a DEBUG trap) would echo the
+# job's and the worker's environment values to stderr, so the start turns it
+# off first.
+_UNTRACE = "set +xvT; trap - DEBUG; "
 _START_ENTER = (
-    f'cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
+    f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
 )
@@ -141,9 +154,13 @@ _START_EXEC = (
     'command -v "$1" >/dev/null 2>&1 '
     '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
     f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
-    'exec "$@"'
 )
-_START_HARNESS = _START_ENTER + _START_EXEC
+_REPORT_ENV = (
+    f'printf "%s " {WORKER_ENV_MARK}; '
+    'names=$(compgen -e) && { for n in $names; do printf "%s=%s\\0" "$n" "${!n}"; done; '
+    f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
+    "echo; "
+)
 # Factory, Nov 13: a harness's `--add-dir` directories are given only where
 # the device has them. After `--` come k (where the kept `--add-dir <dir>`
 # pairs go in the command), n, then n pairs of (path to test, directory as
@@ -157,7 +174,6 @@ _GUARD_DIRS = (
     'shift 2; n=$((n-1)); done; '
     'c=("$@"); set -- "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"; '
 )
-_START_GUARDED = _START_ENTER + _GUARD_DIRS + _START_EXEC
 SSH_UNREACHABLE = 255
 
 GONE = "gone"
@@ -343,6 +359,7 @@ def start_script(
     guarded_dirs: Sequence[str] = (),
     insert_at: int = 0,
     cd: str | None = None,
+    report_env: bool = False,
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
@@ -351,6 +368,7 @@ def start_script(
     the device when the job starts. A relative dir is tested under cd (the
     directory the command resolves it against, itself relative to the job
     directory) when one is given. With none, the command runs as given.
+    With report_env, the start first prints the WORKER_ENV_MARK line.
     """
     tag = target.require_tag()
     if not command:
@@ -368,18 +386,27 @@ def start_script(
     # claude, codex) is loaded. #99 A6: the job's environment and directory
     # are applied after the profile ran, so a profile can change neither.
     # Every step execs, so the start's pid and group are the harness's.
-    script, guard = _START_HARNESS, ""
+    guard = ""
     if guarded_dirs:
         # Factory, Nov 13: each --add-dir only where the device has it.
         pairs = " ".join(
             f"{shlex.quote(posixpath.join(cd or '', path))} {shlex.quote(path)}"
             for path in guarded_dirs
         )
-        script, guard = _START_GUARDED, f"{insert_at} {len(guarded_dirs)} {pairs} "
+        guard = f"{insert_at} {len(guarded_dirs)} {pairs} "
+    script = (
+        ("exec 1>&3 3>&-; " if report_env else "")
+        + _START_ENTER
+        + (_GUARD_DIRS if guarded_dirs else "")
+        + _START_EXEC
+        + (_REPORT_ENV if report_env else "")
+        + 'exec "$@"'
+    )
     login = (
         f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {shlex.quote(launch_record(target))} {assignments} '
         f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {guard}{argv}'
+        + (" 3>&1 1>&2" if report_env else "")
     )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)

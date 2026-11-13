@@ -96,8 +96,10 @@ from lib.device_pool import DevicePool, Placement
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import MachinesConfig
-from lib.orch_yml import OrchConfig
+from lib.harness_env import ApproverProfileExposed, harness_environ
+from lib.orch_yml import Approvals, OrchConfig
 from lib.queue import Job, QueueError, SQLiteJobQueue
+from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
     POLL_SECONDS,
@@ -466,6 +468,7 @@ class Waiter:
         log: Log = lambda line: print(line, file=sys.stderr, flush=True),
         environ: Mapping[str, str] | None = None,
         alive: Callable[[int | None, str | None], bool] = pid_alive,
+        approvals: Approvals | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -483,7 +486,12 @@ class Waiter:
         self.orch = tuple(orch)
         self.spawn = spawn
         self.log = log
-        self.environ = dict(environ if environ is not None else os.environ)
+        try:
+            self.environ = harness_environ(
+                environ if environ is not None else os.environ, approvals
+            )
+        except ApproverProfileExposed as exc:
+            raise WaiterError(str(exc)) from exc
         self.alive = alive
         self._children: dict[str, Child] = {}
         # job id -> (its job directory, run.log size when the run started),
@@ -614,6 +622,7 @@ class Waiter:
     def _spawn(self, argv: list[str], job_dir: Path, brief_path: Path) -> Child:
         env = dict(self.environ)
         env[BRIEF_ENV] = str(brief_path)
+        env[STATE_DIR_ENV] = str(job_dir)  # the run's raw telemetry log goes here (#93)
         log_fd = os.open(
             job_dir / "run.log",
             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,

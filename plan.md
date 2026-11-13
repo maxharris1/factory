@@ -1,167 +1,319 @@
-# Plan for #119, skill-loading and helper-agent probe
+# Plan for #122, a separate approval credential for Max-only actions
 
-Factory briefs tell jobs to "Run as poteto-mode", and the jobs often never read the skill. Max wants to know, from evidence and not from what a model says, which way of asking actually makes each harness read a pstack `SKILL.md`, on each device. He also wants to know whether a CLI job can start a helper agent. This probe answers both, and T06 and T09 build on whatever loading style it shows works.
+Every bot posts to GitHub as `maxharris1`, which is Max's login. The factory tells comments apart only by the `from=` label inside each one. So any bot can post the two comments that only Max should give: a `go` that grants an extra round on a capped ticket, and a `kind=ok` that clears a ship hold. Max chose a GitHub App for the bots. Once Max installs the app and Factory turns the switch on, bot comments come from the app's bot login, and the factory counts those two approvals only from a login in a new `approver_logins` list (`maxharris1`). Until then the factory behaves exactly as it does today.
 
-The smallest change that meets the ticket is one read-only script. It starts each harness with the waiter's own command, then reads the transcript that the harness itself writes. It writes one table to `docs/skill-loading.md`. One PR (#123, branch `factory/issue-119`). Risk low, one review round with Codex Bot. Grok Bot merges on `ship: handoff`.
+This plan is for PR #126 (branch `factory/issue-122`). It changes code and config only. It does not create or install the app, and it never reads, writes or prints a key, token or anything under `~/.config/factory/`. Tests use fake app ids, fake installation ids and fake logins.
 
-## Grounding (what the probe has to fit)
+## How to read this
 
-These facts were checked in this plan job. Each one shapes a choice below.
+One box is one unit of work. Every box names the evidence that checks it. Check a box only when its evidence exists, a test run, a log line or a SHA.
 
-- **The waiter's launch.** `lib/waiter.py` `load_harness_command` reads the bot's argv from `~/.config/factory/waiter-<bot>.yml` (an owner-only file). The brief goes on stdin. `lib/harness_env.py` adds `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for Claude. A remote device runs `lib/remote.py` `start_script` over `ssh -l <bot> <alias>` under the bot's login shell, and `lib/codex_sandbox.py` `for_device` makes a codex argv device-neutral.
-- **poteto-mode cannot be model-invoked.** The pinned `skills/pstack/skills/poteto-mode/SKILL.md` has `disable-model-invocation: true`. The pstack Claude adapter (`skills/pstack/docs/harness/claude-code.md`) says the `Skill` tool "refuses most pstack skills" and says to `Read <pstack>/skills/<name>/SKILL.md and follow it` instead. So style 1 probably does not read the skill. That is a guess, and the probe is how we find out.
-- **Claude writes its own transcript in `-p` mode.** It goes to `~/.claude/projects/<slug>/<session>.jsonl`, and the slug is the cwd with each `/` and `.` changed to `-`. This plan job's own transcript has that shape (measured). Each record has `type`, `cwd`, `version` (the harness version) and `message.content` blocks. `tool_use` blocks carry `name` and `input`, and `tool_result` blocks carry `tool_use_id`, `content` and `is_error`. Subagent transcripts go in `<session>/subagents/`.
-- **Codex writes its own rollout.** It goes to `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` (`~/.codex` by default), with a `session_meta` record that has `cwd` and `cli_version`. Codex reads files through shell calls. The names of its function calls and of its sub-agent tool are not verified here, because codex is not on this Mac's claude-bot PATH. Unit 1 captures them from a real run before the parser is written.
-- **The Mac today.** There is no `~/.claude/skills` and no `~/.agents/skills` for claude-bot, so pstack is not installed there (measured). The probe must not install it. It records what happens.
+The build job runs under `pstack/skills/poteto-mode/playbooks/feature.md`. There is one PR. Codex Bot reviews it (risk high, up to three rounds). Grok Bot merges it on `ship: handoff`. The multi-phase skeleton's ten cloud lanes do not apply to a single backend PR with no UI. Its verification rule does, adapted in **Verify** below.
 
-## Design (architect scaffold)
+Tests alone are not sufficient verification. The PR is verified only when its unit, revert and CI boxes are all checked.
 
-### Candidates
+## The data shape
 
-| | A. Waiter argv, harness's own transcript file | B. Add JSON output flags, parse stdout | C. Go through `orch job run` with a synthetic job |
-| --- | --- | --- | --- |
-| Launch | Exactly the configured argv, prompt on stdin | Configured argv plus `--output-format stream-json --verbose` or `--json` | The real runner |
-| Meets "only the waiter's normal launch" | Yes | No, it changes the flags | Yes |
-| Side effects | A probe directory and the harness's normal session file | Same | Writes orch.db rows, takes a device slot, heartbeats, can be retried by T6 |
-| Evidence source | The harness's transcript | The harness's stream | The harness's transcript |
-| Failure mode | Transcript persistence turned off, recorded as `unknown` | None new | Queue interference |
-
-**Synthesis decision: A.** B breaks the criterion and the out-of-scope rule on launch flags. C puts a probe into the live queue. A's only risk is a config that turns off session persistence, and the probe reports that as `unknown` rather than guessing. Two shapes for the read check were also compared. One branched per tool (`Read`, `Skill`, `Bash cat`, slash expansion). The other asks one question: did a line from the skill's body reach the model's context from a source other than the model? The single question wins. It covers every path, including ones not thought of yet, and it never counts the model's own claim.
-
-Arena runners skipped. The fork was settled by the acceptance criteria, and the remaining shape is small. Codex's review and `interrogate` give the adversarial pass.
-
-### Data shape
+One immutable value answers one question: may this login give a Max-only approval? It is built once from `orch.yml` and passed to the three places that need it: the dispatcher, the waiter and Grok's post helper. `trusted_logins` keeps its current meaning, which bots a login may speak for. Approval is a separate question with its own list.
 
 ```python
-# lib/skill_probe.py
-
-Harness = Literal["claude", "codex"]          # Cursor stays off; not in the table
-Outcome = Literal["yes", "no", "missing", "n/a", "unknown"]
-# yes/no: transcript shows it. missing: the helper agent type is not installed.
-# n/a: the style does not apply to this harness. unknown: no transcript found.
-
-class Style(Enum):
-    RUN_AS = "run-as"            # 1. "Run as poteto-mode"
-    READ_PATH = "read-path"      # 2. "Read <abs>/poteto-mode/SKILL.md and follow it"
-    SLASH = "slash"              # 3. "/poteto-mode" at the top of the prompt
-    CODEX_MENTION = "codex-skill"  # 4. "$poteto-mode", resolved from $HOME/.agents/skills
+# lib/orch_yml.py
 
 @dataclass(frozen=True)
-class StyleSpec:
-    style: Style
-    harnesses: frozenset[Harness]           # where the style applies; elsewhere n/a
-    opening: Callable[[str], str]           # skill_md abs path -> first prompt line
-
-STYLES: tuple[StyleSpec, ...]               # the registry; the only place a style is defined
-
-@dataclass(frozen=True)
-class Evidence:
-    read: Outcome
-    read_via: str | None                    # "Read", "Skill", "shell", "injected"
-    helper: Outcome                         # Claude general-purpose, or Codex sub-agent
-    poteto_agent: Outcome                   # Claude only; codex rows are n/a
-    harness_version: str | None             # from the transcript, not from --version
+class GitHubApp:
+    """The bots' GitHub App (#122). Numbers and a path only. orch never opens
+    private_key_file. enabled is the switch: false keeps today's single-login trust."""
+    app_id: int
+    installations: Mapping[str, int]      # account login -> installation id
+    private_key_file: Path                # absolute; never opened, read or printed
+    bot_login: str | None = None          # e.g. factory-bots[bot], known after the first app post
+    enabled: bool = False
 
 @dataclass(frozen=True)
-class Launch:
-    device: str
-    harness: Harness
-    style: Style
-    argv: tuple[str, ...]                   # from load_harness_command, unchanged
-    env: Mapping[str, str]                  # harness_env(harness) only
-    run_dir: str                            # fresh, empty, under the device's workdir
-    remote: RemoteTarget | None             # None on the local device
+class Approvals:
+    """Who may give a capped-ticket go or a hold ok."""
+    app_trust: bool                       # github_app present and enabled
+    logins: frozenset[str]                # casefolded; approver_logins when app_trust,
+                                          # else the trusted_logins keys (today's hold rule)
+    gh_config_dir: Path | None            # Max's approver gh profile; a path only
 
-@dataclass(frozen=True)
-class ProbeResult:
-    date: str                               # ISO date of the run, UTC
-    device: str
-    harness: Harness
-    style: Style
-    evidence: Evidence
-    note: str                               # one line, such as "no transcript" or a timeout
+    def may_approve(self, login: str) -> bool: ...
+    @classmethod
+    def off(cls, trusted_github_logins: Iterable[str]) -> "Approvals": ...
 
-# Pure core: the unit-tested part
-def skill_canary(skill_md: str) -> str: ...                   # first body line after the H1, never frontmatter
-def claude_evidence(records: Iterable[Mapping], canary: str) -> Evidence: ...
-def codex_evidence(records: Iterable[Mapping], canary: str) -> Evidence: ...
-PARSERS: Mapping[Harness, Callable[[Iterable[Mapping], str], Evidence]]
-def prompt_for(spec: StyleSpec, harness: Harness, skill_md: str) -> str: ...
-def plan_launches(machines: MachinesConfig, bot: str, command: HarnessCommand,
-                  run_id: str) -> list[Launch]: ...
-def render(results: Sequence[ProbeResult]) -> str: ...       # docs/skill-loading.md
+OrchConfig.github_app: GitHubApp | None = None
+OrchConfig.approver_logins: frozenset[str] | None = None   # None when unset
+OrchConfig.approver_gh_config_dir: Path | None = None
 
-# Edge: the only code that touches processes and files
-def run_launch(launch: Launch, prompt: str, timeout: float) -> str: ...  # returns transcript JSONL text, "" if none
-def claude_transcript(home: Path, run_dir: str) -> Path | None: ...      # ~/.claude/projects/<slug>/*.jsonl only
-def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | None: ...  # sessions/**/rollout-*.jsonl only
+def approvals(config: OrchConfig) -> Approvals: ...
+def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]: ...
 ```
 
-`bin/skill-probe` mirrors `bin/orch` and has these subcommands:
+```yaml
+# orch.yml, after Max installs the app (fake numbers)
+approver_logins:
+  - maxharris1
+approver_gh_config_dir: /home/grok/.config/factory/gh-approver   # absolute, outside every harness HOME
+github_app:
+  app_id: 123456
+  installations:
+    maxharris1: 1111111
+    aut0-code: 2222222
+  private_key_file: /home/box/.config/factory/github-app-bots.pem
+  bot_login: factory-bots[bot]
+  enabled: false        # Factory flips this in the rollout ticket, not here
+trusted_logins:
+  factory-bots[bot]: [grok-bot, claude-bot, codex-bot, cursor-bot]
+  maxharris1: [grok-bot]
+```
 
-- `skill-probe run --bot <bot> [--machines PATH] [--device NAME] [--out DIR] [--dry-run] [--timeout SEC]`. Run it as that bot's own user on the box. It covers every enabled device that lists the bot's harness, locally on the box and over SSH elsewhere. It writes `<out>/<device>-<harness>-<style>.json` (a `ProbeResult`) and a copy of each transcript beside it. `--dry-run` prints each `Launch` and its prompt and starts nothing.
-- `skill-probe render <result.json>... > docs/skill-loading.md`.
+The switch has two states. Each Max-only check reads `approvals.app_trust` and nothing else.
 
-### The rules the parsers enforce
+| Check | Switch off (today, the default) | Switch on |
+| --- | --- | --- |
+| `go` on a capped ticket | Author trusted for `grok-bot` (`_trusted`), as today | Header `from=grok-bot role=orchestrator`, and author in `approver_logins`. Anyone else gets `go-not-from-approver` and one wake |
+| `go` on any other ticket | Author trusted for `grok-bot` | Same, unchanged |
+| Hold `ok` and the approver's label removal | Author is `hold.approver`, and `hold.approver` is a `trusted_logins` key | Author is `hold.approver`, and `hold.approver` is in `approver_logins` |
+| Harness environment | Unchanged | Never carries `GH_CONFIG_DIR` naming the approver profile. The waiter refuses to start when the profile sits inside the run's `HOME` |
+| Grok posting a capped `go` or an `ok` | `env -u GH_TOKEN gh`, as today | Only through the approver profile. With no profile configured, it refuses, and Max posts by hand |
 
-- **Read = yes** only when the canary line from the skill's body shows up in a record that the model did not write. That means a `tool_result` (Claude `Read`, `Skill` or `Bash`) that is not `is_error`, an injected user or system record (a slash expansion), or a Codex function-call output. Assistant text and reasoning never count, so a model that says "loaded poteto-mode" without reading it scores `no`. The canary comes from the pinned `SKILL.md` body, never from its frontmatter `description`, because Claude lists that without opening the file.
-- **Helper = yes** when the transcript has a spawn call with a non-error result. For Claude that is an `Agent` (or legacy `Task`) `tool_use` with `subagent_type: general-purpose`. For Codex it is the sub-agent tool call that Unit 1 names from a real rollout, kept in a one-line table so a renamed tool is one edit. `poteto_agent` checks `poteto-agent` and `pstack:poteto-agent`. An "agent type not found" style error scores `missing`, as the ticket asks while T07 is pending.
-- **Applicability.** Styles 1 and 2 run on both harnesses. Style 3 is Claude only, because `codex exec` has no slash commands. Style 4 is Codex only. A cell that does not apply renders as `n/a`. Changing that is one `StyleSpec` edit.
-- **Prompt.** The style's opening line, then fixed text. It asks the harness to start one helper that replies `ok` (and, on Claude, a second of type `poteto-agent`), then to stop. It also tells the harness to read no other file, write no file and make no network or GitHub call. The prompt never contains the canary.
-
-### Credential guard
-
-The probe opens only these paths:
-
-- the pinned `SKILL.md`
-- the bot's waiter config, through `load_harness_command`
-- `machines.yml`
-- its own run directory
-- the two transcript locations above
-
-The transcript locators resolve every candidate path and refuse anything outside `~/.claude/projects/<slug>/` or `$CODEX_HOME/sessions/`. They never touch `~/.codex/auth.json`, `~/.claude/.credentials*`, `.env`, `.runner` or the SSH config. Remote transcripts come back through one fixed `sh` script that `cat`s the single located file. Every ssh call goes through `remote.ssh_argv` with the bot's own alias and `-l <bot>`, as the waiter does.
+Linear authors (`linear:<id>`) are not GitHub logins, so the switch does not apply to them. A Linear ticket keeps today's rule in both states. Appendix A says why.
 
 ## Criterion-to-work map
 
-| # | Acceptance criterion | Work that meets it | Evidence |
+| # | Acceptance criterion | Work that meets it | Tests that fail on revert |
 | --- | --- | --- | --- |
-| 1 | The probe runs on the box and the Mac for both harnesses (Claude and Codex). | Units 3 and 5. `plan_launches` covers every enabled device whose `harnesses` lists the bot's harness: local on the box, `remote.start_script` over SSH to the Mac. Unit 5 is the live run as claude-bot and as codex-bot. | `test_plan_launches_covers_local_and_remote_devices`, `test_disabled_or_placeholder_device_is_skipped`, and the run's result files for `box` and `mac` × `claude` and `codex`, committed through the rendered doc |
-| 2 | `docs/skill-loading.md` has a table of device × harness × style → read yes/no and helper yes/no, with date and harness version. | Unit 4 `render`, then Unit 5 renders the live results into the doc | `test_render_has_one_row_per_device_harness_style`, `test_render_shows_date_and_harness_version`, and the committed `docs/skill-loading.md` |
-| 3 | The probe reads no credential files and uses only the waiter's normal launch. | Unit 3. The argv comes only from `load_harness_command` (and `for_device` remotely), the env only from `harness_env`, and the prompt only on stdin. The transcript locators are path-confined. | `test_local_launch_argv_is_the_waiter_command_unchanged`, `test_remote_launch_uses_start_script_and_bot_alias`, `test_prompt_goes_on_stdin_only`, `test_transcript_locator_refuses_paths_outside_the_transcript_dirs`, `test_probe_run_opens_no_credential_path` (it records every `open` during a dry run and a faked run and asserts none matches `auth.json`, `.credentials*`, `.env`, `.runner`, `id_*`, `FACTORY_WEBHOOK`) |
-| 4 | A unit test covers the transcript parser with fixture logs. | Units 1 and 2. Fixtures go in `tests/fixtures/skill_probe/`, trimmed from real transcripts. | `test_claude_read_tool_counts_as_read`, `test_claude_slash_expansion_counts_as_read`, `test_claude_claim_without_read_is_no`, `test_claude_refused_skill_tool_is_no`, `test_claude_general_purpose_helper_yes_poteto_agent_missing`, `test_codex_shell_read_counts_as_read`, `test_codex_subagent_spawn_counts_as_helper`, `test_missing_transcript_is_unknown`, `test_canary_is_body_not_frontmatter` |
+| 1 | `orch.yml` and `config/orch.example.yml` accept a GitHub App id and installation id, plus a config path for the private key. No real key is committed, read or printed. | Unit 1 | `test_github_app_config_parses_with_fake_ids`, `test_github_app_config_rejects_bad_fields`, `test_check_config_never_opens_the_private_key_file`, `test_example_configs_carry_the_github_app_block` |
+| 2 | Until the app is installed and the switch is on, a capped-ticket `go` and a `kind=ok` from `maxharris1` still work as they do today. | Units 2 and 3, the switch-off branch of each | `test_switch_off_capped_go_from_the_single_login_still_resumes`, `test_switch_off_hold_ok_from_the_single_login_still_clears`. Both are parametrized over no `github_app` block and `enabled: false` |
+| 3a | Switch on, a capped-ticket `go` from the app bot login is refused with wake reason `go-not-from-approver`. | Unit 2 | `test_switch_on_capped_go_from_the_app_bot_is_refused` (one wake, no fix, `cap_extra` unchanged, state stays `capped`) |
+| 3b | Switch on, a capped-ticket `go` from `maxharris1` raises `cap_extra` by 1. | Unit 2 | `test_switch_on_capped_go_from_the_approver_raises_cap_extra` |
+| 3c | Switch on, a `kind=ok` from a non-approver, the app bot login included, leaves the hold in place. | Unit 3 | `test_switch_on_hold_ok_from_the_app_bot_keeps_the_hold`, `test_switch_on_hold_ok_from_a_non_approver_keeps_the_hold` |
+| 3d | Switch on, a `kind=ok` from `maxharris1` in `approver_logins` clears the hold, with today's head-pin rules. | Unit 3 | `test_switch_on_hold_ok_from_the_approver_clears_at_the_head`, `test_switch_on_hold_ok_at_an_old_head_does_not_clear` |
+| 4 | `check-config` fails when `hold.approver` is not in `approver_logins`. | Unit 4 | `test_check_config_fails_when_the_hold_approver_is_not_an_approver`, `test_check_config_passes_when_the_hold_approver_is_an_approver` |
+| 5 | No harness user's environment or home holds Max's approver profile once the switch is on. A test inspects the waiter's environment builder with fake values only. | Unit 5 | `test_waiter_env_drops_the_approver_gh_config_dir`, `test_waiter_refuses_when_the_approver_profile_is_in_the_run_home`, `test_waiter_env_unchanged_with_the_switch_off` |
+| 6 | Trust-map and decision notes are in `docs/decisions/122-approver-credential.md`. | Unit 7 | Reviewer reads the file. `test_example_configs_carry_the_github_app_block` keeps the example in step with the note |
 
-All four rows are mapped. Row 1 and the data in row 2 depend on Unit 5, a live run that starts harnesses. See the open decision below.
+Scope item outside the AC list: "`lib/orchestrate.py` may still post `go`/`ok` under Max's login when Max has authorized it, and must not post those two kinds as the app bot." Unit 6 covers it with `test_approval_post_env_uses_only_the_approver_profile` and `test_approval_post_env_refuses_with_no_profile_when_the_switch_is_on`.
 
-## Units
+Every criterion is mapped.
 
-Each unit ends in a check and gets its own commit. Tests go only in `tests/test_skill_probe.py`, with fixtures in `tests/fixtures/skill_probe/`.
+## Work units
 
-1. **Fixtures from real transcripts.** Claude fixtures are cut from real `-p` transcripts. That includes a `Read` of a `SKILL.md`, an `Agent` spawn, and a refused or not-found agent type. Codex fixtures are cut from real `codex exec` rollouts on the box, read by codex-bot. That covers a shell read and the sub-agent call, which also pins its real tool name. Trim each file to the records the parser reads. Drop prompts and any env-looking text. *Check:* each fixture is valid JSONL, and a grep for `ghp_`, `gho_`, `sk-`, `Bearer `, `BEGIN .* PRIVATE KEY` finds nothing. Until real Codex rollouts exist (Unit 5 makes them), the Codex fixtures follow the documented rollout shape and are marked provisional in a module docstring. Unit 5 replaces them.
-2. **Pure core.** This covers `skill_canary`, `STYLES`, `prompt_for`, `claude_evidence`, `codex_evidence`, `PARSERS` and `render`. *Check:* the row 4 and row 2 tests above pass and fail on revert.
-3. **Launch plan and edges.** This covers `plan_launches`, `run_launch` (local `subprocess` with no shell, prompt on stdin, the timeout killing the process group; remote through `remote.start_script`, `remote.ssh_argv` and `remote.new_tag`, with the run id `skill-probe-<hex>` as the plain-token job id), the two transcript locators, and the remote fetch script. *Check:* the row 1 and row 3 tests pass with fake subprocess and SSH (reusing `tests/fake_ssh.py` and `tests/procs.py`), and `bin/skill-probe run --bot claude-bot --dry-run` prints the box and Mac launches.
-4. **CLI.** `bin/skill-probe` with `run` and `render`. *Check:* `env -u ORCH_DB pytest`, the `check-config` steps and `bash model/check.sh` are green locally and in CI.
-5. **Live run and doc.** As claude-bot on the box, run `bin/skill-probe run --bot claude-bot --out /tmp/skill-probe-<date>`. Then as codex-bot, run `bin/skill-probe run --bot codex-bot --out ...`. That makes 2 devices × 2 harnesses × 3 applicable styles, so 12 short runs. Render all the result files into `docs/skill-loading.md`, with a short prose lead naming the winning style per harness and any `unknown`. Swap the provisional Codex fixtures for trimmed real ones. *Check:* the doc has all 12 rows plus `n/a` cells, each with a date and harness version. The `read=yes` rows have a matching transcript copy in the out dir.
+Each unit is one commit that ends green under `env -u ORCH_DB pytest`. Test first in every unit. Every new test goes in `tests/test_approver_credential.py`. Nothing is appended to `tests/test_dispatcher.py` or `tests/test_brief.py`.
 
-## Throughput checkpoint
+### Unit 1. Parse the app, approver logins and approver profile (AC 1)
 
-- **Blocking first steps.** Unit 1 fixtures pin the transcript shapes. Write no parser before them.
-- **Independent workstreams.** The pure core (Unit 2) and the launch edges (Unit 3) touch disjoint functions and can be written in parallel. The CLI waits for both.
-- **Shared mutable state.** n/a in code. At run time each launch gets its own fresh run directory, so no two launches share a transcript slug or a rollout cwd. Runs go one at a time, so the probe never holds more than one slot's worth of load on a device.
-- **Smallest safe decomposition.** One builder owns it. The code is about 400 lines in one module, and splitting it would cost more review than it saves.
+**Files.**
+
+- [ ] Edit `lib/orch_yml.py`.
+- [ ] Edit `config/orch.example.yml` and `orch.yml`.
+- [ ] New `tests/test_approver_credential.py`.
+
+**Build.**
+
+- [ ] Add `github_app`, `approver_logins` and `approver_gh_config_dir` to `_TOP_KEYS`. Add `GitHubApp`, `Approvals`, `approvals(config)` and the three new `OrchConfig` fields from the data shape.
+- [ ] `_github_app(data, findings)` checks the section is a mapping with no unknown keys. `app_id` is a positive int. `installations` is a non-empty mapping from a GitHub login to a positive int. `private_key_file` is an absolute path string. `bot_login` is `<name>[bot]`. `enabled` is a bool and defaults to false. `private_key_file` is stored as a `Path` and never opened, stat-ed or echoed in a finding.
+- [ ] `_approver_logins` checks a non-empty list of GitHub logins (`_LOGIN`). A `[bot]` login is refused, because an app can never approve.
+- [ ] `approver_gh_config_dir` must be an absolute path. No `~`, because `~` would expand to whichever user reads it.
+- [ ] With `enabled: true`, `bot_login` and `approver_logins` are both required, `bot_login` must not be in `approver_logins`, and `bot_login` must be a `trusted_logins` key, so the bots keep working after the flip. Each broken rule is its own error.
+- [ ] `config/orch.example.yml` gets a commented `approver_logins` and `github_app` block with fake numbers and `enabled: false`, in the style of its `dashboard` and `job_states` blocks. `orch.yml` gets a live `approver_logins: [maxharris1]` and the same commented `github_app` block. Max fills in the real numbers later. No path in either file points at a real key.
+
+**You see.**
+
+- [ ] `orch check-config --orch config/orch.example.yml` prints `ok`. A copy of the example with the block uncommented also prints `ok`, and `approvals(config)` returns `app_trust=False`.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k "github_app or example or private_key"`.
+
+- [ ] `test_github_app_config_parses_with_fake_ids`.
+- [ ] `test_github_app_config_rejects_bad_fields` covers each error above, including `enabled: true` without `bot_login`, an app login inside `approver_logins`, and a relative key path.
+- [ ] `test_check_config_never_opens_the_private_key_file` points `private_key_file` at a `tmp_path` file holding a fake sentinel. It runs `_check_config` in-process with `builtins.open`, `io.open` and `os.open` wrapped to record paths. It asserts the key path was never opened and the sentinel is in neither stdout nor stderr.
+- [ ] `test_example_configs_carry_the_github_app_block` uncomments the example block and parses it.
+
+### Unit 2. Only an approver's `go` lifts a cap once the switch is on (AC 2, 3a, 3b)
+
+**Files.**
+
+- [ ] Edit `lib/dispatcher.py`: `_t1`'s author check, `_resume_after_cap`, a `Dispatcher(approvals=...)` keyword, and the new reason in `GROK_WAKE_REASONS`.
+- [ ] Edit `lib/queue.py`, one `ACTIONS` entry.
+- [ ] Edit `lib/cli.py` `_runtime`, which passes `approvals(config)`.
+- [ ] Edit `tests/test_approver_credential.py`.
+
+**Build.**
+
+- [ ] `Dispatcher.__init__` takes `approvals: Approvals | None = None`. `None` means `Approvals.off(<github trusted_logins keys>)`, so every existing caller and test keeps today's behavior.
+- [ ] `_t1` keeps its header check (`from=grok-bot role=orchestrator`). The author check becomes "trusted for `grok-bot`, or the switch is on and the author may approve". It returns `rejected-go-author` otherwise, as today. After `_resume_after_cap` returns `None` (the ticket is not capped), a go whose author is not trusted for `grok-bot` is still `rejected-go-author`. An approver who is not a trusted login cannot start ordinary work. Nothing else in `_t1` changes.
+- [ ] In `_resume_after_cap`, after it reads `workflow_state = 'capped'` and before it writes anything, it checks the switch. With the switch on and an author who may not approve, it commits nothing, wakes Grok with reason `go-not-from-approver` through `_wake_comment_problem` (once per comment), and returns `(True, "go-not-from-approver")`. With the switch off, it takes today's path. A Linear author always takes today's path.
+- [ ] Add `go-not-from-approver` to `GROK_WAKE_REASONS` and `lib/queue.py` `ACTIONS`. `wake_grok_once` keys it on the comment, as it does `rejected`.
+
+**You see.**
+
+- [ ] With the switch on, a capped ticket and an app-bot go leave `ticket_state` at `capped` with `cap_extra=0`. `jobs` has one `grok` row, action `go-not-from-approver`. The same go from `maxharris1` gives `cap_extra=1`, `workflow_state='fixing'` and one fix job.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k "capped_go"`.
+
+- [ ] `test_switch_off_capped_go_from_the_single_login_still_resumes`, parametrized over no `github_app` block and `enabled: false`.
+- [ ] `test_switch_on_capped_go_from_the_app_bot_is_refused`.
+- [ ] `test_switch_on_capped_go_from_the_approver_raises_cap_extra`.
+- [ ] `test_switch_on_go_from_an_approver_on_an_uncapped_ticket_needs_grok_trust` checks that an approver with no `trusted_logins` entry gets `rejected-go-author` on a ticket that is not capped.
+- [ ] The existing capped-go tests in `tests/test_dispatcher.py` pass unchanged.
+
+### Unit 3. Only an approver's `ok` clears a hold once the switch is on (AC 2, 3c, 3d)
+
+**Files.**
+
+- [ ] Edit `lib/hold.py`. Rename `decide(approver_trusted=)` to `approver_allowed=`, which has one caller, and update the module docstring.
+- [ ] Edit `lib/dispatcher.py`, `_hold_decision` and `_hold_ok_outcome` only.
+- [ ] Edit `tests/test_approver_credential.py`.
+
+**Build.**
+
+- [ ] Add `Dispatcher._may_approve(login)`. With the switch off it is today's `_trusted_login(login)`. With it on it is `approvals.may_approve(login)`. `_hold_decision` passes `approver_allowed=self._may_approve(hold.approver)`. `_hold_ok_outcome` uses the same predicate. The author must still equal `hold.approver`, and the `ok` must still name a 40-character head that covers the current head. `hold.py`'s head-pin logic does not change.
+- [ ] An app-bot login can never be an approver, because Unit 1 refuses it in `approver_logins`. A repo whose `factory.md` names the app as `hold.approver` therefore fails closed at runtime, and the hold stays.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py tests/test_ship_hold.py -k "hold"`. Reuse `tests/test_ship_hold.py`'s `setup`, `approve` and `ok` helpers by import.
+
+- [ ] `test_switch_off_hold_ok_from_the_single_login_still_clears`, parametrized as in Unit 2.
+- [ ] `test_switch_on_hold_ok_from_the_app_bot_keeps_the_hold`. The outcome is `rejected-hold-ok-author` and the ticket stays `awaiting-ok`.
+- [ ] `test_switch_on_hold_ok_from_a_non_approver_keeps_the_hold`.
+- [ ] `test_switch_on_hold_ok_from_the_approver_clears_at_the_head`. The PR merges with `--match-head-commit`.
+- [ ] `test_switch_on_hold_ok_at_an_old_head_does_not_clear`.
+- [ ] `tests/test_ship_hold.py` passes unchanged.
+
+### Unit 4. `check-config` ties `hold.approver` to the approvers (AC 4)
+
+**Files.**
+
+- [ ] Edit `lib/orch_yml.py` (`hold_approver_findings`).
+- [ ] Edit `lib/cli.py` `_check_config`, a cross-file pass after both files load.
+- [ ] Edit `tests/test_approver_credential.py`, with a `tmp_path` `factory.md` fixture that has a `hold:`.
+
+**Build.**
+
+- [ ] `hold_approver_findings(config, hold)` returns an error `hold.approver <login> is not in approver_logins` when `approver_logins` is set and does not hold the approver. When `approver_logins` is unset, the error names `trusted_logins`, today's runtime rule. A `factory.md` with no `hold` gives no finding.
+- [ ] `_check_config` runs it for every `factory.md` it loads and reports under that file's path. The example `factory.md` files have no `hold:`, so the CI steps do not change.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k check_config`.
+
+- [ ] `test_check_config_fails_when_the_hold_approver_is_not_an_approver` covers `approver: max` (the `factory_md` default) and `approver: factory-bots` against `approver_logins: [maxharris1]`. The exit status is 1.
+- [ ] `test_check_config_passes_when_the_hold_approver_is_an_approver`.
+
+### Unit 5. Harness runs never carry the approver profile (AC 5)
+
+**Files.**
+
+- [ ] Edit `lib/harness_env.py` (`harness_environ`).
+- [ ] Edit `lib/waiter.py`: a `Waiter(approvals=...)` keyword and `_spawn`'s env line.
+- [ ] Edit `lib/cli.py` `_wait_autostart`, which passes `approvals(config)` when `orch.yml` loaded.
+- [ ] Edit `tests/test_approver_credential.py`.
+
+**Build.**
+
+- [ ] `harness_environ(environ, approvals) -> dict[str, str]` is pure and compares paths only. It never opens or lists a directory. With the switch off, or with no `gh_config_dir`, it returns `environ` unchanged. With the switch on:
+  - it drops `GH_CONFIG_DIR` when that path equals the approver profile or lies inside it;
+  - it raises `ApproverProfileExposed` when the profile lies inside the run's `HOME`, because `gh` finds `$HOME/.config/gh` with no `GH_CONFIG_DIR` set, and anything under `HOME` belongs to the harness user.
+- [ ] `Waiter.__init__` calls it once and turns `ApproverProfileExposed` into a `WaiterError`. `orch wait --autostart` then exits 2 with that message and starts no harness. `_spawn` builds its env from `harness_environ(self.environ, self.approvals)`. With `approvals=None`, today's env passes through.
+- [ ] Remote runs pass only named variables through `lib/remote.py` (`remote.start_script`), never the box's `GH_CONFIG_DIR`, so they need no change. The decision note says so.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k waiter_env`. Every path is under `tmp_path`, and every login and id is fake.
+
+- [ ] `test_waiter_env_drops_the_approver_gh_config_dir` drives `Waiter._spawn` with a fake `spawn` and asserts the captured `env` has no `GH_CONFIG_DIR`, while other variables pass through.
+- [ ] `test_waiter_refuses_when_the_approver_profile_is_in_the_run_home` uses `HOME=<tmp>/claude-bot` and the profile at `<tmp>/claude-bot/.config/gh`. `Waiter(...)` raises `WaiterError`.
+- [ ] `test_waiter_env_unchanged_with_the_switch_off`.
+- [ ] `tests/test_waiter.py` passes unchanged.
+
+### Unit 6. Grok posts the two approvals only through Max's profile (scope item)
+
+**Files.**
+
+- [ ] Edit `lib/orchestrate.py`, a new `approval_post_env` next to `go_comment`.
+- [ ] Edit `grok/orchestrate-project/SKILL.md`, one sentence on posting a capped `go` or a hold `ok`, and one line on the `go-not-from-approver` wake.
+- [ ] Edit `tests/test_approver_credential.py`.
+
+**Build.**
+
+- [ ] `approval_post_env(approvals, environ) -> dict[str, str]` returns the environment for the `gh` call that posts a capped-ticket `go` or a hold `ok`. It always drops `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN`. With the switch off, that is the whole change, the same as today's `env -u GH_TOKEN gh`. With the switch on, it sets `GH_CONFIG_DIR` to `approvals.gh_config_dir`. When no profile is configured, it raises `OrchestrateError("post it from maxharris1 by hand")`. It never falls back to the bot's own `gh`, so those two kinds are never posted as the app.
+- [ ] The skill tells Grok to post those two kinds with this environment, still only with Max's own words for that ticket. It also says a `go-not-from-approver` wake means a capped go came from a login that cannot approve, and to tell Max once.
+
+**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py tests/test_orchestrate.py -k "approval_post or orchestrate"`.
+
+- [ ] `test_approval_post_env_uses_only_the_approver_profile` gives a fake env with `GH_TOKEN=fake-app-token`. The result has no token variable and `GH_CONFIG_DIR=<fake profile>`.
+- [ ] `test_approval_post_env_refuses_with_no_profile_when_the_switch_is_on`.
+- [ ] `test_approval_post_env_with_the_switch_off_only_drops_tokens`.
+
+### Unit 7. Decision note and SPEC rows (AC 6)
+
+**Files.**
+
+- [ ] New `docs/decisions/122-approver-credential.md`.
+- [ ] Edit `docs/SPEC.md`: the section 6 `hold.approver` row, a section 7 `orch.yml` field list entry, and the section 4.2 T1 row for the capped `go`. There is no decision-log row, per the ticket.
+
+**Build.**
+
+- [ ] The note carries Max's decision and its time (Nov 13, 2026, 2:26 to 2:52 PM ET), the trust map table from **The data shape**, the two switch states, and what Factory flips on rollout. Rollout means setting `enabled: true`, adding `trusted_logins[factory-bots[bot]]`, trimming `maxharris1` to `[grok-bot]`, and moving the bots' `gh` onto the app.
+- [ ] It also records what this ticket cannot check. The factory cannot tell which account a `gh` profile holds without reading its token, so moving the harness users' own `gh` login off `maxharris1` is Max's setup step. The code checks paths only.
+- [ ] It records the Linear gap (Appendix A) and the `hold.approver` default `max` (Appendix C).
+
+**Verify, unit.**
+
+- [ ] The note exists and names every row of the trust map. Codex reads it in review.
 
 ## Verify
 
-- `env -u ORCH_DB pytest`, CI green (pytest, `check-config`, statechart).
-- A dry run on the box prints the exact waiter argv per device, unchanged.
-- The live run's `read=yes` cells each point to a transcript record that is not an assistant record. A reviewer can check that against the saved copies.
-- `blast-radius`: only new files. No change to the waiter, `orch.yml`, `machines.yml`, the vendored pstack or the briefs.
+Tests alone are not sufficient verification. The PR is verified only when its unit, revert and CI boxes are all checked.
 
-## Out of scope (from the ticket, held)
+- [ ] Unit. `env -u ORCH_DB pytest` passes at the PR head, run in the foreground.
+- [ ] Revert. For each test in the map, revert its unit's production change on a scratch branch and record that the test fails. Note the result per criterion in the `ready` comment.
+- [ ] Config. `python bin/orch check-config` passes on all four CI invocations in `.github/workflows/ci.yml`.
+- [ ] Secrets. `git grep -nE "BEGIN (RSA )?PRIVATE KEY|ghs_|ghp_|github_pat_"` at the head finds nothing. `git diff origin/main --stat` lists no `.pem` and nothing under `~/.config/factory`.
+- [ ] CI. `.github/workflows/ci.yml` is green at the head, covering pytest, the `check-config` steps and `statechart`. No workflow state changes, so the model needs no edit.
+- [ ] Perf. None. The change adds one set lookup per `go` on a capped ticket and per hold check.
+- [ ] Review gate. Codex Bot's round-1 review of the `ready` head.
 
-No waiter flag changes. No skill installs. No pstack edits. No Cursor. No `poteto-agent` vendoring (T07). No brief wiring (T09). No model map (T10). Any model the launch uses is whatever the bot's waiter config already sets.
+## Close
 
-## Open decision for Max
+- [ ] Every box above is checked with its evidence.
+- [ ] PR title `#122: Separate approval credential: GitHub App for the bots`.
+- [ ] Post the `ready` handoff with the pushed head, the per-criterion test list and the revert results.
 
-**Who may run Unit 5's live harness launches.** Each factory brief says "Never start another harness", and Unit 5 starts twelve short ones. This ticket's whole scope is to start them, and you approved it. One builder login also cannot run both halves, since the codex half must run as codex-bot. Two parts of the box's own state also have to hold: the box's SSH aliases must reach the Mac, and the live `machines.yml` must enable the Mac for both harnesses (the copy on `main` still has it disabled with placeholders).
+## Appendix A. Calls made without asking Max
 
-**Default.** The build job builds and tests Units 1 to 4 and does not start a harness. It puts the two `run` commands, with `--dry-run` output, in the PR body. You (or a session you start as each bot) run them on the box. The builder then renders the doc, swaps in the real Codex fixtures, and posts `ready`. If you would rather the Claude build job run the claude-bot half itself, say so in the go, and it will.
+No product question blocks this. Each call below is a default, with what Max could ask for instead.
+
+- **Linear tickets keep today's rule.** The ticket is about GitHub logins. A Linear comment's author is a Linear user id, and the app does not change who posts on Linear. So the capped `go` and the hold `ok` on a Linear ticket (Aut0) stay trusted-for-`grok-bot` and trusted-login, as today. The F-02 gap stays open on Linear until bots get their own Linear identity. Max could instead ask for an `approver_linear_users` list now. That needs a second Linear identity for the bots, which does not exist yet.
+- **Approvers live in `orch.yml`, not `factory.md`.** `factory.md` sits in the repo the bots push to, so a bot could edit its own approver list. `orch.yml` lives on the box.
+- **Installations are a mapping from account to id**, because Max installs the app twice (`maxharris1` and `aut0-code`).
+- **A wake reason of its own.** The AC names `go-not-from-approver` as the wake reason, so it is a new reason rather than `rejected` with a detail. That costs one entry each in `GROK_WAKE_REASONS` and `ACTIONS`.
+- **The waiter refuses rather than strips** when the profile sits under `HOME`. A file cannot be stripped from an environment, and failing closed matches the hold's own rule.
+
+## Appendix B. Designs compared (architect scaffold)
+
+- **A, chosen.** One `Approvals` value from `orch.yml`, passed to the dispatcher, the waiter and Grok's post helper. Identity (`trusted_logins`) and capability (`approver_logins`) stay separate lists. The switch is one field. Each of the four checks asks one predicate.
+- **B, rejected.** Add a pseudo-bot `approver` to `trusted_logins` (`maxharris1: [grok-bot, approver]`) and check `_trusted(..., "approver")`. That mixes who a login speaks for with what it may approve. A copied `trusted_logins` line could grant approval by accident. It also has no place for the switch or the profile path.
+- **C, rejected.** Per-repo approvers in `factory.md`. The bots can edit it (see Appendix A).
+
+The arena runners were not run for this plan. The design space is narrow and fixed by the ticket. Codex should press on A's switch-on `_t1` gate in review.
+
+## Appendix C. Risks and lane notes
+
+- **Files beyond the ticket's list.** Each is the smallest hunk that meets an AC:
+  - `lib/cli.py`: wiring in `_runtime` and `_wait_autostart`, and the cross-file pass in `_check_config` (AC 4).
+  - `lib/waiter.py` and `lib/harness_env.py`: the env builder the AC names (AC 5).
+  - `lib/queue.py` and `GROK_WAKE_REASONS`: the AC's wake reason (AC 3a).
+  - `lib/dispatcher.py`: the `_t1` author check (the ticket allows it), `_hold_decision`, `_hold_ok_outcome` and the constructor keyword (AC 3c, 3d).
+  - `orch.yml`: the ticket asks for it.
+  - `grok/orchestrate-project/SKILL.md`: one sentence.
+  - `docs/SPEC.md`: three table rows, no decision log.
+- **#111 is open** and touches `lib/orch_yml.py`, `lib/dispatcher.py`, `lib/cli.py`, `orch.yml` and `config/orch.example.yml`. If it lands first, bring `main` in by a merge commit before `ready`.
+- **`hold.approver` defaults to `max`** in `lib/factory_md.py`. That is not a login in `trusted_logins`, so a hold with the default never clears today. This PR leaves the default alone, since that file is outside the lane. `check-config` now reports it. Changing the default to `maxharris1` is a one-line follow-up for Factory to file.
+- **`orch job run` started by hand**, outside a waiter, inherits that shell's environment (`lib/cli.py` copies `os.environ`). The guard covers every run the factory starts. A person running a job by hand owns their own shell.
+- **A waiter whose `orch.yml` fails to load** runs with `approvals=None` (switch off). The poller fails on the same file, so no job is queued from it.
+- **Switch on with the app not yet trusted.** Unit 1 refuses `enabled: true` unless `bot_login` is a `trusted_logins` key, so the flip cannot lock the bots out.
+
+## Appendix D. Reading list
+
+- `lib/dispatcher.py`: `_t1`, `_resume_after_cap`, `_hold_decision`, `_hold_ok_outcome`, `_trusted_login`, `_wake_comment_problem`, `wake_grok_once`, `GROK_WAKE_REASONS`.
+- `lib/hold.py` `decide` and `_approver_ok`. `lib/factory_md.py` `_hold`.
+- `lib/orch_yml.py` `_validate`, `_trusted_logins` and `_linear_webhook` (the `secret_file` is never read, and that is the pattern to copy).
+- `lib/waiter.py` `Waiter.__init__` and `_spawn`. `lib/harness_env.py`. `lib/cli.py` `_check_config`, `_runtime` and `_wait_autostart`.
+- `lib/orchestrate.py` `go_comment`. `grok/orchestrate-project/SKILL.md` on the `awaiting-ok` wake.
+- `docs/SPEC.md` sections 4.2 (T1, T4H), 6 (`hold`) and 7.

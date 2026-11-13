@@ -12,7 +12,9 @@ needs-attention badge):
   the current step and what can come next; the full chart is behind a
   collapsed toggle; job.html#job-<id> shows one job;
 - activity.html: needs attention, recent handoffs and verdicts, tickets, log;
-- efficiency.html: poll and Linear budget, handoff savings;
+- efficiency.html: poll and Linear budget, handoff savings, tokens and cost
+  per harness, repo and job (#93, lib/dashboard_telemetry.py). Each job's
+  article (job page and modal) ends with its telemetry feed;
 - health.html (Health, #92): each component heartbeat (poller, waiters,
   Linear listener, tunnel, dashboard writer, device probes) as up, stale or
   down with last-seen in ET, pid and device, and each harness whose queued
@@ -47,6 +49,7 @@ import re
 from pathlib import Path
 
 from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
+from lib.dashboard_telemetry import TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel
 
 POLL_MS = 1500
 
@@ -994,6 +997,7 @@ SCRIPT = r"""
       ticking(add(where, el('span')), flow.state_age_seconds, '', ' in ' + flow.state);
     }
     add(art, el('p', 'path', 'path: ' + ((flow.path || []).length ? flow.path.join(' → ') : '—')));
+    add(art, telemetryBlock(r.telemetry));
     // The full chart drawn on the server (#flow-template) is the source of
     // the SVG namespace too, so the page names no URL.
     var tpl = byId('flow-template');
@@ -1072,6 +1076,8 @@ SCRIPT = r"""
       var gone = add(box, el('section', 'panel jobpage'));
       add(add(gone, el('h2')), el('span', null, anchor(modal.job)));
       add(gone, el('p', 'empty', 'That job is no longer running or queued.'));
+      var ended = finishedTelemetry(latest, modal.job);
+      if (ended) add(gone, telemetryBlock(ended));
     }
     var more = add(box, el('p', 'more'));
     add(more, link(null, 'job.html#' + anchor(modal.job))).textContent = 'open on the job page';
@@ -1111,6 +1117,8 @@ SCRIPT = r"""
     trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
     trails = [];
   }
+
+__TELEMETRY__
 
   // --- health page (#92) -------------------------------------------------------
 
@@ -1178,7 +1186,7 @@ SCRIPT = r"""
     main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
     job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
-    efficiency: [renderHealth, renderSavings],
+    efficiency: [renderHealth, renderSavings, renderTokens],
     health: [renderComponents, renderNoWaiter]
   };
   var RENDERERS = [renderBadge].concat(PAGES[PAGE] || []);
@@ -1306,7 +1314,8 @@ def font_faces() -> str:
 
 def page_script() -> str:
     return (
-        SCRIPT.replace("__POLL_MS__", str(POLL_MS))
+        SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
+        .replace("__POLL_MS__", str(POLL_MS))
         .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
         .replace("__FONTS__", font_faces())
     )
@@ -2102,6 +2111,7 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         + "</div>"
         + where
         + f'<p class="path">path: {_e(path)}</p>'
+        + job_block(row.get("telemetry"))
         + diagram
         + legend
         + "</article>"
@@ -2129,7 +2139,7 @@ def _flow_template(snapshot: dict) -> str:
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
     "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
-    "efficiency.html": (_health, _savings),
+    "efficiency.html": (_health, _savings, rollup_panel),
     "health.html": (_components, _no_waiter),
     "job.html": (_jobs, _jobview),
 }
@@ -2152,7 +2162,7 @@ def _page(snapshot: dict, name: str) -> str:
             '<meta name="robots" content="noindex">',
             '<meta name="color-scheme" content="dark">',
             f"<title>factory mission control · {label.lower()}</title>",
-            f"<style>{CSS}</style></head>",
+            f"<style>{CSS}{TELEMETRY_CSS}</style></head>",
             f'<body data-page="{page}" '
             f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
             f'data-refresh="{refresh}">',
