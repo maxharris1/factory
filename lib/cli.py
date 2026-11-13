@@ -553,13 +553,22 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     config, findings = load_orch_yml(config_path, allow_placeholders=True)
     if config is None or any(item.severity == "error" for item in findings):
         return None
+    push = config.dashboard.push
+    # How often a push starts while all is well: the dashboard writer's interval.
+    every = (push.every_minutes or 0) * 60
+    interval = every if every and not push.live else config.poll_seconds
+
+    def log(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
     return poll_pusher_for(
-        config.dashboard.push,
+        push,
         db=db_path,
         orch=orch_path,
         environ=os.environ,
-        log=lambda line: print(line, file=sys.stderr, flush=True),
+        log=log,
         poll_seconds=config.poll_seconds,
+        record=lambda ok: health.push_result(db_path, ok, interval=interval, log=log),
     )
 
 
