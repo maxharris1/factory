@@ -1000,3 +1000,57 @@ def test_re_drive_needs_the_in_force_approve_head_to_cover_the_intent_head(
     assert row["status"] == ("completed" if marked else "failed")
     done = "done" in [action for action, _ in grok_wakes(queue)]
     assert done is bool(marked)
+
+
+# #108 (#42 N3): a PR merged before the handoff is a confirmed merge, not a failure.
+
+
+def merged_pull() -> GhResult:
+    pull = served("pull-42-open.json")
+    return GhResult(0, pull.stdout.replace('"merged": false', '"merged": true'), "")
+
+
+def _state(queue: SQLiteJobQueue) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE ticket_id = '42'"
+            ).fetchone()[0]
+        )
+
+
+def test_handoff_of_an_already_merged_pr_is_merge_confirmed(tmp_path: Path) -> None:
+    """#74, #81 and #82 (7:13 PM and 9:32 PM 2026-11-12): merged before the ship."""
+    dispatcher, queue, gh = github_setup(tmp_path)
+    gh.route(PULL, merged_pull())
+
+    dispatcher.process(approve_snapshot())
+
+    assert outcome(queue) == "merge-confirmed"
+    assert _state(queue) == "merged"
+    assert intent(queue)["status"] == "completed"
+    wakes = grok_wakes(queue)
+    assert [action for action, _ in wakes] == ["done"]
+    assert '"note":"merged before handoff"' in wakes[0][1]
+    assert '"outcome":"merged"' in wakes[0][1]
+    assert gh.count(MARK_READY) == 0
+    with queue.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM needs_attention").fetchone()[0] == 0
+
+
+def test_handoff_redrive_of_an_already_merged_pr_is_merge_confirmed(tmp_path: Path) -> None:
+    dispatcher, queue, gh = github_setup(tmp_path)
+    gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), merged_pull())
+    snapshot = approve_snapshot()
+    dispatcher.process(snapshot)
+    assert intent(queue)["redrive"] == "eligible"
+
+    dispatcher.process(snapshot)
+
+    row = intent(queue)
+    assert (row["status"], row["redrive"]) == ("completed", "spent")
+    assert _state(queue) == "merged"
+    assert outcome(queue) == "ship-already-completed-handoff"
+    assert [action for action, _ in grok_wakes(queue)] == ["ship-failed", "done"]
+    with queue.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM needs_attention").fetchone()[0] == 0

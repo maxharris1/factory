@@ -42,6 +42,7 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 STOPPED_POLL_SECONDS = 300
+MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
 GROK_WAKE_REASONS = (
     "blocked",
@@ -263,6 +264,11 @@ class ShipError(RuntimeError):
     write_confirmed: bool = True
     retryable: bool = False
     safe_detail: str | None = None
+
+
+class AlreadyMergedShip(ShipError):
+    """The PR was merged before the ship could hand it off (#108, #42 N3):
+    the ship has nothing left to do, so it ends as merged, not failed."""
 
 
 SHIP_ERROR_LIMIT = 240
@@ -1962,7 +1968,13 @@ class Dispatcher:
             self._wake_done(ticket, comment, "merged")
             return True, "merged"
         if ship == "handoff":
-            note = self._review_actions(ticket).handoff(ticket, current_head)
+            try:
+                note = self._review_actions(ticket).handoff(ticket, current_head)
+            except AlreadyMergedShip:
+                self._complete_ship_intent(ticket, comment.id, "merged")
+                self._write_state_label(ticket, "merged")
+                self._wake_done(ticket, comment, "merged", note=MERGED_BEFORE_HANDOFF)
+                return True, "merge-confirmed"
             self._complete_ship_intent(ticket, comment.id, "handed-off")
             self._write_state_label(ticket, "handed-off")
             self._wake_done(ticket, comment, "handed-off", note=note)
@@ -2834,7 +2846,14 @@ class Dispatcher:
                 continue
             try:
                 if policy == "handoff":
-                    note = self._review_actions(ticket).handoff(ticket, head)
+                    try:
+                        note = self._review_actions(ticket).handoff(ticket, head)
+                    except AlreadyMergedShip:
+                        self._complete_redrive(ticket, comment_id, "merged")
+                        self._wake_done(
+                            ticket, comment, "merged", note=MERGED_BEFORE_HANDOFF
+                        )
+                        continue
                 else:
                     note = None
                     if not self._review_actions(ticket).is_merged(ticket, head):

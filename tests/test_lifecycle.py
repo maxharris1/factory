@@ -408,3 +408,30 @@ def test_a_handed_off_ticket_with_a_replay_is_read_every_cycle(tmp_path: Path) -
 
     refs = flow.dispatcher._tracked_refs(cycle=1)
     assert [(ref.ticket_id, ref.allow_merged) for ref in refs] == [(TICKET, True)]
+
+
+# --- Unit 4: the shipper reads a merged PR (#42 N3) ----------------------------------
+
+
+def test_review_shipper_reads_a_merged_pr(tmp_path: Path) -> None:
+    from lib.dispatcher import ReviewShipper, ShipRequest
+
+    dispatcher, queue = setup(tmp_path)
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES (?, ?, 'github', 0)", (REPO, TICKET))
+    refs = []
+
+    class NoFreshSource:
+        def tracked_tickets(self, wanted):
+            refs.extend(wanted)
+            return tuple(
+                ticket(head=HEADS[0], factory_config=factory(ship="after:max"))
+                for ref in wanted
+                if ref.allow_merged  # LivePollSource drops a merged PR otherwise
+            )
+
+    request = ShipRequest(REPO, TICKET, HEADS[0], "max", "ok-1", "approve-1")
+    found = ReviewShipper(dispatcher, NoFreshSource())._ticket(request)
+
+    assert found.ticket_id == TICKET
+    assert [ref.allow_merged for ref in refs] == [True]
