@@ -255,6 +255,7 @@ class ShipError(RuntimeError):
 
 
 SHIP_ERROR_LIMIT = 240
+POLL_ERROR_STREAK = 3
 _SECRET_URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://\S*")
 _SECRET_HOST_PATH = re.compile(
     r"\b(?:[A-Za-z0-9-]+\.)+(?:com|io|net|org|dev|app)(?:[:/]\S*)?",
@@ -435,6 +436,8 @@ class Dispatcher:
                 self.process(ticket)
             except Exception as exc:
                 self._record_poll_error(ticket, type(exc).__name__)
+            else:
+                self._clear_poll_error_streak(ticket)
         self.reconcile_jobs()
         if end is not None:
             end()
@@ -3843,7 +3846,40 @@ class Dispatcher:
             )
 
     def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
+        """Record a ticket's failed poll; the POLL_ERROR_STREAK-th failure
+        in a row flags poll-errors attention."""
         self.record_poll_error(ticket.repo, ticket.ticket_id, error)
+        identity = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            count = connection.execute(
+                """
+                INSERT INTO poll_error_streaks (repo, ticket_id, count)
+                VALUES (?, ?, 1)
+                ON CONFLICT(repo, ticket_id) DO UPDATE SET count = count + 1
+                RETURNING count
+                """,
+                identity,
+            ).fetchone()[0]
+        if count == POLL_ERROR_STREAK:
+            self.flag_attention(
+                *identity, "poll-errors", f"{count} polls in a row failed: {error}"
+            )
+
+    def _clear_poll_error_streak(self, ticket: TrackedTicket) -> None:
+        identity = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT count FROM poll_error_streaks WHERE repo = ? AND ticket_id = ?",
+                identity,
+            ).fetchone()
+            if row is None:
+                return
+            connection.execute(
+                "DELETE FROM poll_error_streaks WHERE repo = ? AND ticket_id = ?",
+                identity,
+            )
+        if row[0] >= POLL_ERROR_STREAK:
+            self.clear_attention(*identity, "poll-errors")
 
     def _record_job_error(self, job: Job, error: str) -> None:
         with self._connect() as connection:
@@ -4253,6 +4289,16 @@ class Dispatcher:
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
                     recorded_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS poll_error_streaks (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
                 )
                 """
             )
