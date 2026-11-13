@@ -5252,6 +5252,30 @@ def test_71_a_late_verdict_that_cannot_act_does_not_answer_the_next_ready(
     assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
 
 
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+def test_71_a_late_verdict_for_a_later_round_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str
+) -> None:
+    """A verdict above the round a ready asks for is stale to T3 and T4, so
+    it answers no ready (Codex PR #112 r3 F1)."""
+    late = comment(
+        "future",
+        VERDICT.format(round="3/3", head=HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["future"] == f"stale-{verdict.lower()}"
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+    with queue.connect() as connection:
+        state = tuple(
+            connection.execute("SELECT workflow_state, review_round FROM ticket_state").fetchone()
+        )
+    assert state == ("review", 1)
+
+
 def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
     tmp_path: Path,
 ) -> None:

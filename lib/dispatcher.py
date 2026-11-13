@@ -1541,7 +1541,7 @@ class Dispatcher:
             assert fresh is not None
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
-        if self._verdict_after(ticket, comment, head):
+        if self._verdict_after(ticket, comment, head, review_round):
             # #71: that review already ran. A ready posted after the verdict
             # (a fix that changed nothing) is still reviewed, as round N+1.
             return True, "stale-ready-verdict"
@@ -1600,16 +1600,19 @@ class Dispatcher:
         )
         return True, "queued-ci-fix"
 
-    def _verdict_after(self, ticket: TrackedTicket, ready: Comment, head: str) -> bool:
+    def _verdict_after(
+        self, ticket: TrackedTicket, ready: Comment, head: str, review_round: int
+    ) -> bool:
         """A trusted reviewer verdict for head, posted after the ready, that
         is the first for its round (#71).
 
         A verdict whose round already had one at or before the ready (a late
-        duplicate) answered an earlier ready. One with no round, or a round
-        above the cap, answers none: T3 and T4 act on no such verdict.
+        duplicate) answered an earlier ready. One with no round, a round
+        above the cap, or a round past the one this ready asks for answers
+        none: T3 and T4 act on no such verdict.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
-        cap = self._effective_cap(ticket)
+        last_round = min(self._effective_cap(ticket), review_round + 1)
         before: set[int] = set()
         after: set[int] = set()
         for item in ticket.comments:
@@ -1620,7 +1623,7 @@ class Dispatcher:
             round_number = _round_number(fields.get("round"))
             if (
                 round_number is not None
-                and round_number <= cap
+                and round_number <= last_round
                 and fields.get("kind") == "verdict"
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None
