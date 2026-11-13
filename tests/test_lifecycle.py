@@ -559,3 +559,106 @@ def test_go_after_handoff_changes_nothing(tmp_path: Path) -> None:
     assert len(jobs(flow.queue)) == before
     assert flow.state()["workflow_state"] == "handed-off"
     assert flow.actions.states == []
+
+
+# --- Unit 6: the thread's markers are checked before a job is queued (#66) -----------
+
+
+def _harness_jobs(queue) -> list[tuple[str, str]]:
+    return [
+        (str(row["action"]), str(row["state"]))
+        for row in jobs(queue)
+        if row["recipient"] != "grok"
+    ]
+
+
+def test_go_with_a_later_trusted_ready_queues_no_build(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.head = HEADS[1]
+    flow.ci = "pending"  # the ready waits; only the go is decided here
+    flow.add("ready-1", READY.format(head=HEADS[1]), "claude-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "go-1") == "answered-build"
+    assert _harness_jobs(flow.queue) == [("build", "cancelled")]
+    assert flow.state()["workflow_state"] == "building"
+    with flow.queue.connect() as connection:
+        detail = connection.execute(
+            "SELECT detail FROM job_events WHERE event = 'cancelled'"
+        ).fetchone()[0]
+    assert detail == "answered-by:ready-1"
+
+
+def test_untrusted_later_ready_does_not_suppress_the_build(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("ready-forged", READY.format(head=HEADS[1]), "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "go-1") == "queued-build"
+    assert _harness_jobs(flow.queue) == [("build", "queued")]
+
+
+def test_ready_with_a_later_verdict_queues_no_review(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    flow.finish("claude")
+    flow.head = HEADS[1]
+    flow.add("ready-1", READY.format(head=HEADS[1]), "claude-login")
+    flow.add(
+        "verdict-1",
+        VERDICT.format(round="1/3", head=HEADS[1], verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "ready-1") == "answered-review"
+    assert ("review", "cancelled") in _harness_jobs(flow.queue)
+    assert outcome(flow.queue, "verdict-1") == "queued-review-fix"
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("fixing", 1)
+
+
+def test_revise_with_a_later_ready_queues_no_fix(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    flow.finish("claude")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    flow.add(
+        "revise-1",
+        VERDICT.format(round="1/3", head=HEADS[1], verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+    flow.add("ready-2", READY.format(head=HEADS[2]), "claude-login")
+    flow.ci = "pending"  # keep the later ready unhandled
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "revise-1") == "answered-fix"
+    assert _harness_jobs(flow.queue)[-1] == ("fix", "cancelled")
+    assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("fixing", 1)
+
+
+def test_fresh_db_replay_queues_no_build_for_a_finished_ticket(tmp_path: Path) -> None:
+    """AUT-2284 and AUT-2286 after #66: the state dir was lost, and a fresh
+    database re-read a finished thread (go, ready, APPROVE, handed off)."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.head = HEADS[1]
+    flow.add("ready-1", READY.format(head=HEADS[1]), "claude-login")
+    flow.add("approve-1", APPROVE.format(round="1/3", head=HEADS[1]), "codex-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert [outcome(flow.queue, c) for c in ("go-1", "ready-1", "approve-1")] == [
+        "answered-build",
+        "answered-review",
+        "handed-off",
+    ]
+    assert _harness_jobs(flow.queue) == [("build", "cancelled"), ("review", "cancelled")]
+    assert flow.actions.handoffs == [HEADS[1]]
+    assert flow.state()["workflow_state"] == "handed-off"

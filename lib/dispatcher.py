@@ -1296,6 +1296,13 @@ class Dispatcher:
                 ),
             )
             return True, "queued-go-clarification"
+        answered = self._answered_by(
+            ticket,
+            comment,
+            ("ready", "plan"),
+            f"{ticket.factory.builder_harness}-bot",
+            "builder",
+        )
         self._enqueue_or_flag(
             ticket,
             JobRequest(
@@ -1320,9 +1327,10 @@ class Dispatcher:
                 f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
                 f"g{generation}"
             ),
+            answered=answered,
         )
         self._set_workflow_state(ticket, state)
-        return True, f"queued-{action}"
+        return True, f"answered-{action}" if answered else f"queued-{action}"
 
     def _resume_after_cap(
         self,
@@ -1528,29 +1536,35 @@ class Dispatcher:
             if ac == "met":
                 next_state = "building"
                 outcome = "queued-plan-build"
-                self.queue.enqueue_in_transaction(
-                    connection,
-                    JobRequest(
-                        repo=ticket.repo,
-                        ticket_id=ticket.ticket_id,
+                request = JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action="build",
+                    recipient=builder_harness,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=generation,
+                    detail=self._job_detail(
+                        ticket,
                         action="build",
-                        recipient=builder_harness,
-                        source_comment_id=comment.id,
-                        timeout_seconds=ticket.job_timeout_minutes * 60,
-                        generation=generation,
-                        detail=self._job_detail(
-                            ticket,
-                            action="build",
-                            round_number=int(state["review_round"]) + 1,
-                            cap=self._effective_cap(ticket, connection),
-                            instruction=_comment_link(comment),
-                        ),
+                        round_number=int(state["review_round"]) + 1,
+                        cap=self._effective_cap(ticket, connection),
+                        instruction=_comment_link(comment),
                     ),
+                )
+                job = self.queue.enqueue_in_transaction(
+                    connection,
+                    request,
                     dedupe_key=(
                         f"plan-build:{_scope(ticket.repo, ticket.ticket_id)}:"
                         f"{comment.id}"
                     ),
                 )
+                answered = self._answered_by(
+                    ticket, comment, ("ready",), f"{builder_harness}-bot", "builder"
+                )
+                if answered is not None:
+                    self._cancel_answered(connection, job, request, answered)
             elif gap_count == 0:
                 next_state = "planning"
                 outcome = "queued-plan-gap"
@@ -1704,15 +1718,24 @@ class Dispatcher:
         recorded_status, count = self._record_ci_result(ticket, head, result.status)
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if recorded_status == "success":
+            answered = self._answered_by(
+                ticket,
+                comment,
+                ("verdict",),
+                f"{ticket.factory.reviewer_harness}-bot",
+                "reviewer",
+                head=head,
+            )
             if not self._queue_review(
                 ticket,
                 source_comment_id=comment.id,
                 head=head,
                 generation=generation,
+                answered=answered,
             ):
                 return True, "capped-ready"
             self._set_workflow_state(ticket, "review")
-            return True, "queued-review"
+            return True, "answered-review" if answered else "queued-review"
         if count >= 3:
             self._mark_stuck_and_wake(
                 repo=ticket.repo,
@@ -1862,31 +1885,42 @@ class Dispatcher:
                 )
                 return True, "stale-revise"
             next_state = "capped" if round_number >= cap else "fixing"
+            answered = None
             if next_state == "fixing":
-                self.queue.enqueue_in_transaction(
-                    connection,
-                    JobRequest(
-                        repo=ticket.repo,
-                        ticket_id=ticket.ticket_id,
+                request = JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action="fix",
+                    recipient=ticket.factory.builder_harness,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=int(state["generation"]),
+                    head=ticket.current_head,
+                    detail=self._job_detail(
+                        ticket,
                         action="fix",
-                        recipient=ticket.factory.builder_harness,
-                        source_comment_id=comment.id,
-                        timeout_seconds=ticket.job_timeout_minutes * 60,
-                        generation=int(state["generation"]),
                         head=ticket.current_head,
-                        detail=self._job_detail(
-                            ticket,
-                            action="fix",
-                            head=ticket.current_head,
-                            round_number=round_number + 1,
-                            cap=cap,
-                            instruction=_comment_link(comment),
-                        ),
+                        round_number=round_number + 1,
+                        cap=cap,
+                        instruction=_comment_link(comment),
                     ),
+                )
+                job = self.queue.enqueue_in_transaction(
+                    connection,
+                    request,
                     dedupe_key=(
                         f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
                     ),
                 )
+                answered = self._answered_by(
+                    ticket,
+                    comment,
+                    ("ready",),
+                    f"{ticket.factory.builder_harness}-bot",
+                    "builder",
+                )
+                if answered is not None:
+                    self._cancel_answered(connection, job, request, answered)
             connection.execute(
                 """
                 UPDATE ticket_state
@@ -1903,6 +1937,8 @@ class Dispatcher:
             outcome = (
                 "capped-review"
                 if next_state == "capped"
+                else "answered-fix"
+                if answered is not None
                 else "queued-review-fix"
             )
             connection.execute(
@@ -2486,6 +2522,7 @@ class Dispatcher:
         head: str,
         generation: int,
         detail: str | None = None,
+        answered: Comment | None = None,
     ) -> bool:
         """Queue the next review round; False, with nothing queued, past the cap."""
         _state, completed_rounds = self._review_context(ticket)
@@ -2522,6 +2559,7 @@ class Dispatcher:
                 f"review:{_scope(ticket.repo, ticket.ticket_id)}:"
                 f"{head}:r{review_round}"
             ),
+            answered=answered,
         )
         return True
 
@@ -2554,6 +2592,7 @@ class Dispatcher:
         request: JobRequest,
         *,
         dedupe_key: str,
+        answered: Comment | None = None,
     ) -> Job:
         """Enqueue; when dedupe drops the job, flag the ticket (issue #84).
 
@@ -2561,7 +2600,19 @@ class Dispatcher:
         queued or running. When that job is finished, the comment queues
         nothing and the ticket would stall silently, so it is flagged
         needs-attention instead. A job that is queued clears the flag.
+
+        answered (#108): a later trusted comment already answered this
+        step, so the job is recorded and cancelled in one transaction.
         """
+        if answered is not None:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                job = self.queue.enqueue_in_transaction(
+                    connection, request, dedupe_key=dedupe_key
+                )
+                self._cancel_answered(connection, job, request, answered)
+                connection.commit()
+            return job
         job = self.queue.enqueue(request, dedupe_key=dedupe_key)
         if job.request.source_comment_id == request.source_comment_id:
             self.clear_attention(ticket.repo, ticket.ticket_id, "dedupe-dropped")
@@ -2574,6 +2625,61 @@ class Dispatcher:
                 f"finished job {job.id} ({job.state}); nothing was queued",
             )
         return job
+
+    def _answered_by(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        kinds: tuple[str, ...],
+        bot: str,
+        role: str,
+        head: str | None = None,
+    ) -> Comment | None:
+        """The first later trusted orch:v1 comment that already answered the
+        step comment asks for, or None (#108, #66).
+
+        It must be one of kinds, from a login trusted for bot and role, name
+        head when head is given, and not have been handled as rejected. With
+        an intact database no such answer exists yet when a comment is
+        handled; it is found on a replay (a lost or restored database) or
+        when both comments landed while the poller was down.
+        """
+        after = _comment_order(comment)
+        for item in sorted(ticket.comments, key=_comment_order):
+            if _comment_order(item) <= after:
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if fields["kind"] not in kinds:
+                continue
+            if not self._trusted(ticket, item, fields, bot, role=role):
+                continue
+            if head is not None and _matching_head(fields.get("head", ""), head) is None:
+                continue
+            handled = self._handled_outcome(ticket, item.id)
+            if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
+                continue
+            return item
+        return None
+
+    def _cancel_answered(
+        self,
+        connection: sqlite3.Connection,
+        job: Job,
+        request: JobRequest,
+        answered: Comment,
+    ) -> None:
+        """Cancel the job this comment just queued: answered already."""
+        if job.state != "queued" or job.request.source_comment_id != request.source_comment_id:
+            return
+        self.queue.cancel(job.id, f"answered-by:{answered.id}", connection=connection)
+        if self.log is not None:
+            self.log(
+                f"skipped {request.action}: answered by {answered.id} "
+                f"({request.repo}#{request.ticket_id})"
+            )
 
     def flag_attention(
         self,
