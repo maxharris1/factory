@@ -48,6 +48,7 @@ component (lib/health.py `push_result`).
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -276,6 +277,7 @@ CHILD_ENV = (
 STILL_RUNNING = "dashboard push: previous push still running; skipped this cycle"
 BACKOFF_FIRST_SECONDS = 30.0
 BACKOFF_MAX_SECONDS = 600.0
+BACKOFF_MAX_DOUBLINGS = math.ceil(math.log2(BACKOFF_MAX_SECONDS / BACKOFF_FIRST_SECONDS))
 
 Spawn = Callable[..., object]
 Record = Callable[[bool], None]
@@ -283,7 +285,8 @@ Record = Callable[[bool], None]
 
 def backoff_seconds(failures: int) -> float:
     """How long pushes pause after the failures-th failed push in a row."""
-    return min(BACKOFF_FIRST_SECONDS * 2 ** (failures - 1), BACKOFF_MAX_SECONDS)
+    doublings = min(failures - 1, BACKOFF_MAX_DOUBLINGS)
+    return min(BACKOFF_FIRST_SECONDS * 2**doublings, BACKOFF_MAX_SECONDS)
 
 
 class PollPusher:

@@ -1601,22 +1601,33 @@ class Dispatcher:
         return True, "queued-ci-fix"
 
     def _verdict_after(self, ticket: TrackedTicket, ready: Comment, head: str) -> bool:
-        """A trusted reviewer verdict for head, posted after the ready (#71)."""
+        """A trusted reviewer verdict for head, posted after the ready, that
+        is the first for its round (#71).
+
+        A verdict whose round already had one at or before the ready (a late
+        duplicate) answered an earlier ready. One with no round answers none:
+        T3 and T4 act on no such verdict.
+        """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        before: set[int] = set()
+        after: set[int] = set()
         for item in ticket.comments:
-            if _comment_order(item) <= _comment_order(ready):
-                continue
             try:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
                 continue
+            round_number = _round_number(fields.get("round"))
             if (
-                fields.get("kind") == "verdict"
+                round_number is not None
+                and fields.get("kind") == "verdict"
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
-                return True
-        return False
+                if _comment_order(item) <= _comment_order(ready):
+                    before.add(round_number)
+                else:
+                    after.add(round_number)
+        return bool(after - before)
 
     def _t3(
         self,

@@ -5171,3 +5171,89 @@ def test_71_a_failed_review_of_a_replaced_head_is_not_retried(tmp_path: Path) ->
     with queue.connect() as connection:
         events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
     assert events == ["retry-skipped"]
+
+
+def _round_two_ready_then(tmp_path: Path, late: Comment) -> SQLiteJobQueue:
+    """Round 1 REVISE, a no-change fix readies the head again, then `late` lands."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    now[0] = 160
+    again = _ready_71("ready-2", HEAD_71, 140)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again, late)
+    return queue
+
+
+def _outcomes(queue: SQLiteJobQueue) -> dict[str, str]:
+    with queue.connect() as connection:
+        return dict(connection.execute("SELECT comment_id, outcome FROM handled_comments"))
+
+
+def test_71_a_late_duplicate_verdict_does_not_answer_the_next_ready(tmp_path: Path) -> None:
+    """Codex PR #112 r1 F1: a repeat of the round-1 REVISE is not round 2's verdict."""
+    late = comment("revise-dup", _revise_71(120).body, author="codex-login", created_at=150)
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["revise-dup"] == "duplicate-verdict"
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_late_verdict_for_an_earlier_round_does_not_answer_the_next_ready(
+    tmp_path: Path,
+) -> None:
+    """Any verdict below the round a ready asks for answered an earlier ready."""
+    late = comment(
+        "approve-1",
+        VERDICT.format(round="1/3", head=HEAD_71, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    assert _outcomes(queue)["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_late_roundless_verdict_does_not_answer_the_next_ready(tmp_path: Path) -> None:
+    """T3 and T4 act on no verdict without a round, so none answers a ready."""
+    late = comment(
+        "revise-roundless",
+        "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+        f"head={HEAD_71} verdict=REVISE risk=high -->\nVerdict.\n",
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    assert _outcomes(queue)["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A second ready for the head, listed only once its round-1 REVISE was
+    handled, is still answered by that REVISE: no round-2 review of it."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    late_listed = _ready_71("ready-b", HEAD_71, 110)
+    poll(ready, late_listed, revise)
+    assert _outcomes(queue)["ready-b"] == "stale-ready-verdict"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1)]

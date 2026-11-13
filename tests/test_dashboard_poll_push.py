@@ -327,6 +327,13 @@ def test_backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() -> None:
     assert [backoff_seconds(k) for k in range(1, 8)] == [30, 60, 120, 240, 480, 600, 600]
 
 
+def test_backoff_stays_capped_however_long_the_outage() -> None:
+    """Codex PR #112 r1 F2: 2 ** 1024 overflowed a float before min() capped it."""
+    from lib.dashboard_push import backoff_seconds
+
+    assert [backoff_seconds(k) for k in (1024, 1025, 10**6)] == [600, 600, 600]
+
+
 def failing_pusher():
     outcomes: list[bool] = []
     spawn = Spawn()
@@ -409,3 +416,16 @@ dashboard:
     assert [(r.component, r.device, r.pid, r.last_seen, r.interval_seconds) for r in rows] == [
         ("dashboard-push", "box", os.getpid(), None, 120.0)
     ]
+
+
+def test_a_week_offline_keeps_pausing_ten_minutes_and_recording_each_failure() -> None:
+    push, spawn, clock, lines, outcomes = failing_pusher()
+    for _ in range(1100):
+        push()
+        spawn.children[-1].returncode = 255
+        clock.now += 600
+    clock.now -= 600 - 30
+    push()  # settles failure 1100; 30 s into its 600 s pause
+    assert len(spawn.calls) == 1100
+    assert outcomes == [False] * 1100
+    assert lines[-1].endswith("1100 in a row; pushes paused for 600s")
