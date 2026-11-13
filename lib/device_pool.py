@@ -463,6 +463,30 @@ class DevicePool:
             return _used(connection)
 
 
+def read_autostart(
+    connection: sqlite3.Connection, job_id: str
+) -> tuple[int, str | None] | None:
+    """The autostart waiter (pid, start) that claimed job_id, read without writing.
+
+    None when the job holds no slot, was not claimed by an autostart waiter,
+    or the slot table predates the autostart columns (no autostart claim can
+    exist there).
+    """
+    present = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({SLOTS_TABLE})")
+    }
+    if not {"job_id", "autostart_pid", "autostart_start"} <= present:
+        return None
+    row = connection.execute(
+        f"SELECT autostart_pid, autostart_start FROM {SLOTS_TABLE} WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    pid = _int(tuple(row)[0])
+    return None if pid is None else (pid, _text(tuple(row)[1]))
+
+
 def _placement(row: sqlite3.Row) -> Placement:
     return Placement(
         job_id=str(row["job_id"]),

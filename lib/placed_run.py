@@ -36,9 +36,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from lib.device_monitor import remote_target
-from lib.device_pool import DevicePool, Placement
+from lib.device_pool import DevicePool, Placement, read_autostart
 from lib.machines_yml import Device, MachinesConfig
-from lib.queue import QueueError
+from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
     GONE,
     RUNNING,
@@ -153,6 +153,48 @@ class PlacedRun:
         return released
 
 
+def check_autostart(
+    queue: SQLiteJobQueue,
+    *,
+    job_id: str,
+    bot: str,
+    parent_pid: int | None = None,
+) -> tuple[int, str | None] | None:
+    """Refuse a run of an autostart claim unless its parent is the claiming waiter.
+
+    Codex PR #82 r2 F2.2: `orch job run` calls this before its first
+    heartbeat, and it only reads. A run refused here leaves the job exactly
+    as claimed (no heartbeat since the claim, no runner), so the poller's
+    claimed-job release requeues it (lib/job_state.py) instead of it
+    waiting out the full timeout. That covers a bot turn's run and a
+    waiter's own child orphaned before this check (the waiter exited
+    between spawning it and here). Returns the claiming waiter, for
+    prepare(checked_autostart=...), or None for a job no autostart waiter
+    claimed.
+    """
+    with queue.connect() as connection:
+        claimer = read_autostart(connection, job_id)
+    if claimer is not None:
+        _refuse_unless_child(job_id, bot, claimer, parent_pid)
+    return claimer
+
+
+def _refuse_unless_child(
+    job_id: str,
+    bot: str,
+    claimer: tuple[int, str | None],
+    parent_pid: int | None,
+) -> None:
+    pid, start = claimer
+    parent = os.getppid() if parent_pid is None else parent_pid
+    if parent != pid or (start is not None and process_start(parent) != start):
+        raise PlacementError(
+            f"job {job_id} was claimed by {bot}'s autostart waiter "
+            f"(pid {pid}), which starts it itself; a bot turn "
+            "must not run it, so nothing was started"
+        )
+
+
 def prepare(
     pool: DevicePool,
     config: MachinesConfig,
@@ -166,7 +208,16 @@ def prepare(
     alive: Callable[[int | None, str | None], bool] = pid_alive,
     pid: int | None = None,
     parent_pid: int | None = None,
+    checked_autostart: tuple[int, str | None] | None = None,
 ) -> PlacedRun:
+    """Record this process as the job's runner on its slot.
+
+    checked_autostart is what check_autostart returned before the run's
+    first heartbeat: this run's parent was then the claiming waiter. The
+    slot must still name that waiter; the parent is not looked at again, so
+    a waiter that exits in between (this run is reparented) does not strand
+    the job it already started.
+    """
     placement = pool.placement(job_id)
     if placement is None:
         raise PlacementError(
@@ -178,15 +229,15 @@ def prepare(
             f"job {job_id}'s slot is for {placement.os_user}, not {bot}"
         )
     if placement.autostarted:
-        parent = os.getppid() if parent_pid is None else parent_pid
-        if parent != placement.autostart_pid or (
-            placement.autostart_start is not None
-            and process_start(parent) != placement.autostart_start
-        ):
+        assert placement.autostart_pid is not None
+        claimer = (placement.autostart_pid, placement.autostart_start)
+        if checked_autostart is None:
+            _refuse_unless_child(job_id, bot, claimer, parent_pid)
+        elif checked_autostart != claimer:
             raise PlacementError(
-                f"job {job_id} was claimed by {bot}'s autostart waiter "
-                f"(pid {placement.autostart_pid}), which starts it itself; a bot turn "
-                "must not run it, so nothing was started"
+                f"job {job_id} was claimed again by {bot}'s autostart waiter "
+                f"(pid {placement.autostart_pid}) after this run checked its parent; "
+                "nothing was started"
             )
     device = config.device(placement.device)
     if device is None:

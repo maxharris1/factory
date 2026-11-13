@@ -131,6 +131,116 @@ def test_a_bot_turn_cannot_run_a_job_the_autostart_waiter_claimed(
     _wait_for(lambda: state(db, job_id) == "done", 20, proc)
 
 
+def _dead_waiter() -> tuple[int, str | None]:
+    """A process that was the claiming waiter and has exited."""
+    from lib.worktrees import process_start
+
+    gone = subprocess.Popen(["sleep", "30"])
+    start = process_start(gone.pid)
+    gone.kill()
+    gone.wait()
+    return gone.pid, start
+
+
+def test_r2_f2_2_a_run_orphaned_before_prepare_leaves_the_claim_releasable(
+    tmp_path: Path,
+) -> None:
+    """Codex PR #82 r2 F2.2: the waiter exits between spawn and `prepare`.
+
+    The reparented `orch job run` must be refused before its first
+    heartbeat, so the job stays claimed (no heartbeat since the claim, no
+    runner) and the poller's claimed-job release requeues it at once rather
+    than after the full timeout.
+    """
+    from lib.dispatcher import Dispatcher
+    from lib.job_state import CLAIMED, JobStateConfig, derive
+    from tests.test_wait import TRUSTED_LOGINS
+    from unittest.mock import Mock
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    pool = local_pool(queue)
+    taken = pool.claim("claude", autostart=_dead_waiter())
+    assert taken is not None and taken[0].id == job_id
+    with sqlite3.connect(db) as connection:
+        before = connection.execute(
+            "SELECT last_activity_at FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+
+    marker = tmp_path / "ran"
+    result = orch("job", "run", "claude-bot", job_id, "--db", str(db),
+                  "--machines", str(MACHINES), "--", "touch", str(marker))
+    assert result.returncode == 2, result.stderr
+    assert "autostart waiter" in result.stderr and "nothing was started" in result.stderr
+    assert not marker.exists()
+
+    with sqlite3.connect(db) as connection:
+        after = connection.execute(
+            "SELECT state, last_activity_at FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert after == ("running", before)  # no heartbeat was written
+    placement = pool.placement(job_id)
+    assert placement is not None and placement.runner_pid is None
+    assert derive(
+        last_activity_at=before, now=time.time(), placement=placement, stale_seconds=120
+    ) == CLAIMED
+
+    dispatcher = Dispatcher(
+        db, SQLiteJobQueue(db, clock=time.time), trusted_logins=TRUSTED_LOGINS,
+        review_actions=Mock(), grok_delivery=Mock(deliver=Mock(return_value="d")),
+        job_states=JobStateConfig(release_claimed_seconds=0.0),
+    )
+    dispatcher.reconcile_jobs()
+    assert state(db, job_id) == "queued"  # the same job row, back in line
+    assert pool.placement(job_id) is None
+    again = pool.claim("claude")
+    assert again is not None and again[0].id == job_id
+
+
+def test_r2_f2_2_a_run_checked_before_its_waiter_exited_still_attaches(tmp_path: Path) -> None:
+    """Checked while the waiter lived, reparented before `prepare`: it runs.
+
+    prepare does not look at the parent again; it only requires that the
+    slot still names the waiter the check saw.
+    """
+    from lib import placed_run
+    from tests.test_remote_start import FakeTransport
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    pool = local_pool(queue)
+    waiter_pid, waiter_start = os.getpid(), waiter_module.process_start(os.getpid())
+    pool.claim("claude", autostart=(waiter_pid, waiter_start))
+    checked = placed_run.check_autostart(
+        queue, job_id=job_id, bot="claude-bot", parent_pid=waiter_pid
+    )
+    assert checked == (waiter_pid, waiter_start)
+    from tests.test_waiter import load_machines_yml, local_only
+
+    machines, _ = load_machines_yml(MACHINES, allow_placeholders=True)
+    assert machines is not None
+    placed_run.prepare(
+        pool, local_only(machines), job_id=job_id, bot="claude-bot", owner="claude",
+        worktree=False, log=[].append, transport=FakeTransport(), pid=os.getpid(),
+        parent_pid=1, checked_autostart=checked,
+    )
+    placement = pool.placement(job_id)
+    assert placement is not None and placement.runner_pid == os.getpid()
+
+    # A claim made again by another waiter after the check is refused.
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE device_slots SET autostart_pid = ?, runner_pid = NULL WHERE job_id = ?",
+            (waiter_pid + 1, job_id),
+        )
+    with pytest.raises(placed_run.PlacementError, match="claimed again"):
+        placed_run.prepare(
+            pool, local_only(machines), job_id=job_id, bot="claude-bot", owner="claude",
+            worktree=False, log=[].append, transport=FakeTransport(), pid=os.getpid(),
+            parent_pid=waiter_pid, checked_autostart=checked,
+        )
+
+
 def test_a_second_run_of_a_running_job_is_refused(tmp_path: Path) -> None:
     db, _queue, job_id = claimed(tmp_path)
     first = subprocess.Popen(["sleep", "30"])
@@ -196,6 +306,50 @@ def test_a_repeated_failed_is_a_no_op_and_a_handoff_after_it_is_refused(tmp_path
     assert late.returncode == 1
     assert "already failed" in late.stderr
     assert job_row(db, job_id) == ("failed", None)
+
+
+# Codex PR #82 r2 F2.4: the slots table as round 1 (origin/main) left it,
+# before the autostart columns; `orch job done` never opens a DevicePool, so
+# nothing migrates it on this path.
+ROUND_1_SLOTS = """
+CREATE TABLE device_slots (
+    job_id TEXT PRIMARY KEY,
+    device TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    os_user TEXT NOT NULL,
+    placed_at REAL NOT NULL,
+    runner_pid INTEGER,
+    runner_start TEXT,
+    worker_pid INTEGER,
+    worker_start TEXT,
+    remote_started INTEGER NOT NULL DEFAULT 0,
+    worker_tag TEXT
+)
+"""
+
+
+@pytest.mark.parametrize("outcome", [["--handoff", "c-1"], ["--failed"]])
+def test_job_done_tolerates_a_round_1_slots_table(tmp_path: Path, outcome: list[str]) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    taken = queue.claim("claude")
+    assert taken is not None and taken.id == job_id
+    with sqlite3.connect(db) as connection:
+        connection.execute(ROUND_1_SLOTS)
+        connection.execute(
+            "INSERT INTO device_slots (job_id, device, harness, os_user, placed_at, "
+            "runner_pid, runner_start) VALUES (?, 'box', 'claude', 'claude-bot', ?, ?, NULL)",
+            (job_id, time.time(), os.getpid()),
+        )
+    result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
+    assert result.returncode == 0, result.stderr
+    expected = ("done", "c-1") if outcome[0] == "--handoff" else ("failed", None)
+    assert job_row(db, job_id) == expected
+    with sqlite3.connect(db) as connection:  # read only: nothing was migrated
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(device_slots)")}
+    assert "autostart_pid" not in columns
+    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
+    assert again.returncode == 0 and "nothing changed" in again.stdout
 
 
 @pytest.mark.parametrize("outcome", [["--handoff", "c-bot-turn"], ["--failed"]])

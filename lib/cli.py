@@ -14,6 +14,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 from lib import job_run, linear_webhook, placed_run, waiter, worktrees
 from lib.dashboard_cli import main as dashboard_main
@@ -794,18 +795,30 @@ def _done_settled(
             f"job {job_id} is already {already}; refusing a different outcome, "
             "nothing changed"
         )
-    if state != "running" or slot is None or slot["autostart_pid"] is None:
+    # Codex PR #82 r2 F2.4: this path never opens a DevicePool, so the slots
+    # table may predate the autostart columns (an update while a job runs).
+    # A missing column reads as NULL: no autostart waiter can have claimed a
+    # job in a table it could not record itself in.
+    autostart = _slot_value(slot, "autostart_pid")
+    if state != "running" or autostart is None:
         return None
-    runner = slot["runner_pid"]
-    if runner is not None and worktrees.pid_alive(int(runner), slot["runner_start"]) and (
-        worktrees.descends_from(os.getpid(), int(runner))
-    ):
+    runner = _slot_value(slot, "runner_pid")
+    if runner is not None and worktrees.pid_alive(
+        int(runner), _slot_value(slot, "runner_start")
+    ) and worktrees.descends_from(os.getpid(), int(runner)):
         return None
     return 2, (
-        f"job {job_id} was claimed by its autostart waiter (pid {slot['autostart_pid']}), "
+        f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
         "whose harness run finishes it; only that run may call orch job done, so a bot "
         "turn must not run or post for it. Nothing changed"
     )
+
+
+def _slot_value(slot: sqlite3.Row | None, name: str) -> Any:
+    """A slot column, or None when there is no slot or the column predates it."""
+    if slot is None or name not in slot.keys():
+        return None
+    return slot[name]
 
 
 def _has_slots(connection: sqlite3.Connection) -> bool:
@@ -862,6 +875,17 @@ def _job_run(argv: list[str]) -> int:
         return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
 
     try:
+        # Codex PR #82 r2 F2.2: an autostart claim is checked before the
+        # first heartbeat, read only, so a refused run leaves the job claimed
+        # (and the poller's claimed-job release requeues it).
+        checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
+    except placed_run.PlacementError as exc:
+        print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 2
+    except (sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
@@ -878,6 +902,7 @@ def _job_run(argv: list[str]) -> int:
             worktree=args.worktree,
             log=log,
             transport=SshTransport(),
+            checked_autostart=checked_autostart,
         )
     except (placed_run.PlacementError, WaitError, ValueError) as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
