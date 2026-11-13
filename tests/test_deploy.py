@@ -95,7 +95,7 @@ python.chmod(0o755)
         + "\ntrusted_linear_users:\n  test-user-id: [grok-bot]\n",
         encoding="utf-8",
     )
-    environment = dict(os.environ)
+    environment = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
     environment.update(
         {
             "EXPECTED_REQUIREMENTS": str(ROOT / "requirements.txt"),
