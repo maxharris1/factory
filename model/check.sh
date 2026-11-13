@@ -68,6 +68,7 @@ done
 fixing
 handed-off
 intake
+merge-queue
 merged
 plan-check
 planning
@@ -77,6 +78,7 @@ refused
 review
 ship
 stuck
+updating
 waiting-external
 waiting-max"
 

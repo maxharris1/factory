@@ -33,6 +33,8 @@ SPEC_STATE = {
     "Ship": "ship",
     "Merged": "merged",
     "HandedOff": "handed-off",
+    "MergeQueue": "merge-queue",
+    "Updating": "updating",
     "WaitingExternal": "waiting-external",
     "AwaitingOk": "awaiting-ok",
     "PostMerge": "post-merge",

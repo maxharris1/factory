@@ -164,6 +164,16 @@ stateDiagram-v2
   Capped --> Fixing: Max's own words OK one more round
   HandedOff --> Review: trusted ready at a new head, within the effective cap
   HandedOff --> Merged: PR merged (by Factory or by hand)
+  Ship --> MergeQueue: APPROVE, finish_line merge (ship = handoff marks the PR ready and waits here, not HandedOff)
+  MergeQueue --> Merged: poller squash-merges the queue head (clean, CI green, approval covers the head), or the merge is observed
+  MergeQueue --> Updating: PR conflicts with base, update-from-main job queued
+  Updating --> MergeQueue: trivial update (each conflict hunk took one side, nothing else changed), approval carried
+  Updating --> Review: non-trivial update, cross-family re-review
+  Updating --> Stuck: two failed updates (update-failed-2)
+  MergeQueue --> Planning: trusted go, queue plan
+  MergeQueue --> Building: trusted go, queue build
+  MergeQueue --> Review: trusted ready at a new head, within the effective cap
+  MergeQueue --> Abandoned: PR closed unmerged
   Done --> [*]
 ```
 

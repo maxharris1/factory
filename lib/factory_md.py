@@ -24,6 +24,11 @@ factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It only acts on ship: merge; on any
 other ship it is accepted with a warning and never applied.
 
+finish_line is optional (issue #130): ready-for-review stops at the
+handoff; merge keeps watching the approved PR until it merges or closes.
+Omitted, it follows ship: ship: merge gives merge, any other ship gives
+ready-for-review. ship: merge with finish_line: ready-for-review is refused.
+
 parse_factory_context keeps the prose after the front block (Review, Ship,
 Context) for the waiter's standard brief (#80): the brief appends it as an
 additional-context section. Project-specific behavior lives there, not in
@@ -63,6 +68,7 @@ _GLOB = re.compile(r"^[A-Za-z0-9._*?/@+=~-]+$")
 
 DEFAULT_HOLD_LABEL = "factory:hold"
 DEFAULT_HOLD_APPROVER = "max"
+FINISH_LINES = ("ready-for-review", "merge")
 
 # The most factory.md prose a brief carries (about four screens).
 CONTEXT_LIMIT = 16_000
@@ -79,6 +85,7 @@ _TOP_KEYS = {
     "github_issues",
     "github_labels",
     "hold",
+    "finish_line",
 }
 _HOLD_KEYS = {"label", "approver", "paths"}
 
@@ -107,6 +114,17 @@ class FactoryConfig:
     github_issues: bool = False
     github_labels: bool = False
     hold: HoldConfig | None = None
+    # None resolves from ship (default_finish_line), so a config built in
+    # code gets the same default as one parsed from factory.md.
+    finish_line: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.finish_line is None:
+            object.__setattr__(self, "finish_line", default_finish_line(self.ship))
+
+
+def default_finish_line(ship: str) -> str:
+    return "merge" if ship == "merge" else "ready-for-review"
 
 
 @dataclass(frozen=True)
@@ -164,6 +182,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     github_issues = _optional_bool(data, "github_issues", findings)
     github_labels = _optional_bool(data, "github_labels", findings)
     hold = _hold(data, findings)
+    finish_line = _finish_line(data, ship, findings)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -217,6 +236,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
         github_issues=github_issues,
         github_labels=github_labels,
         hold=hold,
+        finish_line=finish_line,
     )
     return config, findings
 
@@ -457,6 +477,29 @@ def _ship(data: dict, findings: list[Finding]) -> str | None:
         Finding("error", "ship must be merge, handoff, or after:<approver>")
     )
     return None
+
+
+def _finish_line(
+    data: dict, ship: str | None, findings: list[Finding]
+) -> str | None:
+    if "finish_line" not in data:
+        return None if ship is None else default_finish_line(ship)
+    value = data["finish_line"]
+    if value not in FINISH_LINES:
+        findings.append(
+            Finding("error", "finish_line must be ready-for-review or merge")
+        )
+        return None
+    if ship == "merge" and value == "ready-for-review":
+        findings.append(
+            Finding(
+                "error",
+                "ship: merge merges on APPROVE; finish_line: ready-for-review "
+                "contradicts it",
+            )
+        )
+        return None
+    return str(value)
 
 
 def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:

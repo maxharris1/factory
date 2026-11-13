@@ -26,6 +26,7 @@ ACTIONS = (
     "build",
     "review",
     "fix",
+    "update-from-main",
     "clarify",
     "stuck",
     "blocked",

@@ -106,6 +106,16 @@ CHART_TRANSITIONS = frozenset(
         ("capped", "fixing"),
         ("handed-off", "review"),
         ("handed-off", "merged"),
+        ("ship", "merge-queue"),
+        ("merge-queue", "merged"),
+        ("merge-queue", "updating"),
+        ("merge-queue", "planning"),
+        ("merge-queue", "building"),
+        ("merge-queue", "review"),
+        ("merge-queue", "abandoned"),
+        ("updating", "merge-queue"),
+        ("updating", "review"),
+        ("updating", "stuck"),
     }
 )
 

@@ -14,19 +14,21 @@ vars == <<state, paused, cap, configOk, flags, counts>>
 States == {
   "intake", "refused", "questions", "waiting-max", "planning", "plan-check",
   "building", "review", "fixing", "stuck", "capped", "blocked", "ship",
-  "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge", "done",
-  "abandoned"
+  "merged", "handed-off", "merge-queue", "updating", "waiting-external",
+  "awaiting-ok", "post-merge", "done", "abandoned"
 }
 
 \* handed-off is not terminal (#108): the poll still watches it, for a merge
-\* and for a trusted ready that re-enters review inside the cap.
+\* and for a trusted ready that re-enters review inside the cap. merge-queue
+\* and updating (#130) are watched the same way, every cycle.
 Terminal == {"refused", "stuck", "blocked", "abandoned", "done"}
 
 \* Every state a tracked PR can be in when the poll sees it merged (#108).
 \* Intake and questions have no PR yet; merged, post-merge and done are past it.
 MergeFrom == {
   "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
-  "ship", "awaiting-ok", "waiting-external", "stuck", "handed-off"
+  "ship", "awaiting-ok", "waiting-external", "stuck", "handed-off",
+  "merge-queue", "updating"
 }
 
 \* Phase 1 jobs. post-merge is T9, which Phase 1 leaves off, so it is not a job
@@ -35,13 +37,20 @@ JobStates == {"planning", "building", "review", "fixing"}
 
 AfterGo == {
   "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
-  "ship", "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge",
-  "done", "stuck"
+  "ship", "merged", "handed-off", "merge-queue", "updating", "waiting-external",
+  "awaiting-ok", "post-merge", "done", "stuck"
 }
 
 ReviewAndAfter == {
   "review", "fixing", "capped", "blocked", "ship", "merged", "handed-off",
-  "waiting-external", "awaiting-ok", "post-merge", "done"
+  "merge-queue", "updating", "waiting-external", "awaiting-ok", "post-merge",
+  "done"
+}
+
+\* Approved and past ship: the head these states hold is covered (or merged by hand).
+Covered == {
+  "ship", "merged", "handed-off", "merge-queue", "updating", "waiting-external",
+  "awaiting-ok", "post-merge", "done"
 }
 
 Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
@@ -67,7 +76,8 @@ TypeOK ==
        planGaps: 0..2,
        deaths: 0..2,
        declines: 0..3,
-       extra: 0..1
+       extra: 0..1,
+       updates: 0..2
      ]
 
 Init ==
@@ -82,7 +92,7 @@ Init ==
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
        planGaps |-> 0, deaths |-> 0, declines |-> 0,
-       extra |-> 0
+       extra |-> 0, updates |-> 0
      ]
 
 \* Valid config: brief posted, questions step starts. Invalid config: refused.
@@ -346,6 +356,17 @@ T4ShipHandoff ==
   /\ flags' = flags
   /\ counts' = counts
 
+\* #130. finish_line merge (ship = handoff or merge): the PR is marked ready
+\* and waits in the merge queue instead of handed-off, watched until it merges.
+T4ShipQueue ==
+  /\ "T4" \notin Omit
+  /\ state = "ship"
+  /\ flags.covered
+  /\ state' = "merge-queue"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
 T4ShipAfter ==
   /\ "T4" \notin Omit
   /\ state = "ship"
@@ -457,10 +478,10 @@ MaxOkAnotherRound ==
 
 \* #108. A trusted ready at a new head after handoff re-enters review. The
 \* approved round counts as completed, so the next review is round + 2, and it
-\* must be within the effective cap.
+\* must be within the effective cap. #130: the same from merge-queue.
 ReenterAfterHandoff ==
   /\ "T2" \notin Omit
-  /\ state = "handed-off"
+  /\ state \in {"handed-off", "merge-queue"}
   /\ counts.round + 1 < cap + counts.extra
   /\ state' = "review"
   /\ keep
@@ -475,9 +496,97 @@ MergeObserved ==
   /\ state' = "merged"
   /\ keep
   /\ flags' = [flags EXCEPT !.byHand = ~flags.covered \/ state \notin
-       {"ship", "awaiting-ok", "waiting-external", "handed-off"}]
+       {"ship", "awaiting-ok", "waiting-external", "handed-off", "merge-queue",
+        "updating"}]
   /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
-       !.planGaps = 0]
+       !.planGaps = 0, !.updates = 0]
+
+\* #130. The queue step acts on the head of a repo's merge queue. It squash-
+\* merges it when it is clean, CI is green and the approval covers the head.
+QueueMerge ==
+  /\ "T4" \notin Omit
+  /\ state = "merge-queue"
+  /\ flags.covered
+  /\ state' = "merged"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+\* #130. The queue head conflicts with base: an update-from-main job is queued.
+QueueConflict ==
+  /\ "T4" \notin Omit
+  /\ state = "merge-queue"
+  /\ state' = "updating"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+\* #130. The PR is closed unmerged.
+QueueClosed ==
+  /\ "T4" \notin Omit
+  /\ state = "merge-queue"
+  /\ state' = "abandoned"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+\* #130. A trusted go on a merge-queue ticket leaves the queue and queues a plan
+\* or a build; ship waits for a new APPROVE. The model draws the risk cap at
+\* the first review, so it starts the ticket over from the go: no cap, no
+\* mapped plan, and every counter cleared.
+GoFresh ==
+  /\ "T1" \notin Omit
+  /\ KindGo = "go"
+  /\ state = "merge-queue"
+  /\ paused' = "none"
+  /\ cap' = 0
+  /\ configOk' = configOk
+  /\ flags' = [flags EXCEPT !.covered = FALSE, !.planOk = FALSE]
+  /\ counts' = [c \in DOMAIN counts |-> 0]
+
+QueueGoPlan == GoFresh /\ state' = "planning"
+
+QueueGoBuild == GoFresh /\ state' = "building"
+
+\* #130. The update job's ready. Trivial (each conflict hunk took one side and
+\* nothing else changed): the approval is carried to the new head and the
+\* ticket goes back in the queue. Otherwise a cross-family re-review at the
+\* approved round (the round does not move).
+UpdateTrivial ==
+  /\ "T2" \notin Omit
+  /\ state = "updating"
+  /\ state' = "merge-queue"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.updates = 0]
+
+UpdateNonTrivial ==
+  /\ "T2" \notin Omit
+  /\ state = "updating"
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ counts' = [counts EXCEPT !.updates = 0, !.deaths = 0, !.gate = 0]
+
+\* #130. An update fails (the job fails, its ready is still dirty, or no ready
+\* arrives). Once: one more update. Twice: stuck, update-failed-2.
+UpdateRetry ==
+  /\ "T6" \notin Omit
+  /\ state = "updating"
+  /\ counts.updates = 0
+  /\ state' = state
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.updates = 1]
+
+UpdateStuck ==
+  /\ "T6" \notin Omit
+  /\ state = "updating"
+  /\ counts.updates = 1
+  /\ state' = "stuck"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.updates = 2]
 
 End ==
   /\ state \in Terminal
@@ -495,7 +604,11 @@ Next ==
   \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
-  \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved \/ End
+  \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved
+  \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
+  \/ QueueGoPlan \/ QueueGoBuild
+  \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
+  \/ End
 
 Spec == Init /\ [][Next]_vars
 
@@ -520,6 +633,8 @@ CountersBounded ==
   /\ counts.declines = 3 => state = "stuck"
   /\ counts.planGaps = 2 => state = "stuck"
   /\ counts.deaths = 2 => state = "stuck"
+  /\ counts.updates = 2 => state = "stuck"
+  /\ counts.updates = 1 => state = "updating"
   /\ counts.acUnmet <= 2
 
 ContradictoryConfigNeverRuns ==
@@ -527,10 +642,7 @@ ContradictoryConfigNeverRuns ==
 
 \* A hand merge (MergeObserved before a covered ship) is Max's, not the factory's.
 ShipPinnedToCoveredHead ==
-  state \in {
-    "ship", "merged", "handed-off", "waiting-external", "awaiting-ok", "post-merge",
-    "done"
-  } => flags.covered \/ flags.byHand
+  state \in Covered => flags.covered \/ flags.byHand
 
 CapAtReview ==
   /\ state \in {"intake", "refused", "questions", "planning", "plan-check", "building"}
@@ -569,6 +681,7 @@ T4Decided ==
   /\ state = "ship" =>
        ENABLED T4PatchDiffers /\ ENABLED T4ShipMerge
          /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter /\ ENABLED T4Hold
+         /\ ENABLED T4ShipQueue
   /\ state = "awaiting-ok" =>
        ENABLED T4HoldOk /\ ENABLED T4HoldPatchDiffers
 
@@ -594,6 +707,21 @@ HandedOffDecided ==
   /\ state = "handed-off" => ENABLED MergeObserved
   /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
        ENABLED ReenterAfterHandoff
+
+\* #130. A ticket in merge-queue can always leave it: merged, abandoned,
+\* updating, or back to work on a go or a ready. An update can always end:
+\* back in the queue, a re-review, merged, or stuck after its second failure.
+MergeQueueDecided ==
+  /\ state = "merge-queue" =>
+       /\ ENABLED QueueMerge /\ ENABLED MergeObserved
+       /\ ENABLED QueueClosed /\ ENABLED QueueConflict
+       /\ ENABLED QueueGoPlan /\ ENABLED QueueGoBuild
+  /\ state = "merge-queue" /\ counts.round + 1 < cap + counts.extra =>
+       ENABLED ReenterAfterHandoff
+  /\ state = "updating" =>
+       ENABLED UpdateTrivial /\ ENABLED UpdateNonTrivial /\ ENABLED MergeObserved
+  /\ state = "updating" /\ counts.updates = 0 => ENABLED UpdateRetry
+  /\ state = "updating" /\ counts.updates = 1 => ENABLED UpdateStuck
 
 T9Decided ==
   /\ AllowPostMerge /\ state = "merged" => ENABLED T9PostMerge

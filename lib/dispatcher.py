@@ -33,6 +33,7 @@ from lib.job_state import (
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
+from lib.update_check import UpdateClass
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
@@ -41,6 +42,10 @@ _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
 STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
+# #130: an approved ticket on a finish_line: merge project stays watched,
+# polled every cycle, until its PR merges or closes.
+WATCHED_STATES = ("merge-queue", "updating")
+UPDATE_FAILURES_TO_STOP = 2
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
@@ -135,6 +140,11 @@ class TrackedTicket:
     # #108 (#42 N3): the PR is merged. Set only on a fresh read, which never
     # records the merge itself: its caller decides.
     merged: bool = False
+    # #130: GitHub's mergeability (None while GitHub computes it) and a PR
+    # closed without merging.
+    mergeable: bool | None = None
+    mergeable_state: str | None = None
+    closed: bool = False
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -375,6 +385,11 @@ class Feeder(Protocol):
     def feed_once(self) -> object: ...
 
 
+# (repo, base branch, approved head, updated head) -> whether the update is
+# trivial, and why (lib/update_check.py).
+UpdateClassifier = Callable[[str, str, str, str], UpdateClass]
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -389,6 +404,7 @@ class Dispatcher:
         job_states: JobStateConfig | None = None,
         log: Callable[[str], None] | None = None,
         feeder: Feeder | None = None,
+        update_classifier: UpdateClassifier | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -410,6 +426,9 @@ class Dispatcher:
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
         self.feeder = feeder
+        # #130: decides whether an update-from-main kept the approval. None,
+        # or any error, sends the update back to review (fail closed).
+        self.update_classifier = update_classifier
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
@@ -471,6 +490,7 @@ class Dispatcher:
                 self.process(ticket)
             except Exception as exc:
                 self._record_poll_error(ticket, type(exc).__name__)
+        self._advance_merge_queues()
         self.reconcile_jobs()
         if end is not None:
             end()
@@ -708,7 +728,8 @@ class Dispatcher:
                     if self._after_finish(ticket, comment):
                         continue
                     if (
-                        self._review_context(ticket)[0] == "handed-off"
+                        self._review_context(ticket)[0]
+                        in ("handed-off", *WATCHED_STATES)
                         and self._ship_intent(ticket, comment.id) is None
                     ):
                         # #108: a verdict with no re-entry behind it wakes nobody.
@@ -1275,7 +1296,8 @@ class Dispatcher:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return True, "rejected-go-author"
-        if self._review_context(ticket)[0] == "handed-off":
+        current = self._review_context(ticket)[0]
+        if current == "handed-off":
             # #108: a handed-off ticket re-enters only through the builder's
             # ready, inside the cap; a go changes nothing.
             return True, "go-after-handoff"
@@ -1310,6 +1332,10 @@ class Dispatcher:
                 ),
             )
             return True, "queued-go-clarification"
+        if current in (*WATCHED_STATES, "waiting-external"):
+            # #130: a go on a watched ticket is honored; the ticket leaves
+            # the merge queue and ship waits for a new APPROVE.
+            self._leave_merge_queue(ticket, "go")
         answered = self._answered_by(
             ticket, comment, action, ticket.factory.builder_harness
         )
@@ -1689,9 +1715,19 @@ class Dispatcher:
             return True, "capped-ready"
         reported_head = fields["head"]
         reentry: int | None = None
-        if state == "handed-off":
+        rereview = False
+        if state == "updating":
+            settled = self._settle_update(ticket, comment, reported_head)
+            if settled is not None:
+                return settled
+            ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+            rereview = True
+        elif state in ("handed-off", "merge-queue"):
             shipped = self._shipped_approval(ticket)
-            if shipped is not None and _matching_head(reported_head, shipped[0]):
+            approved = self._queue_row(ticket)["approved_head"]
+            if (shipped is not None and _matching_head(reported_head, shipped[0])) or (
+                approved is not None and _matching_head(reported_head, approved)
+            ):
                 return True, "ready-already-shipped"
             reentry = (
                 shipped[1]
@@ -1744,6 +1780,8 @@ class Dispatcher:
                 answered=answered,
             ):
                 return True, "capped-ready"
+            if rereview:
+                self._leave_merge_queue(ticket, "update-rereview")
             self._set_workflow_state(ticket, "review")
             return True, "answered-review" if answered else "queued-review"
         if count >= 3:
@@ -1783,9 +1821,152 @@ class Dispatcher:
                 f"g{generation}"
             ),
         )
-        if reentry is not None:
+        if rereview:
+            self._leave_merge_queue(ticket, "update-ci-red")
+        if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _settle_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reported_head: str,
+    ) -> tuple[bool, str] | None:
+        """The builder's ready after an update-from-main job (#130).
+
+        A trivial update keeps the approval: the ticket goes back to the
+        queue at the new head and the ready is recorded as
+        approval-carried:<old>-><new>. A PR that still conflicts counts as
+        a failed update. None sends the ready on through T2 to review (a
+        non-trivial update) or to a CI fix (red CI), with the fresh ticket
+        in _polled.
+        """
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        row = self._queue_row(ticket)
+        approved = row["approved_head"]
+        back_to = _queue_state(ticket.factory.ship)
+        failed = {
+            "repo": ticket.repo,
+            "ticket_id": ticket.ticket_id,
+            "source_comment_id": comment.id,
+            "timeout_seconds": ticket.job_timeout_minutes * 60,
+            "project_bot": ticket.grok_bot,
+            "back_to": back_to,
+        }
+        if row["update_from_head"] is not None and _matching_head(
+            reported_head, str(row["update_from_head"])
+        ):
+            return True, self._update_failed(**failed, why="the ready names the old head")
+        try:
+            fresh = self._fresh_ticket(ticket)
+        except Exception:
+            return False, "pr-head-unavailable"
+        fresh = fresh or ticket
+        if fresh.merged:
+            return True, "ready-on-merged-pr"
+        head = _matching_head(reported_head, fresh.current_head)
+        if head is None:
+            return True, "stale-ready-head"
+        self._polled[key] = fresh
+        if fresh.mergeable_state == "dirty":
+            return True, self._update_failed(**failed, why="the PR still conflicts")
+        if fresh.mergeable is None:
+            return False, "update-mergeable-pending"
+        ci = fresh.ci.get(head)
+        if ci is None or ci.status == "pending":
+            return False, "ci-pending"
+        if approved is None or ci.status != "success":
+            return None
+        verdict = self._classify_update(fresh, str(approved), head)
+        if not verdict.trivial:
+            if self.log is not None:
+                self.log(
+                    f"update re-review: {ticket.repo}#{ticket.ticket_id} at "
+                    f"{head[:12]}: {verdict.reason}"
+                )
+            return None
+        self._write_state_label(fresh, back_to)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET approved_head = ?, workflow_state = ?, update_failures = 0,
+                    update_from_head = NULL
+                WHERE repo = ? AND ticket_id = ? AND workflow_state = 'updating'
+                """,
+                (head, back_to, *key),
+            )
+            connection.commit()
+        if self.log is not None:
+            self.log(
+                f"approval carried: {ticket.repo}#{ticket.ticket_id} "
+                f"{str(approved)[:12]} -> {head[:12]} ({verdict.reason})"
+            )
+        return True, f"approval-carried:{str(approved)[:12]}->{head[:12]}"
+
+    def _classify_update(
+        self, ticket: TrackedTicket, approved_head: str, head: str
+    ) -> UpdateClass:
+        if self.update_classifier is None:
+            return UpdateClass(False, "no update check is configured")
+        try:
+            return self.update_classifier(
+                ticket.repo, ticket.factory.base_branch, approved_head, head
+            )
+        except Exception as exc:
+            return UpdateClass(False, f"check failed: {type(exc).__name__}")
+
+    def _queue_row(self, ticket: TrackedTicket) -> dict[str, object]:
+        """The ticket's merge-queue columns (#130), all None when unset."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT approved_head, approved_at, approve_comment_id,
+                       update_failures, update_from_head
+                FROM ticket_state WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if row is None:
+            return dict.fromkeys(
+                (
+                    "approved_head",
+                    "approved_at",
+                    "approve_comment_id",
+                    "update_failures",
+                    "update_from_head",
+                )
+            )
+        return dict(row)
+
+    def _leave_merge_queue(self, ticket: TrackedTicket, reason: str) -> None:
+        """Clear the ticket's approval so ship waits for a new APPROVE, and
+        cancel a queued update-from-main job (#130)."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET approved_head = NULL, approved_at = NULL,
+                    approve_comment_id = NULL, update_failures = 0,
+                    update_from_head = NULL
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                key,
+            )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND action = 'update-from-main'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(str(job["id"]), reason, connection=connection)
+            connection.commit()
 
     def _shipped_approval(self, ticket: TrackedTicket) -> tuple[str, int | None] | None:
         """(head, round) of the APPROVE whose ship intent completed last."""
@@ -1815,13 +1996,18 @@ class Dispatcher:
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved
         round counts as completed, so the next review is approved_round + 1.
-        False when the ticket left handed-off meanwhile."""
+        A merge-queue ticket (#130) leaves the queue the same way. False when
+        the ticket left handed-off or merge-queue meanwhile."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             changed = connection.execute(
                 """
-                UPDATE ticket_state SET review_round = ?
-                WHERE repo = ? AND ticket_id = ? AND workflow_state = 'handed-off'
+                UPDATE ticket_state
+                SET review_round = ?, approved_head = NULL, approved_at = NULL,
+                    approve_comment_id = NULL, update_failures = 0,
+                    update_from_head = NULL
+                WHERE repo = ? AND ticket_id = ?
+                  AND workflow_state IN ('handed-off', 'merge-queue')
                 """,
                 (approved_round, ticket.repo.lower(), ticket.ticket_id),
             ).rowcount
@@ -2077,6 +2263,7 @@ class Dispatcher:
                 intent,
             )
         assert intent_status == "pending"
+        watch = ticket.factory.finish_line == "merge"
         if ship == "merge":
             actions = self._review_actions(ticket)
             if actions.is_merged(ticket, current_head):
@@ -2084,6 +2271,8 @@ class Dispatcher:
                 self._write_state_label(ticket, "merged")
                 self._wake_done(ticket, comment, "merged")
                 return True, "merge-confirmed"
+            if watch and self._waits_in_merge_queue(ticket):
+                return self._enter_merge_queue(ticket, comment, current_head)
             self._ship_head(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "merged")
             self._write_state_label(ticket, "merged")
@@ -2097,15 +2286,334 @@ class Dispatcher:
                 self._write_state_label(ticket, "merged")
                 self._wake_done(ticket, comment, "merged", note=MERGED_BEFORE_HANDOFF)
                 return True, "merge-confirmed"
+            if watch:
+                return self._enter_merge_queue(ticket, comment, current_head)
             self._complete_ship_intent(ticket, comment.id, "handed-off")
             self._write_state_label(ticket, "handed-off")
             self._wake_done(ticket, comment, "handed-off", note=note)
             return True, "handed-off"
         approver = ship.removeprefix("after:")
         self._review_actions(ticket).await_approver(ticket, current_head, approver)
-        self._complete_ship_intent(ticket, comment.id, "waiting-external")
+        self._complete_ship_intent(
+            ticket,
+            comment.id,
+            "waiting-external",
+            approval=(current_head, comment) if watch else None,
+        )
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _enter_merge_queue(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+    ) -> tuple[bool, str]:
+        """#130: a covered APPROVE on a finish_line: merge project. The
+        ticket waits in merge-queue, watched every poll, until the queue
+        step merges it or its PR closes. The done wake comes with the merge."""
+        self._complete_ship_intent(
+            ticket, comment.id, "merge-queue", approval=(head, comment)
+        )
+        self._write_state_label(ticket, "merge-queue")
+        if self.log is not None:
+            self.log(
+                f"merge-queue: {ticket.repo}#{ticket.ticket_id} approved at "
+                f"{head[:12]}; the poller merges it"
+            )
+        return True, "merge-queue"
+
+    def _advance_merge_queues(self) -> None:
+        """#130: act on the head of each repo's merge queue, once a poll.
+
+        Only the oldest approval per repo moves: it merges, or gets an
+        update-from-main job when it conflicts. Every other member waits,
+        so two approved PRs never keep breaking each other.
+        """
+        heads: dict[str, sqlite3.Row] = {}
+        for row in self._merge_queue_members():
+            heads.setdefault(str(row["repo"]), row)
+        for row in heads.values():
+            try:
+                self._advance_merge_queue(row)
+            except Exception as exc:
+                self.record_poll_error(
+                    str(row["repo"]),
+                    str(row["ticket_id"]),
+                    f"merge-queue:{type(exc).__name__}",
+                )
+
+    def _advance_merge_queue(self, row: sqlite3.Row) -> None:
+        polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
+        if polled is None or row["workflow_state"] == "updating":
+            return
+        ticket = self._fresh_ticket(polled)
+        if ticket is None:
+            return
+        if ticket.merged:
+            self.record_terminal(ticket.repo, ticket.ticket_id, "merged", ticket)
+            return
+        if ticket.closed:
+            self._abandon_closed(ticket)
+            return
+        if ticket.factory.finish_line != "merge":
+            return
+        if ticket.mergeable_state in ("dirty", "behind"):
+            self._queue_update(ticket, row)
+            return
+        head = ticket.current_head
+        ci = ticket.ci.get(head) if head is not None else None
+        if (
+            head is None
+            or ticket.mergeable is not True
+            or ci is None
+            or ci.status != "success"
+            or not self._approval_covers(ticket, str(row["approved_head"]), head)
+        ):
+            return
+        ship = ticket.factory.ship
+        if ship.startswith("after:"):
+            # The approver's ok still ships it (ReviewShipper).
+            return
+        if ship == "merge" and self._held(ticket, head):
+            return
+        self._merge_queue_head(ticket, row, head)
+
+    def _merge_queue_head(
+        self,
+        ticket: TrackedTicket,
+        row: sqlite3.Row,
+        head: str,
+    ) -> None:
+        approve = self._queue_comment(ticket, row)
+        try:
+            self._ship_head(ticket, head)
+        except ShipError as exc:
+            if exc.retryable or type(exc).__name__ == "HeadMismatchError":
+                # The head moved under the merge, or GitHub is not ready: the
+                # next poll reads the PR again.
+                self.record_poll_error(
+                    ticket.repo, ticket.ticket_id, f"merge-queue-merge:{type(exc).__name__}"
+                )
+                return
+            self._mark_stuck_and_wake(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                source_comment_id=approve.id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                reason="merge-failed",
+                detail=self._project_wake_detail(
+                    ticket,
+                    f"the merge queue could not merge {head[:12]}: {safe_ship_error(exc)}",
+                ),
+            )
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._enter_merged(connection, ticket.repo, ticket.ticket_id, "merge-queue")
+            connection.commit()
+        if self.log is not None:
+            self.log(f"merged: {ticket.repo}#{ticket.ticket_id} at {head[:12]} (merge queue)")
+        try:
+            self._write_state_label(ticket, "merged")
+        except RetryableStateError:
+            self.record_poll_error(ticket.repo, ticket.ticket_id, "merged-label")
+        self._wake_done(ticket, approve, "merged")
+
+    def _queue_comment(self, ticket: TrackedTicket, row: sqlite3.Row) -> Comment:
+        """The APPROVE the queue entry came from, as wake and job source."""
+        comment_id = str(row["approve_comment_id"])
+        return next(
+            (item for item in ticket.comments if item.id == comment_id),
+            Comment(id=comment_id, author="", body="", created_at=0),
+        )
+
+    def _abandon_closed(self, ticket: TrackedTicket) -> None:
+        """A watched PR closed without merging: the watch ends (#130)."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"""
+                UPDATE ticket_state SET workflow_state = 'abandoned'
+                WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
+                """,
+                key,
+            )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(str(job["id"]), "closed", connection=connection)
+            connection.commit()
+        if self.log is not None:
+            self.log(f"abandoned: {ticket.repo}#{ticket.ticket_id} closed unmerged")
+        try:
+            self._write_state_label(ticket, "abandoned")
+        except RetryableStateError:
+            self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
+
+    def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
+        """An update-from-main job for the conflicting queue head (#130)."""
+        head = ticket.current_head
+        if head is None:
+            return
+        scope = _scope(ticket.repo, ticket.ticket_id)
+        generation = int(row["generation"])
+        failures = int(row["update_failures"])
+        source = self._queue_comment(ticket, row)
+        request = JobRequest(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            action="update-from-main",
+            recipient=ticket.factory.builder_harness,
+            source_comment_id=source.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            generation=generation,
+            head=head,
+            detail=self._job_detail(
+                ticket,
+                action="update-from-main",
+                head=head,
+                round_number=int(row["review_round"]) + 1,
+                instruction=(
+                    f"The approved PR is {ticket.mergeable_state} against "
+                    f"{ticket.factory.base_branch}: merge it in."
+                ),
+            ),
+        )
+        self._write_state_label(ticket, "updating")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.queue.enqueue_in_transaction(
+                connection,
+                request,
+                dedupe_key=f"t-update:{scope}:{head}:u{failures}:g{generation}",
+            )
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET workflow_state = 'updating', update_from_head = ?
+                WHERE repo = ? AND ticket_id = ? AND workflow_state = ?
+                """,
+                (head, ticket.repo.lower(), ticket.ticket_id, row["workflow_state"]),
+            )
+            connection.commit()
+        if self.log is not None:
+            self.log(
+                f"updating: {ticket.repo}#{ticket.ticket_id} conflicts with "
+                f"{ticket.factory.base_branch}; update-from-main queued"
+            )
+
+    def _update_failed(
+        self,
+        *,
+        repo: str,
+        ticket_id: str,
+        source_comment_id: str,
+        timeout_seconds: int,
+        project_bot: str | None,
+        back_to: str,
+        why: str,
+    ) -> str:
+        """Count one failed update. The second stops the ticket and asks
+        Max (update-failed-2); the first puts it back in the queue, whose
+        next pass queues one more update job."""
+        key = (repo.lower(), ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT update_failures, update_from_head FROM ticket_state
+                WHERE repo = ? AND ticket_id = ? AND workflow_state = 'updating'
+                """,
+                key,
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return "update-not-pending"
+            failures = int(row["update_failures"]) + 1
+            if failures < UPDATE_FAILURES_TO_STOP:
+                connection.execute(
+                    """
+                    UPDATE ticket_state
+                    SET update_failures = ?, workflow_state = ?
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (failures, back_to, *key),
+                )
+                connection.commit()
+                if self.log is not None:
+                    self.log(f"update failed once: {repo}#{ticket_id}: {why}")
+                return "update-failed-1"
+            connection.execute(
+                "UPDATE ticket_state SET update_failures = ? WHERE repo = ? AND ticket_id = ?",
+                (failures, *key),
+            )
+            self._set_stuck_in_transaction(
+                connection,
+                repo=repo,
+                ticket_id=ticket_id,
+                source_comment_id=source_comment_id,
+                timeout_seconds=timeout_seconds,
+                reason="update-failed-2",
+            )
+            self._ensure_stuck_wake_in_transaction(
+                connection,
+                repo=repo,
+                ticket_id=ticket_id,
+                detail=json.dumps(
+                    {
+                        "project_bot": project_bot,
+                        "detail": (
+                            "update-from-main failed twice on "
+                            f"{str(row['update_from_head'] or '')[:12]} ({why}): ask Max"
+                        ),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+            connection.commit()
+        return "stuck-update-failed-2"
+
+    def _waits_in_merge_queue(self, ticket: TrackedTicket) -> bool:
+        """A ship: merge APPROVE merges at once unless its PR conflicts or
+        an older approval in the same repo is still queued (#130)."""
+        if ticket.mergeable_state == "dirty":
+            return True
+        return any(
+            member[1] != ticket.ticket_id
+            for member in self._merge_queue_members(ticket.repo)
+        )
+
+    def _merge_queue_members(self, repo: str | None = None) -> list[sqlite3.Row]:
+        """Approved tickets still watched, oldest approval first (#130).
+
+        merge-queue and updating tickets, plus waiting-external ones whose
+        APPROVE recorded an approval (ship: after: with finish_line: merge).
+        A stuck ticket leaves the queue, so the next one moves up.
+        """
+        query = """
+            SELECT repo, ticket_id, workflow_state, approved_head, approved_at,
+                   approve_comment_id, update_failures, update_from_head,
+                   generation, review_round
+            FROM ticket_state
+            WHERE workflow_state IN ('merge-queue', 'updating', 'waiting-external')
+              AND approved_head IS NOT NULL
+              AND stuck = 0
+        """
+        args: tuple[str, ...] = ()
+        if repo is not None:
+            query += " AND repo = ?"
+            args = (repo.lower(),)
+        query += " ORDER BY repo, approved_at, ticket_id"
+        with self._connect() as connection:
+            return connection.execute(query, args).fetchall()
 
     def _superseded_by_revise(
         self,
@@ -2509,7 +3017,9 @@ class Dispatcher:
                 SELECT action, recipient, head, generation
                 FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
-                  AND action IN ('plan', 'build', 'review', 'fix', 'clarify')
+                  AND action IN (
+                      'plan', 'build', 'review', 'fix', 'update-from-main', 'clarify'
+                  )
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
@@ -2862,8 +3372,13 @@ class Dispatcher:
         if intent_head != current_head or intent_policy != policy:
             raise RuntimeError("ship intent does not match approval")
         if status == "completed":
-            merged = self._review_context(ticket)[0] == "merged"
-            self._write_state_label(ticket, "merged" if merged else _ship_state(policy))
+            current = self._review_context(ticket)[0]
+            self._write_state_label(
+                ticket,
+                current
+                if current in ("merged", *WATCHED_STATES)
+                else _ship_state(policy),
+            )
             return True, f"ship-already-completed-{policy}"
         if status == "pending":
             if policy == "merge" and self._review_actions(ticket).is_merged(
@@ -2958,6 +3473,8 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment_id: str,
         state: str,
+        *,
+        approval: tuple[str, Comment] | None = None,
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2970,8 +3487,34 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
             self._enter_ship_state(connection, ticket.repo, ticket.ticket_id, state)
+            if approval is not None:
+                self._record_approval(connection, ticket, *approval)
             connection.commit()
         self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
+
+    def _record_approval(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        head: str,
+        comment: Comment,
+    ) -> None:
+        """The covering APPROVE the merge queue orders and gates on (#130)."""
+        connection.execute(
+            f"""
+            UPDATE ticket_state
+            SET approved_head = ?, approved_at = ?, approve_comment_id = ?,
+                update_failures = 0, update_from_head = NULL
+            WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
+            """,
+            (
+                head,
+                comment.created_at,
+                comment.id,
+                ticket.repo.lower(),
+                ticket.ticket_id,
+            ),
+        )
 
     def _mark_ship_intent_failed(
         self,
@@ -3070,7 +3613,8 @@ class Dispatcher:
             if (
                 approve_in_force is None
                 or comment_id != approve_in_force[0].id
-                or self._review_context(ticket)[0] in ("merged", "handed-off", "done")
+                or self._review_context(ticket)[0]
+                in ("merged", "handed-off", "done", *WATCHED_STATES)
                 or self._has_completed_ship_at(ticket, str(row["head"]), policy)
                 or not self._approval_covers(
                     ticket, approve_in_force[1].get("head", ""), str(row["head"])
@@ -3138,6 +3682,11 @@ class Dispatcher:
                 )
                 continue
             state = _ship_state(policy)
+            if state == "handed-off" and ticket.factory.finish_line == "merge":
+                self._complete_redrive(
+                    ticket, comment_id, "merge-queue", approval=(head, comment)
+                )
+                continue
             self._complete_redrive(ticket, comment_id, state)
             self._wake_done(ticket, comment, state, note=note)
 
@@ -3169,6 +3718,8 @@ class Dispatcher:
         ticket: TrackedTicket,
         comment_id: str,
         state: str = "handed-off",
+        *,
+        approval: tuple[str, Comment] | None = None,
     ) -> None:
         """failed -> completed, and hand the APPROVE back to T4.
 
@@ -3188,6 +3739,8 @@ class Dispatcher:
                 (*scope, comment_id),
             )
             self._enter_ship_state(connection, ticket.repo, ticket.ticket_id, state)
+            if approval is not None:
+                self._record_approval(connection, ticket, *approval)
             connection.execute(
                 """
                 DELETE FROM handled_comments
@@ -3506,7 +4059,7 @@ class Dispatcher:
                 """
                 SELECT recipient FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
-                  AND action IN ('plan', 'build', 'fix')
+                  AND action IN ('plan', 'build', 'fix', 'update-from-main')
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -3563,6 +4116,21 @@ class Dispatcher:
             return
         if handoff is not None:
             self._done_from_handoff(job, handoff)
+            return
+        if job.request.action == "update-from-main":
+            # #130: a failed update counts toward update-failed-2 in place of
+            # the generic retry; the queue queues the next attempt.
+            polled = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+            self._update_failed(
+                repo=job.request.repo,
+                ticket_id=job.request.ticket_id,
+                source_comment_id=job.request.source_comment_id,
+                timeout_seconds=job.request.timeout_seconds,
+                project_bot=_detail_project_bot(job.request.detail),
+                back_to=_queue_state(polled.factory.ship if polled else "handoff"),
+                why=f"job {job.id} failed",
+            )
+            self.queue.mark_failure_handled(job.id)
             return
         if job.request.attempt == 1:
             if job.request.action == "review" and self._review_retry_waits(job):
@@ -3631,7 +4199,7 @@ class Dispatcher:
             if job.request.head is None or round_number is None:
                 return None
             kind, bot, role = "verdict", f"{ticket.factory.reviewer_harness}-bot", "reviewer"
-        elif action in ("build", "fix"):
+        elif action in ("build", "fix", "update-from-main"):
             round_number = None
             kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"
         else:
@@ -4011,7 +4579,10 @@ class Dispatcher:
                     ticket_id=str(row["ticket_id"]),
                     tracker=str(row["tracker"]),
                     allow_merged=state == "merged"
-                    or (state == "handed-off" and bool(row["replay"])),
+                    or (
+                        state in ("handed-off", *WATCHED_STATES)
+                        and bool(row["replay"])
+                    ),
                 )
             )
         if cycle is not None:
@@ -4568,6 +5139,11 @@ class Dispatcher:
                     timeout_seconds INTEGER,
                     generation INTEGER NOT NULL DEFAULT 1,
                     cap_extra INTEGER NOT NULL DEFAULT 0,
+                    approved_head TEXT,
+                    approved_at REAL,
+                    approve_comment_id TEXT,
+                    update_failures INTEGER NOT NULL DEFAULT 0,
+                    update_from_head TEXT,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
@@ -4593,6 +5169,11 @@ class Dispatcher:
                 "paused_generation": "INTEGER",
                 "paused_question_id": "TEXT",
                 "cap_extra": "INTEGER NOT NULL DEFAULT 0",
+                "approved_head": "TEXT",
+                "approved_at": "REAL",
+                "approve_comment_id": "TEXT",
+                "update_failures": "INTEGER NOT NULL DEFAULT 0",
+                "update_from_head": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in columns:
@@ -5039,6 +5620,7 @@ ACTED_VERDICT_OUTCOMES = frozenset(
         "merged",
         "merge-confirmed",
         "handed-off",
+        "merge-queue",
         "waiting-external",
         "ship-unconfirmed",
         "ship-failed",
@@ -5266,11 +5848,17 @@ def _ship_state(policy: str) -> str:
     return "waiting-external"
 
 
+def _queue_state(policy: str) -> str:
+    """Where an approved finish_line: merge ticket waits (#130)."""
+    return "waiting-external" if policy.startswith("after:") else "merge-queue"
+
+
 def _state_for_action(action: str) -> str:
     return {
         "plan": "planning",
         "build": "building",
         "review": "review",
         "fix": "fixing",
+        "update-from-main": "updating",
         "clarify": "questions",
     }[action]

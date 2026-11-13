@@ -8,8 +8,9 @@ brief per job kind:
 * implement: a `build` or `plan` job (the builder);
 * fix: a `fix` job (CI red, or a REVISE verdict);
 * review: a `review` job (the cross-family reviewer);
-* merge-only: a `fix` job whose detail says `"kind": "merge-only"` (bring the
-  base branch in by a merge commit, nothing else).
+* merge-only: an `update-from-main` job (#130), or a `fix` job whose detail
+  says `"kind": "merge-only"` (bring the base branch in by a merge commit,
+  nothing else).
 
 Each brief is rendered from the job row alone: repo, PR or ticket, head sha,
 round and cap, risk, the review-rules contract (docs/SPEC.md section 8, the
@@ -43,7 +44,13 @@ from lib.queue import Job
 
 KINDS = ("implement", "fix", "review", "merge-only")
 
-_ACTION_KINDS = {"build": "implement", "plan": "implement", "fix": "fix", "review": "review"}
+_ACTION_KINDS = {
+    "build": "implement",
+    "plan": "implement",
+    "fix": "fix",
+    "review": "review",
+    "update-from-main": "merge-only",
+}
 _BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
 # SPEC section 8: one round for low risk, up to three for high.
 _DEFAULT_CAPS = {"low": 1, "high": 3}
@@ -294,6 +301,12 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "3. Resolve any conflict without changing behavior, then run the tests.",
             "4. Push, then post the ready handoff below with the head you pushed.",
         ]
+        if job.request.action == "update-from-main":
+            body.append(
+                "The PR is approved. Resolve each conflict hunk by taking exactly one side when you "
+                "can, and change nothing else: the poller then carries the approval to your merge "
+                "commit. Any other edit sends the PR back to review."
+            )
         body.extend(_builder_notes(job))
     return "## What to do\n" + "\n".join(body)
 
