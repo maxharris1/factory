@@ -200,8 +200,24 @@ session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 database stays on the box, and the bot runs `orch job done` there); ssh exits
 with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
-`--worktree` is box-only and refused for a remote job (exit 2): the harness
-checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+The command runs under the bot's login shell (`bash -lc 'exec "$@"'`), so the
+bot's own PATH (gh, claude, codex) is loaded, and stdin is forwarded to it.
+
+`--worktree` works the same on every device (#94): the harness runs in the
+job's checkout, `$ORCH_JOB_WORKTREE`. On a remote device `orch job run` first
+checks over the same alias that `git`, `gh` and the command's binary exist
+under `bash -lc`, then clones or fetches the job's repo into
+`<workdir_root>/jobs/<job-id>` at the job's head (on the job's branch when
+that branch's tip is the head, else detached; with no head, the base
+branch), keeping orch's worker records out of `git status`, and copies
+`$ORCH_JOB_BRIEF`, if set, to `<job-id>.brief.md` beside the checkout
+(`ORCH_JOB_BRIEF` then names that copy on the device). An existing checkout
+is reused as is, and a remote checkout is never removed. If the check or the
+checkout fails (a missing tool, an unreachable device, a failed clone),
+nothing starts: the job is requeued and its slot freed in one transaction,
+with no round or attempt charged, a `requeued-unstarted` job event, one log
+line saying why, and exit status 75. Harnesses never build their own remote
+command.
 
 A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
 process's environment, so there the worker is named by its record alone, one
