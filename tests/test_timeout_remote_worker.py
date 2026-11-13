@@ -149,6 +149,11 @@ def test_a_box_job_keeps_the_plain_timeout(tmp_path: Path) -> None:
     poller = Poller(tmp_path, box_slots=3)  # ties with the PC: the box comes first
     job_id = poller.review(timeout=TIMEOUT)
     assert poller.claim().device == "box"
+    # Started (#91: a placed job with no worker never started), its runner
+    # and worker still live: nothing but the timeout acts on it.
+    poller.live.update((11, 22))
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start="r", alive=lambda *_: False)
+    poller.pool.attach_worker(job_id, owner="codex", pid=22, start="w")
     poller.now[0] = CLAIMED_AT + 30
     poller.queue.heartbeat(job_id, owner="codex")
     poller.at(30 + TIMEOUT)
@@ -157,6 +162,9 @@ def test_a_box_job_keeps_the_plain_timeout(tmp_path: Path) -> None:
         ("queued", 2),
     ]
     assert held_events(poller, job_id) == []
+    with poller.queue.connect() as connection:
+        events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
+    assert "dead" not in events
 
 
 def test_mark_timed_out_refuses_a_job_with_a_remote_start(tmp_path: Path) -> None:

@@ -578,8 +578,8 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
 
     def ungated(argv: list[str]) -> list[str]:
         gate = [sys.executable, "-I", "-S", "-c", job_run._GATE]
-        assert argv[:5] == gate and argv[5].isdigit(), argv
-        return argv[6:]
+        assert argv[:5] == gate and argv[5].isdigit() and argv[6].isdigit(), argv
+        return argv[7:]
 
     assert [ungated(argv) for argv in started if argv[0] != "git"] == [command]
     assert code == 0

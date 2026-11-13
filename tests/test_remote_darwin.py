@@ -39,6 +39,7 @@ from tests.test_remote_start import (
     orch,
     remote_setup,
     starts,
+    state,
     use_fake_ssh,
     wait_file,
     wait_gone,
@@ -522,8 +523,10 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
         encoding="utf-8"
     )
     assert record.split()[1:3] == [BOOT, tag]
-    assert len(calls) == 2  # the start, then the check that the worker is gone
+    # the start, the check that the worker is gone, then (exit 3) whether it ran the harness
+    assert len(calls) == 3 and f"= {tag} ]" in calls[2]["script"]
     assert pool.placement(job_id) is None
+    assert state(queue, job_id) == "running"  # it ran: no unstarted requeue
 
 
 def test_darwin_remote_child_left_in_the_group_keeps_the_slot_until_it_ends(

@@ -157,6 +157,10 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   ends the slot is released once the worker is confirmed gone (a remote
   worker still running is sent SIGTERM first); otherwise it stays held for
   the poller to confirm.
+  How COMMAND ended is recorded in job_events while the job still runs
+  (#91). If its harness never started (no worker, or it was never
+  exec'd), the job is requeued, no round charged, in the step that frees
+  the slot.
   --worktree runs COMMAND in the job's checkout on the device it is placed
   on, at the job's head or the default branch, exported as
   ORCH_JOB_WORKTREE. On the box that is a git worktree of one shared clone
@@ -1104,8 +1108,9 @@ def _job_run_command(argv: list[str]) -> int:
     if token is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
         environment[job_token.PROOF_ENV] = token
+    code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
-        return job_run.run(
+        code = job_run.run(
             placed.argv(command, remote_env),
             beat=beat,
             interval=interval,
@@ -1114,7 +1119,9 @@ def _job_run_command(argv: list[str]) -> int:
             setup=setup,
             teardown=teardown,
             started=placed.started,
+            execed=placed.execed,
         )
+        return code
     except placed_run.CheckoutError as exc:
         reason = " ".join(str(exc).split())
         try:
@@ -1138,15 +1145,23 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
         # only a box run is failed here.
-        if placed.autostart and not placed.remote:
-            _fail_unfinished(queue, args.job_id, owner, log)
+        settle = (
+            (lambda: _fail_unfinished(queue, args.job_id, owner, log))
+            if placed.autostart and not placed.remote
+            else None
+        )
         try:
-            placed.finish()
+            # #91: requeues a harness that never started; otherwise settles
+            # the job while its slot is held (#99 round 2).
+            placed.finish(code, settle)
         except (QueueError, sqlite3.Error, OSError) as exc:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
+            if settle is not None:
+                settle()  # a settled or requeued job is no longer running: left alone
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
