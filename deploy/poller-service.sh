@@ -34,7 +34,9 @@
 #
 # State loss (#66): before a start, a missing ${ORCH_DB:-<state>/orch.db} is
 # restored from the backup `orch poll` takes every cycle (`orch restore-db`),
-# logging RESTORED. With no backup it is created empty (`orch init-db`) with a
+# logging RESTORED. ORCH_DB and ORCH_DB_BACKUP are read with webhook.env and
+# orch-poll.env loaded, as run-poller.sh loads them, so recovery uses the
+# poller's own paths. With no backup it is created empty (`orch init-db`) with a
 # WARNING; any other restore failure starts nothing.
 set -euo pipefail
 
@@ -46,7 +48,6 @@ PIDFILE="${STATE}/poller.pid"
 LOG="${ORCH_POLL_LOG:-${STATE}/poller.log}"
 SERVICE_LOG="${STATE}/poller-service.log"
 SERVICE_LOCK="${STATE}/poller-service.lock"
-DB="${ORCH_DB:-${STATE}/orch.db}"
 STOPPED="${STATE}/poller.stopped"
 AUTOSTART="${CONFIG}/poller-autostart"
 RUNNER="${HERE}/run-poller.sh"
@@ -118,16 +119,22 @@ loud() {
     say "$@" | tee -a "$LOG" >&2
 }
 
-# #66: never start the poller on a silently empty database.
-ensure_db() {
-    local status=0
-    mkdir -p "$STATE" "$(dirname "$DB")"
-    [[ -e "$DB" ]] && return 0
-    orch restore-db --db "$DB" >&2 || status=$?
+# #66: never start the poller on a silently empty database. A subshell, so
+# the poller's environment stays out of this script.
+ensure_db() (
+    local db status=0
+    set -a
+    . "${CONFIG}/webhook.env"
+    . "${CONFIG}/orch-poll.env"
+    set +a
+    db="${ORCH_DB:-${STATE}/orch.db}"
+    mkdir -p "$STATE" "$(dirname "$db")"
+    [[ -e "$db" ]] && return 0
+    orch restore-db --db "$db" >&2 || status=$?
     case "$status" in
         0) loud "RESTORED orch.db from backup" ;;
         3)
-            orch init-db --db "$DB" >&2 || return 1
+            orch init-db --db "$db" >&2 || return 1
             loud "WARNING orch.db was missing and no backup exists; created an empty database (dedupe now relies on thread markers)"
             ;;
         *)
@@ -135,7 +142,7 @@ ensure_db() {
             return 1
             ;;
     esac
-}
+)
 
 # Start the poller unless it is running. Only `start` clears a stop.
 launch() {

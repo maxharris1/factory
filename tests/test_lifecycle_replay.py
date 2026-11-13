@@ -60,7 +60,7 @@ class Thread:
         head = heads[-1] if heads else self.base.current_head
         return replace(self.base, comments=visible, current_head=head, ci={head: CIResult("success")})
 
-    def github_candidates(self, label_prefix: str):
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()):
         return (self.snapshot(),) if self.base.factory.tickets == "github" else ()
 
     def linear_candidates(self, query, *, exclude, reserve):

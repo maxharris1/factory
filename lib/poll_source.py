@@ -383,7 +383,15 @@ class LivePollSource:
                 f"poll cycle recorded {self._cycle_errors} source error(s)"
             )
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(
+        self,
+        label_prefix: str,
+        *,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+    ) -> tuple[TrackedTicket, ...]:
+        """Open PRs that may start tracking; exclude, (repo lowercased, PR
+        number) pairs already tracked, are skipped unread (#108: a tracked
+        PR is read by tracked_tickets on its own cadence)."""
         tickets: list[TrackedTicket] = []
         for project in self.config.projects:
             if project.linear_project_id is not None:
@@ -426,6 +434,8 @@ class LivePollSource:
                         number = str(
                             _positive_int(issue.get("number"), "issue number")
                         )
+                        if (project.repo.lower(), number) in exclude:
+                            continue
                         comments: tuple[Comment, ...] | None = None
                         if not labelled:
                             comments = self.github.list_comments(

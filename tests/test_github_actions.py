@@ -917,7 +917,7 @@ class GitHubFixtureSource:
             risk="high",
         )
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         del label_prefix
         return (self._ticket(),)
 

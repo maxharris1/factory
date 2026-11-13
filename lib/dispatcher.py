@@ -154,7 +154,12 @@ class TicketRef:
 
 
 class PollSource(Protocol):
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]: ...
+    def github_candidates(
+        self,
+        label_prefix: str,
+        *,
+        exclude: frozenset[tuple[str, str]],
+    ) -> tuple[TrackedTicket, ...]: ...
 
     def linear_candidates(
         self,
@@ -413,6 +418,8 @@ class Dispatcher:
         # #108: the poll cycle count and interval, for the stopped-state cadence.
         self._cycle = 0
         self._poll_seconds = POLL_SECONDS
+        # Stopped tickets whose turn came and that no read has reached yet.
+        self._stopped_due: set[tuple[str, str]] = set()
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -430,7 +437,9 @@ class Dispatcher:
         self._cycle += 1
         self._feed(source)
         try:
-            github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
+            github = source.github_candidates(
+                GITHUB_STATE_LABEL_PREFIX, exclude=self._tracked_github_ids()
+            )
         except Exception as exc:
             self.record_poll_error("github", "-", type(exc).__name__)
             github = ()
@@ -454,6 +463,9 @@ class Dispatcher:
         except Exception as exc:
             self.record_poll_error("tracked", "-", type(exc).__name__)
             tracked = ()
+        self._stopped_due.difference_update(
+            (ticket.repo.lower(), ticket.ticket_id) for ticket in tracked
+        )
         for ticket in tracked:
             try:
                 self.process(ticket)
@@ -491,6 +503,7 @@ class Dispatcher:
                 self._discover((ticket,), tracker=ref.tracker)
 
     def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+        self._stopped_due.discard((repo.lower(), ticket_id))
         with self._connect() as connection:
             connection.execute(
                 """
@@ -614,6 +627,7 @@ class Dispatcher:
         try:
             self._redrive_handoffs(ticket)
             self._process_comments(ticket, comments)
+            self._cancel_answered_jobs(ticket)
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
@@ -1297,11 +1311,7 @@ class Dispatcher:
             )
             return True, "queued-go-clarification"
         answered = self._answered_by(
-            ticket,
-            comment,
-            ("ready", "plan"),
-            f"{ticket.factory.builder_harness}-bot",
-            "builder",
+            ticket, comment, action, ticket.factory.builder_harness
         )
         self._enqueue_or_flag(
             ticket,
@@ -1561,7 +1571,7 @@ class Dispatcher:
                     ),
                 )
                 answered = self._answered_by(
-                    ticket, comment, ("ready",), f"{builder_harness}-bot", "builder"
+                    ticket, comment, "build", builder_harness
                 )
                 if answered is not None:
                     self._cancel_answered(connection, job, request, answered)
@@ -1721,10 +1731,10 @@ class Dispatcher:
             answered = self._answered_by(
                 ticket,
                 comment,
-                ("verdict",),
-                f"{ticket.factory.reviewer_harness}-bot",
-                "reviewer",
+                "review",
+                ticket.factory.reviewer_harness,
                 head=head,
+                round_number=self._review_context(ticket)[1] + 1,
             )
             if not self._queue_review(
                 ticket,
@@ -1915,9 +1925,9 @@ class Dispatcher:
                 answered = self._answered_by(
                     ticket,
                     comment,
-                    ("ready",),
-                    f"{ticket.factory.builder_harness}-bot",
-                    "builder",
+                    "fix",
+                    ticket.factory.builder_harness,
+                    head=ticket.current_head,
                 )
                 if answered is not None:
                     self._cancel_answered(connection, job, request, answered)
@@ -2630,20 +2640,25 @@ class Dispatcher:
         self,
         ticket: TrackedTicket,
         comment: Comment,
-        kinds: tuple[str, ...],
-        bot: str,
-        role: str,
+        action: str,
+        recipient: str,
+        *,
         head: str | None = None,
+        round_number: int | None = None,
     ) -> Comment | None:
         """The first later trusted orch:v1 comment that already answered the
-        step comment asks for, or None (#108, #66).
+        action job comment queues for recipient, or None (#108, #66).
 
-        It must be one of kinds, from a login trusted for bot and role, name
-        head when head is given, and not have been handled as rejected. With
-        an intact database no such answer exists yet when a comment is
-        handled; it is found on a replay (a lost or restored database) or
-        when both comments landed while the poller was down.
+        Only the answer that job's step accepts counts: a plan for a plan, a
+        ready for a build or fix (at a new head when the job has one, as
+        _posted_handoff reads it), and for a review a verdict naming head at
+        round_number. It must come from a login trusted for recipient's bot
+        and role, and not have been handled as rejected. With an intact
+        database no such answer exists yet when a comment is handled; it is
+        found on a replay (a lost or restored database) or when both
+        comments landed while the poller was down.
         """
+        kind, role = _ANSWERS[action]
         after = _comment_order(comment)
         for item in sorted(ticket.comments, key=_comment_order):
             if _comment_order(item) <= after:
@@ -2652,17 +2667,73 @@ class Dispatcher:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
                 continue
-            if fields["kind"] not in kinds:
+            if fields["kind"] != kind:
                 continue
-            if not self._trusted(ticket, item, fields, bot, role=role):
+            if not self._trusted(ticket, item, fields, f"{recipient}-bot", role=role):
                 continue
-            if head is not None and _matching_head(fields.get("head", ""), head) is None:
+            reported = fields.get("head", "")
+            if action == "review":
+                if (
+                    _matching_head(reported, head) is None
+                    or _round_number(fields.get("round")) != round_number
+                ):
+                    continue
+            elif head is not None and _matching_head(reported, head) is not None:
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
                 continue
             return item
         return None
+
+    def _cancel_answered_jobs(self, ticket: TrackedTicket) -> None:
+        """Cancel this ticket's queued steps that a later trusted comment
+        already answered (#108).
+
+        Catches a job queued before its answer was read: one restored from
+        a backup taken before the builder or reviewer posted, whose
+        triggering comment is already handled and so is never replayed.
+        """
+        ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+        sources = {comment.id: comment for comment in ticket.comments}
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                  AND action IN ({", ".join("?" for _ in _ANSWERS)})
+                ORDER BY created_at, id
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, *_ANSWERS),
+            ).fetchall()
+        answered: list[tuple[Job, Comment]] = []
+        for row in rows:
+            job = _job(row)
+            source = sources.get(job.request.source_comment_id)
+            if source is None:
+                continue
+            answer = self._answered_by(
+                ticket,
+                source,
+                job.request.action,
+                job.request.recipient,
+                head=job.request.head,
+                round_number=_detail_round_number(job.request.detail),
+            )
+            if answer is not None:
+                answered.append((job, answer))
+        if not answered:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for job, answer in answered:
+                current = connection.execute(
+                    "SELECT state FROM jobs WHERE id = ?", (job.id,)
+                ).fetchone()
+                if current is not None and current["state"] == "queued":
+                    self._cancel_answered(connection, job, job.request, answer)
+            connection.commit()
 
     def _cancel_answered(
         self,
@@ -3464,6 +3535,16 @@ class Dispatcher:
         if job.request.action == "stuck":
             self.queue.mark_failure_handled(job.id)
             return
+        if job.request.recipient != "grok" and self._finished_identity(
+            job.request.repo, job.request.ticket_id
+        ):
+            # #108: a running job left alone at the merge fails into a
+            # finished ticket: no retry, no stuck.
+            self._record_job_event_once(
+                job, "after-merge", "the ticket is finished; no T6 retry"
+            )
+            self.queue.mark_failure_handled(job.id)
+            return
         if self._is_stuck_identity(job.request.repo, job.request.ticket_id):
             self._ensure_stuck_wake(job.request.repo, job.request.ticket_id)
             self.queue.mark_failure_handled(job.id)
@@ -3763,6 +3844,8 @@ class Dispatcher:
                 stuck_reason = excluded.stuck_reason,
                 stuck_source_comment_id = excluded.stuck_source_comment_id,
                 timeout_seconds = excluded.timeout_seconds
+            WHERE ticket_state.workflow_state IS NULL
+               OR ticket_state.workflow_state NOT IN ('merged', 'done')
             """,
             (
                 repo.lower(),
@@ -3863,9 +3946,11 @@ class Dispatcher:
         its merge is seen and a trusted ready may re-enter review.
 
         With cycle, a ticket in a stopped state (handed-off, capped, blocked,
-        refused, or stuck) with nothing to replay is read only on its turn:
-        once every STOPPED_POLL_SECONDS, spread across cycles by a hash of
-        its identity. Every other ticket is read every cycle.
+        refused, or stuck) with nothing to replay is offered only once its
+        turn came: once every STOPPED_POLL_SECONDS, spread across cycles by a
+        hash of its identity. It stays offered until a read reaches it (a
+        ticket or a poll error), so a cycle that reads no Linear, or defers
+        the read, only delays it. Every other ticket is offered every cycle.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -3908,17 +3993,18 @@ class Dispatcher:
             ).fetchall()
         every = max(1, STOPPED_POLL_SECONDS // max(1, self._poll_seconds))
         refs: list[TicketRef] = []
+        stopped_keys: set[tuple[str, str]] = set()
         for row in rows:
             state = row["workflow_state"]
             catching_up = bool(row["replay"]) or bool(row["unsettled"])
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
-            if (
-                cycle is not None
-                and stopped
-                and not catching_up
-                and (cycle + _spread(row["repo"], row["ticket_id"])) % every != 0
-            ):
-                continue
+            if cycle is not None and stopped and not catching_up:
+                key = (str(row["repo"]).lower(), str(row["ticket_id"]))
+                stopped_keys.add(key)
+                if (cycle + _spread(row["repo"], row["ticket_id"])) % every == 0:
+                    self._stopped_due.add(key)
+                if key not in self._stopped_due:
+                    continue
             refs.append(
                 TicketRef(
                     repo=str(row["repo"]),
@@ -3928,6 +4014,8 @@ class Dispatcher:
                     or (state == "handed-off" and bool(row["replay"])),
                 )
             )
+        if cycle is not None:
+            self._stopped_due &= stopped_keys
         return tuple(refs)
 
     def active_job_tickets(self) -> frozenset[tuple[str, str]]:
@@ -3959,6 +4047,16 @@ class Dispatcher:
             ref.ticket_id for ref in self._tracked_refs() if ref.tracker == "linear"
         }
         return self._tracked_linear_ids() - polled
+
+    def _tracked_github_ids(self) -> frozenset[tuple[str, str]]:
+        """(repo, PR number) of every tracked GitHub ticket, repo lowercased."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT repo, ticket_id FROM tracked_tickets WHERE tracker = 'github'"
+            ).fetchall()
+        return frozenset(
+            (str(row["repo"]).lower(), str(row["ticket_id"])) for row in rows
+        )
 
     def _tracked_linear_ids(self) -> frozenset[str]:
         with self._connect() as connection:
@@ -4214,6 +4312,14 @@ class Dispatcher:
 
     def _is_stuck(self, ticket: TrackedTicket) -> bool:
         return self._is_stuck_identity(ticket.repo, ticket.ticket_id)
+
+    def _finished_identity(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return row is not None and row["workflow_state"] in FINISHED_STATES
 
     def _is_stuck_identity(self, repo: str, ticket_id: str) -> bool:
         with self._connect() as connection:
@@ -4957,6 +5063,14 @@ def _round_number(value: object) -> int | None:
 
 # _posted_handoff: a ready whose head T2 could not yet check against the PR.
 _HANDOFF_UNREAD = object()
+
+# The handoff kind and role that answers each harness step (#108).
+_ANSWERS = {
+    "plan": ("plan", "builder"),
+    "build": ("ready", "builder"),
+    "fix": ("ready", "builder"),
+    "review": ("verdict", "reviewer"),
+}
 
 # Handled outcomes that rejected a verdict: such a comment is no job's handoff.
 _REJECTED_OUTCOMES = (

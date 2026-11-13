@@ -158,7 +158,8 @@ args = sys.argv[1:]
 if args[:1] in (["restore-db"], ["init-db"]):
     # #66: the service's database step. FAKE_RESTORE is restore-db's exit.
     with open(os.environ.get("FAKE_ORCH_CALLS", os.devnull), "a") as calls:
-        calls.write(" ".join(args) + "\\n")
+        backup = os.environ.get("ORCH_DB_BACKUP")
+        calls.write(" ".join(args) + (f" backup={backup}" if backup else "") + "\\n")
     database = Path(args[args.index("--db") + 1])
     code = int(os.environ.get("FAKE_RESTORE", "3")) if args[0] == "restore-db" else 0
     if code == 0:
@@ -540,6 +541,25 @@ def test_ensure_inits_and_warns_with_no_backup(home: Path) -> None:
     ]
     assert database.exists()
     assert _pidfile(home).exists()
+
+
+def test_recovery_uses_the_paths_the_poller_loads(home: Path) -> None:
+    """run-poller.sh loads orch-poll.env before `orch poll`; recovery must
+    resolve ORCH_DB and ORCH_DB_BACKUP from it too, or it prepares another
+    database from another backup than the poller then opens."""
+    database = home / "custom-state" / "orch.db"
+    saved = home / "custom-backup" / "orch.db"
+    (home / ".config/factory/orch-poll.env").write_text(
+        f'ORCH_DB="{database}"\nORCH_DB_BACKUP="{saved}"\n', encoding="utf-8"
+    )
+    calls = home / "calls.txt"
+
+    result = _service(home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls))
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text() == f"restore-db --db {database} backup={saved}\n"
+    assert database.read_bytes() == b"restored"
+    assert not _lost_db(home).exists()
 
 
 def test_a_failed_restore_starts_no_poller(home: Path) -> None:

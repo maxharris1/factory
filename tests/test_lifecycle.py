@@ -10,13 +10,18 @@ Dispatcher over a temp database with test_dispatcher's fakes.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from lib.dispatcher import CIResult, Comment, TrackedTicket
 from lib.queue import Job, JobRequest
+from lib.state_backup import backup, restore
 from tests.test_dispatcher import (
     GO,
+    PLAN,
     READY,
     VERDICT,
     FakeGrokDelivery,
@@ -288,7 +293,7 @@ class MergingSource:
         self.merged: set[str] = set()
         self.refs: list[tuple] = []
 
-    def github_candidates(self, label_prefix: str) -> tuple:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple:
         return ()
 
     def linear_candidates(self, query, *, exclude, reserve) -> tuple:
@@ -349,7 +354,13 @@ class Config:
 
 
 class RefSource(MergingSource):
+    """Reads every ref it is offered, as the live source does on GitHub."""
+
     config = Config()
+
+    def tracked_tickets(self, refs) -> tuple[TrackedTicket, ...]:
+        self.refs.append(tuple(ref.ticket_id for ref in refs))
+        return tuple(ticket(ticket_id=ref.ticket_id) for ref in refs)
 
 
 def _reads(tmp_path: Path, states: dict[str, tuple[str | None, int]], cycles: int):
@@ -662,3 +673,127 @@ def test_fresh_db_replay_queues_no_build_for_a_finished_ticket(tmp_path: Path) -
     assert _harness_jobs(flow.queue) == [("build", "cancelled"), ("review", "cancelled")]
     assert flow.actions.handoffs == [HEADS[1]]
     assert flow.state()["workflow_state"] == "handed-off"
+
+
+def test_a_verdict_for_another_round_does_not_answer_the_review(tmp_path: Path) -> None:
+    """A fresh database replays a thread whose head moved: ready H1 is stale,
+    so the review queued for ready H2 is round 1. APPROVE 2/3 is not that
+    review's answer (T4 calls it stale), so it must not cancel it."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("ready-1", READY.format(head=HEADS[1]), "claude-login")
+    flow.add(
+        "revise-1",
+        VERDICT.format(round="1/3", head=HEADS[1], verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+    flow.add("ready-2", READY.format(head=HEADS[2]), "claude-login")
+    flow.add("approve-2", APPROVE.format(round="2/3", head=HEADS[2]), "codex-login")
+    flow.head = HEADS[2]
+
+    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "ready-2") == "queued-review"
+    review = flow.queue.claim("codex")
+    assert review is not None
+    assert (review.request.head, round_of(review)) == (HEADS[2], "1/3")
+
+
+@pytest.mark.parametrize(
+    ("state", "answer", "action"),
+    [
+        ("planning", READY.format(head=HEADS[0]), "plan"),
+        ("building", PLAN.format(round="1", ac="met"), "build"),
+    ],
+    ids=["ready-for-plan", "plan-for-build"],
+)
+def test_an_answer_of_another_kind_does_not_answer_the_step(
+    tmp_path: Path, state: str, answer: str, action: str
+) -> None:
+    """A ready never answers a plan job, nor a plan a build job: each is
+    rejected when handled, so the step it would cancel must stay queued."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state=state), "grok-login")
+    flow.add("answer-1", answer, "claude-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "go-1") == f"queued-{action}"
+    assert outcome(flow.queue, "answer-1").startswith("rejected-")
+    assert _harness_jobs(flow.queue) == [(action, "queued")]
+
+
+def test_a_restored_job_answered_after_the_backup_is_cancelled(tmp_path: Path) -> None:
+    """The cycle backup holds the build queued. The builder then finished it
+    and posted its ready, and the state was lost before the next backup.
+    The restored go is already handled and never replayed, so the ready
+    alone must retire the build."""
+    state = tmp_path / "state"
+    dispatcher, queue = setup(state)
+    go = comment("go-1", GO.format(state="building"), author="grok-login", created_at=1)
+    ready = comment(
+        "ready-1", READY.format(head=HEADS[0]), author="claude-login", created_at=101
+    )
+    dispatcher.process(ticket(go, head=HEADS[0]))
+    saved = tmp_path / "backup" / "orch.db"
+    backup(queue.path, saved)
+    build = queue.claim("claude")
+    assert build is not None
+    queue.finish(build.id, owner="claude", handoff_comment_id=ready.id)
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+
+    dispatcher, queue = setup(state)
+    dispatcher.process(ticket(go, ready, head=HEADS[0], ci={HEADS[0]: CIResult("success")}))
+
+    assert _harness_jobs(queue) == [("build", "cancelled"), ("review", "queued")]
+    assert queue.claim("claude") is None
+
+
+@pytest.mark.parametrize("attempt", [1, 2])
+def test_a_job_failing_after_the_merge_is_neither_retried_nor_stuck(
+    tmp_path: Path, attempt: int
+) -> None:
+    """The merge leaves a running job alone. When it then fails, T6 queues
+    no retry (attempt 1) and marks no stuck with no stuck wake (attempt 2)."""
+    flow = Flow(tmp_path)
+    assert flow.go() == "queued-build"
+    if attempt == 2:
+        first = flow.queue.claim("claude")
+        assert first is not None
+        flow.queue.finish(first.id, owner="claude", handoff_comment_id=None)
+        flow.dispatcher.reconcile_jobs()
+    running = flow.queue.claim("claude")
+    assert running is not None and running.request.attempt == attempt
+    flow.dispatcher.record_terminal(REPO, TICKET, "merged")
+
+    flow.queue.finish(running.id, owner="claude", handoff_comment_id=None)
+    flow.dispatcher.reconcile_jobs()
+
+    assert [(row["state"], row["attempt"]) for row in jobs(flow.queue, "build")][-1] == (
+        "failed",
+        attempt,
+    )
+    assert flow.queue.claim("claude") is None
+    assert (flow.state()["workflow_state"], flow.state()["stuck"]) == ("merged", 0)
+    assert wakes(flow.queue, "stuck") == 0
+
+
+def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
+    """Every stuck path (CI red, device offline, declined, job failed) goes
+    through one write; on a merged or done ticket it writes nothing."""
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.record_terminal(REPO, TICKET, "merged")
+
+    dispatcher._mark_stuck_and_wake(
+        repo=REPO,
+        ticket_id=TICKET,
+        source_comment_id="c-1",
+        timeout_seconds=3600,
+        reason="device-offline",
+        detail="{}",
+    )
+
+    assert state_row(queue)["stuck"] == 0
+    assert wakes(queue, "stuck") == 0

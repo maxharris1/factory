@@ -228,7 +228,7 @@ class FakeSource:
         self.linear_query: str | None = None
         self.last_refs: tuple[TicketRef, ...] = ()
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         self.github_label = label_prefix
         return self.github
 
