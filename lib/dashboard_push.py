@@ -328,10 +328,13 @@ def poll_pusher_for(
     wall: Callable[[], float] = time.time,
     fingerprint: "Fingerprint | None" = None,
     log: Callable[[str], None],
+    poll_seconds: int | None = None,
 ) -> PollPusher | None:
     """The poll loop's push hook, or None when dashboard.push is not set.
 
     With `live: true` it is a `LivePusher`; `orch poll` starts its watcher.
+    `poll_seconds` is the poller's own orch.yml poll_seconds (30 or 60); each
+    push passes it as `--poll-seconds` so poll health uses that interval.
     """
     if config.transport == "none":
         return None
@@ -346,6 +349,8 @@ def poll_pusher_for(
     ]
     if orch is not None:
         argv += ["--orch", str(orch)]
+    if poll_seconds is not None:
+        argv += ["--poll-seconds", str(poll_seconds)]
     env = {name: environ[name] for name in CHILD_ENV if name in environ}
     env["PYTHONUNBUFFERED"] = "1"
     every = (config.every_minutes or 0) * 60

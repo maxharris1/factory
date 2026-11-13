@@ -50,6 +50,7 @@ if [ ! -f "$STATECHART" ]; then
 fi
 
 section41="abandoned
+awaiting-ok
 blocked
 building
 capped

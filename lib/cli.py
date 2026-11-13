@@ -505,6 +505,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
         orch=orch_path,
         environ=os.environ,
         log=lambda line: print(line, file=sys.stderr, flush=True),
+        poll_seconds=config.poll_seconds,
     )
 
 
