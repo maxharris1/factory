@@ -81,7 +81,7 @@ Note: Refused, Stuck, Blocked, Capped and Abandoned are terminal unless Max acts
 
 ## 4. Dispatcher transition table
 
-`orch` polls each configured repo every 60 s (`env -u GH_TOKEN gh`, plus Linear for Aut0). It reads only tickets/PRs it already tracks and comments that carry an `orch:` header. Every row is a plain `if`. It's idempotent: each handled comment ID is recorded, so a restart never acts twice.
+`orch` polls each configured repo every `poll_seconds` (30 or 60 s, 30 as shipped; `env -u GH_TOKEN gh`), plus Linear for Aut0 on its own 60 s cadence and budget. The interval is the sleep after each cycle, so a cycle's own work adds to it: 30 s is the poll interval, not a 30 s pickup promise. It reads only tickets/PRs it already tracks and comments that carry an `orch:` header. Every row is a plain `if`. It's idempotent: each handled comment ID is recorded, so a restart never acts twice.
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|

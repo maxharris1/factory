@@ -77,7 +77,9 @@ RECENT_VERDICTS = 12
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
 LINEAR_BUDGET_COMPLEXITY_PER_HOUR = 1_500_000
-# Poll health from the age of the last finished cycle (orch poll, POLL_SECONDS).
+# Poll health from the age of the last finished cycle (orch poll). Sized for
+# POLL_SECONDS (60), the slowest allowed poll_seconds, so a 30-second poller
+# is never shown late early.
 HEALTH_OK_SECONDS = 2 * POLL_SECONDS + 30
 HEALTH_LATE_SECONDS = 5 * POLL_SECONDS
 # A handled orch:v1 comment's outcome as the dispatcher writes it.

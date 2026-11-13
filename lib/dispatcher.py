@@ -23,10 +23,9 @@ from lib.job_state import (
     derive,
     read_placements,
 )
-from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
-POLL_SECONDS = 60
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
 GROK_WAKE_REASONS = (
@@ -3512,10 +3511,16 @@ class PollLoop:
         source: PollSource,
         *,
         sleep: Callable[[float], None] = time.sleep,
+        interval_seconds: float | None = None,
     ):
         self.dispatcher = dispatcher
         self.source = source
         self.sleep = sleep
+        if interval_seconds is None:
+            # orch.yml poll_seconds (30 or 60) when the source carries it.
+            config = getattr(source, "config", None)
+            interval_seconds = getattr(config, "poll_seconds", POLL_SECONDS)
+        self.interval_seconds = interval_seconds
 
     def run(
         self,
@@ -3525,6 +3530,10 @@ class PollLoop:
         after_poll: Callable[[], None] | None = None,
     ) -> None:
         """Poll forever (or `max_polls` times), sleeping between cycles.
+
+        The sleep (`interval_seconds`, orch.yml poll_seconds) starts after a
+        cycle finishes, so cycle start to cycle start is the cycle's own work
+        plus the interval.
 
         `after_poll` (the dashboard push, when configured) runs after every
         cycle, including one whose error went to `on_error`. It must not block; if it raises, one line
@@ -3547,7 +3556,7 @@ class PollLoop:
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return
-            self.sleep(POLL_SECONDS)
+            self.sleep(self.interval_seconds)
 
 
 def _after_poll(hook: Callable[[], None]) -> None:

@@ -39,6 +39,7 @@ Shorter companion: [docs/PLAN.md](PLAN.md). Aut0 cleanup detail: [docs/AUT0-CLEA
 | Nov 12 | F2-02 design: each remote device in `machines.yml` names an `ssh_alias` containing `{bot}` (the PC's is `pc-wsl-{bot}`, so `pc-wsl-claude-bot`, `pc-wsl-codex-bot` and `pc-wsl-cursor-bot`), the box's own SSH config holds the host and key, and `orch` always passes `-l <bot user>` and never a key path. `orch wait` claims through the device pool; `orch job run` starts a remote job over that alias in `<workdir_root>/jobs/<job-id>` (`--worktree` stays box-only). A slot is released only once the worker is confirmed gone: by `orch job run` when its command ends (a remote worker still running is sent SIGTERM and checked again), or by the poller for a finished job whose runner died. The poller checks each remote device holding a slot over SSH once per poll; a device that fails every check for 60 minutes marks each job still running on it `stuck` at once (no T6 retry), wakes Grok Bot once through the ticket's stuck flag, and keeps the slot held. The PC and Mac stay `enabled: false` until Max turns them on. | Factory decided (technical) |
 | Nov 12, 4:03 PM | Job states (issue #75). A running job is `claimed` (it holds a device slot, no `orch job run` recorded itself, and nothing has heartbeated since the claim), `running` (fresh heartbeat), `stale` (no heartbeat for more than `job_states.stale_minutes`, default 2) or `dead` (its recorded runner is gone and its worker is confirmed gone, by pid on the box or by `check_worker` over SSH), derived in one function, `lib/job_state.py`, used by the poller, the dashboard and `orch status`. `orch job run` heartbeats every 30 seconds by default (or a third of the timeout if shorter). The poller requeues a job claimed for more than `job_states.release_claimed_minutes` (default 5) as the same job row, so no review round or T6 attempt is charged, frees its slot and logs a `job_events` row; a dead job takes the existing failure path (failed, then T6). The dashboard shows the state on each slot, the job's own round (`detail.round`), and counts stale and dead jobs in stuck / overdue and needs attention. | Max approved the scope ("yes lets address these fixes"); details Factory decided (technical) |
 | Nov 12 | Job states follow-up (PR #77). A job the poller requeues after an unstarted claim restarts its queue-wait clock at the release (`last_activity_at`; `created_at` is kept for its place in line), so the job timeout and T6 never act on time it spent queued before the claim; a failed Grok delivery requeue keeps its original clock. `orch job run` heartbeats every 15 seconds by default (or a third of the timeout if shorter); an `--interval` override is capped at 30 seconds (half the smallest `job_states.stale_minutes`) and at a third of the timeout. | Factory decided (technical) |
+| Nov 12 | GitHub polling may run every 30 seconds. `poll_seconds` is 30 or 60 (shipped 30; anything else is refused) and is the sleep after each cycle, so a cycle's elapsed time includes its own work and 30 seconds is the poll interval, not a 30-second pickup promise. Linear keeps its own 60-second cadence (`LINEAR_POLL_SECONDS`): its discovery search, dirty-row reads and tracked reads run only on every second 30-second cycle, under the same per-window budget as before (20 requests and 25,000 complexity per 60-second window), and the `linear_webhook` reconcile fallback keeps its `reconcile_seconds`. A 30-second poller makes no more Linear calls per hour than a 60-second one. | Max asked (relayed by Factory); the cadence split is the builder's design, in review |
 
 Low-risk changes (docs, cleanup, monitoring) get one Codex review round, with leftover minors batched into a follow-up ticket. High-risk changes (ship, merge, sign-off, credential and isolation code) keep up to three rounds. Every extra round needs Max's own words. (Max, earlier today.)
 
@@ -89,7 +90,7 @@ The 125-item old factory plan, its state-chart formalization of that plan, and i
 | Orchestrator | Grok Bot, skill `orchestrate-project` (this Factory bot) | Intake, clarifying questions, routing, technical decisions, stop reports, posting `orch:go`, relaying product questions. | Does not start `claude`, `codex`, or `cursor-agent`. Does not create logins or credentials. Does not treat another agent's approval as Max's. Does not create GitHub issues or labels on Aut0. |
 | Builder session | Claude Bot, Codex Bot, or Cursor Bot, as routed | Starts its own harness as poteto-mode, builds or plans, self-checks, posts `ready`. | Does not start a harness it does not own. |
 | Reviewer session | A bot whose model family differs from the builder | Reviews, runs the named verify skill (UI and database checks), posts `verdict`. Blocks only on a demonstrated failure. | Does not merge. Does not act as a second Judge. |
-| Dispatcher | `orch`, a script | Polls trackers every 60 seconds, applies the transition table, queues jobs, merges when `ship: merge` and the head is the approved SHA, marks terminal states. | Does not make judgment calls. Does not exec a harness binary. Wakes Grok Bot or a harness bot when the next action is not fully determined. |
+| Dispatcher | `orch`, a script | Polls GitHub every `poll_seconds` (30 or 60; shipped 30) and Linear on its own 60-second cadence, applies the transition table, queues jobs, merges when `ship: merge` and the head is the approved SHA, marks terminal states. | Does not make judgment calls. Does not exec a harness binary. Wakes Grok Bot or a harness bot when the next action is not fully determined. |
 | Aut0 after handoff | Oliver's existing flow | Whatever Aut0 already does after Ready for Review, which may include Aut0 Judge and human review. | Not part of the factory loop. The factory does not run a second judge. |
 
 Harness ownership is fixed: **Claude Bot starts every Claude session, Codex Bot every Codex session, Cursor Bot every Cursor CLI job.** Grok Bot and `orch` only queue requests.
@@ -154,7 +155,7 @@ Planning is required when the ticket is expected to touch more than 3 files (D36
 
 ### 4.2 Dispatcher transition table
 
-`orch` polls each configured repo every 60 s (`env -u GH_TOKEN gh`, plus Linear for Aut0). It reads only tickets and PRs it already tracks, and comments that carry an `orch:` header. Every row is a plain `if`. It is idempotent: each handled comment ID is recorded, so a restart never acts twice.
+`orch` polls each configured repo every `poll_seconds` (`env -u GH_TOKEN gh`), 30 or 60 seconds and 30 as shipped, plus Linear for Aut0 on its own 60-second cadence. `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. Linear's discovery, dirty-row and tracked reads run at most once per 60 seconds whatever `poll_seconds` is (every second cycle at 30), so the faster GitHub cycle neither doubles Linear discovery or fallback polling nor raises Linear API calls (section 7). It reads only tickets and PRs it already tracks, and comments that carry an `orch:` header. Every row is a plain `if`. It is idempotent: each handled comment ID is recorded, so a restart never acts twice.
 
 | # | Event (mechanical) | Known answer | Wakes |
 |---|---|---|---|
@@ -310,7 +311,9 @@ Fields from the old Aut0 Factory block that this schema drops on purpose: `owner
 Decided content:
 
 ```yaml
-poll_seconds: 60
+# 30 or 60: the sleep after each cycle (GitHub every cycle; Linear
+# keeps its own 60-second cadence and budget).
+poll_seconds: 30
 # Default job timeout. A project may set job_timeout (minutes) to override.
 # job_timeout: 60
 linear:
@@ -382,11 +385,21 @@ depend on full-text `OR` semantics.
 Linear's API-key limits are shared per user: 2,500 requests/hour and
 3,000,000 complexity points/hour. Factory owns the named
 `LINEAR_SHARE = 0.5`; the other half remains available to Max's other API
-keys. For poll interval `P`, one cycle is capped at
+keys. Linear work runs in windows of `P = 60` seconds (`LINEAR_POLL_SECONDS`),
+whatever `poll_seconds` is. One window is capped at
 `floor(2500 × LINEAR_SHARE × P / 3600)` requests and
-`floor(3,000,000 × LINEAR_SHARE × P / 3600)` complexity. At `P = 60`, that
-is 20 requests and 25,000 complexity per cycle, or at most 1,200 requests and
-1,500,000 complexity per hour.
+`floor(3,000,000 × LINEAR_SHARE × P / 3600)` complexity: 20 requests and
+25,000 complexity per window, or at most 1,200 requests and 1,500,000
+complexity per hour. With `poll_seconds: 60` every cycle opens a window, as
+before. With `poll_seconds: 30` only every second cycle does: it runs the
+discovery search, dirty-row reads and tracked Linear reads, and the cycle
+between makes no Linear read for them (tracked Linear tickets wait for the
+next Linear cycle; GitHub tickets are read every cycle). The sleeps alone put
+Linear cycles at least 60 seconds apart. The window's counters reset only
+when a window opens, so a direct read between Linear cycles (the fresh read
+before a ship or T4/T8 write, the Ready for Review move) counts against the
+same window. A 30-second poller therefore makes the same Linear calls per
+hour as a 60-second one.
 
 Brief and go each run a filtered search over configured project IDs and
 workflow states other than `completed` and `canceled`. A page contains 50
@@ -427,8 +440,10 @@ refused); only the listener reads it, once at startup, and the value is never
 logged, printed or put in an error. `check-config` validates the keys and
 does not read the file. `linear_webhook` needs at least one Linear project.
 
-With the webhook configured, each poll cycle reads the dirty rows and the
-tickets with queued or running jobs. Dirty untracked issues are read
+With the webhook configured, each Linear cycle (every cycle at
+`poll_seconds: 60`, every second cycle at 30) reads the dirty rows and the
+tickets with queued or running jobs; a GitHub-only cycle leaves the dirty
+queue untouched. Dirty untracked issues are read
 directly (oldest first, under the same budget) instead of searching; an
 issue outside the configured projects, completed, canceled or deleted is
 dropped quietly. A tracked ticket is reread in full only when it is dirty,
@@ -620,7 +635,7 @@ Do not start F1-11, F1-12, or F1-10's Aut0 ticket until Max says go on the Linea
 #### F1-01 — Repo skeleton
 
 - **Description:** README, `orch.yml` (repos to poll and dispatcher settings), a `factory.md` schema plus `orch check-config`, and example `factory.md` files (Aut0, Cleffy and Tracy as examples only).
-- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds: 60`. The default job timeout is 60 minutes; a project may set `job_timeout` to override. `check-config` warns on an unknown optional model name. No other invented `orch.yml` fields are required to pass.
+- **Acceptance criteria:** `orch check-config` accepts the examples and refuses a missing required field, a same-family reviewer, and `tickets: linear` combined with GitHub issue or label creation. `orch.yml` lists projects and `poll_seconds` (30 or 60; shipped 30, since Nov 12). The default job timeout is 60 minutes; a project may set `job_timeout` to override. `check-config` warns on an unknown optional model name. No other invented `orch.yml` fields are required to pass.
 - **Depends on:** none.
 - **Size:** S.
 

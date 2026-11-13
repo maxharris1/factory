@@ -35,7 +35,12 @@ from lib.github_actions import (
 )
 from lib.handoff import HandoffError, parse_comment
 from lib.linear_webhook import DirtyRow
-from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
+from lib.orch_yml import (
+    LINEAR_POLL_SECONDS,
+    OrchConfig,
+    Project,
+    resolve_job_timeout,
+)
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 TIMEOUT_SECONDS = 60.0
@@ -234,6 +239,20 @@ class LivePollSource:
         self._webhook_full_cycle = False
         self._last_reconcile: float | None = None
         self._linear_documents: dict[str, tuple[float, dict[str, Any]]] = {}
+        # Linear cadence (GitHub may poll every 30 seconds). GitHub is read
+        # every cycle; Linear work runs on every `_linear_every`-th cycle, so
+        # Linear cycles are at least LINEAR_POLL_SECONDS apart (the sleeps
+        # alone add up to that). Its budget is sized for that window, and its counters
+        # reset only when a Linear window opens, so a direct read between
+        # Linear cycles (fresh_ticket, the Ready for Review move) still
+        # counts against the window. At poll_seconds 60 every cycle is a
+        # Linear cycle, exactly as before.
+        self._linear_every = max(
+            1, -(-LINEAR_POLL_SECONDS // max(1, config.poll_seconds))
+        )
+        self._linear_window_seconds = self._linear_every * config.poll_seconds
+        self._cycles_until_linear = 0
+        self._linear_due = True
         cleared = _secret_env_names(config)
         # list_comments and ci_status are polling reads: they get the same
         # short timeout, retries and backoff as every other gh read here.
@@ -270,12 +289,22 @@ class LivePollSource:
         self._factory_cache.clear()
         self._ticket_cache.clear()
         self._linear_issue_cache.clear()
-        self._linear_requests = 0
-        self._linear_complexity = 0
+        self._linear_due = self._cycles_until_linear <= 0
+        if self._linear_due:
+            self._cycles_until_linear = self._linear_every
+            self._linear_requests = 0
+            self._linear_complexity = 0
+        self._cycles_until_linear -= 1
         self._cycle_errors = 0
         self._cycle_deferrals = {}
         if self.config.linear_webhook is not None:
-            self._begin_webhook_cycle()
+            if self._linear_due:
+                self._begin_webhook_cycle()
+            else:
+                # GitHub-only cycle: the dirty queue is left for the next
+                # Linear cycle, untouched and unacked.
+                self._dirty = {}
+                self._dirty_fetched = {}
 
     def _begin_webhook_cycle(self) -> None:
         """Snapshot the dirty queue and the tickets with active jobs.
@@ -426,7 +455,7 @@ class LivePollSource:
             for project in self.config.projects
             if project.linear_project_id is not None
         }
-        if not projects:
+        if not projects or not self._linear_due:
             return ()
         if self.config.linear_webhook is None:
             return self._searched_candidates(projects, query, exclude, reserve)
@@ -589,8 +618,14 @@ class LivePollSource:
     ) -> tuple[TrackedTicket, ...]:
         found: list[TrackedTicket] = []
         projects = {project.repo.lower(): project for project in self.config.projects}
+        # Between Linear cycles tracked Linear tickets wait for the next one:
+        # no Linear read, and nothing rebuilt from an older read.
         linear_refs = sorted(
-            (ref for ref in tickets if ref.tracker == "linear"),
+            (
+                ref
+                for ref in tickets
+                if ref.tracker == "linear" and self._linear_due
+            ),
             key=_linear_ref_key,
         )
         linear_keys = [_linear_ref_key(ref) for ref in linear_refs]
@@ -894,7 +929,7 @@ class LivePollSource:
         *,
         reserve: int = 0,
     ) -> bool:
-        interval = self.config.poll_seconds
+        interval = self._linear_window_seconds
         request_limit = int(
             LINEAR_REQUESTS_PER_HOUR * LINEAR_SHARE
         ) * interval // 3600
