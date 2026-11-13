@@ -118,15 +118,31 @@ def test_the_poll_push_passes_the_poll_interval(seconds: int) -> None:
     assert argv[argv.index("--poll-seconds") + 1] == str(seconds)
 
 
-def test_live_pushes_pass_the_poll_interval_on_every_status_push() -> None:
-    pusher, spawned = _pusher(LIVE_PUSH, poll_seconds=30)
+@pytest.mark.parametrize("seconds", [30, 60])
+def test_live_pushes_pass_the_poll_interval_on_every_status_push(seconds: int) -> None:
+    now = [1000.0]
+    commits = [0]
+    pusher, spawned = _pusher(
+        LIVE_PUSH,
+        poll_seconds=seconds,
+        clock=lambda: now[0],
+        wall=lambda: float(NOW),
+        fingerprint=lambda _db: commits[0],
+    )
     assert isinstance(pusher, LivePusher)
-    pusher()  # a cycle end: status (and the full set) carry --last-cycle
-    pusher._seen = object()  # a database change seen by the watcher
+    pusher()  # a cycle end: the first push is the full set, with --last-cycle
+    assert len(spawned) == 1 and "--status-only" not in spawned[0]
+    commits[0] += 1  # a database change seen by the watcher
+    pusher.tick()  # still inside the 1 s live throttle: nothing new starts
+    assert len(spawned) == 1
+    now[0] += pusher.min_interval + 0.5  # past the throttle
     pusher.tick()
-    assert spawned
+    assert len(spawned) == 2
+    status = spawned[1]
+    assert "--status-only" in status
+    assert status[status.index("--poll-seconds") + 1] == str(seconds)
     for argv in spawned:
-        assert argv[argv.index("--poll-seconds") + 1] == "30"
+        assert argv[argv.index("--poll-seconds") + 1] == str(seconds)
 
 
 def test_without_a_poll_interval_the_child_reads_orch_yml() -> None:
