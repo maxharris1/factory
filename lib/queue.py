@@ -3,10 +3,17 @@
 Consumers use four operations: enqueue, claim, heartbeat, and finish.
 Claim is non-blocking; F1-06 may block around it without changing this
 interface. A finish with no handoff comment is a failed job for T6.
+
+Claim order (issue #85): a job on a ticket marked urgent first, then a job
+resuming a paused step (its detail says `"resume": true`), then a job on a
+ticket marked bug, then the oldest. `ticket_priority` holds the urgent and
+bug marks (the backlog feeder writes them from the issue's labels or Linear
+priority); a database without that table orders on resume and age alone.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Collection
@@ -35,6 +42,8 @@ STATES = ("queued", "running", "done", "failed")
 # Device-pool placements (lib/device_pool.py). The table exists once a
 # DevicePool has opened this database; a queued job never holds a row.
 SLOTS_TABLE = "device_slots"
+# Urgent and bug marks per ticket for the claim order (issue #85).
+PRIORITY_TABLE = "ticket_priority"
 
 
 class QueueError(ValueError):
@@ -220,18 +229,10 @@ class SQLiteJobQueue:
         excluded = frozenset(excluded_job_ids)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                """
-                SELECT * FROM jobs
-                WHERE state = 'queued' AND recipient = ?
-                ORDER BY created_at, id
-                """,
-                (recipient,),
-            ).fetchall()
             row = next(
                 (
                     candidate
-                    for candidate in rows
+                    for candidate in claim_order(connection, recipient)
                     if str(candidate["id"]) not in excluded
                 ),
                 None,
@@ -471,8 +472,92 @@ class SQLiteJobQueue:
                     )
                     """
                 )
+                connection.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
+                        repo TEXT NOT NULL,
+                        ticket_id TEXT NOT NULL,
+                        urgent INTEGER NOT NULL DEFAULT 0,
+                        bug INTEGER NOT NULL DEFAULT 0,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (repo, ticket_id)
+                    )
+                    """
+                )
         except sqlite3.DatabaseError as exc:
             raise QueueError("database file is not valid SQLite") from exc
+
+
+def set_ticket_priority(
+    connection: sqlite3.Connection,
+    repo: str,
+    ticket_id: str,
+    *,
+    urgent: bool,
+    bug: bool,
+    at: float,
+) -> None:
+    """Record a ticket's urgent and bug marks for the claim order."""
+    connection.execute(
+        f"""
+        INSERT INTO {PRIORITY_TABLE} (repo, ticket_id, urgent, bug, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(repo, ticket_id) DO UPDATE SET
+            urgent = excluded.urgent, bug = excluded.bug,
+            updated_at = excluded.updated_at
+        """,
+        (repo.lower(), ticket_id, int(urgent), int(bug), at),
+    )
+
+
+def priority_rank(*, urgent: bool, resume: bool, bug: bool) -> int:
+    """0 urgent, 1 a resumed paused step, 2 bug, 3 everything else."""
+    if urgent:
+        return 0
+    if resume:
+        return 1
+    if bug:
+        return 2
+    return 3
+
+
+def is_resume(detail: str | None) -> bool:
+    """A job whose detail marks it as resuming a paused step."""
+    if not detail:
+        return False
+    try:
+        value = json.loads(detail)
+    except ValueError:
+        return False
+    return isinstance(value, dict) and value.get("resume") is True
+
+
+def claim_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.Row]:
+    """Queued jobs for recipient in claim order (see the module doc)."""
+    rows = connection.execute(
+        """
+        SELECT * FROM jobs
+        WHERE state = 'queued' AND recipient = ?
+        ORDER BY created_at, id
+        """,
+        (recipient,),
+    ).fetchall()
+    marks: dict[tuple[str, str], tuple[bool, bool]] = {}
+    if rows and _has_table(connection, PRIORITY_TABLE):
+        for mark in connection.execute(
+            f"SELECT repo, ticket_id, urgent, bug FROM {PRIORITY_TABLE}"
+        ):
+            marks[(str(mark["repo"]), str(mark["ticket_id"]))] = (
+                bool(mark["urgent"]),
+                bool(mark["bug"]),
+            )
+
+    def key(row: sqlite3.Row) -> tuple[int, float, str]:
+        urgent, bug = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), (False, False))
+        rank = priority_rank(urgent=urgent, resume=is_resume(row["detail"]), bug=bug)
+        return rank, float(row["created_at"]), str(row["id"])
+
+    return sorted(rows, key=key)
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

@@ -1,9 +1,11 @@
 """Device pool scheduling (docs/SPEC.md F2-01).
 
 A slot is one row in `device_slots`, in the dispatcher database next to
-`jobs`. `claim` moves the oldest queued job for a harness to running and
-holds a slot for it on the first device, in machines.yml order, that is
-schedulable, lists that harness, and has a free slot. Both writes happen
+`jobs`. `claim` moves the first queued job for a harness, in the queue's
+claim order (lib/queue.py claim_order: urgent, a resumed paused step, bug,
+then oldest), to running and holds a slot for it on the least-loaded
+device (most free slots; a tie goes to the earlier device in machines.yml)
+that is schedulable and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
@@ -38,7 +40,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
-from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job
+from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job, claim_order
 from lib.remote import new_tag
 from lib.schema import HARNESSES
 
@@ -82,14 +84,31 @@ def choose_device(
     harness: str,
     used: Mapping[str, int],
 ) -> Device | None:
-    """First schedulable device listing harness with a free slot, or None."""
+    """The least-loaded schedulable device listing harness, or None.
+
+    Least loaded is the most free slots (slot_max minus held); a tie goes
+    to the device listed first in machines.yml (issue #85).
+    """
+    best: Device | None = None
+    best_free = 0
     for device in config.devices:
         if not device.eligible(harness):
             continue
         assert device.slot_max is not None
-        if used.get(device.name, 0) < device.slot_max:
-            return device
-    return None
+        free = device.slot_max - used.get(device.name, 0)
+        if free > best_free:
+            best, best_free = device, free
+    return best
+
+
+def free_slots(config: MachinesConfig, harness: str, used: Mapping[str, int]) -> int:
+    """Free slots, summed over every schedulable device listing harness."""
+    total = 0
+    for device in config.devices:
+        if device.eligible(harness):
+            assert device.slot_max is not None
+            total += max(0, device.slot_max - used.get(device.name, 0))
+    return total
 
 
 class DevicePool:
@@ -176,16 +195,12 @@ class DevicePool:
             if device is None:
                 connection.commit()
                 return None
-            rows = connection.execute(
-                """
-                SELECT * FROM jobs
-                WHERE state = 'queued' AND recipient = ?
-                ORDER BY created_at, id
-                """,
-                (harness,),
-            ).fetchall()
             row = next(
-                (item for item in rows if str(item["id"]) not in excluded),
+                (
+                    item
+                    for item in claim_order(connection, harness)
+                    if str(item["id"]) not in excluded
+                ),
                 None,
             )
             if row is None:
