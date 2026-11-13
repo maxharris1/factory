@@ -20,6 +20,12 @@ trusted_logins:
     - cursor-bot
 # Before install, Max must add the confirmed stable Linear user ID under
 # trusted_linear_users. The poller refuses Linear polling without it.
+# intake (issue #85, docs/SPEC.md section 7): the backlog feeder turns a
+# tagged ticket into a draft PR plus brief and go by itself. A GitHub
+# project names the label (default factory:ready) a trusted login applies;
+# a Linear project names the workflow state a trusted Linear user moves the
+# issue to. trusted: defaults to the trusted_logins (GitHub) or
+# trusted_linear_users (Linear) keys. A project without intake is not fed.
 projects:
   - repo: aut0-code/aut0
     factory_ref: dev
@@ -27,8 +33,12 @@ projects:
     grok_bot: offer-brief-project
     linear_ready_for_review: true
     job_timeout: 150
+    intake:
+      linear_state: In Progress
   - repo: maxharris1/Cleffy
     factory_ref: dev
+    intake:
+      label: factory:ready
   - repo: maxharris1/tracy-harris-coaching
     factory_ref: main
   # The factory's own PRs: GitHub only, no Linear. They are built outside
@@ -38,6 +48,8 @@ projects:
   - repo: maxharris1/factory
     factory_ref: main
     ready_starts_review: true
+    intake:
+      label: factory:ready
 # Optional Linear webhook listener (README "Linear webhook"). Off unless
 # this section is present; the poller then behaves exactly as without it.
 # Max saves the Linear signing secret to secret_file (chmod 600).

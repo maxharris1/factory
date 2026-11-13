@@ -54,7 +54,9 @@ def _restore_signals():
     signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
-def machines_file(tmp_path: Path, *, box_enabled: bool = True, box_slots: int = 1) -> Path:
+def machines_file(tmp_path: Path, *, box_enabled: bool = True, box_slots: int = 3) -> Path:
+    # Placement is least loaded with ties in file order (issue #85): with 3
+    # slots each, an empty pool places on the box, which comes first.
     path = tmp_path / "machines.yml"
     path.write_text(
         f"""
@@ -279,7 +281,7 @@ def test_remote_target_refuses_option_or_path_injection(fields: dict) -> None:
 
 
 def test_orch_wait_claims_a_box_slot_and_names_the_device(tmp_path: Path) -> None:
-    machines = machines_file(tmp_path, box_slots=1)
+    machines = machines_file(tmp_path, box_slots=3)
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
     first = enqueue(queue, "claude", "1")

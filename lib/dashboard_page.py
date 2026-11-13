@@ -508,6 +508,26 @@ SCRIPT = r"""
     if (w.warning !== null && w.warning !== undefined) add(box, el('p', 'bad', 'warning: ' + w.warning));
   }
 
+  // Backlog feeder (#85): appended to Factory status like the webhook block.
+  var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
+    'feeding': 'feeding', 'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued',
+    'closed': 'PR closed, not fed'};
+  function renderFeeder(d) {
+    var root = byId('kpis');
+    var f = d.feeder;
+    if (!root || !f) return;
+    var box = add(root, el('div'));
+    box.setAttribute('id', 'feeder');
+    add(box, el('h2', null, 'Feeder'));
+    add(box, el('p', null, 'eligible ' + f.eligible + ' · fed ' + f.fed +
+      ' · waiting for capacity ' + f.waiting_capacity));
+    var list = add(box, el('ul'));
+    (f.items || []).forEach(function (item) {
+      add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
+        (FEEDER_STATE[item.state] || item.state) + (item.pr ? ' → PR #' + item.pr : '')));
+    });
+  }
+
   function slotCard(r) {
     var card = opensModal(link('slot job' + (r.overdue ? ' overdue' : ''), 'job.html#' + anchor(r.job)), r.job);
     card.title = r.repo + '#' + r.ticket_id + ' (job ' + r.job + ')';
@@ -631,7 +651,7 @@ SCRIPT = r"""
 
   // --- activity page ---------------------------------------------------------
 
-  var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', stale: 'warn', paused: 'warn',
+  var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn',
                    down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   function renderAttention(d) {
     var a = d.attention || {count: 0, items: []};
@@ -1154,7 +1174,7 @@ SCRIPT = r"""
   }
 
   var PAGES = {
-    main: [renderKpis, renderLinearWebhook, renderLanes, renderQueue],
+    main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
     job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
     efficiency: [renderHealth, renderSavings],
@@ -1447,7 +1467,41 @@ def _kpis(snapshot: dict) -> str:
         for label, value, cls in tiles
     )
     return _panel(
-        "kpis", "Factory status", f'<div class="kpis">{inner}</div>' + _linear_webhook(snapshot)
+        "kpis",
+        "Factory status",
+        f'<div class="kpis">{inner}</div>' + _linear_webhook(snapshot) + _feeder(snapshot),
+    )
+
+
+_FEEDER_STATE = {
+    "eligible": "eligible",
+    "waiting-capacity": "waiting for capacity",
+    "feeding": "feeding",
+    "error": "feed error, retrying",
+    "fed": "fed",
+    "done": "fed, job queued",
+    "closed": "PR closed, not fed",
+}
+
+
+def _feeder(snapshot: dict) -> str:
+    """The backlog feeder (#85), a small block inside Factory status; only
+    once a feeder has run. The script's renderFeeder builds the same markup."""
+    feeder = snapshot.get("feeder")
+    if not feeder:
+        return ""
+    rows = "".join(
+        f"<li>{_e(item['repo'])}#{_e(item['issue'])} "
+        f"{_e(_FEEDER_STATE.get(item['state'], item['state']))}"
+        + (f" → PR #{_e(item['pr'])}" if item.get("pr") else "")
+        + "</li>"
+        for item in feeder["items"]
+    )
+    return (
+        '<div id="feeder"><h2>Feeder</h2>'
+        f"<p>eligible {_e(feeder['eligible'])} · fed {_e(feeder['fed'])} · "
+        f"waiting for capacity {_e(feeder['waiting_capacity'])}</p>"
+        f"<ul>{rows}</ul></div>"
     )
 
 
@@ -1655,8 +1709,10 @@ def _queue(snapshot: dict) -> str:
 # --- activity page -----------------------------------------------------------------
 
 
-_ATTENTION = {"stuck": "bad", "overdue": "bad", "dead": "bad", "stale": "warn", "paused": "warn",
-              "down": "bad", "no-waiter": "bad", "health": "bad"}
+_ATTENTION = {
+    "stuck": "bad", "overdue": "bad", "dead": "bad", "needs-attention": "bad",
+    "stale": "warn", "paused": "warn", "down": "bad", "no-waiter": "bad", "health": "bad",
+}
 _HEALTH_LINK = re.compile(r"health\.html#[A-Za-z0-9_-]+")
 
 

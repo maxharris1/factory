@@ -68,9 +68,9 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `is_merged` | `GET pulls/<n>` | `head.sha` must be a full SHA, open or merged. True only when `merged` and `head.sha` is exactly the head |
 | `branch_tip` | `GET git/ref/heads/<branch>` | The full 40-char lowercase SHA of the remote ref, or raise |
 | `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
-| `merge` | `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError` |
+| `merge` | `GET pulls/<n>` (and for a draft the GraphQL `markPullRequestReadyForReview`), then `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | Marks a draft ready first (issue #83: GitHub refuses to merge a draft with 405). The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError`. A 405, a 5xx, a timeout or a mark-ready that did not land raises with `retryable=True`, so the dispatcher re-drives the ship once; anything else, or a failed re-drive, flags the ticket needs-attention |
 | `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
-| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
@@ -151,9 +151,11 @@ has no bot users and no SSH yet. The PC's `workdir_root` is
 assumes a device is reachable: the poller checks it (below).
 
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
-moves the oldest queued job for that harness to running and holds a slot on
-the first device, in `machines.yml` order, that is enabled, has no
-placeholder, lists the harness, and has a free slot. Slots are generic: any
+moves the first queued job for that harness, in claim order (a ticket marked
+urgent, then a job resuming a paused step, then a ticket marked bug, then the
+oldest; issue #85), to running and holds a slot on the least-loaded device
+(the most free slots; a tie goes to the earlier device in `machines.yml`)
+that is enabled, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
@@ -410,6 +412,63 @@ With `linear_webhook` in `orch.yml`, Linear discovery is driven by dirty
 issues instead of a search every cycle (next section); without it, every
 cycle is exactly as described above.
 
+### Backlog feeder (issue #85)
+
+A project with an `intake` section in `orch.yml` is fed by
+[`lib/feeder.py`](lib/feeder.py) at the start of each poll, before
+discovery. The signal is per-project config, never code:
+
+```yaml
+  - repo: owner/app            # factory.md tickets: github
+    factory_ref: main
+    intake:
+      label: factory:ready     # default; applied by a trusted login
+  - repo: owner/linear-app     # a Linear project
+    factory_ref: dev
+    linear_project_id: ...
+    intake:
+      linear_state: In Progress
+      # trusted: [linear-user-id]   # default: the trusted_linear_users keys
+```
+
+An open GitHub issue carrying the label, applied by a trusted login (the
+actor of the latest `labeled` event; default the `trusted_logins` keys), or a
+Linear issue in the state, moved there by a trusted Linear user, is
+eligible. For each eligible ticket, while its builder harness has room, the
+feeder opens a branch from the base branch with an empty start commit
+(`factory/issue-<n>`, or the Linear issue's own branch name), opens a draft
+PR whose body says `Fixes #<n>` (or `Fixes <identifier>`), labels it
+`factory` and `orch:state/<building|planning>` on a GitHub-ticket repo, and
+posts a `brief` (the ticket body plus the repo's `factory.md` prose) and a
+`go` (state=planning when the ticket names more than 3 files, else
+building; risk=high on a `risk:high` label), both from `grok-bot` as the
+orchestrator. On a Linear project brief and go go on the Linear issue in the
+visible header form, and no GitHub label is written. The poll then reads the
+new PR fresh and starts tracking it, so T1 queues its job in the same poll.
+
+Every step is recorded in `feeder_items` before the next, keyed on (repo,
+ticket): a re-poll never opens a second PR, a PR already open on the branch
+is reused (the open one, never an older merged or closed PR on the same
+branch), and a brief or go the orchestrator already posted is not posted
+again. A retry on a PR already recorded first checks that PR is still open;
+one closed or merged meanwhile ends the feed (`closed`) with nothing posted. Only a brief or go whose author orch.yml trusts as `grok-bot` counts as
+already posted, so a forged one never stands in for the real go. A fed
+ticket is never fed again. Room for a harness is the free slots on every
+schedulable device that lists it, minus its queued jobs, minus tickets fed
+for it in the last 10 minutes whose job is not queued yet (so a go the
+poller never acts on cannot stall the feeder). A ticket whose feed failed
+midway resumes first, but takes room like a new one: it waits while the
+harness has none. Tickets are fed urgent first (an `urgent`
+label or Linear priority Urgent), then `bug`, then oldest; the feeder also
+records those marks in `ticket_priority`, refreshed every poll (a label
+added after the feed still moves the queued job), which the queue's claim
+order reads (urgent, then a resumed paused step, then bug, then oldest). The live
+clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
+same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
+Linear request path and budget (every page of the intake state, read with
+the same `gitBranchName: branchName` alias the poller uses). A feeder error is recorded in `poll_errors`
+(`feeder`) and never stops the poll.
+
 ## Linear webhook
 
 ```sh
@@ -533,7 +592,7 @@ A process exit does not wake a bot, so a plain `orch wait` claim used to sit
 until another bot pinged its owner (#74 r2 and #77 r2 each waited 12 to 57
 minutes). [`lib/waiter.py`](lib/waiter.py) (issue #80) removes that hand-off:
 `orch wait <bot> --autostart`, run as the bot's own user and login, claims
-the bot's next job on a box slot, renders its standard brief and starts it
+the bot's next job on the least-loaded device (issue #85), renders its standard brief and starts it
 itself as `orch job run <bot> <job-id> --worktree -- <command>`, then goes
 straight back to waiting. `orch job run` heartbeats before the harness starts
 and records itself on the slot, so the job reads `running` within seconds of
@@ -567,9 +626,26 @@ the claim, with no model turn and no message to any bot. The harness posts its
   `<state>/jobs/<job-id>/brief.md` (mode 600, path in `$ORCH_JOB_BRIEF`);
   `orch job run`'s output goes to `run.log` beside it. `--state-dir`
   defaults to `~/.local/state/factory/waiter-<bot>`.
-- **Box only.** The autostart waiter claims box slots only: a harness on a
-  remote device cannot run `orch job done` on the box. Remote devices stay
-  with a bot running plain `orch wait`.
+- **Every device (issue #85).** The autostart waiter claims through the whole
+  device pool, so the least-loaded device takes the job. On a remote device
+  it runs `orch job run` without `--worktree` (the harness starts over the
+  bot's own SSH alias, "Remote start"), and the brief says the working
+  directory is `$ORCH_JOB_WORKDIR`. That device has no `orch.db`, so the
+  harness ends its output with `ORCH-HANDOFF: <comment-id>` (or
+  `ORCH-HANDOFF: failed`); the output returns over SSH into `run.log`, and
+  when the run ends the waiter runs `orch job done` on the box: done with
+  that id only when `orch job run` exited 0 and the marker is the last line
+  of this run's output (`run.log` from where this run began; the runner's
+  own `orch job run:` lines are skipped), else failed for T6 (a nonzero
+  exit, or a last line that is missing, malformed or says failed). Once a
+  remote worker was started, a failed run leaves the job running instead:
+  the poller fails it when the device confirms the worker gone, so T6 never
+  starts attempt 2 beside it. A job already finished by then is left alone. The waiter records each remote
+  run in `<job-dir>/remote.json` and starts it with `orch job run
+  --status-file <job-dir>/exit`, so a restarted waiter adopts the remote runs
+  still running for its bot and finishes each once it ends (a runner gone
+  with no status file: failed). The record goes once the job is finished,
+  so no run is finished twice.
 - **Failures.** A job with no standard brief (an action other than build,
   plan, fix or review), a job id that is not a plain token, or a start that
   fails is failed at once for T6 and its slot is freed. When the harness
@@ -793,8 +869,8 @@ changes neither. Run `poller-service.sh stop` before re-running
 bin/orch status --db "$ORCH_DB"
 ```
 
-`orch status` prints a read-only summary of queued jobs, occupied box slots,
-devices, and paused tracker items. It opens the dispatcher database read-only and does
+`orch status` prints a read-only summary of queued jobs, devices with one
+slot count each and their running jobs, and paused tracker items. It opens the dispatcher database read-only and does
 not claim, release, lease, wake, or update anything. `--machines` defaults to
 the checkout's `machines.yml`, read with placeholders accepted; an invalid
 file exits 1. Each device row shows the device, its eligible harnesses (`?`
@@ -808,8 +884,18 @@ counted once. A running job shows its state (`claimed`, `running`, `stale` or
 `dead`, see "Job states") instead of `running`; `--orch` (default the
 checkout's `orch.yml` when present) supplies `job_states.stale_minutes`.
 `orch status` never checks a remote worker over SSH, so a remote job whose
-runner died shows as `stale` until the poller confirms it dead. A running job that holds no slot (claimed before F2-02, or
-whose worker already ended) is a `Slots — box` line.
+runner died shows as `stale` until the poller confirms it dead.
+A `Needs attention` section lists tickets the poller flagged (a ship that
+failed and will not be retried, a job dedupe dropped: issues #83 and #84)
+until the ticket is merged, handed off or done. Once a backlog feeder has run,
+a `Feeder — eligible N, fed N, waiting for capacity N` section lists each
+ticket eligible at its last poll with its state and PR. Each device has one
+slot count (issue #90): a running harness job that holds no slot (claimed
+with no device by an older `orch wait`, or whose worker already ended) runs
+on the box, so it is listed under the box device, marked `no-placement`, and
+counted in the box's slots; the device pool counts it too, so the box never
+starts more than `slot_max`. A running grok wake holds no slot and is listed
+under `Grok wakes`.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
 section shows the last delivery (or `never` and the listener's age, or
@@ -1013,9 +1099,10 @@ database; `--machines`, else the checkout's `machines.yml` when present.
 
 The snapshot shows the queue (queued, running, done and failed jobs by
 recipient and action), running jobs with the age of their last heartbeat,
-queued jobs with their wait, box slots (running harness jobs that hold no
-device-pool slot, as in `orch status`; a job placed on a device counts on
-that device's row) and, when `machines.yml` (F2-01) is
+queued jobs with their wait, box slots (every running harness job on the
+box: placed there, or holding no device-pool slot, which counts in the box
+row's held slots as in `orch status`, issue #90; a job placed on another
+device counts on that device's row) and, when `machines.yml` (F2-01) is
 present, device rows (enabled, placeholder, harnesses, slots held from
 `device_slots` when that table exists; absent or invalid files show no
 device rows), stuck tickets and overdue jobs (a heartbeat or queue wait

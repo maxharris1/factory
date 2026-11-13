@@ -5,18 +5,38 @@ when the bot's model turn notices. A process exit does not wake a bot, so
 claims sat until another bot pinged it. With `--autostart` the waiter, which
 runs as the owning bot's own user and login, starts the job itself:
 
-* it claims through the device pool, box slots only (`local_only`): a job
-  on a remote device could not run `orch job done` on the box, so remote
-  devices stay with a bot that runs plain `orch wait`;
+* it claims through the whole device pool (issue #85), so the least-loaded
+  device takes the job: the box, or a remote device such as the PC or the
+  Mac. A remote job runs over the bot's own SSH alias through `orch job
+  run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
 * it renders the standard brief for the job (lib/brief.py), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
   GitHub token variable unset;
 * it writes the brief to `<state>/jobs/<job-id>/brief.md` (mode 600) and
-  runs `orch job run <bot> <job-id> --db ... --machines ... --worktree --
+  runs `orch job run <bot> <job-id> --db ... --machines ... [--worktree] --
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started.
+
+A remote device has no orch.db, so the harness there cannot run `orch job
+done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
+(or `ORCH-HANDOFF: failed`); that output comes back over SSH into run.log,
+and when the run ends the waiter runs `orch job done` on the box: done with
+that comment id only when `orch job run` exited 0 and the marker is the last
+line of this run's output (run.log from the offset where this run began,
+skipping the runner's own `orch job run:` lines); failed (for T6) when the
+exit is nonzero or the last line is missing, malformed or says failed. A
+failed run whose remote worker was started is not failed here: its job stays
+running until the poller's device check confirms the worker gone, so T6
+never retries it beside a live worker. A job already finished by then is
+left alone.
+
+A remote run is recorded in `<job-dir>/remote.json` (pid, process start,
+run.log offset) and started with `--status-file <job-dir>/exit`, so a
+restarted waiter adopts every remote run still running for its bot and
+finishes it from the status file when it ends (gone without one: failed).
+The record is removed once the job is finished, so no run is finished twice.
 
 `orch job run` sends the first heartbeat before the harness starts and
 records itself on the job's slot, so the job reads `running` within seconds
@@ -95,6 +115,18 @@ _CONFIG_KEYS = frozenset({"bot", "command"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+# The remote harness's last word: a GitHub comment id, a Linear comment id
+# (a UUID), or failed. Read from the tail of run.log only.
+_MARKER = re.compile(
+    r"^ORCH-HANDOFF: ([0-9]{1,20}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|failed)$"
+)
+MARKER_TAIL_BYTES = 64 * 1024
+# Lines `orch job run` itself writes to run.log (lib/cli.py _job_run log()).
+RUNNER_LOG_PREFIX = "orch job run: "
+# Per remote job, in its job directory: what a restarted waiter needs to
+# finish the run (#87 F1.4), and the exit status `orch job run` leaves.
+REMOTE_RECORD = "remote.json"
+STATUS_FILE = "exit"
 
 Log = Callable[[str], None]
 
@@ -208,6 +240,7 @@ def job_run_argv(
     machines: Path,
     command: Sequence[str],
     worktree: bool = True,
+    status_file: Path | None = None,
 ) -> list[str]:
     """`orch job run` for one job: fixed flags, the job id, then the bot's command."""
     if bot not in OWNING_BOTS:
@@ -217,7 +250,29 @@ def job_run_argv(
     argv = [*orch, "job", "run", bot, job_id, "--db", str(db), "--machines", str(machines)]
     if worktree:
         argv.append("--worktree")
+    if status_file is not None:
+        argv += ["--status-file", str(status_file)]
     return [*argv, "--", *command]
+
+
+def handoff_marker(text: str) -> str | None:
+    """The run's final `ORCH-HANDOFF: <id|failed>` line, or None (#87 F1.5).
+
+    The marker counts only as the last line of the harness's output. Blank
+    lines and the box runner's own `orch job run: ...` lines (it logs after
+    the harness exits) are skipped; any other line after a marker, or a
+    malformed last marker, means there is no completion.
+    """
+    last = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(RUNNER_LOG_PREFIX):
+            continue
+        last = stripped
+    if last is None:
+        return None
+    match = _MARKER.fullmatch(last)
+    return match.group(1) if match is not None else None
 
 
 def local_only(config: MachinesConfig) -> MachinesConfig:
@@ -343,6 +398,48 @@ class StopFlag:
         return self._set
 
 
+class AdoptedRun:
+    """An `orch job run` an earlier waiter started, found again after a restart.
+
+    It is not this process's child, so its exit status comes from the status
+    file it writes when it ends. Gone with no status file (killed) reads as
+    a failure (255).
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        start: str | None,
+        status_path: Path,
+        alive: Callable[[int, str | None], bool],
+    ):
+        self.pid = pid
+        self.start = start
+        self.status_path = status_path
+        self.alive = alive
+
+    def poll(self) -> int | None:
+        code = read_status(self.status_path)
+        if code is not None:
+            return code
+        if self.alive(self.pid, self.start):
+            return None
+        code = read_status(self.status_path)  # it may have ended just now
+        return 255 if code is None else code
+
+
+def read_status(path: Path) -> int | None:
+    """The exit status `orch job run --status-file` wrote, or None."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return 255
+
+
 class Waiter:
     def __init__(
         self,
@@ -380,7 +477,11 @@ class Waiter:
         self.environ = dict(environ if environ is not None else os.environ)
         self.alive = alive
         self._children: dict[str, Child] = {}
+        # job id -> (its job directory, run.log size when the run started),
+        # for runs placed on a remote device
+        self._remote: dict[str, tuple[Path, int]] = {}
         self._locked = 0
+        self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
 
     def running(self) -> set[str]:
@@ -388,6 +489,8 @@ class Waiter:
 
     def step(self) -> str | None:
         """Reap finished runs, then claim and start at most one job."""
+        if not self._recovered:
+            self._recover()
         self._reap()
         try:
             claimed = claim_once(
@@ -421,7 +524,12 @@ class Waiter:
     def _start(self, job: Job, placement: Placement | None) -> str | None:
         request = job.request
         label = f"job {job.id} ({request.repo}#{request.ticket_id} {request.action})"
+        device = (
+            self.pool.config.device(placement.device) if placement is not None else None
+        )
+        remote = device is not None and not device.local
         try:
+            job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
                 bot=self.bot,
@@ -429,22 +537,50 @@ class Waiter:
                 db=self.db,
                 machines=self.machines,
                 command=self.harness.command,
+                worktree=not remote,  # worktrees are box-only
+                status_file=job_dir / STATUS_FILE if remote else None,
             )
-            brief = self._brief(job)
-            job_dir = self._job_dir(job.id)
+            brief = self._brief(job, remote_device=device.name if remote else None)
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
+            offset = 0
+            if remote:
+                # Only this run's output counts: whatever run.log already
+                # holds is an earlier run's (#87 F1.5).
+                (job_dir / STATUS_FILE).unlink(missing_ok=True)
+                (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
+                offset = _size(job_dir / "run.log")
             child = self._spawn(argv, job_dir, brief_path)
         except (WaiterError, BriefError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
             return None
         self._children[job.id] = child
-        device = placement.device if placement is not None else "no device"
-        self.log(f"{label}: started orch job run (pid {child.pid}) on {device}")
+        if remote:
+            self._remote[job.id] = (job_dir, offset)
+            try:
+                _write_private(
+                    job_dir / REMOTE_RECORD,
+                    json.dumps(
+                        {
+                            "job_id": job.id,
+                            "pid": child.pid,
+                            "start": process_start(child.pid),
+                            "offset": offset,
+                        },
+                        sort_keys=True,
+                    ).encode("utf-8"),
+                )
+            except OSError as exc:
+                self.log(
+                    f"{label}: could not record the remote run ({_one_line(exc)}); "
+                    "a waiter restart before it ends leaves it to T6"
+                )
+        where = placement.device if placement is not None else "no device"
+        self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
 
-    def _brief(self, job: Job) -> str:
+    def _brief(self, job: Job, *, remote_device: str | None = None) -> str:
         try:
             result = self.context.load(job.request.repo)
         except Exception as exc:  # a context failure never blocks the start
@@ -455,6 +591,7 @@ class Waiter:
             context=result.context,
             context_ref=result.ref,
             context_note=result.note,
+            remote_device=remote_device,
         )
 
     def _job_dir(self, job_id: str) -> Path:
@@ -503,13 +640,139 @@ class Waiter:
                 "the poller requeues an unstarted claim"
             )
 
+    def _recover(self) -> None:
+        """Adopt remote runs an earlier waiter started and did not finish (#87 F1.4).
+
+        Each remote run leaves remote.json in its job directory until the
+        box finishes it. A job still running for this bot is watched again
+        (its status file gives the exit status); any other record is stale
+        and is removed.
+        """
+        jobs = self.state_dir / "jobs"
+        try:
+            records = sorted(jobs.glob(f"*/{REMOTE_RECORD}")) if jobs.is_dir() else []
+        except OSError as exc:
+            self.log(f"cannot look for remote runs to adopt: {_one_line(exc)}")
+            return
+        for path in records:
+            job_dir = path.parent
+            job_id = job_dir.name
+            if job_id in self._children or not _JOB_ID.fullmatch(job_id):
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                pid = record["pid"]
+                start = record.get("start")
+                offset = record.get("offset", 0)
+                if (
+                    record.get("job_id") != job_id
+                    or not isinstance(pid, int)
+                    or isinstance(pid, bool)
+                    or pid < 1
+                    or not isinstance(offset, int)
+                    or offset < 0
+                    or (start is not None and not isinstance(start, str))
+                ):
+                    raise ValueError("bad record")
+            except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+                self.log(f"job {job_id}: unreadable {REMOTE_RECORD}; left to T6")
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                state = retry_locked(lambda: self._job_state(job_id))
+            except (QueueError, sqlite3.Error, OSError) as exc:
+                self.log(f"cannot read job {job_id} to adopt it: {_one_line(exc)}")
+                return  # try again at the next step
+            if state != ("running", self.recipient):
+                path.unlink(missing_ok=True)
+                continue
+            self._children[job_id] = AdoptedRun(
+                pid, start, job_dir / STATUS_FILE, self.alive
+            )
+            self._remote[job_id] = (job_dir, offset)
+            self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
+        self._recovered = True
+
+    def _job_state(self, job_id: str) -> tuple[str, str] | None:
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                "SELECT state, recipient FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return None if row is None else (str(row[0]), str(row[1]))
+
     def _reap(self) -> None:
         for job_id, child in list(self._children.items()):
             code = child.poll()
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
-                self._settle(job_id, child.pid, code)
+                remote = self._remote.pop(job_id, None)
+                if remote is not None:
+                    self._finish_remote(job_id, remote[0], code, offset=remote[1])
+                else:
+                    self._settle(job_id, child.pid, code)
+
+    def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
+        """`orch job done` on the box for a remote run, from its marker line.
+
+        Done needs both: `orch job run` exited 0, and the last line of this
+        run's output (after `offset` in run.log) is a comment-id marker.
+        Anything else fails the job for T6 (#87 F1.5), but only when no
+        remote worker was started: once one was, the job stays running
+        until the poller's device check confirms the worker gone and fails
+        it then, so a retry never runs beside it (#87 r2 F2.1).
+        """
+        try:
+            with open(job_dir / "run.log", "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(offset, size - MARKER_TAIL_BYTES))
+                tail = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            tail = ""
+        marker = handoff_marker(tail)
+        handoff = None if code != 0 or marker in (None, "failed") else marker
+        if handoff is None:
+            try:
+                placement = self.pool.placement(job_id)
+            except (QueueError, sqlite3.Error, OSError) as exc:
+                self.log(f"job {job_id}: could not read its slot ({_one_line(exc)}); left to T6")
+                self._forget_remote(job_dir)
+                return
+            if placement is not None and placement.remote_started:
+                self.log(
+                    f"job {job_id}: remote run ended without a handoff (exit {code}); "
+                    "its worker may still run, so the poller fails it once the device "
+                    "confirms it gone"
+                )
+                self._forget_remote(job_dir)
+                return
+        try:
+            job = retry_locked(
+                lambda: self.queue.finish(job_id, owner=self.recipient, handoff_comment_id=handoff)
+            )
+        except QueueError as exc:
+            self.log(f"job {job_id}: not finished from the box ({_one_line(exc)})")
+            self._forget_remote(job_dir)
+            return
+        except (sqlite3.Error, OSError) as exc:
+            self.log(f"job {job_id}: orch job done failed ({_one_line(exc)}); T6 times it out")
+            self._forget_remote(job_dir)
+            return
+        self._forget_remote(job_dir)
+        if handoff:
+            how = f"handoff {handoff}"
+        elif code != 0:
+            how = f"failed (orch job run exited {code})"
+        else:
+            how = f"failed ({marker or 'no final ORCH-HANDOFF line'})"
+        self.log(f"job {job_id}: ran orch job done on the box: {job.state}, {how}")
+
+    def _forget_remote(self, job_dir: Path) -> None:
+        try:
+            (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
+        except OSError as exc:
+            self.log(f"could not remove {job_dir / REMOTE_RECORD}: {_one_line(exc)}")
 
     def _settle(self, job_id: str, runner: int, code: int) -> None:
         """A run that ended while its job still runs hands the job to T6 now.
@@ -586,6 +849,13 @@ class Waiter:
             retry_locked(lambda: self.pool.release(job_id, owner=self.recipient))
         except (QueueError, sqlite3.Error, OSError) as exc:
             self.log(f"job {job_id}: could not free its slot ({_one_line(exc)})")
+
+
+def _size(path: Path) -> int:
+    try:
+        return os.stat(path).st_size
+    except FileNotFoundError:
+        return 0
 
 
 def lock_path(db: Path, bot: str) -> Path:
