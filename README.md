@@ -403,6 +403,12 @@ backoff (writes are never retried); a ref that still times out records a retryab
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated
 row per cycle to `poll_deferrals`, not `poll_errors`.
+A poll step's exception, and one that escapes a whole cycle, keeps its class in
+`poll_errors.error` and stores its message and newest ten frames, redacted and
+capped at 4,000 characters, in `poll_errors.detail`; the same text goes to the
+poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
+`ticket_state` row records a `stuck-wake:<class>` error and the rest of the
+cycle still runs.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized

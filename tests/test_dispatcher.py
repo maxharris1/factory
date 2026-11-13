@@ -2394,6 +2394,198 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     assert second.request.generation > first.request.generation
 
 
+class CycleSource(FakeSource):
+    def __init__(self, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.ended = 0
+
+    def end_cycle(self) -> None:
+        self.ended += 1
+
+
+def mark_stuck(
+    queue: SQLiteJobQueue,
+    repo: str,
+    ticket_id: str,
+    *,
+    source_comment_id: str | None,
+    timeout_seconds: int | None,
+) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds, generation
+            ) VALUES (?, ?, 0, 1, 'cancelled by hand', ?, ?, 1)
+            """,
+            (repo, ticket_id, source_comment_id, timeout_seconds),
+        )
+
+
+def stuck_wakes(queue: SQLiteJobQueue) -> dict[tuple[str, str], sqlite3.Row]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    return {(row["repo"], row["ticket_id"]): row for row in rows}
+
+
+def test_stuck_row_with_null_timeout_and_source_wakes_with_defaults(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    mark_stuck(queue, "owner/cleffy", "103", source_comment_id=None, timeout_seconds=None)
+    mark_stuck(queue, "owner/repo", "200", source_comment_id="c-200", timeout_seconds=900)
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    wakes = stuck_wakes(queue)
+    assert wakes[("owner/cleffy", "103")]["timeout_seconds"] == 3600
+    assert wakes[("owner/cleffy", "103")]["source_comment_id"] == "-"
+    assert wakes[("owner/repo", "200")]["timeout_seconds"] == 900
+    assert wakes[("owner/repo", "200")]["source_comment_id"] == "c-200"
+    assert source.ended == 1
+    with queue.connect() as connection:
+        assert connection.execute("SELECT count(*) FROM poll_errors").fetchone()[0] == 0
+
+
+def test_one_failing_stuck_wake_is_recorded_and_the_rest_still_wake(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    mark_stuck(queue, "owner/bad", "1", source_comment_id="c-1", timeout_seconds=600)
+    mark_stuck(queue, "owner/repo", "2", source_comment_id="c-2", timeout_seconds=600)
+    ensure = dispatcher._ensure_stuck_wake
+
+    def failing(repo: str, ticket_id: str) -> None:
+        if repo == "owner/bad":
+            raise TypeError("stuck row is broken")
+        ensure(repo, ticket_id)
+
+    dispatcher._ensure_stuck_wake = failing  # type: ignore[method-assign]
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    assert set(stuck_wakes(queue)) == {("owner/repo", "2")}
+    assert [job.request.ticket_id for job in delivery.jobs] == ["2"]
+    assert source.ended == 1
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchall()
+    assert [(row["repo"], row["ticket_id"], row["error"]) for row in errors] == [
+        ("owner/bad", "1", "stuck-wake:TypeError")
+    ]
+    assert "Traceback (most recent call last)" in errors[0]["detail"]
+    assert "in failing" in errors[0]["detail"]
+    assert errors[0]["detail"].endswith("TypeError: stuck row is broken")
+    assert "TypeError: stuck row is broken" in capsys.readouterr().err
+
+
+def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenGithub(CycleSource):
+        def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+            raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
+
+    dispatcher.poll_once(BrokenGithub())
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("github", "-", "RuntimeError")
+    assert "in github_candidates" in row["detail"]
+    assert "RuntimeError: gh exploded" in row["detail"]
+    assert "ghp_abcdefghijklmnop" not in row["detail"]
+
+
+def test_poll_loop_error_writes_its_traceback_to_poll_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenEnd(CycleSource):
+        def end_cycle(self) -> None:
+            raise ValueError("end of cycle failed")
+
+    PollLoop(dispatcher, BrokenEnd(), sleep=lambda _seconds: None).run(
+        max_polls=1,
+        on_error=lambda exc: dispatcher.record_poll_exception("poll", "-", exc),
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("poll", "-", "ValueError")
+    assert "in end_cycle" in row["detail"]
+    assert row["detail"].endswith("ValueError: end of cycle failed")
+    assert "ValueError: end of cycle failed" in capsys.readouterr().err
+
+
+def test_poll_errors_gains_a_detail_column_on_an_existing_database(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE poll_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                error TEXT NOT NULL,
+                recorded_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO poll_errors (repo, ticket_id, error, recorded_at) "
+            "VALUES ('poll', '-', 'TypeError', 1)"
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.record_poll_exception("poll", "-", RuntimeError("after migration"))
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT error, detail FROM poll_errors ORDER BY id"
+        ).fetchall()
+    assert rows[0]["error"] == "TypeError"
+    assert rows[0]["detail"] is None
+    assert rows[1]["error"] == "RuntimeError"
+    assert rows[1]["detail"] == "RuntimeError: after migration"
+
+
+def test_poll_error_detail_keeps_the_newest_frames_within_the_cap(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    def recurse(depth: int) -> None:
+        if depth == 0:
+            raise RuntimeError("bottom " + "x" * 10000)
+        recurse(depth - 1)
+
+    try:
+        recurse(50)
+    except RuntimeError as exc:
+        dispatcher.record_poll_exception("poll", "-", exc)
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert len(detail) <= 4000
+    assert detail.endswith("x" * 100)
+
+
 def test_duplicate_ready_for_one_head_does_not_increment_gate_twice(
     tmp_path: Path,
 ) -> None:

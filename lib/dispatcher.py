@@ -7,6 +7,7 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -270,6 +271,29 @@ _SECRET_ASSIGNMENT = re.compile(
     r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+POLL_ERROR_FRAMES = 10
+POLL_ERROR_DETAIL_LIMIT = 4000
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_URL.sub("<url>", text)
+    text = _SECRET_HOST_PATH.sub("<host>", text)
+    text = _SECRET_TOKEN.sub("<secret>", text)
+    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+
+
+def poll_error_detail(exc: BaseException) -> str:
+    """The exception's message and its newest frames, redacted and capped.
+
+    Stored in poll_errors.detail beside the bare class name; the tail is
+    kept when the cap cuts, so the raising frame and message survive.
+    """
+    text = _redact(
+        "".join(traceback.format_exception(exc, limit=-POLL_ERROR_FRAMES)).rstrip()
+    )
+    if len(text) > POLL_ERROR_DETAIL_LIMIT:
+        text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
+    return text
 
 
 def safe_ship_error(exc: BaseException) -> str:
@@ -283,11 +307,7 @@ def safe_ship_error(exc: BaseException) -> str:
     detail = getattr(exc, "safe_detail", None)
     if not isinstance(detail, str):
         detail = str(exc)
-    detail = _SECRET_BODY.sub(" <body omitted>", detail)
-    detail = _SECRET_URL.sub("<url>", detail)
-    detail = _SECRET_HOST_PATH.sub("<host>", detail)
-    detail = _SECRET_TOKEN.sub("<secret>", detail)
-    detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
+    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
     detail = "".join(char if char.isprintable() else " " for char in detail)
     detail = " ".join(detail.split())
     text = f"{name}: {detail}" if detail else name
@@ -408,7 +428,7 @@ class Dispatcher:
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
-            self.record_poll_error("github", "-", type(exc).__name__)
+            self.record_poll_exception("github", "-", exc)
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -422,19 +442,19 @@ class Dispatcher:
                 ),
             )
         except Exception as exc:
-            self.record_poll_error("linear", "-", type(exc).__name__)
+            self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
         try:
             tracked = source.tracked_tickets(self._tracked_refs())
         except Exception as exc:
-            self.record_poll_error("tracked", "-", type(exc).__name__)
+            self.record_poll_exception("tracked", "-", exc)
             tracked = ()
         for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
-                self._record_poll_error(ticket, type(exc).__name__)
+                self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         self.reconcile_jobs()
         if end is not None:
             end()
@@ -452,7 +472,7 @@ class Dispatcher:
         try:
             report = self.feeder.feed_once()
         except Exception as exc:
-            self.record_poll_error("feeder", "-", type(exc).__name__)
+            self.record_poll_exception("feeder", "-", exc)
             return
         fresh_reader = getattr(source, "fresh_ticket", None)
         if fresh_reader is None:
@@ -461,21 +481,44 @@ class Dispatcher:
             try:
                 ticket = fresh_reader(ref)
             except Exception as exc:
-                self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
+                self.record_poll_exception(ref.repo, ref.ticket_id, exc)
                 continue
             if ticket is not None:
                 self._discover((ticket,), tracker=ref.tracker)
 
-    def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+    def record_poll_error(
+        self,
+        repo: str,
+        ticket_id: str,
+        error: str,
+        detail: str | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO poll_errors (
-                    repo, ticket_id, error, recorded_at
-                ) VALUES (?, ?, ?, ?)
+                    repo, ticket_id, error, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, error, self.queue.now()),
+                (repo.lower(), ticket_id, error, detail, self.queue.now()),
             )
+
+    def record_poll_exception(
+        self,
+        repo: str,
+        ticket_id: str,
+        exc: BaseException,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Record the class in poll_errors.error and the traceback in detail.
+
+        The same traceback goes to stderr, the poller's log.
+        """
+        error = f"{prefix}{type(exc).__name__}"
+        detail = poll_error_detail(exc)
+        print(f"orch poll: {repo} {ticket_id} {error}\n{detail}", file=sys.stderr, flush=True)
+        self.record_poll_error(repo, ticket_id, error, detail)
 
     def record_poll_deferral(self, detail: str) -> None:
         with self._connect() as connection:
@@ -3842,9 +3885,6 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
-        self.record_poll_error(ticket.repo, ticket.ticket_id, error)
-
     def _record_job_error(self, job: Job, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -3904,7 +3944,11 @@ class Dispatcher:
                 """
             ).fetchall()
         for row in rows:
-            self._ensure_stuck_wake(str(row["repo"]), str(row["ticket_id"]))
+            repo, ticket_id = str(row["repo"]), str(row["ticket_id"])
+            try:
+                self._ensure_stuck_wake(repo, ticket_id)
+            except Exception as exc:
+                self.record_poll_exception(repo, ticket_id, exc, prefix="stuck-wake:")
 
     def _ensure_stuck_wake(self, repo: str, ticket_id: str) -> None:
         with self._connect() as connection:
@@ -3960,8 +4004,10 @@ class Dispatcher:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"]),
-                timeout_seconds=int(state["timeout_seconds"]),
+                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                timeout_seconds=int(
+                    state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
+                ),
                 generation=generation,
                 detail=reason,
             ),
@@ -4252,10 +4298,16 @@ class Dispatcher:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
-                    recorded_at REAL NOT NULL
+                    recorded_at REAL NOT NULL,
+                    detail TEXT
                 )
                 """
             )
+            if "detail" not in {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(poll_errors)").fetchall()
+            }:
+                connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_deferrals (
