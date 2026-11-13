@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Top bar</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<header style="width: 100%; background: #1a1b26; color: #c0caf5; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.5">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; min-height: 56px; box-sizing: border-box; padding: 8px 24px">
+<div style="display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 15px; line-height: 1; font-weight: 600; letter-spacing: -0.01em; color: #ced8ff; white-space: nowrap">
+<span>Factory <b style="font-weight: 600; color: #acdc7e">Mission Control</b></span>
+<span aria-hidden="true" style="display: block; width: 8px"><dc-import name="PixelStrip" effect="caret" tint="{{ caretTint }}" rate="{{ caretRate }}" cell="4" strip-height="12" hint-size="8px,12px"></dc-import></span>
+</div>
+<nav aria-label="Pages" style="display: flex; flex-wrap: wrap; gap: 2px">
+<sc-for list="{{ items }}" as="item" hint-placeholder-count="5">
+<a href="{{ item.href }}" aria-current="{{ item.cur }}" style="padding: 6px 12px; font-size: 14px; line-height: 1.2; font-weight: 500; text-decoration: none; color: {{ item.fg }}; background: {{ item.bg }}; box-shadow: {{ item.shadow }}">{{ item.label }}</a>
+</sc-for>
+</nav>
+<div role="status" style="display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1; font-weight: 500; letter-spacing: 0.04em; color: {{ linkColor }}"><span aria-hidden="true" style="width: 8px; height: 8px; background: {{ linkColor }}"></span><span>{{ linkText }}</span></div>
+<div style="margin-left: auto; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.3; color: #8b93b8">snapshot <span style="color: #a9b1d6">2s ago</span> · <span style="color: #a9b1d6">20:48:45 UTC</span> · read-only, redacted</div>
+</div>
+<dc-import name="PixelStrip" effect="field" tint="#9ece6a" load="0.69" seed="21" cell="4" strip-height="24" hint-size="100%,24px"></dc-import>
+<sc-if value="{{ showAttention }}" hint-placeholder-val="{{ true }}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; min-height: 36px; box-sizing: border-box; padding: 6px 24px; background: rgba(247,118,142,0.09); border-bottom: 1px solid rgba(247,118,142,0.45); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 12px"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="16" seed="5" hint-size="12px,16px"></dc-import></span>
+<a href="Activity.dc.html" style="font-weight: 700; color: #f7768e; text-decoration: none">2 need attention</a>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px">
+<span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">stuck</span>
+<a href="Job.dc.html" style="font-weight: 600; color: #c0caf5; text-decoration: none">cleffy#103</a>
+<span style="color: #a9b1d6">planning: cancelled, superseded by sanctioned intake</span>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px">
+<span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">down</span>
+<a href="System.dc.html" style="font-weight: 600; color: #c0caf5; text-decoration: none">waiter cursor-bot @ box</a>
+<span style="color: #a9b1d6">never seen</span>
+</div>
+</div>
+</sc-if>
+</header>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"current":{"editor":"enum","options":["lanes","tickets","activity","efficiency","system"],"default":"lanes"},"link":{"editor":"enum","options":["live","stale","lost"],"default":"live"},"attention":{"editor":"boolean","default":true},"$preview":{"width":1440,"height":116}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var p = this.props;
+    var current = String(p.current || 'lanes');
+    var link = String(p.link || 'live');
+    var pages = [
+      ['lanes', 'Lanes', 'Lanes.dc.html'],
+      ['tickets', 'Tickets', 'Tickets.dc.html'],
+      ['activity', 'Activity', 'Activity.dc.html'],
+      ['efficiency', 'Efficiency', 'Efficiency.dc.html'],
+      ['system', 'System', 'System.dc.html']
+    ];
+    var items = [];
+    for (var i = 0; i < pages.length; i++) {
+      var on = pages[i][0] === current;
+      items.push({
+        label: pages[i][1],
+        href: pages[i][2],
+        cur: on ? 'page' : 'false',
+        fg: on ? '#ced8ff' : '#b7bfea',
+        bg: on ? '#24283b' : 'transparent',
+        shadow: on ? 'inset 0 -2px 0 #9ece6a' : 'none'
+      });
+    }
+    var links = {
+      live: ['LIVE', '#9ece6a', 1],
+      stale: ['STALE', '#ff9e64', 0.4],
+      lost: ['LINK LOST', '#f7768e', 0]
+    };
+    var l = links[link] || links.live;
+    return {
+      items: items,
+      linkText: l[0],
+      linkColor: l[1],
+      caretTint: l[1],
+      caretRate: l[2],
+      showAttention: !(p.attention === false || p.attention === 'false')
+    };
+  }
+}
+</script>
+</body>
+</html>
