@@ -464,3 +464,64 @@ def test_a_url_template_with_credentials_is_refused_before_git_sees_it(
 )
 def test_url_templates_without_secrets_are_accepted(template: str) -> None:
     worktrees.check_remote_url(template.format(repo="acme/widgets"))
+
+
+# --- #105: a T6 retry takes over the kept worktree of the attempt it repeats ---------
+
+
+def _kept_with_a_commit(root: Path, origin: dict, n: int):
+    checkout = prepare(root, origin, n, origin["pr"])
+    (checkout.path / "README").write_text("half done\n", encoding="utf-8")
+    git("commit", "-q", "-am", "attempt 1", cwd=checkout.path)
+    commit = git("rev-parse", "HEAD", cwd=checkout.path)
+    assert worktrees.finish(checkout, lambda _m: None) is False
+    _orphan_pid(root, n)
+    return checkout, commit
+
+
+def test_retry_adopts_the_kept_worktree_with_unpushed_commits(
+    tmp_path: Path, origin: dict
+) -> None:
+    root = tmp_path / "work"
+    first, commit = _kept_with_a_commit(root, origin, 1)
+    messages: list[str] = []
+
+    retry = prepare(root, origin, 2, origin["pr"], adopt=job_id(1), log=messages.append)
+
+    assert retry.path == root / "jobs" / job_id(2)
+    assert git("rev-parse", "HEAD", cwd=retry.path) == commit
+    assert retry.start == origin["pr"]
+    assert not first.path.exists()
+    assert not first.record.exists()
+    assert json.loads(retry.record.read_text())["start"] == origin["pr"]
+    assert str(retry.path) in listed(retry)
+    assert messages == [f"reusing kept worktree of job {job_id(1)} (unpushed commits)"]
+    # The commit is still work, so the retry's own finish keeps it too.
+    assert worktrees.finish(retry, lambda _m: None) is False
+
+
+@pytest.mark.parametrize("case", ["clean", "live", "missing", "self"])
+def test_retry_does_not_adopt_a_clean_or_live_worktree(
+    tmp_path: Path, origin: dict, case: str
+) -> None:
+    root = tmp_path / "work"
+    if case == "clean":
+        first = prepare(root, origin, 1, origin["pr"])
+        _orphan_pid(root, 1)
+    elif case == "live":
+        first, _commit = _kept_with_a_commit(root, origin, 1)
+        record = json.loads(first.record.read_text())
+        record["pid"] = os.getpid()
+        record.pop("pid_start", None)
+        first.record.write_text(json.dumps(record), encoding="utf-8")
+    else:
+        first = None
+    adopt = job_id(2) if case == "self" else job_id(1)
+    messages: list[str] = []
+
+    retry = prepare(root, origin, 2, origin["pr"], adopt=adopt, log=messages.append)
+
+    assert git("rev-parse", "HEAD", cwd=retry.path) == origin["pr"]
+    assert messages == []
+    if first is not None:
+        assert first.path.is_dir() and first.record.is_file()

@@ -258,6 +258,7 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "3. Before `ready`, self-check: prove-it-works, deslop, no-comments.",
             "4. Push, then post the ready handoff below with the head you pushed.",
         ]
+        body.extend(_builder_notes(job))
     elif kind == "fix":
         body = [
             "Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). "
@@ -268,6 +269,7 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "3. Run the tests. Self-check: prove-it-works, deslop, no-comments.",
             "4. Push, then post the ready handoff below with the head you pushed.",
         ]
+        body.extend(_builder_notes(job))
     elif kind == "review":
         verify = facts["verify"]
         verify_line = (
@@ -292,7 +294,21 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
             "3. Resolve any conflict without changing behavior, then run the tests.",
             "4. Push, then post the ready handoff below with the head you pushed.",
         ]
+        body.extend(_builder_notes(job))
     return "## What to do\n" + "\n".join(body)
+
+
+def _builder_notes(job: Job) -> list[str]:
+    notes = [
+        "Run test suites in the foreground, however long they take: never in the background. "
+        "Print mode stops background tasks after your last turn, and unpushed work is lost.",
+    ]
+    if job.request.attempt > 1:
+        notes.append(
+            "This is a retry. The working directory may hold the last attempt's work: check "
+            "`git status` and `git log @{u}..` before you start, and build on it rather than redo it."
+        )
+    return notes
 
 
 def _handoff_section(job: Job, bot: str, kind: str, facts: dict) -> str:
@@ -312,7 +328,13 @@ def _handoff_section(job: Job, bot: str, kind: str, facts: dict) -> str:
         )
         example = "A link to `plan.md` and the criterion-to-work map."
     else:
-        header = f"<!-- orch:v1 kind=ready from={bot} role=builder head=<pushed-head-sha> -->"
+        # #105: round and risk come from the job, never from the builder.
+        round_key = f" round={facts['round']}" if facts["round"] else ""
+        risk_key = f" risk={facts['risk']}" if facts["risk"] else ""
+        header = (
+            f"<!-- orch:v1 kind=ready from={bot} role=builder{round_key} "
+            f"head=<pushed-head-sha>{risk_key} -->"
+        )
         example = "What changed, the tests and their results, and anything left open."
     target = (
         f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
