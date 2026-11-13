@@ -54,6 +54,8 @@ import yaml
 from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
@@ -500,6 +502,8 @@ def _scrub(value: object) -> object:
         return {key: _scrub(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_scrub(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 
@@ -648,6 +652,7 @@ def collect_snapshot(
             job_states if job_states is not None else JobStateConfig(),
             alive,
         )
+        telemetry = read_telemetry(connection, now)  # issue #93
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -673,6 +678,7 @@ def collect_snapshot(
         machines_path, db["held"], unplaced=db["box_running"]
     )
     box_running = db["box_running"] + db["running_on"].get(box_name, 0)
+    attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
     report = component_health.load_report(
         db_path,
         now,
@@ -745,6 +751,7 @@ def collect_snapshot(
         # The backlog feeder at its last poll (issue #85); None when none has run.
         "feeder": db["feeder"],
         "statechart": chart,
+        "telemetry": telemetry["rollup"],
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 
@@ -1482,7 +1489,7 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     pages in PAGES order.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True) + "\n"}
+    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_pages(snapshot))
     targets = [out_dir / name for name in texts]
     temps: list[str] = []
