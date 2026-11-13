@@ -408,6 +408,34 @@ class DevicePool:
             )
             return None
 
+    def forget_worker(self, job_id: str, *, owner: str, runner: int, earlier: Placement) -> None:
+        """Drop the record of an earlier runner's worker, now confirmed gone.
+
+        Guarded: the slot is still run by `runner` and still names exactly
+        the worker that was confirmed gone, so a newer record is never
+        dropped. The slot then reads as never started, and a start that
+        fails before any worker can be requeued (#94).
+        """
+
+        def worker(slot: Placement) -> tuple[object, ...]:
+            return (slot.worker_pid, slot.worker_start, slot.remote_started, slot.worker_tag)
+
+        def guard(row: sqlite3.Row) -> None:
+            slot = _placement(row)
+            if slot.runner_pid != runner or worker(slot) != worker(earlier):
+                raise QueueError(
+                    f"job {job_id}'s slot changed while its earlier worker was checked; "
+                    "nothing was started"
+                )
+
+        self._update_slot(
+            job_id,
+            owner,
+            "worker_pid = NULL, worker_start = NULL, remote_started = 0, worker_tag = NULL",
+            (),
+            guard=guard,
+        )
+
     def held(self) -> tuple[HeldSlot, ...]:
         """Every held slot with its job's state, oldest placement first."""
         with self.queue.connect() as connection:

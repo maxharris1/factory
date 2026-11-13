@@ -443,6 +443,36 @@ def test_requeued_job_can_be_claimed_again(tmp_path: Path) -> None:
     assert claimed is not None and claimed[0].id == job_id
 
 
+@pytest.mark.parametrize(
+    ("tools", "template", "reason"),
+    [
+        (("git", "harness"), None, "missing under bash -lc on pc: gh"),
+        (("git", "gh", "harness"), "file://{tmp}/missing/{{repo}}.git", "git fetch failed"),
+        (("git", "gh", "harness"), "https://user:secret@example.invalid/{{repo}}.git", "credentials"),
+    ],
+    ids=["preflight", "clone", "url"],
+)
+def test_a_failed_start_after_taking_over_a_dead_runners_slot_still_requeues(
+    tmp_path: Path, tools: tuple[str, ...], template: str | None, reason: str
+) -> None:
+    device = Device(tmp_path, login_tools=tools)
+    machines, queue, pool, job_id = remote_job(tmp_path, head=device.feature)
+    # a runner that died after recording its remote start, before spawning ssh
+    pool.attach_runner(job_id, owner="codex", pid=99999999, start=None, alive=lambda *_: False)
+    pool.attach_worker(job_id, owner="codex", remote=True)
+    before = row(queue, job_id)
+
+    code, err = run_job(
+        tmp_path, device, machines, job_id,
+        template=template.format(tmp=tmp_path) if template else None,
+    )
+
+    assert_requeued(queue, pool, job_id, before, code, err)
+    assert reason in err
+    assert starts(device) == []
+    assert not device.report.exists()
+
+
 def test_a_credential_carrying_url_template_is_refused_and_requeued(tmp_path: Path) -> None:
     device = Device(tmp_path)
     machines, queue, pool, job_id = remote_job(tmp_path, head=device.feature)

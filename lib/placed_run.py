@@ -353,6 +353,15 @@ def prepare(
     except QueueError as exc:
         raise PlacementError(str(exc)) from exc
     _earlier_worker_gone(placement, device, transport, alive)
+    if placement.worker_pid is not None or placement.remote_started:
+        try:
+            retry_locked(
+                lambda: pool.forget_worker(
+                    job_id, owner=owner, runner=runner, earlier=placement
+                )
+            )
+        except QueueError as exc:
+            raise PlacementError(str(exc)) from exc
     return PlacedRun(
         pool=pool,
         placement=placement,
