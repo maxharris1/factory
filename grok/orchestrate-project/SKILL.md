@@ -19,7 +19,7 @@ The dispatcher queues work. This skill does not start a harness.
 - Do not add `orch:v1` keys. The keys already on main are the only keys.
 - Do not invent a third risk class. The classes are `low` and `high`.
 - Do not post `orch:go` twice for one intake, and do not post it again when a mid-work answer resumes the same step.
-- Read `factory.md` from the project's base branch. Do not read it from a pull request head.
+- Read `factory.md` from the project's `factory_ref` in `orch.yml`, the trusted base branch the poller reads. Do not read it from a pull request head or the repository's default branch.
 
 ## Interface
 
@@ -71,7 +71,7 @@ Question classes: `observable`, `default-able`, `product`
 ## Intake
 
 1. Take the ticket Max handed over (a GitHub issue, a Linear issue, or a description that will become one on that project's tracker). A ticket the backlog feeder took in (it has the feeder's brief and `orch:go` already) needs no intake from you; see Brief.
-2. Resolve `factory.md` from the project's `base_branch`, not from a pull request head. In a checkout of that branch, the path is the repo-root `factory.md`. Otherwise fetch that file with `env -u GH_TOKEN gh` from `base_branch`.
+2. Resolve `factory.md` the way the poller does. Look up the project in `orch.yml` and read its `projects[].factory_ref`. If the project has no `factory_ref`, stop and report `blocked`. In a checkout of that branch, the path is the repo-root `factory.md`. Otherwise fetch that file with `env -u GH_TOKEN gh` from `factory_ref`, never from a pull request head. After `read_factory`, if `project.config.base_branch` is not `factory_ref`, refuse: report `blocked` with both names as the evidence, and post no brief, questions or `orch:go`.
 3. Call `read_factory(path)`. The path's filename must be `factory.md`.
 4. If the result has a stop, the config is refused. Report that stop once (below) and stop. Do not post a brief, questions, or `orch:go`.
 5. If the result has warnings, keep them on the ticket notes. An unknown model name does not refuse the project.
@@ -150,7 +150,7 @@ Build a `RouteRequest` from `project.config`, the brief's risk, the likely files
 
 Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence. `assert_cross_family` uses the same rule as `orch check-config`.
 
-Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. The verify value is the skill name from `factory.md`, or `none`.
+Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory only, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` (the same action) is already there, do not post another; that intake already went. The verify value is the skill name from `factory.md`, or `none`.
 
 `post_go` writes `builder`, `risk`, and `state` (`planning` or `building`). The reviewer, models, verify skill, job, and file count are in the body. Do not add a header key for them.
 
@@ -166,7 +166,7 @@ The dispatcher enforces the round cap from `factory.md`. This skill does not.
 
 A `kind=questions` comment from a builder or reviewer is a T5 wake. Classify those questions the same way. Decide each `default-able` question and post `answers_comment` with the decision. Ask each product question one at a time, then post `answers_comment` with Max's words. Do not post another `orch:go`. The dispatcher resumes the same step. That resume is not a review round.
 
-If an answer changes the scope of the ticket, set `scope_changed` on any later `RouteRequest`. That is this skill's judgment. The job becomes `plan`.
+If an answer changes the scope of the ticket (this skill's judgment), post the `answers_comment`, then call `choose_route` once more with `scope_changed=True` on the `RouteRequest` and post one go for that decision, which has `job=plan` (`state=planning`). A plan go has its own T1 dedupe key, so T1 queues the plan even after a build go. If the ticket already has a plan go, do not post another.
 
 ## Stops
 

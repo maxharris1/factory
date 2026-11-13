@@ -569,8 +569,14 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "GH_TOKEN",
         "lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute",
         "route_job(config, marked_urgent=urgent)",
+        "projects[].factory_ref",
+        "`project.config.base_branch` is not `factory_ref`, refuse",
+        "`scope_changed=True`",
+        "`job=plan`",
+        "a trusted `grok-bot` `kind=go` with the same `state`",
     ):
         assert phrase in text
+    assert "set `scope_changed` on any later" not in text
     assert "choose_fit" not in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "lib.usage.route_job(config, marked_urgent=urgent)" in readme
