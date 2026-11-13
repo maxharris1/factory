@@ -183,8 +183,8 @@ another bot; no key, `-i` or config path is ever passed. Each remote start gets
 a fresh random worker tag, recorded on the slot before ssh starts, and the
 start script runs under `exec env ORCH_WORKER_TAG=<tag>`, so the command and
 every process it starts carry the tag; the tag, not a process number, names
-the job's worker. The script refuses (exit 125, nothing run) a device without
-Linux `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
+the job's worker. On Linux the script refuses (exit 125, nothing run) a device
+without `/proc` and a `grep -z`, makes `<workdir_root>/jobs/<job-id>`, records
 the worker's process group and boot id (sshd starts the command in its own
 session) in `.orch-worker.pid` there, and execs the command with `ORCH_JOB_ID`,
 `ORCH_JOB_BOT`, `ORCH_JOB_DEVICE` and `ORCH_JOB_WORKDIR` (not `ORCH_DB`: the
@@ -193,6 +193,32 @@ with the command's status. The record is never removed. The heartbeat stays
 local and beats while ssh runs; SIGTERM and SIGHUP go to ssh.
 `--worktree` is box-only and refused for a remote job (exit 2): the harness
 checks the repo out in `$ORCH_JOB_WORKDIR` itself.
+
+A macOS device (`uname -s` is `Darwin`) has no `/proc` and cannot read another
+process's environment, so there the worker is named by its record alone, one
+file per start (`.orch-worker-<tag>.pid` in the job directory). The start
+refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
+id (a UUID) and the start leads its own process group, then creates the record with
+noclobber (it refuses if the file exists), holding
+`<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
+UTC). A check that finds no record cannot tell whether the start is still on
+its way, so it creates the record itself as a fence (`fenced`) and cannot tell
+this time; the fenced start then refuses, and later checks read the fence as
+gone. A start that never ran (unreachable, refused) so frees its slot one check
+later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+every step to succeed with a well-formed result: ps exits 0, every line it
+lists is three numbers, and awk reads all of them, exits 0 and prints exactly
+three 0/1 answers. Then a record from an earlier boot session or an empty group
+is gone; a group holding only the bot's own processes and led by the recorded
+leader is running; a malformed record, another tag, another user's process in the group,
+a group whose leader has exited (nothing ties the processes left to this start),
+a leader with a different start time (the number was reused), or any failed or
+malformed step (no boot session UUID, a user id that is not a number, ps, awk)
+cannot tell. The stop sends SIGTERM to the recorded group only when the check
+would say running. A process that leaves the job's group (`setsid`), or stays in
+it after its leader exits, is never signalled on macOS; the latter keeps the
+slot until it ends. Every script runs under POSIX `sh` whatever the login shell
+(the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
