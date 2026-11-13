@@ -37,8 +37,9 @@ stdout on a pipe and hands the pipe to a `Session` here:
   checks of #91 and #92).
 
 Secrets: every string that goes into the table (step titles, file paths,
-exit reasons, tool names) is scrubbed first (`Scrubber`): the values of this
-process's environment variables whose names look secret are replaced,
+exit reasons, tool names) is scrubbed first (`Scrubber`): the values of the
+harness's environment variables whose names look secret, and always its
+ORCH_JOB_PROOF and ORCH_WORKER_TAG, are replaced,
 whatever their length and however the text quotes or escapes them (each
 value is matched against the text as written and as read after up to three
 rounds of shell unquoting or JSON, Python and C string-escape decoding, with
@@ -85,7 +86,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import IO, Any
 
-from lib.remote import WORKER_ENV_END, WORKER_ENV_MARK
+from lib.job_token import PROOF_ENV
+from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 
 TABLE = "job_telemetry"
 STATE_DIR_ENV = "ORCH_JOB_STATE_DIR"
@@ -246,6 +248,9 @@ _SECRET_NAME = re.compile(
     r"(?i)(token|secret|passw|pwd|key|auth|credential|cookie|session|webhook|private|signature)"
 )
 _NOT_SECRET_NAME = re.compile(r"XDG_SESSION_\w+|DESKTOP_SESSION")
+# #100 r8: what orch itself hands a run, under names that do not read as
+# secret: the run's completion proof (#96) and a remote start's worker tag.
+_RUN_SECRETS = frozenset({PROOF_ENV, TAG_ENV})
 _FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 _QUOTING = frozenset("'\"\\")
 _ESCAPES = {
@@ -373,9 +378,14 @@ class Scrubber:
             value.strip()
             for name, value in environ.items()
             if value.strip()
-            and value.strip().lower() not in _FLAG_VALUES
-            and _SECRET_NAME.search(name)
-            and not _NOT_SECRET_NAME.fullmatch(name)
+            and (
+                name in _RUN_SECRETS
+                or (
+                    value.strip().lower() not in _FLAG_VALUES
+                    and _SECRET_NAME.search(name)
+                    and not _NOT_SECRET_NAME.fullmatch(name)
+                )
+            )
         }
         lines = {line.strip() for value in values for line in value.splitlines() if line.strip()}
         bare = {"".join(char for char in value if char not in _QUOTING) for value in values | lines}

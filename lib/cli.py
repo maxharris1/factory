@@ -1072,19 +1072,6 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
 
-    session = telemetry.start_session(
-        connect=queue.connect,
-        database=database,
-        job_id=args.job_id,
-        bot=args.bot,
-        repo=repo,
-        command=command,
-        log=log,
-        worker_env=placed.remote,
-    )
-    if session is not None:
-        sessions.append(session)
-        command = session.argv
     environment = dict(os.environ)
     # Never pass on a token this process inherited (another job's run).
     environment.pop(job_token.PROOF_ENV, None)
@@ -1095,6 +1082,25 @@ def _job_run_command(argv: list[str]) -> int:
             DB_ENV: str(database),
         }
     )
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
+    # #100 r8: the summary's scrubber knows the harness's own environment,
+    # the proof included.
+    session = telemetry.start_session(
+        connect=queue.connect,
+        database=database,
+        job_id=args.job_id,
+        bot=args.bot,
+        repo=repo,
+        command=command,
+        log=log,
+        environ=environment,
+        worker_env=placed.remote,
+    )
+    if session is not None:
+        sessions.append(session)
+        command = session.argv
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
     remote_env = {
@@ -1139,9 +1145,6 @@ def _job_run_command(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
-    if token is not None and not placed.remote:
-        # Not sent to a remote device: it would be on the ssh command line.
-        environment[job_token.PROOF_ENV] = token
     harness = command
     if placed.remote:
         # A remote device has no orch.db (the waiter finishes its job on the

@@ -296,3 +296,41 @@ def test_a_quoted_or_escaped_env_secret_never_reaches_status_json(
     title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
     assert title.startswith("$ deploy --pin") and "[redacted-env]" in title
     assert not readable(secret, title), title
+
+
+DIGITLESS_PROOF = "walrusHarborQuietLanternMeadow-Copper_Fjord"  # a valid mint() shape
+
+
+@pytest.mark.parametrize("name, value", [
+    ("ORCH_JOB_PROOF", DIGITLESS_PROOF),
+    ("ORCH_JOB_PROOF", "k7"),
+    ("ORCH_JOB_PROOF", "A" * 43),
+    ("ORCH_WORKER_TAG", "0123456789abcdef0123456789abcdef"),
+])
+@pytest.mark.parametrize("form", ["plain", "chunks", "quoted", "json"])
+def test_a_per_run_secret_orch_hands_the_harness_never_reaches_status_json(
+    tmp_path: Path, name: str, value: str, form: str
+) -> None:
+    """#100 r8: the run's proof and worker tag are secret whatever their value."""
+    word = {
+        "plain": value,
+        "chunks": "''".join(value[i : i + 8] for i in range(0, len(value), 8)),
+        "quoted": shlex.quote(value + "'"),
+        "json": json.dumps(value),
+    }[form]
+    event = {"type": "item.completed", "item": {
+        "id": "x", "type": "command_execution", "status": "completed", "exit_code": 0,
+        "command": f"env {name}={word} orch job done"}}
+    db, log = seeded(tmp_path)
+    session = telemetry.Session(
+        connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
+        repo="maxharris1/cleffy", harness="codex", argv=["codex"], raw_log=None,
+        scrub=telemetry.Scrubber({name: value}), log=lambda _: None,
+        stdout=io.BytesIO(), clock=lambda: NOW - 5,
+    )
+    session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+    session.flush()
+    status = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))[0]
+    title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
+    assert title.startswith(f"$ env {name}=") and "[redacted-env]" in title, title
+    assert not readable(value, title), title
