@@ -14,8 +14,9 @@ machine that ran the job.
 Snapshot shape:
 
 * each running or queued job gets `telemetry`: a summary (counters, tool
-  calls by type, files, tests, tokens, cost, elapsed, last activity, exit
-  reason, the last STEPS_SHOWN steps) or null when it has none;
+  calls by type, files touched, tests, tokens, cost, elapsed, last activity,
+  exit reason, the last STEPS_SHOWN steps, each a fixed label) or null when
+  it has none;
 * the top-level `telemetry` holds the rollup over the last WINDOW_DAYS:
   totals, then tokens and cost per harness and per repo, and the summaries
   of the RECENT_JOBS most recently finished jobs (so a job modal opened on
@@ -41,7 +42,6 @@ WINDOW_DAYS = 7
 RECENT_JOBS = 12
 STEPS_SHOWN = 12
 TOOLS_SHOWN = 8
-FILES_SHOWN = 10
 ROW_LIMIT = 2000
 TEXT_LIMIT = 160
 HARNESSES = ("claude", "codex", "cursor")
@@ -51,11 +51,16 @@ STEP_STATUSES = ("running", "ok", "error")
 _COLUMNS = (
     "job_id", "harness", "repo", "started_at", "updated_at", "last_event_at",
     "finished_at", "elapsed_seconds", "events", "turns", "tool_calls",
-    "files_touched", "files", "commands", "test_runs", "tests_passed",
+    "files_touched", "commands", "test_runs", "tests_passed",
     "tests_failed", "tokens_in", "tokens_cached", "tokens_out", "cost_usd",
     "exit_code", "exit_reason", "steps",
 )
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# What a label or exit reason can be (lib/telemetry.py writes only these
+# shapes): tool names, fixed words and counts, "[redacted-env]". Anything
+# else in the table is not shown.
+_LABEL = re.compile(r"[\w .:\[\]-]{1,40}")
+_REASON = re.compile(r"[\w .;()-]{1,100}")
 
 
 # --- reading -------------------------------------------------------------------
@@ -103,6 +108,10 @@ def _json(value: object, kind: type) -> object:
     return data if isinstance(data, kind) else kind()
 
 
+def _shaped(value: object, shape: re.Pattern[str], fallback: str) -> str:
+    return value if isinstance(value, str) and shape.fullmatch(value) else fallback
+
+
 def _harness(value: object) -> str:
     return str(value) if str(value) in HARNESSES else "other"
 
@@ -111,21 +120,20 @@ def summary(row: sqlite3.Row | dict, now: float) -> dict:
     """One job's telemetry as the dashboard shows it."""
     tools = _json(row["tool_calls"], dict)
     counted = sorted(
-        ((_text(name, 40), _count(n)) for name, n in tools.items()),  # type: ignore[union-attr]
+        ((_shaped(name, _LABEL, "other"), _count(n)) for name, n in tools.items()),  # type: ignore[union-attr]
         key=lambda item: (-item[1], item[0]),
     )
-    files = [_text(path) for path in _json(row["files"], list)][-FILES_SHOWN:]  # type: ignore[union-attr]
     steps = []
     for step in list(_json(row["steps"], list))[-STEPS_SHOWN:]:  # type: ignore[arg-type]
         if not isinstance(step, dict):
             continue
-        kind = step.get("kind")
+        kind = step.get("kind") if step.get("kind") in STEP_KINDS else "tool"
         status = step.get("status")
         steps.append(
             {
-                "kind": kind if kind in STEP_KINDS else "tool",
+                "kind": kind,
                 "status": status if status in STEP_STATUSES else "running",
-                "title": _text(step.get("title", "")),
+                "label": _shaped(step.get("label"), _LABEL, kind),
                 "age_seconds": _age(now, step.get("at")),
             }
         )
@@ -139,7 +147,6 @@ def summary(row: sqlite3.Row | dict, now: float) -> dict:
         "tool_calls": [{"name": name, "count": n} for name, n in counted[:TOOLS_SHOWN]],
         "tool_calls_total": sum(n for _, n in counted),
         "files_touched": _count(row["files_touched"]),
-        "files": files,
         "commands": _count(row["commands"]),
         "test_runs": _count(row["test_runs"]),
         "tests_passed": _maybe_count(row["tests_passed"]),
@@ -153,7 +160,7 @@ def summary(row: sqlite3.Row | dict, now: float) -> dict:
         "updated_age_seconds": _age(now, row["updated_at"]),
         "finished": finished,
         "exit_code": row["exit_code"] if finished and isinstance(row["exit_code"], int) else None,
-        "exit_reason": _text(row["exit_reason"], 100) if finished and row["exit_reason"] else None,
+        "exit_reason": _shaped(row["exit_reason"], _REASON, "finished") if finished and row["exit_reason"] else None,
         "steps": steps,
     }
 
@@ -343,7 +350,7 @@ def job_block(item: dict | None) -> str:
         + "".join(
             "<li>"
             + _span("chip " + _STATUS[step["status"]][1], _STATUS[step["status"]][0])
-            + _span("what", step["title"])
+            + _span("what", step["label"])
             + _span("when", f"{_dur(step['age_seconds'])} ago")
             + "</li>"
             for step in steps
@@ -503,7 +510,7 @@ TELEMETRY_SCRIPT = r"""
       var li = add(ul, el('li'));
       var st = TELE_STATUS[s.status] || TELE_STATUS.running;
       add(li, chip(st[0], st[1]));
-      add(li, el('span', 'what', s.title));
+      add(li, el('span', 'what', s.label));
       ticking(add(li, el('span', 'when')), s.age_seconds, '', ' ago');
     });
     return sec;

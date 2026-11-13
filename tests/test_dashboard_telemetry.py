@@ -10,8 +10,8 @@ from __future__ import annotations
 import io
 import json
 import re
-import shlex
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,12 +20,12 @@ from lib import telemetry
 from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
-from tests.test_telemetry import ESCAPED_SECRETS, QUOTING_ONLY_SECRETS, readable
+from tests.test_telemetry import readable
 
 STEPS = [
-    {"at": NOW - 50, "kind": "tool", "title": "Read lib/app.py", "status": "ok"},
-    {"at": NOW - 40, "kind": "command", "title": "$ python3 -m pytest -q", "status": "error"},
-    {"at": NOW - 5, "kind": "command", "title": "$ git status", "status": "running"},
+    {"at": NOW - 50, "kind": "tool", "status": "ok", "label": "edit 2 files"},
+    {"at": NOW - 40, "kind": "command", "status": "error", "label": "command"},
+    {"at": NOW - 5, "kind": "tool", "status": "running", "label": "mcp:github.get_pr"},
 ]
 
 
@@ -44,7 +44,6 @@ def add_telemetry(db: Path, job_id: str, **values) -> None:
         "turns": 3,
         "tool_calls": json.dumps({"shell": 7, "file_change": 2}),
         "files_touched": 2,
-        "files": json.dumps(["lib/app.py", "tests/test_app.py"]),
         "commands": 7,
         "test_runs": 2,
         "tests_passed": 40,
@@ -101,19 +100,19 @@ def test_a_running_job_gets_its_counters_and_recent_steps(tmp_path: Path) -> Non
     assert item["elapsed_seconds"] == 290
     assert item["last_activity_age_seconds"] == 5 and item["updated_age_seconds"] == 10
     assert item["finished"] is False and item["exit_reason"] is None
-    assert [(s["status"], s["title"], s["age_seconds"]) for s in item["steps"]] == [
-        ("ok", "Read lib/app.py", 50),
-        ("error", "$ python3 -m pytest -q", 40),
-        ("running", "$ git status", 5),
+    assert [(s["status"], s["label"], s["age_seconds"]) for s in item["steps"]] == [
+        ("ok", "edit 2 files", 50),
+        ("error", "command", 40),
+        ("running", "mcp:github.get_pr", 5),
     ]
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
     for needle in ("codex · last activity 5s ago", "<b>3</b><span>turns</span>",
                    '<b class="bad">40 / 1</b><span>tests pass / fail</span>',
                    "<b>24,763 / 1,220</b><span>tokens in / out</span>", "shell ×7",
-                   "$ git status", "4m 50s"):
+                   "mcp:github.get_pr", "4m 50s"):
         assert needle in article, needle
     # The newest step first.
-    assert article.index("$ git status") < article.index("Read lib/app.py")
+    assert article.index("mcp:github.get_pr") < article.index("edit 2 files")
 
 
 def test_a_job_with_a_row_but_no_events_says_no_telemetry_yet(tmp_path: Path) -> None:
@@ -131,11 +130,14 @@ def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: 
         db,
         "r-codex-review",
         tool_calls="{not json",
-        files=json.dumps([f"token={GH_CLASSIC}"]),
         steps=json.dumps([
-            {"at": NOW - 1, "kind": "evil", "status": "pwned", "title": f"$ echo {GH_CLASSIC}\n<script>"},
+            {"at": NOW - 1, "kind": "evil", "status": "pwned", "label": f"echo {GH_CLASSIC}\n<script>",
+             "title": f"$ echo {GH_CLASSIC}"},
+            {"at": NOW - 1, "kind": "command", "status": "ok", "label": "deploy --pin $'walr''us'"},
             "not a step",
         ]),
+        finished_at=NOW - 2,
+        exit_reason=f"error: {GH_CLASSIC}",
         turns=-4,
         tokens_in="many",
         cost_usd=-1,
@@ -148,9 +150,11 @@ def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: 
     assert item["tool_calls"] == [] and item["turns"] == 0 and item["tokens_in"] == 0
     assert item["cost_usd"] is None and item["harness"] == "other"
     assert item["steps"] == [
-        {"kind": "tool", "status": "running", "title": item["steps"][0]["title"], "age_seconds": 1}
+        {"kind": "tool", "status": "running", "label": "tool", "age_seconds": 1},
+        {"kind": "command", "status": "ok", "label": "command", "age_seconds": 1},
     ]
-    assert "\n" not in item["steps"][0]["title"]
+    assert item["exit_reason"] == "finished"
+    assert "walr" not in text
     html = render_pages(snapshot)["job.html"]
     assert GH_CLASSIC not in html and "<script>" not in _no_script(html).split("<body", 1)[1]
 
@@ -171,7 +175,7 @@ def test_nonfinite_numbers_in_the_table_never_reach_published_json(tmp_path: Pat
     add_telemetry(
         db, "d-claude-build-1", harness="claude", cost_usd=bad,
         finished_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
-        steps=json.dumps([{"at": bad, "kind": "tool", "title": "x", "status": "ok"}]),
+        steps=json.dumps([{"at": bad, "kind": "tool", "label": "x", "status": "ok"}]),
     )
     snapshot = collect_snapshot(db, log, now=NOW)
     status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
@@ -245,11 +249,11 @@ def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) ->
                     hash_="#job-r-codex-")
     view = out["text"]["jobview"]
     for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220",
-                   "shell ×7", "$ python3 -m pytest -q", "$ git status"):
+                   "shell ×7", "command", "mcp:github.get_pr"):
         assert needle in view, needle
     dump = out["dump"]["jobview"]
     assert re.search(r'section\.telemetry', dump) and "span.chip.bad" in dump
-    assert view.index("$ git status") < view.index("Read lib/app.py")
+    assert view.index("mcp:github.get_pr") < view.index("edit 2 files")
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     tokens = eff["text"]["tokens"]
     for needle in ("Tokens and cost", "last 7 days", "per harness", "per repo", "recent jobs",
@@ -268,69 +272,143 @@ def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> No
     assert "no telemetry" in eff["text"]["tokens"]
 
 
-@pytest.mark.parametrize(
-    "secret, command",
-    [(secret, shlex.join(["deploy", "--pin", secret])) for secret in ["walrus'" + "harbor", *QUOTING_ONLY_SECRETS]]
-    + [(secret, shlex.join(["deploy", "--pin", json.dumps({"pin": secret})])) for secret in ESCAPED_SECRETS],
-)
-@pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_quoted_or_escaped_env_secret_never_reaches_status_json(
-    tmp_path: Path, harness: str, secret: str, command: str
-) -> None:
+# --- no command or argument text is stored or published (#100 r10) ---------------------------
+
+# Max, on the round-9 REVISE: "Hide those fields in the job modal instead". A
+# step keeps a fixed label; no command line, argument, pattern, path, query or
+# error message is stored, so no quoting of a secret can be read back from it.
+DIGITLESS_PROOF = "walrusHarborQuietLanternMeadow-Copper_Fjord"  # a valid mint() shape
+LONG_SECRET = "walrusharbor" * 200
+ESC_SECRET = "walrus\x1bharbor-pin"
+
+
+def _ansi_c_chunks(value: str) -> str:
+    return "".join("$'" + value[i : i + 4] + "'" for i in range(0, len(value), 4))
+
+
+def _locale_chunks(value: str) -> str:
+    return "".join('$"' + value[i : i + 4] + '"' for i in range(0, len(value), 4))
+
+
+def _printf_q(value: str) -> str:
+    return subprocess.check_output(
+        ["/bin/bash", "--noprofile", "--norc", "-c", 'printf %q "$1"', "_", value], env={}
+    ).decode()
+
+
+def _bash_reads(word: str) -> str:
+    return subprocess.check_output(
+        ["/bin/bash", "--noprofile", "--norc", "-c", "printf %s " + word], env={}
+    ).decode()
+
+
+SHELL_FORMS = {
+    "plain": lambda value: value,
+    "ansi-c-chunks": _ansi_c_chunks,
+    "locale-chunks": _locale_chunks,
+    "printf-q": _printf_q,
+    "quote-chunks": lambda value: "''".join(value[i : i + 8] for i in range(0, len(value), 8)),
+    "json": json.dumps,
+}
+SECRETS = {
+    "proof": ("ORCH_JOB_PROOF", DIGITLESS_PROOF),
+    "worker-tag": ("ORCH_WORKER_TAG", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"),
+    "registered": ("DEPLOY_PASSWORD", "otter" + "lantern-key"),
+    "esc": ("DEPLOY_PASSWORD", ESC_SECRET),
+    "long": ("DEPLOY_PASSWORD", LONG_SECRET),
+}
+
+
+def _events(harness: str, word: str) -> list[dict]:
+    """One event for every field a harness can put free text in, each carrying `word`."""
     if harness == "claude":
-        event = {"type": "assistant", "message": {"id": "m", "content": [
-            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}
-    else:
-        event = {"type": "item.completed", "item": {
-            "id": "t", "type": "command_execution", "command": command, "exit_code": 0, "status": "completed"}}
+        uses = [
+            ("Bash", {"command": f"env ORCH_JOB_PROOF={word} orch job done", "description": word}),
+            ("Edit", {"file_path": f"/work/{word}/app.py", "old_string": word, "new_string": word}),
+            ("Grep", {"pattern": word, "path": f"/work/{word}"}),
+            ("Read", {"file_path": f"src/{word}.py"}),
+            ("Task", {"description": word, "prompt": word}),
+        ]
+        return [
+            {"type": "system", "subtype": "init", "cwd": f"/work/{word}"},
+            {"type": "assistant", "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": f"t{n}", "name": name, "input": data}
+                for n, (name, data) in enumerate(uses)]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t0", "is_error": True, "content": word}]}},
+            {"type": "result", "subtype": "error_during_execution", "is_error": True, "result": word},
+        ]
+    items = [
+        {"type": "command_execution", "command": f"env ORCH_JOB_PROOF={word} orch job done",
+         "aggregated_output": word, "exit_code": 1, "status": "failed"},
+        {"type": "file_change", "changes": [{"path": f"/work/{word}/a.py"}, {"path": f"{word}.py"}],
+         "status": "completed"},
+        {"type": "web_search", "query": word},
+        {"type": "mcp_tool_call", "server": "github", "tool": "get_pr", "arguments": {"q": word},
+         "status": "completed"},
+        {"type": "error", "message": word},
+    ]
+    return [
+        {"type": "turn.started"},
+        *({"type": "item.completed", "item": {"id": f"i{n}", **item}} for n, item in enumerate(items)),
+        {"type": "turn.failed", "error": {"message": word}},
+        {"type": "error", "message": word},
+    ]
+
+
+LABELS = {
+    "claude": ["command", "Edit", "Grep", "Read", "Task", "error during execution"],
+    "codex": ["command", "edit 2 files", "web_search", "mcp:github.get_pr", "error", "turn failed", "error"],
+}
+EXIT_REASONS = {"claude": "error during execution; exit 0", "codex": "error; exit 0"}
+
+
+def _fragments(secret: str) -> set[str]:
+    return {secret[i : i + 4] for i in range(len(secret) - 3)}
+
+
+@pytest.mark.parametrize("form", sorted(SHELL_FORMS))
+@pytest.mark.parametrize("which", sorted(SECRETS))
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_no_command_or_argument_text_reaches_the_row_status_json_or_the_job_modal(
+    tmp_path: Path, harness: str, which: str, form: str
+) -> None:
+    name, secret = SECRETS[which]
+    word = SHELL_FORMS[form](secret)
+    if form != "json":
+        assert _bash_reads(word) == secret  # the form really is the secret, as the shell reads it
     db, log = seeded(tmp_path)
     session = telemetry.Session(
         connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
         repo="maxharris1/cleffy", harness=harness, argv=[harness], raw_log=None,
-        scrub=telemetry.Scrubber({"DEPLOY_PASSWORD": secret}), log=lambda _: None,
+        scrub=telemetry.Scrubber({name: secret}), log=lambda _: None,
         stdout=io.BytesIO(), clock=lambda: NOW - 5,
     )
-    session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+    session.consume(io.BytesIO("".join(json.dumps(e) + "\n" for e in _events(harness, word)).encode()))
     session.flush()
-    status = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))[0]
-    title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
-    assert title.startswith("$ deploy --pin") and "[redacted-env]" in title
-    assert not readable(secret, title), title
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        row = dict(connection.execute("SELECT * FROM job_telemetry").fetchone())
+    stored = json.loads(row["steps"])
+    assert "files" not in row
+    assert [set(step) for step in stored] == [{"at", "kind", "status", "label"}] * len(stored)
+    assert [step["label"] for step in stored] == LABELS[harness]
 
+    snapshot = collect_snapshot(db, log, now=NOW)
+    status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
+    item = _running(_strict(status.read_text()))["13"]["telemetry"]
+    assert "files" not in item
+    assert [step["label"] for step in item["steps"]] == LABELS[harness][-12:]
+    assert [set(step) for step in item["steps"]] == [{"kind", "status", "label", "age_seconds"}] * len(item["steps"])
+    session.finish(0)
+    with sqlite3.connect(db) as connection:
+        reason = connection.execute("SELECT exit_reason FROM job_telemetry").fetchone()[0]
+    assert reason == EXIT_REASONS[harness]
 
-DIGITLESS_PROOF = "walrusHarborQuietLanternMeadow-Copper_Fjord"  # a valid mint() shape
-
-
-@pytest.mark.parametrize("name, value", [
-    ("ORCH_JOB_PROOF", DIGITLESS_PROOF),
-    ("ORCH_JOB_PROOF", "k7"),
-    ("ORCH_JOB_PROOF", "A" * 43),
-    ("ORCH_WORKER_TAG", "0123456789abcdef0123456789abcdef"),
-])
-@pytest.mark.parametrize("form", ["plain", "chunks", "quoted", "json"])
-def test_a_per_run_secret_orch_hands_the_harness_never_reaches_status_json(
-    tmp_path: Path, name: str, value: str, form: str
-) -> None:
-    """#100 r8: the run's proof and worker tag are secret whatever their value."""
-    word = {
-        "plain": value,
-        "chunks": "''".join(value[i : i + 8] for i in range(0, len(value), 8)),
-        "quoted": shlex.quote(value + "'"),
-        "json": json.dumps(value),
-    }[form]
-    event = {"type": "item.completed", "item": {
-        "id": "x", "type": "command_execution", "status": "completed", "exit_code": 0,
-        "command": f"env {name}={word} orch job done"}}
-    db, log = seeded(tmp_path)
-    session = telemetry.Session(
-        connect=lambda: sqlite3.connect(db), job_id="r-codex-review", bot="codex-bot",
-        repo="maxharris1/cleffy", harness="codex", argv=["codex"], raw_log=None,
-        scrub=telemetry.Scrubber({name: value}), log=lambda _: None,
-        stdout=io.BytesIO(), clock=lambda: NOW - 5,
-    )
-    session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
-    session.flush()
-    status = write_snapshot_pages(tmp_path / "out", collect_snapshot(db, log, now=NOW))[0]
-    title = _running(_strict(status.read_text()))["13"]["telemetry"]["steps"][-1]["title"]
-    assert title.startswith(f"$ env {name}=") and "[redacted-env]" in title, title
-    assert not readable(value, title), title
+    own = [json.dumps(row), json.dumps(item), reason]
+    published = [status.read_text(), render_pages(snapshot)["job.html"]]
+    for text in own:
+        assert not any(piece in text for piece in _fragments(secret)), text
+    for text in own + published:
+        assert secret not in text and word not in text
+        assert not readable(secret, text)

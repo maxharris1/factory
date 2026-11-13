@@ -109,7 +109,7 @@ def test_claude_stream_json_fixture_parses_into_the_summary() -> None:
     assert summary.events == 12
     assert summary.turns == 6  # the result event's num_turns
     assert dict(summary.tool_calls) == {"Read": 1, "Edit": 1, "Bash": 2}
-    assert summary.files_touched == 1 and summary.files == ["lib/app.py"]
+    assert summary.files_touched == 1
     assert summary.commands == 2
     assert (summary.test_runs, summary.tests_passed, summary.tests_failed) == (1, 41, 1)
     # tokens in counts every input token, cached ones included (Codex's convention).
@@ -117,11 +117,10 @@ def test_claude_stream_json_fixture_parses_into_the_summary() -> None:
     assert summary.cost_usd == pytest.approx(0.4213)
     assert summary.cli_reason == "success"
     assert summary.last_event_at == 1011.0
-    steps = [(step["kind"], step["status"], step["title"]) for step in summary.steps]
-    assert steps[:2] == [("tool", "ok", "Read lib/app.py"), ("tool", "ok", "Edit lib/app.py")]
-    assert steps[2][:2] == ("command", "error")
-    assert steps[2][2].startswith("$ GH_TOKEN=[redacted") and steps[2][2].endswith("git push origin HEAD")
-    assert steps[3] == ("command", "ok", "$ python3 -m pytest -q")
+    steps = [(step["kind"], step["status"], step["label"]) for step in summary.steps]
+    assert steps == [
+        ("tool", "ok", "Read"), ("tool", "ok", "Edit"), ("command", "error", "command"), ("command", "ok", "command"),
+    ]
     no_secret(summary.row())
 
 
@@ -140,15 +139,16 @@ def test_codex_exec_json_fixture_parses_into_the_summary() -> None:
     assert summary.events == 13
     assert summary.turns == 1
     assert dict(summary.tool_calls) == {"shell": 3, "file_change": 1, "mcp:github.get_pr": 1}
-    assert summary.files == ["…/lib/app.py", "tests/test_app.py"]  # outside the base: the last two parts
+    assert summary.files_touched == 2
     assert summary.commands == 3
     assert (summary.test_runs, summary.tests_passed, summary.tests_failed) == (1, 2, 0)
     assert (summary.tokens_in, summary.tokens_cached, summary.tokens_out) == (24763, 24448, 122)
     assert summary.cost_usd is None  # Codex reports no cost
     assert summary.cli_reason == "completed"
-    statuses = [(step["title"].split(" ", 1)[0], step["status"]) for step in summary.steps]
-    assert statuses == [("$", "ok"), ("edit", "ok"), ("$", "ok"), ("mcp:github.get_pr", "ok"), ("$", "error")]
-    assert summary.steps[-1]["title"].endswith("Authorization: [redacted]")  # the rest of the line goes
+    statuses = [(step["label"], step["status"]) for step in summary.steps]
+    assert statuses == [
+        ("command", "ok"), ("edit 2 files", "ok"), ("command", "ok"), ("mcp:github.get_pr", "ok"), ("command", "error"),
+    ]
     no_secret(summary.row())
 
 
@@ -156,8 +156,10 @@ def test_codex_turn_failures_and_errors_become_the_exit_reason() -> None:
     summary = Summary("codex", Scrubber({}))
     summary.feed({"type": "turn.started"}, 1.0)
     summary.feed({"type": "turn.failed", "error": {"message": f"401 with key {API_KEY}"}}, 2.0)
-    assert summary.cli_reason.startswith("turn failed: 401 with key")
-    assert summary.steps[-1]["kind"] == "error"
+    assert summary.cli_reason == "turn failed"
+    assert summary.steps[-1] == {"at": 2.0, "kind": "error", "status": "error", "label": "turn failed"}
+    summary.feed({"type": "error", "message": "stream disconnected"}, 3.0)
+    assert summary.cli_reason == "error"
     no_secret(summary.row())
     no_secret(summary.cli_reason)
 
@@ -176,7 +178,18 @@ def test_unknown_and_malformed_events_are_counted_and_ignored() -> None:
     assert summary.turns == 0 and not summary.steps and not summary.tool_calls
 
 
-def test_recent_steps_and_files_are_capped() -> None:
+def test_claude_result_reasons_are_fixed_labels() -> None:
+    for subtype, is_error, reason in [
+        ("success", False, "success"), ("success", True, "error"), ("error_max_turns", True, "max turns reached"),
+        ("error_max_budget_usd", True, "error"), (f"weird {API_KEY}", False, "finished"), (None, False, "finished"),
+        (["x"], False, "finished"),
+    ]:
+        summary = Summary("claude", Scrubber({}))
+        summary.feed({"type": "result", "subtype": subtype, "is_error": is_error, "result": API_KEY}, 1.0)
+        assert summary.cli_reason == reason
+
+
+def test_recent_steps_are_capped_and_files_only_counted() -> None:
     summary = Summary("claude", Scrubber({}))
     for index in range(telemetry.RECENT_STEPS + 15):
         summary.feed(
@@ -187,7 +200,7 @@ def test_recent_steps_and_files_are_capped() -> None:
         )
     assert len(summary.steps) == telemetry.RECENT_STEPS
     assert summary.files_touched == telemetry.RECENT_STEPS + 15
-    assert len(json.loads(summary.row()["files"])) <= telemetry.MAX_FILES
+    assert "files" not in summary.row() and "src/file" not in json.dumps(summary.row())
 
 
 @pytest.mark.parametrize(
@@ -225,7 +238,24 @@ def test_scrubber_removes_env_values_token_shapes_and_auth_headers() -> None:
     assert "abc" not in scrub("echo abc")  # a short secret is scrubbed too
     assert scrub("a\nb\tc") == "a b c"
     long = scrub("x " * 400)
-    assert len(long) == telemetry.TITLE_LIMIT and long.endswith("…")
+    assert len(long) == telemetry.LABEL_LIMIT and long.endswith("…")
+
+
+@pytest.mark.parametrize("prefix", ["", "deploy --pin ", "x " * 2000])
+def test_the_scrubber_matches_a_secret_before_it_cuts_the_text(prefix: str) -> None:
+    """#100 r9 finding 2: a 2,400-character secret is matched whole, then the text is cut."""
+    secret = "walrusharbor" * 200
+    scrub = Scrubber({"DEPLOY_PASSWORD": secret})
+    for limit in (telemetry.LABEL_LIMIT, 300):
+        text = scrub(prefix + secret + " done", limit=limit)
+        assert "walr" not in text and "harbor" not in text, text
+
+
+def test_a_text_too_long_to_match_whole_is_hidden_whole() -> None:
+    scrub = Scrubber({"DEPLOY_PASSWORD": "walrusharbor"})
+    fits = "y " * (telemetry.SCRUB_LIMIT // 2)
+    assert scrub(fits) == fits[: telemetry.LABEL_LIMIT - 1] + "…"
+    assert scrub(fits + "y") == telemetry.HIDDEN
 
 
 # --- the raw log's size cap ------------------------------------------------------------
@@ -368,15 +398,16 @@ def test_a_malformed_event_is_skipped_with_one_line(tmp_path: Path, monkeypatch)
     assert messages == ["telemetry: skipped an event (KeyError)"]
 
 
-def test_env_secrets_are_scrubbed_from_titles_and_reasons(tmp_path: Path) -> None:
+def test_env_secrets_are_scrubbed_from_tool_names(tmp_path: Path) -> None:
     session, db, _, _ = _session(tmp_path, environ={"DEPLOY_SECRET": ENV_SECRET})
     event = {"type": "assistant", "message": {"id": "m", "content": [
-        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": f"deploy --pass {ENV_SECRET}"}}]}}
+        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": f"deploy --pass {ENV_SECRET}"}},
+        {"type": "tool_use", "id": "u", "name": f"mcp__{ENV_SECRET}", "input": {}}]}}
     session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
     session.finish(0)
     row = _row(db)
     no_secret(row)
-    assert "[redacted-env]" in row["steps"]
+    assert [step["label"] for step in json.loads(row["steps"])] == ["command", "mcp__[redacted-env]"]
 
 
 @pytest.mark.parametrize("secret", ["7", "42", "4821", "pw!"])
@@ -392,9 +423,9 @@ def test_a_short_env_secret_never_reaches_the_table(tmp_path: Path, secret: str)
     session.consume(io.BytesIO("".join(json.dumps(e) + "\n" for e in events).encode()))
     session.finish(0)
     row = _row(db)
-    titles = [step["title"] for step in json.loads(row["steps"])]
-    assert len(titles) == 3 and all("[redacted-env]" in title for title in titles)
-    for text in (*titles, row["files"], row["exit_reason"], row["tool_calls"]):
+    labels = [step["label"] for step in json.loads(row["steps"])]
+    assert labels == ["command", "Edit", "turn failed"]
+    for text in (*labels, row["exit_reason"], row["tool_calls"]):
         assert secret not in text, text
 
 
@@ -431,7 +462,9 @@ def _decoded_once(text: str) -> set[str]:
         except ValueError:
             pass
     try:
-        found.update(_strings(ast.literal_eval(text)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            found.update(_strings(ast.literal_eval(text)))
     except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
         pass
     return found
@@ -461,8 +494,7 @@ def readable(secret: str, title: str) -> bool:
 @pytest.mark.parametrize("secret", [
     QUOTED_SECRET, "plainpass", "multi\nline-secret-tail", "'walrus'", "\\harbor\"", *QUOTING_ONLY_SECRETS,
 ])
-@pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str, secret: str) -> None:
+def test_the_scrubber_hides_a_shell_quoted_env_secret(secret: str) -> None:
     commands = [
         shlex.join(["deploy", "--pin", secret]),
         "deploy --pin " + json.dumps(secret),
@@ -470,20 +502,11 @@ def test_a_shell_quoted_env_secret_cannot_be_recovered_from_a_title(harness: str
         "bash -lc " + shlex.quote(shlex.join(["deploy", "--pin", secret])),
         "deploy --pin " + "''".join(secret),
     ]
-    summary = Summary(harness, Scrubber({"DEPLOY_PASSWORD": secret}))
-    for index, command in enumerate(commands):
-        if harness == "claude":
-            summary.feed({"type": "assistant", "message": {"id": f"m{index}", "content": [
-                {"type": "tool_use", "id": f"t{index}", "name": "Bash", "input": {"command": command}}]}}, 1.0)
-        else:
-            summary.feed({"type": "item.completed", "item": {
-                "id": f"t{index}", "type": "command_execution", "command": command,
-                "exit_code": 0, "status": "completed"}}, 1.0)
-    titles = [step["title"] for step in json.loads(summary.row()["steps"])]
-    assert len(titles) == len(commands)
-    for title in titles:
-        assert "[redacted-env]" in title, title
-        assert not readable(secret, title), title
+    scrub = Scrubber({"DEPLOY_PASSWORD": secret})
+    for command in commands:
+        text = scrub(command, limit=300)
+        assert "[redacted-env]" in text, text
+        assert not readable(secret, text), text
 
 
 ESCAPED_SECRETS = [
@@ -513,18 +536,8 @@ SHELL_ENCODINGS = {
 }
 
 
-def _command_event(harness: str, index: int, command: str) -> dict:
-    if harness == "claude":
-        return {"type": "assistant", "message": {"id": f"m{index}", "content": [
-            {"type": "tool_use", "id": f"t{index}", "name": "Bash", "input": {"command": command}}]}}
-    return {"type": "item.completed", "item": {
-        "id": f"t{index}", "type": "command_execution", "command": command,
-        "exit_code": 0, "status": "completed"}}
-
-
 @pytest.mark.parametrize("secret", ESCAPED_SECRETS)
-@pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_an_escaped_env_secret_cannot_be_recovered_from_a_title(harness: str, secret: str) -> None:
+def test_the_scrubber_hides_an_escaped_env_secret(secret: str) -> None:
     commands = [
         "deploy --pin " + shell(string(secret))
         for string in STRING_ENCODINGS.values()
@@ -533,21 +546,18 @@ def test_an_escaped_env_secret_cannot_be_recovered_from_a_title(harness: str, se
     commands.append(shlex.join(["deploy", "--json", json.dumps({"pin": secret})]))
     scrub = Scrubber({"DEPLOY_PASSWORD": secret})
     for command in commands:
-        summary = Summary(harness, scrub)
-        summary.feed(_command_event(harness, 0, command), 1.0)
-        [step] = json.loads(summary.row()["steps"])
-        title = step["title"]
-        assert "[redacted-env]" in title, (command, title)
-        assert not readable(secret, title), (command, title)
+        text = scrub(command, limit=300)
+        assert "[redacted-env]" in text, (command, text)
+        assert not readable(secret, text), (command, text)
 
 
 def test_escape_decoding_keeps_text_that_holds_no_secret() -> None:
     scrub = Scrubber({"DEPLOY_PASSWORD": "walrus\u00e9harbor"})
     command = 'printf "a\\tb\\u00e9" --json \'{"k": "v\\n"}\''
-    assert scrub(command) == command
+    assert scrub(command, limit=300) == command
 
 
-def test_a_blank_line_in_a_secret_does_not_strip_quoting_from_every_title() -> None:
+def test_a_blank_line_in_a_secret_does_not_strip_quoting_from_every_text() -> None:
     scrub = Scrubber({"DEPLOY_KEY": "first-key-line\n\n  \nsecond-key-line"})
     assert scrub("echo 'hi' \"there\"") == "echo 'hi' \"there\""
     assert scrub("cat 'first-key-line'") == "cat [redacted-env]"
@@ -558,7 +568,7 @@ def test_flags_and_system_session_variables_are_not_treated_as_secrets() -> None
         "XDG_SESSION_ID": "3", "XDG_SESSION_TYPE": "tty", "XDG_SESSION_CLASS": "user",
         "CLAUDE_CODE_CHILD_SESSION": "1", "USE_KEYRING": "true", "AUTH_DISABLED": "0",
     })
-    assert scrub("pytest -n 3 tests/user_tty.py; exit 1 0 true") == "pytest -n 3 tests/user_tty.py; exit 1 0 true"
+    assert scrub("pytest -n 3 tests/user_tty.py; exit 1 0 true", limit=300) == "pytest -n 3 tests/user_tty.py; exit 1 0 true"
 
 
 @pytest.mark.parametrize(
@@ -951,12 +961,12 @@ def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
     run, db, job_id = _remote_run(tmp_path, harness, profile=profile)
     assert run.returncode == 0, run.stderr
     row = _row(db, job_id)
-    stored = [step["title"] for step in json.loads(row["steps"])]
+    stored = [step["label"] for step in json.loads(row["steps"])]
     status = write_snapshot_pages(
         tmp_path / "public", collect_snapshot(db, tmp_path / "empty-log", now=time.time())
     )[0]
     published = json.loads(status.read_text())["telemetry"]["recent"][0]["steps"]
-    assert stored == [step["title"] for step in published] == ["$ deploy --pin [redacted-env]"]
+    assert stored == [step["label"] for step in published] == ["command"]
     raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
     assert run.stdout == "plain worker line\n" and raw.endswith(run.stdout)
     assert "welcome" not in raw and "late" not in raw
@@ -1018,27 +1028,29 @@ def _remote_session(tmp_path: Path, stream: bytes):
     return _row(db), out, messages
 
 
-def _bash(command: str) -> bytes:
+def _tool_call(name: str) -> bytes:
     event = {"type": "assistant", "message": {"id": "m", "content": [
-        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}]}}
+        {"type": "tool_use", "id": "t", "name": name, "input": {"command": name}}]}}
     return (json.dumps(event) + "\n").encode()
 
 
 def test_a_remote_session_scrubs_the_reported_environment_and_never_keeps_the_report(tmp_path: Path) -> None:
     report = _report({"DEPLOY_PASSWORD": WORKER_SECRET, "PATH": "/usr/bin"})
-    row, out, messages = _remote_session(tmp_path, b"hi\n" + report + _bash(f"deploy {WORKER_SECRET}"))
-    assert [step["title"] for step in json.loads(row["steps"])] == ["$ deploy [redacted-env]"]
-    assert row["exit_reason"] == "exit 3"
+    call = _tool_call(f"mcp__{WORKER_SECRET}")
+    row, out, messages = _remote_session(tmp_path, b"hi\n" + report + call)
+    assert [step["label"] for step in json.loads(row["steps"])] == ["mcp__[redacted-env]"]
+    assert row["exit_reason"] == "exit 3" and WORKER_SECRET not in json.dumps(row)
     assert out.getvalue() == b"hi\n" and messages == []
-    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"hi\n" + _bash(f"deploy {WORKER_SECRET}")
+    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"hi\n" + call
 
 
 def test_a_report_that_does_not_start_its_line_is_still_never_kept(tmp_path: Path) -> None:
     report = _report({"DEPLOY_PASSWORD": WORKER_SECRET})
-    row, out, messages = _remote_session(tmp_path, b"welcome" + report + _bash(f"deploy {WORKER_SECRET}"))
-    assert [step["title"] for step in json.loads(row["steps"])] == ["$ deploy [redacted-env]"]
+    call = _tool_call(f"mcp__{WORKER_SECRET}")
+    row, out, messages = _remote_session(tmp_path, b"welcome" + report + call)
+    assert [step["label"] for step in json.loads(row["steps"])] == ["mcp__[redacted-env]"]
     assert out.getvalue() == b"welcome" and messages == []
-    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"welcome" + _bash(f"deploy {WORKER_SECRET}")
+    assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"welcome" + call
 
 
 @pytest.mark.parametrize(
@@ -1047,11 +1059,12 @@ def test_a_report_that_does_not_start_its_line_is_still_never_kept(tmp_path: Pat
     ids=["missing", "cut-short", "not-hex"],
 )
 def test_a_remote_session_without_a_whole_report_hides_every_text(tmp_path: Path, report: bytes) -> None:
-    row, _, messages = _remote_session(tmp_path, report + _bash(f"deploy {WORKER_SECRET}"))
-    assert [step["title"] for step in json.loads(row["steps"])] == ["[redacted-env]"]
+    row, _, messages = _remote_session(tmp_path, report + _tool_call(f"mcp__{WORKER_SECRET}") + _tool_call("Bash"))
+    assert [step["label"] for step in json.loads(row["steps"])] == ["[redacted-env]", "command"]
+    assert json.loads(row["tool_calls"]) == {"[redacted-env]": 2}
     assert WORKER_SECRET not in json.dumps(row)
     assert row["exit_reason"] == "exit 3"
-    assert messages == ([] if not report else ["telemetry: unreadable worker environment report; step text hidden"])
+    assert messages == ([] if not report else ["telemetry: unreadable worker environment report; tool names hidden"])
 
 
 def test_an_oversized_report_is_dropped_whole_and_the_session_stays_blind(tmp_path: Path, monkeypatch) -> None:

@@ -27,7 +27,12 @@ stdout on a pipe and hands the pipe to a `Session` here:
   touched, commands run, the last test run's pass and fail counts, tokens
   in (of which cached) and out, cost when the CLI reports it, the last
   activity and the CLI's own exit reason, plus the last RECENT_STEPS steps
-  (tool calls and commands with their status, and errors).
+  (tool calls and commands with their status, and errors). A step is its
+  time, kind, status and a fixed label (`command`, the harness's tool name,
+  `edit <n> files`, the error kind) and the exit reason is a fixed label too:
+  no command line, tool argument, pattern, path, query or error message is
+  ever stored (#100 r10, Max: "Hide those fields in the job modal instead").
+  File paths are only counted.
 * `Session.flush` writes the summary to the `job_telemetry` table in
   orch.db; `orch job run` calls it right after each job heartbeat (every
   ~15 seconds), and `Session.finish` writes it once more when the harness
@@ -36,8 +41,9 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `jobs.last_activity_at` (`last_seen` reads it, for the stale and health
   checks of #91 and #92).
 
-Secrets: every string that goes into the table (step titles, file paths,
-exit reasons, tool names) is scrubbed first (`Scrubber`): the values of the
+Secrets: the only free text that goes into the table is the harness's tool
+names (as tool call counts and step labels). Defense in depth, they are
+scrubbed first (`Scrubber`): the values of the
 harness's environment variables whose names look secret, and always its
 ORCH_JOB_PROOF and ORCH_WORKER_TAG, are replaced,
 whatever their length and however the text quotes or escapes them (each
@@ -49,17 +55,18 @@ value; each line of a multi-line value is matched on its own), keeping
 only boolean flag values such as `1` or `true` and the XDG_SESSION_* and
 DESKTOP_SESSION descriptors; then
 the dashboard's `redact` removes token-shaped strings, auth headers, key
-assignments, URLs and email addresses, and the text is cut to one short
-line. A remote run's text comes from the worker, so its scrubber also
-learns the harness's own environment there (after the login profile): the
+assignments, URLs and email addresses, and only then is the text cut to one
+short label; a text longer than SCRUB_LIMIT is hidden whole. A remote
+run's tool names come from the worker, so its scrubber also learns the
+harness's own environment there (after the login profile): the
 start prints it as one report line before the harness (lib/remote.py
 WORKER_ENV_MARK), which is never logged or copied. The profile's own stdout
 goes to stderr, so the report starts the stream; text before the mark on
 its line is kept, the report itself never. Until a whole report is read
-the scrubber is blind and every text is stored as `[redacted-env]`.
+the scrubber is blind and every tool name is stored as `[redacted-env]`.
 Assistant text and tool output are never stored; tool output is only
 read for test counts. The dashboard (lib/dashboard_telemetry.py) shows
-only these summaries and scrubbed step titles.
+only these summaries and step labels.
 
 Counters are clamped to 0..MAX_COUNT and a cost must be finite, so every
 value fits a SQLite INTEGER and standard JSON. A telemetry failure (an
@@ -96,11 +103,10 @@ RAW_LOG_NAME = "events.jsonl"
 MAX_LOG_BYTES = 20 * 1024 * 1024
 MAX_LINE_BYTES = 1024 * 1024
 RECENT_STEPS = 20
-MAX_FILES = 50
 MAX_TOOL_TYPES = 40
-TITLE_LIMIT = 120
+LABEL_LIMIT = 40
+SCRUB_LIMIT = 16 * 1024
 HIDDEN = "[redacted-env]"
-REASON_LIMIT = 100
 SCAN_BYTES = 64 * 1024
 MAX_COUNT = 2**53 - 1
 
@@ -124,7 +130,6 @@ COLUMNS = (
     "turns",
     "tool_calls",
     "files_touched",
-    "files",
     "commands",
     "test_runs",
     "tests_passed",
@@ -153,7 +158,6 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     turns INTEGER NOT NULL,
     tool_calls TEXT NOT NULL,
     files_touched INTEGER NOT NULL,
-    files TEXT NOT NULL,
     commands INTEGER NOT NULL,
     test_runs INTEGER NOT NULL,
     tests_passed INTEGER,
@@ -392,11 +396,11 @@ class Scrubber:
         self._values = sorted(bare | set(self._values), key=len, reverse=True)
         self.blind = False
 
-    def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
-        if self.blind:
+    def __call__(self, value: object, limit: int = LABEL_LIMIT) -> str:
+        text = str(value)
+        if self.blind or len(text) > SCRUB_LIMIT:
             return HIDDEN
-        text = self._cut(str(value)[: limit * 16])
-        return _clip(self._redact(" ".join(text.split())), limit)
+        return _clip(self._redact(" ".join(self._cut(text).split())), limit)
 
     def _cut(self, text: str) -> str:
         """Replace every run of `text` that reads as a secret, as written or
@@ -510,7 +514,6 @@ class EventLog:
 # --- parsing: one summary from either CLI's events ------------------------------------
 
 _EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-_PATH_TOOLS = frozenset({"Read", "LS", "Glob", "Grep"})
 _CLAUDE_REASONS = {
     "success": "success",
     "error_max_turns": "max turns reached",
@@ -588,15 +591,13 @@ def _command_text(command: object) -> str:
 class Summary:
     """Everything the dashboard shows of one run, from its events."""
 
-    def __init__(self, harness: str, scrub: Callable[..., str], *, base: str | None = None):
+    def __init__(self, harness: str, scrub: Callable[..., str]):
         self.harness = harness
         self.scrub = scrub
-        self.base = base
         self.events = 0
         self.turns = 0
         self.tool_calls: Counter[str] = Counter()
-        self.files: list[str] = []
-        self._file_set: set[str] = set()
+        self._files: set[str] = set()  # for the count only; never stored
         self.files_touched = 0
         self.commands = 0
         self.test_runs = 0
@@ -626,36 +627,26 @@ class Summary:
             self._codex(kind, event, now)
 
     def _tool(self, name: str) -> str:
-        key = self.scrub(name, 40) or "unknown"
+        """Count a call of the harness's tool `name`; its label for the step."""
+        key = self.scrub(name) or "unknown"
         if key not in self.tool_calls and len(self.tool_calls) >= MAX_TOOL_TYPES:
             key = "other"
         self.tool_calls[key] += 1
         return key
 
-    def _step(self, now: float, kind: str, title: str, status: str) -> dict:
-        step = {"at": now, "kind": kind, "title": self.scrub(title), "status": status}
+    def _step(self, now: float, kind: str, label: str, status: str) -> dict:
+        """A step is its kind, status and a fixed label: never text from its arguments."""
+        step = {"at": now, "kind": kind, "status": status, "label": label}
         self.steps.append(step)
         return step
 
-    def _relative(self, path: str) -> str:
-        base = (self.base or "").rstrip("/")
-        if base and path.startswith(base + "/"):
-            return path[len(base) + 1 :]
-        if not path.startswith("/"):
-            return path
-        parts = [part for part in path.split("/") if part]
-        return "…/" + "/".join(parts[-2:])
-
-    def _touch(self, path: object) -> str:
+    def _touch(self, path: object) -> bool:
         if not isinstance(path, str) or not path:
-            return ""
-        shown = self.scrub(self._relative(path))
-        if shown not in self._file_set:
-            self._file_set.add(shown)
+            return False
+        if path not in self._files:
+            self._files.add(path)
             self.files_touched += 1
-            self.files.append(shown)
-            del self.files[:-MAX_FILES]
-        return shown
+        return True
 
     def _finished(self, call_id: str, error: bool, output: str) -> None:
         entry = self._open.pop(call_id, None)
@@ -674,17 +665,13 @@ class Summary:
         if counts is not None:
             self.tests_passed, self.tests_failed = counts
 
-    def _error(self, now: float, message: object, reason: str) -> None:
-        self._step(now, "error", f"{reason}: {message}" if message else reason, "error")
-        self.cli_reason = self.scrub(f"{reason}: {message}" if message else reason, REASON_LIMIT)
+    def _error(self, now: float, reason: str) -> None:
+        self._step(now, "error", reason, "error")
+        self.cli_reason = reason
 
     # -- Claude Code: --output-format stream-json --
 
     def _claude(self, kind: str, event: dict, now: float) -> None:
-        if kind == "system":
-            if event.get("subtype") == "init" and isinstance(event.get("cwd"), str) and not self.base:
-                self.base = event["cwd"]
-            return
         message = event.get("message")
         if kind == "result":
             self._claude_result(event, now)
@@ -731,25 +718,16 @@ class Summary:
         name = str(block.get("name") or "unknown")
         call_id = str(block.get("id") or f"call-{self.events}")
         data = block.get("input") if isinstance(block.get("input"), dict) else {}
-        self._tool(name)
+        label = self._tool(name)
         command: str | None = None
         if name == "Bash":
             command = _command_text(data.get("command"))
             self.commands += 1
-            step = self._step(now, "command", "$ " + command.split("\n", 1)[0], "running")
-        elif name in _EDIT_TOOLS:
-            shown = self._touch(data.get("file_path") or data.get("notebook_path"))
-            step = self._step(now, "tool", f"{name} {shown}".strip(), "running")
-        elif name in _PATH_TOOLS:
-            target = data.get("file_path") or data.get("path") or ""
-            shown = self._relative(target) if isinstance(target, str) else ""
-            pattern = data.get("pattern")
-            detail = " ".join(str(part) for part in (pattern, shown) if part)
-            step = self._step(now, "tool", f"{name} {detail}".strip(), "running")
-        elif isinstance(data.get("description"), str):
-            step = self._step(now, "tool", f"{name} {data['description']}", "running")
+            step = self._step(now, "command", "command", "running")
         else:
-            step = self._step(now, "tool", name, "running")
+            if name in _EDIT_TOOLS:
+                self._touch(data.get("file_path") or data.get("notebook_path"))
+            step = self._step(now, "tool", label, "running")
         self._open[call_id] = (step, command)
 
     def _claude_result(self, event: dict, now: float) -> None:
@@ -764,11 +742,13 @@ class Summary:
             cost = float(cost)
             if math.isfinite(cost) and cost >= 0:
                 self.cost_usd = cost
-        subtype = str(event.get("subtype") or "")
-        reason = _CLAUDE_REASONS.get(subtype, subtype or "finished")
-        if event.get("is_error") and subtype == "success":
+        subtype = event.get("subtype")
+        reason = _CLAUDE_REASONS.get(subtype) if isinstance(subtype, str) else None
+        if reason is None:
+            reason = "error" if isinstance(subtype, str) and subtype.startswith("error") else "finished"
+        if event.get("is_error") and reason == "success":
             reason = "error"
-        self.cli_reason = self.scrub(reason, REASON_LIMIT)
+        self.cli_reason = reason
         if reason != "success":
             self._step(now, "error", reason, "error")
 
@@ -785,11 +765,9 @@ class Summary:
                 self.tokens_out += _int(usage.get("output_tokens"))
             self.cli_reason = "completed"
         elif kind == "turn.failed":
-            error = event.get("error")
-            message = error.get("message") if isinstance(error, dict) else None
-            self._error(now, message, "turn failed")
+            self._error(now, "turn failed")
         elif kind == "error":
-            self._error(now, event.get("message"), "error")
+            self._error(now, "error")
         elif kind in ("item.started", "item.updated", "item.completed"):
             item = event.get("item")
             if isinstance(item, dict):
@@ -817,27 +795,19 @@ class Summary:
             self._tool("shell")
             command = _command_text(item.get("command"))
             self.commands += 1
-            step = self._step(now, "command", "$ " + command.split("\n", 1)[0], "running")
+            step = self._step(now, "command", "command", "running")
         elif item_type == "file_change":
             self._tool("file_change")
             changes = item.get("changes") if isinstance(item.get("changes"), list) else []
-            shown = [
-                self._touch(change.get("path"))
-                for change in changes
-                if isinstance(change, dict)
-            ]
-            shown = [path for path in shown if path]
-            title = "edit " + ", ".join(shown[:3]) + (f" +{len(shown) - 3}" if len(shown) > 3 else "")
-            step = self._step(now, "tool", title, "running")
+            count = sum(self._touch(change.get("path")) for change in changes if isinstance(change, dict))
+            step = self._step(now, "tool", f"edit {count} file{'' if count == 1 else 's'}", "running")
         elif item_type == "mcp_tool_call":
-            name = f"mcp:{item.get('server')}.{item.get('tool')}"
-            self._tool(name)
-            step = self._step(now, "tool", name, "running")
+            label = self._tool(f"mcp:{item.get('server')}.{item.get('tool')}")
+            step = self._step(now, "tool", label, "running")
         elif item_type == "web_search":
-            self._tool("web_search")
-            step = self._step(now, "tool", f"web_search {item.get('query') or ''}".strip(), "running")
+            step = self._step(now, "tool", self._tool("web_search"), "running")
         elif item_type == "error":
-            self._step(now, "error", f"error: {item.get('message') or ''}", "error")
+            self._step(now, "error", "error", "error")
             return
         else:
             return  # agent_message, reasoning, todo_list: not steps
@@ -851,7 +821,6 @@ class Summary:
             "turns": _int(self.turns),
             "tool_calls": json.dumps(dict(self.tool_calls.most_common()), sort_keys=False),
             "files_touched": _int(self.files_touched),
-            "files": json.dumps(self.files),
             "commands": _int(self.commands),
             "test_runs": _int(self.test_runs),
             "tests_passed": _maybe_int(self.tests_passed),
@@ -1036,7 +1005,7 @@ class Session:
         that cannot be read leaves the scrubber blind."""
         environ = worker_environ(line)
         if environ is None:
-            self._warn("worker-env", "telemetry: unreadable worker environment report; step text hidden")
+            self._warn("worker-env", "telemetry: unreadable worker environment report; tool names hidden")
             return
         with self._lock:
             self.scrub.learn(environ)
@@ -1074,8 +1043,7 @@ class Session:
                 "finished_at": now if finished else None,
                 "elapsed_seconds": max(0.0, self.monotonic() - self._started),
                 "exit_code": code if finished else None,
-                # cli_reason was scrubbed when it was read; the rest is ours
-                "exit_reason": _clip(exit_reason(code, cli_reason), REASON_LIMIT) if finished else None,
+                "exit_reason": exit_reason(code, cli_reason) if finished else None,
             }
         )
         return data

@@ -545,10 +545,14 @@ from pathlib import Path
 
 proof, job = os.environ["ORCH_JOB_PROOF"], os.environ["ORCH_JOB_ID"]
 chunks = "''".join(proof[i:i + 8] for i in range(0, len(proof), 8))
+ansi_c = "".join("$'" + proof[i:i + 4] + "'" for i in range(0, len(proof), 4))
+locale = "".join('$"' + proof[i:i + 4] + '"' for i in range(0, len(proof), 4))
 commands = [
     "env ORCH_JOB_PROOF=" + proof + " orch job done",
     "env ORCH_JOB_PROOF=" + chunks + " orch job done",
     "bash -lc " + shlex.quote("ORCH_JOB_PROOF=" + json.dumps(proof) + " orch job done"),
+    "env ORCH_JOB_PROOF=" + ansi_c + " orch job done",
+    "env ORCH_JOB_PROOF=" + locale + " orch job done",
 ]
 for n, command in enumerate(commands):
     print(json.dumps({"type": "assistant", "message": {"id": f"m{n}", "content": [
@@ -571,17 +575,21 @@ def _telemetry_texts(db: Path, job_id: str) -> list[str]:
     return [] if row is None else [value for value in row if isinstance(value, str)]
 
 
-def _command_titles(db: Path, job_id: str) -> list[str]:
+def _command_steps(db: Path, job_id: str) -> list[dict]:
     with sqlite3.connect(db) as connection:
         row = connection.execute("SELECT steps FROM job_telemetry WHERE job_id = ?", (job_id,)).fetchone()
     steps = json.loads(row[0]) if row is not None else []
-    return [step["title"] for step in steps if step["kind"] == "command"]
+    return [step for step in steps if step["kind"] == "command"]
+
+
+def _proof_pieces(proof: str) -> set[str]:
+    return {proof[i:i + 8] for i in range(len(proof) - 7)}
 
 
 def test_the_runs_proof_never_reaches_its_persisted_or_published_summary(
     autostart: dict, tmp_path: Path
 ) -> None:
-    """#100 r8: the summary's scrubber knows the proof the run handed its harness."""
+    """#100 r8, r10: no command text is kept, however the proof is quoted in it."""
     from lib.dashboard import collect_snapshot, write_snapshot_pages
     from tests.test_telemetry import readable
 
@@ -590,21 +598,22 @@ def test_the_runs_proof_never_reaches_its_persisted_or_published_summary(
     job_id = enqueue(queue, "a", head=None, timeout_seconds=6)
     proof_file = autostart["harness_dir"] / f"{job_id}.proof"
     proof = _wait_for(lambda: proof_file.exists() and proof_file.read_text(), 20, proc)
-    titles = _wait_for(lambda: len(_command_titles(db, job_id)) == 3 and _command_titles(db, job_id),
-                       20, proc)
-    assert all("[redacted-env]" in title for title in titles), titles
+    steps = _wait_for(lambda: len(_command_steps(db, job_id)) == 5 and _command_steps(db, job_id), 20, proc)
+    assert [(set(step), step["label"]) for step in steps] == [({"at", "kind", "status", "label"}, "command")] * 5
     poller_log = tmp_path / "poller.log"
     poller_log.touch()
     status = write_snapshot_pages(tmp_path / "public", collect_snapshot(db, poller_log, now=time.time()))[0]
     published = json.loads(status.read_text())
     assert any(row.get("telemetry") for row in published["running"])
-    for text in [*_telemetry_texts(db, job_id), status.read_text(), *titles]:
+    for text in [*_telemetry_texts(db, job_id), status.read_text()]:
         assert not readable(proof, text), text
+        assert not any(piece in text for piece in _proof_pieces(proof)), text
     (autostart["harness_dir"] / f"{job_id}.go").touch()
     _wait_for(lambda: _released(db, job_id), 20, proc)
     assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
     for text in _telemetry_texts(db, job_id):
         assert not readable(proof, text), text
+        assert not any(piece in text for piece in _proof_pieces(proof)), text
 
 
 def test_a_token_minted_for_one_run_does_not_reach_the_next_job(autostart: dict) -> None:
