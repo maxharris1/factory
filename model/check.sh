@@ -10,12 +10,23 @@ view=$root/model/view.mjs
 pin=de8ee15dd1194627d21eb5fcd41cb1873208dabb
 jar_sha=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
+# GitHub answers 429 to busy CI runners. Try a download five times, waiting
+# longer each time, before the check fails.
+retry() {
+  try=1
+  until "$@"; do
+    [ "$try" -lt 5 ] || return 1
+    sleep $((try * 15))
+    try=$((try + 1))
+  done
+}
+
 if [ -z "${TLA2TOOLS:-}" ]; then
   dest=${XDG_CACHE_HOME:-$HOME/.cache}/factory-tlc/tla2tools-1.7.4.jar
   mkdir -p "$(dirname "$dest")"
   if [ ! -f "$dest" ] || ! echo "$jar_sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
     tmp=$(mktemp)
-    curl -fsSL -o "$tmp" "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+    retry curl -fsSL -o "$tmp" "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
     echo "$jar_sha  $tmp" | sha256sum -c -
     mv "$tmp" "$dest"
   fi
@@ -37,7 +48,7 @@ if [ -z "${STATECHART:-}" ]; then
       git -C "$cache" remote add origin https://github.com/cursor/plugins.git
       git -C "$cache" sparse-checkout init --cone
       git -C "$cache" sparse-checkout set pstack/skills/statechart
-      git -C "$cache" fetch --depth 1 origin "$pin"
+      retry git -C "$cache" fetch --depth 1 origin "$pin"
       git -C "$cache" checkout -q --detach FETCH_HEAD
     fi
   fi
