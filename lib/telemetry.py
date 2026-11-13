@@ -324,8 +324,9 @@ def _unquote(reading: Reading) -> Reading:
 
 def _readings(text: str) -> list[Reading]:
     """`text` as written, and as read after each mix of up to _DECODE_ROUNDS
-    rounds of string-escape decoding, shell unquoting and dropping quotes: one (character,
-    start, end) per character read, with the run of `text` it came from."""
+    rounds of string-escape decoding, shell unquoting and dropping quotes:
+    one (character, start, end) per character read, with the run of `text`
+    it came from."""
     written: Reading = [(char, index, index + 1) for index, char in enumerate(text)]
     readings, frontier, seen = [written], [written], {text}
     for _ in range(_DECODE_ROUNDS):
@@ -358,8 +359,8 @@ class Scrubber:
             and not _NOT_SECRET_NAME.fullmatch(name)
         }
         lines = {line.strip() for value in values for line in value.splitlines() if line.strip()}
-        unquoted = {"".join(char for char in value if char not in _QUOTING) for value in values | lines}
-        self._values = sorted(unquoted, key=len, reverse=True)
+        bare = {"".join(char for char in value if char not in _QUOTING) for value in values | lines}
+        self._values = sorted(bare, key=len, reverse=True)
 
     def __call__(self, value: object, limit: int = TITLE_LIMIT) -> str:
         text = self._cut(str(value)[: limit * 16])
