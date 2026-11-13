@@ -36,6 +36,7 @@ ACTIONS = (
     "rejected",
     "stale",
     "done",
+    "awaiting-ok",
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")

@@ -71,6 +71,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.handoff import STATES
+from lib.hold import LabelEvent
 from lib.schema import AUT0_REPO
 
 TOKEN_VARIABLES = (
@@ -82,6 +83,7 @@ TOKEN_VARIABLES = (
 GH = ("env", *(part for name in TOKEN_VARIABLES for part in ("-u", name)), "gh")
 TIMEOUT_SECONDS = 60.0
 STATE_LABEL_PREFIX = "orch:state/"
+PULL_FILES_LIMIT = 3000
 
 _OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 _REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
@@ -391,6 +393,64 @@ class GitHubReviewActions:
                 seen.add(int(comment.id))
                 comments.append(comment)
         return tuple(sorted(comments, key=lambda item: (item.created_at, int(item.id))))
+
+    def pull_labels(self, repo: str, number: str) -> tuple[str, ...]:
+        """The PR's labels, all pages (issue #86 hold label)."""
+        endpoint = f"{_repo_path(repo)}/issues/{_number(number)}/labels?per_page=100"
+        return tuple(sorted(_labels(self._pages(endpoint))))
+
+    def pull_files(self, repo: str, number: str) -> tuple[str, ...]:
+        """Every path the PR's diff against base touches, all pages, with a
+        rename's old path too (issue #86 hold paths). GitHub lists at most
+        3000 files; a PR at that limit is refused rather than read short."""
+        endpoint = f"{_repo_path(repo)}/pulls/{_number(number)}/files?per_page=100"
+        paths: set[str] = set()
+        count = 0
+        for page in self._pages(endpoint):
+            if not isinstance(page, list):
+                raise GitHubAdapterError("pull request files page is not a list")
+            for item in page:
+                raw = _object(item)
+                count += 1
+                for key in ("filename", "previous_filename"):
+                    value = raw.get(key)
+                    if value is None and key == "previous_filename":
+                        continue
+                    if not isinstance(value, str) or not value:
+                        raise GitHubAdapterError(f"pull request file has no {key}")
+                    paths.add(value)
+        if count >= PULL_FILES_LIMIT:
+            raise GitHubAdapterError("pull request lists 3000 or more files")
+        return tuple(sorted(paths))
+
+    def label_events(self, repo: str, number: str) -> tuple[LabelEvent, ...]:
+        """The PR's labeled and unlabeled events, all pages (issue #86)."""
+        endpoint = f"{_repo_path(repo)}/issues/{_number(number)}/events?per_page=100"
+        events: list[LabelEvent] = []
+        for page in self._pages(endpoint):
+            if not isinstance(page, list):
+                raise GitHubAdapterError("issue events page is not a list")
+            for item in page:
+                raw = _object(item)
+                action = raw.get("event")
+                if action not in ("labeled", "unlabeled"):
+                    continue
+                name = _object(raw.get("label")).get("name")
+                actor = _object(raw.get("actor")).get("login")
+                if not isinstance(name, str) or not name:
+                    raise GitHubAdapterError("label event has no label name")
+                if not isinstance(actor, str) or _LOGIN.fullmatch(actor) is None:
+                    raise GitHubAdapterError("label event has no valid actor login")
+                events.append(
+                    LabelEvent(
+                        id=str(_comment_id(raw.get("id"))),
+                        action=str(action),
+                        label=name,
+                        actor=actor,
+                        created_at=_created_at(raw.get("created_at")),
+                    )
+                )
+        return tuple(events)
 
     def ci_status(self, repo: str, head: str) -> CIResult:
         """Check runs and commit statuses on head.

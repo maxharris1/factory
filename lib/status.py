@@ -29,8 +29,10 @@ from lib.worktrees import pid_alive
 ROOT = Path(__file__).resolve().parent.parent
 
 PAUSED_STATES = frozenset(
-    {"waiting-max", "waiting-external", "stuck", "blocked", "capped"}
+    {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
+# Issue #86: the dispatcher's ship_holds table names who a held PR waits on.
+SHIP_HOLDS_TABLE = "ship_holds"
 
 
 class StatusError(RuntimeError):
@@ -46,6 +48,8 @@ class TrackerRow:
     paused_action: str | None = None
     stuck: bool = False
     stuck_reason: str | None = None
+    # Issue #86: the hold approver while the ticket is awaiting-ok.
+    waiting_on: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,7 @@ class SQLiteStatusReader:
         connection = self._connect()
         try:
             connection.execute("BEGIN")
+            approvers = _hold_approvers(connection)
             tracker_rows = connection.execute(
                 """
                 SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -280,6 +285,11 @@ class SQLiteStatusReader:
                     if row["stuck_reason"] is not None
                     else None
                 ),
+                waiting_on=(
+                    approvers.get((str(row["repo"]), str(row["ticket_id"])))
+                    if row["workflow_state"] == "awaiting-ok"
+                    else None
+                ),
             )
             for row in tracker_rows
         )
@@ -315,6 +325,22 @@ class SQLiteStatusReader:
             if connection is not None:
                 connection.close()
             raise StatusError(f"cannot read database: {exc}") from exc
+
+
+def _hold_approvers(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(repo, ticket id) -> approver of the ticket's latest hold, if any."""
+    present = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (SHIP_HOLDS_TABLE,),
+    ).fetchone()
+    if not present:
+        return {}
+    return {
+        (str(row[0]), str(row[1])): str(row[2])
+        for row in connection.execute(
+            f"SELECT repo, ticket_id, approver FROM {SHIP_HOLDS_TABLE}"
+        )
+    }
 
 
 def device_rows(
@@ -491,6 +517,8 @@ def render(status: Status) -> str:
     for row in status.paused:
         action = f" paused={row.paused_action}" if row.paused_action else ""
         state = row.state
+        if row.waiting_on:
+            state = f"{state} waiting on {row.waiting_on}"
         if row.stuck:
             reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
             state = f"stuck{reason}"

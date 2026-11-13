@@ -61,9 +61,9 @@ from lib.job_state import (
 )
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
-from lib.orch_yml import POLL_SECONDS
+from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED
 from lib.queue import ACTIONS, RECIPIENTS, STATES
-from lib.status import PAUSED_STATES
+from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
 SCHEMA = "factory-dashboard/v1"
@@ -79,9 +79,17 @@ RECENT_VERDICTS = 12
 # (lib/poll_source.py LINEAR_*_PER_HOUR * LINEAR_SHARE).
 LINEAR_BUDGET_REQUESTS_PER_HOUR = 1250
 LINEAR_BUDGET_COMPLEXITY_PER_HOUR = 1_500_000
-# Poll health from the age of the last finished cycle (orch poll, POLL_SECONDS).
-HEALTH_OK_SECONDS = 2 * POLL_SECONDS + 30
-HEALTH_LATE_SECONDS = 5 * POLL_SECONDS
+# Poll health from the age of the last finished cycle (orch poll), scaled to
+# the poller's own poll_seconds (30 or 60): ok up to two cycles plus 30
+# seconds, late up to five cycles, stale after that.
+
+
+def health_thresholds(poll_seconds: int) -> tuple[int, int]:
+    """(ok, late) cycle-age limits in seconds for a `poll_seconds` poller."""
+    return 2 * poll_seconds + 30, 5 * poll_seconds
+
+
+HEALTH_OK_SECONDS, HEALTH_LATE_SECONDS = health_thresholds(POLL_SECONDS)
 # A handled orch:v1 comment's outcome as the dispatcher writes it.
 _OUTCOME = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
 _ROUND = re.compile(r"[0-9]{1,3}/[0-9]{1,3}")
@@ -584,9 +592,12 @@ def collect_snapshot(
     chart_path: Path | None = None,
     job_states: JobStateConfig | None = None,
     alive: Alive | None = pid_alive,
+    poll_seconds: int = POLL_SECONDS,
 ) -> dict:
     """Read everything once. `last_cycle_at` is when the poller's last cycle
     ended (the live push passes it); without it poll health is "unknown".
+    `poll_seconds` is the poller's orch.yml poll_seconds (30 or 60): poll
+    health's `cycle_seconds` and its ok and late thresholds follow it.
     `chart_path` is the statechart chart the job page draws (default
     model/chart.mmd); only its file name is copied out. `job_states` is
     orch.yml's job_states (the stale threshold); `alive` checks a recorded
@@ -603,6 +614,12 @@ def collect_snapshot(
         or not math.isfinite(last_cycle_at)
     ):
         raise DashboardError("last_cycle_at must be a Unix time")
+    if (
+        isinstance(poll_seconds, bool)
+        or not isinstance(poll_seconds, int)
+        or poll_seconds not in POLL_SECONDS_ALLOWED
+    ):
+        raise DashboardError("poll_seconds must be 30 or 60")
     chart = load_chart(chart_path)
     connection = open_readonly(db_path)
     try:
@@ -680,6 +697,7 @@ def collect_snapshot(
             "health": _poll_health(
                 _age(now, last_cycle_at),
                 _age(now, max(activity)) if activity else None,
+                poll_seconds,
             ),
             "linear_budget": db["linear_budget"],
             "verdicts": db["verdicts"],
@@ -735,23 +753,28 @@ def _attention(
         if (row["repo"], row["ticket_id"]) in listed:
             continue
         detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
+        if row.get("waiting_on"):
+            detail += f" (waiting on {row['waiting_on']})"
         items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
                       "detail": detail})
     return {"count": len(items), "items": items}
 
 
-def _poll_health(cycle_age: int | None, activity_age: int | None) -> dict:
+def _poll_health(
+    cycle_age: int | None, activity_age: int | None, poll_seconds: int
+) -> dict:
+    ok_seconds, late_seconds = health_thresholds(poll_seconds)
     if cycle_age is None:
         state = "unknown"
-    elif cycle_age <= HEALTH_OK_SECONDS:
+    elif cycle_age <= ok_seconds:
         state = "ok"
-    elif cycle_age <= HEALTH_LATE_SECONDS:
+    elif cycle_age <= late_seconds:
         state = "late"
     else:
         state = "stale"
     return {
         "state": state,
-        "cycle_seconds": POLL_SECONDS,
+        "cycle_seconds": poll_seconds,
         "last_cycle_age_seconds": cycle_age,
         "last_activity_age_seconds": activity_age,
     }
@@ -947,6 +970,7 @@ def _read_db(
     # (repo casefolded, ticket id) as stored -> tracker, round, state.
     ticket_info: dict[tuple[str, str], tuple[str, int, str]] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
+        approvers = _hold_approvers(connection)
         for row in connection.execute(
             """
             SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
@@ -969,6 +993,13 @@ def _read_db(
                 else None
             )
             stuck = bool(row["stuck"])
+            # Issue #86: who a held PR waits on, only while awaiting-ok.
+            approver = (
+                approvers.get((str(row["repo"]), str(row["ticket_id"])))
+                if str(row["workflow_state"]) == "awaiting-ok"
+                else None
+            )
+            waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
             ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = (
                 _enum(row["tracker"], TRACKERS),
                 int(row["review_round"]),
@@ -984,6 +1015,7 @@ def _read_db(
                     "gate_count": int(row["gate_count"]),
                     "stuck": stuck,
                     "paused_action": paused_action,
+                    **waiting,
                 }
             )
             if stuck:
@@ -1006,6 +1038,7 @@ def _read_db(
                         "ticket_id": ticket_id,
                         "state": state,
                         "paused_action": paused_action,
+                        **waiting,
                     }
                 )
     _add_job_tickets(connection, active, ticket_info, chart, now)

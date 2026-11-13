@@ -1,6 +1,8 @@
 """orch.yml schema (docs/SPEC.md section 7).
 
-Required: poll_seconds (the decided interval, 60) and projects[].repo.
+Required: poll_seconds (30 or 60, the GitHub poll interval) and
+projects[].repo. Linear keeps its own LINEAR_POLL_SECONDS cadence whatever
+poll_seconds is (lib/poll_source.py).
 job_timeout is optional and measured in minutes. When the file and the
 project both omit it, the timeout is 60 minutes. Unknown fields are
 refused so v1 stays closed.
@@ -25,7 +27,15 @@ from lib.job_state import (
 )
 from lib.load import Finding, is_strict_int, load_yaml
 
+# The seconds `orch poll` sleeps after each cycle. GitHub is read every
+# cycle; a cycle's own work adds to it, so this is the gap between cycles,
+# not a promise of pickup within that many seconds.
+POLL_SECONDS_ALLOWED = (30, 60)
+# The default and slowest allowed interval (dashboard poll health uses it).
 POLL_SECONDS = 60
+# Linear discovery, dirty-row and tracked reads run at most once per this
+# many seconds, with the per-window budget sized for it, at any poll_seconds.
+LINEAR_POLL_SECONDS = 60
 DEFAULT_JOB_TIMEOUT_MINUTES = 60
 DEFAULT_WEBHOOK_AUTH_ENV = "FACTORY_WEBHOOK_AUTH"
 DEFAULT_LINEAR_WEBHOOK_PATH = "/linear-webhook"
@@ -252,10 +262,11 @@ def _poll_seconds(data: dict, findings: list[Finding]) -> int | None:
         findings.append(Finding("error", "missing required field 'poll_seconds'"))
         return None
     value = data["poll_seconds"]
-    if value != POLL_SECONDS:
-        findings.append(Finding("error", "poll_seconds must be 60"))
+    if not is_strict_int(value) or value not in POLL_SECONDS_ALLOWED:
+        allowed = " or ".join(str(item) for item in POLL_SECONDS_ALLOWED)
+        findings.append(Finding("error", f"poll_seconds must be {allowed}"))
         return None
-    return POLL_SECONDS
+    return int(value)
 
 
 def _timeout(
