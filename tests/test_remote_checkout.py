@@ -569,7 +569,8 @@ def test_box_worktree_is_unchanged_and_makes_no_ssh_call(tmp_path: Path) -> None
     assert f"removed job worktree {work / 'jobs' / job_id}" in err
 
 
-def test_box_worktree_failure_is_still_exit_1_and_not_requeued(tmp_path: Path) -> None:
+def test_box_worktree_failure_is_still_exit_1_and_requeued_as_unstarted(tmp_path: Path) -> None:
+    """#91: a box setup failure starts no harness, so it is an unstarted requeue."""
     device = Device(tmp_path)
     machines, queue, pool, job_id = remote_job(tmp_path, head=device.feature, box=True)
     code, err = run_job(
@@ -579,5 +580,6 @@ def test_box_worktree_failure_is_still_exit_1_and_not_requeued(tmp_path: Path) -
     )
     assert code == 1, err
     assert "git fetch failed" in err
-    assert row(queue, job_id)["state"] == "running"
+    assert row(queue, job_id)["state"] == "queued"
+    assert pool.placement(job_id) is None
     assert device.ssh.calls() == []

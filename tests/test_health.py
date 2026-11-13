@@ -1,0 +1,1342 @@
+"""Component heartbeats and the Health tab (issue #92).
+
+Fakes only: heartbeats go to a temp health database beside a temp orch.db,
+device probes use a fake transport, the tunnel probe a fake fetch, and no
+thread sleeps for real.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import sqlite3
+import stat
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from lib import health
+from lib.cli import main as cli_main
+from lib.dashboard import collect_snapshot
+from lib.dashboard_page import PAGES, render_pages
+from lib.machines_yml import load_machines_yml
+from lib.queue import JobRequest, SQLiteJobQueue
+from lib.remote import SSH_UNREACHABLE
+from lib.status import main as status_main
+from tests.test_wait import restore_signals  # noqa: F401  (fixture)
+
+NOW = 1_794_000_000.0  # Nov 6, 2026, 4:20 PM EST
+PAGE_NOW = 1_800_000_000.0  # the page harness's clock is 3 s past this
+DEVICES = frozenset({"box", "pc", "mac"})
+ORCH_EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "orch.example.yml"
+MACHINES = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses:
+      claude: claude-bot
+      codex: codex-bot
+      cursor: cursor-bot
+  - name: pc
+    tailscale_name: pc.example.ts.net
+    slot_max: 2
+    harnesses:
+      codex: codex-bot
+    workdir_root: /home/{bot}/factory-work
+    ssh_alias: pc-wsl-{bot}
+  - name: mac
+    enabled: false
+    tailscale_name: mac.example.ts.net
+    slot_max: 2
+    harnesses:
+      claude: claude-bot
+    workdir_root: /Users/{bot}/factory-work
+    ssh_alias: mac-{bot}
+"""
+
+
+def make_db(tmp_path: Path, now: float = NOW) -> tuple[Path, SQLiteJobQueue]:
+    path = tmp_path / "orch.db"
+    return path, SQLiteJobQueue(path, clock=lambda: now - 30)
+
+
+def machines_file(tmp_path: Path, text: str = MACHINES) -> Path:
+    path = tmp_path / "machines.yml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def request(recipient: str, ticket: str = "42") -> JobRequest:
+    return JobRequest(
+        repo="owner/repo",
+        ticket_id=ticket,
+        action="build",
+        recipient=recipient,
+        source_comment_id=f"go-{recipient}-{ticket}",
+        timeout_seconds=3600,
+        head="3f9c2ab",
+    )
+
+
+def store(db: Path, clock: float = NOW) -> health.HealthStore:
+    return health.HealthStore(db, devices=DEVICES, clock=lambda: clock)
+
+
+def orch(*, listener: bool = False, push: bool = False) -> SimpleNamespace:
+    """What lib/health.py reads of an OrchConfig."""
+    return SimpleNamespace(
+        linear_webhook=SimpleNamespace(public_url=None) if listener else None,
+        dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
+    )
+
+
+def machines_config(tmp_path: Path, text: str = MACHINES):
+    config, _ = load_machines_yml(machines_file(tmp_path, text), allow_placeholders=True)
+    return config
+
+
+def row(**overrides) -> health.Heartbeat:
+    values = dict(
+        component="waiter",
+        device="box",
+        bot="codex-bot",
+        pid=4242,
+        started_at=NOW - 600,
+        last_seen=NOW,
+        version="0123456789ab",
+        interval_seconds=15.0,
+        stopped_at=None,
+        checked_at=None,
+    )
+    values.update(overrides)
+    return health.Heartbeat(**values)
+
+
+# --- thresholds -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "age, expected",
+    [
+        (0, "up"),
+        (44, "up"),
+        (45, "up"),  # three 15 s beats
+        (46, "stale"),
+        (119, "stale"),
+        (120, "stale"),  # eight beats
+        (121, "down"),
+        (86_400, "down"),
+    ],
+)
+def test_stale_and_down_thresholds_follow_the_beat_interval(age: int, expected: str) -> None:
+    assert health.STALE_BEATS == 3
+    assert health.DOWN_BEATS == 8
+    assert health.BEAT_SECONDS == 15.0
+    state, _ = health.classify(row(last_seen=NOW - age), NOW)
+    assert state == expected
+
+
+def test_thresholds_scale_with_a_slower_component() -> None:
+    probe = row(component="device-probe", bot="", interval_seconds=60.0)
+    assert health.classify(probe._replace(last_seen=NOW - 180), NOW)[0] == "up"
+    assert health.classify(probe._replace(last_seen=NOW - 181), NOW)[0] == "stale"
+    assert health.classify(probe._replace(last_seen=NOW - 480), NOW)[0] == "stale"
+    assert health.classify(probe._replace(last_seen=NOW - 481), NOW)[0] == "down"
+
+
+def test_a_cleanly_stopped_component_is_down_at_once() -> None:
+    state, reason = health.classify(row(last_seen=NOW - 2, stopped_at=NOW - 1), NOW)
+    assert (state, reason) == ("down", "stopped")
+
+
+def test_a_component_never_seen_is_down() -> None:
+    assert health.classify(row(last_seen=None), NOW) == ("down", "never seen")
+
+
+def test_a_failed_latest_probe_is_at_least_stale() -> None:
+    probe = row(component="device-probe", bot="", interval_seconds=60.0,
+                last_seen=NOW - 30, checked_at=NOW - 5)
+    state, reason = health.classify(probe, NOW)
+    assert state == "stale"
+    assert "unreachable" in reason
+
+
+# --- writing heartbeats -------------------------------------------------------------------
+
+
+def test_beat_writes_one_row_per_component_device_and_bot(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    writer = store(db)
+    writer.beat("waiter", "box", bot="codex-bot", pid=11, started_at=NOW - 60, version="abcdef012345")
+    writer.beat("waiter", "box", bot="codex-bot", pid=11, started_at=NOW - 60, version="abcdef012345")
+    writer.beat("poller", "box", pid=12, started_at=NOW - 5, version="unknown")
+    rows = health.read_heartbeats(db)
+    assert rows is not None
+    assert sorted((r.component, r.device, r.bot, r.pid) for r in rows) == [
+        ("poller", "box", "", 12),
+        ("waiter", "box", "codex-bot", 11),
+    ]
+    waiter = next(r for r in rows if r.component == "waiter")
+    assert waiter.last_seen == NOW
+    assert waiter.started_at == NOW - 60
+    assert waiter.interval_seconds == health.BEAT_SECONDS
+
+
+def test_heartbeats_live_beside_orch_db_not_in_it(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db).beat("poller", "box", pid=1, started_at=NOW, version="unknown")
+    assert health.health_path(db) == tmp_path / "orch.health.db"
+    assert health.health_path(db).is_file()
+    with sqlite3.connect(db) as connection:
+        tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master")}
+    assert health.TABLE not in tables
+
+
+def test_the_health_db_copies_orch_db_permissions(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    db.chmod(0o660)
+    store(db).beat("poller", "box", pid=1, started_at=NOW, version="unknown")
+    mode = stat.S_IMODE(health.health_path(db).stat().st_mode)
+    assert mode == 0o660
+
+
+def test_no_health_db_reads_as_unknown(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    assert health.read_heartbeats(db) is None
+    report = health.build_report(None, NOW, queued=[("j1", "codex")])
+    assert report.known is False
+    assert report.components == ()
+    assert report.no_waiter == ()
+
+
+SECRETS = {
+    "FACTORY_WEBHOOK_URL": "https://hooks.example.test/s3cr3t-webhook-path",
+    "FACTORY_WEBHOOK_KEY": "whk_0123456789abcdefSECRET",
+    "GH_TOKEN": "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "LINEAR_API_KEY": "lin_api_SECRETSECRETSECRET",
+}
+
+
+def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in SECRETS.items():
+        monkeypatch.setenv(name, value)
+    db, _ = make_db(tmp_path)
+    beater = health.Beater(db, "waiter", devices=["box"], bot="codex-bot",
+                           store=store(db), log=lambda line: None)
+    beater.beat_now()
+    beater.close()
+    store(db).beat("poller", "box", pid=os.getpid(), started_at=NOW, version=health.factory_version())
+
+    with sqlite3.connect(health.health_path(db)) as connection:
+        columns = [r[1] for r in connection.execute(f"PRAGMA table_info({health.TABLE})")]
+        values = connection.execute(f"SELECT * FROM {health.TABLE}").fetchall()
+    assert columns == [
+        "component", "device", "bot", "pid", "started_at", "last_seen",
+        "version", "interval_seconds", "stopped_at", "checked_at",
+    ]
+    for record in values:
+        component, device, bot, pid, started, seen, version, interval, stopped, checked = record
+        assert component in health.COMPONENTS
+        assert health.TOKEN.fullmatch(device)
+        assert bot in ("", "claude-bot", "codex-bot", "cursor-bot")
+        assert isinstance(pid, int)
+        assert health.VERSION.fullmatch(version)
+        for number in (started, seen, interval, stopped, checked):
+            assert number is None or isinstance(number, float)
+    raw = health.health_path(db).read_bytes()
+    for value in SECRETS.values():
+        assert value.encode() not in raw
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("component", "poller; DROP TABLE x"),
+        ("component", "token=abc"),
+        ("device", "user@host"),
+        ("device", "-oProxyCommand=x"),
+        ("device", "a" * 65),
+        ("bot", "grok-bot"),
+        ("version", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+        ("version", "0123456789abcdef0123456789abcdef01234567"),
+        ("device", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+        ("device", "retired"),
+        ("pid", 0),
+        ("pid", None),
+        ("interval", 0.5),
+    ],
+)
+def test_beat_refuses_anything_outside_the_allowlist(tmp_path: Path, field: str, value: object) -> None:
+    db, _ = make_db(tmp_path)
+    args: dict = dict(component="waiter", device="box", bot="codex-bot", pid=1,
+                      started_at=NOW, version="unknown", interval=15.0)
+    args[field] = value
+    component = args.pop("component")
+    device = args.pop("device")
+    with pytest.raises(health.HealthError):
+        store(db).beat(component, device, **args)
+    assert health.read_heartbeats(db) in (None, ())
+
+
+def test_factory_version_is_a_short_sha_or_unknown(tmp_path: Path) -> None:
+    assert health.VERSION.fullmatch(health.factory_version())
+    assert health.factory_version(tmp_path) == "unknown"
+    git = tmp_path / "repo" / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    (git / "refs" / "heads" / "main").write_text("0123456789abcdef0123456789abcdef01234567\n")
+    assert health.factory_version(tmp_path / "repo") == "0123456789ab"
+
+
+# --- the beat thread ------------------------------------------------------------------------
+
+
+def test_beater_beats_every_device_and_marks_stopped_on_exit(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    clock = [NOW - 100]
+    writer = health.HealthStore(db, devices=DEVICES, clock=lambda: clock[0])
+    beater = health.Beater(db, "waiter", devices=["box", "pc"], bot="codex-bot",
+                           store=writer, pid=77, log=lambda line: None)
+    beater.beat_now()
+    clock[0] = NOW
+    beater.beat_now()
+    rows = {r.device: r for r in health.read_heartbeats(db) or ()}
+    assert set(rows) == {"box", "pc"}
+    assert all(r.last_seen == NOW and r.started_at == NOW - 100 and r.pid == 77 for r in rows.values())
+    beater.close()
+    rows = {r.device: r for r in health.read_heartbeats(db) or ()}
+    assert all(r.stopped_at == NOW for r in rows.values())
+    beater.beat_now()  # after close nothing more is written
+    assert {r.device: r.stopped_at for r in health.read_heartbeats(db) or ()} == {"box": NOW, "pc": NOW}
+
+
+def test_a_plain_waiter_removes_its_row_on_exit(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    beater = health.Beater(db, "waiter", devices=["box"], bot="claude-bot",
+                           store=store(db), on_exit="delete", log=lambda line: None)
+    beater.beat_now()
+    assert len(health.read_heartbeats(db) or ()) == 1
+    beater.close()
+    assert health.read_heartbeats(db) == ()
+
+
+def test_a_failed_beat_logs_once_and_never_raises(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    lines: list[str] = []
+
+    class Broken(health.HealthStore):
+        def beat(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    beater = health.Beater(db, "poller", devices=["box"], store=Broken(db, devices=DEVICES), log=lines.append)
+    beater.beat_now()
+    beater.beat_now()
+    assert lines == ["health: poller heartbeat failed: OperationalError"]
+
+
+def test_the_beat_thread_runs_and_stops(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    with health.Beater(db, "linear-listener", devices=["box"], store=store(db),
+                       interval=60.0, log=lambda line: None):
+        deadline = time.monotonic() + 5
+        while not health.read_heartbeats(db) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert [r.component for r in health.read_heartbeats(db) or ()] == ["linear-listener"]
+    assert all(r.stopped_at is not None for r in health.read_heartbeats(db) or ())
+
+
+# --- the device SSH probe ------------------------------------------------------------------
+
+
+class FakeTransport:
+    def __init__(self, codes: dict[str, int]):
+        self.codes = codes
+        self.calls: list[list[str]] = []
+
+    def run(self, argv, *, timeout: float) -> int:
+        argv = list(argv)
+        self.calls.append(argv)
+        alias = argv[argv.index("--") + 1]
+        return self.codes.get(alias, 0)
+
+
+def test_probe_targets_are_enabled_remote_devices_only(tmp_path: Path) -> None:
+    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    targets = health.probe_targets(machines)
+    assert [(t.device, t.target.alias, t.target.user) for t in targets] == [
+        ("pc", "pc-wsl-codex-bot", "codex-bot"),
+    ]
+
+
+def test_device_probe_marks_reachable_devices_up_and_unreachable_ones_unseen(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    writer = store(db)
+    health.HealthStore(db, devices={"retired"}, clock=lambda: NOW).beat(
+        "device-probe", "retired", pid=1, started_at=NOW, version="unknown", interval=60.0)
+    transport = FakeTransport({"pc-wsl-codex-bot": 0})
+    prober = health.DeviceProber(writer, health.probe_targets(machines), transport, log=lambda line: None)
+    prober.forget_others()
+    prober.probe_once()
+    rows = {r.device: r for r in health.read_heartbeats(db) or ()}
+    assert set(rows) == {"pc"}  # the retired device's row is forgotten
+    assert rows["pc"].last_seen == NOW
+    assert rows["pc"].interval_seconds == health.PROBE_SECONDS
+    argv = transport.calls[0]
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-1] == "exit 0"
+
+    later = store(db, NOW + 300)
+    transport.codes["pc-wsl-codex-bot"] = SSH_UNREACHABLE
+    health.DeviceProber(later, health.probe_targets(machines), transport, log=lambda line: None).probe_once()
+    pc = next(r for r in health.read_heartbeats(db) or ())
+    assert pc.last_seen == NOW  # an unreachable probe never counts as seen
+    assert pc.checked_at == NOW + 300
+    assert health.classify(pc, NOW + 300)[0] == "stale"
+    assert health.classify(pc, NOW + 500)[0] == "down"
+
+
+def test_poller_beats_write_the_poller_and_probe_rows(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    transport = FakeTransport({})
+    with health.poller_beats(db, machines_file(tmp_path), transport=transport,
+                             interval=3600.0, log=lambda line: None):
+        deadline = time.monotonic() + 5
+        while len(health.read_heartbeats(db) or ()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        rows = {(r.component, r.device) for r in health.read_heartbeats(db) or ()}
+    assert rows == {("poller", "box"), ("device-probe", "pc")}
+    poller = next(r for r in health.read_heartbeats(db) or () if r.component == "poller")
+    assert poller.stopped_at is not None
+
+
+def test_waiter_devices_are_the_eligible_devices_for_its_harness(tmp_path: Path) -> None:
+    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    assert health.waiter_devices(machines, "codex-bot") == ["box", "pc"]
+    assert health.waiter_devices(machines, "claude-bot") == ["box"]  # mac is disabled
+    assert health.waiter_devices(None, "claude-bot") == ["box"]
+
+
+# --- the report: no waiter for a queued job ---------------------------------------------
+
+
+def eligible(tmp_path: Path) -> dict:
+    machines, _ = load_machines_yml(machines_file(tmp_path), allow_placeholders=True)
+    return health.eligible_devices(machines)
+
+
+def test_a_queued_job_with_no_live_waiter_is_flagged(tmp_path: Path) -> None:
+    rows = (row(component="poller", bot=""),)
+    report = health.build_report(rows, NOW, queued=[("j1", "codex"), ("j2", "codex"), ("j3", "grok")],
+                                 eligible=eligible(tmp_path))
+    assert [(n.harness, n.bot, n.jobs) for n in report.no_waiter] == [("codex", "codex-bot", ("j1", "j2"))]
+    assert report.no_waiter[0].anchor == "health-waiter-codex-bot"
+
+
+def test_a_live_waiter_on_an_eligible_device_clears_the_flag(tmp_path: Path) -> None:
+    rows = (row(component="poller", bot=""), row(device="pc", last_seen=NOW - 50))  # stale still counts
+    report = health.build_report(rows, NOW, queued=[("j1", "codex")], eligible=eligible(tmp_path))
+    assert report.no_waiter == ()
+
+
+@pytest.mark.parametrize(
+    "waiter",
+    [
+        row(last_seen=NOW - 500),  # down
+        row(stopped_at=NOW),  # stopped
+        row(device="mac"),  # mac does not list codex
+        row(bot="claude-bot"),  # another bot's waiter
+    ],
+)
+def test_a_dead_or_ineligible_waiter_still_leaves_the_job_flagged(tmp_path: Path, waiter) -> None:
+    report = health.build_report((waiter,), NOW, queued=[("j1", "codex")], eligible=eligible(tmp_path))
+    assert [n.harness for n in report.no_waiter] == ["codex"]
+
+
+def test_a_known_health_db_with_no_poller_row_shows_the_poller_down() -> None:
+    report = health.build_report((row(),), NOW, queued=[])
+    poller = report.components[0]
+    assert (poller.component, poller.state, poller.reason) == ("poller", "down", "never seen")
+    assert [c.component for c in report.down] == ["poller"]
+
+
+def test_report_lines_for_orch_status() -> None:
+    rows = (
+        row(component="poller", bot="", pid=10, last_seen=NOW - 5),
+        row(last_seen=NOW - 600, pid=4242),
+    )
+    report = health.build_report(rows, NOW, queued=[("j1", "codex")])
+    lines = health.render_lines(report, NOW)
+    assert lines[0] == "Health (2 components, 1 down)"
+    assert lines[1].startswith("  poller @ box up, last seen ")
+    assert lines[1].endswith(" ET (5s ago), pid 10")
+    assert "waiter codex-bot @ box down (no heartbeat for 10m)" in lines[2]
+    assert lines[3] == "  no waiter for codex: 1 queued job"
+
+
+@pytest.mark.parametrize(
+    "when, text",
+    [
+        (1_794_000_000.0, "Nov 6 4:20:00 PM ET"),  # EST (UTC-5)
+        (1_780_000_000.0, "May 28 4:26:40 PM ET"),  # EDT (UTC-4)
+        (1_772_953_199.0, "Mar 8 1:59:59 AM ET"),  # the last EST second, 2026
+        (1_772_953_200.0, "Mar 8 3:00:00 AM ET"),  # the first EDT second
+        (1_793_512_799.0, "Nov 1 1:59:59 AM ET"),  # the last EDT second, 2026
+        (1_793_512_800.0, "Nov 1 1:00:00 AM ET"),  # back to EST
+    ],
+)
+def test_last_seen_is_shown_in_eastern_time(when: float, text: str) -> None:
+    assert health.et(when) == text
+
+
+# --- the dashboard ------------------------------------------------------------------------
+
+
+ONLY_CODEX = """\
+devices:
+  - name: box
+    local: true
+    slot_max: 3
+    harnesses:
+      codex: codex-bot
+"""
+
+
+def snapshot(tmp_path: Path, db: Path, now: float = NOW, *, machines: str = MACHINES,
+             config=None) -> dict:
+    return collect_snapshot(db, tmp_path / "poller.log", now=now,
+                            machines_path=machines_file(tmp_path, machines), alive=None,
+                            orch=config)
+
+
+def test_health_is_the_tab_after_efficiency(tmp_path: Path) -> None:
+    assert PAGES[-2:] == ("efficiency.html", "health.html")
+    db, _ = make_db(tmp_path)
+    html = render_pages(snapshot(tmp_path, db))["index.html"]
+    nav = html[html.index('id="nav"'):html.index("</nav>")]
+    assert nav.index("efficiency.html") < nav.index('href="health.html"')
+    assert ">Health</a>" in nav
+
+
+def test_the_health_page_lists_components_with_state_et_pid_and_device(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 5).beat("poller", "box", pid=101, started_at=NOW - 900, version="0123456789ab")
+    store(db, NOW - 60).beat("waiter", "box", bot="codex-bot", pid=202, started_at=NOW - 900, version="unknown")
+    store(db, NOW - 900).beat("linear-listener", "box", pid=303, started_at=NOW - 990, version="unknown")
+    data = snapshot(tmp_path, db)
+    components = {(c["component"], c["bot"]): c for c in data["health"]["components"]}
+    assert components[("poller", "")]["state"] == "up"
+    assert components[("poller", "")]["pid"] == 101
+    assert components[("poller", "")]["device"] == "box"
+    assert components[("poller", "")]["last_seen_et"] == health.et(NOW - 5)
+    assert components[("waiter", "codex-bot")]["state"] == "stale"
+    assert components[("linear-listener", "")]["state"] == "down"
+    # Also down: the claude and cursor waiters and pc's probe, which
+    # machines.yml expects and which never beat.
+    assert data["health"]["down"] == 4
+    page = render_pages(data)["health.html"]
+    assert 'id="components"' in page
+    assert health.et(NOW - 5) in page
+    assert ">101<" in page and ">stale<" in page.lower()
+
+
+def test_a_down_component_shows_on_the_needs_attention_line(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 5).beat("poller", "box", pid=101, started_at=NOW - 900, version="unknown")
+    store(db, NOW - 900).beat("waiter", "box", bot="codex-bot", pid=202, started_at=NOW - 990, version="unknown")
+    data = snapshot(tmp_path, db, machines=ONLY_CODEX)
+    items = [i for i in data["attention"]["items"] if i["kind"] == "down"]
+    assert len(items) == 1
+    assert items[0]["component"] == "waiter codex-bot @ box"
+    assert items[0]["link"] == "health.html#health-waiter-codex-bot-box"
+    assert data["attention"]["count"] >= 1
+    index = render_pages(data)["index.html"]
+    assert 'id="attention-count">1<' in index
+    activity = render_pages(data)["activity.html"]
+    assert "waiter codex-bot @ box" in activity
+
+
+def test_a_queued_job_with_no_waiter_is_flagged_on_the_dashboard(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request("codex"), dedupe_key="a")
+    queue.enqueue(request("grok", "43"), dedupe_key="b")
+    store(db, NOW - 5).beat("poller", "box", pid=101, started_at=NOW - 900, version="unknown")
+    data = snapshot(tmp_path, db)
+    flagged = [q for q in data["queued"] if q.get("no_waiter")]
+    assert [(q["job"], q["no_waiter"], q["no_waiter_link"]) for q in flagged] == [
+        (job.id[:8], "codex", "health.html#health-waiter-codex-bot"),
+    ]
+    assert data["health"]["no_waiter"] == [
+        {"harness": "codex", "bot": "codex-bot", "jobs": [job.id[:8]], "count": 1,
+         "anchor": "health-waiter-codex-bot"},
+    ]
+    attention = [i for i in data["attention"]["items"] if i["kind"] == "no-waiter"]
+    assert attention[0]["detail"] == "no waiter for codex (1 queued job)"
+    pages = render_pages(data)
+    assert "no waiter for codex" in pages["index.html"]
+    assert 'href="health.html#health-waiter-codex-bot"' in pages["index.html"]
+    assert 'id="health-waiter-codex-bot"' in pages["health.html"]
+
+    store(db, NOW - 5).beat("waiter", "box", bot="codex-bot", pid=7, started_at=NOW - 60, version="unknown")
+    data = snapshot(tmp_path, db)
+    assert not any(q.get("no_waiter") for q in data["queued"])
+    assert data["health"]["no_waiter"] == []
+
+
+def test_without_heartbeats_the_dashboard_attention_is_unchanged(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request("codex"), dedupe_key="a")
+    data = snapshot(tmp_path, db)
+    assert data["health"]["known"] is False
+    assert data["attention"]["count"] == 0
+    assert not any("no_waiter" in q for q in data["queued"])
+
+
+# --- orch status and orch health -----------------------------------------------------------
+
+
+def test_orch_status_has_a_health_section(tmp_path: Path) -> None:
+    from tests.test_wait import dispatcher_for
+
+    db, queue = make_db(tmp_path)
+    dispatcher_for(db)  # the tracker tables orch status reads
+    queue.enqueue(request("codex"), dedupe_key="a")
+    store(db, NOW - 5).beat("poller", "box", pid=101, started_at=NOW - 900, version="unknown")
+    out = io.StringIO()
+    code = status_main(["--db", str(db), "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                        "--orch", str(ORCH_EXAMPLE)],
+                       stdout=out, clock=lambda: NOW)
+    assert code == 0
+    text = out.getvalue()
+    # orch.example.yml pushes the dashboard; machines.yml runs a codex waiter.
+    assert "\nHealth (3 components, 2 down)\n" in text
+    assert "  poller @ box up, last seen " in text
+    assert "  waiter codex-bot @ box down (never seen), never seen" in text
+    assert "  dashboard @ box down (never seen), never seen" in text
+    assert "  no waiter for codex: 1 queued job" in text
+    assert "build -> codex queued 30s [no waiter for codex]" in text
+
+
+def test_orch_health_exits_3_when_something_needs_attention(tmp_path: Path, capsys) -> None:
+    db, queue = make_db(tmp_path)
+    machines = machines_file(tmp_path, ONLY_CODEX)
+    now = time.time()
+    store(db, now).beat("poller", "box", pid=101, started_at=now, version="unknown")
+    store(db, now).beat("waiter", "box", bot="codex-bot", pid=102, started_at=now, version="unknown")
+    store(db, now).beat("dashboard", "box", pid=103, started_at=now, version="unknown")
+    args = ["health", "--db", str(db), "--machines", str(machines), "--orch", str(ORCH_EXAMPLE)]
+    assert cli_main(args) == 0
+    assert "poller @ box up" in capsys.readouterr().out
+
+    queue.enqueue(request("cursor"), dedupe_key="a")
+    assert cli_main([*args, "--json"]) == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["no_waiter"][0]["harness"] == "cursor"
+    assert data["components"][0]["component"] == "poller"
+
+
+def test_orch_health_forget_removes_a_retired_components_rows(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db).beat("waiter", "pc", bot="cursor-bot", pid=5, version="unknown")
+    store(db).beat("poller", "box", pid=6, version="unknown")
+    assert cli_main(["health", "forget", "waiter", "--db", str(db), "--bot", "cursor-bot"]) == 0
+    assert [r.component for r in health.read_heartbeats(db) or ()] == ["poller"]
+
+
+# --- the components wire their heartbeats in ------------------------------------------------
+
+
+class Recorder:
+    entered: list[dict] = []
+
+    def __init__(self, db, component, **kwargs):
+        Recorder.entered.append({"db": db, "component": component, **kwargs})
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_the_beat_thread_blocks_the_signals_orch_wait_guards(tmp_path: Path) -> None:
+    import signal
+    import threading
+
+    db, _ = make_db(tmp_path)
+    seen: list[set] = []
+    done = threading.Event()
+
+    class Probe(health.HealthStore):
+        def beat(self, *args, **kwargs):
+            seen.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+            done.set()
+
+    with health.Beater(db, "waiter", devices=["box"], bot="codex-bot", store=Probe(db, devices=DEVICES),
+                       interval=60.0, log=lambda line: None):
+        assert done.wait(5)
+    assert {signal.SIGINT, signal.SIGTERM, signal.SIGHUP} <= set(seen[0])
+    assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, [])  # main thread untouched
+
+
+def test_plain_orch_wait_beats_as_a_waiter_while_it_blocks(
+    tmp_path: Path, monkeypatch, capsys, restore_signals
+) -> None:
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request("codex"), dedupe_key="a")
+    Recorder.entered = []
+    monkeypatch.setattr(health, "Beater", Recorder)
+    assert cli_main(["wait", "codex-bot", "--db", str(db), "--machines", str(machines_file(tmp_path))]) == 0
+    assert [(e["component"], e["bot"], e["devices"], e["on_exit"]) for e in Recorder.entered] == [
+        ("waiter", "codex-bot", ["box", "pc"], "delete"),
+    ]
+
+
+def test_the_dashboard_push_records_the_dashboard_writer(tmp_path: Path, monkeypatch) -> None:
+    from lib import dashboard_cli
+
+    db, _ = make_db(tmp_path)
+    beats: list[tuple] = []
+    monkeypatch.setattr(health, "beat_once", lambda db, component, **kw: beats.append((db, component, kw)) or True)
+
+    class Sent:
+        def send(self, paths):
+            return None
+
+    monkeypatch.setattr(dashboard_cli, "transport_for", lambda config: Sent())
+    code = dashboard_cli.main(["push", "--once", "--db", str(db), "--out", str(tmp_path / "out"),
+                               "--machines", str(machines_file(tmp_path)), "--log", str(tmp_path / "p.log"),
+                               "--orch", str(Path(__file__).resolve().parents[1] / "config" / "orch.example.yml")])
+    assert code == 0
+    assert [(b[0], b[1]) for b in beats] == [(db, "dashboard")]
+    assert (tmp_path / "out" / "health.html").is_file()
+
+
+def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Path) -> None:
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    db, queue = make_db(tmp_path, PAGE_NOW)
+    queue.enqueue(request("codex"), dedupe_key="a")
+    store(db, PAGE_NOW - 5).beat("poller", "box", pid=101, started_at=PAGE_NOW - 900, version="unknown")
+    store(db, PAGE_NOW - 900).beat("linear-listener", "box", pid=303, started_at=PAGE_NOW - 990,
+                                   version="unknown")
+    data = snapshot(tmp_path, db, PAGE_NOW, machines=ONLY_CODEX)
+    (tmp_path / "health").mkdir()
+    page = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "components", "no-waiter"])
+    text = page["text"]
+    assert "poller" in text["components"] and "UP" in text["components"]
+    assert "linear-listener" in text["components"] and "DOWN" in text["components"]
+    assert health.et(PAGE_NOW - 5) in text["components"]
+    assert "no waiter for codex: 1 queued job" in text["no-waiter"]
+    # Down: the listener and the codex waiter; codex has no waiter.
+    assert text["attention-count"] == "3"
+    (tmp_path / "main").mkdir()
+    main = _run_page(tmp_path / "main", data, "main", BAR + ["hud", "kpis", "lanes", "queue"])
+    assert "no waiter for codex" in main["text"]["queue"]
+    assert "a.chip.bad[href=health.html#health-waiter-codex-bot]" in main["dump"]["queue"]
+
+
+# --- review round 1 (PR #98): each class the review named ------------------------------------
+
+
+def test_expected_components_that_never_beat_are_down(tmp_path: Path) -> None:
+    """A1: every configured component is listed; one that never beat is down."""
+    rows = (row(component="poller", bot="", pid=1),)
+    machines = machines_config(tmp_path)
+    report = health.build_report(
+        rows, NOW, expected=health.expected_components(machines, orch(listener=True, push=True)))
+    listed = {(c.component, c.bot, c.device): (c.state, c.reason) for c in report.components}
+    assert listed == {
+        ("poller", "", "box"): ("up", ""),
+        ("waiter", "claude-bot", "box"): ("down", "never seen"),
+        ("waiter", "codex-bot", "box"): ("down", "never seen"),
+        ("waiter", "cursor-bot", "box"): ("down", "never seen"),
+        ("linear-listener", "", "box"): ("down", "never seen"),
+        ("tunnel", "", "box"): ("down", "never reached"),
+        ("dashboard", "", "box"): ("down", "never seen"),
+        ("device-probe", "", "pc"): ("down", "never reached"),
+    }
+    assert len(report.down) == 7
+
+
+def test_a_waiter_on_any_eligible_device_meets_its_bots_slot(tmp_path: Path) -> None:
+    rows = (row(component="poller", bot="", pid=1), row(device="pc", pid=2))
+    report = health.build_report(
+        rows, NOW, expected=health.expected_components(machines_config(tmp_path), orch()))
+    codex = [c for c in report.components if c.bot == "codex-bot"]
+    assert [(c.device, c.state) for c in codex] == [("pc", "up")]
+
+
+def test_unconfigured_components_are_listed_but_need_no_attention(tmp_path: Path) -> None:
+    """A1: the registry separates configured components from retired ones."""
+    rows = (
+        row(component="poller", bot="", pid=1),
+        row(device="mac", bot="claude-bot", last_seen=NOW - 900),  # mac is disabled
+        row(component="linear-listener", bot="", last_seen=NOW - 900),  # no linear_webhook
+    )
+    report = health.build_report(
+        rows, NOW, expected=health.expected_components(machines_config(tmp_path, ONLY_CODEX), orch()))
+    retired = {c.component: c for c in report.components if not c.configured}
+    assert set(retired) == {"waiter", "linear-listener"}
+    assert all(c.state == "down" for c in retired.values())
+    assert [c.label for c in report.down] == ["waiter codex-bot @ box"]
+    assert "(not configured)" in "\n".join(health.render_lines(report, NOW))
+
+
+def test_the_dashboard_expects_what_orch_yml_configures(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 5).beat("poller", "box", pid=101, version="unknown")
+    store(db, NOW - 5).beat("waiter", "box", bot="codex-bot", pid=102, version="unknown")
+    data = snapshot(tmp_path, db, machines=ONLY_CODEX, config=orch(listener=True, push=True))
+    down = sorted(i["component"] for i in data["attention"]["items"] if i["kind"] == "down")
+    assert down == ["dashboard @ box", "linear-listener @ box", "tunnel @ box"]
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "unreadable"])
+def test_unreadable_health_storage_needs_attention(tmp_path: Path, capsys, damage: str) -> None:
+    """A2: a health file that cannot be read is flagged, never reported as fine."""
+    db, _ = make_db(tmp_path)
+    path = health.health_path(db)
+    if damage == "corrupt":
+        path.write_bytes(b"not a database, " * 64)
+    else:
+        store(db).beat("poller", "box", pid=1, version="unknown")
+        path.chmod(0)
+        if os.access(path, os.R_OK):
+            pytest.skip("running as root: chmod 0 does not stop reads")
+    try:
+        args = ["health", "--db", str(db), "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                "--orch", str(ORCH_EXAMPLE)]
+        assert cli_main(args) == 1
+        assert "unknown: cannot read orch.health.db" in capsys.readouterr().out
+        assert cli_main([*args, "--json"]) == 1
+        assert json.loads(capsys.readouterr().out)["error"].startswith("cannot read orch.health.db")
+
+        data = snapshot(tmp_path, db)
+        items = [i for i in data["attention"]["items"] if i["kind"] == "health"]
+        assert [(i["component"], i["link"]) for i in items] == [("health storage", "health.html#components")]
+        assert items[0]["detail"].startswith("unknown: cannot read orch.health.db")
+        pages = render_pages(data)
+        assert 'id="attention-count">1<' in pages["index.html"]
+        assert "health storage" in pages["activity.html"]
+    finally:
+        path.chmod(0o600)
+
+
+def _page_with_fresh_rows(tmp_path: Path) -> dict:
+    db, _ = make_db(tmp_path, PAGE_NOW)
+    store(db, PAGE_NOW).beat("poller", "box", pid=101, version="unknown")
+    store(db, PAGE_NOW).beat("waiter", "box", bot="codex-bot", pid=102, version="unknown")
+    return snapshot(tmp_path, db, PAGE_NOW, machines=ONLY_CODEX)
+
+
+def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Path) -> None:
+    """A3: a snapshot that stops changing never keeps showing UP. A one-off
+    snapshot (no writer, no publication interval) vouches for nothing: a
+    component past its thresholds is unknown, and the old snapshot is one
+    needs-attention item."""
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _page_with_fresh_rows(tmp_path)
+    assert data["health"]["publish_seconds"] is None
+    ids = BAR + ["hud", "components", "no-waiter"]
+    (tmp_path / "now").mkdir()
+    fresh = _run_page(tmp_path / "now", data, "health", ids)["text"]
+    assert _states(fresh["components"]) == ["UP", "UP"]
+    assert fresh["attention-count"] == "0"
+
+    for advance in (50, 121):
+        (tmp_path / str(advance)).mkdir()
+        later = _run_page(tmp_path / str(advance), data, "health", ids, actions=[["advance", advance]])["text"]
+        assert _states(later["components"]) == ["UNKNOWN", "UNKNOWN"]
+        assert "no snapshot for " in later["components"]
+        assert "2 components · 0 down" in later["components"]
+        assert later["attention-count"] == "1"
+
+
+def test_the_activity_page_lists_an_old_snapshot_once(tmp_path: Path) -> None:
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _page_with_fresh_rows(tmp_path)
+    page = _run_page(tmp_path, data, "activity", BAR + ["hud", "attention"], actions=[["advance", 121]])
+    assert "health snapshot" in page["text"]["attention"]
+    assert "unknown: no snapshot for 2m" in page["text"]["attention"]
+    assert "a.ticket[href=health.html#components]" in page["dump"]["attention"]
+    assert "poller @ box" not in page["text"]["attention"]
+
+
+@pytest.mark.parametrize(
+    "device",
+    [SECRETS["GH_TOKEN"], SECRETS["LINEAR_API_KEY"], "whk_0123456789abcdefSECRET", "retired"],
+)
+def test_every_writer_refuses_a_device_outside_machines_yml(tmp_path: Path, device: str) -> None:
+    """A4: the device column is checked against the machines.yml inventory."""
+    db, _ = make_db(tmp_path)
+    machines = machines_file(tmp_path)
+    with pytest.raises(health.HealthError):
+        health.HealthStore(db, devices=health.known_devices(health.load_machines(machines))).beat(
+            "tunnel", device, pid=1, version="unknown")
+    lines: list[str] = []
+    beater = health.Beater(db, "waiter", devices=["box"], bot="codex-bot",
+                           store=health.HealthStore(db, devices={"box"}), log=lines.append)
+    beater.devices = (device,)
+    beater.beat_now()
+    assert lines == ["health: waiter heartbeat failed: HealthError"]
+    assert cli_main(["health", "beat", "tunnel", "--db", str(db), "--device", device,
+                     "--pid", str(os.getpid())]) == 2
+    assert health.read_heartbeats(db) in (None, ())
+    raw = health.health_path(db).read_bytes() if health.health_path(db).exists() else b""
+    assert device.encode() not in raw
+
+
+def test_the_inventory_is_machines_yml_plus_the_local_device(tmp_path: Path) -> None:
+    assert health.known_devices(machines_config(tmp_path)) == {"box", "pc", "mac"}
+    assert health.known_devices(None) == {"box"}
+
+
+def test_a_locked_health_db_never_stalls_the_dashboard_push(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A5: heartbeat I/O is bounded, and a dropped beat is logged and flagged."""
+    from lib import dashboard_cli
+
+    db, _ = make_db(tmp_path)
+    store(db).beat("poller", "box", pid=1, version="unknown")
+    holder = sqlite3.connect(health.health_path(db), isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    sent: list = []
+
+    class Sent:
+        def send(self, paths):
+            sent.append(time.monotonic())
+
+    monkeypatch.setattr(dashboard_cli, "transport_for", lambda config: Sent())
+    started = time.monotonic()
+    try:
+        code = dashboard_cli.main(["push", "--once", "--db", str(db), "--out", str(tmp_path / "out"),
+                                   "--machines", str(machines_file(tmp_path)),
+                                   "--log", str(tmp_path / "p.log"), "--orch", str(ORCH_EXAMPLE)])
+    finally:
+        holder.rollback()
+        holder.close()
+    assert code == 0
+    assert sent and sent[0] - started < 4 * health.BUSY_SECONDS + 1
+    assert "health: dashboard heartbeat failed: OperationalError" in capsys.readouterr().err
+    status = json.loads((tmp_path / "out" / "status.json").read_text())
+    assert [i["component"] for i in status["attention"]["items"] if i["kind"] == "health"] == [
+        "health storage"]
+
+
+def test_a_locked_health_db_bounds_a_waiters_exit(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    beater = health.Beater(db, "waiter", devices=["box", "pc"], bot="codex-bot",
+                           store=store(db), log=lambda line: None)
+    beater.beat_now()
+    holder = sqlite3.connect(health.health_path(db), isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    started = time.monotonic()
+    try:
+        beater.close()
+    finally:
+        holder.rollback()
+        holder.close()
+    assert time.monotonic() - started < 2 * health.BUSY_SECONDS + 1
+
+
+def test_one_waiter_exiting_keeps_another_live_waiters_row(tmp_path: Path) -> None:
+    """A6: rows are per process; B's clean exit never hides A."""
+    db, queue = make_db(tmp_path)
+    queue.enqueue(request("codex"), dedupe_key="a")
+    a = health.Beater(db, "waiter", devices=["box"], bot="codex-bot", store=store(db),
+                      on_exit="delete", pid=1001, log=lambda line: None)
+    b = health.Beater(db, "waiter", devices=["box"], bot="codex-bot", store=store(db),
+                      on_exit="delete", pid=1002, log=lambda line: None)
+    a.beat_now()
+    b.beat_now()
+    b.close()
+    rows = health.read_heartbeats(db) or ()
+    assert [(r.component, r.bot, r.pid) for r in rows] == [("waiter", "codex-bot", 1001)]
+    report = health.build_report(rows, NOW, queued=[("j1", "codex")], eligible=eligible(tmp_path))
+    assert report.no_waiter == ()
+
+
+def test_one_entry_per_component_shows_its_best_process(tmp_path: Path) -> None:
+    rows = (
+        row(component="poller", bot="", pid=1),
+        row(pid=10, last_seen=NOW - 100),  # an older waiter, stale
+        row(pid=11, last_seen=NOW - 2),  # a live one
+    )
+    report = health.build_report(rows, NOW)
+    waiters = [c for c in report.components if c.component == "waiter"]
+    assert [(c.pid, c.state) for c in waiters] == [(11, "up")]
+
+
+def test_a_beat_removes_rows_other_processes_left_down(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 900).beat("waiter", "pc", bot="codex-bot", pid=1, version="unknown")  # died
+    store(db, NOW - 20).beat("waiter", "box", bot="codex-bot", pid=2, version="unknown")  # alive
+    store(db, NOW - 20).beat("waiter", "box", bot="codex-bot", pid=3, version="unknown")
+    store(db, NOW - 10).stop("waiter", "box", bot="codex-bot", pid=3)  # stopped
+    store(db, NOW - 900).beat("waiter", "box", bot="claude-bot", pid=4, version="unknown")  # other bot
+    store(db).beat("waiter", "box", bot="codex-bot", pid=5, version="unknown")
+    left = sorted((r.bot, r.pid) for r in health.read_heartbeats(db) or ())
+    assert left == [("claude-bot", 4), ("codex-bot", 2), ("codex-bot", 5)]
+
+
+MANY_DEVICES = MACHINES + "".join(
+    f"""\
+  - name: {name}
+    tailscale_name: {name}.example.ts.net
+    slot_max: 1
+    harnesses:
+      codex: codex-bot
+    workdir_root: /home/{{bot}}/factory-work
+    ssh_alias: {name}-{{bot}}
+"""
+    for name in ("hang1", "hang2", "hang3")
+)
+
+
+def test_a_hanging_device_never_delays_another_devices_probe(tmp_path: Path) -> None:
+    """A7: each device keeps its own probe cadence."""
+    db, _ = make_db(tmp_path)
+    release = threading.Event()
+    good: list[float] = []
+
+    class Hanging:
+        def run(self, argv, *, timeout: float) -> int:
+            alias = list(argv)[list(argv).index("--") + 1]
+            if alias.startswith("hang"):
+                release.wait(10)
+                return SSH_UNREACHABLE
+            good.append(time.monotonic())
+            return 0
+
+    machines = machines_config(tmp_path, MANY_DEVICES)
+    targets = health.probe_targets(machines)
+    assert [t.device for t in targets][0] == "pc" and len(targets) == 4
+    writer = health.HealthStore(db, devices=health.known_devices(machines))
+    with health.DeviceProber(writer, targets, Hanging(), interval=0.05, log=lambda line: None):
+        deadline = time.monotonic() + 5
+        while len(good) < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        release.set()
+    assert len(good) >= 4  # pc kept probing while three devices hung
+
+
+def test_the_beat_loop_keeps_its_cadence_when_a_step_is_slow() -> None:
+    starts: list[float] = []
+
+    def step() -> None:
+        starts.append(time.monotonic())
+        time.sleep(0.06)
+
+    loop = health._Loop("test", 0.1, step, block_signals=False)
+    loop.start()
+    time.sleep(0.55)
+    loop.stop()
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert gaps and max(gaps) < 0.15
+
+
+def test_a_tunnel_counts_as_seen_only_when_the_listener_answers(tmp_path: Path) -> None:
+    """A8: the tunnel's beat is an end-to-end GET, not a pid anyone can name."""
+    db, _ = make_db(tmp_path)
+    answers: list[object] = [405]
+    urls: list[str] = []
+
+    def fetch(url: str, timeout: float) -> int | None:
+        urls.append(url)
+        answer = answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer  # type: ignore[return-value]
+
+    lines: list[str] = []
+    probe = health.TunnelProber(store(db), "box", "https://box.example.ts.net/linear-webhook",
+                                fetch=fetch, pid=7, log=lines.append)
+    probe.probe_once()
+    (tunnel,) = health.read_heartbeats(db) or ()
+    assert (tunnel.component, tunnel.last_seen) == ("tunnel", NOW)
+    assert urls == ["https://box.example.ts.net/linear-webhook"]
+
+    for answer in (502, 200, 404, None):
+        answers[0] = answer
+        health.TunnelProber(store(db, NOW + 60), "box", "https://x.example/linear-webhook",
+                            fetch=fetch, pid=7, log=lines.append).probe_once()
+        (tunnel,) = health.read_heartbeats(db) or ()
+        assert tunnel.last_seen == NOW and tunnel.checked_at == NOW + 60
+        assert health.classify(tunnel, NOW + 60) == ("stale", "unreachable, last reached 1m ago")
+    answers[0] = OSError("boom")
+    probe.probe_once()
+    probe.probe_once()
+    assert lines == ["health: tunnel probe failed: OSError"]  # logged once, never raised
+
+
+def test_orch_health_has_no_pid_beat_for_anyone_to_renew(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    assert cli_main(["health", "beat", "tunnel", "--db", str(db), "--pid", str(os.getpid())]) == 2
+    assert health.read_heartbeats(db) is None
+
+
+def test_the_listener_beats_and_probes_its_tunnel(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    with health.listener_beats(db, "https://box.example.ts.net/linear-webhook",
+                               machines_path=machines_file(tmp_path), fetch=lambda url, t: 405,
+                               interval=60.0, log=lambda line: None):
+        deadline = time.monotonic() + 5
+        while len(health.read_heartbeats(db) or ()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        live = {r.component: r for r in health.read_heartbeats(db) or ()}
+        assert set(live) == {"linear-listener", "tunnel"}
+        assert all(r.last_seen is not None for r in live.values())
+    assert all(r.stopped_at is not None for r in health.read_heartbeats(db) or ())
+
+    plain = health.listener_beats(db, None, machines_path=machines_file(tmp_path))
+    assert plain.tunnel is None
+
+
+def test_the_linear_listener_passes_its_public_url(tmp_path: Path, monkeypatch) -> None:
+    from lib import cli as cli_module
+
+    seen: list = []
+
+    class Beats:
+        def __init__(self, db, url, **kwargs):
+            seen.append(url)
+
+        def __enter__(self):
+            raise KeyboardInterrupt
+
+        def __exit__(self, *exc):
+            return False
+
+    import socket
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    db, _ = make_db(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("s" * 40)
+    secret.chmod(0o600)
+    config = tmp_path / "orch.yml"
+    config.write_text(
+        "poll_seconds: 60\nlinear:\n  api_key_env: LINEAR_KEY\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_linear_users:\n  user-1: [grok-bot]\n"
+        "projects:\n  - repo: owner/repo\n    factory_ref: main\n"
+        "    linear_project_id: p1\n"
+        f"linear_webhook:\n  bind: 127.0.0.1:{port}\n"
+        f"  secret_file: {secret}\n"
+        "  public_url: https://box.example.ts.net/linear-webhook\n"
+    )
+    monkeypatch.setattr(health, "listener_beats", Beats)
+    code = cli_module.main(["linear-webhook", "serve", "--db", str(db), "--orch", str(config)])
+    assert (code, seen) == (130, ["https://box.example.ts.net/linear-webhook"])
+
+
+@pytest.mark.parametrize("every", [60, 720, 1440])
+def test_a_scheduled_dashboard_push_stays_up_between_pushes(tmp_path: Path, monkeypatch, every: int) -> None:
+    """A9: the dashboard writer's interval follows every supported push schedule."""
+    from lib import dashboard_cli
+
+    db, _ = make_db(tmp_path)
+    config = tmp_path / "orch.yml"
+    config.write_text(ORCH_EXAMPLE.read_text().replace(
+        "    method: scp\n", f"    method: scp\n    every_minutes: {every}\n"))
+
+    class Sent:
+        def send(self, paths):
+            return None
+
+    monkeypatch.setattr(dashboard_cli, "transport_for", lambda c: Sent())
+    for _ in range(2):
+        assert dashboard_cli.main(["push", "--once", "--db", str(db), "--out", str(tmp_path / "out"),
+                                   "--machines", str(machines_file(tmp_path)),
+                                   "--log", str(tmp_path / "p.log"), "--orch", str(config)]) == 0
+    (dashboard,) = [r for r in health.read_heartbeats(db) or () if r.component == "dashboard"]
+    assert dashboard.interval_seconds == every * 60.0
+    assert health.classify(dashboard, dashboard.last_seen + every * 60)[0] == "up"
+
+
+# --- review round 2 (PR #98): each class the review named ------------------------------------
+
+
+def _published(tmp_path: Path, monkeypatch, *, every: int | None = None, live: bool = False) -> dict:
+    """status.json as one real `orch dashboard push --once` sends it, with a
+    queued codex job, a live poller and a live codex waiter; dated PAGE_NOW
+    so the page harness's clock is 3 s after it."""
+    from lib import dashboard_cli
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    db, queue = make_db(tmp_path, time.time())
+    queue.enqueue(request("codex"), dedupe_key="queued")
+    health.HealthStore(db, devices={"box"}).beat("poller", "box", pid=101)
+    health.HealthStore(db, devices={"box"}).beat("waiter", "box", bot="codex-bot", pid=102)
+    config = tmp_path / "orch.yml"
+    extra = (f"    every_minutes: {every}\n" if every else "") + ("    live: true\n" if live else "")
+    config.write_text(ORCH_EXAMPLE.read_text().replace("    method: scp\n", "    method: scp\n" + extra))
+    sent: list[dict] = []
+
+    class Sent:
+        def send(self, paths):
+            sent.append(json.loads(paths[0].read_text()))
+
+    monkeypatch.setattr(dashboard_cli, "transport_for", lambda c: Sent())
+    assert dashboard_cli.main(["push", "--once", "--db", str(db), "--out", str(tmp_path / "out"),
+                               "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                               "--log", str(tmp_path / "p.log"), "--orch", str(config)]) == 0
+    (data,) = sent
+    data["generated_at_epoch"] = PAGE_NOW
+    return data
+
+
+def _states(text: str) -> list[str]:
+    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text)
+
+
+@pytest.mark.parametrize("every, live, seconds", [(5, False, 300), (1440, False, 86400),
+                                                  (None, False, 30), (5, True, 30)])
+def test_a_push_publishes_its_own_cadence_and_its_own_heartbeat(
+    tmp_path: Path, monkeypatch, every, live, seconds,
+) -> None:
+    """R2-1/R2-4: the snapshot says how often it is published (a live push
+    publishes every poll cycle), and the first push already shows its writer up."""
+    data = _published(tmp_path, monkeypatch, every=every, live=live)
+    assert data["health"]["publish_seconds"] == seconds
+    rows = {c["component"]: (c["state"], c["reason"], c["interval_seconds"])
+            for c in data["health"]["components"]}
+    assert rows["dashboard"] == ("up", "", seconds)
+    assert rows["poller"][0] == rows["waiter"][0] == "up"
+    assert data["attention"]["count"] == 0
+
+
+@pytest.mark.parametrize("advance", [0, 121, 299, 600, 897])  # the clock starts 3 s in
+def test_healthy_components_stay_up_between_scheduled_pushes(tmp_path: Path, monkeypatch, advance) -> None:
+    """R2-1/R2-2: within its publication window a snapshot keeps every
+    state it observed, and the no-waiter panel agrees with them."""
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _published(tmp_path / "push", monkeypatch, every=5)
+    (tmp_path / "page").mkdir()
+    page = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+                     actions=[["advance", advance]])["text"]
+    assert _states(page["components"]) == ["UP", "UP", "UP"]
+    assert page["attention-count"] == "0"
+    assert "every queued job has a live waiter" in page["no-waiter"]
+
+
+def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: Path, monkeypatch) -> None:
+    """R2-1/R2-2: once the next push is overdue the page cannot see the other
+    components, so they are unknown, not down; the writer itself ages to
+    stale and then down, which is the one needs-attention item, and the
+    no-waiter panel no longer claims every queued job has a waiter."""
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    data = _published(tmp_path / "push", monkeypatch, every=5)
+    ids = BAR + ["hud", "components", "no-waiter"]
+    (tmp_path / "stale").mkdir()
+    stale = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])["text"]
+    assert _states(stale["components"]) == ["UNKNOWN", "UNKNOWN", "STALE"]
+    assert "DOWN" not in stale["components"]
+    assert stale["attention-count"] == "0"
+    assert "every queued job has a live waiter" not in stale["no-waiter"]
+    assert "unknown" in stale["no-waiter"]
+
+    (tmp_path / "down").mkdir()
+    down = _run_page(tmp_path / "down", data, "activity", BAR + ["hud", "attention"],
+                     actions=[["advance", 8 * 300 + 1]])
+    assert down["text"]["attention-count"] == "1"
+    assert "dashboard @ box" in down["text"]["attention"]
+    assert "poller" not in down["text"]["attention"] and "waiter" not in down["text"]["attention"]
+
+
+def _overdue_page(tmp_path: Path, *, waiter_seen: float, writer_interval: int,
+                  publish_seconds: int | None, push: bool, advance: int) -> dict:
+    from tests.test_dashboard_layout import BAR, _run_page
+
+    db, queue = make_db(tmp_path, PAGE_NOW)
+    queue.enqueue(request("codex"), dedupe_key="queued")
+    store(db, PAGE_NOW).beat("poller", "box", pid=101)
+    store(db, PAGE_NOW + waiter_seen).beat("waiter", "box", bot="codex-bot", pid=102)
+    store(db, PAGE_NOW).beat("dashboard", "box", pid=103, interval=writer_interval)
+    data = collect_snapshot(db, tmp_path / "poller.log", now=PAGE_NOW,
+                            machines_path=machines_file(tmp_path, ONLY_CODEX), alive=None,
+                            orch=orch(push=push), publish_seconds=publish_seconds)
+    (tmp_path / "page").mkdir()
+    return _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+                     actions=[["advance", advance]])["text"]
+
+
+@pytest.mark.parametrize("waiter_seen, expected", [
+    (0, ["UNKNOWN", "UNKNOWN", "STALE"]),
+    (-60, ["UNKNOWN", "UNKNOWN", "STALE"]),
+    (-100, ["UNKNOWN", "UNKNOWN", "STALE"]),
+])
+def test_an_overdue_snapshot_vouches_for_no_state_past_its_up_window(
+    tmp_path: Path, waiter_seen, expected,
+) -> None:
+    """R3-2: once the next push is overdue, a component the snapshot already
+    showed stale is as unseen as one it showed up: it is unknown, and the
+    no-waiter panel stops claiming a live waiter for its queued job."""
+    from tests.test_dashboard_layout import NODE
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    page = _overdue_page(tmp_path, waiter_seen=waiter_seen, writer_interval=15,
+                         publish_seconds=15, push=True, advance=46)
+    assert _states(page["components"]) == expected
+    assert "every queued job has a live waiter" not in page["no-waiter"]
+    assert "unknown: no snapshot for " in page["no-waiter"]
+
+
+def test_a_retired_writer_row_does_not_hide_an_old_one_off_snapshot(tmp_path: Path) -> None:
+    """R3-3: only a dashboard row that can alert stands in for the old
+    snapshot; a retired (not configured) one still leaves the one
+    needs-attention item."""
+    from tests.test_dashboard_layout import NODE
+
+    if NODE is None:
+        pytest.skip("node is not installed")
+    page = _overdue_page(tmp_path, waiter_seen=0, writer_interval=300,
+                         publish_seconds=None, push=False, advance=3000)
+    assert _states(page["components"]) == ["UNKNOWN", "UNKNOWN", "DOWN"]
+    assert page["attention-count"] == "1"
+
+
+@pytest.mark.parametrize(
+    "component, device, interval",
+    [("device-probe", "pc", health.PROBE_SECONDS), ("tunnel", "box", health.BEAT_SECONDS)],
+)
+@pytest.mark.parametrize("latest_failed", [True, False])
+def test_a_check_shows_its_latest_result_across_restarts(
+    tmp_path: Path, component, device, interval, latest_failed,
+) -> None:
+    """R2-3: after a poller or listener restart, the newest check decides,
+    whichever process made it; a failure is stale with the last success."""
+    db, _ = make_db(tmp_path)
+    if latest_failed:
+        store(db, NOW - 10).beat(component, device, pid=10, interval=interval)
+        store(db, NOW).checked(component, device, pid=11, interval=interval)
+        expected = [(11, "stale", "unreachable, last reached 10s ago")]
+    else:
+        store(db, NOW - 10).checked(component, device, pid=10, interval=interval)
+        store(db, NOW).beat(component, device, pid=11, interval=interval)
+        expected = [(11, "up", "")]
+    report = health.build_report(health.read_heartbeats(db), NOW,
+                                 expected=health.Expected((), frozenset()))
+    assert [(c.pid, c.state, c.reason) for c in report.components] == expected

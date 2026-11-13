@@ -19,8 +19,13 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   and a grep that reads NUL-separated environments; make
   `<workdir>/jobs/<job-id>`, record `<process group> <boot id>` in
   `.orch-worker.pid` there, and exec the harness command with the job's
-  environment under the bot's login shell (`bash -lc 'exec "$@"'`, #94),
-  so its own PATH (gh, claude, codex) is loaded; the exec keeps the pid.
+  environment under the bot's login shell (`bash -lc`, #94), so its own
+  PATH (gh, claude, codex) is loaded. The job's environment and directory
+  are applied inside that shell after the profile ran, so a profile cannot
+  change them (#99 A6); just before the exec into the harness, once it is
+  found on the login PATH, the start writes its tag to the launch record
+  `<workdir>/jobs/<job-id>.launched` (#99 A2). Every step execs, so the
+  pid stays the start's.
   sshd runs the command in a new session, so that process group is the
   job's. The record is never removed: deleting bookkeeping is not
   evidence the processes are gone;
@@ -31,6 +36,8 @@ worker. The remote POSIX shell scripts sent as the SSH command:
   job's checkout in `<workdir>/jobs/<job-id>` at the job's head, and copy
   the brief from stdin to `<workdir>/jobs/<job-id>.brief.md`. Job values
   are passed as quoted positional arguments, never spliced into the script;
+* launched: exit 0 when the launch record holds this start's tag (it
+  reached the harness), 1 when it does not, else unsure;
 * check: exit 1 while any process of this user carries the job's tag
   (wherever its group or session now is); otherwise exit 3 ("cannot tell")
   while the recorded group, from this boot, still has a process (one that
@@ -113,19 +120,6 @@ PID_FILE = ".orch-worker.pid"
 # checkout and the harness) runs under the bot's login shell.
 LOGIN_SHELL = "bash"
 LOGIN_NAME = "orch-job"
-_EXEC_ARGS = 'exec "$@"'
-# Factory, Nov 13: a harness's `--add-dir` directories are given only where
-# the device has them. Arguments: k (where the kept `--add-dir <dir>` pairs
-# go in the command), n, then n directories, then the command. Each
-# directory is tested with `test -d` on the device at start time; the exec
-# still keeps the start's pid and group. Directories are positional
-# arguments, never spliced into the script text.
-_GUARDED_EXEC = (
-    'k=$1; n=$2; shift 2; a=(); '
-    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$1"); fi; '
-    'shift; n=$((n-1)); done; '
-    'c=("$@"); exec "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"'
-)
 PREFLIGHT_TOOLS = ("git", "gh")
 _PREFLIGHT_MARK = "orch-preflight: missing"
 _CHECKOUT_MARK = "orch-checkout:"
@@ -133,6 +127,35 @@ TAG_ENV = "ORCH_WORKER_TAG"
 # The start script's own exit status when it cannot make or enter the job
 # directory, or record the worker: the harness never ran.
 START_REFUSED = 125
+# The harness's own exit status says nothing about whether it ran (#99 A2).
+# The start writes its worker tag to the launch record (`launch_record`)
+# just before the exec into the harness, once the harness is found under
+# the login PATH; a start with no record of its tag never ran the harness.
+_START_ENTER = (
+    f'cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
+    f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
+    f"shift; "
+)
+_START_EXEC = (
+    'command -v "$1" >/dev/null 2>&1 '
+    '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
+    f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
+    'exec "$@"'
+)
+_START_HARNESS = _START_ENTER + _START_EXEC
+# Factory, Nov 13: a harness's `--add-dir` directories are given only where
+# the device has them. After `--` come k (where the kept `--add-dir <dir>`
+# pairs go in the command), n, then n directories, then the command. Each
+# directory is tested with `test -d` on the device at start time, after the
+# profile ran; the command (still "$1") is then found and exec'd as above.
+# Directories are positional arguments, never spliced into the script text.
+_GUARD_DIRS = (
+    'k=$1; n=$2; shift 2; a=(); '
+    'while [ "$n" -gt 0 ]; do if test -d "$1"; then a+=(--add-dir "$1"); fi; '
+    'shift; n=$((n-1)); done; '
+    'c=("$@"); set -- "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"; '
+)
+_START_GUARDED = _START_ENTER + _GUARD_DIRS + _START_EXEC
 SSH_UNREACHABLE = 255
 
 GONE = "gone"
@@ -337,14 +360,19 @@ def start_script(
     )
     argv = " ".join(shlex.quote(part) for part in command)
     # #94: the harness runs under the bot's login shell, so its own PATH (gh,
-    # claude, codex) is loaded. `exec "$@"` keeps the start's pid and group.
-    login = f"{LOGIN_SHELL} -lc {shlex.quote(_EXEC_ARGS)} {LOGIN_NAME} {argv}"
+    # claude, codex) is loaded. #99 A6: the job's environment and directory
+    # are applied after the profile ran, so a profile can change neither.
+    # Every step execs, so the start's pid and group are the harness's.
+    script, guard = _START_HARNESS, ""
     if guarded_dirs:
+        # Factory, Nov 13: each --add-dir only where the device has it.
         dirs = " ".join(shlex.quote(path) for path in guarded_dirs)
-        login = (
-            f"{LOGIN_SHELL} -lc {shlex.quote(_GUARDED_EXEC)} {LOGIN_NAME} "
-            f"{insert_at} {len(guarded_dirs)} {dirs} {argv}"
-        )
+        script, guard = _START_GUARDED, f"{insert_at} {len(guarded_dirs)} {dirs} "
+    login = (
+        f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
+        f'"$d" {shlex.quote(launch_record(target))} {assignments} '
+        f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {guard}{argv}'
+    )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
     darwin_file = shlex.quote(darwin_record(tag))
@@ -356,7 +384,7 @@ def start_script(
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
         f"|| exit {START_REFUSED}; "
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {login}'
+        f"{login}"
     )
     inner = (
         f"d={directory}; "
@@ -366,7 +394,7 @@ def start_script(
         f"read -r b < /proc/sys/kernel/random/boot_id || exit {START_REFUSED}; "
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
         f'echo "$$ $b" > {pid_file} || exit {START_REFUSED}; '
-        f'exec env {assignments} ORCH_JOB_WORKDIR="$d" {login}'
+        f"{login}"
     )
     return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(inner)}"
 
@@ -677,6 +705,30 @@ class SshTransport:
             completed.stdout.decode("utf-8", "replace"),
             completed.stderr.decode("utf-8", "replace"),
         )
+
+
+def launch_record(target: RemoteTarget) -> str:
+    """Beside the job directory: the tag of the last start that reached its harness."""
+    return f"{target.job_dir}.launched"
+
+
+def launched_script(target: RemoteTarget) -> str:
+    """Exit 0 when this start reached its harness, 1 when it did not, else unsure."""
+    tag = target.require_tag()
+    record = shlex.quote(launch_record(target))
+    return _sh(
+        f"[ -e {record} ] || exit 1; "
+        f"{{ read -r t < {record}; }} 2>/dev/null || exit 3; "
+        f'[ "$t" = {tag} ] && exit 0; exit 1'
+    )
+
+
+def harness_launched(transport: Transport, target: RemoteTarget) -> bool | None:
+    """True or False once the device answers whether the start reached its harness."""
+    code = transport.run(
+        ssh_argv(target, launched_script(target)), timeout=PROBE_TIMEOUT_SECONDS
+    )
+    return {0: True, 1: False}.get(code)
 
 
 def check_worker(transport: Transport, target: RemoteTarget) -> str:

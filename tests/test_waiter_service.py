@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.procs import alive
+
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "waiter-service.sh"
 UNIT = ROOT / "deploy" / "orch-waiter@.service"
@@ -102,15 +104,6 @@ def _all_starts(home: Path) -> list[int]:
     return [pid for bot in ("claude-bot", "codex-bot") for pid in _starts(home, bot)]
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    stat = Path(f"/proc/{pid}/stat")
-    return not stat.exists() or stat.read_text().rpartition(")")[2].split()[0] != "Z"
-
-
 def _wait_for(predicate, seconds: float = 15.0):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -130,17 +123,17 @@ def test_a_killed_waiter_is_restarted_by_its_supervisor(home: Path) -> None:
     assert started.returncode == 0, started.stderr
     first = _wait_for(lambda: _starts(home))[0]
     supervisor = _supervisor(home)
-    assert _alive(first) and _alive(supervisor)
+    assert alive(first) and alive(supervisor)
 
     os.kill(first, signal.SIGKILL)
     second = _wait_for(lambda: len(_starts(home)) >= 2 and _starts(home)[1])
-    assert second != first and _alive(second)
+    assert second != first and alive(second)
     assert _supervisor(home) == supervisor  # the same supervisor brought it back
 
     # It keeps doing so.
     os.kill(second, signal.SIGKILL)
     third = _wait_for(lambda: len(_starts(home)) >= 3 and _starts(home)[2])
-    assert _alive(third)
+    assert alive(third)
     log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
     assert "restarting" in log
 
@@ -151,7 +144,7 @@ def test_stop_ends_the_supervisor_and_the_waiter_without_a_restart(home: Path) -
     supervisor = _supervisor(home)
     stopped = _service(home, "claude-bot", "stop")
     assert stopped.returncode == 0, stopped.stderr
-    _wait_for(lambda: not _alive(waiter) and not _alive(supervisor))
+    _wait_for(lambda: not alive(waiter) and not alive(supervisor))
     time.sleep(0.6)
     assert len(_starts(home)) == 1
     status = _service(home, "claude-bot", "status")
@@ -185,7 +178,7 @@ def test_ensure_brings_back_a_killed_supervisor(home: Path) -> None:
     supervisor = _supervisor(home)
     os.kill(supervisor, signal.SIGKILL)
     os.kill(waiter, signal.SIGKILL)
-    _wait_for(lambda: not _alive(supervisor))
+    _wait_for(lambda: not alive(supervisor))
     assert _service(home, "claude-bot", "status").returncode == 3
     assert _service(home, "claude-bot", "ensure").returncode == 0
     _wait_for(lambda: len(_starts(home)) == 2)
@@ -201,15 +194,15 @@ def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
     orphan = _wait_for(lambda: _starts(home))[0]
     supervisor = _supervisor(home)
     os.kill(supervisor, signal.SIGKILL)
-    _wait_for(lambda: not _alive(supervisor))
-    assert _alive(orphan)
+    _wait_for(lambda: not alive(supervisor))
+    assert alive(orphan)
 
     assert _service(home, "claude-bot", "ensure").returncode == 0
     _wait_for(lambda: len(_starts(home)) >= 2)
     refused = home / "refused-claude-bot"
     _wait_for(lambda: refused.exists() and refused.read_text().strip())
     time.sleep(0.5)
-    live = [pid for pid in _starts(home) if _alive(pid)]
+    live = [pid for pid in _starts(home) if alive(pid)]
     assert live == [orphan]
     lock = home / ".local/state/factory/waiter-claude-bot.lock"
     assert lock.read_text().strip() == str(orphan)
@@ -217,9 +210,9 @@ def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
     stopped = _service(home, "claude-bot", "stop")
     assert stopped.returncode == 0, stopped.stderr
     assert "stopped orphaned waiter" in stopped.stdout
-    _wait_for(lambda: not _alive(orphan))
+    _wait_for(lambda: not alive(orphan))
     time.sleep(0.6)
-    assert [pid for pid in _starts(home) if _alive(pid)] == []
+    assert [pid for pid in _starts(home) if alive(pid)] == []
 
 
 def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) -> None:
