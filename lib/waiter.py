@@ -9,6 +9,9 @@ runs as the owning bot's own user and login, starts the job itself:
   device takes the job: the box, or a remote device such as the PC or the
   Mac. A remote job runs over the bot's own SSH alias through `orch job
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
+* before anything starts it checks every pinned skill file on the placed
+  device against skills/skills.lock (lib/skill_preflight.py), and a missing
+  or changed file fails the job;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -100,6 +103,8 @@ from lib.machines_yml import MachinesConfig
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.orch_yml import Approvals, OrchConfig
 from lib.queue import Job, QueueError, SQLiteJobQueue
+from lib import skill_preflight
+from lib.skill_preflight import PreflightError
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -547,6 +552,9 @@ class Waiter:
         )
         remote = device is not None and not device.local
         try:
+            skill_preflight.preflight(
+                self.queue, job, bot=self.bot, placement=placement, device=device
+            )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
@@ -569,7 +577,7 @@ class Waiter:
                 (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
                 offset = _size(job_dir / "run.log")
             child = self._spawn(argv, job_dir, brief_path)
-        except (WaiterError, BriefError, OSError, ValueError) as exc:
+        except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
             return None
