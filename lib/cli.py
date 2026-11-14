@@ -80,7 +80,7 @@ usage: orch <command> [options]
 
 commands:
   check-config     validate orch.yml, machines.yml and factory.md
-  install-skills   install the pinned pstack skills
+  install-skills   install the pinned pstack and router skills
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
