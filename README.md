@@ -1610,9 +1610,9 @@ names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
 mismatched for at most the instants between local `rename(2)` calls. The static server
-never serves the temp names. `<options>` are `-o BatchMode=yes -o
-ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`, so a
-dead link fails in seconds (issue #106). Every command is an argv list (no
+never serves the temp names. `<options>` are `-o BatchMode=yes`; connect
+and keepalive timeouts are left to the host's ssh_config (issue #224), and
+the 20-second per-command timeout still bounds a dead link (issue #106). Every command is an argv list (no
 local shell) with a 20-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
 bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
@@ -1625,7 +1625,8 @@ ssh_config file itself. `check-config` validates the section.
 
 *When a push fails* (issue #106), `orch poll` reads the push child's exit
 status. After the k-th failure in a row it starts no push until
-min(30·2^(k-1), 600) seconds after the failed one started, with one
+min(30·2^(k-1), 60) seconds after the failed one started (30 seconds after
+the first failure, then 60; issue #224), with one
 `dashboard push: failed (exit N), k in a row; pushes paused for Ss` line;
 a success clears the backoff. A live push's pending change waits and goes
 out when the backoff ends. Each push's outcome is the `dashboard-push`
