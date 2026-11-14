@@ -38,7 +38,7 @@ def test_build_step_names_the_scope() -> None:
     for section in sections("build"):
         assert (
             "3. Run only the tests for the files you touched plus a short smoke set. "
-            "Before `ready`, self-check: principle-prove-it-works, no-comments."
+            "Before `ready`, run the router's \"Before ready\" steps."
         ) in section.splitlines()
 
 
@@ -48,7 +48,7 @@ def test_fix_step_names_the_scope(kind: str) -> None:
         assert "3. Run the tests." not in section
         assert (
             "3. Run only the new test and the tests for the files you touched, plus a short smoke set. "
-            "Self-check: principle-prove-it-works, no-comments."
+            "Then run the router's \"Before ready\" steps."
         ) in section.splitlines()
 
 

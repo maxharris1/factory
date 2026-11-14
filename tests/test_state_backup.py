@@ -3,7 +3,9 @@ and restored when it is missing."""
 
 from __future__ import annotations
 
+import gc
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -88,17 +90,29 @@ def test_restore_db_restores_a_missing_db(tmp_path: Path, capsys) -> None:
     assert _dedupe_keys(lost) == ["t1:build"]
 
 
-def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
-    _dispatcher, queue = _seeded(tmp_path)
-    dest = tmp_path / "share" / "orch.db"
-    backup(queue.path, dest)
-    before = queue.path.read_bytes()
+def _contents(path: Path) -> list[str]:
+    with closing(sqlite3.connect(path)) as connection:
+        return list(connection.iterdump())
 
-    code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
+
+def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
+    gc.disable()
+    try:
+        _dispatcher, queue = _seeded(tmp_path)
+        dest = tmp_path / "share" / "orch.db"
+        backup(queue.path, dest)
+        inode = queue.path.stat().st_ino
+        before = _contents(queue.path)
+
+        code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
+        gc.collect()
+    finally:
+        gc.enable()
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert queue.path.read_bytes() == before
+    assert queue.path.stat().st_ino == inode
+    assert _contents(queue.path) == before
 
 
 def test_restore_db_rejects_a_corrupt_backup(tmp_path: Path, capsys) -> None:
