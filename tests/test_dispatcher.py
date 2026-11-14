@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -2603,6 +2604,17 @@ CREDENTIAL_BODIES = (
     json.dumps({"errors": [{"extensions": {"secret": CANARY}}]}, indent=2),
     repr({"credentials": {"password": CANARY}}),
     f"<html><input name=pass value={CANARY}></html>",
+    json.dumps(json.dumps({"credentials": {"password": CANARY}}))
+    .replace("{", r"\u007b")
+    .replace("}", r"\u007d"),
+    json.dumps(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}}), safe='{}":, '),
+    "%7B%22credentials%22: %7B%22password%22: %22" + CANARY + "%22%7D%7D",
+    "&#123;&quot;credentials&quot;: &#123;&quot;password&quot;: &quot;"
+    + CANARY
+    + "&quot;&#125;&#125;",
+    r"\x7b'credentials': \x7b'password': '" + CANARY + r"'\x7d\x7d",
 )
 
 

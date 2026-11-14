@@ -406,7 +406,8 @@ row per cycle to `poll_deferrals`, not `poll_errors`.
 A poll step's exception, and one that escapes a whole cycle, keeps its class in
 `poll_errors.error` and stores its message and newest ten frames, redacted and
 capped at 4,000 characters, in `poll_errors.detail`; each message in the chain
-loses everything from its first `{`, `[` or `<` on, so no response body is kept.
+is cut at its first character outside letters, digits, spaces and `_.,:;()'/=+-`,
+so no response body, escaped or not, is kept.
 The same text goes to the poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
 `ticket_state` row records a `stuck-wake:<class>` error and the rest of the
 cycle still runs.

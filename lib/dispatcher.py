@@ -271,6 +271,7 @@ _SECRET_ASSIGNMENT = re.compile(
     r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+_PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
 POLL_ERROR_FRAMES = 10
 POLL_ERROR_DETAIL_LIMIT = 4000
 _POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
@@ -288,14 +289,19 @@ def _without_body(exc: BaseException) -> str:
     name, separator, message = "".join(
         traceback.format_exception_only(type(exc), exc)
     ).partition(": ")
-    return name.rstrip() + separator + _SECRET_BODY.sub("<body omitted>", message).rstrip() + "\n"
+    message = message.rstrip()
+    plain = _PLAIN_MESSAGE.match(message).group(0)
+    if plain != message:
+        plain += "<body omitted>"
+    return name.rstrip() + separator + plain + "\n"
 
 
 def poll_error_detail(exc: BaseException) -> str:
     """The exception chain's messages and newest frames, redacted and capped.
 
-    Each message loses everything from its first {, [ or < on, so no
-    structured body reaches the redactors. Stored in poll_errors.detail
+    Each message is cut at its first character outside letters, digits,
+    spaces and _.,:;()'/=+-, so no structured or escaped body reaches the
+    redactors. Stored in poll_errors.detail
     beside the bare class name; the tail is kept when the cap cuts, so the
     raising frame and message survive.
     """
