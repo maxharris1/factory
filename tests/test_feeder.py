@@ -394,6 +394,7 @@ def test_a_labelled_issue_from_a_trusted_login_opens_one_draft_pr_with_brief_and
     assert pull["draft"] is True
     assert pull["head"] == "factory/issue-85"
     assert pull["base"] == "main"
+    assert pull["title"] == "#85: Issue 85"
     assert "Fixes #85" in pull["body"]
     assert github.commits == [("owner/app", BASE_SHA, github.commits[0][2])]
     assert "85" in github.commits[0][2]
@@ -476,7 +477,7 @@ def test_a_linear_issue_moved_to_the_intake_state_by_a_trusted_user_is_fed(
     pull = github.pulls[("acme/linear-app", 501)]
     assert pull["head"] == "max/aut-7-linear-work"  # Linear's own branch name
     assert pull["base"] == "dev"
-    assert pull["title"].startswith("AUT-7")
+    assert pull["title"] == "AUT-7: Linear work"
     assert "Fixes AUT-7" in pull["body"]
     # tickets: linear: no GitHub labels, and brief and go stay on Linear.
     assert ("acme/linear-app", 501) not in github.labels

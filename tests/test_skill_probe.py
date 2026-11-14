@@ -211,11 +211,14 @@ def test_missing_transcript_is_unknown():
 
 def test_fixtures_hold_no_secret_shapes():
     secret = re.compile(r"ghp_|gho_|sk-[A-Za-z0-9]|Bearer |BEGIN .* PRIVATE KEY")
-    for path in FIXTURES.iterdir():
+    for path in FIXTURES.rglob("*"):
+        if not path.is_file():
+            continue
         text = path.read_text(encoding="utf-8")
         assert not secret.search(text), path.name
-        for line in text.splitlines():
-            json.loads(line)
+        if path.suffix == ".jsonl":
+            for line in text.splitlines():
+                json.loads(line)
 
 
 # Prompt
