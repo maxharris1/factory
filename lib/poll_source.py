@@ -43,6 +43,7 @@ from lib.orch_yml import (
     Project,
     resolve_job_timeout,
 )
+from lib.pr_title import SOURCE, github_source
 from lib.project_rules import FactoryRead
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -143,7 +144,7 @@ class HTTPResult:
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 ErrorSink = Callable[[str, str, str], None]
 DeferralSink = Callable[[str], None]
-TerminalSink = Callable[[str, str, str], None]
+TerminalSink = Callable[[str, str, str, "TrackedTicket | None"], None]
 
 
 class DirtyQueue(Protocol):
@@ -397,7 +398,15 @@ class LivePollSource:
                 f"{sources}"
             )
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(
+        self,
+        label_prefix: str,
+        *,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+    ) -> tuple[TrackedTicket, ...]:
+        """Open PRs that may start tracking; exclude, (repo lowercased, PR
+        number) pairs already tracked, are skipped unread (#108: a tracked
+        PR is read by tracked_tickets on its own cadence)."""
         tickets: list[TrackedTicket] = []
         for project in self.config.projects:
             if project.linear_project_id is not None:
@@ -440,6 +449,8 @@ class LivePollSource:
                         number = str(
                             _positive_int(issue.get("number"), "issue number")
                         )
+                        if (project.repo.lower(), number) in exclude:
+                            continue
                         comments: tuple[Comment, ...] | None = None
                         if not labelled:
                             comments = self.github.list_comments(
@@ -685,7 +696,14 @@ class LivePollSource:
                         raise PollSourceError(
                             "Linear issue is not in its configured project"
                         )
-                    found.append(self._linear_ticket(project, issue))
+                    found.append(
+                        self._linear_ticket(
+                            project,
+                            issue,
+                            tracked=True,
+                            allow_merged=ref.allow_merged,
+                        )
+                    )
                     continue
                 if ref.tracker != "github":
                     continue
@@ -1150,11 +1168,20 @@ class LivePollSource:
         if cached is not None:
             return cached
         pull = self._github_pull(project.repo, number, fresh=fresh)
-        if pull.get("merged") is True and not allow_merged:
-            if self.terminal_sink is not None:
-                self.terminal_sink(project.repo, number, "merged")
-            raise _TerminalTicket()
+        merged = pull.get("merged") is True
         head = _pr_head(pull, project.repo, number)
+        if merged and not fresh:
+            # #108: every merge the poll sees ends the ticket; the fresh read
+            # is a caller's mid-step read and records nothing (#42 N3).
+            if self.terminal_sink is not None:
+                self.terminal_sink(
+                    project.repo,
+                    number,
+                    "merged",
+                    self._merged_ticket(project, factory, number, pull, head),
+                )
+            if not allow_merged:
+                raise _TerminalTicket()
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
@@ -1175,9 +1202,36 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
+            source_issue=github_source(pull, project.repo, number),
+            pr_title=_open_title(pull),
+            merged=merged and fresh,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _merged_ticket(
+        self,
+        project: Project,
+        factory: FactoryConfig,
+        number: str,
+        pull: Mapping[str, Any],
+        head: str,
+    ) -> TrackedTicket:
+        """Enough of a merged PR for its orch:state/merged label: no comment
+        or CI read."""
+        return TrackedTicket(
+            repo=project.repo,
+            ticket_id=number,
+            factory=factory,
+            comments=(),
+            current_head=head,
+            ci={},
+            risk="high",
+            ticket_url=_optional_string(pull.get("html_url")),
+            pr_number=number,
+            grok_bot=project.grok_bot,
+            merged=True,
+        )
 
     def _hold_inputs(
         self,
@@ -1226,6 +1280,8 @@ class LivePollSource:
         issue: Mapping[str, Any],
         *,
         fresh: bool = False,
+        tracked: bool = False,
+        allow_merged: bool = False,
     ) -> TrackedTicket:
         identifier = issue.get("identifier")
         if not isinstance(identifier, str) or not identifier:
@@ -1233,6 +1289,8 @@ class LivePollSource:
         cache_key = ("linear", project.repo.lower(), identifier)
         cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
+            if cached.merged and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             return cached
         comments_data = _object(issue.get("comments"), "Linear comments")
         comments_page = _object(
@@ -1249,6 +1307,8 @@ class LivePollSource:
         comments = linear_comments
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
+        pr_title: str | None = None
+        merged = False
         pr_number = self._linked_pr_number(
             project.repo,
             identifier,
@@ -1257,7 +1317,11 @@ class LivePollSource:
         )
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
+            merged = pull.get("merged") is True
+            if merged and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
+            pr_title = _open_title(pull)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
@@ -1297,9 +1361,22 @@ class LivePollSource:
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(issue),
             ready_starts_review=project.ready_starts_review,
+            source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
+            pr_title=pr_title,
+            merged=merged,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _linear_merged(
+        self, project: Project, identifier: str, allow_merged: bool
+    ) -> None:
+        """#108: a tracked Linear ticket whose PR is merged ends, from a new
+        read or from the one discovery cached earlier in the cycle."""
+        if self.terminal_sink is not None:
+            self.terminal_sink(project.repo, identifier, "merged", None)
+        if not allow_merged:
+            raise _TerminalTicket()
 
     def _linked_pr_number(
         self,
@@ -1629,6 +1706,12 @@ def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
             )
         )
     return tuple(dict.fromkeys(names))
+
+
+def _open_title(pull: Mapping[str, Any]) -> str | None:
+    """An open PR's title; None for a closed or merged one, which is left alone."""
+    title = pull.get("title")
+    return title if pull.get("state") == "open" and isinstance(title, str) else None
 
 
 def _has_label(value: object, prefix: str) -> bool:

@@ -743,6 +743,16 @@ def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(
     assert legacy.exists()
 
 
+def test_profile_makes_the_state_dir_before_logging(tmp_path: Path) -> None:
+    """#66 fix 3: the profile redirects into the state dir, which a reboot lost."""
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    profile = (tmp_path / ".config/factory/profile.sh").read_text(encoding="utf-8")
+    state = f"{tmp_path}/.local/state/factory"
+
+    assert profile.index(f'mkdir -p "{state}"') < profile.index(f'>>"{state}/poller-service.log"')
+
+
 @pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
 def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
     tmp_path: Path,

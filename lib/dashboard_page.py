@@ -50,6 +50,7 @@ from pathlib import Path
 
 from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
 from lib.dashboard_telemetry import TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel
+from lib.pr_title import label
 
 POLL_MS = 1500
 
@@ -356,8 +357,14 @@ SCRIPT = r"""
     var cut = text.lastIndexOf('/');
     return cut >= 0 ? text.slice(cut + 1) : text;
   }
-  function ticketOf(row) { return short(row.repo) + '#' + row.ticket_id; }
-  function jobLabel(r) { return r.tracker === 'linear' ? String(r.ticket_id) : ticketOf(r); }
+  // #115: the source issue first, the PR second.
+  function prOf(row, first) { return row.pr && String(row.pr) !== String(first) ? ' (PR #' + row.pr + ')' : ''; }
+  function ticketIn(repo, row) {
+    var first = row.source ? String(row.source).replace(/^#/, '') : row.ticket_id;
+    return repo + '#' + first + prOf(row, first);
+  }
+  function ticketOf(row) { return ticketIn(short(row.repo), row); }
+  function jobLabel(r) { return r.tracker === 'linear' ? String(r.ticket_id) + prOf(r, r.ticket_id) : ticketOf(r); }
   function jobKind(r) { return r.tracker === 'github' ? 'PR' : r.tracker === 'linear' ? 'ticket' : null; }
   function anchor(job) { return 'job-' + String(job).replace(/[^A-Za-z0-9_-]/g, '-'); }
   function bot(name) { return el('span', 'bot ' + (BOTS[name] ? name : 'other'), name); }
@@ -537,7 +544,7 @@ SCRIPT = r"""
 
   function slotCard(r) {
     var card = opensModal(link('slot job' + (r.overdue ? ' overdue' : ''), 'job.html#' + anchor(r.job)), r.job);
-    card.title = r.repo + '#' + r.ticket_id + ' (job ' + r.job + ')';
+    card.title = ticketIn(r.repo, r) + ' (job ' + r.job + ')';
     var top = add(card, el('div', 'top'));
     add(top, bot(r.recipient));
     var kind = jobKind(r);
@@ -720,7 +727,7 @@ SCRIPT = r"""
     var tbody = add(table, el('tbody'));
     rows.forEach(function (r) {
       var tr = add(tbody, el('tr'));
-      add(tr, el('td', null, r.repo + '#' + r.ticket_id));
+      add(tr, el('td', null, ticketIn(r.repo, r)));
       add(tr, el('td', null, r.tracker));
       add(tr, el('td', r.stuck ? 'bad' : null, r.state));
       add(tr, el('td', 'num', r.round));
@@ -1378,12 +1385,16 @@ def _short(repo: object) -> str:
     return str(repo).rsplit("/", 1)[-1]
 
 
-def _ticket(row: dict) -> str:
-    return f"{_short(row['repo'])}#{row['ticket_id']}"
+def _ticket(row: dict, *, full: bool = False) -> str:
+    repo = str(row["repo"]) if full else _short(row["repo"])
+    return label(repo, str(row["ticket_id"]), row.get("source"), row.get("pr"))
 
 
 def _job_label(row: dict) -> str:
-    return str(row["ticket_id"]) if row.get("tracker") == "linear" else _ticket(row)
+    if row.get("tracker") == "linear":
+        pr = row.get("pr")
+        return f"{row['ticket_id']} (PR #{pr})" if pr else str(row["ticket_id"])
+    return _ticket(row)
 
 
 def _job_kind(row: dict) -> str | None:
@@ -1593,7 +1604,7 @@ def _slot(row: dict) -> str:
     return (
         f'<a class="slot job{" overdue" if row["overdue"] else ""}" '
         f'href="job.html#{anchor(row["job"])}" '
-        f'title="{_e(row["repo"])}#{_e(row["ticket_id"])} (job {_e(row["job"])})">'
+        f'title="{_e(_ticket(row, full=True))} (job {_e(row["job"])})">'
         f'<div class="top">{_bot(row["recipient"])}'
         + (_span("kind", kind) if kind else "")
         + _span("ticket", _job_label(row))
@@ -1812,7 +1823,7 @@ def _tickets(snapshot: dict) -> str:
         )
         body = "".join(
             "<tr>"
-            + _td(f"{row['repo']}#{row['ticket_id']}")
+            + _td(_ticket(row, full=True))
             + _td(row["tracker"])
             + _td(row["state"], "bad" if row["stuck"] else None)
             + _td(row["round"], "num")

@@ -40,3 +40,17 @@ def _no_local_overlay():
         os.environ.pop("ORCH_NO_LOCAL_OVERLAY", None)
     else:
         os.environ["ORCH_NO_LOCAL_OVERLAY"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
+    """#66: `orch poll` backs up after every cycle; never to the real
+    ~/.local/share/factory/backup. Tests that need a path set their own."""
+    backup = tmp_path_factory.mktemp("db-backup") / "orch.db"
+    previous = os.environ.get("ORCH_DB_BACKUP")
+    os.environ["ORCH_DB_BACKUP"] = str(backup)
+    yield backup
+    if previous is None:
+        os.environ.pop("ORCH_DB_BACKUP", None)
+    else:
+        os.environ["ORCH_DB_BACKUP"] = previous

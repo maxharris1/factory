@@ -20,5 +20,8 @@
   8. File the tickets but do not start them until Max says so.
 - **D3 #152 (data):** `status.json` now has `projects` (tracker, ship mode, approver, low and high round caps per `orch.yml`
   project, or `status: unknown` with a `reason`). It backs SPEC 3.6 item 5's "[not shown by the dashboard today]" values; #141 renders it.
-- **Open question for Max:** the subscription headroom usage source per harness (#151 reports what each CLI exposes, then Max picks).
+- **D2 #151 (data):** `status.json` now has `usage` (5-hour and 7-day used, resets_at, headroom, observed_at per bot account),
+  captured from every job. Max's picks (2026-11-14): Claude reads Claude Code's `get_usage` control reply, sent once at each job's
+  start; Codex reads the `rate_limits` of its own session rollout's `token_count` events. A login that cannot report limits, or a
+  window the CLI leaves null, shows `no reading`. Cursor shows `not tracked`.
 - **Later (2026-11-13, 6:30 PM ET):** Max said to get these into the factory queue ("get these into the factory que").

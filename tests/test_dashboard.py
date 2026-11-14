@@ -523,6 +523,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "statechart",
         "telemetry",
         "projects",  # per-project ship mode and round caps (#152)
+        "usage",  # subscription headroom per bot account (#151)
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)
@@ -530,7 +531,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
 
 def test_queue_counts_by_recipient_and_action(tmp_path: Path) -> None:
     queue = snapshot_for(tmp_path)["queue"]
-    assert queue["totals"] == {"queued": 2, "running": 2, "done": 3, "failed": 1}
+    assert queue["totals"] == {"queued": 2, "running": 2, "done": 3, "failed": 1, "cancelled": 0}
     rows = {(row["recipient"], row["action"]): row for row in queue["by_recipient_action"]}
     assert rows[("claude", "build")] == {
         "recipient": "claude",
@@ -539,6 +540,7 @@ def test_queue_counts_by_recipient_and_action(tmp_path: Path) -> None:
         "running": 0,
         "done": 1,
         "failed": 1,
+        "cancelled": 0,
     }
     assert rows[("codex", "review")]["running"] == 1
     assert rows[("codex", "review")]["done"] == 1

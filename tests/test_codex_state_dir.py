@@ -336,14 +336,15 @@ def test_without_the_state_dir_the_fake_sandbox_fails_the_job_as_before(
 ) -> None:
     # The control: the same fake under a name that is not `codex` gets no
     # --add-dir, its `orch job done` cannot write, and the job ends failed,
-    # exactly as every Codex job did before #103.
+    # exactly as every Codex job did before #103. Since #151 a codex bot's
+    # wrapper still gets the telemetry --json after its exec.
     (tmp_path / "bin-codex").mkdir()
     wrapped = _write_exe(tmp_path / "bin-codex" / "codex-wrapper", FAKE_CODEX)
     db, job_id, record, stderr = _run_codex_job(
         tmp_path, [str(wrapped), "exec", "--sandbox", "workspace-write", "-"]
     )
 
-    assert record["argv"] == ["exec", "--sandbox", "workspace-write", "-"], stderr
+    assert record["argv"] == ["exec", "--json", "--sandbox", "workspace-write", "-"], stderr
     assert record["writable"] is False
     assert _job_row(db, job_id) == ("failed", None)
 

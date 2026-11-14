@@ -137,7 +137,7 @@ def test_each_kind_has_the_standard_parts(
     # How the job is finished.
     assert f"orch job done {bot} {item.id} --handoff <comment-id>" in text
     assert f"orch job done {bot} {item.id} --failed" in text
-    assert "env -u GH_TOKEN gh" in text
+    assert "env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh" in text
 
 
 def test_review_brief_states_the_round_and_the_verdict_header() -> None:
@@ -406,8 +406,6 @@ def test_a_pr_number_that_is_not_strict_is_unknown(value: object) -> None:
 
 
 def _with(repo: str = "owner/repo", ticket_id: str = "42") -> Job:
-    from dataclasses import replace
-
     base = job("fix")
     return replace(base, request=replace(base.request, repo=repo, ticket_id=ticket_id))
 
@@ -470,3 +468,32 @@ def test_a_plain_repo_is_shown_with_its_pr_link() -> None:
     text = render_brief(_with(repo="maxharris1/factory.md-x_y"), bot="claude-bot", context=None)
     assert "- repo: maxharris1/factory.md-x_y" in text
     assert "https://github.com/maxharris1/factory.md-x_y/pull/42" in text
+
+
+@pytest.mark.parametrize(
+    ("ticket_id", "extra", "wanted"),
+    [
+        ("116", {"source_issue": "#115"}, "`#115: <issue title>`"),
+        ("AUT-2284", {}, "`AUT-2284: <title>`"),
+        ("AUT-2284", {"source_issue": "AUT-2284"}, "`AUT-2284: <title>`"),
+        ("116", {}, "`#<issue>: <issue title>`, with the source issue's number (not the PR's)"),
+        ("116", {"source_issue": "#1`; rm"}, "`#<issue>: <issue title>`"),
+    ],
+)
+def test_the_build_brief_titles_the_pr_with_its_source_issue(
+    ticket_id: str, extra: dict, wanted: str
+) -> None:
+    base = job(raw_detail=detail(**extra))
+    built = replace(base, request=replace(base.request, ticket_id=ticket_id))
+
+    task = render_brief(built, bot="claude-bot", context=None).split("## What to do")[1]
+    task = task.split("## Handoff comment")[0]
+
+    assert f"The PR's title starts with its source issue: {wanted}" in task
+    assert "gh pr edit --title" in task
+
+
+def test_only_the_build_brief_asks_for_the_title() -> None:
+    for action, recipient in (("plan", "claude"), ("fix", "claude"), ("review", "codex")):
+        brief = render_brief(job(action, recipient), bot=f"{recipient}-bot", context=None)
+        assert "title starts with its source issue" not in brief

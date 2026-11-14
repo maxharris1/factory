@@ -376,7 +376,8 @@ def test_switch_off_hold_ok_from_the_single_login_still_clears(
     dispatcher.process(snapshot(approve(), ok_from(approver), factory=factory, labels=("factory:hold",)))
 
     assert actions.merges == [(True, HEAD)]
-    assert handled_outcome(queue, "ok-1") == "hold-ok"
+    # #108: the APPROVE merges first in the pass; merged is absorbing.
+    assert handled_outcome(queue, "ok-1") == "after-merge"
 
 
 @pytest.mark.parametrize("approver", [MAX, APP_BOT])
@@ -420,7 +421,8 @@ def test_switch_on_hold_ok_from_the_approver_clears_at_the_head(tmp_path: Path) 
 
     assert actions.merges == [(True, HEAD)]
     assert workflow_state(queue) == "merged"
-    assert handled_outcome(queue, "ok-1") == "hold-ok"
+    # #108: the APPROVE merges first in the pass; merged is absorbing.
+    assert handled_outcome(queue, "ok-1") == "after-merge"
 
 
 def test_switch_on_hold_ok_at_an_old_head_does_not_clear(tmp_path: Path) -> None:

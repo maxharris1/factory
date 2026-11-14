@@ -158,6 +158,16 @@ import os, signal, sys, time
 from pathlib import Path
 
 args = sys.argv[1:]
+if args[:1] in (["restore-db"], ["init-db"]):
+    # #66: the service's database step. FAKE_RESTORE is restore-db's exit.
+    with open(os.environ.get("FAKE_ORCH_CALLS", os.devnull), "a") as calls:
+        backup = os.environ.get("ORCH_DB_BACKUP")
+        calls.write(" ".join(args) + (f" backup={backup}" if backup else "") + "\\n")
+    database = Path(args[args.index("--db") + 1])
+    code = int(os.environ.get("FAKE_RESTORE", "3")) if args[0] == "restore-db" else 0
+    if code == 0:
+        database.write_bytes(b"restored" if args[0] == "restore-db" else b"")
+    raise SystemExit(code)
 assert args[:2] == ["poll", "--pidfile"], args
 if os.environ.get("FAKE_ORCH_FAIL"):
     print("orch poll: another orch poll owns orch.db.lock", file=sys.stderr)
@@ -552,6 +562,90 @@ def test_a_sigterm_between_cycles_exits_at_once(restore_signals) -> None:
 
     assert _loop_until_exit(dispatcher, stopper) == 143
     assert dispatcher.finished == 1
+
+
+# --- #108 Unit 7: a missing database is restored before the poller starts (#66) ---
+
+
+def _lost_db(home: Path) -> Path:
+    return home / ".local/state/factory/orch.db"
+
+
+@pytest.mark.parametrize("command", ["start", "ensure"])
+def test_ensure_restores_a_missing_db_from_backup(home: Path, command: str) -> None:
+    database = _lost_db(home)
+    calls = home / "calls.txt"
+
+    result = _service(home, command, FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls))
+
+    assert result.returncode == 0, result.stderr
+    assert "RESTORED orch.db from backup" in result.stderr
+    assert "RESTORED orch.db from backup" in (
+        home / ".local/state/factory/poller.log"
+    ).read_text()
+    assert database.read_bytes() == b"restored"
+    assert calls.read_text() == f"restore-db --db {database}\n"
+    assert _pidfile(home).exists()
+
+
+def test_ensure_inits_and_warns_with_no_backup(home: Path) -> None:
+    database = _lost_db(home)
+    calls = home / "calls.txt"
+
+    result = _service(home, "ensure", FAKE_RESTORE="3", FAKE_ORCH_CALLS=str(calls))
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "WARNING orch.db was missing and no backup exists; created an empty "
+        "database (dedupe now relies on thread markers)"
+    ) in result.stderr
+    assert calls.read_text().splitlines() == [
+        f"restore-db --db {database}",
+        f"init-db --db {database}",
+    ]
+    assert database.exists()
+    assert _pidfile(home).exists()
+
+
+def test_recovery_uses_the_paths_the_poller_loads(home: Path) -> None:
+    """run-poller.sh loads orch-poll.env before `orch poll`; recovery must
+    resolve ORCH_DB and ORCH_DB_BACKUP from it too, or it prepares another
+    database from another backup than the poller then opens."""
+    database = home / "custom-state" / "orch.db"
+    saved = home / "custom-backup" / "orch.db"
+    (home / ".config/factory/orch-poll.env").write_text(
+        f'ORCH_DB="{database}"\nORCH_DB_BACKUP="{saved}"\n', encoding="utf-8"
+    )
+    calls = home / "calls.txt"
+
+    result = _service(home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls))
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text() == f"restore-db --db {database} backup={saved}\n"
+    assert database.read_bytes() == b"restored"
+    assert not _lost_db(home).exists()
+
+
+def test_a_failed_restore_starts_no_poller(home: Path) -> None:
+    database = _lost_db(home)
+
+    result = _service(home, "start", FAKE_RESTORE="1")
+
+    assert result.returncode == 1
+    assert "orch restore-db exited 1; not starting the poller" in result.stderr
+    assert not database.exists()
+    assert not _pidfile(home).exists()
+
+
+def test_an_existing_db_is_never_restored(home: Path) -> None:
+    calls = home / "calls.txt"
+    database = home / ".local/state/factory/orch.db"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+
+    assert _service(home, "ensure", FAKE_ORCH_CALLS=str(calls)).returncode == 0
+
+    assert not calls.exists()
 
 
 # --- issue #134: a poller this shell cannot see -----------------------------

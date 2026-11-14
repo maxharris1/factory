@@ -1,0 +1,11 @@
+{
+  "source": "Reconstructed from the #66 evidence (the Linear thread is not readable from CI): a finished, handed-off Aut0 ticket that a fresh orch.db re-queued as a build after the state dir was lost",
+  "repo": "aut0-code/aut0",
+  "ticket_id": "AUT-2284",
+  "risk": "high",
+  "comments": [
+    ["aut-2284-go", "linear:grok", "2026-11-11T15:00:00Z", "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building risk=high -->"],
+    ["aut-2284-ready", "maxharris1", "2026-11-11T16:10:00Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder head=1111111111111111111111111111111111111111 -->"],
+    ["aut-2284-approve", "maxharris1", "2026-11-11T16:40:00Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/3 head=1111111111111111111111111111111111111111 verdict=APPROVE risk=high -->"]
+  ]
+}

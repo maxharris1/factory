@@ -185,7 +185,7 @@ def test_orch_poll_hands_its_orch_yml_poll_seconds_to_the_pusher(
     code = cli.main(["poll", "--db", str(database), "--orch", str(orch), "--once",
                      "--pidfile", str(tmp_path / "poller.pid")])
     assert code == 0
-    argv = seen["after_poll"].argv
+    argv = seen["after_poll"].pusher.argv
     assert argv[:5] == [sys.executable, str(ROOT / "bin" / "orch"), "dashboard", "push", "--once"]
     assert argv[argv.index("--poll-seconds") + 1] == str(seconds)
 

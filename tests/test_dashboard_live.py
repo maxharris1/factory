@@ -531,14 +531,14 @@ def test_orch_poll_with_live_push_starts_and_stops_the_watcher(
     tmp_path: Path, monkeypatch
 ) -> None:
     seen, events = _run_poll(tmp_path, monkeypatch)
-    assert isinstance(seen["after_poll"], LivePusher)
-    assert seen["after_poll"].db == tmp_path / "orch.db"
+    assert isinstance(seen["after_poll"].pusher, LivePusher)
+    assert seen["after_poll"].pusher.db == tmp_path / "orch.db"
     assert events == ["start", "run", "stop"]
 
 
 def test_orch_poll_once_does_not_start_the_watcher(tmp_path: Path, monkeypatch) -> None:
     seen, events = _run_poll(tmp_path, monkeypatch, "--once")
-    assert isinstance(seen["after_poll"], LivePusher)
+    assert isinstance(seen["after_poll"].pusher, LivePusher)
     assert events == ["run"]
 
 
