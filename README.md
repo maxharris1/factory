@@ -1590,6 +1590,12 @@ bin/orch eval-report --input tests/fixtures/eval/week
 
 The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
+```sh
+bin/orch eval-report --db ~/.local/share/factory/backup/orch.db --baseline o4-orch.db
+```
+
+`--db` prints the SF-10 metrics (#209) of an `orch.db` backup beside the `--baseline` snapshot (O4's). Both are opened read-only. A metric whose source a snapshot does not record prints `unrecorded`; [`lib/eval_report.py`](lib/eval_report.py) lists where each metric comes from.
+
 ## Model family
 
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.

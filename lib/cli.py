@@ -33,7 +33,7 @@ from lib import (
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
-from lib.eval_report import EvalError, build_report, render
+from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.harness_env import harness_env
@@ -120,8 +120,11 @@ doctor [--home PATH] [--project PATH] [--cloud]
   --print-canary prints the prompt and does not read replies.
 
 eval-report --input PATH [--since TIME] [--until TIME]
+eval-report --db PATH --baseline PATH
   Print the weekly eval report for one directory of fixtures or
   collected logs. It does not contact GitHub or Linear.
+  --db prints the #209 metrics of a backed-up orch.db, opened read-only,
+  beside those of the --baseline snapshot (O4's).
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -414,10 +417,27 @@ class _Parser(argparse.ArgumentParser):
 
 def _eval_report(argv: list[str]) -> int:
     parser = _Parser(prog="orch eval-report", add_help=True)
-    parser.add_argument("--input", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", type=Path)
+    source.add_argument("--db", type=Path)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--since")
     parser.add_argument("--until")
     args = parser.parse_args(argv)
+    if args.db is not None:
+        if args.baseline is None:
+            parser.error("--db needs --baseline")
+        if args.since is not None or args.until is not None:
+            parser.error("--since and --until read --input only")
+        try:
+            current, baseline = build_metrics(args.db), build_metrics(args.baseline)
+        except EvalError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(render_metrics(current, baseline), end="")
+        return 0
+    if args.baseline is not None:
+        parser.error("--baseline needs --db")
     try:
         built = build_report(args.input, since=args.since, until=args.until)
     except EvalError as exc:
