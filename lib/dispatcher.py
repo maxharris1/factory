@@ -1609,10 +1609,23 @@ class Dispatcher:
         A verdict whose round already had one at or before the ready (a late
         duplicate) answered an earlier ready. One with no round, a round
         above the cap, or a round past the one this ready asks for answers
-        none: T3 and T4 act on no such verdict.
+        none: T3 and T4 act on no such verdict. Nor does one for a completed
+        round that T3 did not act on: another verdict closed that round.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         last_round = min(self._effective_cap(ticket), review_round + 1)
+        with self._connect() as connection:
+            round_closers = {
+                str(row["comment_id"])
+                for row in connection.execute(
+                    """
+                    SELECT comment_id FROM review_events
+                    WHERE repo = ? AND ticket_id = ?
+                    AND outcome IN ('queued-review-fix', 'capped-review')
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
         before: set[int] = set()
         after: set[int] = set()
         for item in ticket.comments:
@@ -1624,6 +1637,7 @@ class Dispatcher:
             if (
                 round_number is not None
                 and round_number <= last_round
+                and (round_number > review_round or item.id in round_closers)
                 and fields.get("kind") == "verdict"
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None

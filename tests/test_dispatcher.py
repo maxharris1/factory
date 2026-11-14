@@ -5295,3 +5295,45 @@ def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
     poll(ready, late_listed, revise)
     assert _outcomes(queue)["ready-b"] == "stale-ready-verdict"
     assert _reviews_71(queue) == [(HEAD_71, "done", 1)]
+
+
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+@pytest.mark.parametrize("late_head", [HEAD_71, NEW_HEAD_71], ids=["same-head", "new-head"])
+def test_71_a_late_verdict_for_a_completed_round_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str, late_head: str
+) -> None:
+    """A verdict for a round another verdict already closed is stale to T3
+    and T4, so it answers no ready, whatever head it names (Codex PR #112 r4 F1)."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    now[0] = 160
+    again = _ready_71("ready-2", late_head, 140)
+    late = comment(
+        "late-round-1",
+        VERDICT.format(round="1/3", head=late_head, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again, late, head=late_head)
+    now[0] = 200
+    poll(ready, revise, again, late, head=late_head)
+    outcomes = _outcomes(queue)
+    assert outcomes["late-round-1"] in (f"stale-{verdict.lower()}", "duplicate-verdict")
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (late_head, "queued", 1)]
+    with queue.connect() as connection:
+        state = tuple(
+            connection.execute("SELECT workflow_state, review_round FROM ticket_state").fetchone()
+        )
+    assert state == ("review", 1)
