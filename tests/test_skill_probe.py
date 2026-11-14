@@ -118,6 +118,11 @@ def test_claude_general_purpose_helper_yes_poteto_agent_missing():
     assert (found.helper, found.poteto_agent) == ("yes", "missing")
 
 
+def test_claude_live_transcript_from_pc():
+    found = evidence("claude", "claude_live_read_path.jsonl")
+    assert found == sp.Evidence("yes", "Read", "yes", "missing", "2.1.322")
+
+
 def test_codex_shell_read_counts_as_read():
     found = evidence("codex", "codex_shell_read.jsonl")
     assert (found.read, found.read_via) == ("yes", "shell")

@@ -4,7 +4,7 @@ This page records how each harness on each device actually takes in a pstack ski
 
 ## Status
 
-**No live run yet.** The table has no rows. The build job for #119 does not start harnesses (factory briefs forbid it), and the Codex half has to run as codex-bot. Max, or a session Max starts as each bot, runs the commands under "Run it", then the builder renders the results here.
+**Partly measured.** The pc rows below are from a live run on Nov 13, 2026 (7:07 PM ET; the table dates are UTC). The box and Mac rows, and every Codex row, are still to be measured. The #119 fix job that was cleared to run them was placed on the pc. From there the box refuses SSH, the Mac refuses claude-bot's login (no key on the pc), and codex-bot's home is closed to claude-bot. So that job could reach neither device and could not run anything as codex-bot.
 
 Known before any run (checked on Nov 13, 2026):
 
@@ -12,10 +12,28 @@ Known before any run (checked on Nov 13, 2026):
 - pstack is not installed for claude-bot on the Mac: there is no `~/.claude/skills` and no `~/.agents/skills`. The probe records what happens and installs nothing.
 - `machines.yml` on `main` has the Mac disabled with placeholder values. The live copy on the box must enable it for both harnesses before the Mac rows can be measured.
 
+What the pc run shows:
+
+- pstack is not installed for claude-bot on the pc either: `~/.claude/skills/poteto-mode/` does not exist. So all three styles score `no` there. `run-as` got "Unknown skill" from the `Skill` tool, `read-path` got "File does not exist" from `Read`, and `slash` did not expand.
+- The control rows point `read-path` at the repo's pinned copy with `--skill-md`. With that file present, `read-path` scores `yes` via `Read`. `run-as` and `slash` still score `no`, because they look for an installed skill, not a path.
+- Helper agents start on Claude 2.1.322 under the waiter's launch (`claude -p --model opus --effort high --dangerously-skip-permissions`). The `Agent` call of type `general-purpose` returns "Async agent launched successfully". `poteto-agent` is `missing` ("Agent type 'poteto-agent' not found"), as expected until T07.
+- A trimmed copy of the control `read-path` transcript is the fixture `tests/fixtures/skill_probe/claude_live_read_path.jsonl`.
+
 ## Results
 
 | Date | Device | Harness | Version | Style | Read | Read via | Helper | poteto-agent | Note |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-11-14 | pc | claude | 2.1.322 | run-as | no |  | yes | missing |  |
+| 2026-11-14 | pc | claude | 2.1.322 | read-path | no |  | yes | missing |  |
+| 2026-11-14 | pc | claude | 2.1.322 | slash | no |  | yes | missing |  |
+| 2026-11-14 | pc | claude | 2.1.322 | run-as | no |  | yes | missing | control: `--skill-md` = repo's pinned copy |
+| 2026-11-14 | pc | claude | 2.1.322 | read-path | yes | Read | yes | missing | control: `--skill-md` = repo's pinned copy |
+| 2026-11-14 | pc | claude | 2.1.322 | slash | no |  | yes | missing | control: `--skill-md` = repo's pinned copy |
+| | pc | codex | | all | | | | | not measured: codex-bot not reachable from the job |
+| | box | claude | | all | | | | | not measured: box refused SSH from the pc |
+| | box | codex | | all | | | | | not measured: box refused SSH from the pc |
+| | mac | claude | | all | | | | | not measured: Mac refused SSH from the pc |
+| | mac | codex | | all | | | | | not measured: Mac refused SSH from the pc |
 
 ## What each column means
 
