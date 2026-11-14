@@ -48,8 +48,8 @@ harnesses:
     panel: [opus high, opus high]
   codex:
     budget: medium (high)
-    default: sol high         # D12, D20: Codex builder and reviewer helpers run Sol.
-    panel: [sol high, sol high]
+    default: gpt-6.1-sol high # D12, D20: Codex builder and reviewer helpers run Sol.
+    panel: [gpt-6.1-sol high, gpt-6.1-sol high]
   cursor:
     budget: medium (high)
     default: inherit-parent   # Cursor jobs are off. Helpers run on the parent model.
@@ -114,7 +114,7 @@ interrogate reviewers: opus high, opus high
 | --- | --- | --- | --- |
 | AC1 | Every helper role in the pinned `setup-pstack/SKILL.md` has a value per harness, read from the pinned file. | `pinned_roles` parses step 5 of the pinned SKILL.md. `load_map` raises if any harness in `HARNESSES` lacks a line for any pinned role. | `test_roles_read_from_pin`: the role list equals the step-5 block parsed from the pinned file, has 17 entries, and its path hash matches `skills.lock`. `test_every_role_every_harness`: `set(load_map())` equals `set(HARNESSES)`, and each harness has one line per pinned role in pin order. `test_new_pinned_role_fails`: a tmp root with an extra step-5 role makes `load_map` raise. |
 | AC2 | Every Claude value parses in the adapter's format. | The claude value check above, run inside `load_map`. | `test_claude_values_adapter_format`: every claude entry, panel entries included, matches the regex, and `model` is in `{opus, sonnet, haiku, fable}`. `test_claude_rejects_versioned`: a tmp YAML with `opus-5.5 high` or `claude-opus-5-5-high` raises `ModelMapError`. |
-| AC3 | Codex helpers (builder and reviewer) are Sol. No criterion requires changing Codex's main launch model. | `codex.default` and `codex.panel` are `sol high`. One codex map serves both builder and reviewer jobs, since the brief picks lines by harness, not by job kind. No file outside the three is touched, and `lib/brief.py`, `orch.yml` and the codex launch path are unchanged. | `test_codex_helpers_sol`: every codex role, panel entries included, has model `sol`. `brief_lines("codex")` contains no non-Sol model. `git diff --stat main...` lists only the three files and `plan.md`. |
+| AC3 | Codex helpers (builder and reviewer) are Sol. No criterion requires changing Codex's main launch model. | `codex.default` and `codex.panel` are `gpt-6.1-sol high`. One codex map serves both builder and reviewer jobs, since the brief picks lines by harness, not by job kind. No file outside the three is touched, and `lib/brief.py`, `orch.yml` and the codex launch path are unchanged. | `test_codex_helpers_sol`: every codex role, panel entries included, has model `gpt-6.1-sol`. `brief_lines("codex")` contains no non-Sol model. `test_codex_rejects_non_gpt_slug`: a codex value that is not a `gpt-*` slug with an effort (`sol high`, `astra high`) fails to load. `git diff --stat main...` lists only the three files and `plan.md`. |
 | AC4 | No Claude line names `grok-*`, and no Codex line names `grok-*` or `claude-*`. | The cross-family check above, in `load_map`. | `test_no_foreign_families`: scan `brief_lines("claude")`, `brief_lines("codex")` and `rules_text()` for `grok-`, and the codex output for `claude-`. `test_foreign_family_rejected`: a tmp YAML with `grok-4.7-xhigh-fast` under claude, or `claude-opus-5-5-high` under codex, raises. |
 | AC5 | The brief lines and the rules text come from the same YAML, and the rules text says the brief wins. | Both render from one `load_map` result. `rules_text` carries the "brief wins" comment line. | `test_brief_and_rules_same_source`: the role lines in `rules_text()` equal `brief_lines("claude")` line for line. `test_rules_follow_yaml`: change `claude.default` in a tmp YAML and both outputs change together. `test_rules_say_brief_wins`: `rules_text()` contains "the brief wins". `test_rules_shape`: no frontmatter, `# budget:` line present, one line per pinned role. |
 
@@ -132,6 +132,6 @@ All five criteria map to work. Status: **ac=met**.
 
 ## Assumptions the reviewer should check
 
-- **Sol's string.** Max's words in #119 were "current setting Astra and then sol subagents". The YAML writes Sol as `sol high`, in the codex adapter's `<model> <effort>` form (`codex.md:38`). If Codex's `spawn_agent` lists Sol under another slug, that change is one YAML value and one constant in the test. Effort `high` matches Max's "Opus 5.5 high" for Claude. Nothing in the ticket sets a different Codex effort.
+- **Sol's string.** Max's words in #119 were "current setting Astra and then sol subagents". The YAML writes Sol as `gpt-6.1-sol high`, in the codex adapter's `<model> <effort>` form (`codex.md:38`). `spawn_agent` rejects the bare `sol` (round-1 REVISE) and lists `gpt-6.1-sol`. The loader takes only `gpt-*` slugs for codex, matching the adapter's Models table, so a bare nickname fails to load. Effort `high` matches Max's "Opus 5.5 high" for Claude. Nothing in the ticket sets a different Codex effort.
 - **Cursor row.** Cursor jobs are off, but `HARNESSES` includes `cursor`. So cursor gets `inherit-parent` for every role, which is valid in Cursor's own format and names no model.
 - **Cross-judge on one family.** With every Claude entry on `opus`, `arena cross-judge pool` has no other-family entry, so Arena on Claude runs without a cross-judge. The reviewer rules (one family per harness, "same model, research only") make that intended. The same holds for codex.

@@ -26,7 +26,7 @@ _EFFORT = r"(max|xhigh|high|medium|low)"
 _ALIASES = frozenset({"inherit-parent", "auto"})
 _VALUE_FORMS = {
     "claude": re.compile(rf"^(opus|sonnet|haiku|fable) {_EFFORT}$"),
-    "codex": re.compile(rf"^[a-z0-9][a-z0-9.\-]* {_EFFORT}$"),
+    "codex": re.compile(rf"^gpt-[a-z0-9][a-z0-9.\-]* {_EFFORT}$"),
     "cursor": re.compile(r"^[a-z0-9][a-z0-9.\-]*$"),
 }
 _FOREIGN = {

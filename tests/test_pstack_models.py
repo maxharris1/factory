@@ -163,10 +163,25 @@ def test_claude_panel_entry_checked(tmp_path):
 def test_codex_helpers_sol():
     for line in load_map()["codex"]:
         for entry in entries(line.value):
-            assert entry.split()[0] == "sol", entry
+            assert entry.split()[0] == "gpt-6.1-sol", entry
     for line in role_lines(brief_lines("codex")):
         value = line.split(": ", 1)[1]
-        assert all(entry.split()[0] == "sol" for entry in value.split(", ")), line
+        assert all(entry.split()[0] == "gpt-6.1-sol" for entry in value.split(", ")), line
+
+
+@pytest.mark.parametrize("bad", ["sol high", "astra high", "o3 high", "6.1-sol high", "gpt-6.1-sol"])
+def test_codex_rejects_non_gpt_slug(tmp_path, bad):
+    root = tmp_root(tmp_path)
+    edit_map(root, "default: gpt-6.1-sol high", f"default: {bad}")
+    with pytest.raises(ModelMapError, match="codex"):
+        load_map(root)
+
+
+def test_codex_panel_entry_checked(tmp_path):
+    root = tmp_root(tmp_path)
+    edit_map(root, "panel: [gpt-6.1-sol high, gpt-6.1-sol high]", "panel: [gpt-6.1-sol high, sol high]")
+    with pytest.raises(ModelMapError, match="'sol high'"):
+        load_map(root)
 
 
 def test_no_foreign_families():
@@ -181,9 +196,9 @@ def test_no_foreign_families():
     ("old", "new"),
     [
         ("default: opus high", "default: grok-4.7-xhigh-fast"),
-        ("default: sol high", "default: claude-opus-5-5-high"),
-        ("default: sol high", "default: grok-4.7 high"),
-        ("panel: [sol high, sol high]", "panel: [sol high, claude-opus-5-5 high]"),
+        ("default: gpt-6.1-sol high", "default: claude-opus-5-5-high"),
+        ("default: gpt-6.1-sol high", "default: grok-4.7 high"),
+        ("panel: [gpt-6.1-sol high, gpt-6.1-sol high]", "panel: [gpt-6.1-sol high, claude-opus-5-5 high]"),
     ],
 )
 def test_foreign_family_rejected(tmp_path, old, new):

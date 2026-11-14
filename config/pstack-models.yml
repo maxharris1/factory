@@ -29,8 +29,8 @@ harnesses:
     panel: [opus high, opus high]
   codex:
     budget: medium (high)
-    default: sol high
-    panel: [sol high, sol high]
+    default: gpt-6.1-sol high
+    panel: [gpt-6.1-sol high, gpt-6.1-sol high]
   cursor:
     budget: medium (high)
     default: inherit-parent
