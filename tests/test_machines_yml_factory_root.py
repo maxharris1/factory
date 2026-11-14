@@ -130,7 +130,11 @@ def test_non_string_factory_root_is_refused(tmp_path):
 
 @pytest.mark.parametrize(
     "value",
-    ["/home/{bot}/factory-work", "/home/{bot}/factory-work/factory"],
+    [
+        "/home/{bot}/factory-work",
+        "/home/{bot}/factory-work/factory",
+        "/home/codex-bot/factory-work/factory",
+    ],
 )
 def test_factory_root_equal_to_or_inside_workdir_root_is_refused(tmp_path, value):
     config, findings = _two_devices(tmp_path, pc_extra=f"    factory_root: {value}\n")

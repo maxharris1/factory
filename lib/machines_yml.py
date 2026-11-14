@@ -361,13 +361,6 @@ def _device(
         placeholder("factory_root")
     else:
         problem = _workdir_problem(raw_factory)
-        if problem is None and workdir_root is not None and _is_within(
-            str(raw_factory), workdir_root
-        ):
-            problem = (
-                "must not be workdir_root or inside it "
-                "(it is the deployed factory checkout, not where jobs run)"
-            )
         if problem is None:
             factory_root = str(raw_factory)
         else:
@@ -460,6 +453,19 @@ def _device(
                 )
             )
 
+    if (
+        factory_root is not None
+        and workdir_root is not None
+        and _is_within_for_any_bot(factory_root, workdir_root, harnesses.values())
+    ):
+        findings.append(
+            Finding(
+                "error",
+                f"{prefix}.factory_root must not be workdir_root or inside it "
+                "(it is the deployed factory checkout, not where jobs run)",
+            )
+        )
+
     if _error_count(findings) > errors_before:
         return None
     return Device(
@@ -518,8 +524,15 @@ def _workdir_problem(value: object) -> str | None:
     return None
 
 
-def _is_within(path: str, root: str) -> bool:
-    return path == root or path.startswith(root + "/")
+def _is_within_for_any_bot(path: str, root: str, bots) -> bool:
+    for bot in (BOT_TOKEN, *bots):
+        resolved_path = path.replace(BOT_TOKEN, bot)
+        resolved_root = root.replace(BOT_TOKEN, bot)
+        if resolved_path == resolved_root or resolved_path.startswith(
+            resolved_root + "/"
+        ):
+            return True
+    return False
 
 
 def _ssh_alias_problem(value: object) -> str | None:
