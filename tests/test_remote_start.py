@@ -54,9 +54,11 @@ def _restore_signals():
     signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
-def machines_file(tmp_path: Path, *, box_enabled: bool = True, box_slots: int = 3) -> Path:
-    # Placement is least loaded with ties in file order (issue #85): with 3
-    # slots each, an empty pool places on the box, which comes first.
+def machines_file(
+    tmp_path: Path, *, box_enabled: bool = True, box_slots: int = 3, pc: bool = True
+) -> Path:
+    # Placement is lowest utilization with ties off-box (issue #223): an empty
+    # pool places on the pc. pc=False disables the pc, so jobs land on the box.
     path = tmp_path / "machines.yml"
     path.write_text(
         f"""
@@ -68,6 +70,7 @@ devices:
     harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
   - name: pc
     tailscale_name: pc.example.ts.net
+    enabled: {str(pc).lower()}
     slot_max: 3
     harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
     workdir_root: {tmp_path}/remote/{{bot}}/work
@@ -289,7 +292,7 @@ def test_remote_target_refuses_option_or_path_injection(fields: dict) -> None:
 
 
 def test_orch_wait_claims_a_box_slot_and_names_the_device(tmp_path: Path) -> None:
-    machines = machines_file(tmp_path, box_slots=3)
+    machines = machines_file(tmp_path, box_slots=3, pc=False)
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
     first = enqueue(queue, "claude", "1")
@@ -306,9 +309,7 @@ def test_orch_wait_claims_a_box_slot_and_names_the_device(tmp_path: Path) -> Non
 
 
 def test_orch_wait_keeps_waiting_while_no_eligible_slot_is_free(tmp_path: Path) -> None:
-    machines = machines_file(tmp_path, box_enabled=True, box_slots=1)
-    text = machines.read_text(encoding="utf-8").replace("  - name: pc\n", "  - name: pc\n    enabled: false\n")
-    machines.write_text(text, encoding="utf-8")
+    machines = machines_file(tmp_path, box_enabled=True, box_slots=1, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config_of(machines))
     first = enqueue(queue, "claude", "1")
@@ -328,18 +329,21 @@ def test_orch_wait_keeps_waiting_while_no_eligible_slot_is_free(tmp_path: Path) 
     assert pool.used() == {"box": 1}
 
 
-def test_orch_wait_places_on_the_remote_device_once_the_box_is_full(tmp_path: Path) -> None:
+def test_orch_wait_places_on_the_remote_device_first_and_the_box_on_a_tie(tmp_path: Path) -> None:
     machines = machines_file(tmp_path, box_slots=1)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config_of(machines))
-    enqueue(queue, "codex", "1")
+    first = enqueue(queue, "codex", "1")
     second = enqueue(queue, "codex", "2")
-    wait_for_job(queue, "codex", io.StringIO(), pool=pool)
     out = io.StringIO()
     wait_for_job(queue, "codex", out, pool=pool)
     line = json.loads(out.getvalue())
-    assert (line["id"], line["device"], line["remote"]) == (second, "pc", True)
-    assert line["workdir"] == f"{tmp_path}/remote/codex-bot/work/jobs/{second}"
+    assert (line["id"], line["device"], line["remote"]) == (first, "pc", True)
+    assert line["workdir"] == f"{tmp_path}/remote/codex-bot/work/jobs/{first}"
+    out = io.StringIO()
+    wait_for_job(queue, "codex", out, pool=pool)
+    line = json.loads(out.getvalue())
+    assert (line["id"], line["device"], line["remote"]) == (second, "box", False)
 
 
 def test_an_undelivered_job_is_failed_and_its_slot_released(tmp_path: Path) -> None:
@@ -510,7 +514,7 @@ def test_an_unreachable_device_after_the_job_keeps_the_slot(tmp_path: Path) -> N
 def test_box_job_releases_its_slot_once_the_command_has_ended(
     tmp_path: Path, source: str, expected: int
 ) -> None:
-    machines = machines_file(tmp_path)
+    machines = machines_file(tmp_path, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config_of(machines))
     job_id = enqueue(queue, "claude", "1")
@@ -542,7 +546,7 @@ def test_a_job_without_a_slot_is_refused_and_nothing_runs(tmp_path: Path) -> Non
 
 
 def test_a_second_runner_is_refused_while_the_first_still_runs(tmp_path: Path) -> None:
-    machines = machines_file(tmp_path)
+    machines = machines_file(tmp_path, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config_of(machines))
     job_id = enqueue(queue, "claude", "1")
@@ -594,7 +598,7 @@ class FakeTransport:
 
 
 def monitor_setup(tmp_path: Path, recipient: str, *, box: bool, now: list[float] | None = None):
-    machines = machines_file(tmp_path, box_enabled=box)
+    machines = machines_file(tmp_path, box_enabled=box, pc=not box)
     clock = now if now is not None else [1000.0]
     queue = SQLiteJobQueue(tmp_path / "d.db", clock=lambda: clock[0])
     config = config_of(machines)
@@ -1075,7 +1079,7 @@ def test_r1_f12_malformed_or_unsafe_pid_records_are_unknown_and_never_stopped(
 def test_r1_f13_box_takeover_is_refused_while_the_dead_runners_worker_lives(
     tmp_path: Path,
 ) -> None:
-    machines = machines_file(tmp_path)
+    machines = machines_file(tmp_path, pc=False)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     pool = DevicePool(queue, config_of(machines))
     job_id = enqueue(queue, "claude", "1")

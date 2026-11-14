@@ -162,7 +162,7 @@ def remote_job(
     detail: dict | None = None,
     box: bool = False,
 ) -> tuple[Path, SQLiteJobQueue, DevicePool, str]:
-    machines = machines_file(tmp_path, box_enabled=box)
+    machines = machines_file(tmp_path, box_enabled=box, pc=not box)
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=time.time)
     job_id = queue.enqueue(
         JobRequest(
