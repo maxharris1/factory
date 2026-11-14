@@ -523,7 +523,7 @@ def test_a_job_state_failure_is_recorded_and_never_stops_the_poll(tmp_path: Path
     poller.at(60)
     with poller.queue.connect() as connection:
         errors = [tuple(row) for row in connection.execute("SELECT repo, error FROM poll_errors")]
-    assert ("maxharris1/factory", "job-states:RuntimeError") in errors
+    assert ("maxharris1/factory", "job-states:RuntimeError: boom") in errors
     assert poller.row(job_id)["state"] == "running"
 
 

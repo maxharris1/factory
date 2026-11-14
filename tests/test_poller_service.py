@@ -13,6 +13,7 @@ import pytest
 
 from lib import cli
 from tests.procs import alive
+from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "poller-service.sh"
@@ -25,11 +26,11 @@ sys.path.insert(0, {root!r})
 from lib import cli
 
 class Loop:
-    def __init__(self, dispatcher, source):
-        pass
+    def __init__(self, dispatcher, source, sleep=time.sleep):
+        self.sleep = sleep
     def run(self, **_kwargs):
         print("polling", flush=True)
-        time.sleep(60)
+        self.sleep(60)
 
 cli._runtime = lambda path, orch, create, **_: (object(), object())
 cli.PollLoop = Loop
@@ -500,6 +501,67 @@ def test_without_proc_the_poller_is_recognized_by_ps(home: Path, tmp_path: Path)
     assert _service(home, "status", **no_proc).stdout == f"running (pid {pid})\n"
     assert _service(home, "stop", **no_proc).returncode == 0
     assert not alive(pid)
+
+
+# --- #107: SIGTERM waits for the poll cycle boundary --------------------------------------------
+
+
+class _Dispatcher:
+    def __init__(self, during):
+        self.during = during
+        self.finished = 0
+
+    def poll_once(self, source) -> None:
+        self.during()
+        self.finished += 1
+
+
+def _loop_until_exit(dispatcher, stopper) -> int:
+    from types import SimpleNamespace
+
+    from lib.dispatcher import PollLoop
+
+    source = SimpleNamespace(config=SimpleNamespace(poll_seconds=30))
+    with pytest.raises(SystemExit) as stopped:
+        PollLoop(dispatcher, source, sleep=stopper.sleep).run()
+    return stopped.value.code
+
+
+def test_a_sigterm_mid_cycle_lets_the_cycle_finish(restore_signals) -> None:
+    from lib.cli import StopAtBoundary
+
+    stopper = StopAtBoundary(sleep=lambda seconds: None)
+    signal.signal(signal.SIGTERM, stopper.on_term)
+    dispatcher = _Dispatcher(lambda: os.kill(os.getpid(), signal.SIGTERM))
+
+    assert _loop_until_exit(dispatcher, stopper) == 143
+    assert dispatcher.finished == 1
+
+
+def test_a_second_sigterm_mid_cycle_exits_at_once(restore_signals) -> None:
+    from lib.cli import StopAtBoundary
+
+    stopper = StopAtBoundary(sleep=lambda seconds: None)
+    signal.signal(signal.SIGTERM, stopper.on_term)
+
+    def twice() -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    dispatcher = _Dispatcher(twice)
+    assert _loop_until_exit(dispatcher, stopper) == 143
+    assert dispatcher.finished == 0
+
+
+def test_a_sigterm_between_cycles_exits_at_once(restore_signals) -> None:
+    from lib.cli import StopAtBoundary
+
+    stopper = StopAtBoundary(sleep=lambda seconds: os.kill(os.getpid(), signal.SIGTERM))
+    signal.signal(signal.SIGTERM, stopper.on_term)
+    dispatcher = _Dispatcher(lambda: None)
+
+    assert _loop_until_exit(dispatcher, stopper) == 143
+    assert dispatcher.finished == 1
 
 
 # --- #108 Unit 7: a missing database is restored before the poller starts (#66) ---

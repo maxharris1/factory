@@ -23,6 +23,7 @@ from lib.dispatcher import (
     ReviewActions,
     TicketRef,
     TrackedTicket,
+    scrub_detail,
     trusted_bots,
 )
 from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
@@ -35,7 +36,7 @@ from lib.github_actions import (
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
-from lib.linear_webhook import DirtyRow
+from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
     LINEAR_POLL_SECONDS,
     OrchConfig,
@@ -155,6 +156,14 @@ class DirtyQueue(Protocol):
 
     def record_polling(self, now: float) -> None: ...
 
+    def seen_at(self, issue_id: str) -> float | None: ...
+
+    def listener_started_at(self) -> float | None: ...
+
+    def record_missed(
+        self, issue_id: str, identifier: str | None, event_at: float, found_at: float
+    ) -> None: ...
+
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -231,7 +240,7 @@ class LivePollSource:
         self._linear_complexity = 0
         self._linear_candidate_cursor: tuple[str, str] | None = None
         self._linear_tracked_cursor: tuple[str, str] | None = None
-        self._cycle_errors = 0
+        self._cycle_errors: dict[str, int] = {}
         self._cycle_deferrals: dict[str, int] = {}
         # Linear webhook mode (orch.yml linear_webhook). With no webhook
         # configured none of this is read and every cycle is as before.
@@ -302,7 +311,7 @@ class LivePollSource:
             self._linear_requests = 0
             self._linear_complexity = 0
         self._cycles_until_linear -= 1
-        self._cycle_errors = 0
+        self._cycle_errors = {}
         self._cycle_deferrals = {}
         if self.config.linear_webhook is not None:
             if self._linear_due:
@@ -381,8 +390,12 @@ class LivePollSource:
             )
         self._cycle_deferrals = {}
         if self._cycle_errors:
+            sources = ", ".join(
+                f"{source} x{count}" for source, count in sorted(self._cycle_errors.items())
+            )
             raise PollCycleError(
-                f"poll cycle recorded {self._cycle_errors} source error(s)"
+                f"poll cycle recorded {sum(self._cycle_errors.values())} source error(s): "
+                f"{sources}"
             )
 
     def github_candidates(
@@ -478,11 +491,11 @@ class LivePollSource:
             return self._searched_candidates(projects, query, exclude, reserve)
         found: tuple[TrackedTicket, ...] = ()
         if self._reconcile_due():
-            errors = self._cycle_errors
+            errors = sum(self._cycle_errors.values())
             deferrals = sum(self._cycle_deferrals.values())
             found = self._searched_candidates(projects, query, exclude, reserve)
             if (
-                self._cycle_errors == errors
+                sum(self._cycle_errors.values()) == errors
                 and sum(self._cycle_deferrals.values()) == deferrals
             ):
                 self._last_reconcile = self.clock()
@@ -893,12 +906,49 @@ class LivePollSource:
             entry = (self.clock(), issue)
             for key in keys:
                 self._linear_documents[key] = entry
+            self._check_missed(issue)
         else:
             for key in keys:
                 self._linear_documents.pop(key, None)
         for row in self._dirty.values():
             if row.issue_id in keys or row.identifier in keys:
                 self._dirty_fetched[row.issue_id] = row
+
+    def _check_missed(self, issue: Mapping[str, Any]) -> None:
+        """Webhook mode (#79): record a comment on a configured project's
+        issue that no delivery covered (lib/linear_webhook.missed_delivery)."""
+        if self.linear_dirty is None:
+            return
+        issue_id = issue.get("id")
+        project = issue.get("project")
+        configured = {
+            item.linear_project_id
+            for item in self.config.projects
+            if item.linear_project_id is not None
+        }
+        if not (
+            isinstance(issue_id, str)
+            and isinstance(project, dict)
+            and project.get("id") in configured
+        ):
+            return
+        newest = _newest_comment_at(issue)
+        if newest is None:
+            return
+        now = self.clock()
+        try:
+            seen = self.linear_dirty.seen_at(issue_id)
+            started = self.linear_dirty.listener_started_at()
+            if missed_delivery(newest, seen, started, now):
+                identifier = issue.get("identifier")
+                self.linear_dirty.record_missed(
+                    issue_id,
+                    identifier if isinstance(identifier, str) else None,
+                    newest,
+                    now,
+                )
+        except Exception as exc:
+            self._record("linear-webhook", "-", exc)
 
     def _linear_request(self, document: Mapping[str, object]) -> dict[str, Any]:
         if self.clock() < self._linear_backoff_until:
@@ -1490,10 +1540,15 @@ class LivePollSource:
         self._cycle_deferrals[reason] = self._cycle_deferrals.get(reason, 0) + 1
 
     def _record(self, repo: str, ticket_id: str, exc: Exception) -> None:
-        self._cycle_errors += 1
+        self._cycle_errors[repo] = self._cycle_errors.get(repo, 0) + 1
         if self.error_sink is None:
             return
-        self.error_sink(repo, ticket_id, _safe_reason(exc))
+        reason = _safe_reason(exc)
+        for name in _secret_env_names(self.config):
+            value = self.environ.get(name)
+            if value:
+                reason = reason.replace(value, "<secret>")
+        self.error_sink(repo, ticket_id, reason)
 
 
 def _json_object(text: str, source: str) -> dict[str, Any]:
@@ -1628,12 +1683,15 @@ def _is_rate_limited(status: int | None, stdout: str, stderr: str) -> bool:
 
 
 def _safe_reason(exc: Exception) -> str:
+    """The poll_errors text for a source error. A PollSourceError's message
+    is built here from safe parts; any other error keeps its kind and gets
+    its message scrubbed."""
     if isinstance(exc, PollSourceError):
         return f"PollSourceError:{str(exc)}"
     status = _status_code(str(exc))
-    if status is not None:
-        return f"{type(exc).__name__}:HTTP-{status}"
-    return type(exc).__name__
+    kind = type(exc).__name__ if status is None else f"{type(exc).__name__}:HTTP-{status}"
+    detail = scrub_detail(str(exc))
+    return f"{kind}: {detail}" if detail else kind
 
 
 def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
@@ -1789,6 +1847,21 @@ def _linear_comment(value: object) -> Comment | None:
         body=body,
         created_at=parsed.timestamp(),
     )
+
+
+def _newest_comment_at(issue: Mapping[str, Any]) -> float | None:
+    comments = issue.get("comments")
+    nodes = comments.get("nodes") if isinstance(comments, dict) else None
+    newest = None
+    for node in nodes if isinstance(nodes, list) else ():
+        created = node.get("createdAt") if isinstance(node, dict) else None
+        try:
+            parsed = datetime.fromisoformat(created) if isinstance(created, str) else None
+        except ValueError:
+            continue
+        if parsed is not None and parsed.tzinfo is not None:
+            newest = max(newest or 0.0, parsed.timestamp())
+    return newest
 
 
 def _risk(

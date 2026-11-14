@@ -28,7 +28,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter, handoff_marker
 from lib.worktrees import pid_alive
-from tests.test_brief import detail
+from tests.test_brief import FACTORY_ROOT, detail
 from tests.test_remote_start import Ssh
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, slots, state
 
@@ -196,11 +196,11 @@ def test_handoff_marker_accepts_only_comment_ids() -> None:
 
 def test_the_remote_brief_names_the_workdir_and_the_marker() -> None:
     queue_job = _job("build")
-    text = render_brief(queue_job, bot="claude-bot", context=None, remote_device="pc")
+    text = render_brief(queue_job, bot="claude-bot", factory_root=FACTORY_ROOT, context=None, remote_device="pc")
     assert "pc" in text and "$ORCH_JOB_WORKDIR" in text
     assert "ORCH-HANDOFF: <comment-id>" in text
     assert "ORCH-HANDOFF: failed" in text
-    local = render_brief(queue_job, bot="claude-bot", context=None)
+    local = render_brief(queue_job, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "ORCH-HANDOFF" not in local
     assert "orch job done claude-bot" in local
 

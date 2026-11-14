@@ -1273,7 +1273,8 @@ def _read_db(
             ),
             "listener_age_seconds": _age(now, health.started_at),
             "dirty": health.dirty,
-            "warning": health.silence_warning(now),
+            "warning": health.warning(now),
+            "note": health.quiet_note(now),
         }
 
     recent_handoffs: list[dict] = []
