@@ -2889,18 +2889,29 @@ class Dispatcher:
         self._merge_queue_head(ticket, row, head)
 
     def _update_job_before(self, ticket: TrackedTicket, comment: Comment) -> str | None:
-        """The update-from-main job a ready answers: the latest queued no
-        later than the ready was posted."""
+        """The update-from-main attempt a ready came from: the job that
+        handed it off, else the latest job that has run and was queued no
+        later than the ready's whole second. A job still queued (a retry not
+        yet claimed) or cancelled unclaimed never ran, so it posted nothing."""
         with self._connect() as connection:
             job = connection.execute(
                 """
                 SELECT id FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
-                  AND created_at <= ?
-                ORDER BY created_at DESC, id DESC
+                  AND (
+                    handoff_comment_id = ?
+                    OR (state IN ('running', 'done', 'failed') AND created_at < ? + 1)
+                  )
+                ORDER BY handoff_comment_id = ? DESC, created_at DESC, id DESC
                 LIMIT 1
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.created_at),
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment.id,
+                    comment.created_at,
+                    comment.id,
+                ),
             ).fetchone()
         return None if job is None else str(job["id"])
 
@@ -3160,16 +3171,20 @@ class Dispatcher:
 
     def _merge_turn(self, ticket: TrackedTicket) -> bool:
         """Whether a finish_line: merge ticket may merge now (#130): it heads
-        its repo's merge queue and nothing in that repo merged this poll.
-        Every merge of a watched ticket passes this one gate. During the
-        per-ticket pass it defers, so the queue holds every approval this
-        poll records before one is chosen."""
+        its repo's merge queue, GitHub says it merges cleanly, and nothing in
+        that repo merged this poll. Every merge of a watched ticket passes
+        this one gate; a PR that conflicts, is behind or is still being
+        checked waits for the queue's update instead of failing its ship.
+        During the per-ticket pass it defers, so the queue holds every
+        approval this poll records before one is chosen."""
         if ticket.factory.finish_line != "merge":
             return True
         if self._ticket_pass:
             self._deferred_ships[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             return False
         if ticket.repo.lower() in self._merged_repos:
+            return False
+        if ticket.mergeable is not True or ticket.mergeable_state in ("dirty", "behind"):
             return False
         members = self._merge_queue_members(ticket.repo)
         return not members or members[0]["ticket_id"] == ticket.ticket_id
