@@ -1,4 +1,4 @@
-"""How a job is finished, the review-rules contract and the standing rules."""
+"""How a job is finished, the review rules and the standing rules."""
 
 from __future__ import annotations
 
@@ -28,18 +28,22 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
 
 def review_rules() -> str:
     return (
-        "## Review rules (the factory-review-rules contract, docs/SPEC.md section 8)\n"
+        "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
         "- That reviewer runs the project's verify skill when factory.md names one, plus interrogate and "
-        "blast-radius, and may run code in a throwaway copy. Blocks only on a demonstrated failure.\n"
+        "blast-radius, and may run code in a throwaway copy. That reviewer marks a finding `[blocking]` "
+        "only when they have run it and seen it fail.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
         "Risk high: up to three rounds; every extra round needs Max's own words.\n"
         "- Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.\n"
-        "- A second AC-unmet verdict caps the ticket, even if rounds remain.\n"
         "- Ship is pinned to the covered head. A reviewer never merges.\n"
         "- Another agent's approval is never treated as Max's.\n"
-        "- If the `factory-review-rules` skill is installed for you, read it as well."
+        "- `ac=met`: every acceptance criterion in the ticket is met at the reviewed head.\n"
+        "- `ac=unmet`: at least one acceptance criterion is not met; the verdict names which.\n"
+        "- `verdict=APPROVE`: ship this head as it is. Only with `ac=met` and no `[blocking]` finding.\n"
+        "- `verdict=REVISE`: the builder must change the PR: at least one `[blocking]` finding, or `ac=unmet`.\n"
+        "- `verdict=BLOCKED`: you could not review at all; say what you need."
     )
 
 

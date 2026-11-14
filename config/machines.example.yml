@@ -6,3 +6,17 @@ devices:
     slot_max: 1
     harnesses:
       claude: claude-bot
+    # factory_root is the deployed factory checkout (skills/, bin/orch), not
+    # workdir_root. Optional on the local device, required on remote ones.
+    factory_root: /home/box/factory
+  # A remote device names both, side by side. workdir_root is where job
+  # worktrees are made (empty at job start); factory_root is not workdir_root
+  # and may not sit inside it.
+  # - name: pc
+  #   tailscale_name: pc-wsl-bots.example.ts.net
+  #   slot_max: 3
+  #   harnesses:
+  #     claude: claude-bot
+  #   workdir_root: /home/{bot}/factory-work
+  #   factory_root: /home/{bot}/factory
+  #   ssh_alias: pc-wsl-{bot}
