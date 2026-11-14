@@ -52,12 +52,10 @@ export const step = (action, from, to) => {
   if (action === "T6JobStuck") return "job dies twice (T6)";
   if (action === "T6DeviceOffline") return "device offline 60 minutes";
   if (action === "T3Revise" && to.state === "fixing") return "REVISE, under the round cap";
-  if (action === "T3Revise" && from.counts.acUnmet === 1 && to.counts.acUnmet === 2) {
-    return "a second AC-unmet verdict";
-  }
   if (action === "T3Revise") return "REVISE at the cap";
   if (action === "T7Blocked") return "BLOCKED";
   if (action === "T4Approve") return "APPROVE on the current head";
+  if (action === "T4HeadMoves") return "a new head is pushed";
   if (action === "T4PatchDiffers") return "head changed and the patch differs";
   if (action === "T4ShipMerge") return "ship = merge";
   if (action === "T4ShipHandoff") return "ship = handoff";

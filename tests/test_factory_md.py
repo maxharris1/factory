@@ -103,6 +103,7 @@ def test_examples_match_the_spec_choices() -> None:
         "Never ship",
         "CLAUDE.md",
         "on the box",
+        "ok head=<sha>",
     ):
         assert phrase in tracy_text
 
@@ -178,7 +179,20 @@ def test_same_family_reviewer_is_refused(tmp_path: Path, harness: str) -> None:
     data["reviewer"]["harness"] = harness
     config, findings = load_factory_md(write_factory(tmp_path, data))
     assert config is None
-    assert any("same-family reviewer" in finding.message for finding in findings)
+    found = [finding.message for finding in findings]
+    if harness == "cursor":
+        assert found == [
+            "same-family reviewer: builder family not established: "
+            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint",
+            "same-family reviewer: reviewer family not established: "
+            "give a claude*/sonnet*/opus*/haiku*/gpt*/codex*/o<n> model hint",
+        ]
+        return
+    family = "anthropic" if harness == "claude" else "openai"
+    assert found == [
+        "same-family reviewer: "
+        f"builder family {family!r} and reviewer family {family!r}"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -202,7 +216,61 @@ def test_cursor_hint_in_the_same_family_is_refused(
     data = _actors(builder_harness, builder_model, reviewer_harness, reviewer_model)
     config, findings = load_factory_md(write_factory(tmp_path, data))
     assert config is None
-    assert any("same-family reviewer" in finding.message for finding in findings)
+    family = "openai" if builder_harness == "codex" else "anthropic"
+    assert [finding.message for finding in findings] == [
+        "same-family reviewer: "
+        f"builder family {family!r} and reviewer family {family!r}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "xsonnet",
+        "magnum-opus",
+        "opusmt",
+        "haikus",
+        "claudette",
+        "opus-mt-en-de",
+        "codexes",
+        "gpt-j",
+        "gpt-neo-2.7b",
+        "o3x",
+    ],
+)
+def test_family_word_needs_a_boundary(tmp_path: Path, hint: str) -> None:
+    data = _actors("claude", None, "cursor", hint)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert config is None
+    assert any(
+        "reviewer family not established" in finding.message for finding in findings
+    )
+    assert not any("reviewer family 'anthropic'" in f.message for f in findings)
+
+
+@pytest.mark.parametrize(
+    ("hint", "family"),
+    [
+        ("claude", "anthropic"),
+        ("opus", "anthropic"),
+        ("claude-3.5", "anthropic"),
+        ("sonnet:latest", "anthropic"),
+        ("haiku_4", "anthropic"),
+        ("gpt5", "openai"),
+        ("gpt-4o", "openai"),
+        ("codex-mini", "openai"),
+        ("o3", "openai"),
+        ("o4-mini", "openai"),
+    ],
+)
+def test_family_word_with_a_boundary_resolves(
+    tmp_path: Path, hint: str, family: str
+) -> None:
+    other = "codex" if family == "anthropic" else "claude"
+    data = _actors(other, None, "cursor", hint)
+    config, findings = load_factory_md(write_factory(tmp_path, data))
+    assert findings == []
+    assert config is not None
 
 
 def test_cursor_reviewer_with_another_family_is_accepted(tmp_path: Path) -> None:

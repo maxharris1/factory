@@ -13,8 +13,12 @@ marks urgent — may use it. A missing or unverified report is not a
 reserve and does not block routing.
 
 A route is both sides or neither. The reviewer is a different model
-family from the builder this call selected. Family resolution is the
-check-config rule. This module does not read a usage account.
+family from the builder this call selected. On a later round,
+`built_by=(harness, model)` names what actually built: that is the
+builder, and the reviewer is outside its family. Family resolution is
+the check-config rule. A preferred harness check-config would refuse
+(unknown, or no family) raises instead of routing around it. This
+module does not read a usage account.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Never, Protocol
 
-from lib.factory_md import FactoryConfig, _resolved_family
+from lib.factory_md import FactoryConfig, resolved_family
 from lib.schema import HARNESSES
 
 RESERVE_REMAINING = 0.20
@@ -126,6 +130,7 @@ def job_is_urgent(
 
 def fit_table(config: FactoryConfig, role: Role) -> tuple[FitRow, ...]:
     preferred, model = _preference(config, role)
+    _known_family(preferred, model, role)
     ordered = (preferred, *[item for item in HARNESSES if item != preferred])
     rows: list[FitRow] = []
     for rank, harness in enumerate(ordered):
@@ -141,6 +146,7 @@ def route_job(
     resumed_paused_step: bool = False,
     past_ship: bool = False,
     marked_urgent: bool = False,
+    built_by: tuple[str, str | None] | None = None,
 ) -> JobRoute:
     """Pick a builder and a cross-family reviewer, or pick neither."""
     urgent = job_is_urgent(
@@ -149,10 +155,15 @@ def route_job(
         marked_urgent=marked_urgent,
     )
     source: UsageSource = usage if usage is not None else NoUsage()
-    builder_rows = fit_table(config, "builder")
-    builder = _select(builder_rows, "builder", urgent, source, None)
-    if builder is None:
-        return JobRoute(None, None, _blocked(builder_rows, urgent, source, None))
+    if built_by is None:
+        builder_rows = fit_table(config, "builder")
+        builder = _select(builder_rows, "builder", urgent, source, None)
+        if builder is None:
+            return JobRoute(None, None, _blocked(builder_rows, urgent, source, None))
+    else:
+        harness, model = built_by
+        family = _known_family(harness, model, "built_by")
+        builder = Assignment("builder", harness, model, family, False)
     reviewer_rows = fit_table(config, "reviewer")
     reviewer = _select(reviewer_rows, "reviewer", urgent, source, builder.family)
     if reviewer is None:
@@ -254,8 +265,17 @@ def _in_reserve(report: UsageReport | None) -> bool:
     return report.remaining <= RESERVE_REMAINING
 
 
+def _known_family(harness: str, model: str | None, label: str) -> str:
+    if harness not in HARNESSES:
+        raise ValueError(f"{label} harness {harness!r} is unknown")
+    family = _family(harness, model)
+    if family is None:
+        raise ValueError(f"{label} family not established for {harness!r}")
+    return family
+
+
 def _family(harness: str, model: str | None) -> str | None:
-    family, _hint = _resolved_family(harness, model)
+    family, _hint = resolved_family(harness, model)
     return family
 
 

@@ -1,7 +1,8 @@
 #!/bin/sh
 # /statechart check for the section 4 ticket loop.
 # Phase 1 and the T9-enabled model must pass TLC. The drawing configs must
-# match the section 4.1 state names. Omitting T1 or T1P must fail.
+# match the section 4.1 state names. Omitting T1 or T1P, or T4ShipMerge's
+# covered guard, must fail.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -92,20 +93,48 @@ state_labels() {
 }
 
 # statechart drops a step that stays on one label. Section 4.1 still has
-# Building --> Building for CI red. Put that arrow on the drawing.
-add_building_self_loop() {
+# Building --> Building and Fixing --> Fixing for CI red. Put those arrows on
+# the drawing. The injected loops are checked against section 4.1, not the
+# model.
+add_ci_red_self_loops() {
   awk '
-    $2 == "building" && $1 ~ /^s[0-9]+:$/ {
+    $1 ~ /^s[0-9]+:$/ && ($2 == "building" || $2 == "fixing") {
       id = $1
       sub(/:$/, "", id)
+      ids[++n] = id
     }
-    id != "" && $1 == id && $2 == "-->" && index($3, id ":") == 1 { has = 1 }
+    $2 == "-->" && $3 == $1 ":" { has[$1] = 1 }
     /^  class s/ && !inserted {
-      if (id != "" && !has) print "  " id " --> " id ": CI red, fix"
+      for (i = 1; i <= n; i++) {
+        if (!has[ids[i]]) print "  " ids[i] " --> " ids[i] ": CI red, fix"
+      }
       inserted = 1
     }
     { print }
   ' "$1"
+}
+
+# The state the shortest path under "## <rule> breaks" ends in.
+break_end() {
+  awk -v head="## $1 breaks" '
+    $0 == head { on = 1; next }
+    on && /^## / { exit }
+    on && /^[0-9]+\. / { last = $0 }
+    END {
+      n = split(last, parts, ": ")
+      sub(/^[0-9]+\. /, "", parts[n])
+      print parts[n]
+    }
+  ' "$2"
+}
+
+expect_break() {
+  name=$1
+  rule=$2
+  end=$3
+  grep -q "^## $rule breaks\$" "$RUN_OUT/report.md" || fail "$name did not break $rule"
+  [ "$(break_end "$rule" "$RUN_OUT/report.md")" = "$end" ] ||
+    fail "$name counterexample did not end in $end"
 }
 
 # Logs stay outside --out. statechart refuses a folder that is not empty.
@@ -140,7 +169,7 @@ expect_clean() {
   fi
 }
 
-echo "1/6 phase 1 model (T9 off)"
+echo "1/7 phase 1 model (T9 off)"
 run_statechart "$root/model/Orchestrator.cfg"
 expect_clean "phase 1" 0
 grep -q '^## Rules that hold$' "$RUN_OUT/report.md" || fail "phase 1 report has no holding rules"
@@ -151,7 +180,7 @@ if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "phase 1 report contains a broken rule"
 fi
 
-echo "2/6 model with T9 enabled"
+echo "2/7 model with T9 enabled"
 run_statechart "$root/model/OrchestratorAll.cfg"
 expect_clean "T9-enabled" 0
 grep -q 'T9Decided' "$RUN_OUT/report.md" || fail "T9-enabled report did not check T9Decided"
@@ -159,7 +188,7 @@ if grep -q ' breaks$' "$RUN_OUT/report.md"; then
   fail "T9-enabled report contains a broken rule"
 fi
 
-echo "3/6 phase 1 chart"
+echo "3/7 phase 1 chart"
 run_statechart "$root/model/chart.cfg"
 expect_clean "phase 1 chart" 0
 got=$(state_labels "$RUN_OUT/chart.mmd")
@@ -170,7 +199,7 @@ if state_labels "$RUN_OUT/chart.mmd" | grep -qx 'post-merge'; then
 fi
 grep -q 'kind=go' "$RUN_OUT/chart.mmd" || fail "phase 1 chart has no kind=go handoff"
 
-echo "4/6 section 4.1 chart"
+echo "4/7 section 4.1 chart"
 run_statechart "$root/model/chart-all.cfg"
 expect_clean "section 4.1 chart" 0
 got=$(state_labels "$RUN_OUT/chart.mmd")
@@ -181,19 +210,22 @@ grep -q 'kind=go, queue plan' "$RUN_OUT/chart.mmd" || fail "chart is missing kin
 grep -q 'trusted builder posts kind=plan' "$RUN_OUT/chart.mmd" || fail "chart is missing kind=plan"
 grep -q 'project has a post-merge check' "$RUN_OUT/chart.mmd" || fail "chart is missing T9"
 drawn=$(mktemp)
-add_building_self_loop "$RUN_OUT/chart.mmd" >"$drawn"
+add_ci_red_self_loops "$RUN_OUT/chart.mmd" >"$drawn"
 diff -u "$root/model/chart.mmd" "$drawn" || fail "model/chart.mmd is not the section 4.1 chart"
 
-echo "5/6 fixture omitting T1"
+echo "5/7 fixture omitting T1"
 run_statechart "$root/model/fixtures/omit-t1.cfg"
 expect_clean "omit-t1" 1
-grep -q '^## T1KindGo breaks$' "$RUN_OUT/report.md" || fail "omit-t1 did not break T1KindGo"
-grep -q 'questions' "$RUN_OUT/report.md" || fail "omit-t1 counterexample did not reach questions"
+expect_break "omit-t1" T1KindGo questions
 
-echo "6/6 fixture omitting T1P"
+echo "6/7 fixture omitting T1P"
 run_statechart "$root/model/fixtures/omit-t1p.cfg"
 expect_clean "omit-t1p" 1
-grep -q '^## T1PDecided breaks$' "$RUN_OUT/report.md" || fail "omit-t1p did not break T1PDecided"
-grep -q 'planning' "$RUN_OUT/report.md" || fail "omit-t1p counterexample did not reach planning"
+expect_break "omit-t1p" T1PDecided planning
+
+echo "7/7 fixture dropping the covered guard on ship = merge"
+run_statechart "$root/model/fixtures/omit-ship-guard.cfg"
+expect_clean "omit-ship-guard" 1
+expect_break "omit-ship-guard" ShipPinnedToCoveredHead merged
 
 echo "statechart ok"
