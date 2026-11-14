@@ -1355,6 +1355,11 @@ PATH_CUTS = [
     ("Inspect lib/x,/home/bot/private/deployment.txt", "Inspect [path]"),
     ("Inspect x:/home/bot/private/deployment.txt", "Inspect [path]"),
     ("Inspect <~/private/deployment.txt>", "Inspect [path]"),
+    (r"Read /\ company\ secrets/private.txt", "Read [path]"),
+    (r"Read /\ company\ secrets/private.txt then report", "Read [path]"),
+    ("Read /\\\tcompany/private.txt", "Read [path]"),
+    (r"Read \\\ company\ secrets\private.txt", "Read [path]"),
+    (r"Read //\ company/private.txt", "Read [path]"),
 ]
 
 
@@ -1389,7 +1394,7 @@ def test_every_absolute_path_form_is_cut_whole_before_it_is_stored(tmp_path: Pat
     assert claude["subagents"][0]["description"] == cut
 
 
-@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call", "edit lib/telemetry.py.", "see (lib/x.py)", "use ../x/y", "a // b"])
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", r"Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call", "edit lib/telemetry.py.", "see (lib/x.py)", "use ../x/y", "a // b"])
 def test_relative_slashes_are_not_paths(text: str) -> None:
     live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
     assert "[path]" not in live["plan"][0]["text"]

@@ -655,15 +655,22 @@ _SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed
 _RELATIVE_PATH = re.compile(r"""[(\['"`]*(?!-)[\w.-]+(?:[/\\][\w.-]+)*[/\\]?[.,;:!?)\]'"`]*""")
 
 
+def _is_path(token: str) -> bool:
+    return bool(re.search(r"[/\\]", token)) and bool(token.strip("/\\")) and not _RELATIVE_PATH.fullmatch(token)
+
+
 def _cut_paths(text: str) -> str:
     """Every word with a slash is a path unless it reads as a plain relative one
-    (`lib/x.py`, `../y`, `and/or`) or is only slashes (`a / b`). Where a path
-    ends cannot be told from text (quotes, spaces, escapes), so everything from
-    the first such word to the end goes."""
-    for word in re.finditer(r"\S+", text):
-        token = word.group()
-        if re.search(r"[/\\]", token) and token.strip("/\\") and not _RELATIVE_PATH.fullmatch(token):
-            return text[: word.start()] + "[path]"
+    (`lib/x.py`, `../y`, `and/or`) or is only slashes (`a / b`). A shell word
+    joined by escaped spaces (`/\\ my\\ dir/x`) is judged as it unescapes. Where
+    a path ends cannot be told from text (quotes, spaces, escapes), so
+    everything from the first such word to the end goes."""
+    for shell_word in re.finditer(r"(?:\\[\s\S]?|[^\s\\])+", text):
+        if _is_path(re.sub(r"\\([\s\S])", r"\1", shell_word.group())):
+            return text[: shell_word.start()] + "[path]"
+        for word in re.finditer(r"\S+", shell_word.group()):
+            if _is_path(word.group()):
+                return text[: shell_word.start() + word.start()] + "[path]"
     return text
 
 
