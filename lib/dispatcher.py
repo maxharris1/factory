@@ -2254,7 +2254,11 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        builder_harness = self._job_builder_harness(ticket)
+        builder_harness = (
+            ticket.factory.builder_harness
+            if ticket.factory_md is not None
+            else self._job_builder_harness(ticket)
+        )
         if builder_harness is None and ticket.ready_starts_review:
             # The project builds its PRs outside the queue (orch.yml
             # projects[].ready_starts_review): factory.md's builder, trusted
@@ -5196,6 +5200,7 @@ class Dispatcher:
                 SELECT recipient FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix', 'update-from-main')
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,

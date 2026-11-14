@@ -327,6 +327,50 @@ def test_old_builder_retry_does_not_replace_new_plan_route(tmp_path: Path) -> No
     assert row is not None and row["recipient"] == "codex"
 
 
+def test_obsolete_retry_created_last_cannot_build_or_review(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.post(pr, "old-go", _go("builder=codex reviewer=claude "), "grok-login")
+    board.poll()
+    old = board.claim("codex")
+    board.post(
+        pr,
+        "new-go",
+        _go("builder=claude reviewer=codex ").replace("state=building", "state=planning"),
+        "grok-login",
+    )
+    board.poll()
+    board.finish("claude")
+    board.post(
+        pr,
+        "new-plan",
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met -->\nGood",
+        "claude-login",
+    )
+    board.poll()
+    board.finish("claude")
+    board.queue.finish(old.id, owner="codex", handoff_comment_id=None)
+    board.poll()
+    board.ready(pr, pr.head, "new-ready")
+    board.poll()
+    assert _outcome(board.queue, "new-ready") == "queued-review"
+    retry = board.claim("codex")
+    assert retry.request.action == "build" and retry.request.attempt == 2
+    board.queue.finish(retry.id, owner="codex", handoff_comment_id="obsolete-ready")
+    pr.push(sha(2))
+    board.post(pr, "obsolete-ready", _ready("codex", pr.head), "codex-login")
+    board.poll()
+
+    assert _outcome(board.queue, "obsolete-ready") == "rejected-ready-author"
+    with board.queue.connect() as connection:
+        reviews = connection.execute(
+            "SELECT recipient FROM jobs WHERE action = 'review' "
+            "AND source_comment_id = 'obsolete-ready'"
+        ).fetchall()
+    assert reviews == []
+    assert not pr.merged
+
+
 def _routed_board(tmp_path: Path, *, conflict: bool):
     board = Board(tmp_path)
     board.factory = replace(board.factory, reviewer_harness="cursor", reviewer_model="gpt-5")

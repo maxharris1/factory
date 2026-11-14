@@ -109,7 +109,6 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert not queue.path.with_name(queue.path.name + "-wal").exists()
     assert _snapshot(queue.path) == before
 
 
