@@ -5,9 +5,10 @@ stdout on a pipe and hands the pipe to a `Session` here:
 
 * `harness_argv` adds the fixed stream flags to the bot's own command:
   Claude Code (`claude -p ...`) gets `--output-format stream-json --verbose`
-  and Codex (`codex exec ...`) gets `--json`. A command that already picks an
-  output format, or that is neither, is run as given. Nothing from a job
-  row reaches the argv; the flags are constants.
+  and Codex (`codex exec ...`) gets `--json`. So does codex-bot's wrapper
+  around it (`<wrapper> exec ...`, #151), right after its `exec`. A command
+  that already picks an output format, or that is neither, is run as given.
+  Nothing from a job row reaches the argv; the flags are constants.
 * Every stdout line is appended to `<state dir>/events.jsonl` (mode 600, in
   a mode-700 directory) on the box that runs `orch job run`: the waiter's
   job directory ($ORCH_JOB_STATE_DIR), else `telemetry-<bot>/<job-id>`
@@ -40,10 +41,13 @@ stdout on a pipe and hands the pipe to a `Session` here:
   rewritten with each heartbeat and `job_telemetry.updated_at` moves with
   `jobs.last_activity_at` (`last_seen` reads it, for the stale and health
   checks of #91 and #92).
-* Claude Code's `rate_limit_event` lines give subscription usage readings
-  (lib/usage_readings.py, #151): the 5-hour and 7-day used fraction, reset
-  time and status word only. They are written to `usage_readings` in the
-  same transaction as the telemetry row, per harness, bot and device.
+* Subscription usage readings (lib/usage_readings.py, #151): the 5-hour
+  and 7-day used fraction and reset time only. Claude's come from the
+  `get_usage` probe at the job's start (lib/usage_probe.py, `add_usage`);
+  a box Codex run's come from its own session rollout, found by the
+  `thread.started` thread id and read on each flush (lib/codex_rollout.py).
+  They are written to `usage_readings` in the same transaction as the
+  telemetry row, per harness, bot and device.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels). Defense in depth, they are
@@ -100,7 +104,10 @@ from typing import IO, Any
 from lib.codex_sandbox import exec_index
 from lib.job_token import PROOF_ENV
 from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
-from lib.usage_readings import Reading, parse_claude, store
+from lib.codex_rollout import THREAD_ID
+from lib.codex_rollout import latest as rollout_latest
+from lib.codex_rollout import default_home as codex_home
+from lib.usage_readings import Reading, parse_codex, store
 
 TABLE = "job_telemetry"
 STATE_DIR_ENV = "ORCH_JOB_STATE_DIR"
@@ -206,7 +213,9 @@ def last_seen(connection: sqlite3.Connection, job_id: str) -> float | None:
 # --- the harness argv ---------------------------------------------------------
 
 
-def harness_argv(command: Sequence[str]) -> tuple[list[str], str | None]:
+def harness_argv(
+    command: Sequence[str], bot_harness: str | None = None
+) -> tuple[list[str], str | None]:
     """The command with its stream flags added, and the harness it names.
 
     Only constants are added. `claude` with `-p`/`--print` and no
@@ -214,7 +223,10 @@ def harness_argv(command: Sequence[str]) -> tuple[list[str], str | None]:
     which stream-json needs with --print); `codex ... exec` (or `e`) with no
     `--json` gets `--json` right after the subcommand word, found by skipping
     option values (`codex --profile exec exec` names its subcommand second).
-    Anything else is returned unchanged.
+    For a codex bot (`bot_harness` "codex"), a wrapper whose own first word
+    is `exec` (codex-bot's `codex-review-harness exec ...`, which passes its
+    arguments on to `codex exec`) is read the same way (#151). Anything else
+    is returned unchanged.
     """
     argv = list(command)
     if not argv:
@@ -230,11 +242,11 @@ def harness_argv(command: Sequence[str]) -> tuple[list[str], str | None]:
         if "--verbose" not in rest:
             extra.append("--verbose")
         return [argv[0], *extra, *rest], "claude"
-    if name == "codex":
-        index = exec_index(argv)
+    if name == "codex" or bot_harness == "codex":
+        index = exec_index(["codex", *rest])
         options = rest[: rest.index("--")] if "--" in rest else rest
         if index is None or "--json" in options or "--experimental-json" in options:
-            return argv, "codex"
+            return argv, "codex" if name == "codex" else None
         return [*argv[: index + 1], "--json", *argv[index + 1 :]], "codex"
     return argv, None
 
@@ -621,7 +633,7 @@ class Summary:
         self._seen_items: set[str] = set()
         self._messages: dict[str, tuple[int, int, int]] = {}
         self._totals = False
-        self.usage: dict[str, Reading] = {}
+        self.thread_id: str | None = None
 
     # -- shared --
 
@@ -633,9 +645,6 @@ class Summary:
             self._claude(kind, event, now)
         elif kind in _CODEX_EVENTS:
             self._codex(kind, event, now)
-        elif kind == "rate_limit_event" and self.harness == "claude":
-            for reading in parse_claude(event, now):
-                self.usage[reading.window] = reading
 
     def _tool(self, name: str) -> str:
         """Count a call of the harness's tool `name`; its label for the step."""
@@ -766,7 +775,11 @@ class Summary:
     # -- Codex: codex exec --json --
 
     def _codex(self, kind: str, event: dict, now: float) -> None:
-        if kind == "turn.started":
+        if kind == "thread.started":
+            thread_id = event.get("thread_id")
+            if isinstance(thread_id, str) and THREAD_ID.fullmatch(thread_id):
+                self.thread_id = thread_id
+        elif kind == "turn.started":
             self.turns += 1
         elif kind == "turn.completed":
             usage = event.get("usage")
@@ -922,9 +935,12 @@ class Session:
         monotonic: Callable[[], float] = time.monotonic,
         worker_env: bool = False,
         device: str = "box",
+        rollout_home: str | None = None,
     ):
         self.connect = connect
         self.device = device
+        self.rollout_home = rollout_home  # a box Codex run's CODEX_HOME (#151)
+        self.usage: dict[str, Reading] = {}
         self.job_id = job_id
         self.bot = bot
         self.repo = repo
@@ -1064,8 +1080,9 @@ class Session:
     def _write(self, code: int | None, *, finished: bool) -> None:
         try:
             data = self.row(code, finished=finished)
+            self._read_rollout()
             with self._lock:
-                readings = list(self.summary.usage.values())
+                readings = list(self.usage.values())
             marks = ", ".join("?" for _ in COLUMNS)
             with closing(self.connect()) as connection:
                 with connection:
@@ -1084,6 +1101,22 @@ class Session:
                     )
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
+
+    def add_usage(self, readings: list[Reading]) -> None:
+        """Keep each window's newest reading; the next flush stores them (#151)."""
+        with self._lock:
+            for reading in readings:
+                kept = self.usage.get(reading.window)
+                if kept is None or reading.observed_at >= kept.observed_at:
+                    self.usage[reading.window] = reading
+
+    def _read_rollout(self) -> None:
+        if self.harness != "codex" or self.rollout_home is None:
+            return
+        with self._lock:
+            thread_id = self.summary.thread_id
+        if thread_id is not None:
+            self.add_usage(parse_codex(rollout_latest(self.rollout_home, thread_id), self.clock()))
 
     def _send_handoff(self) -> None:
         """Copy the final message's ORCH-HANDOFF line to stdout, once (#87)."""
@@ -1133,7 +1166,8 @@ def start_session(
     if not enabled(env):
         return None
     try:
-        argv, harness = harness_argv(command)
+        argv, harness = harness_argv(command, HARNESS_BY_BOT.get(bot))
+        harness = harness or HARNESS_BY_BOT.get(bot, "other")
         scrub = Scrubber(env, blind=worker_env)
         raw = EventLog(
             state_dir(job_id, bot, database, env) / RAW_LOG_NAME, max_bytes=max_log_bytes, log=log
@@ -1146,7 +1180,7 @@ def start_session(
         job_id=job_id,
         bot=bot,
         repo=repo,
-        harness=harness or HARNESS_BY_BOT.get(bot, "other"),
+        harness=harness,
         argv=argv,
         raw_log=raw,
         scrub=scrub,
@@ -1154,4 +1188,5 @@ def start_session(
         stdout=stdout if stdout is not None else getattr(sys.stdout, "buffer", None),
         worker_env=worker_env,
         device=device,
+        rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
     )

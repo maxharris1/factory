@@ -53,7 +53,7 @@ def _accounts(machines: MachinesConfig | None) -> list[Account]:
 def _rows(connection: sqlite3.Connection) -> dict[Account, dict[str, Reading]] | None:
     try:
         rows = connection.execute(
-            f"SELECT device, harness, bot, window, used, resets_at, status, observed_at"
+            f"SELECT device, harness, bot, window, used, resets_at, observed_at"
             f" FROM {TABLE} ORDER BY device, harness, bot LIMIT {ROW_LIMIT}"
         ).fetchall()
     except sqlite3.OperationalError:
@@ -72,14 +72,12 @@ def _rows(connection: sqlite3.Connection) -> dict[Account, dict[str, Reading]] |
 
 def _window(reading: Reading | None, now: float) -> dict:
     if reading is None:
-        return {"used": None, "resets_at": None, "observed_at": None, "status": None,
-                "state": "no reading"}
+        return {"used": None, "resets_at": None, "observed_at": None, "state": "no reading"}
     state = window_state(reading, now)
     return {
         "used": reading.used if state == "ok" else None,
         "resets_at": reading.resets_at,
         "observed_at": reading.observed_at,
-        "status": reading.status,
         "state": state,
     }
 
