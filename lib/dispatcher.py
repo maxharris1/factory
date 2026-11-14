@@ -1778,6 +1778,8 @@ class Dispatcher:
             if fresh is not None and fresh.merged:
                 # #108: the next poll's own read records the merge.
                 return True, "ready-on-merged-pr"
+            if fresh is not None and self._review_context(fresh)[0] == "abandoned":
+                return True, "ready-on-closed-pr"
             if fresh is not None:
                 head = _matching_head(reported_head, fresh.current_head)
             if head is None:
@@ -1898,7 +1900,6 @@ class Dispatcher:
         if fresh.merged:
             return True, "ready-on-merged-pr"
         if fresh.closed:
-            self._abandon_closed(fresh)
             return True, "ready-on-closed-pr"
         head = _matching_head(reported_head, fresh.current_head)
         if head is None:
@@ -2399,7 +2400,6 @@ class Dispatcher:
             self.record_terminal(ticket.repo, ticket.ticket_id, "merged", ticket)
             return
         if ticket.closed:
-            self._abandon_closed(ticket)
             return
         if row["workflow_state"] == "updating":
             # An update job is out: its ready (T2) or failure (T6) moves on,
@@ -3211,13 +3211,19 @@ class Dispatcher:
         )
 
     def _fresh_ticket(self, ticket: TrackedTicket) -> TrackedTicket | None:
-        """The ticket read again, uncached, or None when the source cannot."""
+        """The ticket read again, uncached, or None when the source cannot.
+
+        A fresh read that shows a watched PR closed unmerged abandons it
+        (#130) before the caller acts on the read."""
         if self._fresh_reader is None:
             return None
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        return self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        fresh = self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        if fresh is not None and fresh.closed and not fresh.merged and self._watched(fresh):
+            self._abandon_closed(fresh)
+        return fresh
 
     def _enqueue_or_flag(
         self,
@@ -5023,7 +5029,7 @@ class Dispatcher:
                 "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
                 (repo.lower(), ticket_id),
             ).fetchone()
-        return row is not None and row["workflow_state"] in FINISHED_STATES
+        return row is not None and row["workflow_state"] in (*FINISHED_STATES, "abandoned")
 
     def _is_stuck_identity(self, repo: str, ticket_id: str) -> bool:
         with self._connect() as connection:

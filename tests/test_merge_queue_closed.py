@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from lib.queue import Job
 from lib.update_check import UpdateClass
-from tests.merge_queue_support import Board, sha
+from tests.merge_queue_support import PR, Board, sha
 from tests.test_merge_queue_gate import after_board
 
 OK = "<!-- orch:v1 kind=ok from=tracy-site role=approver head={head} -->"
@@ -69,14 +70,72 @@ def test_an_ok_on_a_closed_approved_pr_never_ships(tmp_path: Path, race: bool) -
     assert board.outcome("ok") != "shipped"
 
 
-def test_a_builder_ready_on_a_closed_queued_pr_starts_no_review(tmp_path: Path) -> None:
+def stale_open_on_the_first_read(board: Board, head: str) -> None:
+    tracked = board.tracked_tickets
+    first = [True]
+
+    def read(refs):
+        tickets = tracked(refs)
+        if first[0]:
+            first[0] = False
+            return tuple(replace(t, current_head=head, closed=False) for t in tickets)
+        return tickets
+
+    board.tracked_tickets = read
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_a_builder_ready_on_a_closed_queued_pr_starts_no_review(
+    tmp_path: Path, race: bool
+) -> None:
     board = Board(tmp_path)
     pr = board.open("42", sha(1))
     board.build_and_approve(pr, mergeable=None)
     assert board.state("42")["workflow_state"] == "merge-queue"
     pr.push(sha(2))
-    board.ready(pr, pr.head)
+    ready = board.ready(pr, pr.head)
+    if race:
+        stale_open_on_the_first_read(board, sha(1))
     pr.closed = True
+    board.poll()
     board.poll()
 
     assert_abandoned(board)
+    assert board.outcome(ready) != "queued-review"
+
+
+def a_reviewer_running_past_its_approve(board: Board, pr: PR) -> Job:
+    pr.mergeable, pr.mergeable_state = None, None
+    board.go(pr, "go-42")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    reviewer = board.claim("codex")
+    board.approve(pr)
+    board.poll()
+    return reviewer
+
+
+def an_update_builder_running(board: Board, pr: PR) -> Job:
+    board.build_and_approve(pr, mergeable=False)
+    assert board.state("42")["workflow_state"] == "updating"
+    return board.claim("claude")
+
+
+@pytest.mark.parametrize(
+    "start", [a_reviewer_running_past_its_approve, an_update_builder_running]
+)
+def test_a_job_failing_after_the_close_is_not_retried(tmp_path: Path, start) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    held = start(board, pr)
+    assert board.state("42")["approved_head"] == sha(1)
+    pr.closed = True
+    board.poll()
+    assert board.state("42")["workflow_state"] == "abandoned"
+    board.queue.finish(held.id, owner=held.request.recipient, handoff_comment_id=None)
+    board.poll()
+
+    assert_abandoned(board)
+    assert board.queue.claim(held.request.recipient) is None
