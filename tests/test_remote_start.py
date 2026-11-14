@@ -72,6 +72,7 @@ devices:
     harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
     workdir_root: {tmp_path}/remote/{{bot}}/work
     ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
 """.lstrip(),
         encoding="utf-8",
     )
@@ -173,6 +174,7 @@ def _remote_yaml(**fields: str) -> str:
         "harnesses": "{codex: codex-bot}",
         "workdir_root": "/home/work",
         "ssh_alias": "pc-wsl-{bot}",
+        "factory_root": "/home/{bot}/factory",
         **fields,
     }
     lines = ["devices:", "  - name: pc"]

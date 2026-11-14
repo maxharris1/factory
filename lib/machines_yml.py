@@ -16,6 +16,14 @@ never works on a mounted Windows drive. A whole path component may be
 the token {bot}, which resolves to the harness's bot user, so one device
 can give each bot its own home (/home/{bot}/factory-work).
 
+Every remote device also names a factory_root: the absolute path of that
+device's deployed factory checkout (skills/, bin/orch), which briefs
+rendered on the box use to name files that exist on the placed device.
+It is not workdir_root, the folder job worktrees are made under, which is
+empty at job start, so factory_root may not equal workdir_root or sit
+inside it. It follows the workdir_root path rules, {bot} included. The
+local device may name one too.
+
 Slots are counted per device name, so no two devices may share a
 tailscale_name (compared case-insensitively): that would give one host
 two slot budgets.
@@ -59,6 +67,7 @@ _DEVICE_KEYS = {
     "harnesses",
     "workdir_root",
     "ssh_alias",
+    "factory_root",
 }
 # An ssh_alias once {bot} is resolved: a bare Host alias. No user@, no
 # leading '-' (it would be read as an option), no spaces or shell syntax.
@@ -76,6 +85,7 @@ class Device:
     workdir_root: str | None = None
     placeholders: tuple[str, ...] = ()
     ssh_alias: str | None = None
+    factory_root: str | None = None
 
     @property
     def placeholder(self) -> bool:
@@ -108,6 +118,16 @@ class Device:
             return None
         return self.ssh_alias.replace(BOT_TOKEN, self.harnesses[harness])
 
+    def factory_root_for(self, harness: str) -> str | None:
+        """factory_root with {bot} resolved to the harness's bot user.
+
+        None when factory_root is unset (or a placeholder), or when the
+        device does not list the harness.
+        """
+        if self.factory_root is None or harness not in self.harnesses:
+            return None
+        return self.factory_root.replace(BOT_TOKEN, self.harnesses[harness])
+
 
 def tailscale_key(name: str) -> str:
     """One host, one key: Tailscale (DNS) names are case-insensitive."""
@@ -131,6 +151,11 @@ class MachinesConfig:
 
     def device(self, name: str) -> Device | None:
         return next((item for item in self.devices if item.name == name), None)
+
+    def factory_root(self, device_name: str, harness: str) -> str | None:
+        """The deployed factory checkout for harness on the named device."""
+        device = self.device(device_name)
+        return None if device is None else device.factory_root_for(harness)
 
 
 def is_placeholder(value: object) -> bool:
@@ -320,6 +345,34 @@ def _device(
         else:
             findings.append(Finding("error", f"{prefix}.workdir_root {problem}"))
 
+    factory_root: str | None = None
+    raw_factory = item.get("factory_root")
+    if "factory_root" not in item:
+        if not local:
+            findings.append(
+                Finding(
+                    "error",
+                    f"missing required field '{prefix}.factory_root' "
+                    "(every remote device names its deployed factory checkout, "
+                    "not workdir_root)",
+                )
+            )
+    elif is_placeholder(raw_factory):
+        placeholder("factory_root")
+    else:
+        problem = _workdir_problem(raw_factory)
+        if problem is None and workdir_root is not None and _is_within(
+            str(raw_factory), workdir_root
+        ):
+            problem = (
+                "must not be workdir_root or inside it "
+                "(it is the deployed factory checkout, not where jobs run)"
+            )
+        if problem is None:
+            factory_root = str(raw_factory)
+        else:
+            findings.append(Finding("error", f"{prefix}.factory_root {problem}"))
+
     ssh_alias: str | None = None
     raw_alias = item.get("ssh_alias")
     if local:
@@ -419,6 +472,7 @@ def _device(
         workdir_root=workdir_root,
         placeholders=tuple(placeholders),
         ssh_alias=ssh_alias,
+        factory_root=factory_root,
     )
 
 
@@ -462,6 +516,10 @@ def _workdir_problem(value: object) -> str | None:
     if value == FORBIDDEN_WORKDIR_ROOT or value.startswith(FORBIDDEN_WORKDIR_ROOT + "/"):
         return "must not be under /mnt/ (a mounted Windows drive on WSL)"
     return None
+
+
+def _is_within(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
 
 
 def _ssh_alias_problem(value: object) -> str | None:

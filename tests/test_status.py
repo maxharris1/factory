@@ -163,12 +163,14 @@ devices:
     harnesses: {cursor: cursor-bot}
     workdir_root: /home/work
     ssh_alias: pc-{bot}
+    factory_root: /home/{bot}/factory
   - name: mac
     tailscale_name: REPLACE_WITH_MAC_TAILSCALE_NAME
     slot_max: REPLACE_WITH_MAC_SLOT_MAX
     harnesses: REPLACE_WITH_MAC_HARNESSES
     workdir_root: /Users/work
     ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS
+    factory_root: /Users/{bot}/factory
 """.lstrip(),
         encoding="utf-8",
     )
