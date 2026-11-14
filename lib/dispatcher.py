@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib import project_rules
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -439,8 +440,21 @@ class Dispatcher:
             except Exception as exc:
                 self._record_poll_error(ticket, type(exc).__name__)
         self.reconcile_jobs()
+        self._record_factory_reads(source)
         if end is not None:
             end()
+
+    def _record_factory_reads(self, source: PollSource) -> None:
+        """Store each project's factory.md as this cycle read it (#152)."""
+        reads = getattr(source, "factory_reads", None)
+        if reads is None:
+            return
+        try:
+            cycle = reads()
+            with self._connect() as connection:
+                project_rules.record_reads(connection, cycle, self.queue.now())
+        except Exception as exc:
+            self.record_poll_error("factory", "-", type(exc).__name__)
 
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -4204,6 +4218,7 @@ class Dispatcher:
                 )
                 """
             )
+            project_rules.ensure_table(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_holds (
