@@ -139,7 +139,7 @@ def test_lock_without_a_factory_section_is_refused(tmp_path: Path) -> None:
     bump_pin(root, "a" * 40, "0.15.36")
     lock = root / "skills" / "skills.lock"
     text = lock.read_text(encoding="utf-8")
-    lock.write_text(text[: text.index("factory:")], encoding="utf-8")
+    lock.write_text(text[: text.index("factory:")] + text[text.index("kit:") :], encoding="utf-8")
     assert verify_pin(root) == ["skills.lock is missing factory"]
 
 

@@ -54,7 +54,8 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import LivePollSource, PollSourceError
-from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
+from lib.pstack_models import rules_text
+from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
@@ -107,9 +108,13 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   An unknown model name warns on stderr and still exits 0.
 
 install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checkout]
+               [--remove-claude-extras]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
   and ~/.cursor/skills. --cloud copies them into the project at
-  .claude/skills, .agents/skills, and .cursor/skills.
+  .claude/skills, .agents/skills, and .cursor/skills. A local install also
+  links pstack's agents/ and docs/ into ~/.claude and writes
+  ~/.claude/rules/pstack-models.md. --remove-claude-extras removes those
+  three and leaves the skills.
 
 doctor [--home PATH] [--project PATH] [--cloud]
        [--responses DIR] [--print-canary]
@@ -1635,17 +1640,24 @@ def _install_skills(argv: list[str]) -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--cloud", action="store_true")
     parser.add_argument("--allow-unstable-checkout", action="store_true")
+    parser.add_argument("--remove-claude-extras", action="store_true")
     args = parser.parse_args(argv)
     try:
         anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
-    if unstable:
-        print(f"orch install-skills: {unstable}", file=sys.stderr)
-        return 1
-    errors = install_skills(ROOT, anchor, mode)
+    if args.remove_claude_extras:
+        if mode != "local":
+            print("orch install-skills: --remove-claude-extras is for a local install", file=sys.stderr)
+            return 2
+        errors = remove_claude_extras(anchor, rules_text(ROOT))
+    else:
+        unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
+        if unstable:
+            print(f"orch install-skills: {unstable}", file=sys.stderr)
+            return 1
+        errors = install_skills(ROOT, anchor, mode, rules=rules_text(ROOT) if mode == "local" else None)
     if errors:
         for message in errors:
             print(message, file=sys.stderr)
