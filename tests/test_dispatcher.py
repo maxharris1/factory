@@ -241,7 +241,7 @@ class FakeSource:
         self.linear_query: str | None = None
         self.last_refs: tuple[TicketRef, ...] = ()
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         self.github_label = label_prefix
         return self.github
 
@@ -1534,10 +1534,12 @@ class RaisingSource(FakeSource):
         super().__init__()
         self.failing = failing
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(
+        self, label_prefix: str, *, exclude=frozenset()
+    ) -> tuple[TrackedTicket, ...]:
         if self.failing == "github_candidates":
             raise RuntimeError("listing failed")
-        return super().github_candidates(label_prefix)
+        return super().github_candidates(label_prefix, exclude=exclude)
 
     def tracked_tickets(
         self,
@@ -2566,7 +2568,7 @@ def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
 
     class BrokenGithub(CycleSource):
-        def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+        def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
             raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
 
     dispatcher.poll_once(BrokenGithub())
@@ -6421,7 +6423,9 @@ def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path
     now = [200.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
     poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
-    assert _reviews_71(queue) == []
+    # #108: the empty DB records the answered review cancelled, never claimable.
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert queue.claim("codex") is None
 
 
 def test_71_a_ready_for_a_replaced_head_queues_no_review(tmp_path: Path) -> None:

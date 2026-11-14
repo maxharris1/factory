@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lib.brief.common import QUESTIONS_LINES
+
 # The most a plan handoff carries: GitHub caps a comment at 65,536 characters.
 PLAN_HANDOFF_LIMIT = 60_000
 
@@ -14,6 +16,7 @@ def task_lines(facts: dict) -> list[str]:
         "plan handoff comment, never in a file in the repo.",
         f"3. Post the plan handoff below with `round={facts['plan_round']}/2`: "
         "`ac=met` when every criterion is mapped, `ac=unmet` when one is not.",
+        *QUESTIONS_LINES,
     ]
 
 

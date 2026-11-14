@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lib.brief.common import GH, QUESTIONS_LINES
 from lib.queue import Job
 
 
@@ -18,7 +19,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         f"1. Read the ticket and its brief (Job data). {plan_line}",
         f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
         "Test first.",
-        "3. Before `ready`, self-check: prove-it-works, deslop, no-comments.",
+        "3. Before `ready`, self-check: principle-prove-it-works, no-comments.",
         "4. Push, then post the ready handoff below with the head you pushed.",
         _title_line(facts),
         *builder_notes(job),
@@ -38,7 +39,7 @@ def _title_line(facts: dict) -> str:
         title = f"`{source}: <title>`"
     return (
         f"The PR's title starts with its source issue: {title}. If you open the PR, title it so; "
-        "if its title lacks the prefix, fix it with `env -u GH_TOKEN gh pr edit --title`."
+        f"if its title lacks the prefix, fix it with `{GH} pr edit --title`."
     )
 
 
@@ -46,6 +47,7 @@ def builder_notes(job: Job) -> list[str]:
     notes = [
         "Run test suites in the foreground, however long they take: never in the background. "
         "Print mode stops background tasks after your last turn, and unpushed work is lost.",
+        *QUESTIONS_LINES,
     ]
     if job.request.attempt > 1:
         notes.append(

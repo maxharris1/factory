@@ -1240,7 +1240,7 @@ def _read_db(
             """
             LEFT JOIN ticket_state AS state
               ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
-            WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+            WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'done')
             """
             if "ticket_state" in tables
             else ""

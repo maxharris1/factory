@@ -219,7 +219,7 @@ class SQLiteStatusReader:
                 FROM needs_attention AS flag
                 LEFT JOIN ticket_state AS state
                   ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
-                WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+                WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'done')
                 ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
                 """
             ).fetchall()
