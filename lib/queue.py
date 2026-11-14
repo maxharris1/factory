@@ -663,9 +663,10 @@ def cancel_queued(
 
 
 def cancel_if_finished(connection: sqlite3.Connection, job_id: str, now: float) -> bool:
-    """A harness job just put back in queued whose ticket has merged or is
-    done is cancelled instead (#130): whichever path released it, nothing
-    new runs for a finished ticket. Grok wakes are left alone."""
+    """A harness job just put back in queued whose ticket has merged, is
+    done or was abandoned is cancelled instead (#130): whichever path
+    released it, nothing new runs for a finished ticket. Grok wakes are
+    left alone."""
     if not _has_table(connection, "ticket_state"):
         return False
     finished = connection.execute(
@@ -673,7 +674,7 @@ def cancel_if_finished(connection: sqlite3.Connection, job_id: str, now: float) 
         SELECT 1 FROM jobs JOIN ticket_state AS ticket
           ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
         WHERE jobs.id = ? AND jobs.state = 'queued' AND jobs.recipient != 'grok'
-          AND ticket.workflow_state IN ('merged', 'done')
+          AND ticket.workflow_state IN ('merged', 'done', 'abandoned')
         """,
         (job_id,),
     ).fetchone()

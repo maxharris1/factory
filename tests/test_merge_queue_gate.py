@@ -158,6 +158,40 @@ def test_a_re_review_clears_the_approval_an_ok_would_ship(tmp_path: Path) -> Non
     assert board.actions.fast_forwards == []
 
 
+@pytest.mark.parametrize(("older_number", "younger_number"), [("2", "1"), ("1", "2")])
+def test_oks_in_one_poll_ship_the_oldest_approval_first(
+    tmp_path: Path, older_number: str, younger_number: str
+) -> None:
+    board = after_board(tmp_path)
+    older = board.open(older_number, sha(int(older_number)))
+    younger = board.open(younger_number, sha(int(younger_number)))
+    for pr in (older, younger):
+        board.go(pr, "go-" + pr.number)
+    board.poll()
+    for _ in (older, younger):
+        board.finish("claude")
+    for pr in (older, younger):
+        board.ready(pr, pr.head)
+    board.poll()
+    for _ in (older, younger):
+        board.finish("codex")
+    for pr in (older, younger):
+        board.approve(pr)
+    for pr in (older, younger):
+        board.post(
+            pr,
+            "ok-" + pr.number,
+            "<!-- orch:v1 kind=ok from=tracy-site role=approver head=" + pr.head + " -->",
+            "tracy-login",
+        )
+    board.poll()
+    assert board.actions.fast_forwards == [("main", older.head)]
+    assert board.outcome("ok-" + younger.number) is None
+
+    board.poll()
+    assert board.actions.fast_forwards == [("main", older.head), ("main", younger.head)]
+
+
 def test_an_ok_waits_its_turn_behind_an_older_approval(tmp_path: Path) -> None:
     board = after_board(tmp_path)
     older = board.open("1", sha(1))

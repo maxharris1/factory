@@ -450,6 +450,10 @@ class Dispatcher:
         self._stopped_due: set[tuple[str, str]] = set()
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
+        # #130: while the per-ticket pass runs, an approval later in it may
+        # not be recorded yet, so an after: ok's ship waits for the pass end.
+        self._ticket_pass = False
+        self._deferred_ships: dict[tuple[str, str], TrackedTicket] = {}
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -497,9 +501,18 @@ class Dispatcher:
         self._stopped_due.difference_update(
             (ticket.repo.lower(), ticket.ticket_id) for ticket in tracked
         )
-        for ticket in tracked:
+        self._ticket_pass, self._deferred_ships = True, {}
+        try:
+            for ticket in tracked:
+                try:
+                    self.process(ticket)
+                except Exception as exc:
+                    self._record_poll_error(ticket, type(exc).__name__)
+        finally:
+            self._ticket_pass = False
+        for key, ticket in self._deferred_ships.items():
             try:
-                self.process(ticket)
+                self.process(self._polled.get(key, ticket))
             except Exception as exc:
                 self._record_poll_error(ticket, type(exc).__name__)
         self._advance_merge_queues()
@@ -2658,9 +2671,14 @@ class Dispatcher:
     def _merge_turn(self, ticket: TrackedTicket) -> bool:
         """Whether a finish_line: merge ticket may merge now (#130): it heads
         its repo's merge queue and nothing in that repo merged this poll.
-        Every merge of a watched ticket passes this one gate."""
+        Every merge of a watched ticket passes this one gate. During the
+        per-ticket pass it defers, so the queue holds every approval this
+        poll records before one is chosen."""
         if ticket.factory.finish_line != "merge":
             return True
+        if self._ticket_pass:
+            self._deferred_ships[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+            return False
         if ticket.repo.lower() in self._merged_repos:
             return False
         members = self._merge_queue_members(ticket.repo)

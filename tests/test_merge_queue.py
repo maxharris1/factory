@@ -6,9 +6,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from lib.device_pool import DevicePool
 from lib.dispatcher import ShipError
 from lib.factory_md import HoldConfig
+from lib.queue import cancel_if_finished
 from tests.merge_queue_support import Board, sha
+from tests.test_remote_start import config_of, machines_file
 
 
 def test_approve_on_a_handoff_repo_enters_the_merge_queue_and_merges(tmp_path: Path) -> None:
@@ -203,6 +208,54 @@ def test_a_pr_closed_unmerged_ends_the_watch(tmp_path: Path) -> None:
     assert board.actions.states[-1] == "abandoned"
     board.poll()
     assert board.last_refs == ()
+
+
+def test_a_closed_pr_never_restarts_its_claimed_update(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pool = DevicePool(board.queue, config_of(machines_file(tmp_path, box_enabled=False)))
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    job, _ = pool.claim("claude")
+    assert job.request.action == "update-from-main"
+    pr.closed = True
+    board.poll()
+    assert board.state("42")["workflow_state"] == "abandoned"
+
+    board.now[0] += 301
+    board.poll()
+    assert pool.claim("claude") is None
+    assert board.jobs("update-from-main")[0]["state"] == "cancelled"
+
+
+def test_an_update_that_fails_after_its_pr_closed_is_not_retried(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    job = board.claim("claude")
+    pr.closed = True
+    board.poll()
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+    board.poll()
+
+    row = board.state("42")
+    assert (row["workflow_state"], row["update_failures"]) == ("abandoned", 0)
+    assert [job["state"] for job in board.jobs("update-from-main")] == ["failed"]
+
+
+@pytest.mark.parametrize("state", ["merged", "done", "abandoned"])
+def test_a_released_job_of_a_finished_ticket_is_cancelled(tmp_path: Path, state: str) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    job = board.queue.claim("claude")
+    with board.queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = ? WHERE ticket_id = '42'", (state,)
+        )
+        connection.execute("UPDATE jobs SET state = 'queued' WHERE id = ?", (job.id,))
+        assert cancel_if_finished(connection, job.id, board.now[0])
+    assert board.jobs("update-from-main")[0]["state"] == "cancelled"
 
 
 def test_a_merge_by_hand_is_observed(tmp_path: Path) -> None:
