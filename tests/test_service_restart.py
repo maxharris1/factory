@@ -12,6 +12,7 @@ and is SIGKILLed at teardown.
 from __future__ import annotations
 
 import json
+import sqlite3
 import os
 import signal
 import subprocess
@@ -140,9 +141,13 @@ def test_self_heal_retries_and_escalates_a_restart_that_cannot_stop(home: Path) 
         {"component": "waiter", "bot": "codex-bot", "device": "box", "configured": True,
          "label": label, "pid": 1234, "started_at": 0, "state": "up",
          "stale_code": True, "version": "111111111111"}]}
+    # An idle queue: self-heal drains a stale waiter whose job count it cannot read (#219).
+    db = state / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute("CREATE TABLE jobs (id TEXT, recipient TEXT, state TEXT)")
     passes = []
     for now in (1000, 1120, 1240, 1360):
-        facts = heal.facts_for("box", config, state, None, now)
+        facts = heal.facts_for("box", config, state, db, now)
         actions = heal.heal(report, facts=facts, state_dir=state, deploy=DEPLOY,
                             webhook=heal.Webhook(), environ=_env(home), now=now)
         passes.append([(a.kind, a.reason) for a in actions])
