@@ -31,8 +31,9 @@
 #
 # Drain (#219): self-heal writes waiter-<bot>.drain in the state directory
 # when this bot's waiter runs stale code with jobs in flight; the waiter
-# (told the path by ORCH_WAITER_DRAIN) then claims nothing until self-heal
-# restarts it after its last job. start removes the marker.
+# (told the path by ORCH_WAITER_DRAIN) then claims nothing, acknowledges in
+# waiter-<bot>.drain.ack, and self-heal restarts it after its last job.
+# start removes the marker and the ack.
 #
 # Environment: ~/.config/factory/waiter.env, if present, is read for the
 # waiter (ORCH_DB and other ORCH_* paths only). ORCH_DB defaults to
@@ -226,7 +227,7 @@ supervise() {
 
 start() {
     mkdir -p "$STATE"
-    rm -f "$STOPPED" "$DRAIN"
+    rm -f "$STOPPED" "$DRAIN" "$DRAIN.ack"
     launch
 }
 

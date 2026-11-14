@@ -301,9 +301,10 @@ heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
   component in 30 minutes. Logs to self-heal.log in the state directory
   and escalates to the Factory webhook when a component cannot be fixed or
   flaps. Never calls an LLM and never signals a job. deploy/self-heal.sh
-  runs it every 2 minutes. A stale-code waiter with running jobs is
-  drained (waiter-<bot>.drain: it claims nothing) and restarted once they
-  end.
+  runs it every 2 minutes. A stale-code waiter is drained first
+  (waiter-<bot>.drain: it claims nothing and confirms in
+  waiter-<bot>.drain.ack) and restarted only once it has confirmed and has
+  no running job.
 heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
             [--device NAME] [--dry-run]
   Fast-forward the checkout to origin/main (issue #219), keeping local

@@ -39,14 +39,20 @@ Per component (its health label), in order:
    grok.webhook_url_env); the URL and auth values come from the environment
    and are never logged.
 
-Drain (#219): a waiter running stale code with jobs in flight (running
-jobs for its harness in orch.db; a count that cannot be read counts as
-busy) is not restarted. Its marker waiter-<bot>.drain, naming the
-checkout's commit, makes the waiter stop claiming (lib/waiter.py); the
-first pass that finds no running job restarts it, and its service start
-removes the marker. A drain longer than DRAIN_ESCALATE_SECONDS escalates
-once per window and kills nothing. Markers of owned waiters no longer
-draining are removed.
+Drain (#219): a waiter running stale code (and not down) is restarted
+only once it has stopped claiming and has no job in flight. Its marker
+waiter-<bot>.drain, naming the checkout's commit, makes the waiter stop
+claiming (lib/waiter.py); the waiter then writes waiter-<bot>.drain.ack
+naming the same commit, after its last claim. A pass reads the ack before
+it counts running jobs (orch.db, by harness; a count that cannot be read
+counts as busy), so a restart decided on an ack and a zero count cannot
+race a claim. Writing a new marker removes the old ack. A pass that finds
+an idle waiter without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for
+it, so an idle waiter still restarts in the same pass; a busy one restarts
+on the first pass after its last job. A drain longer than
+DRAIN_ESCALATE_SECONDS escalates once per window and kills nothing. The
+marker and ack of owned waiters no longer draining are removed, and the
+waiter's service start removes both.
 
 Each restart and escalation is one line in self-heal.log; a skip, a
 deferral or a drain is logged only when a component's decision changes.
@@ -94,6 +100,8 @@ DEFER = "defer"
 DRAIN = "drain"
 ESCALATE = "escalate"
 DRAIN_ESCALATE_SECONDS = 2 * 60 * 60
+ACK_POLLS = 20
+ACK_POLL_SECONDS = 0.5
 
 Runner = Callable[[Sequence[str], Mapping[str, str], Path], int]
 Poster = Callable[[str, str, bytes, float], WebhookResult]
@@ -112,6 +120,9 @@ class Facts:
     waiter_jobs: Mapping[str, int | None] = field(default_factory=dict)
     # When each bot's drain marker was written (its mtime).
     drain_since: Mapping[str, float] = field(default_factory=dict)
+    # The commit each bot's waiter acknowledged draining for, when its ack
+    # matches the marker; read before waiter_jobs.
+    drain_acked: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -231,16 +242,20 @@ def decide(
         if item.get("state") != health.DOWN and service.startswith("waiter:"):
             bot = service.split(":", 1)[1]
             jobs = facts.waiter_jobs.get(bot, 0)
-            if jobs is None or jobs > 0:
+            acked = bool(report.get("code_version")) and (
+                facts.drain_acked.get(bot) == str(report.get("code_version")))
+            if jobs is None or jobs > 0 or not acked:
                 count = "unknown" if jobs is None else str(jobs)
-                actions.append(act(DRAIN, f"stale code, {count} running jobs"))
+                state = (f"{count} running jobs" if jobs != 0
+                         else "waiting for the waiter to stop claiming")
+                actions.append(act(DRAIN, f"stale code, {state}"))
                 since = facts.drain_since.get(bot)
                 if (escalation is None and since is not None
                         and now - since >= DRAIN_ESCALATE_SECONDS
                         and (key.escalated_at is None
                              or now - key.escalated_at >= WINDOW_SECONDS)):
-                    actions.append(act(ESCALATE, f"draining for {int((now - since) // 60)}m "
-                                                 f"with {count} running jobs"))
+                    actions.append(act(ESCALATE, f"draining for {int((now - since) // 60)}m, "
+                                                 f"{state}"))
                 continue
         if len(attempts) >= MAX_ATTEMPTS:
             actions.append(act(SKIP, f"backoff: {len(attempts)} restarts in "
@@ -298,15 +313,26 @@ def drain_path(state_dir: Path, bot: str) -> Path:
     return state_dir / f"waiter-{bot}.drain"
 
 
+def drain_ack_path(state_dir: Path, bot: str) -> Path:
+    """Where the waiter acknowledges the drain, after its last claim."""
+    return state_dir / f"waiter-{bot}.drain.ack"
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def _mark_drain(state_dir: Path, bot: str, version: str) -> None:
     """Write the drain marker naming the checkout's commit; an unchanged
-    marker keeps its mtime, which dates the drain."""
+    marker keeps its mtime, which dates the drain, and its ack. A new
+    marker drops the old ack first, so only an ack written after it counts."""
     path = drain_path(state_dir, bot)
-    try:
-        if path.read_text(encoding="utf-8").strip() == version:
-            return
-    except OSError:
-        pass
+    if _read(path) == version:
+        return
+    drain_ack_path(state_dir, bot).unlink(missing_ok=True)
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temp.write_text(version + "\n", encoding="utf-8")
     os.replace(temp, path)
@@ -401,6 +427,8 @@ def heal(
     post: Poster = send_webhook,
     clock: Callable[[], float] = time.monotonic,
     dry_run: bool = False,
+    refresh: Callable[[], Facts] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> list[Action]:
     """One self-heal pass: observe, decide, act, log, save."""
     log_path = state_dir / LOG_NAME
@@ -412,14 +440,25 @@ def heal(
     states = load_state(state_dir / STATE_NAME, log)
     observe(report, states, now)
     actions = decide(report, states, facts, now)
+    version = str(report.get("code_version") or "unknown")
+    if not dry_run:
+        for action in actions:
+            if action.kind == DRAIN:
+                _mark_drain(state_dir, action.service.split(":", 1)[1], version)
+        idle = {a.service.split(":", 1)[1] for a in actions
+                if a.kind == DRAIN and facts.waiter_jobs.get(a.service.split(":", 1)[1]) == 0}
+        if idle and refresh is not None:
+            for _ in range(ACK_POLLS):
+                sleep(ACK_POLL_SECONDS)
+                facts = refresh()
+                if all(facts.drain_acked.get(bot) == version for bot in idle):
+                    break
+            actions = decide(report, states, facts, now)
     child_env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
     done: dict[str, int] = {}
     draining = {a.service.split(":", 1)[1] for a in actions if a.kind == DRAIN}
     for action in actions:
         key = states.setdefault(action.label, KeyState())
-        if action.kind == DRAIN and not dry_run:
-            _mark_drain(state_dir, action.service.split(":", 1)[1],
-                        str(report.get("code_version") or "unknown"))
         if action.kind in (SKIP, DEFER, DRAIN):
             note = f"{action.kind} {action.label} ({action.reason})"
             if key.last != note:
@@ -452,6 +491,7 @@ def heal(
             bot = service.split(":", 1)[1] if service.startswith("waiter:") else None
             if bot is not None and bot not in draining:
                 drain_path(state_dir, bot).unlink(missing_ok=True)
+                drain_ack_path(state_dir, bot).unlink(missing_ok=True)
     acted = {action.label for action in actions}
     for label, key in states.items():
         if label not in acted:
@@ -490,14 +530,18 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
         owned.add(LISTENER_SERVICE)
     jobs: dict[str, int | None] = {}
     drains: dict[str, float] = {}
+    acked: dict[str, str] = {}
     for bot in health.OWNING_BOTS:
         if (config_dir / f"waiter-autostart-{bot}").is_file():
             owned.add(f"waiter:{bot}")
-            jobs[bot] = running_jobs(db, health.OWNING_BOTS[bot])
             try:
                 drains[bot] = drain_path(state_dir, bot).stat().st_mtime
             except OSError:
                 pass
+            ack = _read(drain_ack_path(state_dir, bot))
+            if ack is not None and ack == _read(drain_path(state_dir, bot)):
+                acked[bot] = ack
+            jobs[bot] = running_jobs(db, health.OWNING_BOTS[bot])
         if (state_dir / f"waiter-{bot}.stopped").exists():
             held.add(f"waiter:{bot}")
     if (state_dir / "poller.stopped").exists():
@@ -505,7 +549,7 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
     if (state_dir / "linear-webhook.stopped").exists():
         held.add(LISTENER_SERVICE)
     return Facts(device, frozenset(owned), frozenset(held), _listener_busy(db, now),
-                 jobs, drains)
+                 jobs, drains, acked)
 
 
 def running_jobs(db: Path | None, recipient: str) -> int | None:
@@ -598,9 +642,11 @@ def main(argv: list[str], *, stdin: TextIO | None = None,
     now = clock()
     db = os.environ.get("ORCH_DB")
     device = args.device or health.local_device(health.load_machines(args.machines))
+    db_path = Path(db) if db else None
     heal(
         report,
-        facts=facts_for(device, config_dir, state_dir, Path(db) if db else None, now),
+        facts=facts_for(device, config_dir, state_dir, db_path, now),
+        refresh=lambda: facts_for(device, config_dir, state_dir, db_path, now),
         state_dir=state_dir,
         deploy=args.deploy,
         webhook=_webhook(args.orch),

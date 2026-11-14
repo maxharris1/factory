@@ -343,13 +343,23 @@ def test_git_never_gets_the_webhook_secrets_or_a_github_token() -> None:
 # --- rollback ---------------------------------------------------------------------------------
 
 
-def test_a_failed_apply_rolls_back_to_the_old_head_and_local_edits(repo: Repo) -> None:
+def test_a_failed_apply_rolls_back_to_the_old_head_and_local_edits(
+        repo: Repo, monkeypatch) -> None:
     local = MACHINES.replace("line 1\n", "line 1 local\n")
     write(repo.box, "machines.yml", local)
-    write(repo.box, "lib/new.py", "untracked in the way\n")
+    write(repo.box, "lib/untracked.py", "untracked local file\n")
     write(repo.upstream, "machines.yml", MACHINES.replace("line 9\n", "line 9 upstream\n"))
     write(repo.upstream, "lib/new.py", "upstream adds this\n")
     repo.commit("adds new.py")
+    real = self_deploy.Git.out
+
+    def merge_then_fail(self, *args, **kwargs):
+        result = real(self, *args, **kwargs)
+        if args[0] == "merge":
+            raise self_deploy.GitError(args, 1)
+        return result
+
+    monkeypatch.setattr(self_deploy.Git, "out", merge_then_fail)
     old = repo.head()
     before = repo.snapshot()
     outcome, _, posts = run(repo)
@@ -357,6 +367,111 @@ def test_a_failed_apply_rolls_back_to_the_old_head_and_local_edits(repo: Repo) -
     assert "restored the old HEAD and local edits" in outcome.detail
     assert repo.head() == old
     assert repo.snapshot() == before
+    assert len(posts.calls) == 1
+
+
+# --- filesystem shapes a rollback could not restore are refused before any change ----------
+
+
+def tree(root: Path) -> dict[str, tuple[str, bytes | str]]:
+    """Every path under root but .git, with its type and contents or link target."""
+    out: dict[str, tuple[str, bytes | str]] = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root)
+        if rel.parts[0] == ".git":
+            continue
+        if path.is_symlink():
+            out[str(rel)] = ("link", os.readlink(path))
+        elif path.is_dir():
+            out[str(rel)] = ("dir", b"")
+        else:
+            out[str(rel)] = ("file", path.read_bytes())
+    return out
+
+
+def kept_file_is_a_directory(r: Repo) -> None:
+    (r.box / "orch.yml").unlink()
+    write(r.box, "orch.yml/local-settings.yml", "precious local data\n")
+
+
+def kept_file_is_a_symlink(r: Repo) -> None:
+    write(r.box.parent, "elsewhere/machines.yml", "live machines\n")
+    (r.box / "machines.yml").unlink()
+    (r.box / "machines.yml").symlink_to(r.box.parent / "elsewhere/machines.yml")
+
+
+def kept_parent_is_a_symlink(r: Repo) -> None:
+    write(r.box.parent, "deploy-live/install.sh", "#!/bin/sh\necho live\n")
+    (r.box / "deploy/install.sh").unlink()
+    (r.box / "deploy").rmdir()
+    (r.box / "deploy").symlink_to(r.box.parent / "deploy-live")
+
+
+@pytest.mark.parametrize("setup, reason", [
+    (kept_file_is_a_directory, "unsupported file type at orch.yml"),
+    (kept_file_is_a_symlink, "unsupported file type at machines.yml"),
+    (kept_parent_is_a_symlink, "unsupported file type at deploy"),
+])
+@pytest.mark.parametrize("collides", [False, True])
+def test_a_kept_path_that_is_not_a_plain_file_is_refused_untouched(
+        repo: Repo, setup, reason, collides) -> None:
+    setup(repo)
+    if collides:
+        write(repo.box, "lib/new.py", "untracked collision\n")
+        write(repo.upstream, "lib/new.py", "upstream file\n")
+    write(repo.upstream, "lib/code.py", "VERSION = 2\n")
+    repo.commit("upstream")
+    old = repo.head()
+    before = tree(repo.box)
+    outside = tree(repo.box.parent / "elsewhere") if (repo.box.parent / "elsewhere").exists() else {}
+    outcome, _, posts = run(repo)
+    assert (outcome.kind, outcome.detail) == ("refused", reason)
+    assert repo.head() == old
+    assert tree(repo.box) == before
+    if outside:
+        assert tree(repo.box.parent / "elsewhere") == outside
+    assert len(posts.calls) == 1
+
+
+def untracked_file(r: Repo) -> str:
+    write(r.box, "lib/new.py", "untracked local file\n")
+    return "lib/new.py"
+
+
+def ignored_file(r: Repo) -> str:
+    write(r.box, ".git/info/exclude", "*.local\n")
+    write(r.box, "notes.local", "ignored but precious\n")
+    return "notes.local"
+
+
+def untracked_directory(r: Repo) -> str:
+    write(r.box, "tools/scratch.txt", "local scratch\n")
+    return "tools"
+
+
+def untracked_symlink(r: Repo) -> str:
+    (r.box / "lib/new.py").symlink_to(r.box.parent / "nowhere")
+    return "lib/new.py"
+
+
+@pytest.mark.parametrize("setup, adds", [
+    (untracked_file, "lib/new.py"),
+    (ignored_file, "notes.local"),
+    (untracked_directory, "tools"),
+    (untracked_symlink, "lib/new.py"),
+])
+def test_a_local_path_in_the_way_of_an_upstream_addition_is_refused_untouched(
+        repo: Repo, setup, adds) -> None:
+    in_the_way = setup(repo)
+    write(repo.upstream, adds, "upstream adds this\n")
+    repo.commit("adds")
+    old = repo.head()
+    before = tree(repo.box)
+    outcome, _, posts = run(repo)
+    assert (outcome.kind, outcome.detail) == (
+        "refused", f"local path in the way of upstream: {in_the_way}")
+    assert repo.head() == old
+    assert tree(repo.box) == before
     assert len(posts.calls) == 1
 
 

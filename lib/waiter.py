@@ -74,8 +74,10 @@ claimed job, which the poller requeues after release_claimed_minutes (#77).
 Drain (#219): while the drain marker (`drain`, the state directory's
 waiter-<bot>.drain, which self-heal writes when this waiter runs stale code
 with jobs in flight) names another commit than the one this waiter loaded,
-it reaps and recovers as usual but claims nothing. Self-heal restarts it
-once its last job ends; a waiter already on that commit ignores the marker.
+it reaps and recovers as usual but claims nothing, and writes
+waiter-<bot>.drain.ack naming that commit from a step that has already
+decided not to claim. Self-heal restarts it only with that ack and no
+running job; a waiter already on that commit ignores the marker.
 """
 
 from __future__ import annotations
@@ -565,7 +567,26 @@ class Waiter:
             self.log(f"draining for {target}: no new claims until restarted "
                      f"({len(self._children) + len(self._remote)} running jobs)")
         self._draining_for = target
+        if target is not None:
+            self._acknowledge(target)
         return target is not None
+
+    def _acknowledge(self, target: str) -> None:
+        """Tell self-heal this waiter claims nothing more for `target`:
+        written only from a step that has already decided not to claim."""
+        assert self.drain is not None
+        ack = self.drain.with_name(self.drain.name + ".ack")
+        try:
+            if ack.read_text(encoding="utf-8").strip() == target:
+                return
+        except OSError:
+            pass
+        try:
+            temp = ack.with_name(f".{ack.name}.{os.getpid()}.tmp")
+            temp.write_text(target + "\n", encoding="utf-8")
+            os.replace(temp, ack)
+        except OSError as exc:
+            self.log(f"drain ack not written ({type(exc).__name__})")
 
     def serve(self, stop: Stop, *, poll: float = POLL_SECONDS) -> int:
         self.log(

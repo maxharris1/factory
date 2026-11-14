@@ -65,3 +65,20 @@ def test_the_marker_path_follows_the_service_then_the_state_dir(tmp_path: Path) 
         "codex-bot", {"ORCH_STATE_DIR": "/srv/state"}) == Path("/srv/state/waiter-codex-bot.drain")
     assert waiter_module.drain_marker("codex-bot", {}) == (
         Path.home() / ".local/state/factory/waiter-codex-bot.drain")
+
+
+def test_a_draining_waiter_acknowledges_only_from_a_step_that_claimed_nothing(
+        tmp_path: Path) -> None:
+    db, queue, _, waiter = draining_waiter(tmp_path, [])
+    ack = tmp_path / "waiter-claude-bot.drain.ack"
+    first = enqueue(queue, "a")
+    assert waiter.step() == first
+    assert not ack.exists()
+    waiter.drain.write_text("bbbbbbbbbbbb\n")
+    second = enqueue(queue, "b")
+    assert waiter.step() is None
+    assert ack.read_text() == "bbbbbbbbbbbb\n"
+    assert state(db, first) == "running" and state(db, second) == "queued"
+    ack.unlink()
+    assert waiter.step() is None
+    assert ack.read_text() == "bbbbbbbbbbbb\n"

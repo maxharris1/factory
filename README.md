@@ -1290,18 +1290,24 @@ Only the account that owns the checkout pulls:
   when a kept file conflicts, the checkout is not on `main`, has local
   commits, staged changes, an operation in progress, or edits to any other
   tracked file. A failure while applying resets to the old HEAD and
-  restores the backups. A fetch failing for 30 minutes escalates; its log
+  restores the backups. A kept file that is a directory or symlink (or
+  sits under a symlinked directory), or any local path, tracked or not,
+  where upstream adds a file, also leaves the checkout unchanged, so a
+  rollback never deletes local data. A fetch failing for 30 minutes escalates; its log
   line holds only the exit code.
 - When the merge changed `deploy/` or `requirements.txt` it runs
   `deploy/install.sh --update`, which installs requirements into the
   existing venv instead of recreating it (`self-deploy-install.log`).
 - The heal pass that follows runs as a new process, so the poller and
   waiters on the old commit show stale code and are restarted in the same
-  pass: the poller through `poller-service.sh restart`, an idle waiter
-  through `waiter-service.sh <bot> restart`. A waiter with jobs running is
-  drained instead: `waiter-<bot>.drain` makes it claim nothing, and it is
-  restarted once its last job ends. A running `orch job run` is never
-  stopped.
+  pass: the poller through `poller-service.sh restart`, a waiter through
+  `waiter-service.sh <bot> restart`. A stale waiter is drained first:
+  `waiter-<bot>.drain` makes it claim nothing, and it confirms in
+  `waiter-<bot>.drain.ack`. It is restarted only after that confirmation,
+  with no job running: an idle waiter within the same pass, a busy one once
+  its last job ends. A waiter started before #219 never confirms, so it
+  stays drained and escalates after 2 hours; restart it by hand once. A
+  running `orch job run` is never stopped.
 
 Each deploy, refusal and escalation is a `self-deploy:` line in
 `self-heal.log`; a repeated outcome is logged once. State is

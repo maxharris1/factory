@@ -1,5 +1,6 @@
 """#219 end to end: after self-deploy moves the checkout, the heal pass
-restarts the poller through its service script and an idle waiter at once;
+restarts the poller through its service script and an idle waiter in the
+same pass, once the waiter acknowledges it has stopped claiming;
 an up-to-date checkout restarts nothing."""
 
 from __future__ import annotations
@@ -20,9 +21,15 @@ def heal_pass(tmp_path: Path, checkout: Path, running: str, jobs: int = 0) -> Ru
         dict(component(version=running), stale_code=running != code),
     ]}
     runs = Runs()
+
+    def waiter_acknowledged() -> heal.Facts:
+        return heal.Facts("box", OWNED, waiter_jobs={"codex-bot": jobs},
+                          drain_acked={"codex-bot": code})
+
     heal.heal(data, facts=heal.Facts("box", OWNED, waiter_jobs={"codex-bot": jobs}),
               state_dir=tmp_path, deploy=checkout / "deploy", webhook=heal.Webhook(),
-              environ={"PATH": "/usr/bin"}, now=1_800_000_000.0, run=runs, clock=lambda: 0.0)
+              environ={"PATH": "/usr/bin"}, now=1_800_000_000.0, run=runs, clock=lambda: 0.0,
+              refresh=waiter_acknowledged, sleep=lambda _seconds: None)
     return runs
 
 

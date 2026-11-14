@@ -16,12 +16,17 @@ One pass, in order; the first guard that fails ends it:
    any other account exits at once and logs nothing.
 2. The checkout is left alone (logged, escalated once) when it is not on
    main, has a merge, rebase, cherry-pick or revert in progress, has
-   staged changes, or has a modified tracked file outside KEPT.
+   staged changes, has a KEPT path (or a parent of one) that is not a
+   regular file (or a real directory), or has a modified tracked file
+   outside KEPT.
 3. `git fetch origin main` (no secret in its environment; on failure only
    the exit code is logged). Failures for FETCH_ESCALATE_SECONDS escalate.
 4. HEAD is origin/main: nothing to do.
-5. HEAD is not an ancestor of origin/main (local commits): left alone,
-   escalated once.
+5. HEAD is not an ancestor of origin/main (local commits), or a local
+   path the old HEAD does not track (untracked, ignored, a directory or a
+   symlink) sits where upstream adds one: left alone, escalated once. So
+   the merge and a rollback's reset only ever touch tracked paths and the
+   backed-up kept files.
 6. Fast-forward keeping the local edits to KEPT files: each dirty kept
    file and `git diff HEAD` are backed up under self-deploy/<stamp>/ in
    the state directory; a kept file upstream also changed gets a 3-way
@@ -46,6 +51,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -194,11 +200,47 @@ def _shape(git: Git) -> tuple[str | None, list[str]]:
             return f"{marker} in progress", []
     if not git.ok("diff", "--cached", "--quiet"):
         return "staged changes", []
+    odd = _odd_kept_path(git.checkout)
+    if odd is not None:
+        return f"unsupported file type at {odd}", []
     dirty = git.names("diff", "--name-only", "-z", "HEAD")
     other = sorted(name for name in dirty if name not in KEPT)
     if other:
         return "local edits outside the keep list: " + ",".join(other[:5]), []
     return None, sorted(dirty)
+
+
+def _odd_kept_path(checkout: Path) -> str | None:
+    """The first part of a kept path that is not a real directory (parents)
+    or a regular file (the file itself), which a backup cannot restore."""
+    for name in KEPT:
+        parts = name.split("/")
+        for depth in range(1, len(parts) + 1):
+            try:
+                mode = os.lstat(checkout.joinpath(*parts[:depth])).st_mode
+            except FileNotFoundError:
+                break
+            leaf = depth == len(parts)
+            if not (stat.S_ISREG(mode) if leaf else stat.S_ISDIR(mode)):
+                return "/".join(parts[:depth])
+    return None
+
+
+def _in_the_way(git: Git, old: str, new: str) -> str | None:
+    """A local path the merge would have to overwrite or delete: one that
+    upstream adds (or a parent of it) but the old HEAD does not track."""
+    tracked = set(git.names("ls-tree", "-r", "-t", "-z", "--name-only", old))
+    for name in git.names("diff", "--name-only", "-z", "--no-renames", "--diff-filter=A",
+                          old, new):
+        parts = name.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            if prefix in tracked:
+                continue
+            if os.path.lexists(git.checkout / prefix):
+                return prefix
+            break
+    return None
 
 
 def _merge_kept(git: Git, files: Sequence[str], old: str, new: str
@@ -290,6 +332,12 @@ def run_pass(
     if not git.ok("merge-base", "--is-ancestor", old, new):
         return Outcome(REFUSED, f"local commits: HEAD {old[:12]} is not behind origin/main",
                        old, new), {}
+    try:
+        blocker = _in_the_way(git, old, new)
+    except GitError as exc:
+        return Outcome(REFUSED, f"git unreadable ({exc})", old, new), {}
+    if blocker is not None:
+        return Outcome(REFUSED, f"local path in the way of upstream: {blocker}", old, new), {}
     if dry_run:
         return Outcome(WOULD_DEPLOY, f"{old[:12]}..{new[:12]}", old, new), {}
     started = clock()

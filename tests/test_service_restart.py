@@ -141,15 +141,24 @@ def test_self_heal_retries_and_escalates_a_restart_that_cannot_stop(home: Path) 
         {"component": "waiter", "bot": "codex-bot", "device": "box", "configured": True,
          "label": label, "pid": 1234, "started_at": 0, "state": "up",
          "stale_code": True, "version": "111111111111"}]}
-    # An idle queue: self-heal drains a stale waiter whose job count it cannot read (#219).
+    # An idle queue that the waiter acknowledges draining for (#219).
     db = state / "orch.db"
     with sqlite3.connect(db) as connection:
         connection.execute("CREATE TABLE jobs (id TEXT, recipient TEXT, state TEXT)")
     passes = []
+
+    def waiter_acknowledges(now: float) -> heal.Facts:
+        marker = heal.drain_path(state, "codex-bot")
+        if marker.exists():
+            heal.drain_ack_path(state, "codex-bot").write_text(marker.read_text())
+        return heal.facts_for("box", config, state, db, now)
+
     for now in (1000, 1120, 1240, 1360):
         facts = heal.facts_for("box", config, state, db, now)
         actions = heal.heal(report, facts=facts, state_dir=state, deploy=DEPLOY,
-                            webhook=heal.Webhook(), environ=_env(home), now=now)
+                            webhook=heal.Webhook(), environ=_env(home), now=now,
+                            refresh=lambda now=now: waiter_acknowledges(now),
+                            sleep=lambda _seconds: None)
         passes.append([(a.kind, a.reason) for a in actions])
 
     assert all((heal.SKIP, "held stopped") not in actions for actions in passes)
