@@ -409,8 +409,11 @@ def test_failed_build_with_a_posted_ready_is_done_from_ready(tmp_path: Path) -> 
     assert outcome(flow.queue, ready_id) == "queued-review"
 
 
-def test_a_ready_whose_review_already_answered_is_done_from_ready(tmp_path: Path) -> None:
-    """#71 with #105: T2 calls the ready stale-ready-verdict, yet it was the fix's handoff."""
+def test_a_failed_fixs_ready_listed_with_its_verdict_is_reviewed_and_done_from_ready(
+    tmp_path: Path,
+) -> None:
+    """#105: the ready is the failed fix's handoff. A verdict listed with it
+    that T3 could not act on while fixing does not answer it (Codex PR #112 r5 F1)."""
     flow = Flow(tmp_path)
     fix = _failed_fix(flow)
     flow.head = HEADS[2]
@@ -430,7 +433,8 @@ def test_a_ready_whose_review_already_answered_is_done_from_ready(tmp_path: Path
     flow.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
     flow.dispatcher.process(flow.snapshot())
     flow.dispatcher.reconcile_jobs()
-    assert outcome(flow.queue, ready_id) == "stale-ready-verdict"
+    assert outcome(flow.queue, ready_id) == "queued-review"
+    assert outcome(flow.queue, "revise-2/3") == "queued-review-fix"
     assert _jobs(flow.queue, "fix")[0] == ("done", 1, ready_id)
     assert all(attempt == 1 for _state, attempt, _handoff in _jobs(flow.queue, "fix"))
     assert [event for event, _detail in _events(flow.queue)] == ["done-from-ready"]
@@ -631,3 +635,30 @@ def test_claude_print_mode_gets_the_bg_wait_ceiling_on_a_remote_device(
 )
 def test_orch_job_run_reads_the_job_a_retry_repeats(detail: str | None, expected: str | None) -> None:
     assert cli._retry_of(detail) == expected
+
+
+def test_a_builds_ready_listed_with_a_verdict_is_reviewed(tmp_path: Path) -> None:
+    """A verdict T3 could not act on while building does not answer the
+    build's ready (Codex PR #112 r5 F1)."""
+    flow = Flow(tmp_path)
+    assert flow.go("go-1") == "queued-build"
+    build = flow.queue.claim("claude")
+    assert build is not None
+    flow.head = HEADS[1]
+    ready_id = f"ready-{HEADS[1][:6]}"
+    flow.comments.append(
+        comment(ready_id, READY.format(head=HEADS[1]), author="claude-login", created_at=flow.now[0] + 10)
+    )
+    flow.comments.append(
+        comment(
+            "revise-1/3",
+            VERDICT.format(round="1/3", head=HEADS[1], verdict="REVISE", risk="high"),
+            author="codex-login",
+            created_at=flow.now[0] + 20,
+        )
+    )
+    flow.now[0] += 30
+    flow.queue.finish(build.id, owner="claude", handoff_comment_id=ready_id)
+    flow.dispatcher.process(flow.snapshot())
+    assert outcome(flow.queue, ready_id) == "queued-review"
+    assert outcome(flow.queue, "revise-1/3") == "queued-review-fix"

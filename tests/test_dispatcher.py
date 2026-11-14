@@ -5337,3 +5337,48 @@ def test_71_a_late_verdict_for_a_completed_round_does_not_answer_the_next_ready(
             connection.execute("SELECT workflow_state, review_round FROM ticket_state").fetchone()
         )
     assert state == ("review", 1)
+
+
+@pytest.mark.parametrize("listed_first", [True, False], ids=["verdict-listed-first", "listed-together"])
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE", "BLOCKED"])
+def test_71_a_verdict_that_never_acted_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str, listed_first: bool
+) -> None:
+    """A next-round verdict T3 and T4 did not act on, because the ticket was
+    still fixing or the dispatcher ignores its verdict, answers no ready
+    (Codex PR #112 r5 F1)."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    again = _ready_71("ready-2", NEW_HEAD_71, 140)
+    unacted = comment(
+        "unacted-2",
+        VERDICT.format(round="2/3", head=NEW_HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    now[0] = 160
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    if listed_first:
+        poll(ready, revise, unacted, head=NEW_HEAD_71)
+    now[0] = 200
+    poll(ready, revise, again, unacted, head=NEW_HEAD_71)
+    now[0] = 220
+    poll(ready, revise, again, unacted, head=NEW_HEAD_71)
+    assert _outcomes(queue)["ready-2"] == "queued-review"
+    assert [head for head, _state, _attempt in _reviews_71(queue)] == [HEAD_71, NEW_HEAD_71]
+    with queue.connect() as connection:
+        active = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action IN ('fix', 'review') "
+            "AND state IN ('queued', 'running')"
+        ).fetchone()[0]
+    assert active >= 1

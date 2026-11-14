@@ -1611,10 +1611,24 @@ class Dispatcher:
         above the cap, or a round past the one this ready asks for answers
         none: T3 and T4 act on no such verdict. Nor does one for a completed
         round that T3 did not act on: another verdict closed that round.
+        A verdict for the next round answers it only if T3 or T4 could act
+        on it: not BLOCKED, not while the ticket is still building or fixing,
+        and not one they already handled without acting.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         last_round = min(self._effective_cap(ticket), review_round + 1)
+        working = self._review_context(ticket)[0] in ("building", "fixing")
         with self._connect() as connection:
+            handled = {
+                str(row["comment_id"]): str(row["outcome"])
+                for row in connection.execute(
+                    """
+                    SELECT comment_id, outcome FROM handled_comments
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
             round_closers = {
                 str(row["comment_id"])
                 for row in connection.execute(
@@ -1637,8 +1651,14 @@ class Dispatcher:
             if (
                 round_number is not None
                 and round_number <= last_round
-                and (round_number > review_round or item.id in round_closers)
+                and (
+                    item.id in round_closers
+                    if round_number <= review_round
+                    else not working
+                    and (item.id not in handled or _acted_verdict(handled[item.id]))
+                )
                 and fields.get("kind") == "verdict"
+                and fields.get("verdict") in ("REVISE", "APPROVE")
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
