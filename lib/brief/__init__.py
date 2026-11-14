@@ -40,7 +40,9 @@ one rendered brief per job kind; regenerate it with
 
 from __future__ import annotations
 
-from lib.brief import build, fix, merge_only, plan, review
+from pathlib import Path
+
+from lib.brief import build, fix, merge_only, plan, review, skills
 from lib.brief.common import (
     BOTS,
     TEXT_LIMIT,
@@ -51,11 +53,13 @@ from lib.brief.common import (
     handoff_section,
     job_section,
     opening,
+    questions_handoff_section,
 )
 from lib.brief.context import context_section
 from lib.brief.plan import PLAN_HANDOFF_LIMIT
 from lib.brief.rules import finish_section, review_rules, rules
 from lib.factory_md import FactoryContext
+from lib.pstack_pin import ROOT
 from lib.queue import Job
 
 __all__ = [
@@ -96,11 +100,16 @@ def render_brief(
     context_ref: str | None = None,
     context_note: str | None = None,
     remote_device: str | None = None,
+    factory_root: str | None = None,
+    pin_root: Path = ROOT,
 ) -> str:
     """The brief for job, as `bot` runs it. See the module doc.
 
     remote_device names the remote device the job is placed on, or None on
-    the box."""
+    the box. factory_root is the placed device's deployed factory checkout;
+    the Skills section names files under it, checked against pin_root's
+    skills.lock. A plan, build, fix or review job whose files cannot be named
+    gets a questions-only brief (fail closed)."""
     if bot not in BOTS:
         raise BriefError(f"{bot!r} is not a harness bot")
     if f"{job.request.recipient}-bot" != bot:
@@ -108,11 +117,27 @@ def render_brief(
     kind = brief_kind(job)
     detail = detail_of(job)
     facts = facts_of(job, detail, context)
+    role = "reviewer" if kind == "review" else "builder"
+    router = (
+        None
+        if kind == "merge-only"
+        else skills.resolve(role, bot, factory_root, pin_root)
+    )
+    if isinstance(router, str):
+        middle = [
+            "## What to do\n" + "\n".join(skills.blocked_task_lines(router)),
+            questions_handoff_section(bot, role, facts),
+        ]
+    else:
+        middle = [
+            *([skills.section(router)] if router is not None else []),
+            "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
+            _handoff(job, bot, kind, facts, skills_read=router is not None),
+        ]
     parts = [
         opening(bot, kind),
         job_section(job, bot, kind, facts, remote_device),
-        "## What to do\n" + "\n".join(_task_lines(job, kind, facts)),
-        _handoff(job, bot, kind, facts),
+        *middle,
         finish_section(job, bot, remote_device),
         review_rules(),
         rules(),
@@ -138,7 +163,7 @@ def _task_lines(job: Job, kind: str, facts: dict) -> list[str]:
     return merge_only.task_lines(job, facts)
 
 
-def _handoff(job: Job, bot: str, kind: str, facts: dict) -> str:
+def _handoff(job: Job, bot: str, kind: str, facts: dict, *, skills_read: bool) -> str:
     if kind == "review":
         header, example = review.handoff(bot, facts)
     elif _is_plan(job, kind):
@@ -146,4 +171,4 @@ def _handoff(job: Job, bot: str, kind: str, facts: dict) -> str:
     else:
         header, example = build.ready_handoff(bot, facts)
     role = "reviewer" if kind == "review" else "builder"
-    return handoff_section(bot, role, facts, header, example)
+    return handoff_section(bot, role, facts, header, example, skills_read=skills_read)

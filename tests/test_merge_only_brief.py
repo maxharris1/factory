@@ -48,7 +48,7 @@ def test_keeps_merge_commit_no_rebase_no_force_push(section: str) -> None:
 
 def test_rules_and_finish_sections_stay() -> None:
     for text in variants():
-        assert "No force-push and no rebase of a pushed branch. Bring a base branch in by a merge commit only." in text
+        assert "Never start another factory job or message another bot." in text
         assert text.index("## What to do") < text.index("## Finish the job")
 
 
