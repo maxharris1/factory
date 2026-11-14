@@ -40,3 +40,13 @@ def test_dashboard_maps_the_update_job_and_names_the_new_states() -> None:
     assert JOB_STATES["update-from-main"] == "updating"
     assert GLOSS["merge-queue"] == "approved, waiting to merge"
     assert GLOSS["updating"] == "merging base in"
+
+
+def test_status_lists_an_approval_waiting_on_its_external_approver(tmp_path: Path) -> None:
+    board = Board(tmp_path, ship="after:max")
+    board.build_and_approve(board.open("42", sha(1)), mergeable=None)
+    assert board.state("42")["workflow_state"] == "waiting-external"
+
+    reader = SQLiteStatusReader(board.queue.path)
+    queue = build_status(reader, reader, clock=lambda: board.now[0]).merge_queue
+    assert [(row.ticket_id, row.state) for row in queue] == [("42", "waiting-external")]

@@ -31,7 +31,7 @@ def default_backup_path(environ: dict[str, str] | None = None) -> Path:
 
 
 def _check_apart(db: Path, backup: Path) -> None:
-    if backup.resolve().parent == db.resolve().parent:
+    if backup.resolve().parent.is_relative_to(db.resolve().parent):
         raise BackupError(
             f"backup {backup} is in the database's own directory; that directory "
             "is what a state loss takes"

@@ -668,6 +668,9 @@ class Dispatcher:
 
     def process(self, ticket: TrackedTicket) -> None:
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        if ticket.closed and self._watched(ticket):
+            self._abandon_closed(ticket)
+            return
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._redrive_handoffs(ticket)
@@ -1894,6 +1897,9 @@ class Dispatcher:
         fresh = fresh or ticket
         if fresh.merged:
             return True, "ready-on-merged-pr"
+        if fresh.closed:
+            self._abandon_closed(fresh)
+            return True, "ready-on-closed-pr"
         head = _matching_head(reported_head, fresh.current_head)
         if head is None:
             return True, "stale-ready-head"
@@ -2683,6 +2689,19 @@ class Dispatcher:
             return False
         members = self._merge_queue_members(ticket.repo)
         return not members or members[0]["ticket_id"] == ticket.ticket_id
+
+    def _watched(self, ticket: TrackedTicket) -> bool:
+        """An approved ticket the merge queue still watches (#130)."""
+        with self._connect() as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                  AND workflow_state IN ('merge-queue', 'updating', 'waiting-external')
+                  AND approved_head IS NOT NULL
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone() is not None
 
     def _merge_queue_members(self, repo: str | None = None) -> list[sqlite3.Row]:
         """Approved tickets still watched, oldest approval first (#130).
@@ -5519,6 +5538,8 @@ class ReviewShipper:
         result = ticket.ci.get(head)
         if result is None or result.status != "success":
             raise ShipError(f"CI on {head} is not green")
+        if ticket.closed:
+            raise RetryableStateError(f"PR closed before {head} shipped")
         if not dispatcher._merge_turn(ticket):
             raise RetryableStateError(f"{head} waits its turn in the merge queue")
         status, fresh = dispatcher._prepare_external_ship(request)

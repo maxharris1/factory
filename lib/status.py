@@ -502,7 +502,11 @@ def build_status(
                 (
                     row
                     for row in tracker_rows
-                    if not row.stuck and row.state in MERGE_QUEUE_STATES
+                    if not row.stuck
+                    and (
+                        row.state in MERGE_QUEUE_STATES
+                        or (row.state == "waiting-external" and row.approved_at is not None)
+                    )
                 ),
                 key=lambda row: (
                     row.repo.casefold(),
