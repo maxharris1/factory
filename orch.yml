@@ -18,6 +18,21 @@ trusted_logins:
     - claude-bot
     - codex-bot
     - cursor-bot
+# Who may give a capped-ticket go or a hold ok once github_app.enabled is
+# true (#122, docs/decisions/122-approver-credential.md). Until then
+# trusted_logins decides, as before. Max fills in the app's real numbers
+# after he installs it; orch never opens private_key_file. Fake numbers:
+approver_logins:
+  - maxharris1
+# approver_gh_config_dir: /home/grok/.config/factory/gh-approver
+# github_app:
+#   app_id: 123456
+#   installations:
+#     maxharris1: 1111111
+#     aut0-code: 2222222
+#   private_key_file: /home/box/.config/factory/github-app-bots.pem
+#   bot_login: factory-bots[bot]
+#   enabled: false
 # Before install, Max must add the confirmed stable Linear user ID under
 # trusted_linear_users. The poller refuses Linear polling without it.
 # intake (issue #85, docs/SPEC.md section 7): the backlog feeder turns a

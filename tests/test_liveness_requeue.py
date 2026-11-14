@@ -382,7 +382,7 @@ def test_an_early_exit_keeps_its_slot_while_the_worker_is_not_confirmed_gone(
 ) -> None:
     poller, job_id, ssh = _remote(tmp_path)
     marker = tmp_path / "go-offline"
-    # The device answers the start (127), then goes offline for the check.
+    # The device answers the launch, then goes offline: the follow is lost (#128).
     script = (
         f"import sys, time, pathlib; pathlib.Path({str(marker)!r}).touch(); "
         "time.sleep(0.5); sys.exit(127)"
@@ -390,7 +390,8 @@ def test_an_early_exit_keeps_its_slot_while_the_worker_is_not_confirmed_gone(
     env = ssh.env()
     proc = orch(
         "job", "run", "codex-bot", job_id, "--db", str(poller.path),
-        "--machines", str(poller.machines), "--", sys.executable, "-c", script,
+        "--machines", str(poller.machines), "--follow-grace", "2",
+        "--", sys.executable, "-c", script,
         env=env,
     )
     deadline = time.time() + 30
@@ -398,7 +399,7 @@ def test_an_early_exit_keeps_its_slot_while_the_worker_is_not_confirmed_gone(
         time.sleep(0.02)
     ssh.offline("fakepc-codex-bot").touch()
     _, err = proc.communicate(timeout=60)
-    assert proc.returncode == 127, err
+    assert proc.returncode == 255, err
     # Not confirmed gone: the slot stays, so nothing is requeued under it.
     assert poller.pool.placement(job_id) is not None
     assert poller.row(job_id)["state"] == "running"
@@ -671,7 +672,8 @@ def _tokenless_done(poller: Poller, job_id: str) -> subprocess.CompletedProcess:
 
 
 def _run_in_process(
-    poller: Poller, job_id: str, monkeypatch, env: dict | None = None, before: str = ""
+    poller: Poller, job_id: str, monkeypatch, env: dict | None = None, before: str = "",
+    expect: int = 1,
 ) -> list:
     """`orch job run` of a started harness that fails, in this process (its waiter is our parent).
 
@@ -700,9 +702,10 @@ def _run_in_process(
     monkeypatch.setattr(cli, "_fail_unfinished", failed)
     code = cli._job_run([
         "codex-bot", job_id, "--db", str(poller.path), "--machines", str(poller.machines),
-        "--interval", "0.2", "--", sys.executable, "-c", f"{before}raise SystemExit(1)",
+        "--interval", "0.2", "--follow-grace", "2",
+        "--", sys.executable, "-c", f"{before}raise SystemExit(1)",
     ])
-    assert code == 1
+    assert code == expect
     return competing
 
 
@@ -751,6 +754,7 @@ def test_r2_a_started_remote_autostart_run_whose_slot_stays_held_keeps_it_runnin
     competing = _run_in_process(
         poller, job_id, monkeypatch, env=ssh.env(),
         before=f"import pathlib; pathlib.Path({str(offline)!r}).touch(); ",
+        expect=255,  # #128: the device went quiet, so the follow is lost
     )
     assert competing == []
     row = poller.row(job_id)

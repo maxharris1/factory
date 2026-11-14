@@ -174,6 +174,9 @@ Call `StopLedger.report` for that ticket and stop. A second report of the same s
 - `stuck` — also post `stuck_comment` when this ticket has no `kind=stuck` comment yet.
 - `blocked` — a `verdict=BLOCKED`, a `RouteError`, or anything unparsed. Evidence is the verdict or the text that did not parse.
 - `capped` — revise at the cap, or a second acceptance-criterion-unmet verdict.
+- `go-not-from-approver` — with the GitHub App switch on (#122), a `go` on a capped ticket came from a login not in `approver_logins`, so no extra round was granted. Tell Max once; an extra round still needs his own words.
+
+Post a capped-ticket `go` or a hold `ok` with the environment from `lib.orchestrate.approval_post_env`, given `lib.orch_yml.approvals(config)`'s `app_trust` and `gh_config_dir`, and only with Max's own words for that ticket. With the switch on it uses only Max's approver profile; when it raises, ask Max to post it himself. Never post those two kinds as the app bot.
 - `abandoned` — Max dropped the ticket.
 
 ```

@@ -9,7 +9,7 @@ runs as the owning bot's own user and login, starts the job itself:
   device takes the job: the box, or a remote device such as the PC or the
   Mac. A remote job runs over the bot's own SSH alias through `orch job
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
-* it renders the standard brief for the job (lib/brief.py), with the target
+* it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
   GitHub token variable unset;
@@ -21,7 +21,8 @@ runs as the owning bot's own user and login, starts the job itself:
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
-(or `ORCH-HANDOFF: failed`); that output comes back over SSH into run.log,
+(or `ORCH-HANDOFF: failed`); that output is relayed by orch job run's
+follower (lib/remote_follow.py) into run.log,
 and when the run ends the waiter runs `orch job done` on the box: done with
 that comment id only when `orch job run` exited 0 and the marker is the last
 line of this run's output (run.log from the offset where this run began,
@@ -96,7 +97,8 @@ from lib.device_pool import DevicePool, Placement
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import MachinesConfig
-from lib.orch_yml import OrchConfig
+from lib.harness_env import ApproverProfileExposed, harness_environ
+from lib.orch_yml import Approvals, OrchConfig
 from lib.queue import Job, QueueError, SQLiteJobQueue
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
@@ -467,6 +469,7 @@ class Waiter:
         log: Log = lambda line: print(line, file=sys.stderr, flush=True),
         environ: Mapping[str, str] | None = None,
         alive: Callable[[int | None, str | None], bool] = pid_alive,
+        approvals: Approvals | None = None,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -484,7 +487,12 @@ class Waiter:
         self.orch = tuple(orch)
         self.spawn = spawn
         self.log = log
-        self.environ = dict(environ if environ is not None else os.environ)
+        try:
+            self.environ = harness_environ(
+                environ if environ is not None else os.environ, approvals
+            )
+        except ApproverProfileExposed as exc:
+            raise WaiterError(str(exc)) from exc
         self.alive = alive
         self._children: dict[str, Child] = {}
         # job id -> (its job directory, run.log size when the run started),

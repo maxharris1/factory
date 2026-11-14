@@ -998,8 +998,11 @@ def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
     published = json.loads(status.read_text())["telemetry"]["recent"][0]["steps"]
     assert stored == [step["label"] for step in published] == ["command"]
     raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
-    assert run.stdout == "plain worker line\n" and raw.endswith(run.stdout)
-    assert "welcome" not in raw and "late" not in raw
+    # #128: a detached run's device log holds its stdout and stderr together,
+    # so the profile's own output is relayed ahead of the report line; it is
+    # read with the scrubber still blind, and the report itself never kept.
+    assert run.stdout.endswith("plain worker line\n") and raw.endswith("plain worker line\n")
+    assert "late" not in raw
     for text in (run.stdout, run.stderr, raw):
         assert "ORCH-WORKER-ENV" not in text and WORKER_SECRET.encode().hex() not in text
     for text in (run.stdout, run.stderr, json.dumps(row), status.read_text()):

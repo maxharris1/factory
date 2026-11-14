@@ -317,7 +317,8 @@ def test_transport_for_unconfigured_is_the_noop() -> None:
     assert isinstance(transport_for(PushConfig()), NoopTransport)
 
 
-OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+# #106: a dead link fails in seconds, not after the 60 s send timeout.
+OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
 CONFIG_OPTIONS = ["-F", "/home/box/.ssh/config", *OPTIONS]
 RENAME_BOTH = (
     "cd -- {dir} && mv -f -- .status.json.push-tmp status.json"
@@ -330,8 +331,8 @@ def test_rsync_uploads_to_temp_names_then_renames_both_in_one_ssh(tmp_path: Path
     paths = files(tmp_path)
     transport = SshTransport(TARGET, "/srv/factory-dashboard", runner=runner)
     transport.send(paths)
-    rsync = ["rsync", "--quiet", "--timeout=30", "--chmod=F644", "-e",
-             "ssh -o BatchMode=yes -o ConnectTimeout=10", "--"]
+    rsync = ["rsync", "--quiet", "--timeout=10", "--chmod=F644", "-e",
+             "ssh " + " ".join(OPTIONS), "--"]
     assert [argv for argv, _ in runner.calls] == [
         [*rsync, str(paths[0]), f"{TARGET}:/srv/factory-dashboard/.status.json.push-tmp"],
         [*rsync, str(paths[1]), f"{TARGET}:/srv/factory-dashboard/.index.html.push-tmp"],
@@ -339,7 +340,7 @@ def test_rsync_uploads_to_temp_names_then_renames_both_in_one_ssh(tmp_path: Path
     ]
     for _, kwargs in runner.calls:
         assert kwargs["shell"] is False
-        assert kwargs["timeout"] == 60
+        assert kwargs["timeout"] == 20
         assert kwargs["check"] is False
         assert kwargs["stdin"] is subprocess.DEVNULL
 
@@ -399,7 +400,7 @@ def test_rsync_passes_the_ssh_config_to_its_ssh(tmp_path: Path) -> None:
     ).send(files(tmp_path))
     first = runner.calls[0][0]
     assert first[first.index("-e") + 1] == (
-        "ssh -F /home/box/.ssh/config -o BatchMode=yes -o ConnectTimeout=10"
+        "ssh " + " ".join(CONFIG_OPTIONS)
     )
     assert runner.calls[-1][0][:3] == ["ssh", "-F", "/home/box/.ssh/config"]
 
