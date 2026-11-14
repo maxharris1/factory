@@ -212,7 +212,8 @@ def test_a_box_with_no_factory_root_names_its_own_checkout(tmp_path: Path) -> No
 
 
 SOURCES = ("skills/skills.lock", "config/pstack-models.yml", "skills/pstack/skills/setup-pstack/SKILL.md")
-CORRUPTIONS = [b"broken: [\n", b"a: 1\na: 2\n", b"key: *missing\n", b"\xff\xfe\n", b"- a list\n", b""]
+CORRUPTIONS = [b"broken: [\n", b"a: 1\na: 2\n", b"key: *missing\n", b"\xff\xfe\n", b"- a list\n", b"",
+               b"? [a, b]\n: value\n", b"a: !!int zz\n", b"[" * 20000]
 
 
 def _pin_copy(root: Path, bad: str, content: bytes) -> Path:
@@ -234,11 +235,14 @@ def test_any_malformed_pin_input_fails_closed(tmp_path: Path, bad: str, content:
 
 
 @pytest.mark.parametrize("bad", SOURCES)
-def test_a_malformed_pin_input_still_starts_the_job_with_a_questions_brief(tmp_path: Path, bad: str) -> None:
+@pytest.mark.parametrize("content", CORRUPTIONS)
+def test_a_malformed_pin_input_still_starts_the_job_with_a_questions_brief(
+    tmp_path: Path, bad: str, content: bytes
+) -> None:
     from functools import partial
     from unittest.mock import patch
 
-    pin = _pin_copy(tmp_path / "pin", bad, CORRUPTIONS[0])
+    pin = _pin_copy(tmp_path / "pin", bad, content)
     run = tmp_path / "run"
     run.mkdir()
     with patch("lib.waiter.render_brief", partial(render_brief, pin_root=pin)):

@@ -33,6 +33,12 @@ def _construct_mapping(loader: yaml.SafeLoader, node: yaml.Node, deep: bool = Fa
     mapping: dict = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise ConstructorError(
+                "while constructing a mapping", node.start_mark, f"unhashable key ({exc})", key_node.start_mark
+            ) from exc
         if key in mapping:
             raise ConstructorError(
                 "while constructing a mapping",
@@ -51,7 +57,11 @@ UniqueKeyLoader.add_constructor(
 
 
 def load_yaml(text: str) -> object:
-    return yaml.load(text, Loader=UniqueKeyLoader)
+    """The parsed document; any malformed text raises yaml.YAMLError."""
+    try:
+        return yaml.load(text, Loader=UniqueKeyLoader)
+    except (ValueError, RecursionError) as exc:
+        raise yaml.YAMLError(f"invalid YAML: {exc}") from exc
 
 
 def split_front_matter(text: str) -> tuple[str, str]:
