@@ -543,10 +543,8 @@ def _poll(argv: list[str]) -> int:
                 beats = health.poller_beats(path, args.machines).start()
                 try:
                     loop.run(
-                        on_error=lambda exc: dispatcher.record_poll_error(
-                            "poll",
-                            "-",
-                            type(exc).__name__,
+                        on_error=lambda exc: dispatcher.record_poll_exception(
+                            "poll", "-", exc
                         ),
                         after_poll=after_poll,
                     )

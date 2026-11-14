@@ -1,10 +1,12 @@
 import ast
+import contextlib
 import json
 import os
 import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -18,7 +20,9 @@ from lib.dispatcher import (
     TrackedTicket,
     ship_mode,
 )
+from lib.dashboard import collect_snapshot
 from lib.factory_md import FactoryConfig
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -2392,6 +2396,300 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     second = delivery.jobs[0]
     assert second.id != first.id
     assert second.request.generation > first.request.generation
+
+
+class CycleSource(FakeSource):
+    def __init__(self, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.ended = 0
+
+    def end_cycle(self) -> None:
+        self.ended += 1
+
+
+def mark_stuck(
+    queue: SQLiteJobQueue,
+    repo: str,
+    ticket_id: str,
+    *,
+    source_comment_id: str | None,
+    timeout_seconds: int | None,
+) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds, generation
+            ) VALUES (?, ?, 0, 1, 'cancelled by hand', ?, ?, 1)
+            """,
+            (repo, ticket_id, source_comment_id, timeout_seconds),
+        )
+
+
+def stuck_wakes(queue: SQLiteJobQueue) -> dict[tuple[str, str], sqlite3.Row]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    return {(row["repo"], row["ticket_id"]): row for row in rows}
+
+
+def test_stuck_row_with_null_timeout_and_source_wakes_with_defaults(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    mark_stuck(queue, "owner/cleffy", "103", source_comment_id=None, timeout_seconds=None)
+    mark_stuck(queue, "owner/repo", "200", source_comment_id="c-200", timeout_seconds=900)
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    wakes = stuck_wakes(queue)
+    assert wakes[("owner/cleffy", "103")]["timeout_seconds"] == 3600
+    assert wakes[("owner/cleffy", "103")]["source_comment_id"] == "-"
+    assert wakes[("owner/repo", "200")]["timeout_seconds"] == 900
+    assert wakes[("owner/repo", "200")]["source_comment_id"] == "c-200"
+    assert source.ended == 1
+    with queue.connect() as connection:
+        assert connection.execute("SELECT count(*) FROM poll_errors").fetchone()[0] == 0
+
+
+def test_one_failing_stuck_wake_is_recorded_and_the_rest_still_wake(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    mark_stuck(queue, "owner/bad", "1", source_comment_id="c-1", timeout_seconds=600)
+    mark_stuck(queue, "owner/repo", "2", source_comment_id="c-2", timeout_seconds=600)
+    ensure = dispatcher._ensure_stuck_wake
+
+    def failing(repo: str, ticket_id: str) -> None:
+        if repo == "owner/bad":
+            raise TypeError("stuck row is broken")
+        ensure(repo, ticket_id)
+
+    dispatcher._ensure_stuck_wake = failing  # type: ignore[method-assign]
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    assert set(stuck_wakes(queue)) == {("owner/repo", "2")}
+    assert [job.request.ticket_id for job in delivery.jobs] == ["2"]
+    assert source.ended == 1
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchall()
+    assert [(row["repo"], row["ticket_id"], row["error"]) for row in errors] == [
+        ("owner/bad", "1", "stuck-wake:TypeError")
+    ]
+    assert "Traceback (most recent call last)" in errors[0]["detail"]
+    assert "in failing" in errors[0]["detail"]
+    assert errors[0]["detail"].endswith("TypeError: stuck row is broken")
+    assert "TypeError: stuck row is broken" in capsys.readouterr().err
+
+
+def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenGithub(CycleSource):
+        def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+            raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
+
+    dispatcher.poll_once(BrokenGithub())
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("github", "-", "RuntimeError")
+    assert "in github_candidates" in row["detail"]
+    assert "RuntimeError: gh exploded" in row["detail"]
+    assert "ghp_abcdefghijklmnop" not in row["detail"]
+
+
+def test_poll_loop_error_writes_its_traceback_to_poll_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenEnd(CycleSource):
+        def end_cycle(self) -> None:
+            raise ValueError("end of cycle failed")
+
+    PollLoop(dispatcher, BrokenEnd(), sleep=lambda _seconds: None).run(
+        max_polls=1,
+        on_error=lambda exc: dispatcher.record_poll_exception("poll", "-", exc),
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("poll", "-", "ValueError")
+    assert "in end_cycle" in row["detail"]
+    assert row["detail"].endswith("ValueError: end of cycle failed")
+    assert "ValueError: end of cycle failed" in capsys.readouterr().err
+
+
+def test_poll_errors_gains_a_detail_column_on_an_existing_database(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE poll_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                error TEXT NOT NULL,
+                recorded_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO poll_errors (repo, ticket_id, error, recorded_at) "
+            "VALUES ('poll', '-', 'TypeError', 1)"
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.record_poll_exception("poll", "-", RuntimeError("after migration"))
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT error, detail FROM poll_errors ORDER BY id"
+        ).fetchall()
+    assert rows[0]["error"] == "TypeError"
+    assert rows[0]["detail"] is None
+    assert rows[1]["error"] == "RuntimeError"
+    assert rows[1]["detail"] == "RuntimeError: after migration"
+
+
+def test_poll_error_detail_keeps_the_newest_frames_within_the_cap(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    def recurse(depth: int) -> None:
+        if depth == 0:
+            raise RuntimeError("bottom " + "x" * 10000)
+        recurse(depth - 1)
+
+    try:
+        recurse(50)
+    except RuntimeError as exc:
+        dispatcher.record_poll_exception("poll", "-", exc)
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert len(detail) <= 4000
+    assert detail.endswith("x" * 100)
+
+
+CANARY = "hunter" + "2"
+CREDENTIAL_BODIES = (
+    json.dumps({"password": CANARY}),
+    json.dumps({"client_secret": CANARY, "message": "Bad credentials"}),
+    json.dumps({"token": f"{CANARY} with spaces"}),
+    repr({"api_key": CANARY}),
+    f"Authorization: Bearer {CANARY}",
+    f"password={CANARY}",
+    json.dumps({"credentials": {"password": CANARY}}),
+    json.dumps({"credentials": [CANARY]}),
+    json.dumps({"auth": {"user": "bot", "pass": CANARY}}),
+    json.dumps({"errors": [{"extensions": {"secret": CANARY}}]}, indent=2),
+    repr({"credentials": {"password": CANARY}}),
+    f"<html><input name=pass value={CANARY}></html>",
+    json.dumps(json.dumps({"credentials": {"password": CANARY}}))
+    .replace("{", r"\u007b")
+    .replace("}", r"\u007d"),
+    json.dumps(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}}), safe='{}":, '),
+    "%7B%22credentials%22: %7B%22password%22: %22" + CANARY + "%22%7D%7D",
+    "&#123;&quot;credentials&quot;: &#123;&quot;password&quot;: &quot;"
+    + CANARY
+    + "&quot;&#125;&#125;",
+    r"\x7b'credentials': \x7b'password': '" + CANARY + r"'\x7d\x7d",
+    f"credentials: password = {CANARY}",
+    f"token: password = {CANARY}",
+    f"session cookie: auth key {CANARY}",
+    f"bad credentials for user bot pass {CANARY}",
+)
+
+
+class GhFailure(FakeSource):
+    def __init__(self, body: str, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.body = body
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        try:
+            raise RuntimeError(f"inner {self.body}")
+        except RuntimeError as inner:
+            raise ValueError(f"outer {self.body}") from inner
+
+
+def assert_canary_hidden(queue: SQLiteJobQueue, log: Path) -> None:
+    with queue.connect() as connection:
+        details = [
+            row["detail"]
+            for row in connection.execute("SELECT detail FROM poll_errors").fetchall()
+        ]
+    assert details and all(details)
+    assert not [detail for detail in details if CANARY in detail]
+    assert CANARY not in log.read_text()
+    snapshot = collect_snapshot(queue.path, log, now=100)
+    assert snapshot["poller"]["log"]["tail"]
+    assert CANARY not in json.dumps(snapshot)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(GhFailure(body))
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert "The above exception was the direct cause" in detail
+    assert "RuntimeError: inner" in detail
+    assert "ValueError: outer" in detail
+    assert_canary_hidden(queue, log)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_github_adapter_error_body_stays_out_of_detail_stderr_and_dashboard(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    actions = GitHubReviewActions(runner=lambda *_: GhResult(1, "", body))
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    tracked = ticket(comment("go", GO.format(state="building"), author="grok-login"))
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo','42','github',0)")
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(FakeSource(tracked))
+
+    with queue.connect() as connection:
+        error = connection.execute("SELECT error FROM poll_errors").fetchone()[0]
+    assert error == "RetryableStateError"
+    assert_canary_hidden(queue, log)
 
 
 def test_duplicate_ready_for_one_head_does_not_increment_gate_twice(

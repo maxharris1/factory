@@ -34,6 +34,10 @@ never beaten), each harness with queued jobs but no live waiter, and an
 orch.health.db that cannot be read is a needs-attention item linked to the
 Health tab, and such a queued job carries `no_waiter`. With no
 orch.health.db nothing is flagged.
+
+Projects (#152): `projects` is each orch.yml project's tracker, ship mode
+and round caps as the poller last read its factory.md (lib/project_rules.py).
+An unreadable or not-yet-read factory.md is `unknown` with the reason.
 """
 
 from __future__ import annotations
@@ -75,7 +79,9 @@ from lib.job_state import (
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
+from lib.project_rules import read_rows as read_project_rules
 from lib.queue import ACTIONS, RECIPIENTS, STATES
+from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
@@ -654,6 +660,7 @@ def collect_snapshot(
             alive,
         )
         telemetry = read_telemetry(connection, now)  # issue #93
+        rules = read_project_rules(connection)  # issue #152
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -753,8 +760,46 @@ def collect_snapshot(
         "feeder": db["feeder"],
         "statechart": chart,
         "telemetry": telemetry["rollup"],
+        "projects": _projects(orch, rules, now),
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+def _projects(
+    orch: OrchConfig | None, rules: dict[str, sqlite3.Row], now: float
+) -> list[dict]:
+    """Each orch.yml project's tracker, ship mode and round caps, in orch.yml
+    order, as the poller last read its factory.md (issue #152). A project
+    whose factory.md was unreadable, or not read yet, is `unknown` with the
+    reason and no values."""
+    if orch is None:
+        return []
+    projects: list[dict] = []
+    for project in orch.projects:
+        row = rules.get(project.repo.lower())
+        if row is None or row["reason"] is not None:
+            projects.append({
+                "repo": project.repo,
+                "status": "unknown",
+                "tracker": "unknown",
+                "ship": "unknown",
+                "approver": None,
+                "rounds": None,
+                "reason": _clean(row["reason"]) if row else "not read by the poller yet",
+                "read_age_seconds": _age(now, row["read_at"]) if row else None,
+            })
+            continue
+        ship, _, approver = str(row["ship"]).partition(":")
+        projects.append({
+            "repo": project.repo,
+            "status": "ok",
+            "tracker": _enum(row["tickets"], TICKETS),
+            "ship": _enum(ship, ("merge", "handoff", "after")),
+            "approver": _clean(approver) if approver else None,
+            "rounds": {"low": int(row["rounds_low"]), "high": int(row["rounds_high"])},
+            "read_age_seconds": _age(now, row["read_at"]),
+        })
+    return projects
 
 
 def _attention(

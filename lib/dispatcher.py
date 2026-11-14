@@ -7,12 +7,13 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from lib import attention
+from lib import attention, project_rules
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -272,6 +273,77 @@ _SECRET_ASSIGNMENT = re.compile(
     r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+_PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
+_CREDENTIAL_WORD = re.compile(
+    r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
+    r"|cookie|signature|bearer|basic)"
+)
+POLL_ERROR_FRAMES = 10
+POLL_ERROR_DETAIL_LIMIT = 4000
+_POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
+_POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_URL.sub("<url>", text)
+    text = _SECRET_HOST_PATH.sub("<host>", text)
+    text = _SECRET_TOKEN.sub("<secret>", text)
+    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+
+
+def _without_body(exc: BaseException) -> str:
+    name, separator, message = "".join(
+        traceback.format_exception_only(type(exc), exc)
+    ).partition(": ")
+    safe = getattr(exc, "safe_detail", None)
+    if isinstance(safe, str) and safe:
+        separator, message = ": ", safe
+    message = message.rstrip()
+    plain = _PLAIN_MESSAGE.match(message).group(0)
+    credential = _CREDENTIAL_WORD.search(plain)
+    if credential is not None:
+        plain = plain[: credential.start()] + "<credential omitted>"
+    elif plain != message:
+        plain += "<body omitted>"
+    return name.rstrip() + separator + plain + "\n"
+
+
+def poll_error_detail(exc: BaseException) -> str:
+    """The exception chain's messages and newest frames, redacted and capped.
+
+    A ShipError's safe_detail stands in for its message when set. Each
+    message is cut at its first character outside letters, digits, spaces
+    and _.,:;()'/=+-, so no structured or escaped body reaches the
+    redactors, and at its first credential-like word, so no redactor can
+    consume a key and leave its value. Stored in poll_errors.detail
+    beside the bare class name; the tail is kept when the cap cuts, so the
+    raising frame and message survive.
+    """
+    from lib.dashboard import redact
+
+    blocks: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        seen.add(id(current))
+        frames = "".join(traceback.format_tb(current.__traceback__, limit=-POLL_ERROR_FRAMES))
+        if frames:
+            blocks.append(f"Traceback (most recent call last):\n{frames}{_without_body(current)}")
+        else:
+            blocks.append(_without_body(current))
+        if current.__cause__ is not None:
+            link, current = _POLL_ERROR_CAUSE, current.__cause__
+        elif not current.__suppress_context__:
+            link, current = _POLL_ERROR_CONTEXT, current.__context__
+        else:
+            current = None
+        if current is None or id(current) in seen:
+            break
+        blocks.append(link)
+    text = _redact(redact("".join(reversed(blocks)).rstrip()))
+    if len(text) > POLL_ERROR_DETAIL_LIMIT:
+        text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
+    return text
 
 
 def safe_ship_error(exc: BaseException) -> str:
@@ -285,11 +357,7 @@ def safe_ship_error(exc: BaseException) -> str:
     detail = getattr(exc, "safe_detail", None)
     if not isinstance(detail, str):
         detail = str(exc)
-    detail = _SECRET_BODY.sub(" <body omitted>", detail)
-    detail = _SECRET_URL.sub("<url>", detail)
-    detail = _SECRET_HOST_PATH.sub("<host>", detail)
-    detail = _SECRET_TOKEN.sub("<secret>", detail)
-    detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
+    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
     detail = "".join(char if char.isprintable() else " " for char in detail)
     detail = " ".join(detail.split())
     text = f"{name}: {detail}" if detail else name
@@ -412,7 +480,7 @@ class Dispatcher:
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
-            self.record_poll_error("github", "-", type(exc).__name__)
+            self.record_poll_exception("github", "-", exc)
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -426,22 +494,35 @@ class Dispatcher:
                 ),
             )
         except Exception as exc:
-            self.record_poll_error("linear", "-", type(exc).__name__)
+            self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
         try:
             tracked = source.tracked_tickets(self._tracked_refs())
         except Exception as exc:
-            self.record_poll_error("tracked", "-", type(exc).__name__)
+            self.record_poll_exception("tracked", "-", exc)
             tracked = ()
         for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
-                self._record_poll_error(ticket, type(exc).__name__)
+                self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         self.reconcile_jobs()
+        self._record_factory_reads(source)
         if end is not None:
             end()
+
+    def _record_factory_reads(self, source: PollSource) -> None:
+        """Store each project's factory.md as this cycle read it (#152)."""
+        reads = getattr(source, "factory_reads", None)
+        if reads is None:
+            return
+        try:
+            cycle = reads()
+            with self._connect() as connection:
+                project_rules.record_reads(connection, cycle, self.queue.now())
+        except Exception as exc:
+            self.record_poll_error("factory", "-", type(exc).__name__)
 
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -456,7 +537,7 @@ class Dispatcher:
         try:
             report = self.feeder.feed_once()
         except Exception as exc:
-            self.record_poll_error("feeder", "-", type(exc).__name__)
+            self.record_poll_exception("feeder", "-", exc)
             return
         fresh_reader = getattr(source, "fresh_ticket", None)
         if fresh_reader is None:
@@ -465,21 +546,44 @@ class Dispatcher:
             try:
                 ticket = fresh_reader(ref)
             except Exception as exc:
-                self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
+                self.record_poll_exception(ref.repo, ref.ticket_id, exc)
                 continue
             if ticket is not None:
                 self._discover((ticket,), tracker=ref.tracker)
 
-    def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+    def record_poll_error(
+        self,
+        repo: str,
+        ticket_id: str,
+        error: str,
+        detail: str | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO poll_errors (
-                    repo, ticket_id, error, recorded_at
-                ) VALUES (?, ?, ?, ?)
+                    repo, ticket_id, error, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, error, self.queue.now()),
+                (repo.lower(), ticket_id, error, detail, self.queue.now()),
             )
+
+    def record_poll_exception(
+        self,
+        repo: str,
+        ticket_id: str,
+        exc: BaseException,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Record the class in poll_errors.error and the traceback in detail.
+
+        The same traceback goes to stderr, the poller's log.
+        """
+        error = f"{prefix}{type(exc).__name__}"
+        detail = poll_error_detail(exc)
+        print(f"orch poll: {repo} {ticket_id} {error}\n{detail}", file=sys.stderr, flush=True)
+        self.record_poll_error(repo, ticket_id, error, detail)
 
     def record_poll_deferral(self, detail: str) -> None:
         with self._connect() as connection:
@@ -3882,9 +3986,6 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
-        self.record_poll_error(ticket.repo, ticket.ticket_id, error)
-
     def _record_job_error(self, job: Job, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -3944,7 +4045,11 @@ class Dispatcher:
                 """
             ).fetchall()
         for row in rows:
-            self._ensure_stuck_wake(str(row["repo"]), str(row["ticket_id"]))
+            repo, ticket_id = str(row["repo"]), str(row["ticket_id"])
+            try:
+                self._ensure_stuck_wake(repo, ticket_id)
+            except Exception as exc:
+                self.record_poll_exception(repo, ticket_id, exc, prefix="stuck-wake:")
 
     def _ensure_stuck_wake(self, repo: str, ticket_id: str) -> None:
         with self._connect() as connection:
@@ -4000,8 +4105,10 @@ class Dispatcher:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"]),
-                timeout_seconds=int(state["timeout_seconds"]),
+                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                timeout_seconds=int(
+                    state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
+                ),
                 generation=generation,
                 detail=reason,
             ),
@@ -4205,6 +4312,7 @@ class Dispatcher:
                 )
                 """
             )
+            project_rules.ensure_table(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_holds (
@@ -4292,10 +4400,16 @@ class Dispatcher:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
-                    recorded_at REAL NOT NULL
+                    recorded_at REAL NOT NULL,
+                    detail TEXT
                 )
                 """
             )
+            if "detail" not in {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(poll_errors)").fetchall()
+            }:
+                connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_deferrals (

@@ -89,8 +89,9 @@ def store(db: Path, clock: float = NOW) -> health.HealthStore:
 
 
 def orch(*, listener: bool = False, push: bool = False) -> SimpleNamespace:
-    """What lib/health.py reads of an OrchConfig."""
+    """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
+        projects=(),
         linear_webhook=SimpleNamespace(public_url=None) if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
     )

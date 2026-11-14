@@ -18,5 +18,7 @@
   7. Live run data: **build now** (#147). This is Max's OK to partly reverse r10's no-text rule for task-list text, current
      task and sub-agent description and type only, still scrubbed and redacted.
   8. File the tickets but do not start them until Max says so.
+- **D3 #152 (data):** `status.json` now has `projects` (tracker, ship mode, approver, low and high round caps per `orch.yml`
+  project, or `status: unknown` with a `reason`). It backs SPEC 3.6 item 5's "[not shown by the dashboard today]" values; #141 renders it.
 - **Open question for Max:** the subscription headroom usage source per harness (#151 reports what each CLI exposes, then Max picks).
 - **Later (2026-11-13, 6:30 PM ET):** Max said to get these into the factory queue ("get these into the factory que").
