@@ -5382,3 +5382,33 @@ def test_71_a_verdict_that_never_acted_does_not_answer_the_next_ready(
             "AND state IN ('queued', 'running')"
         ).fetchone()[0]
     assert active >= 1
+
+
+@pytest.mark.parametrize("listed_first", [True, False], ids=["approve-listed-first", "listed-together"])
+def test_71_an_approve_for_an_unreviewed_head_does_not_answer_its_ready(
+    tmp_path: Path, listed_first: bool
+) -> None:
+    """T4 rejects an APPROVE for a head no review ran on, so it answers no
+    ready for that head (Codex PR #112 r6 F1)."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-a", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 160
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    again = _ready_71("ready-b", NEW_HEAD_71, 140)
+    approve = comment(
+        "approve-b",
+        VERDICT.format(round="1/3", head=NEW_HEAD_71, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    if listed_first:
+        poll(ready, approve, head=NEW_HEAD_71)
+    poll(ready, again, approve, head=NEW_HEAD_71)
+    now[0] = 180
+    poll(ready, again, approve, head=NEW_HEAD_71)
+    assert _outcomes(queue)["ready-b"] == "queued-review"
+    assert NEW_HEAD_71 in [head for head, _state, _attempt in _reviews_71(queue)]

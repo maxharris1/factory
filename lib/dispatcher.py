@@ -1613,11 +1613,16 @@ class Dispatcher:
         round that T3 did not act on: another verdict closed that round.
         A verdict for the next round answers it only if T3 or T4 could act
         on it: not BLOCKED, not while the ticket is still building or fixing,
-        and not one they already handled without acting.
+        not an APPROVE for a head other than the last reviewed one, and not
+        one they already handled without acting.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         last_round = min(self._effective_cap(ticket), review_round + 1)
         working = self._review_context(ticket)[0] in ("building", "fixing")
+        review_head = self._latest_review_head(ticket)
+        approvable = (
+            review_head is not None and _matching_head(head, review_head) is not None
+        )
         with self._connect() as connection:
             handled = {
                 str(row["comment_id"]): str(row["outcome"])
@@ -1656,6 +1661,7 @@ class Dispatcher:
                     if round_number <= review_round
                     else not working
                     and (item.id not in handled or _acted_verdict(handled[item.id]))
+                    and (approvable or fields.get("verdict") != "APPROVE")
                 )
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
