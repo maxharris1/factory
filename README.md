@@ -1178,10 +1178,13 @@ CLI's own output, captured by `orch job run` for every job and stored in
   that job's own rollout, `$CODEX_HOME/sessions/.../rollout-*-<thread
   id>.jsonl` (`lib/codex_rollout.py`): on each flush for a box job, and
   once over SSH when a remote job ends. Windows are matched by
-  `window_minutes` (300, 10080).
+  `window_minutes` (300, 10080). A reading is dated by its event's own
+  timestamp, so rereading an old event never makes it fresh. A newer
+  `token_count` whose `rate_limits` is null or missing, or that leaves a
+  window out, reads that window as `no reading`.
 
-A window that has reset, or a reading older than 24 hours, is `stale` and
-its `used` is null. Cursor shows `not tracked`, and a database without the
+A newer `no reading` replaces older numbers. A window that has reset, or a
+reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
 table shows `no telemetry`.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,

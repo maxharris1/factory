@@ -41,6 +41,7 @@ CODEX_EXEC = (FIXTURES / "codex-exec-json.jsonl").read_bytes()
 ROLLOUT = (FIXTURES / "codex-rollout.jsonl").read_bytes()
 THREAD = "00000000-0000-4000-8000-000000000151"
 CAPTURED = 1794673532.0  # 2026-11-14T16:25:32Z
+EMITTED = CAPTURED - 2  # the rollout fixture's last token_count, 2026-11-14T16:25:30Z
 FIVE_HOUR_RESET = 1794684332  # 2026-11-14T19:25:32Z
 SEVEN_DAY_RESET = 1795204800  # 2026-11-20T20:00:00Z
 WRAPPER = [
@@ -80,13 +81,21 @@ def test_the_get_usage_reply_gives_both_windows_as_fractions() -> None:
     ]
 
 
-def test_a_login_without_limits_gives_no_reading() -> None:
-    assert parse_get_usage(UNAVAILABLE, CAPTURED) == []
+@pytest.mark.parametrize(
+    "out", [UNAVAILABLE, reply({"five_hour": {"utilization": 1, "resets_at": "2026-11-14T19:25:32+00:00"}},
+                               available="true")])
+def test_a_login_without_limits_gives_no_reading(out: bytes) -> None:
+    assert parse_get_usage(out, CAPTURED) == [
+        Reading("five_hour", None, None, CAPTURED), Reading("seven_day", None, None, CAPTURED)]
 
 
-def test_a_null_window_is_no_reading_never_zero() -> None:
-    out = reply({"five_hour": None, "seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}})
-    assert parse_get_usage(out, CAPTURED) == [Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED)]
+@pytest.mark.parametrize("five_hour", [None, "missing", {"utilization": 3}])
+def test_a_null_or_missing_window_is_no_reading_never_zero(five_hour: object) -> None:
+    limits = {"seven_day": {"utilization": 24, "resets_at": "2026-11-20T20:00:00+00:00"}}
+    if five_hour != "missing":
+        limits["five_hour"] = five_hour
+    assert parse_get_usage(reply(limits), CAPTURED) == [
+        Reading("five_hour", None, None, CAPTURED), Reading("seven_day", 0.24, SEVEN_DAY_RESET, CAPTURED)]
 
 
 @pytest.mark.parametrize(
@@ -94,7 +103,6 @@ def test_a_null_window_is_no_reading_never_zero() -> None:
     [
         reply(None, subtype="error"),
         reply({"five_hour": {"utilization": 1, "resets_at": "2026-11-14T19:25:32+00:00"}}, request_id="other"),
-        reply({"five_hour": {"utilization": 1, "resets_at": "2026-11-14T19:25:32+00:00"}}, available="true"),
         b"not json\n",
         b"",
     ],
@@ -106,13 +114,14 @@ def test_an_error_another_reply_or_no_reply_gives_no_reading(out: bytes) -> None
 @pytest.mark.parametrize("utilization", [True, math.nan, 150, -1, "12"])
 def test_an_invalid_utilization_is_kept_as_unknown(utilization: object) -> None:
     out = reply({"five_hour": {"utilization": utilization, "resets_at": "2026-11-14T19:25:32+00:00"}})
-    [reading] = parse_get_usage(out, CAPTURED)
-    assert reading.used is None
+    reading = parse_get_usage(out, CAPTURED)[0]
+    assert reading.window == "five_hour" and reading.used is None
 
 
 @pytest.mark.parametrize("resets_at", ["2026-11-14T19:25:32", "soon", "2027-06-01T00:00:00+00:00", 1794684332, None])
-def test_a_bad_reset_drops_the_window(resets_at: object) -> None:
-    assert parse_get_usage(reply({"five_hour": {"utilization": 10, "resets_at": resets_at}}), CAPTURED) == []
+def test_a_bad_reset_is_no_reading(resets_at: object) -> None:
+    out = reply({"five_hour": {"utilization": 10, "resets_at": resets_at}})
+    assert parse_get_usage(out, CAPTURED)[0] == Reading("five_hour", None, None, CAPTURED)
 
 
 # --- Codex: the session rollout ----------------------------------------------------------
@@ -133,21 +142,43 @@ def test_the_rollout_reader_returns_only_the_last_rate_limit_numbers(tmp_path: P
 def test_codex_windows_are_mapped_by_minutes_and_reset_in_seconds_counts_from_the_event(tmp_path: Path) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path)), THREAD)
     assert parse_codex(found, CAPTURED) == [
-        Reading("five_hour", 0.125, FIVE_HOUR_RESET, CAPTURED),
-        Reading("seven_day", 0.345, SEVEN_DAY_RESET, CAPTURED),
+        Reading("five_hour", 0.125, FIVE_HOUR_RESET, EMITTED),
+        Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED),
     ]
     swapped = {"rate_limits": {"primary": {"used_percent": 34.5, "window_minutes": 10080, "resets_at": SEVEN_DAY_RESET},
                                "secondary": {"used_percent": 1, "window_minutes": 60, "resets_at": FIVE_HOUR_RESET}},
-               "timestamp": None}
-    assert parse_codex(swapped, CAPTURED) == [Reading("seven_day", 0.345, SEVEN_DAY_RESET, CAPTURED)]
+               "timestamp": "2026-11-14T16:25:30Z"}
+    assert parse_codex(swapped, CAPTURED) == [
+        Reading("five_hour", None, None, EMITTED), Reading("seven_day", 0.345, SEVEN_DAY_RESET, EMITTED)]
 
 
-def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(tmp_path: Path) -> None:
-    last = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event_msg","payload":'
-            b'{"type":"token_count","info":null,"rate_limits":null}}\n')
+@pytest.mark.parametrize("stamp", [None, "soon", "2026-11-14T16:25:30", "2026-11-14T16:40:00Z"])
+def test_a_codex_reading_without_a_usable_event_time_is_no_observation(stamp: object) -> None:
+    found = {"rate_limits": {"primary": {"used_percent": 1, "window_minutes": 300, "resets_at": FIVE_HOUR_RESET}},
+             "timestamp": stamp}
+    assert parse_codex(found, CAPTURED) == []
+
+
+TOKEN_COUNT_NULL = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event_msg","payload":'
+                    b'{"type":"token_count","info":null,"rate_limits":null}}\n')
+TOKEN_COUNT_MISSING = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event_msg","payload":'
+                       b'{"type":"token_count","info":null}}\n')
+TOKEN_COUNT_ONE_WINDOW = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event_msg","payload":'
+                          b'{"type":"token_count","rate_limits":{"primary":{"used_percent":40.0,'
+                          b'"window_minutes":300,"resets_at":1794684332}}}}\n')
+TOKEN_COUNT_BAD_RESET = (b'{"timestamp":"2026-11-14T16:26:00.000Z","type":"event_msg","payload":'
+                         b'{"type":"token_count","rate_limits":{"primary":{"used_percent":40.0,'
+                         b'"window_minutes":300,"resets_at":1794684332},"secondary":{"used_percent":50.0,'
+                         b'"window_minutes":10080,"resets_at":1}}}}\n')
+LATER = CAPTURED + 28  # 2026-11-14T16:26:00Z
+
+
+@pytest.mark.parametrize("last", [TOKEN_COUNT_NULL, TOKEN_COUNT_MISSING])
+def test_a_last_token_count_without_rate_limits_is_no_reading_not_an_older_one(tmp_path: Path, last: bytes) -> None:
     found = codex_rollout.latest(str(codex_home(tmp_path, ROLLOUT + last)), THREAD)
     assert found == {"rate_limits": None, "timestamp": "2026-11-14T16:26:00.000Z"}
-    assert parse_codex(found, CAPTURED) == []
+    assert parse_codex(found, CAPTURED + 60) == [
+        Reading("five_hour", None, None, LATER), Reading("seven_day", None, None, LATER)]
 
 
 def test_the_reader_opens_only_the_jobs_own_regular_rollout(tmp_path: Path) -> None:
@@ -210,9 +241,78 @@ def test_a_box_codex_job_stores_its_rollout_readings_on_flush(tmp_path: Path) ->
     assert session.summary.thread_id == THREAD and session.summary.tokens_in == 1200
     session.flush()
     assert _stored(tmp_path / "orch.db") == [
-        ("codex", "codex-bot", "box", "five_hour", 0.125, FIVE_HOUR_RESET, CAPTURED, "job-1"),
-        ("codex", "codex-bot", "box", "seven_day", 0.345, SEVEN_DAY_RESET, CAPTURED, "job-1"),
+        ("codex", "codex-bot", "box", "five_hour", 0.125, FIVE_HOUR_RESET, EMITTED, "job-1"),
+        ("codex", "codex-bot", "box", "seven_day", 0.345, SEVEN_DAY_RESET, EMITTED, "job-1"),
     ]
+
+
+def _codex_session(tmp_path: Path, now: list[float]) -> tuple[Session, Path]:
+    home = codex_home(tmp_path)
+    session = _start(tmp_path, WRAPPER, "codex-bot", {"CODEX_HOME": str(home)})
+    session.clock = lambda: now[0]
+    session.consume(io.BytesIO(CODEX_EXEC))
+    session.flush()
+    [rollout] = (home / "sessions").rglob("rollout-*.jsonl")
+    return session, rollout
+
+
+def _box_codex(tmp_path: Path, now: float) -> dict:
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        return _bots(read_usage(connection, now, BOX))[("box", "codex")]
+
+
+def test_rereading_the_same_rollout_event_never_makes_it_fresher(tmp_path: Path) -> None:
+    now = [CAPTURED]
+    session, _rollout = _codex_session(tmp_path, now)
+    now[0] = EMITTED + usage_readings.STALE_SECONDS + 1
+    session.flush()
+    entry = _box_codex(tmp_path, now[0])
+    assert entry["observed_at"] == EMITTED and entry["age_seconds"] == usage_readings.STALE_SECONDS + 1
+    assert entry["state"] == "stale" and entry["headroom"] is None
+    assert entry["seven_day"] == {"used": None, "resets_at": SEVEN_DAY_RESET, "observed_at": EMITTED,
+                                  "state": "stale"}
+    assert session.usage["seven_day"].observed_at == EMITTED
+
+
+@pytest.mark.parametrize(
+    ("last", "five_hour", "seven_day"),
+    [
+        (TOKEN_COUNT_NULL, None, None),
+        (TOKEN_COUNT_MISSING, None, None),
+        (TOKEN_COUNT_ONE_WINDOW, 0.4, None),
+        (TOKEN_COUNT_BAD_RESET, 0.4, None),
+    ],
+)
+def test_a_newer_rollout_event_without_a_window_clears_its_old_numbers(
+    tmp_path: Path, last: bytes, five_hour: float | None, seven_day: float | None
+) -> None:
+    now = [CAPTURED]
+    session, rollout = _codex_session(tmp_path, now)
+    with rollout.open("ab") as out:
+        out.write(last)
+    now[0] = CAPTURED + 60
+    session.flush()
+    entry = _box_codex(tmp_path, now[0])
+    assert (entry["five_hour"]["used"], entry["seven_day"]["used"]) == (five_hour, seven_day)
+    assert entry["seven_day"]["state"] == "no reading" and entry["observed_at"] == LATER
+    assert entry["state"] == ("ok" if five_hour is not None else "no reading")
+
+
+def test_a_later_claude_login_without_limits_clears_the_stored_numbers(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    first = _session(db, job_id="job-1")
+    first.add_usage(parse_get_usage(GET_USAGE, CAPTURED))
+    first.finish(0)
+    later = _session(db, job_id="job-2", at=CAPTURED + 600)
+    later.add_usage(parse_get_usage(UNAVAILABLE, CAPTURED + 600))
+    later.finish(0)
+    assert [row[3:] for row in _stored(db)] == [
+        ("five_hour", None, None, CAPTURED + 600, "job-2"), ("seven_day", None, None, CAPTURED + 600, "job-2")]
+    with sqlite3.connect(db) as connection:
+        entry = _bots(read_usage(connection, CAPTURED + 660, BOX))[("box", "claude")]
+    assert entry["state"] == "no reading" and entry["headroom"] is None
+    assert entry["five_hour"]["used"] is None and entry["seven_day"]["used"] is None
+    assert _source(db, CAPTURED + 660).read("claude") is None
 
 
 def test_a_remote_codex_job_is_not_read_on_the_box(tmp_path: Path) -> None:
@@ -348,7 +448,7 @@ def test_an_older_reading_never_replaces_a_newer_one(tmp_path: Path) -> None:
 def test_a_run_without_readings_stores_none(tmp_path: Path) -> None:
     db = tmp_path / "orch.db"
     session = _session(db)
-    session.add_usage(parse_get_usage(UNAVAILABLE, CAPTURED))
+    session.add_usage(parse_get_usage(reply(None, subtype="error"), CAPTURED))
     session.finish(0)
     with sqlite3.connect(db) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}

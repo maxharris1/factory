@@ -14,8 +14,13 @@ Sources, chosen by Max (PR #234, 2026-11-14):
   never by position, and keeps `used_percent` and the reset time.
 
 Only the window, the used fraction and the reset time are kept, as numbers.
-A missing or invalid used value stays None, never 0; a reset time that is
-not within RESET_HORIZON_SECONDS of now drops the reading. `Session._write`
+A missing or invalid used value stays None, never 0. A source that answers
+without a window (a null or missing window, a login without limits, a
+`token_count` with no `rate_limits`, or a reset time not within
+RESET_HORIZON_SECONDS of now) gives that window an explicit no-reading
+(`used` and `resets_at` None), which replaces any older numbers. A Codex
+reading is observed at its event's own time, so rereading the same event
+never makes it fresher. `Session._write`
 (lib/telemetry.py) stores them in `usage_readings` in the same transaction
 as the job's telemetry row, on the existing heartbeat flush. A reading is
 keyed by harness, bot (the account's OS user) and device, and an older
@@ -49,6 +54,7 @@ NOT_TRACKED = frozenset({"cursor"})
 CODEX_WINDOW_MINUTES = {300: "five_hour", 10080: "seven_day"}
 GET_USAGE_ID = "orch-usage"
 RESET_HORIZON_SECONDS = 30 * 24 * 3600
+CLOCK_SKEW_SECONDS = 300
 STALE_SECONDS = 24 * 3600
 MAX_REPLY_BYTES = 256 * 1024
 
@@ -59,7 +65,7 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     device TEXT NOT NULL,
     window TEXT NOT NULL,
     used REAL,
-    resets_at INTEGER NOT NULL,
+    resets_at INTEGER,
     observed_at REAL NOT NULL,
     job_id TEXT NOT NULL,
     PRIMARY KEY (harness, bot, device, window)
@@ -82,8 +88,12 @@ WHERE excluded.observed_at > {TABLE}.observed_at
 class Reading:
     window: str
     used: float | None
-    resets_at: int
+    resets_at: int | None
     observed_at: float
+
+
+def missing(window: str, observed_at: float) -> Reading:
+    return Reading(window, None, None, observed_at)
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
@@ -126,8 +136,9 @@ def iso_time(value: object) -> float | None:
 def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
     """The 5-hour and 7-day readings in Claude Code's `get_usage` reply.
 
-    A null window, a login without limits (`rate_limits_available` not
-    true) or an error reply gives no reading for that window."""
+    A null window or a bad reset gives that window a no-reading, and a
+    login without limits (`rate_limits_available` not true) gives both.
+    An error reply, or no reply, is no observation at all."""
     for line in stdout[:MAX_REPLY_BYTES].splitlines():
         try:
             event = json.loads(line)
@@ -143,15 +154,15 @@ def parse_get_usage(stdout: bytes, now: float) -> list[Reading]:
             return []
         limits = reply.get("rate_limits")
         if reply.get("rate_limits_available") is not True or not isinstance(limits, dict):
-            return []
+            return [missing(window, now) for window in WINDOWS]
         found = []
         for window in WINDOWS:
             info = limits.get(window)
-            if not isinstance(info, dict):
-                continue
-            resets = iso_time(info.get("resets_at"))
+            resets = iso_time(info.get("resets_at")) if isinstance(info, dict) else None
             resets_at = reset_time(int(resets), now) if resets is not None else None
-            if resets_at is not None:
+            if resets_at is None:
+                found.append(missing(window, now))
+            else:
                 found.append(Reading(window, used_percent(info.get("utilization")), resets_at, now))
         return found
     return []
@@ -161,14 +172,22 @@ def parse_codex(found: object, now: float) -> list[Reading]:
     """The windows in one Codex rollout `token_count` reading.
 
     `found` is lib/codex_rollout.py's output: `rate_limits` and the event's
-    `timestamp`. A reset is `resets_at` (epoch seconds), else the event time
-    plus `resets_in_seconds`; without either the window is dropped."""
-    if not isinstance(found, dict) or not isinstance(found.get("rate_limits"), dict):
+    `timestamp`. Every reading is observed at the event's time, never now,
+    and an event without a time (or stamped after now plus
+    CLOCK_SKEW_SECONDS) gives nothing. A reset is `resets_at` (epoch
+    seconds), else the event time plus `resets_in_seconds`. A window the
+    event does not report, or reports without a valid reset, is a
+    no-reading; null `rate_limits` makes both windows no-readings."""
+    if not isinstance(found, dict):
         return []
     emitted = iso_time(found.get("timestamp"))
+    if emitted is None or emitted > now + CLOCK_SKEW_SECONDS:
+        return []
+    observed = min(emitted, now)
+    limits = found.get("rate_limits")
     readings: dict[str, Reading] = {}
     for key in ("primary", "secondary"):
-        info = found["rate_limits"].get(key)
+        info = limits.get(key) if isinstance(limits, dict) else None
         if not isinstance(info, dict):
             continue
         minutes = info.get("window_minutes")
@@ -177,11 +196,14 @@ def parse_codex(found: object, now: float) -> list[Reading]:
             continue
         resets_at = reset_time(info.get("resets_at"), now)
         seconds = _number(info.get("resets_in_seconds"))
-        if resets_at is None and emitted is not None and seconds is not None and seconds >= 0:
+        if resets_at is None and seconds is not None and seconds >= 0:
             resets_at = reset_time(round(emitted + seconds), now)
-        if resets_at is not None:
-            readings[window] = Reading(window, used_percent(info.get("used_percent")), resets_at, now)
-    return list(readings.values())
+        readings[window] = (
+            missing(window, observed)
+            if resets_at is None
+            else Reading(window, used_percent(info.get("used_percent")), resets_at, observed)
+        )
+    return [readings.get(window) or missing(window, observed) for window in WINDOWS]
 
 
 def store(
@@ -209,17 +231,21 @@ def from_row(window: object, used: object, resets_at: object, observed_at: objec
     """A stored row, re-validated; None when any key value is not what `store` writes."""
     if window not in WINDOWS:
         return None
-    if isinstance(resets_at, bool) or not isinstance(resets_at, int):
-        return None
     observed = _number(observed_at)
     if observed is None:
+        return None
+    if resets_at is None:
+        return missing(str(window), observed) if used is None else None
+    if isinstance(resets_at, bool) or not isinstance(resets_at, int):
         return None
     return Reading(str(window), used_fraction(used), resets_at, observed)
 
 
 def window_state(reading: Reading, now: float) -> str:
     """`ok`; `stale` once the window has reset or the reading is old; else `no reading`."""
-    if reading.resets_at <= now or now - reading.observed_at > STALE_SECONDS:
+    if (reading.resets_at is not None and reading.resets_at <= now) or (
+        now - reading.observed_at > STALE_SECONDS
+    ):
         return "stale"
     return "ok" if reading.used is not None else "no reading"
 

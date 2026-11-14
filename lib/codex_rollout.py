@@ -7,9 +7,9 @@ its `token_count` events carry `rate_limits.{primary,secondary}`.
 thread id (from the `thread.started` event of `codex exec --json`), reads at
 most MAX_BYTES from its end, and returns the last `token_count` event's
 `rate_limits` with only the numeric fields in KEPT, plus the event's
-timestamp (`rate_limits` None when that event has none: no reading, never
-an older event's). Every other key and line is dropped unread: a line is decoded
-only when it holds both `"token_count"` and `"rate_limits"`. A symlink, a
+timestamp (`rate_limits` None when that event's is null or missing: no
+reading, never an older event's). Every other key and line is dropped
+unread: a line is decoded only when it holds `"token_count"`. A symlink, a
 non-regular file or a path outside `sessions/` is never opened, and no
 other file is.
 
@@ -81,7 +81,7 @@ def _finite(value: object) -> bool:
 
 
 def _limits(line: bytes) -> dict | None:
-    if len(line) > MAX_LINE_BYTES or b'"token_count"' not in line or b'"rate_limits"' not in line:
+    if len(line) > MAX_LINE_BYTES or b'"token_count"' not in line:
         return None
     try:
         event = json.loads(line)
