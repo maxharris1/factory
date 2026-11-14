@@ -60,6 +60,7 @@ from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import read_telemetry
+from lib.dashboard_usage import read_usage
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
@@ -649,6 +650,9 @@ def collect_snapshot(
     ):
         raise DashboardError("poll_seconds must be 30 or 60")
     chart = load_chart(chart_path)
+    machines = (
+        component_health.load_machines(machines_path) if machines_path is not None else None
+    )
     connection = open_readonly(db_path)
     try:
         connection.execute("BEGIN")
@@ -661,6 +665,7 @@ def collect_snapshot(
         )
         telemetry = read_telemetry(connection, now)  # issue #93
         rules = read_project_rules(connection)  # issue #152
+        usage = read_usage(connection, now, machines)  # issue #151
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -691,11 +696,7 @@ def collect_snapshot(
         db_path,
         now,
         queued=[(item["job"], item["recipient"]) for item in db["queued"]],
-        machines=(
-            component_health.load_machines(machines_path)
-            if machines_path is not None
-            else None
-        ),
+        machines=machines,
         orch=orch,
     )
     for item in db["queued"]:
@@ -761,6 +762,7 @@ def collect_snapshot(
         "statechart": chart,
         "telemetry": telemetry["rollup"],
         "projects": _projects(orch, rules, now),
+        "usage": usage,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
 

@@ -1175,6 +1175,35 @@ each poll cycle the dispatcher stores what `LivePollSource` parsed in the
 back. A `factory.md` the poller could not read, or has not read yet, is
 `status: unknown` with the `reason`, never a default.
 
+`status.json`'s `usage` backs the Efficiency page's Subscription headroom
+(issue #151). It has one entry per bot account (each harness's bot user on
+every enabled `machines.yml` device). Each entry gives the 5-hour and 7-day
+window's `used` fraction, `resets_at` and `observed_at`, plus `headroom`
+(the least `1 - used` over fresh windows). Readings come only from the
+CLI's own output, captured by `orch job run` for every job and stored in
+`usage_readings` on the existing telemetry flush:
+
+- **Claude:** at each job's start, `orch job run` sends Claude Code's SDK
+  control request `get_usage` alone to `claude -p --input-format
+  stream-json` (on the job's device, as its bot; no model turn) and keeps
+  `rate_limits.five_hour` and `seven_day` (`lib/usage_probe.py`). A login
+  without the profile scope answers `rate_limits_available: false`, and a
+  window the reply leaves null, so both read `no reading`.
+- **Codex:** `orch job run` adds `--json` to codex-bot's command, a wrapper
+  included (`<wrapper> exec ...`), and keeps the `thread.started` thread id.
+  It then reads only the `rate_limits` of the last `token_count` event in
+  that job's own rollout, `$CODEX_HOME/sessions/.../rollout-*-<thread
+  id>.jsonl` (`lib/codex_rollout.py`): on each flush for a box job, and
+  once over SSH when a remote job ends. Windows are matched by
+  `window_minutes` (300, 10080). A reading is dated by its event's own
+  timestamp, so rereading an old event never makes it fresh. A newer
+  `token_count` whose `rate_limits` is null or missing, or that leaves a
+  window out, reads that window as `no reading`.
+
+A newer `no reading` replaces older numbers. A window that has reset, or a
+reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
+table shows `no telemetry`.
+
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
