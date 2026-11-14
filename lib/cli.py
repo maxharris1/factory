@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import json
 import os
 import shutil
 import signal
@@ -23,6 +24,7 @@ from lib import (
     job_token,
     linear_webhook,
     placed_run,
+    telemetry,
     waiter,
     worktrees,
 )
@@ -32,6 +34,7 @@ from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_report, render
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.harness_env import harness_env
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
@@ -40,7 +43,14 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
-from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
+from lib.orch_yml import (
+    OrchConfig,
+    approvals,
+    hold_approver_findings,
+    load_approvals,
+    load_orch_yml,
+    parse_bind,
+)
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
@@ -158,6 +168,12 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   forwarded to COMMAND; a Ctrl-C reaches COMMAND through the process group.
   A signal before COMMAND starts means it never runs. Exits with COMMAND's
   status; never finishes the job. COMMAND gets ORCH_JOB_ID, ORCH_JOB_BOT and ORCH_DB.
+  Telemetry (issue #93): `claude -p` gets --output-format stream-json
+  --verbose and `codex exec` gets --json; COMMAND's stdout is logged to
+  events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
+  beside the database), capped at 20 MB and rotated,
+  and a scrubbed summary goes to the job_telemetry table with each
+  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
@@ -304,13 +320,11 @@ def _check_config(argv: list[str]) -> int:
     else:
         factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
 
-    failed = _report(
+    orch_config, orch_findings = load_orch_yml(
         orch_path,
-        load_orch_yml(
-            orch_path,
-            allow_placeholders=args.allow_placeholders,
-        )[1],
+        allow_placeholders=args.allow_placeholders,
     )
+    failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:
         machines_path = ROOT / "machines.yml"
@@ -323,7 +337,10 @@ def _check_config(argv: list[str]) -> int:
             )[1],
         ) or failed
     for path in factory_paths:
-        failed = _report(path, load_factory_md(path)[1]) or failed
+        factory, findings = load_factory_md(path)
+        if orch_config is not None and factory is not None:
+            findings = findings + hold_approver_findings(orch_config, factory.hold)
+        failed = _report(path, findings) or failed
     if failed:
         return 1
     print("ok")
@@ -453,6 +470,16 @@ def _wait_autostart(
 
     if note is not None:
         log(f"factory.md context is off: {note}")
+    if config is not None:
+        policy = approvals(config)
+    else:
+        policy, approval_findings = load_approvals(orch_path)
+        if policy is None:
+            print(
+                f"orch wait: {orch_path}: approval settings: {approval_findings[0].message}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         run = waiter.Waiter(
             bot=args.bot,
@@ -464,6 +491,7 @@ def _wait_autostart(
             db=_db_path(args.db),
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
+            approvals=policy,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -653,6 +681,7 @@ def _runtime(
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
+        approvals=approvals(config),
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
@@ -1016,8 +1045,13 @@ def _job_run_command(argv: list[str]) -> int:
     if args.interval is not None and interval < args.interval:
         log(f"--interval {args.interval:g} capped to {interval:g} seconds")
 
+    sessions: list[telemetry.Session] = []  # issue #93: the run's telemetry, once it starts
+
     def beat() -> object:
-        return retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        result = retry_locked(lambda: queue.heartbeat(args.job_id, owner=owner))
+        for session in sessions:
+            session.flush()  # the summary moves with each heartbeat
+        return result
 
     try:
         # Codex PR #82 r2 F2.2: an autostart claim is checked before the
@@ -1068,8 +1102,28 @@ def _job_run_command(argv: list[str]) -> int:
             "ORCH_JOB_ID": args.job_id,
             "ORCH_JOB_BOT": args.bot,
             DB_ENV: str(database),
+            **harness_env(owner),
         }
     )
+    if token is not None and not placed.remote:
+        # Not sent to a remote device: it would be on the ssh command line.
+        environment[job_token.PROOF_ENV] = token
+    # #100 r8: the summary's scrubber knows the harness's own environment,
+    # the proof included.
+    session = telemetry.start_session(
+        connect=queue.connect,
+        database=database,
+        job_id=args.job_id,
+        bot=args.bot,
+        repo=repo,
+        command=command,
+        log=log,
+        environ=environment,
+        worker_env=placed.remote,
+    )
+    if session is not None:
+        sessions.append(session)
+        command = session.argv
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
     remote_env = {
@@ -1078,6 +1132,7 @@ def _job_run_command(argv: list[str]) -> int:
         "ORCH_JOB_DEVICE": placed.device.name,
         # #94: with --worktree, the checkout's and the brief's remote paths
         **placed.remote_env(worktree=args.worktree, brief=box_brief is not None),
+        **harness_env(owner),
     }
 
     def setup() -> Path | None:
@@ -1101,6 +1156,8 @@ def _job_run_command(argv: list[str]) -> int:
             repo,
             head,
             url_template=worktrees.url_template(args.git_url_template),
+            adopt=_retry_of(detail),
+            log=log,
         )
         checkout.append(made)
         environment["ORCH_JOB_WORKTREE"] = str(made.path)
@@ -1114,9 +1171,6 @@ def _job_run_command(argv: list[str]) -> int:
             except (worktrees.WorktreeError, OSError) as exc:
                 log(f"could not remove job worktree {checkout[0].path}: {exc}")
 
-    if token is not None and not placed.remote:
-        # Not sent to a remote device: it would be on the ssh command line.
-        environment[job_token.PROOF_ENV] = token
     harness = command
     if placed.remote:
         # A remote device has no orch.db (the waiter finishes its job on the
@@ -1142,7 +1196,7 @@ def _job_run_command(argv: list[str]) -> int:
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
         code = job_run.run(
-            placed.argv(harness, remote_env),
+            placed.argv(harness, remote_env, report_env=session is not None),
             beat=beat,
             interval=interval,
             log=log,
@@ -1150,6 +1204,7 @@ def _job_run_command(argv: list[str]) -> int:
             setup=setup,
             teardown=teardown,
             started=placed.started,
+            output=session.consume if session is not None else None,
             execed=placed.execed,
         )
         return code
@@ -1176,6 +1231,8 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if session is not None:
+            session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
@@ -1223,6 +1280,16 @@ def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, 
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
     return str(row["repo"]), row["head"], int(row["timeout_seconds"]), row["detail"]
+
+
+def _retry_of(detail: str | None) -> str | None:
+    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
+    try:
+        value = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    retry_of = value.get("retry_of") if isinstance(value, dict) else None
+    return retry_of if isinstance(retry_of, str) else None
 
 
 def _read_brief(path: str | None) -> bytes | None:

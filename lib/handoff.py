@@ -223,11 +223,9 @@ def _check_value(key: str, value: str) -> None:
             raise HandoffError(f"bad {key} {value!r}")
         return
     if key == "round":
-        match = _ROUND.fullmatch(value)
-        if match is None:
-            raise HandoffError(f"bad round {value!r}")
-        cap = match.group(2)
-        if cap is not None and int(match.group(1)) > int(cap):
+        # Syntax only: whether N is within the cap is the dispatcher's call,
+        # since only it knows the extra rounds Max approved (#105).
+        if _ROUND.fullmatch(value) is None:
             raise HandoffError(f"bad round {value!r}")
         return
     if key == "head":

@@ -508,7 +508,7 @@ def test_t1_job_detail_contains_tracker_pr_and_review_context(
         "repo_skill_paths": [],
         "reviewer_harness": "codex",
         "risk": "high",
-        "round": None,
+        "round": "1/3",
         "source_issue": None,
         "verify_skill": "none",
     }
