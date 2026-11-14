@@ -7,14 +7,18 @@ import json
 import sqlite3
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from lib import cli, telemetry
+from lib import cli, remote, telemetry
+from lib.device_pool import DevicePool
 from lib.eval_report import EvalError, Metrics, build_metrics, render_metrics
 from lib.queue import JobRequest
 from lib.state_backup import backup
 from tests.test_dispatcher import setup
+from tests.test_lifecycle import HEADS, Flow
+from tests.test_remote_start import config_of, machines_file
 
 AUT0 = "aut0-code/aut0"
 
@@ -86,6 +90,24 @@ def _job_event(connection: sqlite3.Connection, job_id: str, event: str, detail: 
     )
 
 
+def _verdict(connection: sqlite3.Connection, ticket_id: str, comment_id: str, verdict: str) -> None:
+    repo = AUT0 if ticket_id == "5" else "owner/repo"
+    if verdict == "R":
+        connection.execute(
+            "INSERT INTO review_events VALUES (?, ?, ?, 'queued-review-fix')",
+            (repo, ticket_id, comment_id),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO ship_intents (repo, ticket_id, comment_id, head, policy, status) "
+            "VALUES (?, ?, ?, 'h', 'handoff', 'handed-off')",
+            (repo, ticket_id, comment_id),
+        )
+    connection.execute(
+        "INSERT INTO handled_comments VALUES (?, ?, ?, 'handled')", (repo, ticket_id, comment_id)
+    )
+
+
 def _seeded(directory: Path) -> Path:
     _dispatcher, queue = setup(directory)
     build_1 = _job(queue, "1", "build", "b1")
@@ -116,9 +138,22 @@ def _seeded(directory: Path) -> Path:
         _telemetry(connection, build_2, {"Skill": 1, "Task": 4, "Agent": 1}, elapsed=5400)
         _telemetry(connection, build_3, {}, elapsed=1800)
         _telemetry(connection, review, {"exec": 3}, harness="codex")
-        _job_event(connection, build_1, "requeued-unstarted", "orch-preflight: missing gh; requeued")
-        _job_event(connection, build_1, "requeued-unstarted", "preflight on pc exited 2; requeued")
-        _job_event(connection, build_2, "requeued-unstarted", "checkout failed; requeued")
+        for ticket_id, verdicts in (
+            ("3", "RRA"),
+            ("1", "A"),
+            ("2", "R"),
+            ("5", "A"),
+            ("6", "AR"),
+        ):
+            for number, verdict in enumerate(verdicts, 1):
+                _verdict(connection, ticket_id, f"{verdict}{number}", verdict)
+        requeued = "; requeued, no round charged"
+        for job_id, reason in (
+            (build_1, "missing under bash -lc on pc: gh"),
+            (build_1, "preflight on pc exited 2"),
+            (build_2, "checkout failed on pc: exited 1"),
+        ):
+            _job_event(connection, job_id, "requeued-unstarted", reason + requeued)
     return queue.path
 
 
@@ -176,7 +211,8 @@ def test_a_snapshot_without_a_source_table_reports_it_unrecorded(tmp_path: Path)
         connection.execute("INSERT INTO ticket_state VALUES ('owner/repo', '1', 'fixing', 1)")
     values = _values(build_metrics(db))
     assert values["prs-reviewed"] == 1
-    assert values["first-round-revise-rate"] == 1.0
+    assert values["first-round-revise-rate"] is None
+    assert values["first-pass-approve-rate"] is None
     assert values["skills-read-per-job"] is None
     assert values["preflight-failures"] is None
     assert values["prs-dirty-after-approval"] is None
@@ -225,3 +261,98 @@ def test_cli_db_needs_a_baseline_and_excludes_input(tmp_path: Path, capsys) -> N
     assert cli.main(["eval-report", "--db", str(db)]) == 2
     assert cli.main(["eval-report", "--db", str(db), "--baseline", str(db), "--input", "x"]) == 2
     capsys.readouterr()
+
+
+def _rates(db: Path) -> tuple[object, object]:
+    values = _values(build_metrics(db))
+    return values["first-round-revise-rate"], values["first-pass-approve-rate"]
+
+
+def _backed_up(flow: Flow, tmp_path: Path) -> Path:
+    copy = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, copy)
+    return copy
+
+
+def test_first_round_rates_survive_a_reentry_approve(tmp_path: Path) -> None:
+    flow = Flow(tmp_path / "flow")
+    flow.hand_off_at(1)
+    assert _rates(flow.queue.path) == (0.0, 1.0)
+    assert flow.ready(HEADS[5]) == "queued-review"
+    flow.finish("codex")
+    assert flow.approve("2/3") == "handed-off"
+    assert _rates(_backed_up(flow, tmp_path)) == (0.0, 1.0)
+
+
+def test_first_round_rates_survive_a_reentry_revise(tmp_path: Path) -> None:
+    flow = Flow(tmp_path / "flow")
+    flow.hand_off_at(1)
+    assert flow.ready(HEADS[5]) == "queued-review"
+    flow.finish("codex")
+    assert flow.revise("2/3") == "queued-review-fix"
+    assert _rates(_backed_up(flow, tmp_path)) == (0.0, 1.0)
+
+
+def test_a_first_round_revise_stays_one_after_a_later_approve(tmp_path: Path) -> None:
+    flow = Flow(tmp_path / "flow")
+    flow.hand_off_at(2)
+    assert _rates(_backed_up(flow, tmp_path)) == (1.0, 0.0)
+
+
+def _requeued(tmp_path: Path, fail) -> Path:
+    _dispatcher, queue = setup(tmp_path)
+    pool = DevicePool(queue, config_of(machines_file(tmp_path, box_enabled=False)))
+    job = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="7",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-7",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="7",
+    )
+    assert pool.claim("claude") is not None
+    pool.attach_runner(job.id, owner="claude", pid=12345, start=None, alive=lambda *_: False)
+    target = remote.RemoteTarget("pc", "fakepc-claude-bot", "claude-bot", "/tmp/work", job.id)
+    with pytest.raises(remote.CheckoutError) as caught:
+        fail(target)
+    reason = " ".join(str(caught.value).split())
+    assert pool.requeue_unstarted(job.id, owner="claude", runner=12345, reason=reason)
+    return queue.path
+
+
+def _ssh(code: int, stderr: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        call=lambda *args, **kwargs: SimpleNamespace(code=code, stdout="", stderr=stderr)
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "stderr"),
+    [
+        (3, "orch-preflight: missing gh\n"),
+        (remote.SSH_UNREACHABLE, ""),
+        (127, ""),
+        (2, ""),
+    ],
+)
+def test_every_preflight_failure_is_counted(tmp_path: Path, code: int, stderr: str) -> None:
+    db = _requeued(tmp_path, lambda target: remote.preflight(_ssh(code, stderr), target, "claude"))
+    assert _values(build_metrics(db))["preflight-failures"] == 1
+
+
+def test_a_checkout_failure_is_not_a_preflight_failure(tmp_path: Path) -> None:
+    def fail(target) -> None:
+        remote.checkout(
+            _ssh(1, "orch-checkout: fetch failed\n"),
+            target,
+            url="https://github.com/owner/repo.git",
+            head=None,
+            base_branch=None,
+            branch=None,
+            brief=None,
+        )
+
+    assert _values(build_metrics(_requeued(tmp_path, fail)))["preflight-failures"] == 0

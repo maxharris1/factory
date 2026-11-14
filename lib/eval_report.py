@@ -62,9 +62,13 @@ it writes nothing to it or beside it, and render_metrics prints each
 metric beside O4's baseline snapshot. A metric whose source is not in a
 snapshot prints as unrecorded:
 
-- rounds per PR, first-round REVISE and first-pass APPROVE rates: a PR is
-  reviewed once it has a REVISE round (ticket_state.review_round) or an
-  approval; its rounds are its REVISE rounds plus the approving one
+- rounds per PR: a PR is reviewed once it has a REVISE round
+  (ticket_state.review_round) or an approval; its rounds are its REVISE
+  rounds plus the approving one
+- first-round REVISE and first-pass APPROVE rates: each PR's first acted-on
+  verdict, in handled_comments order: a REVISE recorded in review_events,
+  or an APPROVE recorded as a ship intent or ship hold. A re-entry after
+  handoff does not change it
 - PRs capped: capped now, or a capped review_events outcome
 - PRs dirty after approval: tickets with an update-from-main job
 - duplicate handoffs: duplicate-verdict handled comments
@@ -74,8 +78,9 @@ snapshot prints as unrecorded:
 - Skills read and helpers per job: #100's job_telemetry tool counts
   (Skill; Agent and Task) over Claude jobs. D25 sets no helper cap, so the
   max is printed too
-- preflight failures: requeued-unstarted job events whose reason names
-  the preflight
+- preflight failures: requeued-unstarted job events whose reason is one
+  lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
+  counts: preflight is a job's first ssh call
 - slot-hours lost: telemetry elapsed time of failed and cancelled jobs
 - hand-written gos, ac=unmet with APPROVE, submitted-invalid, repeat-block
   and unsatisfiable stops: nothing records these yet
@@ -880,6 +885,11 @@ APPROVED_STATES = (
     "merged",
     "done",
 )
+PREFLIGHT_FAILURE = re.compile(
+    r"\S+ is unreachable over ssh \(|missing under bash -lc on "
+    r"|bash not found on |preflight on \S+ exited "
+)
+REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
 UNRECORDED_METRICS = (
     "hand-written-gos",
     "ac-unmet-approve",
@@ -979,18 +989,7 @@ def _metric_values(
         )
     )
     values.extend(_tool_metrics(connection, tables))
-    values.append(
-        (
-            "preflight-failures",
-            _scalar(
-                connection,
-                tables,
-                ("job_events",),
-                "SELECT COUNT(*) FROM job_events WHERE event = 'requeued-unstarted' "
-                "AND detail LIKE '%preflight%'",
-            ),
-        )
-    )
+    values.append(("preflight-failures", _preflight_failures(connection, tables)))
     lost = _scalar(
         connection,
         tables,
@@ -1039,14 +1038,60 @@ def _review_metrics(
     if count == 0:
         return [("prs-reviewed", 0), *((name, None) for name in names[1:])]
     total = sum(rounds + int(approved) for rounds, approved in reviewed)
-    revised = sum(1 for rounds, _approved in reviewed if rounds >= 1)
-    first_pass = sum(1 for rounds, approved in reviewed if approved and rounds == 0)
     return [
         ("prs-reviewed", count),
         ("rounds-per-pr", total / count),
-        ("first-round-revise-rate", revised / count),
-        ("first-pass-approve-rate", first_pass / count),
+        *_first_verdict_rates(connection, tables),
     ]
+
+
+def _first_verdict_rates(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, float | None]]:
+    names = ("first-round-revise-rate", "first-pass-approve-rate")
+    if not {"handled_comments", "review_events", "ship_intents"} <= tables:
+        return [(name, None) for name in names]
+    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE' FROM ship_intents"]
+    if "ship_holds" in tables:
+        approvals.append(
+            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE' FROM ship_holds"
+        )
+    marks = ", ".join("?" for _ in REVISE_OUTCOMES)
+    first: dict[tuple[str, str], str] = {}
+    for repo, ticket_id, verdict in connection.execute(
+        f"""
+        SELECT v.repo, v.ticket_id, v.verdict FROM (
+            SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict FROM review_events
+            WHERE outcome IN ({marks})
+            UNION ALL {" UNION ALL ".join(approvals)}
+        ) v
+        JOIN handled_comments h
+          ON h.repo = v.repo AND h.ticket_id = v.ticket_id AND h.comment_id = v.comment_id
+        ORDER BY h.rowid
+        """,
+        REVISE_OUTCOMES,
+    ):
+        first.setdefault((str(repo).lower(), str(ticket_id)), str(verdict))
+    if not first:
+        return [(name, None) for name in names]
+    verdicts = list(first.values())
+    return [
+        ("first-round-revise-rate", verdicts.count("REVISE") / len(verdicts)),
+        ("first-pass-approve-rate", verdicts.count("APPROVE") / len(verdicts)),
+    ]
+
+
+def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> int | None:
+    if "job_events" not in tables:
+        return None
+    return sum(
+        1
+        for (detail,) in connection.execute(
+            "SELECT detail FROM job_events WHERE event = 'requeued-unstarted'"
+        )
+        if PREFLIGHT_FAILURE.match(str(detail or ""))
+    )
 
 
 def _capped(connection: sqlite3.Connection, tables: set[str]) -> int | None:
