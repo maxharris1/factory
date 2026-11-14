@@ -655,3 +655,28 @@ def test_cli_rejects_a_bad_last_cycle(tmp_path: Path) -> None:
         )
         assert result.returncode == 2, (value, result.stderr)
         assert "--last-cycle" in result.stderr
+
+
+def test_a_failed_live_push_backs_off_and_keeps_the_pending_change() -> None:
+    pusher, spawn, clock, fingerprint, lines = live(spawn=Spawn())
+    outcomes: list[bool] = []
+    pusher.record = outcomes.append
+    fingerprint.bump()
+    pusher.tick()
+    assert len(spawn.calls) == 1
+    spawn.children[0].returncode = 255
+    for _ in range(100):  # 25 s of changes while the backoff runs
+        clock.now += 0.25
+        fingerprint.bump()
+        pusher.tick()
+    assert len(spawn.calls) == 1
+    assert lines == ["dashboard push: failed (exit 255), 1 in a row; pushes paused for 30s"]
+    clock.now = 1000 + 30
+    pusher.tick()  # no new change, but the pending one goes out now
+    assert len(spawn.calls) == 2
+    spawn.children[1].returncode = 0
+    fingerprint.bump()
+    clock.now += 1
+    pusher.tick()
+    assert len(spawn.calls) == 3
+    assert outcomes == [False, True]

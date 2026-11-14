@@ -21,7 +21,8 @@ runs as the owning bot's own user and login, starts the job itself:
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
-(or `ORCH-HANDOFF: failed`); that output comes back over SSH into run.log,
+(or `ORCH-HANDOFF: failed`); that output is relayed by orch job run's
+follower (lib/remote_follow.py) into run.log,
 and when the run ends the waiter runs `orch job done` on the box: done with
 that comment id only when `orch job run` exited 0 and the marker is the last
 line of this run's output (run.log from the offset where this run began,
