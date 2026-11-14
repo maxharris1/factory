@@ -42,6 +42,7 @@ from lib.orch_yml import (
     Project,
     resolve_job_timeout,
 )
+from lib.pr_title import SOURCE, github_source
 from lib.project_rules import FactoryRead
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
@@ -1151,6 +1152,8 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
+            source_issue=github_source(pull, project.repo, number),
+            pr_title=_open_title(pull),
             **_pull_facts(pull, fresh=fresh),
         )
         self._ticket_cache[cache_key] = ticket
@@ -1254,6 +1257,7 @@ class LivePollSource:
         comments = linear_comments
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
+        pr_title: str | None = None
         pr_number = self._linked_pr_number(
             project.repo,
             identifier,
@@ -1268,6 +1272,7 @@ class LivePollSource:
             if pull_facts["merged"] and tracked:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
+            pr_title = _open_title(pull)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
@@ -1307,6 +1312,8 @@ class LivePollSource:
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(issue),
             ready_starts_review=project.ready_starts_review,
+            source_issue=identifier if pr_number is not None and SOURCE.fullmatch(identifier) else None,
+            pr_title=pr_title,
             **pull_facts,
         )
         self._ticket_cache[cache_key] = ticket
@@ -1642,6 +1649,12 @@ def _secret_env_names(config: OrchConfig) -> tuple[str, ...]:
             )
         )
     return tuple(dict.fromkeys(names))
+
+
+def _open_title(pull: Mapping[str, Any]) -> str | None:
+    """An open PR's title; None for a closed or merged one, which is left alone."""
+    title = pull.get("title")
+    return title if pull.get("state") == "open" and isinstance(title, str) else None
 
 
 def _has_label(value: object, prefix: str) -> bool:

@@ -26,6 +26,7 @@ from lib import (
     linear_webhook,
     placed_run,
     telemetry,
+    usage_probe,
     waiter,
     worktrees,
 )
@@ -1286,10 +1287,20 @@ def _job_run_command(argv: list[str]) -> int:
         log=log,
         environ=environment,
         worker_env=placed.remote,
+        device=placed.device.name,
     )
     if session is not None:
         sessions.append(session)
         command = session.argv
+        target, binary = placed.target, usage_probe.claude_binary(command)
+        if binary is not None:  # #151: the account's usage, once per job
+            usage_probe.start_claude(
+                session.add_usage,
+                session.clock,
+                (lambda: usage_probe.claude_remote(placed.transport, target))
+                if target is not None
+                else (lambda: usage_probe.claude_local(binary, dict(environment))),
+            )
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
     brief: list[bytes] = []
@@ -1421,6 +1432,11 @@ def _job_run_command(argv: list[str]) -> int:
         return 1
     finally:
         if session is not None:
+            if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
+                session.add_usage(usage_probe.remote_codex(
+                    placed.transport, placed.target, session.harness,
+                    session.summary.thread_id, session.clock(),
+                ))
             session.finish(code)
         placed.ended(code)  # #91: the exit reason, while the job still runs
         # A remote run's job is finished by its waiter on the box, from the
