@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 import signal
 import subprocess
 import sys
 import textwrap
 import time
 from pathlib import Path
+
+import pytest
 
 from tests.procs import alive
 
@@ -80,7 +83,11 @@ def test_ci_installs_pytest_timeout() -> None:
     import pytest_timeout  # noqa: F401
 
 
-def test_a_hung_test_fails_on_timeout_and_its_children_are_killed(tmp_path: Path) -> None:
+TIMEOUT_FAILURE = re.compile(r"^E\s+Failed: Timeout \(>2\.0s\) from pytest-timeout\.$", re.MULTILINE)
+
+
+@pytest.mark.parametrize("ci", [None, "true"], ids=["local", "ci"])
+def test_a_hung_test_fails_on_timeout_and_its_children_are_killed(tmp_path: Path, ci: str | None) -> None:
     hosts = tmp_path / "hosts"
     hosts.mkdir()
     (hosts / "fakepc").write_text("claude-bot\n")
@@ -90,7 +97,8 @@ def test_a_hung_test_fails_on_timeout_and_its_children_are_killed(tmp_path: Path
     (tmp_path / "test_inner.py").write_text(INNER)
     pids_file = tmp_path / "pids"
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if key != "CI"},
+        **({"CI": ci} if ci else {}),
         "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT), os.environ.get("PYTHONPATH")])),
         "REAPER_PIDS": str(pids_file),
         "REAPER_FAKE_SSH": str(ROOT / "tests" / "fake_ssh.py"),
@@ -107,7 +115,7 @@ def test_a_hung_test_fails_on_timeout_and_its_children_are_killed(tmp_path: Path
         pids = read_pids(pids_file)
         assert result.returncode == 1, result.stdout + result.stderr
         assert "2 failed, 1 passed" in result.stdout, result.stdout
-        assert result.stdout.count("Timeout (>2.0s) from pytest-timeout") == 2, result.stdout
+        assert len(TIMEOUT_FAILURE.findall(result.stdout)) == 2, result.stdout
         assert elapsed < 30
         assert set(pids) == {"session", "worker", "kept"}
         deadline = time.monotonic() + 5
