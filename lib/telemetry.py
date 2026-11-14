@@ -652,16 +652,19 @@ _TASK_EVENTS = frozenset({"task_started", "task_progress", "task_notification"})
 _TASK_CREATED = re.compile(r"\bTask #([\w-]{1,40}) created successfully")
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "done"}
 _SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed"}
-_ABSOLUTE_PATH = re.compile(
-    r"(?<!\S)\S*?(?:(?<![\w.~-])~|(?<![\w./\\-])(?:[/\\](?![/\\])|(?<!:)[/\\]{2,}))[^\s/\\].*",
-    re.DOTALL,
-)
+_RELATIVE_PATH = re.compile(r"""[(\['"`]*(?!-)[\w.-]+(?:[/\\][\w.-]+)*[/\\]?[.,;:!?)\]'"`]*""")
 
 
 def _cut_paths(text: str) -> str:
-    """Where a path ends cannot be told from text (quotes, spaces, escapes), so
-    everything from the word an absolute path starts in to the end goes."""
-    return _ABSOLUTE_PATH.sub("[path]", text)
+    """Every word with a slash is a path unless it reads as a plain relative one
+    (`lib/x.py`, `../y`, `and/or`) or is only slashes (`a / b`). Where a path
+    ends cannot be told from text (quotes, spaces, escapes), so everything from
+    the first such word to the end goes."""
+    for word in re.finditer(r"\S+", text):
+        token = word.group()
+        if re.search(r"[/\\]", token) and token.strip("/\\") and not _RELATIVE_PATH.fullmatch(token):
+            return text[: word.start()] + "[path]"
+    return text
 
 
 def _str(value: object) -> str | None:
@@ -683,7 +686,7 @@ class LiveRun:
     Only these texts are ever read from the stream: a task-list item's text
     and active form, and a sub-agent's description and type. Never a prompt,
     a result, a summary or a TaskCreate description. They stay in memory as
-    given; `row` cuts every absolute path and what follows it to `[path]` and scrubs each one."""
+    given; `row` scrubs each one, then cuts every path and what follows it to `[path]`."""
 
     def __init__(self) -> None:
         self.plan: list[dict] = []
@@ -839,22 +842,22 @@ class LiveRun:
         self._replace(items)
 
     def _replace(self, items: list[dict]) -> None:
-        """A new whole list; its last item newly done is the last finished task."""
-        before = {item["text"] for item in self.plan if item["status"] == "done"}
+        """A new whole list; its last item newly done is the last finished task.
+        Items with the same text are told apart by how many of them are done."""
+        before = Counter(item["text"] for item in self.plan if item["status"] == "done")
+        seen: Counter[str] = Counter()
         for item in items:
-            if item["status"] == "done" and item["text"] not in before:
-                self.last_done = item["text"]
+            if item["status"] == "done":
+                seen[item["text"]] += 1
+                if seen[item["text"]] > before[item["text"]]:
+                    self.last_done = item["text"]
         self.plan = items
 
     # -- out --
 
     def row(self, scrub: Callable[..., str]) -> dict[str, Any]:
         def text(value: str | None, limit: int = TASK_TEXT_LIMIT) -> str:
-            if not value:
-                return ""
-            if len(value) <= SCRUB_LIMIT:
-                value = _cut_paths(value)
-            return scrub(value, limit)
+            return _cut_paths(scrub(value, limit)) if value else ""
 
         current = next((item for item in self.plan if item["status"] == "in_progress"), None)
         running = [agent for agent in self.subagents.values() if agent["status"] == "running"]

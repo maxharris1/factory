@@ -1238,6 +1238,20 @@ def test_codex_todo_list_fixture_fills_the_plan_and_derives_in_progress() -> Non
     no_secret(summary.row())
 
 
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_newly_finished_item_counts_even_when_its_text_repeats(harness: str) -> None:
+    def snapshot(last_done: bool) -> dict:
+        items = [("repeat", True), ("another", True), ("repeat", last_done)]
+        if harness == "claude":
+            return _use("t", "TodoWrite", _todos(*((text, "completed" if done else "pending") for text, done in items)))
+        return {"type": "item.updated", "item": {"id": "t", "type": "todo_list",
+                "items": [{"text": text, "completed": done} for text, done in items]}}
+
+    summary = _feed(Summary(harness, Scrubber({})), snapshot(False))
+    assert _live(summary)["last_finished"] == "another"
+    assert _live(_feed(summary, snapshot(True)))["last_finished"] == "repeat"
+
+
 def test_codex_reports_no_subagents() -> None:
     """Codex's collab_tool_call (spawn_agent) carries only a prompt and agent
     messages, no description or type: sub-agents are not available for codex."""
@@ -1330,10 +1344,18 @@ PATH_CUTS = [
     ("Read /Users/John\tDoe/private/deployment.txt", "Read [path]"),
     (r"Read /Users/John\ Doe/private/deployment.txt", "Read [path]"),
     ("/Users/John Doe/private/deployment.txt", "[path]"),
+    ("Compile with -I/home/bot/private/include", "Compile with [path]"),
+    ("Compile with --sysroot=/home/bot/private", "Compile with [path]"),
+    (r"Compile with /I\home\bot\private", "Compile with [path]"),
+    ('Read "/ company secrets/private.txt"', "Read [path]"),
+    (r"Read '\ company secrets\private.txt'", "Read [path]"),
+    ("Inspect lib/x,/home/bot/private/deployment.txt", "Inspect [path]"),
+    ("Inspect x:/home/bot/private/deployment.txt", "Inspect [path]"),
+    ("Inspect <~/private/deployment.txt>", "Inspect [path]"),
 ]
 
 
-def _persisted_live(tmp_path: Path, harness: str, text: str) -> dict:
+def _persisted_live(tmp_path: Path, harness: str, text: str, environ: dict | None = None) -> dict:
     if harness == "claude":
         events = [
             _use("t1", "TodoWrite", {"todos": [{"content": text, "status": "in_progress", "activeForm": text}]}),
@@ -1345,7 +1367,7 @@ def _persisted_live(tmp_path: Path, harness: str, text: str) -> dict:
     db = tmp_path / f"{harness}.db"
     session = Session(
         connect=lambda: sqlite3.connect(db), job_id=harness, bot=f"{harness}-bot", repo="acme/widgets",
-        harness=harness, argv=[], raw_log=None, scrub=Scrubber({}), log=lambda _: None, stdout=io.BytesIO(),
+        harness=harness, argv=[], raw_log=None, scrub=Scrubber(environ or {}), log=lambda _: None, stdout=io.BytesIO(),
     )
     session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
     session.finish(0)
@@ -1364,10 +1386,18 @@ def test_every_absolute_path_form_is_cut_whole_before_it_is_stored(tmp_path: Pat
     assert claude["subagents"][0]["description"] == cut
 
 
-@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call"])
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call", "edit lib/telemetry.py.", "see (lib/x.py)", "use ../x/y", "a // b"])
 def test_relative_slashes_are_not_paths(text: str) -> None:
     live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
     assert "[path]" not in live["plan"][0]["text"]
+
+
+@pytest.mark.parametrize("secret", ["correct horse /battery staple", "/srv/deploy key", "hunter2 -I/x"])
+def test_an_environment_secret_with_a_slash_is_hidden_whole(tmp_path: Path, secret: str) -> None:
+    for harness in ("claude", "codex"):
+        live = _persisted_live(tmp_path, harness, f"Rotate {secret} now", {"DEPLOY_SECRET": secret})
+        assert [item["text"] for item in live["plan"]] == ["Rotate [redacted-env] now"]
+        assert live["current_task"] == "Rotate [redacted-env] now"
 
 
 def test_a_blind_remote_session_hides_task_text(tmp_path: Path) -> None:
