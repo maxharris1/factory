@@ -4,10 +4,12 @@ import json
 
 import pytest
 
-from lib.dispatcher import Comment, TicketRef
+from lib import cli
+from lib.dispatcher import Comment, Dispatcher, TicketRef
 from lib.github_actions import GhResult
-from lib.poll_source import LINEAR_ISSUE_QUERY, HTTPResult, LivePollSource, _risk
+from lib.poll_source import LINEAR_ISSUE_QUERY, HTTPResult, IntakeRisks, LivePollSource, _risk
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue
+from tests.test_live_poll_no_webhook import _dispatcher
 
 TRUSTED = {
     "github": {"grok-login": frozenset({"grok-bot"}), "claude-login": frozenset({"claude-bot"})},
@@ -69,7 +71,12 @@ def test_unknown_risk_is_high() -> None:
     assert _risk((said("grok-login", "plain words risk=low", 1),), TRUSTED) == "high"
 
 
-def test_github_ticket_keeps_its_intake_risk() -> None:
+def test_an_edited_first_header_is_unknown_not_the_next_header() -> None:
+    comments = (said("grok-login", BRIEF_LOW, 1, edited=True), said("grok-login", GO_LOW, 2))
+    assert _risk(comments, TRUSTED) == "high"
+
+
+def github_gh(*bodies: str) -> FakeGh:
     gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
     gh.comments = [
         {
@@ -79,17 +86,64 @@ def test_github_ticket_keeps_its_intake_risk() -> None:
             "created_at": f"2026-11-11T12:00:{number:02d}Z",
             "html_url": f"https://github.test/comment/{number}",
         }
-        for number, body in enumerate((BRIEF_LOW, GO_HIGH), start=1)
+        for number, body in enumerate(bodies, start=1)
     ]
-    source = LivePollSource(config(), gh_runner=gh)
+    return gh
 
-    (ticket,) = source.tracked_tickets((TicketRef("acme/widgets", "12", "github"),))
 
+GITHUB_REF = (TicketRef("acme/widgets", "12", "github"),)
+
+
+def test_github_ticket_keeps_its_intake_risk() -> None:
+    source = LivePollSource(config(), gh_runner=github_gh(BRIEF_LOW, GO_HIGH))
+    (ticket,) = source.tracked_tickets(GITHUB_REF)
     assert ticket.risk == "low"
 
 
+@pytest.mark.parametrize(
+    ("first", "edit", "expected"),
+    [
+        (BRIEF_LOW, "Clarified acceptance criteria.", "low"),
+        (BRIEF_LOW, "", "low"),
+        (GO_HIGH, "", "high"),
+    ],
+)
+def test_editing_the_intake_comment_never_moves_the_stored_risk(
+    first: str, edit: str, expected: str
+) -> None:
+    later = GO_HIGH if expected == "low" else GO_LOW
+    gh = github_gh(first, later)
+    source = LivePollSource(config(), gh_runner=gh)
+    (before,) = source.tracked_tickets(GITHUB_REF)
+    gh.comments[0]["body"] = first.replace(f"risk={expected}", "") + edit
+    gh.comments[0]["updated_at"] = "2026-11-11T12:01:00Z"
+    source.begin_cycle()
+    (after,) = source.tracked_tickets(GITHUB_REF)
+    assert (before.risk, after.risk) == (expected, expected)
+    assert Dispatcher._config_cap(None, after) == Dispatcher._config_cap(None, before)
+
+
+def test_the_stored_risk_survives_a_poller_restart(tmp_path) -> None:
+    path = tmp_path / "orch.db"
+    first = LivePollSource(config(), gh_runner=github_gh(BRIEF_LOW, GO_HIGH), risks=IntakeRisks(path))
+    assert first.tracked_tickets(GITHUB_REF)[0].risk == "low"
+    gh = github_gh(GO_HIGH)
+    restarted = LivePollSource(config(), gh_runner=gh, risks=IntakeRisks(path))
+    assert restarted.tracked_tickets(GITHUB_REF)[0].risk == "low"
+
+
+def test_intake_risks_are_raised_but_never_lowered(tmp_path) -> None:
+    risks = IntakeRisks(tmp_path / "orch.db")
+    assert risks.get("acme/widgets", "12") is None
+    assert risks.keep("Acme/Widgets", "12", "low") == "low"
+    assert risks.keep("acme/widgets", "12", "low") == "low"
+    assert risks.keep("acme/widgets", "12", "high") == "high"
+    assert risks.keep("acme/widgets", "12", "low") == "high"
+    assert IntakeRisks(tmp_path / "orch.db").get("acme/widgets", "12") == "high"
+
+
 class FilesGh(FakeGh):
-    def __init__(self, files: list[str] | None) -> None:
+    def __init__(self, files: list | None) -> None:
         super().__init__(FACTORY.format(tickets="linear", ship="handoff"))
         self.files = files
 
@@ -99,7 +153,13 @@ class FilesGh(FakeGh):
             self.calls.append(list(argv))
             if self.files is None:
                 return GhResult(1, "", "failed (HTTP 502)")
-            return GhResult(0, json.dumps([{"filename": path} for path in self.files]), "")
+            entries = [
+                {"filename": item, "changes": 1, "patch": "@@ -0,0 +1 @@\n+export {};"}
+                if isinstance(item, str)
+                else item
+                for item in self.files
+            ]
+            return GhResult(0, json.dumps(entries), "")
         return super().__call__(argv, timeout)
 
 
@@ -110,6 +170,7 @@ def linear_ticket(
     linked: bool = True,
     go: str = GO_LOW,
     errors: list | None = None,
+    risks: IntakeRisks | None = None,
 ):
     issue = linear_issue()
     issue["comments"]["nodes"][0]["body"] = go
@@ -132,6 +193,7 @@ def linear_ticket(
         gh_runner=gh,
         linear_transport=transport,
         error_sink=None if errors is None else lambda *item: errors.append(item),
+        risks=risks,
     )
     (ticket,) = source.tracked_tickets((TicketRef("acme/widgets", "AUT-42", "linear"),))
     return ticket, gh
@@ -185,3 +247,68 @@ def test_a_linear_high_ticket_reads_no_changed_files() -> None:
     ticket, gh = linear_ticket(labels=[], files=["src/app.ts"], go=GO_HIGH)
     assert ticket.risk == "high"
     assert not any("/files?" in part for call in gh.calls for part in call)
+
+
+def realtime_patch(line: str) -> dict:
+    return {"filename": "db/schema.sql", "changes": 1, "patch": f"@@ -0,0 +1 @@\n{line}"}
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "+ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;",
+        "-alter publication supabase_realtime drop table public.messages;",
+        "+ALTER TABLE public.messages REPLICA IDENTITY FULL;",
+    ],
+)
+def test_a_linear_realtime_table_change_outside_a_realtime_path_is_high(line: str) -> None:
+    ticket, _ = linear_ticket(labels=[], files=["src/app.ts", realtime_patch(line)])
+    assert ticket.risk == "high"
+    assert Dispatcher._config_cap(None, ticket) == 3
+
+
+def test_a_realtime_word_only_in_unchanged_context_stays_low() -> None:
+    item = realtime_patch(" -- realtime notes\n+SELECT 1;")
+    assert linear_ticket(labels=[], files=[item])[0].risk == "low"
+
+
+def test_a_linear_change_whose_contents_are_unread_is_high() -> None:
+    item = {"filename": "db/schema.sql", "changes": 4}
+    assert linear_ticket(labels=[], files=["src/app.ts", item])[0].risk == "high"
+
+
+def test_a_pure_rename_needs_no_patch() -> None:
+    item = {"filename": "src/new.ts", "previous_filename": "src/old.ts", "changes": 0}
+    assert linear_ticket(labels=[], files=[item])[0].risk == "low"
+
+
+def test_an_edited_linear_intake_header_cannot_lower_a_stored_high(tmp_path) -> None:
+    risks = IntakeRisks(tmp_path / "orch.db")
+    assert linear_ticket(labels=[], files=["src/app.ts"], go=GO_HIGH, risks=risks)[0].risk == "high"
+    reworded, _ = linear_ticket(labels=[], files=["src/app.ts"], go=GO_LOW, risks=risks)
+    assert reworded.risk == "high"
+
+
+def test_a_definite_linear_raise_is_stored_but_an_unread_one_is_not(tmp_path) -> None:
+    risks = IntakeRisks(tmp_path / "orch.db")
+    assert linear_ticket(labels=[], files=None, risks=risks)[0].risk == "high"
+    assert linear_ticket(labels=[], files=["src/app.ts"], risks=risks)[0].risk == "low"
+    assert linear_ticket(labels=["migrations"], files=["src/app.ts"], risks=risks)[0].risk == "high"
+    assert linear_ticket(labels=[], files=["src/app.ts"], risks=risks)[0].risk == "high"
+
+
+def test_the_poller_runtime_keeps_risks_in_its_database(tmp_path) -> None:
+    database = tmp_path / "orch.db"
+    _dispatcher(database)
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        "poll_seconds: 60\n"
+        "grok:\n  webhook_url_env: U\n  webhook_key_env: K\n"
+        "trusted_logins:\n  grok-login: [grok-bot]\n"
+        "projects:\n  - repo: acme/widgets\n    factory_ref: main\n",
+        encoding="utf-8",
+    )
+    _, first = cli._runtime(database, orch, create=False)
+    first.risks.keep("acme/widgets", "12", "low")
+    _, restarted = cli._runtime(database, orch, create=False)
+    assert restarted.risks.get("acme/widgets", "12") == "low"
