@@ -5412,3 +5412,83 @@ def test_71_an_approve_for_an_unreviewed_head_does_not_answer_its_ready(
     poll(ready, again, approve, head=NEW_HEAD_71)
     assert _outcomes(queue)["ready-b"] == "queued-review"
     assert NEW_HEAD_71 in [head for head, _state, _attempt in _reviews_71(queue)]
+
+
+def _questions_71(comment_id: str, created_at: float, author: str = "claude-login") -> Comment:
+    return comment(
+        comment_id,
+        QUESTIONS + "\nDoes this need the optional behavior?\n",
+        author=author,
+        created_at=created_at,
+    )
+
+
+def _answers_71(comment_id: str, created_at: float) -> Comment:
+    return comment(comment_id, ANSWERS + "\nYes.\n", author="grok-login", created_at=created_at)
+
+
+def _review_state_71(queue: SQLiteJobQueue) -> tuple[tuple[str, int], int]:
+    with queue.connect() as connection:
+        state = tuple(connection.execute(
+            "SELECT workflow_state, review_round FROM ticket_state"
+        ).fetchone())
+        active = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action IN ('review', 'fix') "
+            "AND state IN ('queued', 'running')"
+        ).fetchone()[0]
+    return state, active
+
+
+def test_71_a_verdict_behind_an_unanswered_question_does_not_answer_its_ready(
+    tmp_path: Path,
+) -> None:
+    """T3 rejects a verdict that lands while the ticket waits on a question,
+    so it answers no ready posted before that question (Codex PR #112 r7 F1)."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    comments = (
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", 110),
+        _revise_71(120),
+        _answers_71("answer", 140),
+    )
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    outcomes = _outcomes(queue)
+    assert outcomes["ready"] == "queued-review"
+    assert outcomes["answer"] == "resumed-review"
+    state, active = _review_state_71(queue)
+    assert state == ("review", 0)
+    assert active >= 1
+
+
+def test_71_a_verdict_after_an_answered_question_still_answers_its_ready(
+    tmp_path: Path,
+) -> None:
+    """The question was answered before the verdict landed, so T3 acts on it
+    and the ready stays answered."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", 110),
+        _answers_71("answer", 115),
+        _revise_71(120),
+    )
+    assert _outcomes(queue)["ready"] == "stale-ready-verdict"
+    assert _reviews_71(queue) == []
+
+
+def test_71_an_untrusted_question_does_not_stop_a_verdict_answering_its_ready(
+    tmp_path: Path,
+) -> None:
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", 110, author="stranger"),
+        _revise_71(120),
+    )
+    assert _outcomes(queue)["ready"] == "stale-ready-verdict"
+    assert _reviews_71(queue) == []

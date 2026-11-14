@@ -1662,6 +1662,7 @@ class Dispatcher:
                     else not working
                     and (item.id not in handled or _acted_verdict(handled[item.id]))
                     and (approvable or fields.get("verdict") != "APPROVE")
+                    and not self._question_open_between(ticket, ready, item)
                 )
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
@@ -1673,6 +1674,39 @@ class Dispatcher:
                 else:
                     after.add(round_number)
         return bool(after - before)
+
+    def _question_open_between(
+        self, ticket: TrackedTicket, ready: Comment, verdict: Comment
+    ) -> bool:
+        """Whether T5 holds the ticket at waiting-max when verdict lands: a
+        question T5 pauses on, posted after ready, with no answers after it.
+        T3 and T4 act on no verdict there (#112 r7)."""
+        start, end = _comment_order(ready), _comment_order(verdict)
+        waiting = False
+        for item in sorted(ticket.comments, key=_comment_order):
+            if not start < _comment_order(item) < end:
+                continue
+            try:
+                handoff = parse_comment(item.body)
+            except HandoffError:
+                continue
+            fields = handoff.as_dict()
+            if fields.get("kind") == "questions":
+                waiting = waiting or (
+                    self._trusted_session(ticket, item, fields)
+                    and (
+                        fields.get("state") == "waiting-max"
+                        or (
+                            fields.get("role") != "orchestrator"
+                            and _has_questions(handoff.body)
+                        )
+                    )
+                )
+            elif fields.get("kind") == "answers" and self._trusted(
+                ticket, item, fields, "grok-bot", role="orchestrator"
+            ):
+                waiting = False
+        return waiting
 
     def _t3(
         self,
