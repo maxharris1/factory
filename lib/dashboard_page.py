@@ -1,13 +1,17 @@
 """The dashboard pages: inline CSS, the server-rendered panels and the script.
 
-Five pages share one bar (navigation, in this order, and the
-needs-attention badge):
+Five pages share one shell (#139, docs/design/mission-control artboards
+TopBar, HeaderBand and StatusLine): the TopBar (brand with its pixel caret,
+navigation in this order, link state, snapshot meta), the header band
+(brightness = running / total slots), the attention strip (every item that
+needs attention, hidden when clear) and the status line (slots per device,
+queue depth and the vitals, each linking to System or Lanes):
 
 - index.html (Lanes): factory status (with Linear webhook health when a
   listener has run), lanes and slots, the queue rail; with script, a click
   on a job opens its flow in a modal (without script the link goes to
   job.html#job-<id>);
-- job.html (Jobs): every running or queued job with the path its ticket
+- job.html (Tickets): every running or queued job with the path its ticket
   took through the statechart (model/chart.mmd, see lib/dashboard_flow.py),
   the current step and what can come next; the full chart is behind a
   collapsed toggle; job.html#job-<id> shows one job;
@@ -15,7 +19,7 @@ needs-attention badge):
 - efficiency.html: poll and Linear budget, handoff savings, tokens and cost
   per harness, repo and job (#93, lib/dashboard_telemetry.py). Each job's
   article (job page and modal) ends with its telemetry feed;
-- health.html (Health, #92): each component heartbeat (poller, waiters,
+- health.html (System, #92): each component heartbeat (poller, waiters,
   Linear listener, tunnel, dashboard writer, device probes) as up, stale or
   down with last-seen in ET, pid and device, and each harness whose queued
   jobs have no live waiter. Down components and those harnesses are also
@@ -40,7 +44,8 @@ reloads every refresh_seconds.
 
 PixelStrip (#138): px_strip renders a strip canvas from the PX_STATE table
 and PX_SCRIPT draws every strip on the page under one animation loop (see
-docs/design/mission-control/SPEC.md section 6). No page places a strip yet.
+docs/design/mission-control/SPEC.md section 6). The shell places the caret,
+the band and the attention block.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from pathlib import Path
 
 from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
 from lib.dashboard_telemetry import TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel
+from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 
 POLL_MS = 1500
@@ -83,26 +89,42 @@ CSS = """
 --mono:"JetBrains Mono Variable",ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 *{box-sizing:border-box}
 html{background:var(--bg);scrollbar-color:rgba(255,255,255,.14) transparent}
-body{margin:0;min-height:100vh;color:var(--text);background:var(--bg);
+body{display:flex;flex-direction:column;margin:0;min-height:100vh;color:var(--text);background:var(--bg);
 font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
 ::selection{background:var(--sel);color:var(--text)}
 a{color:inherit;transition:color .15s var(--ease),background-color .15s var(--ease),box-shadow .15s var(--ease)}
-.bar{position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;
-min-height:56px;padding:8px 24px;border-bottom:1px solid var(--line);
-background:rgba(26,27,38,.9);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
-.brand{font:600 15px/1 var(--mono);letter-spacing:-.01em;color:var(--hdr-text);white-space:nowrap}
+.topbar{width:100%;background:var(--bg);color:var(--text)}
+.top-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;min-height:56px;padding:8px 24px}
+.brand{display:flex;align-items:center;gap:6px;font:600 15px/1 var(--mono);letter-spacing:-.01em;color:var(--hdr-text);white-space:nowrap}
 .brand b{font-weight:600;color:var(--hdr-brand)}
-.brand::after{content:"";display:inline-block;width:.55em;height:1.05em;margin-left:5px;vertical-align:-.17em;
-background:var(--brand);animation:caret 1.1s steps(1) infinite}
-.link{display:flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);letter-spacing:.04em}
-.link .dot{width:8px;height:8px;background:var(--muted)}
-.link.live{color:var(--ok)}.link.live .dot{background:var(--ok);animation:pulse 1.6s ease-out infinite}
-.link.stale{color:var(--warn)}.link.stale .dot{background:var(--warn)}
-.link.lost{color:var(--bad)}.link.lost .dot{background:var(--bad);animation:pulse 1s ease-out infinite}
-.link.boot{color:var(--muted)}
-.bar .meta{margin-left:auto;color:var(--muted);font:12px/1.3 var(--mono)}
-.bar .meta span{color:var(--text-2)}
-main{position:relative;z-index:1;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));
+.caret{display:block;width:8px}
+.link{display:flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);letter-spacing:.04em;color:var(--muted)}
+.link .dot{width:8px;height:8px;background:currentColor}
+.link.live{color:var(--ok)}.link.stale{color:var(--warn)}.link.lost{color:var(--bad)}.link.boot{color:var(--muted)}
+.topbar .meta{margin-left:auto;color:var(--muted);font:12px/1.3 var(--mono)}
+.topbar .meta span{color:var(--text-2)}
+.attn{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;min-height:36px;padding:6px 24px;
+background:color-mix(in srgb,var(--bad) 9%,transparent);border-bottom:1px solid color-mix(in srgb,var(--bad) 45%,transparent);
+font:12px/1.5 var(--mono)}
+.attn-head{display:flex;align-items:center;gap:8px}
+.attn-blk{display:block;width:12px}
+.attn-count{font-weight:700;color:var(--bad);text-decoration:none}
+.attn-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.attn-who{font-weight:600;color:var(--text);text-decoration:none}
+.attn-what{color:var(--text-2)}
+.attn a:hover{text-decoration:underline}
+.statusline{position:sticky;bottom:0;z-index:2;display:flex;flex-wrap:wrap;align-items:stretch;width:100%;min-height:32px;
+background:var(--dim);border-top:1px solid var(--line);font:12px/1.3 var(--mono);color:var(--text-2)}
+.sl-brand{display:flex;align-items:center;padding:6px 9px;background:var(--ok);color:var(--ink);font-weight:700;letter-spacing:.04em}
+.sl-seg{display:flex;align-items:center;gap:6px;padding:6px 9px;border-right:1px solid var(--line)}
+.sl-seg.sl-queue{border-right:0}
+.sl-k{color:var(--muted)}.sl-v{color:var(--text)}
+.sl-fill{flex:1 1 24px}
+.sl-vital{display:flex;align-items:center;gap:7px;padding:6px 9px;border-left:1px solid var(--line);text-decoration:none}
+.sl-vital:hover{background:var(--panel-hi)}
+.sl-vital .blk{width:8px;height:8px;background:currentColor}
+.sl-vital.ok{color:var(--text-2)}.sl-vital.ok .blk{background:var(--ok)}
+main{position:relative;z-index:1;flex:1 0 auto;width:100%;display:grid;align-content:start;grid-template-columns:repeat(12,minmax(0,1fr));
 gap:16px;max-width:1600px;margin:0 auto;padding:20px 24px 32px}
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
@@ -196,13 +218,6 @@ td.bad{color:var(--bad);font-weight:600}
 .nav a{padding:6px 12px;color:var(--hdr-text-2);text-decoration:none;font:500 14px/1.2 var(--sans)}
 .nav a:hover{background:var(--panel-hi);color:var(--hdr-text)}
 .nav a[aria-current=page]{color:var(--hdr-text);background:var(--panel-hi);box-shadow:inset 0 -2px 0 var(--brand)}
-.badge{display:inline-flex;align-items:baseline;gap:7px;padding:5px 12px;border:1px solid var(--bad);
-border-color:color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 9%,transparent);
-color:var(--bad);text-decoration:none;font:500 13px/1.3 var(--mono)}
-.badge:hover{background:var(--bad);color:var(--ink)}
-.badge b{font-size:14px;font-weight:700}
-.badge.clear{border-color:var(--line-hi);background:transparent;color:var(--muted)}
-.badge.clear:hover{background:var(--panel-hi);color:var(--text)}
 a.slot,a.queue-item,.jobs a{color:inherit;text-decoration:none}
 a.slot{display:block}
 a.slot:hover,a.slot:focus-visible{border-color:var(--brand)}
@@ -284,13 +299,12 @@ repeating-linear-gradient(180deg,var(--warn) 0 8px,transparent 8px 16px);
 background-size:100% 2px,100% 2px,2px 100%,2px 100%;background-repeat:repeat-x,repeat-x,repeat-y,repeat-y;
 background-position:0 0,0 100%,100% 0,0 0;animation:px-march 2s steps(4) infinite}
 @keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}
-@keyframes caret{50%{opacity:0}}
-@keyframes pulse{0%{box-shadow:0 0 0 0 currentColor}100%{box-shadow:0 0 0 8px transparent}}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @keyframes breathe{0%,100%{opacity:.18;stroke:var(--accent);stroke-width:3}50%{opacity:.8;stroke:var(--accent);stroke-width:7}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts,#health,#savings{grid-column:1/-1}}
-@media (max-width:640px){.bar{padding:8px 14px}main{padding:14px 12px 24px;gap:12px}.bar .meta{margin-left:0}}
+@media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
+.topbar .meta{margin-left:0}.statusline{position:static}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
 .fresh{outline:2px solid var(--brand);outline-offset:-2px}
@@ -324,6 +338,8 @@ SCRIPT = r"""
   // The job view's simplified diagram (lib/dashboard_flow.py path_geometry).
   var FLOW = __FLOW__;
   var PX = __PIXELSTRIP__;
+  // The shell's link table and the components that carry a code version.
+  var SHELL = __SHELL__;
   var STATUS_URL = 'status.json';
   var FETCH_TIMEOUT_MS = 5000;
   var LINK_LOST_MS = 6000;
@@ -350,6 +366,7 @@ SCRIPT = r"""
   var openDetails = {};
   var modal = null;
   var trails = [];
+  var caretState = 'boot';
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -439,13 +456,179 @@ SCRIPT = r"""
 
   // --- every page ---------------------------------------------------------
 
-  function renderBadge(d) {
-    var a = d.attention || {count: 0};
-    var total = a.count + agedHealth(d).extra.length;
-    var count = byId('attention-count');
-    if (count) count.textContent = String(total);
-    var badge = byId('attention-badge');
-    if (badge) badge.className = 'badge' + (total ? '' : ' clear');
+  // The lanes the page draws: devices with their running jobs and the slots
+  // in use, plus grok wakes. Mirrors lane_devices in lib/dashboard_page.py.
+  function laneDevices(d) {
+    var slots = d.slots || {};
+    var box = slots.box || {};
+    var devices = (slots.devices || []).map(function (x) {
+      return {name: x.name, slot_max: x.slot_max, held: x.held || 0, enabled: x.enabled,
+              placeholder: x.placeholder, harnesses: x.harnesses || [], listed: true, jobs: []};
+    });
+    var byName = {};
+    devices.forEach(function (x) { byName[x.name] = x; });
+    var wakes = [];
+    (d.running || []).forEach(function (r) {
+      if (r.device === null || r.device === undefined) { wakes.push(r); return; }
+      if (!Object.prototype.hasOwnProperty.call(byName, r.device)) {
+        var dev = {name: r.device, slot_max: r.device === 'box' ? box.slot_max : null, held: 0, enabled: true,
+                   placeholder: false, harnesses: [], listed: r.device === 'box' && !devices.length, jobs: []};
+        devices.push(dev);
+        byName[r.device] = dev;
+      }
+      byName[r.device].jobs.push(r);
+    });
+    if (!devices.length) {
+      devices.push({name: 'box', slot_max: box.slot_max, held: 0, enabled: true, placeholder: false,
+                    harnesses: [], listed: true, jobs: []});
+    }
+    // #63 FU-1: a slot held in device_slots is in use even when its job is
+    // not (or no longer) running, so a lane counts max(held, running).
+    devices.forEach(function (dev) { dev.used = Math.max(dev.held, dev.jobs.length); });
+    return {devices: devices, wakes: wakes};
+  }
+
+  // Running / total slots over the devices that can take work (header_load).
+  function headerLoad(d) {
+    var used = 0;
+    var total = 0;
+    laneDevices(d).devices.forEach(function (dev) {
+      if (dev.enabled && !dev.placeholder && dev.slot_max) { used += dev.used; total += dev.slot_max; }
+    });
+    return total ? Math.max(0, Math.min(1, used / total)) : 0;
+  }
+
+  function renderBand(d) {
+    var root = byId('band');
+    if (root) root.replaceChildren(PX.strip('band', {state: 'band', load: headerLoad(d), height: 24}));
+  }
+
+  function attentionItems(d) {
+    var a = d.attention || {items: []};
+    return (a.items || []).concat(agedHealth(d).extra);
+  }
+
+  // The attention strip (#139): every item the count covers, hidden when clear.
+  function renderAttentionStrip(d) {
+    var root = byId('attention-strip');
+    if (!root) return;
+    var items = attentionItems(d);
+    root.replaceChildren();
+    root.hidden = !items.length;
+    if (!items.length) return;
+    var head = add(root, el('div', 'attn-head'));
+    var blk = add(head, el('span', 'attn-blk'));
+    blk.setAttribute('aria-hidden', 'true');
+    add(blk, PX.strip('attention', {state: 'attention', height: 16}));
+    var count = add(head, link('attn-count', 'activity.html#attention'));
+    add(count, el('b', null, items.length)).setAttribute('id', 'attention-count');
+    add(count, el('span', null, items.length === 1 ? ' needs attention' : ' need attention'));
+    items.forEach(function (x) {
+      var row = add(root, el('div', 'attn-item'));
+      add(row, chip(x.kind, ATTENTION[x.kind] || 'muted'));
+      add(row, link('attn-who', x.component ? healthLink(x.link) : 'job.html')).textContent =
+        x.component ? x.component : ticketOf(x);
+      add(row, el('span', 'attn-what', x.detail));
+    });
+  }
+
+  // "behind": configured code components not on the checkout's version
+  // (lib/health.py stale_code). Mirrors version_drift.
+  function versionDrift(h) {
+    h = h || {};
+    var rows = (h.components || []).filter(function (c) {
+      return c.configured !== false && SHELL.code.indexOf(c.component) >= 0;
+    });
+    return {
+      newest: String(h.code_version || 'unknown'),
+      behind: rows.filter(function (c) { return !!c.stale_code; }).map(function (c) { return c.label; }),
+      unknown: rows.filter(function (c) { return c.version === 'unknown'; }).map(function (c) { return c.label; })
+    };
+  }
+
+  function segment(key, text, state, label, age, prefix) {
+    return {key: key, label: label === undefined ? null : label, text: text,
+            state: state === undefined ? null : state,
+            href: Object.prototype.hasOwnProperty.call(SHELL.links, key) ? SHELL.links[key] : null,
+            age: age === undefined ? null : age, prefix: prefix === undefined ? null : prefix};
+  }
+  function present(v) { return v !== null && v !== undefined; }
+
+  // The status line's segments, each from the snapshot. Mirrors status_segments.
+  function statusSegments(d) {
+    var out = [];
+    laneDevices(d).devices.forEach(function (dev) {
+      var value = !dev.enabled || dev.placeholder ? 'off'
+        : dev.used + '/' + (present(dev.slot_max) ? dev.slot_max : '—');
+      out.push(segment('device:' + dev.name, value, null, dev.name));
+    });
+    out.push(segment('queue', num(((d.queue || {}).totals || {}).queued || 0), null, 'queue'));
+    var p = d.poller || {};
+    var h = p.health || {state: 'unknown'};
+    var ps = POLL_STATE[h.state] || POLL_STATE.unknown;
+    var poll = 'poll ' + ps[0].toLowerCase();
+    var cycle = h.last_cycle_age_seconds;
+    if (present(cycle)) out.push(segment('poll', poll + ' · ' + dur(cycle), ps[1], null, cycle, poll + ' · '));
+    else out.push(segment('poll', poll, ps[1]));
+    var errors = (p.errors || {}).last_hour || 0;
+    out.push(segment('poll-errors', num(errors) + ' poll error' + (errors === 1 ? '' : 's') + ' / 1 h', errors ? 'bad' : 'ok'));
+    var b = p.linear_budget || {state: 'ok'};
+    var bs = BUDGET_STATE[b.state] || ['OTHER', 'muted'];
+    out.push(segment('linear', 'linear ' + bs[0].toLowerCase(), bs[1]));
+    var w = p.linear_webhook;
+    if (!w) {
+      out.push(segment('webhook', 'no webhook', 'muted'));
+    } else if (!present(w.last_received_age_seconds)) {
+      out.push(segment('webhook', 'webhook never', present(w.warning) ? 'bad' : 'warn'));
+    } else {
+      out.push(segment('webhook', 'webhook ' + dur(w.last_received_age_seconds), present(w.warning) ? 'bad' : 'ok',
+                       null, w.last_received_age_seconds, 'webhook '));
+    }
+    var f = d.feeder;
+    if (!f) out.push(segment('feeder', 'no feeder', 'muted'));
+    else {
+      var failing = (f.items || []).some(function (x) { return x.state === 'error'; });
+      out.push(segment('feeder', 'feeder ' + num(f.fed) + ' fed', failing ? 'bad' : 'ok'));
+    }
+    var hs = d.health || {};
+    if (!hs.known) {
+      out.push(segment('components', 'components unknown', hs.error ? 'bad' : 'muted'));
+    } else {
+      var rows = agedHealth(d).rows.filter(function (c) { return c.configured !== false; });
+      var up = rows.filter(function (c) { return c.state === 'up'; }).length;
+      var down = rows.some(function (c) { return c.state === 'down'; });
+      out.push(segment('components', up + ' / ' + rows.length + ' up', down ? 'bad' : up < rows.length ? 'warn' : 'ok'));
+    }
+    var drift = versionDrift(hs);
+    if (drift.newest === 'unknown') out.push(segment('version', 'version unknown', 'warn'));
+    else {
+      out.push(segment('version', drift.newest.slice(0, 7) + ' · ' + drift.behind.length + ' behind',
+                       drift.behind.length ? 'warn' : 'ok'));
+    }
+    return out;
+  }
+
+  function renderStatusLine(d) {
+    var root = byId('statusline');
+    if (!root) return;
+    root.replaceChildren();
+    add(root, el('span', 'sl-brand', 'factory'));
+    var filled = false;
+    statusSegments(d).forEach(function (s) {
+      if (s.state === null) {
+        var plain = add(root, el('span', 'sl-seg' + (s.key === 'queue' ? ' sl-queue' : '')));
+        plain.setAttribute('data-seg', s.key);
+        add(plain, el('span', 'sl-k', s.label));
+        add(plain, el('span', 'sl-v', s.text));
+        return;
+      }
+      if (!filled) { add(root, el('span', 'sl-fill')); filled = true; }
+      var a = add(root, link('sl-vital ' + s.state, s.href));
+      a.setAttribute('data-seg', s.key);
+      add(a, el('span', 'blk')).setAttribute('aria-hidden', 'true');
+      var text = add(a, el('span', null, s.text));
+      if (s.age !== null) ticking(text, s.age, s.prefix);
+    });
   }
 
   // #92: a snapshot vouches for the states it observed until its next
@@ -612,33 +795,11 @@ SCRIPT = r"""
     var running = d.running || [];
     var root = panel('lanes', 'Lanes and slots', running.length + ' running');
     if (!root) return;
-    var devices = (d.slots.devices || []).map(function (x) {
-      return {name: x.name, slot_max: x.slot_max, held: x.held || 0, enabled: x.enabled,
-              placeholder: x.placeholder, harnesses: x.harnesses || [], listed: true};
-    });
-    var known = {};
-    devices.forEach(function (x) { known[x.name] = true; });
-    var lanes = {};
-    var wakes = [];
-    running.forEach(function (r) {
-      if (r.device === null || r.device === undefined) { wakes.push(r); return; }
-      (lanes[r.device] || (lanes[r.device] = [])).push(r);
-      if (!known[r.device]) {
-        known[r.device] = true;
-        devices.push({name: r.device, slot_max: r.device === 'box' ? d.slots.box.slot_max : null, held: 0,
-                      enabled: true, placeholder: false, harnesses: [], listed: r.device === 'box' && !devices.length});
-      }
-    });
-    if (!devices.length) {
-      devices.push({name: 'box', slot_max: d.slots.box.slot_max, held: 0, enabled: true, placeholder: false,
-                    harnesses: [], listed: true});
-    }
+    var lanes = laneDevices(d);
     var grid = add(root, el('div', 'devices'));
-    devices.forEach(function (dev) {
-      var jobs = lanes[dev.name] || [];
-      // #63 FU-1: a slot held in device_slots is in use even when its job is
-      // not (or no longer) running, so a lane counts max(held, running).
-      var used = Math.max(dev.held, jobs.length);
+    lanes.devices.forEach(function (dev) {
+      var jobs = dev.jobs;
+      var used = dev.used;
       var card = add(grid, el('section', 'device' + (dev.enabled ? '' : ' disabled')));
       card.setAttribute('data-device', dev.name);
       var head = add(card, el('header'));
@@ -657,6 +818,7 @@ SCRIPT = r"""
       if (!used && !free) free = 1;
       for (var i = 0; i < free; i++) add(slots, el('div', 'slot idle', dev.enabled ? 'idle' : 'off'));
     });
+    var wakes = lanes.wakes;
     if (wakes.length) {
       var card = add(grid, el('section', 'device'));
       card.setAttribute('data-device', 'grok-wakes');
@@ -689,8 +851,7 @@ SCRIPT = r"""
   var ATTENTION = {stuck: 'bad', overdue: 'bad', dead: 'bad', 'needs-attention': 'bad', stale: 'warn', paused: 'warn',
                    down: 'bad', 'no-waiter': 'bad', health: 'bad'};
   function renderAttention(d) {
-    var a = d.attention || {count: 0, items: []};
-    var items = (a.items || []).concat(agedHealth(d).extra);
+    var items = attentionItems(d);
     var root = panel('attention', 'Needs attention', items.length + (items.length === 1 ? ' item' : ' items'));
     if (!root) return;
     list(root, items, 'all clear', function (x) {
@@ -1221,7 +1382,7 @@ __TELEMETRY__
     efficiency: [renderHealth, renderSavings, renderTokens],
     health: [renderComponents, renderNoWaiter]
   };
-  var RENDERERS = [renderBadge].concat(PAGES[PAGE] || []);
+  var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 
   function render(d) {
     latest = d;
@@ -1247,11 +1408,17 @@ __TELEMETRY__
     var state;
     var label;
     if (!everOk) { state = 'boot'; label = failures ? 'NO LINK · static view' : 'ACQUIRING LINK'; }
-    else if (Date.now() - lastOk > LINK_LOST_MS) { state = 'lost'; label = 'LINK LOST · retrying'; }
-    else if (age > STALE_SECONDS) { state = 'stale'; label = 'STALE SNAPSHOT'; }
+    else if (Date.now() - lastOk > LINK_LOST_MS) { state = 'lost'; label = 'LINK LOST'; }
+    else if (age > STALE_SECONDS) { state = 'stale'; label = 'STALE'; }
     else { state = 'live'; label = 'LIVE'; }
     if (link) link.className = 'link ' + state;
     if (text) text.textContent = label;
+    var caret = byId('caret');
+    if (caret && state !== caretState) {
+      caretState = state;
+      caret.replaceChildren(PX.strip('caret', {state: 'link-' + state, height: 12}));
+      PX.bind();
+    }
     var ageNode = byId('age');
     if (ageNode) ageNode.textContent = dur(age) + ' ago';
     var clock = byId('clock');
@@ -1328,9 +1495,11 @@ __TELEMETRY__
 
 # The PixelStrip engine (#138, docs/design/mission-control/SPEC.md section 6):
 # the drawing methods of reference/artboards/PixelStrip.dc.html, copied onto
-# Strip.prototype, under one shared requestAnimationFrame loop. Two lines
+# Strip.prototype, under one shared requestAnimationFrame loop. These lines
 # differ from the artboard: decay's amount follows the strip's progress
-# (heartbeat age / timeout) instead of a timer, and decay is therefore still.
+# (heartbeat age / timeout) instead of a timer, and decay is therefore still;
+# a caret with rate 0 is still too (#139: the lost link is static), and a
+# still caret is always lit, so a 0.4 Hz caret never freezes dark.
 PX_SCRIPT = r"""
 (function () {
   var TABLE = __PX__;
@@ -1503,7 +1672,7 @@ PX_SCRIPT = r"""
       f.bw = Math.max(2, Math.floor(C / f.slots));
     } else if (effect === 'caret') {
       var rate = this._num(p.rate, 1);
-      f.on = rate <= 0 ? true : ((t * rate) % 1) < 0.5;
+      f.on = rate <= 0 || this._bool(p.still) || this._sysStill ? true : ((t * rate) % 1) < 0.5;
     }
     return f;
   };
@@ -1631,7 +1800,8 @@ PX_SCRIPT = r"""
 
     /* skip the frame when nothing on this strip can have changed */
     var oneShot = beatAge < 0.7 || burstAge < 0.5 || (doneAge >= 0 && doneAge < 0.8);
-    var loops = !(effect === 'static' || effect === 'off' || effect === 'decay' || doneAge >= 0.8);
+    var loops = !(effect === 'static' || effect === 'off' || effect === 'decay' || doneAge >= 0.8
+      || (effect === 'caret' && this._num(p.rate, 1) <= 0));
     var animated = !still && (loops || oneShot);
     var sig = [effect, p.tint, p.tintMix, p.progress, p.used, p.slots, p.load, cell, W, H, done, still].join('|');
     if (!animated && sig === this._sig) return;
@@ -1781,6 +1951,11 @@ PX_SCRIPT = r"""
       style += '--p:' + p + ';';
     }
     if (opts.heartbeat !== null && opts.heartbeat !== undefined) el.setAttribute('data-hb', String(Math.max(0, Math.floor(Number(opts.heartbeat) || 0))));
+    if (opts.load !== null && opts.load !== undefined) el.setAttribute('data-load', clamp(Number(opts.load) || 0).toFixed(3));
+    var rate = opts.rate !== null && opts.rate !== undefined ? opts.rate : entry.rate;
+    if (rate !== null && rate !== undefined) el.setAttribute('data-rate', String(Number(rate)));
+    var seed = opts.seed !== null && opts.seed !== undefined ? opts.seed : entry.seed;
+    if (seed !== null && seed !== undefined) el.setAttribute('data-seed', String(Number(seed)));
     el.setAttribute('data-px-key', String(key));
     el.setAttribute('aria-hidden', 'true');
     el.setAttribute('style', style + 'height:' + height + 'px');
@@ -1840,6 +2015,7 @@ def page_script() -> str:
     return (
         SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())
+        .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))
         .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
         .replace("__FONTS__", font_faces())
@@ -1856,10 +2032,10 @@ def page_script() -> str:
 PAGES = ("index.html", "job.html", "activity.html", "efficiency.html", "health.html")
 _PAGE_NAMES = {
     "index.html": ("main", "Lanes"),
-    "job.html": ("job", "Jobs"),
+    "job.html": ("job", "Tickets"),
     "activity.html": ("activity", "Activity"),
     "efficiency.html": ("efficiency", "Efficiency"),
-    "health.html": ("health", "Health"),
+    "health.html": ("health", "System"),
 }
 LIST_MAX = 12
 _BOTS = ("claude", "codex", "cursor", "grok")
@@ -1897,7 +2073,8 @@ PX_BOT_TINTS = {"claude": "#e0af68", "codex": "#7aa2f7", "cursor": "#bb9af7", "g
 PX_FALLBACK = "#9ece6a"
 _PX_BAD = "#f7768e"
 PX_BROKEN = ("dead", "overdue", "stuck", "blocked", "capped", "refused", "no_waiter", "down")
-PX_STATE: dict[str, dict[str, str]] = {
+_PX_LINK = {"live": ("#9ece6a", 1), "stale": ("#ff9e64", 0.4), "lost": (_PX_BAD, 0), "boot": ("#8b93b8", 0)}
+PX_STATE: dict[str, dict[str, str | float]] = {
     "plan": {"effect": "field", "tint": "bot"},
     "build": {"effect": "fill", "tint": "bot"},
     "review": {"effect": "scan", "tint": "bot"},
@@ -1908,6 +2085,10 @@ PX_STATE: dict[str, dict[str, str]] = {
     "idle": {"effect": "twinkle", "tint": PX_FALLBACK},
     "held": {"effect": "off", "tint": PX_FALLBACK, "frame": "px-held"},
     "unknown": {"effect": "off", "tint": PX_FALLBACK},
+    # #139: the brand caret per link state (rate 1 blinks at 1 Hz, 0 is solid).
+    **{f"link-{name}": {"effect": "caret", "tint": tint, "rate": rate} for name, (tint, rate) in _PX_LINK.items()},
+    "band": {"effect": "field", "tint": PX_FALLBACK, "seed": 21},
+    "attention": {"effect": "static", "tint": _PX_BAD, "seed": 5},
 }
 PX_ACTIONS = {"plan": "plan", "build": "build", "review": "review", "fix": "fix"}
 _PX_HEX = re.compile(r"#[0-9a-f]{6}")
@@ -1954,6 +2135,11 @@ def px_frame(state: str) -> str:
     return PX_STATE.get(state, {}).get("frame", "")
 
 
+def _fixed3(value: float) -> str:
+    """0..1 to three places, rounded half up like the script's toFixed(3)."""
+    return str(Decimal(max(0.0, min(1.0, float(value)))).quantize(Decimal("0.001"), ROUND_HALF_UP))
+
+
 def px_strip(
     key: object,
     *,
@@ -1963,14 +2149,19 @@ def px_strip(
     bot: object = None,
     progress: float | None = None,
     heartbeat: float | None = None,
+    load: float | None = None,
+    rate: float | None = None,
+    seed: float | None = None,
     height: int = 16,
 ) -> str:
     """A PixelStrip canvas (the script draws it; without script its CSS
-    gradients are the still frame). `state` picks the effect and tint from
-    PX_STATE; `effect` and `tint` override them. Same markup as PX.strip."""
+    gradients are the still frame). `state` picks the effect, tint, rate and
+    seed from PX_STATE; the keywords override them. Same markup as PX.strip."""
     entry = PX_STATE.get(state, PX_STATE["unknown"])
-    effect = effect or entry["effect"]
+    effect = str(effect or entry["effect"])
     tint = tint or entry["tint"]
+    rate = entry.get("rate") if rate is None else rate
+    seed = entry.get("seed") if seed is None else seed
     if tint == "bot":
         tint = str(bot) if bot in PX_BOT_TINTS else PX_FALLBACK
     if tint not in PX_BOT_TINTS and not _PX_HEX.fullmatch(str(tint)):
@@ -1983,11 +2174,17 @@ def px_strip(
     ]
     style = f"--px:{f'var(--{tint})' if tint in PX_BOT_TINTS else tint};"
     if progress is not None:
-        value = str(Decimal(max(0.0, min(1.0, float(progress)))).quantize(Decimal("0.001"), ROUND_HALF_UP))
+        value = _fixed3(progress)
         attrs.append(("data-progress", value))
         style += f"--p:{value};"
     if heartbeat is not None:
         attrs.append(("data-hb", str(max(0, int(heartbeat)))))
+    if load is not None:
+        attrs.append(("data-load", _fixed3(load)))
+    if rate is not None:
+        attrs.append(("data-rate", f"{float(rate):g}"))
+    if seed is not None:
+        attrs.append(("data-seed", f"{float(seed):g}"))
     attrs += [("data-px-key", str(key)), ("aria-hidden", "true"), ("style", f"{style}height:{height}px")]
     return "<canvas " + " ".join(f'{name}="{_e(value)}"' for name, value in attrs) + "></canvas>"
 
@@ -2092,32 +2289,212 @@ def _when(seconds: object, prefix: str = "", suffix: str = "") -> str:
     return _span("when", prefix + duration(seconds) + suffix)
 
 
-# --- the bar on every page -------------------------------------------------------------
+# --- the shell on every page (#139) -----------------------------------------------------
+#
+# The TopBar (brand and its caret, nav, link state, snapshot meta), the header
+# band, the attention strip and the status line. Each has a script twin in
+# SCRIPT that builds the same markup from status.json.
 
 
-def _bar(snapshot: dict, page: str) -> str:
+def _topbar(snapshot: dict, page: str) -> str:
     current = ' aria-current="page"'
     links = "".join(
         f'<a href="{name}"{current if name == page else ""}>{label}</a>'
         for name, (_, label) in _PAGE_NAMES.items()
     )
-    count = int((snapshot.get("attention") or {}).get("count", 0))
     return (
-        '<header class="bar">'
-        '<div class="brand">Factory <b>Mission Control</b></div>'
+        '<header class="topbar" id="topbar"><div class="top-row">'
+        '<div class="brand"><span>Factory <b>Mission Control</b></span>'
+        f'<span class="caret" id="caret" aria-hidden="true">{px_strip("caret", state="link-boot", height=12)}'
+        "</span></div>"
         f'<nav class="nav" id="nav" aria-label="Pages">{links}</nav>'
-        f'<a class="badge{"" if count else " clear"}" id="attention-badge" '
-        'href="activity.html#attention" '
-        'title="stuck tickets, overdue, stale or dead jobs, paused tickets, '
-        'down components and queued jobs with no waiter">'
-        f'<b id="attention-count">{count}</b> needs attention</a>'
         '<div class="link boot" id="link" role="status" aria-live="polite">'
         '<span class="dot" aria-hidden="true"></span>'
         '<span id="link-text">STATIC SNAPSHOT</span></div>'
         f'<div class="meta">snapshot <span id="age">{_e(snapshot["generated_at"])}</span>'
         ' · <span id="clock"></span> · read-only, redacted</div>'
+        "</div>"
+        f'<div class="band" id="band">{_band(snapshot)}</div>'
+        f"{_attention_strip(snapshot)}"
         "</header>"
     )
+
+
+def header_load(snapshot: dict) -> float:
+    """Running / total slots over the enabled, non-placeholder devices that
+    have a slot_max (the header band's brightness), 0 with no slots."""
+    devices, _ = lane_devices(snapshot)
+    used = total = 0
+    for device in devices:
+        if device["enabled"] and not device["placeholder"] and device["slot_max"]:
+            used += device["used"]
+            total += device["slot_max"]
+    return max(0.0, min(1.0, used / total)) if total else 0.0
+
+
+def _band(snapshot: dict) -> str:
+    return px_strip("band", state="band", load=header_load(snapshot), height=24)
+
+
+def _attention_strip(snapshot: dict) -> str:
+    """Every item behind the attention count, inline with its chip and link;
+    empty and hidden when there is none."""
+    items = (snapshot.get("attention") or {}).get("items") or []
+    if not items:
+        return '<div class="attn" id="attention-strip" hidden></div>'
+
+    def item(row: dict) -> str:
+        if row.get("component"):
+            href, who = _health_link(row.get("link")), row["component"]
+        else:
+            href, who = "job.html", _ticket(row)
+        return (
+            '<div class="attn-item">'
+            + _chip(row["kind"], _ATTENTION.get(row["kind"], "muted"))
+            + f'<a class="attn-who" href="{_e(href)}">{_e(who)}</a>'
+            + _span("attn-what", row["detail"])
+            + "</div>"
+        )
+
+    need = " needs attention" if len(items) == 1 else " need attention"
+    return (
+        '<div class="attn" id="attention-strip">'
+        '<div class="attn-head"><span class="attn-blk" aria-hidden="true">'
+        f'{px_strip("attention", state="attention", height=16)}</span>'
+        '<a class="attn-count" href="activity.html#attention">'
+        f'<b id="attention-count">{len(items)}</b>{_span(None, need)}</a></div>'
+        + "".join(item(row) for row in items)
+        + "</div>"
+    )
+
+
+# Where each status-line segment links (System anchors or Lanes).
+STATUS_LINKS = {
+    "poll": "health.html#health",
+    "poll-errors": "health.html#health",
+    "linear": "health.html#health",
+    "webhook": "index.html#linear-webhook",
+    "feeder": "index.html#feeder",
+    "components": "health.html#components",
+    "version": "health.html#components",
+}
+
+
+def shell_table() -> dict:
+    """What the page script's shell needs from here (SHELL in SCRIPT)."""
+    return {"links": STATUS_LINKS, "code": sorted(CODE_COMPONENTS)}
+
+
+def version_drift(health: dict | None) -> dict:
+    """newest: the checkout's version; behind: configured code components on
+    another known version (lib/health.py stale_code); unknown: configured code
+    components whose version is unknown, not counted as behind."""
+    health = health or {}
+    rows = [
+        row for row in health.get("components") or []
+        if row.get("configured") is not False and row.get("component") in CODE_COMPONENTS
+    ]
+    return {
+        "newest": str(health.get("code_version") or "unknown"),
+        "behind": [row["label"] for row in rows if row.get("stale_code")],
+        "unknown": [row["label"] for row in rows if row.get("version") == "unknown"],
+    }
+
+
+def _segment(key: str, text: str, state: str | None = None, label: str | None = None,
+             age: object = None, prefix: str | None = None) -> dict:
+    return {"key": key, "label": label, "text": text, "state": state,
+            "href": STATUS_LINKS.get(key), "age": age, "prefix": prefix}
+
+
+def _count(value: object) -> str:
+    return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else str(value)
+
+
+def status_segments(snapshot: dict) -> list[dict]:
+    """The status line, one segment per figure, each computed from the
+    snapshot: devices and queue (plain), then the vitals with a state
+    (ok, warn, bad, muted) and a link. Mirrors statusSegments in SCRIPT."""
+    out = []
+    devices, _ = lane_devices(snapshot)
+    for device in devices:
+        if not device["enabled"] or device["placeholder"]:
+            value = "off"
+        else:
+            value = f'{device["used"]}/{"—" if device["slot_max"] is None else device["slot_max"]}'
+        out.append(_segment(f'device:{device["name"]}', value, label=str(device["name"])))
+    out.append(_segment("queue", _count(snapshot["queue"]["totals"]["queued"]), label="queue"))
+    poller = snapshot["poller"]
+    health = poller.get("health") or {"state": "unknown"}
+    label, cls = _POLL_STATE.get(health["state"], _POLL_STATE["unknown"])
+    poll = f"poll {label.lower()}"
+    cycle = health.get("last_cycle_age_seconds")
+    if cycle is None:
+        out.append(_segment("poll", poll, cls))
+    else:
+        out.append(_segment("poll", f"{poll} · {duration(cycle)}", cls, age=cycle, prefix=f"{poll} · "))
+    errors = (poller.get("errors") or {}).get("last_hour") or 0
+    plural = "" if errors == 1 else "s"
+    out.append(_segment("poll-errors", f"{_count(errors)} poll error{plural} / 1 h", "bad" if errors else "ok"))
+    budget = poller.get("linear_budget") or {"state": "ok"}
+    blabel, bcls = _BUDGET_STATE.get(budget["state"], ("OTHER", "muted"))
+    out.append(_segment("linear", f"linear {blabel.lower()}", bcls))
+    webhook = poller.get("linear_webhook")
+    if not webhook:
+        out.append(_segment("webhook", "no webhook", "muted"))
+    elif webhook.get("last_received_age_seconds") is None:
+        out.append(_segment("webhook", "webhook never",
+                            "bad" if webhook.get("warning") is not None else "warn"))
+    else:
+        age = webhook["last_received_age_seconds"]
+        out.append(_segment("webhook", f"webhook {duration(age)}",
+                            "bad" if webhook.get("warning") is not None else "ok",
+                            age=age, prefix="webhook "))
+    feeder = snapshot.get("feeder")
+    if not feeder:
+        out.append(_segment("feeder", "no feeder", "muted"))
+    else:
+        failing = any(item.get("state") == "error" for item in feeder.get("items") or [])
+        out.append(_segment("feeder", f"feeder {_count(feeder['fed'])} fed", "bad" if failing else "ok"))
+    components = snapshot.get("health") or {}
+    if not components.get("known"):
+        out.append(_segment("components", "components unknown",
+                            "bad" if components.get("error") else "muted"))
+    else:
+        rows = [row for row in components.get("components") or [] if row.get("configured") is not False]
+        up = sum(1 for row in rows if row["state"] == "up")
+        down = any(row["state"] == "down" for row in rows)
+        out.append(_segment("components", f"{up} / {len(rows)} up",
+                            "bad" if down else "warn" if up < len(rows) else "ok"))
+    drift = version_drift(components)
+    if drift["newest"] == "unknown":
+        out.append(_segment("version", "version unknown", "warn"))
+    else:
+        behind = len(drift["behind"])
+        out.append(_segment("version", f'{drift["newest"][:7]} · {behind} behind',
+                            "warn" if behind else "ok"))
+    return out
+
+
+def _statusline(snapshot: dict) -> str:
+    parts = ['<span class="sl-brand">factory</span>']
+    filled = False
+    for seg in status_segments(snapshot):
+        if seg["state"] is None:
+            cls = "sl-seg sl-queue" if seg["key"] == "queue" else "sl-seg"
+            parts.append(
+                f'<span class="{cls}" data-seg="{_e(seg["key"])}">'
+                f'{_span("sl-k", seg["label"])}{_span("sl-v", seg["text"])}</span>'
+            )
+            continue
+        if not filled:
+            parts.append('<span class="sl-fill"></span>')
+            filled = True
+        parts.append(
+            f'<a class="sl-vital {seg["state"]}" href="{_e(seg["href"])}" data-seg="{_e(seg["key"])}">'
+            f'<span class="blk" aria-hidden="true"></span>{_span(None, seg["text"])}</a>'
+        )
+    return f'<footer class="statusline" id="statusline">{"".join(parts)}</footer>'
 
 
 # --- main page -------------------------------------------------------------------------
@@ -2832,8 +3209,9 @@ def _page(snapshot: dict, name: str) -> str:
             f'<body data-page="{page}" '
             f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
             f'data-refresh="{refresh}">',
-            _bar(snapshot, name),
+            _topbar(snapshot, name),
             f'<main id="hud">{panels}</main>',
+            _statusline(snapshot),
             extra,
             f"<script>{page_script()}</script>",
             "</body></html>",
