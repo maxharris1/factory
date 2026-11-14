@@ -180,7 +180,7 @@ Call `StopLedger.report` for that ticket and stop. A second report of the same s
 - `capped` — revise at the cap, or a second acceptance-criterion-unmet verdict.
 - `go-not-from-approver` — with the GitHub App switch on (#122), a `go` on a capped ticket came from a login not in `approver_logins`, so no extra round was granted. Tell Max once; an extra round still needs his own words.
 
-Post a capped-ticket `go` or a hold `ok` with the environment from `lib.orchestrate.approval_post_env`, given `lib.orch_yml.approvals(config)`'s `app_trust` and `gh_config_dir`, and only with Max's own words for that ticket. With the switch on it uses only Max's approver profile; when it raises, ask Max to post it himself. Never post those two kinds as the app bot.
+Never post `kind=ok` as Max. A hold `ok` is Max's alone: he posts it himself, and `lib.orchestrate.approver_go_post` refuses every kind but `go`. The one exception is short-term: post a capped-ticket `go` as `maxharris1` only through `approver_go_post`, quoting Max's exact words for that ticket, given `lib.orch_yml.approvals(config)`'s `app_trust` and `gh_config_dir`. Its limit: a capped ticket, one `go` per extra round Max asked for, Max's words quoted unchanged, nothing else. With the switch on it uses only Max's approver profile; when it raises, ask Max to post it himself. Never post a capped `go` as the app bot. `approver_gh_config_dir` is removed once T02f (#173) lands and Max confirms its `/go`, and this path with it.
 - `abandoned` — Max dropped the ticket. Also post the `kind=answers` comment below with `state=abandoned`, quoting Max's words, so the dispatcher records the ticket as abandoned and stops reading it.
 
 ```
