@@ -58,6 +58,7 @@ What the run shows:
 - **Read via.** The tool whose result held the canary (`Read`, `Bash`, `Skill`, `shell`, ...) or `injected`.
 - **Helper.** Claude: an `Agent` (or legacy `Task`) call of type `general-purpose` whose result is not an error. Codex: a `spawn_agent` call whose output, decoded from its JSON text when the rollout stores it that way, names the started agent (`task_name` on Codex 0.162 and 0.167, `agent_id` on older builds) and is not a failure. A plain-text or serialized error scores `no`.
 - **poteto-agent.** Claude only. `missing` when the call failed because the agent type is not installed (T07 vendors it later). `n/a` on Codex.
+- **pstack:poteto-agent, pstack:comment-sicko.** Only in a `--plugin-dir` run: the agent names the Claude adapter uses (`skills/pstack/docs/harness/claude-code.md:20`), scored on the exact `subagent_type`. `yes` when the call's result is not an error. `missing` when the call failed because the name did not resolve, which is a no. `no` when no such call was made. `n/a` in a run without `--plugin-dir`. The rows above predate these columns and show `n/a` when re-rendered.
 - **Version.** From the transcript: Claude's record `version`, Codex's `session_meta.cli_version`.
 
 ## How the probe launches
@@ -88,3 +89,19 @@ bin/skill-probe render /tmp/skill-probe-claude/*.json /tmp/skill-probe-codex/*.j
 ```
 
 Paste its output over the Results table above.
+
+### Run with `--plugin-dir`
+
+```sh
+bin/skill-probe run --bot claude-bot --machines <live machines.yml> --device box \
+  --plugin-dir <abs path to the pinned pstack tree> --out /tmp/skill-probe-plugin
+```
+
+Claude only: a codex bot or a relative path is refused. The waiter argv gets `--plugin-dir <path>` right after its executable and nothing else changes, so Claude loads the tree in place. The probe runs no `claude plugin install` or `marketplace` command, writes no settings, and refuses an `--out` or `--work` inside `~/.claude` or `~/.agents`, so nothing is written into the bot home.
+
+- The canary is the first body line of `<plugin-dir>/skills/poteto-mode/SKILL.md`, the tree actually loaded. A local run refuses a tree without that file. A remote-only run reads the canary from the repo pin, so run it from a checkout pinned to the same tree.
+- `read-path` names the tree's own `SKILL.md`, `slash` opens with `/pstack:poteto-mode`, and the helpers line also asks for `pstack:poteto-agent` and `pstack:comment-sicko`.
+- Each row's Note says `plugin-dir`, so these rows can sit next to the installed-path rows.
+- The `pstack:` prefix depends on Claude naming the plugin after its directory, since pstack ships no `.claude-plugin/plugin.json`. The probe records what happens either way.
+
+No live `--plugin-dir` rows yet. The live run on each device is an operator follow-up, and its rows go in the Results table above.

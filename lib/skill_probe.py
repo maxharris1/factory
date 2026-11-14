@@ -16,6 +16,10 @@ the model's context and never from what the model says.
 * Helper = yes when a spawn call has a result that is not an error; for
   Codex the decoded result must also name the started agent (`agent_id`).
 * No transcript: every cell is `unknown`.
+* `--plugin-dir` (Claude only): the waiter argv gets `--plugin-dir <tree>`
+  after its executable, so the tree loads in place with nothing installed
+  into the bot home. The canary comes from that tree, and the two prefixed
+  agent names the Claude adapter uses are scored on their own.
 
 The probe opens only the canary skill, the waiter config, machines.yml, its
 run and output directories, and the harness transcripts of its own runs
@@ -59,6 +63,10 @@ SKILL = "poteto-mode"
 POTETO_AGENT_TYPES = frozenset({"poteto-agent", "pstack:poteto-agent"})
 CLAUDE_AGENT_TOOLS = frozenset({"Agent", "Task"})
 CODEX_HELPER_TOOLS = frozenset({"spawn_agent"})
+PSTACK_POTETO_AGENT = "pstack:poteto-agent"
+PSTACK_COMMENT_SICKO = "pstack:comment-sicko"
+PLUGIN_SKILL = ("skills", SKILL, "SKILL.md")
+BOT_HOME_DIRS = (".claude", ".agents")
 MISSING_AGENT = re.compile(r"not found|unknown agent|no such agent|invalid agent type", re.I)
 INSTALLED = {
     "claude": (".claude", "skills", SKILL, "SKILL.md"),
@@ -105,6 +113,8 @@ class Evidence:
     helper: Outcome
     poteto_agent: Outcome
     harness_version: str | None
+    pstack_poteto_agent: Outcome = "n/a"
+    pstack_comment_sicko: Outcome = "n/a"
 
 
 UNKNOWN = Evidence("unknown", None, "unknown", "unknown", None)
@@ -137,6 +147,7 @@ class ProbeResult:
     style: Style
     evidence: Evidence
     note: str = ""
+    plugin_dir: str | None = None
 
     def to_json(self) -> str:
         data = asdict(self)
@@ -153,6 +164,7 @@ class ProbeResult:
             style=Style(data["style"]),
             evidence=Evidence(**data["evidence"]),
             note=data.get("note", ""),
+            plugin_dir=data.get("plugin_dir"),
         )
 
 
@@ -183,16 +195,33 @@ def style_spec(style: Style) -> StyleSpec:
     return next(spec for spec in STYLES if spec.style is style)
 
 
-def prompt_for(style: Style, harness: str, skill_path: str, canary: str) -> str:
-    """The style's opening line, then fixed text. It never holds the canary."""
-    helpers = (
-        "Start one helper agent of type general-purpose that replies ok. "
-        "Then start one helper agent of type poteto-agent that replies ok."
-        if harness == "claude"
-        else "Start one sub-agent that replies ok."
+def prompt_for(
+    style: Style, harness: str, skill_path: str, canary: str, *, plugin: bool = False
+) -> str:
+    """The style's opening line, then fixed text. It never holds the canary.
+
+    plugin: the pstack tree is loaded with --plugin-dir, so the slash command
+    and the agent types carry the plugin's `pstack:` prefix.
+    """
+    if harness != "claude":
+        helpers = "Start one sub-agent that replies ok."
+    elif plugin:
+        helpers = (
+            "Start one helper agent of type general-purpose that replies ok. "
+            f"Then start one helper agent of type {PSTACK_POTETO_AGENT} that replies ok. "
+            f"Then start one helper agent of type {PSTACK_COMMENT_SICKO} that replies ok."
+        )
+    else:
+        helpers = (
+            "Start one helper agent of type general-purpose that replies ok. "
+            "Then start one helper agent of type poteto-agent that replies ok."
+        )
+    opening = (
+        f"/pstack:{SKILL}" if plugin and style is Style.SLASH
+        else style_spec(style).opening(skill_path)
     )
     prompt = (
-        f"{style_spec(style).opening(skill_path)}\n\n"
+        f"{opening}\n\n"
         "This is a factory skill-loading probe. Do only this:\n"
         f"1. {helpers}\n"
         "2. Reply with one line saying whether you read the skill, then stop.\n"
@@ -222,9 +251,12 @@ def _blocks(record: Mapping) -> list:
     return []
 
 
-def claude_evidence(records: Iterable[Mapping], canary: str) -> Evidence:
+def claude_evidence(records: Iterable[Mapping], canary: str, *, plugin: bool = False) -> Evidence:
+    """plugin: also score the two `pstack:` agent types; otherwise they stay n/a."""
     records = [record for record in records if isinstance(record, Mapping)]
     if not records:
+        if plugin:
+            return replace(UNKNOWN, pstack_poteto_agent="unknown", pstack_comment_sicko="unknown")
         return UNKNOWN
     version = next(
         (str(r["version"]) for r in records if isinstance(r.get("version"), str)), None
@@ -259,6 +291,7 @@ def claude_evidence(records: Iterable[Mapping], canary: str) -> Evidence:
                 read_via = "injected"
     helper: Outcome = "no"
     poteto: Outcome = "no"
+    pstack: dict[str, Outcome] = {PSTACK_POTETO_AGENT: "no", PSTACK_COMMENT_SICKO: "no"}
     for call_id, call in calls.items():
         if call.get("name") not in CLAUDE_AGENT_TOOLS:
             continue
@@ -269,7 +302,13 @@ def claude_evidence(records: Iterable[Mapping], canary: str) -> Evidence:
             helper = _better(helper, outcome)
         elif kind in POTETO_AGENT_TYPES:
             poteto = _better(poteto, outcome)
-    return Evidence("yes" if read_via else "no", read_via, helper, poteto, version)
+        if kind in pstack:
+            pstack[kind] = _better(pstack[kind], outcome)
+    read = "yes" if read_via else "no"
+    if not plugin:
+        return Evidence(read, read_via, helper, poteto, version)
+    return Evidence(read, read_via, helper, poteto, version,
+                    pstack[PSTACK_POTETO_AGENT], pstack[PSTACK_COMMENT_SICKO])
 
 
 def _spawn_outcome(result: tuple[str, bool] | None) -> Outcome:
@@ -383,15 +422,23 @@ def plan_launches(
     homes: Mapping[str, str],
     skill_md: str | None = None,
     only_device: str | None = None,
+    plugin_dir: str | None = None,
 ) -> list[Launch]:
     """One launch per enabled device x applicable style for bot's harness.
 
     homes maps a device name to the bot's home there (for the installed
     SKILL.md path); skill_md, when given, is used on every device instead.
+    plugin_dir puts `--plugin-dir <plugin_dir>` in every argv, and the
+    read-path style then names the tree's own SKILL.md.
     """
     harness = harness_of(bot, machines)
     if harness not in PARSERS:
         raise ProbeError(f"{harness} is not a probed harness")
+    if plugin_dir is not None:
+        if harness != "claude":
+            raise ProbeError("--plugin-dir is a Claude flag; it cannot probe codex")
+        command = with_plugin_dir(command, plugin_dir)
+        skill_md = skill_md or str(Path(plugin_dir, *PLUGIN_SKILL))
     launches = []
     for device in machines.devices:
         if only_device is not None and device.name != only_device:
@@ -421,6 +468,13 @@ def plan_launches(
                        path, target, neutral.guarded_dirs, neutral.insert_at, neutral.cd)
             )
     return launches
+
+
+def with_plugin_dir(argv: Sequence[str], plugin_dir: str) -> tuple[str, ...]:
+    """argv with `--plugin-dir <plugin_dir>` right after the executable."""
+    if not argv:
+        raise ProbeError("the waiter command is empty")
+    return (argv[0], "--plugin-dir", plugin_dir, *argv[1:])
 
 
 def launch_argv(launch: Launch) -> list[str]:
@@ -614,8 +668,9 @@ def render(results: Sequence[ProbeResult]) -> str:
     devices = sorted({r.device for r in results})
     harnesses = [h for h in PARSERS if any(r.harness == h for r in results)]
     lines = [
-        "| Date | Device | Harness | Version | Style | Read | Read via | Helper | poteto-agent | Note |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Date | Device | Harness | Version | Style | Read | Read via | Helper | poteto-agent "
+        "| pstack:poteto-agent | pstack:comment-sicko | Note |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for device in devices:
         for harness in harnesses:
@@ -628,16 +683,22 @@ def render(results: Sequence[ProbeResult]) -> str:
                         continue
                     lines.append(
                         f"| | {device} | {harness} | | {spec.style.value} "
-                        "| n/a | | n/a | n/a | style does not apply |"
+                        "| n/a | | n/a | n/a | n/a | n/a | style does not apply |"
                     )
                     continue
                 e = result.evidence
+                note = "; ".join(
+                    part for part in (result.note, result.plugin_dir and "plugin-dir") if part
+                )
                 lines.append(
                     f"| {result.date} | {device} | {harness} | {e.harness_version or ''} "
                     f"| {spec.style.value} | {e.read} | {e.read_via or ''} | {e.helper} "
-                    f"| {e.poteto_agent} | {result.note} |"
+                    f"| {e.poteto_agent} | {e.pstack_poteto_agent} | {e.pstack_comment_sicko} "
+                    f"| {note} |"
                 )
     return "\n".join(lines) + "\n"
+
+
 def _pinned_skill() -> Path:
     return Path(__file__).resolve().parent.parent / "skills" / "pstack" / "skills" / SKILL / "SKILL.md"
 
@@ -653,6 +714,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_p.add_argument("--out", type=Path, help="result directory (must not exist)")
     run_p.add_argument("--work", type=Path, help="local run directory root (default: temp)")
     run_p.add_argument("--skill-md", help="absolute SKILL.md path the read-path style names")
+    run_p.add_argument(
+        "--plugin-dir",
+        help="absolute pstack tree to load in place with claude --plugin-dir (Claude only)",
+    )
     run_p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     run_p.add_argument("--dry-run", action="store_true", help="print launches; start nothing")
     render_p = sub.add_parser("render", help="print the results table as markdown")
@@ -668,29 +733,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
+def _refuse_bot_home(path: Path | None, flag: str) -> None:
+    if path is None:
+        return
+    for name in BOT_HOME_DIRS:
+        if _inside(path.absolute(), Path.home() / name):
+            raise ProbeError(f"{flag} must not be inside ~/{name}")
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.skill_md is not None and not args.skill_md.startswith("/"):
         raise ProbeError("--skill-md must be an absolute path")
+    if args.plugin_dir is not None and not args.plugin_dir.startswith("/"):
+        raise ProbeError("--plugin-dir must be an absolute path")
+    _refuse_bot_home(args.out, "--out")
+    _refuse_bot_home(args.work, "--work")
     machines, findings = load_machines_yml(args.machines, allow_placeholders=True)
     if machines is None:
         errors = [f.message for f in findings if f.severity == "error"] or ["invalid"]
         raise ProbeError(f"{args.machines}: {errors[0]}")
     command = load_harness_command(args.config or default_harness_config(args.bot), args.bot)
-    canary = skill_canary(_pinned_skill().read_text(encoding="utf-8"))
     run_id = new_run_id()
     work = args.work or Path(tempfile.gettempdir()) / "skill-probe"
     launches = plan_launches(
         machines, args.bot, command.command, run_id=run_id, local_root=str(work),
         homes={d.name: str(Path.home()) for d in machines.devices if d.local},
-        skill_md=args.skill_md, only_device=args.device,
+        skill_md=args.skill_md, only_device=args.device, plugin_dir=args.plugin_dir,
     )
     if not launches:
         raise ProbeError(f"no enabled device runs {args.bot}")
+    canary_md = _pinned_skill()
+    plugin = args.plugin_dir is not None
+    if plugin and any(launch.remote is None for launch in launches):
+        canary_md = Path(args.plugin_dir, *PLUGIN_SKILL)
+        if not canary_md.is_file():
+            raise ProbeError(f"--plugin-dir has no {'/'.join(PLUGIN_SKILL)}")
+    canary = skill_canary(canary_md.read_text(encoding="utf-8"))
     if args.dry_run:
         for launch in launches:
             print(f"# {launch.name} in {launch.run_dir}")
             print(shlex.join(launch_argv(launch)))
-            print(prompt_for(launch.style, launch.harness, launch.skill_md, canary))
+            print(prompt_for(launch.style, launch.harness, launch.skill_md, canary, plugin=plugin))
         return 0
     if args.out is None:
         raise ProbeError("--out is required unless --dry-run")
@@ -698,7 +781,7 @@ def _run(args: argparse.Namespace) -> int:
     homes: dict[str, str | None] = {}
     date = datetime.now(timezone.utc).date().isoformat()
     for launch in launches:
-        if launch.remote is not None and args.skill_md is None:
+        if launch.remote is not None and args.skill_md is None and not plugin:
             if launch.device not in homes:
                 homes[launch.device] = remote_home(launch.remote)
             home = homes[launch.device]
@@ -708,14 +791,17 @@ def _run(args: argparse.Namespace) -> int:
                 (args.out / f"{launch.name}.json").write_text(result.to_json())
                 continue
             launch = replace(launch, skill_md=str(Path(home, *INSTALLED[launch.harness])))
-        prompt = prompt_for(launch.style, launch.harness, launch.skill_md, canary)
+        prompt = prompt_for(launch.style, launch.harness, launch.skill_md, canary, plugin=plugin)
         text, note = run_launch(
             launch, prompt, timeout=args.timeout, log_path=args.out / f"{launch.name}.log"
         )
         if text:
             (args.out / f"{launch.name}.transcript.jsonl").write_text(text)
-        evidence = PARSERS[launch.harness](parse_jsonl(text), canary)
-        result = ProbeResult(date, launch.device, launch.harness, launch.style, evidence, note)
+        records = parse_jsonl(text)
+        evidence = (claude_evidence(records, canary, plugin=True) if plugin
+                    else PARSERS[launch.harness](records, canary))
+        result = ProbeResult(date, launch.device, launch.harness, launch.style, evidence, note,
+                             args.plugin_dir)
         (args.out / f"{launch.name}.json").write_text(result.to_json())
         print(f"{launch.name}: read={evidence.read} helper={evidence.helper} {note}".rstrip())
     return 0
