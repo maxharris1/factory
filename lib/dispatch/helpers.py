@@ -1,0 +1,318 @@
+"""Module functions shared by the dispatcher's mixins: trust, rounds, handoff text, states."""
+
+from __future__ import annotations
+
+import json
+import re
+import zlib
+from collections.abc import Mapping
+
+from lib.dispatch.constants import (
+    _FENCE_OPEN,
+    _LIST_MARKER,
+    _NO_QUESTIONS,
+    _QUESTIONS_HEADING,
+)
+from lib.dispatch.types import Comment, ShipError, TrackedTicket
+from lib.queue import Job
+
+
+def _spread(repo: str, ticket_id: str) -> int:
+    return zlib.crc32(f"{str(repo).lower()}#{ticket_id}".encode())
+
+
+def _scope(repo: str, ticket_id: str) -> str:
+    return f"{repo.lower()}\x1f{ticket_id}"
+
+
+def trusted_bots(
+    trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
+    author: str,
+) -> frozenset[str]:
+    """The bots a comment author may speak for: GitHub logins from
+    trusted_logins, `linear:<id>` authors from trusted_linear_users."""
+    tracker = "linear" if author.startswith("linear:") else "github"
+    return frozenset(trusted_logins.get(tracker, {}).get(author, frozenset()))
+
+
+def _normalize_trusted_logins(
+    value: Mapping[str, object],
+) -> dict[str, dict[str, frozenset[str]]]:
+    normalized: dict[str, dict[str, frozenset[str]]] = {}
+    if not all(key in ("github", "linear") for key in value):
+        raise ValueError("trusted_logins must be keyed by tracker")
+    for tracker, entries in value.items():
+        if not isinstance(entries, Mapping):
+            raise ValueError("trusted_logins tracker entries must be mappings")
+        normalized[tracker] = {}
+        for login, bots in entries.items():
+            if not isinstance(login, str) or not isinstance(
+                bots, (set, frozenset, tuple, list)
+            ):
+                raise ValueError("trusted_logins entries must be bot sets")
+            normalized[tracker][login] = frozenset(str(bot) for bot in bots)
+    return normalized
+
+
+def _grok_logical_key(job: Job) -> str:
+    request = job.request
+    return (
+        f"{_scope(request.repo, request.ticket_id)}"
+        f"\x1f{request.action}\x1f{request.source_comment_id}"
+    )
+
+
+# Verdict outcomes that took the verdict's action (#80, Codex PR #82 r2
+# F2.3): a fix job queued, the review capped, a re-review queued, or a ship
+# begun or done. Only these make a later identical verdict a duplicate.
+ACTED_VERDICT_OUTCOMES = frozenset(
+    {
+        "queued-review-fix",
+        "capped-review",
+        "queued-patch-review",
+        "merged",
+        "merge-confirmed",
+        "handed-off",
+        "merge-queue",
+        "waiting-external",
+        "ship-unconfirmed",
+        "ship-failed",
+    }
+)
+
+
+def _acted_verdict(outcome: str | None) -> bool:
+    return outcome is not None and (
+        outcome in ACTED_VERDICT_OUTCOMES
+        or outcome.startswith("ship-already-completed-")
+    )
+
+
+def _round_number(value: object) -> int | None:
+    """The N of a round field "N/CAP" (or "N"), or None."""
+    if not isinstance(value, str):
+        return None
+    head = value.split("/", 1)[0].strip()
+    return int(head) if head.isdigit() else None
+
+
+# _posted_handoff: a ready whose head T2 could not yet check against the PR.
+_HANDOFF_UNREAD = object()
+
+# The handoff kind and role that answers each harness step (#108).
+_ANSWERS = {
+    "plan": ("plan", "builder"),
+    "build": ("ready", "builder"),
+    "fix": ("ready", "builder"),
+    "review": ("verdict", "reviewer"),
+}
+
+# Handled outcomes that rejected a verdict: such a comment is no job's handoff.
+_REJECTED_OUTCOMES = (
+    "rejected-",
+    "stale-",
+    "superseded-",
+    "duplicate-",
+    "refused-",
+    "failed-",
+    "ticket-stuck",
+    "ticket-abandoned",
+)
+
+
+def _retry_detail(job: Job) -> str | None:
+    """The failed job's detail naming it as `retry_of`, so the retry can
+    take over a worktree the first attempt kept (#105)."""
+    try:
+        context = json.loads(job.request.detail) if job.request.detail else {}
+    except ValueError:
+        return job.request.detail
+    if not isinstance(context, dict):
+        return job.request.detail
+    context["retry_of"] = job.id
+    return json.dumps(context, separators=(",", ":"), sort_keys=True)
+
+
+def _detail_round_number(detail: str | None) -> int | None:
+    """The round number a job's detail JSON carries ("round": "N/CAP")."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _matching_head(reported: str, current: str | None) -> str | None:
+    if current is None or min(len(reported), len(current)) < 7:
+        return None
+    if current.startswith(reported) or reported.startswith(current):
+        return current
+    return None
+
+
+def _redrive_eligible(exc: BaseException, policy: str) -> bool:
+    """Whether a failed ship gets its one re-drive (issue #47, issue #83)."""
+    if not isinstance(exc, ShipError):
+        return False
+    if policy == "handoff":
+        return exc.write_confirmed is False
+    if policy == "merge":
+        return exc.retryable is True
+    return False
+
+
+def _holds(ticket: TrackedTicket) -> bool:
+    """Issue #86: the hold applies only on a ship: merge repo."""
+    return ticket.factory.ship == "merge" and ticket.factory.hold is not None
+
+
+def ship_mode(policy: str) -> str:
+    """after:<approver> repos fast-forward; every other repo squash-merges."""
+    return "fast-forward" if policy.startswith("after:") else "squash"
+
+
+def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
+    """(created_at, id) with numeric ids compared as integers, so 9 < 10."""
+    if re.fullmatch(r"[0-9]+", comment.id):
+        return comment.created_at, 0, int(comment.id)
+    return comment.created_at, 1, comment.id
+
+
+def _has_questions(body: str) -> bool:
+    """Whether a trusted questions comment asks anything.
+
+    Fail closed: every questions comment counts unless it explicitly says
+    there are none. Fenced code blocks (``` or ~~~, closed) are example text:
+    a Questions heading inside one is ignored. Every Questions heading outside
+    fences (any style: ``## Questions``, ``**Questions:**``, ``Questions: ...``)
+    opens a section, and the comment has questions if any section does. In a
+    section only the first content after the heading decides, whether that
+    is the inline remainder or the next non-blank line: a none-marker
+    ("None.", "N/A", "No questions") or no content at all means none; anything
+    else, headings, bold labels and fenced blocks included, means questions.
+    Headings never close a section, because a heading right under Questions
+    can itself be a question or a label for one.
+    Without a Questions heading, any line that is not a none-marker counts.
+    """
+    lines = body.splitlines()
+    unfenced = _collapse_fences(lines)
+    sections = [
+        (heading.group("rest") or "", unfenced[index + 1 :])
+        for index, line in enumerate(unfenced)
+        if line is not None
+        and (heading := _QUESTIONS_HEADING.fullmatch(line.strip())) is not None
+    ]
+    if sections:
+        return any(_section_asks(rest, after) for rest, after in sections)
+    return any(
+        item and item not in _NO_QUESTIONS
+        for item in map(_question_item, lines)
+    )
+
+
+def _section_asks(rest: str, after: list[str | None]) -> bool:
+    """Whether a Questions section's first content is not a none-marker.
+
+    A fenced block (None) is never a none-marker, so it counts as asking.
+    """
+    for content in [rest, *after]:
+        if content is None:
+            return True
+        item = _question_item(content)
+        if item:
+            return item not in _NO_QUESTIONS
+    return False
+
+
+def _collapse_fences(lines: list[str]) -> list[str | None]:
+    """The lines with each closed fenced code block replaced by one None.
+
+    An opening fence with no closing fence is left as ordinary text, so an
+    unclosed fence never hides anything (fail closed).
+    """
+    collapsed: list[str | None] = []
+    index = 0
+    while index < len(lines):
+        opening = _FENCE_OPEN.match(lines[index])
+        if opening is not None:
+            fence = opening.group("fence")
+            closing = re.compile(
+                rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*"
+            )
+            end = next(
+                (
+                    later
+                    for later in range(index + 1, len(lines))
+                    if closing.fullmatch(lines[later])
+                ),
+                None,
+            )
+            if end is not None:
+                collapsed.append(None)
+                index = end + 1
+                continue
+        collapsed.append(lines[index])
+        index += 1
+    return collapsed
+
+
+def _question_item(line: str) -> str:
+    """A line reduced to its words: no heading, bold or list markup.
+
+    Markup-only lines ("##", "**", "---") reduce to "" and count as blank.
+    """
+    text = re.sub(r"^#{1,6}(?=\s|$)|\s#+$", "", line.strip())
+    text = _LIST_MARKER.sub("", text.strip("*: ")).strip("*: ")
+    text = text.rstrip(".").strip().lower()
+    return "" if re.fullmatch(r"[-*_#=\s]*", text) else text
+
+
+def _comment_link(comment: Comment) -> str:
+    return comment.url or f"comment:{comment.id}"
+
+
+def _detail_project_bot(detail: str | None) -> str | None:
+    if detail is None:
+        return None
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    project_bot = parsed.get("project_bot")
+    return project_bot if isinstance(project_bot, str) else None
+
+
+def _is_patch_id(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
+
+
+def _is_full_sha(value: str) -> bool:
+    return re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _ship_state(policy: str) -> str:
+    if policy == "merge":
+        return "merged"
+    if policy == "handoff":
+        return "handed-off"
+    return "waiting-external"
+
+
+def _queue_state(policy: str) -> str:
+    """Where an approved finish_line: merge ticket waits (#130)."""
+    return "waiting-external" if policy.startswith("after:") else "merge-queue"
+
+
+def _state_for_action(action: str) -> str:
+    return {
+        "plan": "planning",
+        "build": "building",
+        "review": "review",
+        "fix": "fixing",
+        "update-from-main": "updating",
+        "clarify": "questions",
+    }[action]

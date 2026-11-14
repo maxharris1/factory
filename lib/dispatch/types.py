@@ -1,0 +1,304 @@
+"""Dispatcher data types: comments, CI results, tracked tickets, Protocols and ship errors."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
+
+from lib.factory_md import FactoryConfig
+from lib.hold import LabelEvent
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
+from lib.queue import Job
+from lib.update_check import UpdateClass
+
+if TYPE_CHECKING:
+    from lib.dispatcher import Dispatcher
+
+
+@dataclass(frozen=True)
+class Comment:
+    id: str
+    author: str
+    body: str
+    created_at: float
+    url: str | None = None
+    edited_at: float | None = None
+
+
+@dataclass(frozen=True)
+class CIResult:
+    status: str
+    log: str | None = None
+    # False when the head has no check run and no commit status at all:
+    # GitHub ran nothing there (#255), as opposed to CI still running.
+    reported: bool = True
+
+    def __post_init__(self) -> None:
+        if self.status not in ("pending", "success", "failure"):
+            raise ValueError(f"unknown CI status {self.status!r}")
+
+
+# Where a Linear issue stands relative to Ready for Review, read with the
+# ticket: still before review (backlog, triage, unstarted, or started before
+# Ready for Review; the only phase the handoff moves), already in Ready for
+# Review, moved on by a human (completed, canceled, or a started state after
+# Ready for Review), or on a team with no Ready for Review state at all (the
+# PR is still marked ready and the done wake reports the unmoved issue).
+LINEAR_STATE_PHASES = (
+    "before-review",
+    "ready-for-review",
+    "moved-on",
+    "no-ready-state",
+)
+
+
+@dataclass(frozen=True)
+class TrackedTicket:
+    repo: str
+    ticket_id: str
+    factory: FactoryConfig
+    comments: tuple[Comment, ...]
+    current_head: str | None
+    ci: Mapping[str, CIResult]
+    risk: str
+    job_timeout_minutes: int = DEFAULT_JOB_TIMEOUT_MINUTES
+    ticket_url: str | None = None
+    git_branch_name: str | None = None
+    pr_number: str | None = None
+    brief: str | None = None
+    grok_bot: str = "grok-bot"
+    linear_issue_id: str | None = None
+    linear_ready_state_id: str | None = None
+    linear_ready_for_review: bool = False
+    linear_state_phase: str | None = None
+    ready_starts_review: bool = False
+    # Issue #59: the PR had no orch:state/ label and was a candidate only
+    # because it carries a parseable ready. Only a trusted builder ready
+    # naming the PR head may then start tracking (Codex PR #64 r1 F1.1).
+    admitted_by_ready: bool = False
+    # Issue #86: read only when factory.md has hold: on a ship: merge repo.
+    # None means not read; the hold then fails closed (no merge, retry).
+    # labels are the PR's labels, changed_files the paths its diff against
+    # base touches at current_head, label_events its labeled / unlabeled
+    # events.
+    labels: tuple[str, ...] | None = None
+    changed_files: tuple[str, ...] | None = None
+    label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #115: the source issue (`#115`, or a Linear key) and the open
+    # PR's title, so the poller can prefix a title that lacks it.
+    source_issue: str | None = None
+    pr_title: str | None = None
+    # #108 (#42 N3): the PR is merged. A fresh read never records the merge
+    # itself: its caller decides.
+    merged: bool = False
+    # #130: GitHub's mergeability (None while GitHub computes it) and a PR
+    # closed without merging.
+    mergeable: bool | None = None
+    mergeable_state: str | None = None
+    closed: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.repo or not self.ticket_id:
+            raise ValueError("repo and ticket_id must not be empty")
+        if self.risk not in ("low", "high"):
+            raise ValueError("risk must be low or high")
+        if self.job_timeout_minutes < 1:
+            raise ValueError("job_timeout_minutes must be positive")
+
+
+@dataclass(frozen=True)
+class TicketRef:
+    repo: str
+    ticket_id: str
+    tracker: str
+    allow_merged: bool = False
+
+
+class PollSource(Protocol):
+    def github_candidates(
+        self,
+        label_prefix: str,
+        *,
+        exclude: frozenset[tuple[str, str]],
+    ) -> tuple[TrackedTicket, ...]: ...
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]: ...
+
+    def tracked_tickets(
+        self,
+        tickets: tuple[TicketRef, ...],
+    ) -> tuple[TrackedTicket, ...]: ...
+
+    def fresh_ticket(self, ticket: TicketRef) -> TrackedTicket | None: ...
+
+
+class ReviewActions(Protocol):
+    def set_state(self, ticket: TrackedTicket, state: str) -> None: ...
+
+    def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str: ...
+
+    def is_merged(self, ticket: TrackedTicket, head: str) -> bool:
+        """True only when the PR was merged with exactly this head commit.
+
+        Reads GitHub's PR state at call time, never a local clone. Squash
+        and merge-commit merges also count, so this never proves where the
+        base branch points.
+        """
+        ...
+
+    def merge(
+        self,
+        ticket: TrackedTicket,
+        *,
+        squash: bool,
+        match_head_commit: str,
+    ) -> None: ...
+
+    def fast_forward(
+        self,
+        ticket: TrackedTicket,
+        *,
+        branch: str,
+        head: str,
+    ) -> None:
+        """Move branch to exactly head, adding no commit.
+
+        Must be a fast-forward-only update of GitHub's remote ref (for
+        example PATCH git/refs/heads/<branch> with force=false), never a
+        push from a local clone. Raises when head is not a fast-forward of
+        branch's current tip (branch moved, or history diverged). Never
+        merges, squashes or force-pushes instead.
+        """
+        ...
+
+    def branch_tip(self, ticket: TrackedTicket, branch: str) -> str:
+        """The full SHA of GitHub's remote ref for branch, read at call time.
+
+        Never a local clone or a cached value: a ship counts only when this
+        equals the approved head.
+        """
+        ...
+
+    def handoff(self, ticket: TrackedTicket, head: str) -> str | None:
+        """Hand the PR off. A returned note is reported in the done wake."""
+        ...
+
+    def await_approver(
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        approver: str,
+    ) -> None: ...
+
+    def set_title(self, ticket: TrackedTicket, title: str) -> None:
+        """Rename the ticket's PR (issue #115)."""
+        ...
+
+
+class GrokDelivery(Protocol):
+    """Push a Grok job and return a non-empty delivery receipt.
+
+    Any failure after the push but before queue completion can repeat the wake.
+    Implementations must deduplicate on logical_key, which is stable across
+    T6 retries, rather than on job.id.
+    """
+
+    def deliver(self, job: Job, *, logical_key: str) -> str: ...
+
+
+class RetryableStateError(RuntimeError):
+    pass
+
+
+class RetryableShipError(RetryableStateError):
+    pass
+
+
+class ShipError(RuntimeError):
+    """A ship that did not complete.
+
+    write_confirmed is True unless the raiser knows that no external write
+    it sent was confirmed before it failed. A handoff failure with
+    write_confirmed False, or a merge failure the raiser marked retryable
+    (a draft or not-yet-mergeable PR, a GitHub 5xx, a timeout: issue #83),
+    is eligible for the one ship re-drive. safe_detail, when set, is the
+    only text recorded in ship_intents.error.
+    """
+
+    write_confirmed: bool = True
+    retryable: bool = False
+    safe_detail: str | None = None
+
+
+class AlreadyMergedShip(ShipError):
+    """The PR was merged before the ship could hand it off (#108, #42 N3):
+    the ship has nothing left to do, so it ends as merged, not failed."""
+
+
+@dataclass(frozen=True)
+class ShipRequest:
+    repo: str
+    ticket_id: str
+    head: str
+    approver: str
+    source_comment_id: str
+    approve_comment_id: str
+
+
+class Hook(Protocol):
+    """A project hook (T7, T8) sees each unhandled comment before T1/T1P/T2.
+
+    fields is None when the comment has no parseable orch:v1 header.
+    handle returns None when the comment is not the hook's event, or
+    (handled, outcome); handled comments go into the ledger. Hooks run in
+    order and the first answer wins, so (False, outcome) leaves the
+    comment for the next poll without offering it to later hooks or the
+    core rows. kind=go, kind=plan and kind=ready are never offered to hooks.
+    """
+
+    def initialize(self, dispatcher: Dispatcher) -> None: ...
+
+    def handle(
+        self,
+        dispatcher: Dispatcher,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str] | None,
+    ) -> tuple[bool, str] | None: ...
+
+
+class DeviceChecks(Protocol):
+    """F2-02's DeviceMonitor: release gone workers' slots, find offline devices.
+
+    A DeviceMonitor also has `liveness(placement)` (#75), which the
+    dispatcher uses, when present, to find dead jobs.
+    """
+
+    def reconcile(
+        self,
+        now: float,
+        on_offline: Callable[[str, str, float], None],
+    ) -> object: ...
+
+
+class Feeder(Protocol):
+    """The backlog feeder (lib/feeder.py, issue #85).
+
+    feed_once opens a draft PR plus brief and go handoffs for each eligible
+    ticket that fits the free capacity and returns a report whose `fed`
+    lists the tickets it fed this poll as TicketRefs.
+    """
+
+    def feed_once(self) -> object: ...
+
+
+# (repo, base branch, approved head, updated head) -> whether the update is
+# trivial, and why (lib/update_check.py).
+UpdateClassifier = Callable[[str, str, str, str], UpdateClass]
