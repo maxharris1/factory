@@ -191,3 +191,24 @@ def test_no_later_comment_in_the_pass_acts_after_a_fresh_read_abandons(
     assert_abandoned(board)
     assert board.queue.claim("codex") is None
     assert board.queue.claim("claude") is None
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_a_shippers_fresh_closed_read_abandons_before_a_later_go(
+    tmp_path: Path, stale: bool
+) -> None:
+    board = after_board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    board.post(pr, "ok", OK.format(head=pr.head), "tracy-login")
+    board.go(pr, "late-go")
+    if stale:
+        stale_open_on_the_first_read(board, pr.head)
+    pr.closed = True
+    board.poll()
+    board.poll()
+
+    assert board.outcome("late-go") in (None, "after-close")
+    assert_abandoned(board)
+    assert board.queue.claim("claude") is None
+    assert board.queue.claim("codex") is None

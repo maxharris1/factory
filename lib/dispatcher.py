@@ -3223,7 +3223,14 @@ class Dispatcher:
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        fresh = self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        return self._observed(
+            self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        )
+
+    def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
+        """Every read outside the poll's snapshot passes here: one showing
+        a watched PR closed unmerged abandons it (#130) before anything
+        acts on the read."""
         if fresh is not None and fresh.closed and not fresh.merged and self._watched(fresh):
             self._abandon_closed(fresh)
         return fresh
@@ -5647,6 +5654,7 @@ class ReviewShipper:
         ]
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
+        self.dispatcher._observed(found[0])
         return found[0]
 
 
