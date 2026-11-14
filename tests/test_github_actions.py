@@ -1665,3 +1665,26 @@ def test_handoff_of_a_merged_pr_raises_the_typed_already_merged_error() -> None:
     assert isinstance(raised.value, AlreadyMergedShip)
     assert raised.value.write_confirmed is False
     assert gh.keys() == [PULL]
+
+
+@pytest.mark.parametrize(
+    ("checks", "status", "reported"),
+    [
+        ("check-runs-empty.json", "status-empty.json", False),
+        ("check-runs-in-progress.json", "status-empty.json", True),
+        ("check-runs-empty.json", "status-pending.json", True),
+    ],
+    ids=["nothing-reported", "running", "status-pending-only"],
+)
+def test_ci_status_says_whether_anything_reported(
+    checks: str, status: str, reported: bool
+) -> None:
+    """#255: a head with no check run and no status (GitHub skipped CI on a
+    conflicting PR) is told apart from a head whose CI is still running."""
+    actions, gh = adapter()
+    gh.route(CHECKS, served(checks))
+    gh.route(STATUS, served(status))
+
+    result = actions.ci_status("owner/repo", HEAD)
+    assert result.status == "pending"
+    assert result.reported is reported

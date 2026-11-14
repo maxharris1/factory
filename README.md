@@ -165,8 +165,8 @@ assumes a device is reachable: the poller checks it (below).
 moves the first queued job for that harness, in claim order (a ticket marked
 urgent, then a job resuming a paused step, then a ticket marked bug, then the
 oldest; issue #85), to running and holds a slot on the least-loaded device
-(the most free slots; a tie goes to the earlier device in `machines.yml`)
-that is enabled, has no placeholder and lists the harness. Slots are generic: any
+(the lowest utilization, slots held over `slot_max`; a tie goes to a remote
+device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
@@ -1059,10 +1059,27 @@ sourcing its env files (`run-poller.sh --print-db`), else the caller's
 `ORCH_DB`: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
-[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
-hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh) runs
+`poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
 (default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
-0 at once when another copy holds it.
+0 at once when another copy holds it. With `poller-autostart` on and no
+`crontab` (issue #248), `ensure` starts it unless it already runs, and logs
+`crontab not found` once per state directory; it can also be started by hand.
+A loop that `ensure` started exits at its next pass once `remove-autostart`
+has removed `poller-autostart`, and that pass launches nothing; a loop started
+by hand keeps running.
+
+Every `ensure`, held stopped or not, also runs `waiter-service.sh <bot>
+ensure` for each `~/.config/factory/waiter-autostart-<bot>` (logging to
+`waiter-<bot>-service.log`), so whatever keeps the poller alive keeps the
+autostarted waiters alive too, even with a `profile.sh` older than #80.
+
+Before restoring a missing `orch.db`, `start` and `ensure` wait for a box
+copy-in still restoring files: while `ORCH_COPY_IN_STATUS` (default
+`/tmp/sand-copy-in-status.json`) exists and its `"phase"` is not `"done"`,
+they check every `ORCH_COPY_IN_POLL_SEC` (default 5) for up to
+`ORCH_COPY_IN_WAIT` seconds (default 600). An `orch.db` the copy-in brings
+back is kept; after the wait runs out the restore goes ahead.
 
 ## Status
 
@@ -1764,6 +1781,12 @@ bin/orch eval-report --input tests/fixtures/eval/week
 ```
 
 The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
+
+```sh
+bin/orch eval-report --db ~/.local/share/factory/backup/orch.db --baseline o4-orch.db
+```
+
+`--db` prints the SF-10 metrics (#209) of an `orch.db` backup beside the `--baseline` snapshot (O4's). Both are opened read-only. A metric whose source a snapshot does not record prints `unrecorded`; [`lib/eval_report.py`](lib/eval_report.py) lists where each metric comes from.
 
 ## Model family
 

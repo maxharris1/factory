@@ -1,4 +1,4 @@
-"""Routing for throughput (issue #85 B): least-loaded placement and claim order."""
+"""Routing for throughput (issues #85 B, #223): lowest-utilization placement and claim order."""
 
 from __future__ import annotations
 
@@ -34,27 +34,59 @@ def machines(tmp_path: Path, devices: list[tuple[str, int, bool]]):
     return config
 
 
-# --- least-loaded placement --------------------------------------------------
+# --- lowest-utilization placement, ties off-box --------------------------------------------------
 
 
-def test_choose_device_picks_the_device_with_the_most_free_slots(tmp_path: Path) -> None:
-    config = machines(tmp_path, [("box", 3, True), ("pc", 6, False), ("mac", 4, False)])
+def test_choose_device_picks_the_lowest_utilization(tmp_path: Path) -> None:
+    config = machines(tmp_path, [("box", 4, True), ("pc", 10, False), ("mac", 4, False)])
+    assert choose_device(config, "claude", {"pc": 1}).name == "mac"  # 0/4 beats 1/10 with 9 free
+    assert choose_device(config, "claude", {"pc": 1, "mac": 1}).name == "box"  # 0/4
+    assert choose_device(config, "claude", {"pc": 3, "mac": 1, "box": 1}).name == "mac"  # 1/4 < 3/10
+    assert choose_device(config, "claude", {"pc": 2, "mac": 1, "box": 1}).name == "pc"  # 2/10 < 1/4
+
+
+def test_utilization_ties_are_exact(tmp_path: Path) -> None:
+    config = machines(tmp_path, [("box", 3, True), ("pc", 6, False), ("mac", 3, False)])
+    assert choose_device(config, "claude", {"box": 1, "pc": 2, "mac": 1}).name == "pc"  # all 1/3
+    assert choose_device(config, "claude", {"box": 1, "pc": 4, "mac": 1}).name == "mac"  # 1/3 tie
+
+
+def test_a_tie_goes_off_box_to_remotes_in_machines_yml_order(tmp_path: Path) -> None:
+    config = machines(tmp_path, [("box", 4, True), ("pc", 10, False), ("mac", 4, False)])
     assert choose_device(config, "claude", {}).name == "pc"
-    assert choose_device(config, "claude", {"pc": 3}).name == "mac"  # 3 free on pc, 4 on mac
-    assert choose_device(config, "claude", {"pc": 4, "mac": 2}).name == "box"  # 3 > 2 = 2
+    assert choose_device(config, "claude", {"box": 2, "pc": 5, "mac": 2}).name == "pc"
+    assert choose_device(config, "claude", {"pc": 1}).name == "mac"
+    assert choose_device(config, "claude", {"pc": 10, "mac": 4}).name == "box"
+    assert choose_device(config, "claude", {"pc": 10}).name == "mac"
 
 
-def test_ties_go_to_the_earlier_device_in_machines_yml(tmp_path: Path) -> None:
-    config = machines(tmp_path, [("box", 3, True), ("pc", 6, False), ("mac", 4, False)])
-    assert choose_device(config, "claude", {"pc": 3}).name == "mac"  # mac 4 > box 3 = pc 3
-    assert choose_device(config, "claude", {"pc": 3, "mac": 1}).name == "box"  # all tie at 3
-    assert choose_device(config, "claude", {"pc": 4, "mac": 2}).name == "box"  # box 3, pc 2, mac 2
+def test_off_box_ties_follow_local_not_position(tmp_path: Path) -> None:
+    config = machines(tmp_path, [("pc", 4, False), ("box", 4, True), ("mac", 4, False)])
+    assert choose_device(config, "claude", {}).name == "pc"
+    assert choose_device(config, "claude", {"pc": 1}).name == "mac"
+    assert choose_device(config, "claude", {"pc": 1, "mac": 1}).name == "box"
+
+
+def test_the_burst_of_five_spreads_across_devices(tmp_path: Path) -> None:
+    config = machines(tmp_path, [("box", 4, True), ("pc", 10, False), ("mac", 4, False)])
+    used = {"pc": 1}
+    placed = []
+    for _ in range(5):
+        name = choose_device(config, "claude", used).name
+        placed.append(name)
+        used[name] = used.get(name, 0) + 1
+    assert placed == ["mac", "box", "pc", "pc", "mac"]
+    assert used == {"pc": 3, "mac": 2, "box": 1}
 
 
 def test_a_full_device_is_never_chosen(tmp_path: Path) -> None:
     config = machines(tmp_path, [("box", 1, True), ("pc", 1, False)])
     assert choose_device(config, "claude", {"box": 1, "pc": 1}) is None
     assert choose_device(config, "claude", {"box": 1}).name == "pc"
+    assert choose_device(config, "claude", {"pc": 1}).name == "box"
+    config = machines(tmp_path, [("box", 4, True), ("pc", 2, False), ("mac", 10, False)])
+    assert choose_device(config, "claude", {"pc": 2, "mac": 9, "box": 3}).name == "box"  # 3/4 < 9/10
+    assert choose_device(config, "claude", {"pc": 2, "mac": 9, "box": 4}).name == "mac"
 
 
 def test_pool_claims_spread_jobs_across_devices(tmp_path: Path) -> None:
@@ -68,10 +100,10 @@ def test_pool_claims_spread_jobs_across_devices(tmp_path: Path) -> None:
         )
     pool = DevicePool(queue, config)
     devices = [pool.claim("claude")[1].device for _ in range(6)]
-    # free (box, pc, mac): (3,6,4) pc, (3,5,4) pc, (3,4,4) pc on the tie,
-    # (3,3,4) mac, (3,3,3) box on the tie, (2,3,3) pc.
-    assert devices == ["pc", "pc", "pc", "mac", "box", "pc"]
-    assert pool.used() == {"pc": 4, "mac": 1, "box": 1}
+    # used (box/3, pc/6, mac/4): (0,0,0) pc on the off-box tie, (0,1,0) mac before box,
+    # (0,1,1) box, (1,1,1) pc at 1/6, (1,2,1) mac at 1/4, (1,2,2) pc ties box at 1/3, off-box.
+    assert devices == ["pc", "mac", "box", "pc", "mac", "pc"]
+    assert pool.used() == {"pc": 3, "mac": 2, "box": 1}
 
 
 # --- claim order: urgent, then a resumed paused step, then bug, then oldest ---

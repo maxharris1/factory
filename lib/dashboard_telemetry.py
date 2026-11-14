@@ -60,6 +60,7 @@ STEPS_SHOWN = 12
 TOOLS_SHOWN = 8
 ROW_LIMIT = 2000
 TEXT_LIMIT = 160
+NO_DATA = "no data"
 HARNESSES = ("claude", "codex", "cursor")
 STEP_KINDS = ("tool", "command", "error")
 STEP_STATUSES = ("running", "ok", "error")
@@ -128,6 +129,15 @@ def _json(value: object, kind: type) -> object:
 
 def _shaped(value: object, shape: re.Pattern[str], fallback: str) -> str:
     return value if isinstance(value, str) and shape.fullmatch(value) else fallback
+
+
+def _tokens_known(row: sqlite3.Row) -> bool:
+    """False when the CLI reported no usage (#264): the dashboard shows "no
+    data", not 0. A row from before `tokens_unknown` is known if it has any."""
+    flag = row["tokens_unknown"]
+    if isinstance(flag, int) and not isinstance(flag, bool):
+        return flag == 0
+    return any(_count(row[name]) for name in ("tokens_in", "tokens_cached", "tokens_out"))
 
 
 def _harness(value: object) -> str:
@@ -229,6 +239,7 @@ def summary(row: sqlite3.Row | dict, now: float) -> dict:
         "tokens_in": _count(row["tokens_in"]),
         "tokens_cached": _count(row["tokens_cached"]),
         "tokens_out": _count(row["tokens_out"]),
+        "tokens_known": _tokens_known(row),
         "cost_usd": _money(row["cost_usd"]),
         "elapsed_seconds": _count(row["elapsed_seconds"]),
         "last_activity_age_seconds": _age(now, row["last_event_at"]),
@@ -260,12 +271,15 @@ def _bucket(key: str | None) -> dict:
         "tokens_out": 0,
         "cost_usd": 0.0,
         "priced_jobs": 0,
+        "unmetered_jobs": 0,
     }
     return item if key is None else {"name": key, **item}
 
 
 def _add(bucket: dict, row: sqlite3.Row) -> None:
     bucket["jobs"] += 1
+    if not _tokens_known(row):
+        bucket["unmetered_jobs"] += 1
     for name in ("tokens_in", "tokens_cached", "tokens_out"):
         bucket[name] += _count(row[name])
     cost = _money(row["cost_usd"])
@@ -283,7 +297,10 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
         return {"rows": {}, "rollup": _empty_rollup("none")}
     try:
         present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-        live = [name if name in present else f"NULL AS {name}" for name in LIVE_RUN_COLUMNS]
+        live = [
+            name if name in present else f"NULL AS {name}"
+            for name in (*LIVE_RUN_COLUMNS, "tokens_unknown")
+        ]
         rows = connection.execute(
             f"SELECT {', '.join([*_COLUMNS, *live])} FROM {TABLE} WHERE updated_at >= ? "
             "ORDER BY updated_at DESC LIMIT ?",
@@ -374,6 +391,12 @@ def _tests(item: dict) -> str:
     return f"{_num(item['tests_passed'])} / {_num(item['tests_failed'])}"
 
 
+def _tokens(item: dict) -> str:
+    if not item.get("tokens_known", True):
+        return NO_DATA
+    return f"{_num(item['tokens_in'])} / {_num(item['tokens_out'])}"
+
+
 def _stats(item: dict) -> list[tuple[str, str, str]]:
     failed = item["tests_failed"] or 0
     return [
@@ -382,7 +405,7 @@ def _stats(item: dict) -> list[tuple[str, str, str]]:
         (_num(item["commands"]), "commands", ""),
         (_num(item["files_touched"]), "files touched", ""),
         (_tests(item), "tests pass / fail", "bad" if failed else ""),
-        (f"{_num(item['tokens_in'])} / {_num(item['tokens_out'])}", "tokens in / out", ""),
+        (_tokens(item), "tokens in / out", ""),
         (_usd(item["cost_usd"]), "cost", ""),
         (_dur(item["elapsed_seconds"]), "elapsed", ""),
     ]
@@ -479,9 +502,12 @@ def _recent_table(rows: list[dict]) -> str:
         f"<td>{_e(row['job'])}</td>"
         f"<td>{_e(row['repo'])}</td>"
         f"<td>{_e(row['harness'])}</td>"
-        f'<td class="num">{_num(row["tokens_in"])}</td>'
-        f'<td class="num">{_num(row["tokens_out"])}</td>'
-        f'<td class="num">{_usd(row["cost_usd"])}</td>'
+        + (
+            f'<td class="num">{_num(row["tokens_in"])}</td><td class="num">{_num(row["tokens_out"])}</td>'
+            if row.get("tokens_known", True)
+            else f'<td class="num muted">{NO_DATA}</td><td class="num muted">{NO_DATA}</td>'
+        )
+        + f'<td class="num">{_usd(row["cost_usd"])}</td>'
         + ('<td class="bad">' if row["exit_code"] not in (0, None) else "<td>")
         + f"{_e(row['exit_reason'])}</td>"
         + "</tr>"
@@ -514,6 +540,9 @@ def rollup_panel(snapshot: dict) -> str:
             if unpriced
             else ""
         )
+        if totals["unmetered_jobs"]:
+            note += f'<p class="muted">{totals["unmetered_jobs"]} jobs report no token usage ({NO_DATA})</p>'
+
         inner = (
             f'<div class="stats">{stats}</div>{note}'
             '<h3 class="tele-head">per harness</h3>' + _table(rollup["by_harness"], "harness")
@@ -551,6 +580,9 @@ TELEMETRY_SCRIPT = r"""
     }
     return num(t.tests_passed) + ' / ' + num(t.tests_failed);
   }
+  function teleTokens(t) {
+    return t.tokens_known === false ? 'no data' : num(t.tokens_in) + ' / ' + num(t.tokens_out);
+  }
   function telemetryBlock(t) {
     var sec = el('section', 'telemetry');
     add(sec, el('h3', 'tele-head', 'telemetry'));
@@ -571,7 +603,7 @@ TELEMETRY_SCRIPT = r"""
     var stats = add(sec, el('div', 'stats tele-stats'));
     [[num(t.turns), 'turns', ''], [num(t.tool_calls_total), 'tool calls', ''], [num(t.commands), 'commands', ''],
      [num(t.files_touched), 'files touched', ''], [teleTests(t), 'tests pass / fail', t.tests_failed ? 'bad' : ''],
-     [num(t.tokens_in) + ' / ' + num(t.tokens_out), 'tokens in / out', ''], [usd(t.cost_usd), 'cost', ''],
+     [teleTokens(t), 'tokens in / out', ''], [usd(t.cost_usd), 'cost', ''],
      [dur(t.elapsed_seconds), 'elapsed', '']].forEach(function (s) {
       var box = add(stats, el('div', 'stat'));
       add(box, el('b', s[2] || null, s[0]));
@@ -611,8 +643,9 @@ TELEMETRY_SCRIPT = r"""
         add(tr, el('td', null, r.job));
         add(tr, el('td', null, r.repo));
         add(tr, el('td', null, r.harness));
-        add(tr, el('td', 'num', num(r.tokens_in)));
-        add(tr, el('td', 'num', num(r.tokens_out)));
+        var known = r.tokens_known !== false;
+        add(tr, el('td', known ? 'num' : 'num muted', known ? num(r.tokens_in) : 'no data'));
+        add(tr, el('td', known ? 'num' : 'num muted', known ? num(r.tokens_out) : 'no data'));
         add(tr, el('td', 'num', usd(r.cost_usd)));
         add(tr, el('td', (r.exit_code === 0 || r.exit_code === null || r.exit_code === undefined) ? null : 'bad', r.exit_reason || '—'));
       } else {
@@ -640,6 +673,7 @@ TELEMETRY_SCRIPT = r"""
     });
     var unpriced = t.jobs - t.priced_jobs;
     if (unpriced) add(root, el('p', 'muted', unpriced + ' jobs report no cost (Codex does not)'));
+    if (t.unmetered_jobs) add(root, el('p', 'muted', t.unmetered_jobs + ' jobs report no token usage (no data)'));
     add(root, el('h3', 'tele-head', 'per harness'));
     teleTable(root, r.by_harness || [], 'harness', false);
     add(root, el('h3', 'tele-head', 'per repo'));

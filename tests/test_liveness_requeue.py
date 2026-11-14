@@ -115,7 +115,7 @@ def test_a_long_silent_review_under_a_live_runner_is_not_marked_stale(tmp_path: 
 
 def _box_poller(tmp_path: Path) -> tuple[Poller, str]:
     """A Poller whose clock is real time, so `orch job run` and it agree."""
-    poller = Poller(tmp_path, now=time.time(), box_slots=3)  # most free slots: the box
+    poller = Poller(tmp_path, now=time.time(), box_slots=3, pc=False)  # pc off: the box
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     assert poller.claim().device == "box"
@@ -597,7 +597,7 @@ def _autostart_box(tmp_path: Path) -> tuple[Poller, str]:
     """A box job claimed by an autostart waiter: this test process, the run's parent."""
     from lib.worktrees import process_start
 
-    poller = Poller(tmp_path, now=time.time(), box_slots=3)  # most free slots: the box
+    poller = Poller(tmp_path, now=time.time(), box_slots=3, pc=False)  # pc off: the box
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     me = os.getpid()
@@ -748,7 +748,7 @@ def _assert_never_finished_by_another_turn(
 def test_r2_a_started_box_autostart_run_keeps_its_ownership_until_the_job_is_failed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    poller = Poller(tmp_path, now=time.time(), box_slots=3)
+    poller = Poller(tmp_path, now=time.time(), box_slots=3, pc=False)
     poller.queue.clock = time.time
     job_id = poller.review(timeout=3600)
     competing = _run_in_process(poller, job_id, monkeypatch)
