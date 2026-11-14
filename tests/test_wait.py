@@ -262,6 +262,28 @@ def test_job_done_failed_hands_the_job_to_t6(tmp_path: Path) -> None:
     assert json.loads(retry.stdout)["attempt"] == 2
 
 
+def test_failed_after_a_t6_timeout_is_a_no_op(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    run(["wait", "claude-bot"], db)
+    stale = time.time() - 5400 - 60
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET last_activity_at = ?", (stale,))
+    connection.close()
+    dispatcher_for(db).reconcile_jobs()
+    assert state_of(db, job.id)["state"] == "failed"
+
+    late = run(["job", "done", "claude-bot", job.id, "--failed"], db)
+
+    assert late.returncode == 0, late.stderr
+    assert late.stdout == f"failed {job.id} (already recorded; nothing changed)\n"
+    dispatcher_for(db).reconcile_jobs()
+    with sqlite3.connect(db) as connection:
+        retries = connection.execute("SELECT COUNT(*) FROM jobs WHERE attempt = 2").fetchone()[0]
+    connection.close()
+    assert retries == 1
+
+
 def test_job_done_requires_exactly_one_outcome(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
@@ -648,6 +670,9 @@ def _raise_interrupted(*_args: object) -> None:
     raise Interrupted
 
 
+GUARDED = (signal.SIGINT, signal.SIGTERM)
+
+
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_a_signal_between_claim_and_print_still_delivers_the_job(
     tmp_path: Path, restore_signals: None, signum: int
@@ -696,6 +721,31 @@ def test_signals_are_unblocked_while_sleeping(tmp_path: Path, restore_signals: N
     assert all(signal.SIGINT not in mask and signal.SIGTERM not in mask for mask in masks)
 
 
+def test_wait_for_job_restores_the_callers_mask_and_handlers(tmp_path: Path) -> None:
+    _, queue = make_db(tmp_path)
+    saved = {signum: signal.getsignal(signum) for signum in GUARDED}
+    saved_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        signal.signal(signal.SIGINT, _raise_interrupted)
+        signal.signal(signal.SIGTERM, _raise_interrupted)
+        signal.pthread_sigmask(signal.SIG_SETMASK, {signal.SIGUSR1, signal.SIGTERM})
+        queue.enqueue(request(), dedupe_key="a")
+
+        def sleep(_seconds: float) -> None:
+            raise AssertionError("the job is queued; wait should not sleep")
+
+        signalling = SignalOnClaim(queue, signal.SIGINT)
+        wait_for_job(signalling, "claude", io.StringIO(), sleep=sleep, pool=QueuePool(signalling))
+        handlers = {signum: signal.getsignal(signum) for signum in GUARDED}
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, saved_mask)
+        for signum, handler in saved.items():
+            signal.signal(signum, handler)
+    assert handlers == {signal.SIGINT: _raise_interrupted, signal.SIGTERM: _raise_interrupted}
+    assert mask == {signal.SIGUSR1, signal.SIGTERM}
+
+
 def test_a_signal_during_cli_delivery_exits_zero_without_a_traceback(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
@@ -722,6 +772,28 @@ def test_a_signal_during_cli_delivery_exits_zero_without_a_traceback(tmp_path: P
     assert state_of(db, job.id)["state"] == "running"
 
 
+def test_a_signal_just_after_cli_delivery_exits_zero(tmp_path: Path) -> None:
+    db, queue = make_db(tmp_path)
+    job = queue.enqueue(request(), dedupe_key="a")
+    hook = tmp_path / "hook"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(
+        "import os, signal, lib.cli as c\n"
+        "real = c.wait_for_job\n"
+        "def wait_for_job(*args, **kwargs):\n"
+        "    job = real(*args, **kwargs)\n"
+        "    os.kill(os.getpid(), signal.SIGINT)\n"
+        "    os.kill(os.getpid(), signal.SIGTERM)\n"
+        "    return job\n"
+        "c.wait_for_job = wait_for_job\n",
+        encoding="utf-8",
+    )
+    result = run(["wait", "claude-bot"], db, PYTHONPATH=f"{hook}{os.pathsep}{ROOT}")
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["id"] == job.id
+
+
 # F2.3: storage errors are one line, never a traceback.
 
 
@@ -736,6 +808,17 @@ def test_an_os_error_on_the_db_path_is_one_line(tmp_path: Path) -> None:
     result = run(["job", "heartbeat", "claude-bot", "0" * 32], blocked / "orch.db")
     assert result.returncode == 2
     assert result.stderr.startswith("orch job heartbeat: cannot open dispatcher database")
+    assert result.stderr.count("\n") == 1
+
+
+def test_a_db_path_with_a_newline_is_one_line(tmp_path: Path) -> None:
+    path = tmp_path / "two\nlines" / "orch.db"
+    with pytest.raises(WaitError) as raised:
+        open_queue(path)
+    assert "\n" not in str(raised.value)
+    assert repr(str(path)) in str(raised.value)
+    result = run(["wait", "claude-bot"], path)
+    assert result.returncode == 2
     assert result.stderr.count("\n") == 1
 
 
@@ -780,14 +863,17 @@ def test_a_finish_failure_after_a_failed_delivery_is_one_line(
     assert state_of(db, job.id)["state"] == "running"
 
 
-def test_a_broken_stdout_in_the_cli_exits_one_without_a_traceback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bot", sorted(OWNING_BOTS))
+def test_a_broken_stdout_in_the_cli_exits_one_without_a_traceback(
+    tmp_path: Path, bot: str
+) -> None:
     db, queue = make_db(tmp_path)
-    job = queue.enqueue(request(), dedupe_key="a")
+    job = queue.enqueue(request(recipient=OWNING_BOTS[bot]), dedupe_key="a")
     read_end, write_end = os.pipe()
     os.close(read_end)
     try:
         result = subprocess.run(
-            [sys.executable, str(ORCH), "wait", "claude-bot", "--db", str(db)],
+            [sys.executable, str(ORCH), "wait", bot, "--db", str(db)],
             cwd=ROOT,
             stdout=write_end,
             stderr=subprocess.PIPE,
@@ -801,6 +887,10 @@ def test_a_broken_stdout_in_the_cli_exits_one_without_a_traceback(tmp_path: Path
     assert "Traceback" not in result.stderr
     assert result.stderr.count("\n") == 1
     assert state_of(db, job.id)["state"] == "failed"
+    with sqlite3.connect(db) as connection:
+        slots = connection.execute("SELECT COUNT(*) FROM device_slots").fetchone()[0]
+    connection.close()
+    assert slots == 0
 
 
 # F2.4: never create a database or a jobs table.
@@ -867,7 +957,15 @@ def test_two_waiters_one_job_exactly_one_claims_it(tmp_path: Path) -> None:
     try:
         for proc in procs:
             wait_until_sleeping(proc)
-        job = queue.enqueue(request(), dedupe_key="a")
+        holder = hold_write_lock(db)
+        try:
+            holder.row_factory = sqlite3.Row
+            job = queue.enqueue_in_transaction(holder, request(), dedupe_key="a")
+            time.sleep(POLL_SECONDS * 2)
+            assert all(proc.poll() is None for proc in procs)
+            holder.execute("COMMIT")
+        finally:
+            holder.close()
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and all(p.poll() is None for p in procs):
             time.sleep(0.05)

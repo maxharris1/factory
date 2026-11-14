@@ -253,30 +253,36 @@ class SQLiteStatusReader:
         try:
             connection.execute("BEGIN")
             approvers = _hold_approvers(connection)
-            tracker_rows = connection.execute(
-                """
-                SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                       COALESCE(state.workflow_state, 'intake') AS workflow_state,
-                       state.paused_action, COALESCE(state.stuck, 0) AS stuck,
-                       state.stuck_reason
-                FROM tracked_tickets AS tracked
-                LEFT JOIN ticket_state AS state
-                  ON state.repo = tracked.repo
-                 AND state.ticket_id = tracked.ticket_id
-                """
-            ).fetchall()
-            job_rows = connection.execute(
-                """
-                SELECT id, repo, ticket_id, action, recipient, state,
-                       created_at, last_activity_at
-                FROM jobs
-                WHERE state IN ('queued', 'running')
-                """
-            ).fetchall()
-            has_slots = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (SLOTS_TABLE,),
-            ).fetchone()
+            tracker_rows = (
+                connection.execute(
+                    """
+                    SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
+                           COALESCE(state.workflow_state, 'intake') AS workflow_state,
+                           state.paused_action, COALESCE(state.stuck, 0) AS stuck,
+                           state.stuck_reason
+                    FROM tracked_tickets AS tracked
+                    LEFT JOIN ticket_state AS state
+                      ON state.repo = tracked.repo
+                     AND state.ticket_id = tracked.ticket_id
+                    """
+                ).fetchall()
+                if _has_table(connection, "tracked_tickets")
+                and _has_table(connection, "ticket_state")
+                else []
+            )
+            job_rows = (
+                connection.execute(
+                    """
+                    SELECT id, repo, ticket_id, action, recipient, state,
+                           created_at, last_activity_at
+                    FROM jobs
+                    WHERE state IN ('queued', 'running')
+                    """
+                ).fetchall()
+                if _has_table(connection, "jobs")
+                else []
+            )
+            has_slots = _has_table(connection, SLOTS_TABLE)
             placements = (
                 {
                     str(row[0]): str(row[1])
@@ -343,6 +349,8 @@ class SQLiteStatusReader:
         if not self.path.is_file():
             raise StatusError(f"database does not exist: {self.path}")
         wal_path = Path(f"{self.path}-wal")
+        # A -wal that appears or goes after this check, or a -wal with no
+        # -shm, at worst fails or shows the last checkpoint; it never writes.
         query = "?mode=ro" if wal_path.exists() else "?mode=ro&immutable=1"
         uri = self.path.resolve().as_uri() + query
         connection: sqlite3.Connection | None = None
@@ -364,13 +372,19 @@ def _source(
     return {"source": found[0], "pr_number": found[1]} if found else {}
 
 
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _ticket_key(ticket_id: str) -> tuple[int, int | str]:
+    return (0, int(ticket_id)) if ticket_id.isdigit() else (1, ticket_id.casefold())
+
+
 def _hold_approvers(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
     """(repo, ticket id) -> approver of the ticket's latest hold, if any."""
-    present = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (SHIP_HOLDS_TABLE,),
-    ).fetchone()
-    if not present:
+    if not _has_table(connection, SHIP_HOLDS_TABLE):
         return {}
     return {
         (str(row[0]), str(row[1])): str(row[2])
@@ -460,7 +474,7 @@ def build_status(
         key=lambda row: (
             row.recipient,
             row.repo.casefold(),
-            row.ticket_id,
+            _ticket_key(row.ticket_id),
             row.id,
         ),
     )
@@ -523,7 +537,7 @@ def build_status(
                 ),
                 key=lambda row: (
                     row.repo.casefold(),
-                    row.ticket_id,
+                    _ticket_key(row.ticket_id),
                     row.tracker,
                 ),
             )
@@ -632,7 +646,7 @@ def _webhook_line(health: WebhookHealth, observed_at: float) -> str:
 def main(
     argv: list[str] | None = None,
     *,
-    stdout: TextIO = sys.stdout,
+    stdout: TextIO | None = None,
     clock: Callable[[], float] = time.time,
 ) -> int:
     parser = argparse.ArgumentParser(prog="orch status")
@@ -696,7 +710,7 @@ def main(
     except (sqlite3.Error, StatusError) as exc:
         print(f"orch status: {exc}", file=sys.stderr)
         return 1
-    print(report, end="", file=stdout)
+    print(report, end="", file=stdout or sys.stdout)
     return 0
 
 

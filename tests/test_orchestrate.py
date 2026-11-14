@@ -22,9 +22,11 @@ from lib.orchestrate import (
     StopLedger,
     StopReport,
     TicketFlow,
+    answers_comment,
     assert_cross_family,
     brief_comment,
     choose_route,
+    go_comment,
     job_for_file_count,
     read_factory,
     route_from_fit,
@@ -329,24 +331,150 @@ def test_same_family_reviewer_is_refused() -> None:
         route_from_fit(request, FitChoice("cursor", None, "codex", None))
     with pytest.raises(RouteError, match="contradicts"):
         route_from_fit(request, FitChoice("claude", "gpt-5", "codex", None))
-    same = FactoryConfig(
-        base_branch="main",
-        tickets="github",
-        builder_harness="codex",
-        reviewer_harness="codex",
-        rounds_low=1,
-        rounds_high=3,
-        verify="none",
-        ship="merge",
-        skills=(),
-    )
-    decision = choose_route(replace(request, config=same))
-    assert decision.builder_harness == "codex"
-    assert decision.reviewer_harness == "claude"
-    assert decision.builder_family == "openai"
-    assert decision.reviewer_family == "anthropic"
+    for changes, message in (
+        (
+            {"builder_harness": "codex", "reviewer_harness": "codex"},
+            "^same-family reviewer: builder family 'openai' and "
+            "reviewer family 'openai'$",
+        ),
+        (
+            {"builder_harness": "cursor", "builder_model": None},
+            "^same-family reviewer: builder family not established",
+        ),
+        (
+            {"builder_harness": "claude", "builder_model": "gpt-5"},
+            "^builder model hint 'gpt-5' contradicts claude harness$",
+        ),
+    ):
+        config = replace(request.config, **changes)
+        with pytest.raises(RouteError, match=message):
+            choose_route(replace(request, config=config))
     families = assert_cross_family("cursor", "claude-opus", "codex", None)
     assert families == ("anthropic", "openai")
+
+
+def test_choose_route_records_reserve_and_fallback() -> None:
+    base = request_for("examples/cleffy/factory.md")
+    request = replace(
+        base,
+        config=replace(base.config, reviewer_harness="cursor", reviewer_model="gpt-5"),
+    )
+    source = reports(UsageReport("cursor", 0.0, True))
+    fallback = choose_route(request, usage=source)
+    assert (
+        fallback.builder_using_reserve,
+        fallback.reviewer_using_reserve,
+        fallback.builder_fallback,
+        fallback.reviewer_fallback,
+    ) == (False, False, False, True)
+    body = parse_comment(_go_after_questions(fallback, "none")).body
+    assert body.endswith(
+        "**Routing**\n"
+        "Reviewer is a fallback from factory.md's reviewer.\n"
+        "For information; the dispatcher runs factory.md's pair.\n"
+    )
+    reserve = choose_route(replace(request, urgent=True), usage=source)
+    assert (
+        reserve.builder_using_reserve,
+        reserve.reviewer_using_reserve,
+        reserve.builder_fallback,
+        reserve.reviewer_fallback,
+    ) == (False, True, False, False)
+    body = parse_comment(_go_after_questions(reserve, "none")).body
+    assert "**Routing**\nReviewer is using its usage reserve.\n" in body
+    builder_side = choose_route(
+        replace(
+            base,
+            config=replace(
+                base.config,
+                builder_harness="cursor",
+                builder_model="gpt-5",
+                reviewer_harness="claude",
+            ),
+        ),
+        usage=source,
+    )
+    assert (builder_side.builder_harness, builder_side.reviewer_harness) == (
+        "claude",
+        "codex",
+    )
+    assert (builder_side.builder_fallback, builder_side.reviewer_fallback) == (True, True)
+    body = parse_comment(_go_after_questions(builder_side, "none")).body
+    assert body.endswith(
+        "**Routing**\n"
+        "Builder is a fallback from factory.md's builder.\n"
+        "Reviewer is a fallback from factory.md's reviewer.\n"
+        "For information; the dispatcher runs factory.md's pair.\n"
+    )
+    plain = choose_route(base)
+    assert (
+        plain.builder_using_reserve,
+        plain.reviewer_using_reserve,
+        plain.builder_fallback,
+        plain.reviewer_fallback,
+    ) == (False, False, False, False)
+    assert "**Routing**" not in parse_comment(_go_after_questions(plain, "none")).body
+
+
+def test_choose_route_takes_the_builder_that_built() -> None:
+    request = replace(
+        request_for("examples/cleffy/factory.md"), built_by=("cursor", "gpt-5")
+    )
+    decision = choose_route(request)
+    assert decision.built_by == ("cursor", "gpt-5")
+    assert (decision.builder_harness, decision.builder_model) == ("cursor", "gpt-5")
+    assert decision.builder_family == "openai"
+    assert decision.reviewer_harness == "claude"
+    assert decision.reviewer_family == "anthropic"
+    assert choose_route(request_for("examples/cleffy/factory.md")).built_by is None
+
+
+def test_go_comment_rechecks_family_and_job() -> None:
+    decision = choose_route(request_for("examples/cleffy/factory.md"))
+    assert parse_comment(go_comment(decision, "none")).as_dict()["kind"] == "go"
+    for changes, message in (
+        (
+            {"reviewer_harness": "claude", "reviewer_family": "anthropic"},
+            "same-family reviewer",
+        ),
+        ({"builder_family": "openai"}, "builder family"),
+        ({"reviewer_harness": "grok"}, "reviewer harness"),
+        ({"file_count": 4}, "job 'build' does not match"),
+        ({"scope_changed": True}, "job 'build' does not match"),
+    ):
+        with pytest.raises(RouteError, match=message):
+            go_comment(replace(decision, **changes), "none")
+
+
+def test_route_request_refuses_a_string_for_likely_files() -> None:
+    base = request_for("examples/cleffy/factory.md")
+    with pytest.raises(RouteError, match="likely_files"):
+        RouteRequest(
+            config=base.config,
+            risk="low",
+            urgent=False,
+            summary="Docs.",
+            likely_files="README.md",  # type: ignore[arg-type]
+        )
+
+
+def test_multi_line_answer_round_trips() -> None:
+    flow = TicketFlow()
+    flow.post_questions("One call.", (ClassifiedQuestion("Ship it?", "product"),))
+    text = flow.post_answer("Ship it?", "  Yes, on Friday.\nNot before QA signs off.  ")
+    parsed = parse_comment(text)
+    assert parsed.as_dict() == {"kind": "answers", "from": "grok-bot", "role": "orchestrator"}
+    assert parsed.body == (
+        "**Question**\nShip it?\n\n"
+        "**Answer**\nYes, on Friday.\nNot before QA signs off.\n"
+    )
+    assert flow.questions[0].answer == "Yes, on Friday.\nNot before QA signs off."
+    with pytest.raises(QuestionError, match="question text"):
+        ClassifiedQuestion("Ship\nit?", "product")
+    with pytest.raises(QuestionError, match="answer"):
+        answers_comment("Ship it?", "  \n ")
+    with pytest.raises(QuestionError, match="question text"):
+        answers_comment("Ship\nit?", "Yes.")
 
 
 def test_plan_starts_over_three_files_or_when_scope_changes() -> None:
@@ -439,10 +567,16 @@ def test_skill_matches_the_spec_path_and_the_interface() -> None:
         "auth.json",
         ".runner",
         "GH_TOKEN",
-        "lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False) -> JobRoute",
+        "lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute",
         "route_job(config, marked_urgent=urgent)",
+        "projects[].factory_ref",
+        "`project.config.base_branch` is not `factory_ref`, refuse",
+        "`scope_changed=True`",
+        "`job=plan`",
+        "a trusted `grok-bot` `kind=go` with the same `state`",
     ):
         assert phrase in text
+    assert "set `scope_changed` on any later" not in text
     assert "choose_fit" not in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "lib.usage.route_job(config, marked_urgent=urgent)" in readme

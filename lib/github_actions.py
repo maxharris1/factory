@@ -470,8 +470,12 @@ class GitHubReviewActions:
 
         success needs at least one check run that concluded success, or a
         success combined status, and nothing failing or pending. All
-        neutral or skipped, nothing reported, or fewer runs received than
-        total_count is pending.
+        neutral or skipped, nothing reported, or runs received that do not
+        match total_count on every page is pending.
+
+        A short read is pending even when a run in view failed: a rerun on
+        an unread page may supersede that failure, so pending is the safe
+        answer, at the cost of one poll.
         """
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"
@@ -957,10 +961,14 @@ def _comment(item: object) -> Comment:
     url = raw.get("html_url")
     if url is not None and not isinstance(url, str):
         raise GitHubAdapterError(f"comment {comment_id} has a bad html_url")
+    created_at = _created_at(raw.get("created_at"))
+    updated = raw.get("updated_at")
+    updated_at = created_at if updated is None else _created_at(updated)
     return Comment(
         id=str(comment_id),
         author=login,
         body=body,
-        created_at=_created_at(raw.get("created_at")),
+        created_at=created_at,
         url=url,
+        edited_at=updated_at if updated_at > created_at else None,
     )
