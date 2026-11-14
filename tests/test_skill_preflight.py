@@ -409,3 +409,21 @@ def test_a_symlinked_skill_dir_counts(tmp_path: Path, lock_root: Path) -> None:
     expected = skill_preflight.wanted(".claude/skills", str(lock_root), skill_preflight.pinned_files(lock_root))
     found = skill_preflight.local_hashes(tmp_path / "home", sorted(expected))
     assert skill_preflight.compare(expected, found) is None
+
+
+def test_the_box_checks_the_checkout_it_runs_from_whatever_factory_root_names(
+    tmp_path: Path, lock_root: Path
+) -> None:
+    config, findings = load_machines_yml(REPO / "machines.yml", allow_placeholders=True)
+    assert config is not None, findings
+    box = next(device for device in config.devices if device.local)
+    assert box.factory_root_for("claude") not in (None, str(lock_root.resolve()))
+    install(tmp_path / "home")
+    deploy(lock_root)
+    placement = Placement(job_id="j", device=box.name, harness="claude", os_user="claude-bot", placed_at=0.0)
+
+    report = skill_preflight.check(bot="claude-bot", placement=placement, device=box,
+                                   transport=SshTransport(), home=tmp_path / "home", root=lock_root)
+
+    assert report.checkout == str(lock_root.resolve())
+    assert report.error is None

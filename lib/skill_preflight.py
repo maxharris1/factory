@@ -12,8 +12,8 @@ records, at both places the harness reads it from:
   skills/pstack/ and skills/factory/. The routers send the harness there
   for pstack's docs/ and agents/ and for skills/factory/harness/, which are
   never installed. On a remote device the checkout is its factory_root
-  (machines.yml); on the box it is factory_root when named, else this
-  checkout.
+  (machines.yml); on the box it is the checkout the waiter runs from, whose
+  lock it reads (deploy/install.sh points the orch wrapper there).
 
 The whole tree is checked, not a list of named files: the routers reach
 other skills by reference (interrogate runs arena; figure-it-out runs
@@ -142,9 +142,9 @@ def wanted(skills: str, checkout: str, pinned: Pinned) -> dict[str, str]:
 
 
 def checkout_root(device: Device | None, placement: Placement | None, harness: str, root: Path) -> str:
-    configured = device.factory_root_for(harness) if device is not None else None
     if device is None or device.local or placement is None:
-        return configured if configured is not None else str(root.resolve())
+        return str(root.resolve())
+    configured = device.factory_root_for(harness)
     if configured is None:
         raise PreflightError(f"preflight: {device.name} has no factory_root for {harness}")
     return configured
