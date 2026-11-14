@@ -677,7 +677,8 @@ def test_cli_local_install_refuses_a_worktree_checkout(
     bump_pin(root, "a" * 40, "0.15.36")
     if why == "worktree":
         (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
-        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "not-temp"))
+    temp = tmp_path / "not-temp" if why == "worktree" else tmp_path
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
     monkeypatch.setattr(cli, "ROOT", root)
     home = tmp_path / "home"
     assert cli.main(["install-skills", "--home", str(home)]) == 1

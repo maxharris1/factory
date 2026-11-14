@@ -687,6 +687,7 @@ devices:
     harnesses: {claude: claude-bot}
     workdir_root: REPLACE_WITH_PC_WORKDIR_ROOT
     ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
 """,
         encoding="utf-8",
     )
