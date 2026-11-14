@@ -320,6 +320,69 @@ def test_queue_refuses_empty_or_garbage_database(
     assert path.read_bytes() == contents
 
 
+# --- #108 Unit 1: cancel (#66) ------------------------------------------------
+
+
+def _dispatcher_queue(tmp_path: Path, now: list[float]) -> SQLiteJobQueue:
+    from tests.test_dispatcher import setup
+
+    return setup(tmp_path, now)[1]
+
+
+def test_cancel_moves_a_queued_job_to_cancelled_with_an_event(tmp_path: Path) -> None:
+    now = [100.0]
+    queue = _dispatcher_queue(tmp_path, now)
+    job = queue.enqueue(request(), dedupe_key="k")
+    now[0] = 150.0
+
+    cancelled = queue.cancel(job.id, "operator")
+
+    assert (cancelled.state, cancelled.finished_at) == ("cancelled", 150.0)
+    with queue.connect() as connection:
+        events = connection.execute(
+            "SELECT event, detail FROM job_events WHERE job_id = ?", (job.id,)
+        ).fetchall()
+    assert [tuple(row) for row in events] == [("cancelled", "operator")]
+
+
+@pytest.mark.parametrize("finish", ["running", "done", "failed"])
+def test_cancel_refuses_a_job_that_is_not_queued(tmp_path: Path, finish: str) -> None:
+    queue = _dispatcher_queue(tmp_path, [100.0])
+    job = queue.enqueue(request(), dedupe_key="k")
+    assert queue.claim("claude") is not None
+    if finish != "running":
+        queue.finish(
+            job.id, owner="claude", handoff_comment_id="h" if finish == "done" else None
+        )
+
+    with pytest.raises(QueueError, match="only a queued job"):
+        queue.cancel(job.id, "operator")
+    with queue.connect() as connection:
+        row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job.id,)).fetchone()
+        events = connection.execute(
+            "SELECT COUNT(*) FROM job_events WHERE event = 'cancelled'"
+        ).fetchone()[0]
+    assert (row["state"], events) == (finish, 0)
+
+
+def test_cancel_refuses_an_unknown_job(tmp_path: Path) -> None:
+    queue = _dispatcher_queue(tmp_path, [100.0])
+    with pytest.raises(QueueError, match="unknown job"):
+        queue.cancel("missing", "operator")
+
+
+def test_cancelled_job_is_never_retried(tmp_path: Path) -> None:
+    queue = _dispatcher_queue(tmp_path, [100.0])
+    job = queue.enqueue(request(), dedupe_key="k")
+    queue.cancel(job.id, "operator")
+
+    assert queue.outstanding() == ()
+    assert queue.unhandled_failures() == ()
+    assert queue.claim("claude") is None
+    again = queue.enqueue(request(), dedupe_key="k")
+    assert (again.id, again.state) == (job.id, "cancelled")
+
+
 def _dispatcher(path: Path, queue: SQLiteJobQueue) -> Dispatcher:
     return Dispatcher(
         path,

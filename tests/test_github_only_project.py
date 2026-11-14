@@ -195,7 +195,7 @@ class OnePrSource:
         self.ticket = ticket
         dispatcher.poll_once(self)
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         del label_prefix
         return () if self.ticket is None else (self.ticket,)
 

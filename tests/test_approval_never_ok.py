@@ -133,4 +133,5 @@ def test_a_real_max_hold_ok_still_clears_the_hold(tmp_path: Path, enabled: bool)
 
     assert actions.merges == [(True, HEAD)]
     assert workflow_state(queue) == "merged"
-    assert handled_outcome(queue, "ok-1") == "hold-ok"
+    # #108: the APPROVE merges first in the pass; merged is absorbing.
+    assert handled_outcome(queue, "ok-1") == "after-merge"

@@ -23,18 +23,18 @@ stateDiagram-v2
   s4: planning
   s5: waiting-max
   s6: abandoned
-  s7: plan-check
-  s8: review
-  s9: stuck
-  s10: blocked
-  s11: ship
-  s12: fixing
-  s13: awaiting-ok
-  s14: handed-off
-  s15: merged
-  s16: waiting-external
-  s17: done
-  s18: post-merge
+  s7: merged
+  s8: plan-check
+  s9: review
+  s10: stuck
+  s11: blocked
+  s12: done
+  s13: post-merge
+  s14: ship
+  s15: fixing
+  s16: awaiting-ok
+  s17: handed-off
+  s18: waiting-external
   s19: capped
   [*] --> s0
   s0 --> s2: project config invalid
@@ -43,43 +43,45 @@ stateDiagram-v2
   s1 --> s4: kind=go, queue plan
   s1 --> s5: a product question
   s3 --> s5: a product question
-  s3 --> s8: ready, CI green
-  s3 --> s9: device offline 60 minutes or job dies twice (T6) or CI red three times
-  s4 --> s7: trusted builder posts kind=plan
-  s4 --> s9: device offline 60 minutes or job dies twice (T6)
+  s3 --> s9: ready, CI green
+  s3 --> s10: device offline 60 minutes or job dies twice (T6) or CI red three times
+  s4 --> s8: trusted builder posts kind=plan
+  s4 --> s10: device offline 60 minutes or job dies twice (T6)
   s5 --> s1: Max answers
   s5 --> s6: Max drops it
   s5 --> s3: answer, same step resumes
-  s7 --> s3: every acceptance criterion mapped
-  s7 --> s4: an acceptance criterion is unmapped
-  s8 --> s10: BLOCKED
-  s8 --> s11: APPROVE on the current head
-  s8 --> s9: device offline 60 minutes or job dies twice (T6)
-  s8 --> s12: REVISE, under the round cap
-  s11 --> s8: head changed and the patch differs
-  s11 --> s13: ship = merge and the PR is held
-  s11 --> s14: ship = handoff
-  s11 --> s15: ship = merge
-  s11 --> s16: ship = after an approver
-  s12 --> s5: a product question
-  s12 --> s8: ready, CI green
-  s12 --> s9: device offline 60 minutes or job dies twice (T6) or CI red three times
-  s5 --> s12: answer, same step resumes
-  s13 --> s8: head changed and the patch differs
-  s13 --> s12: REVISE, under the round cap
-  s13 --> s15: approver's OK at the head, or approver removes a label-only hold
-  s15 --> s17: merged
-  s15 --> s18: project has a post-merge check
-  s16 --> s15: OK names the previewed SHA
-  s16 --> s12: declined
-  s7 --> s9: gaps a second time
-  s18 --> s17: post-merge fails, follow-up filed or post-merge passes
-  s8 --> s19: REVISE at the cap
-  s19 --> s12: Max okays one more round
-  s13 --> s19: REVISE at the cap
-  s16 --> s9: 3rd decline
+  s7 --> s12: merged
+  s7 --> s13: project has a post-merge check
+  s8 --> s3: every acceptance criterion mapped
+  s8 --> s4: an acceptance criterion is unmapped
+  s9 --> s11: BLOCKED
+  s9 --> s14: APPROVE on the current head
+  s9 --> s10: device offline 60 minutes or job dies twice (T6)
+  s9 --> s15: REVISE, under the round cap
+  s13 --> s12: post-merge fails, follow-up filed or post-merge passes
+  s14 --> s9: head changed and the patch differs
+  s14 --> s16: ship = merge and the PR is held
+  s14 --> s17: ship = handoff
+  s14 --> s7: ship = merge
+  s14 --> s18: ship = after an approver
+  s15 --> s5: a product question
+  s15 --> s9: ready, CI green
+  s15 --> s10: device offline 60 minutes or job dies twice (T6) or CI red three times
+  s5 --> s15: answer, same step resumes
+  s16 --> s9: head changed and the patch differs
+  s16 --> s15: REVISE, under the round cap
+  s16 --> s7: approver's OK at the head, or approver removes a label-only hold
+  s17 --> s7: PR merged
+  s17 --> s9: trusted ready at a new head, within the effective cap
+  s18 --> s7: OK names the previewed SHA
+  s18 --> s15: declined
+  s8 --> s10: gaps a second time
+  s9 --> s19: REVISE at the cap
+  s19 --> s15: Max okays one more round
+  s16 --> s19: REVISE at the cap
+  s18 --> s10: 3rd decline
   s3 --> s3: CI red, fix
-  s12 --> s12: CI red, fix
+  s15 --> s15: CI red, fix
   class s0 blue
   class s1 blue
   class s2 tan
@@ -87,15 +89,15 @@ stateDiagram-v2
   class s4 purple
   class s5 blue
   class s6 tan
-  class s7 purple
-  class s8 yellow
-  class s9 tan
+  class s7 teal
+  class s8 purple
+  class s9 yellow
   class s10 tan
-  class s11 teal
-  class s12 orange
+  class s11 tan
+  class s12 teal
   class s13 teal
   class s14 teal
-  class s15 teal
+  class s15 orange
   class s16 teal
   class s17 teal
   class s18 teal

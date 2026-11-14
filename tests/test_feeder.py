@@ -723,7 +723,7 @@ class FeederSource:
     def __init__(self, github: FakeGitHub):
         self.github_fake = github
 
-    def github_candidates(self, label_prefix: str):
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()):
         return ()
 
     def linear_candidates(self, query: str, *, exclude, reserve):
