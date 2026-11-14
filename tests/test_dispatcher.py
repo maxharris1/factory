@@ -275,7 +275,12 @@ def factory(
     rounds_low: int = 1,
     rounds_high: int = 3,
     ship: str = "merge",
+    finish_line: str = "ready-for-review",
 ) -> FactoryConfig:
+    """finish_line defaults to ready-for-review: these tests drive T4 through
+    process() alone, which never runs the merge queue step (#130), so a
+    ship: merge APPROVE merges at once. finish_line: merge, where every merge
+    waits for that step, is covered on tests/merge_queue_support.py's Board."""
     return FactoryConfig(
         base_branch="main",
         tickets=tickets,
@@ -286,6 +291,7 @@ def factory(
         verify="none",
         ship=ship,
         skills=(),
+        finish_line=finish_line,
     )
 
 
@@ -6423,8 +6429,8 @@ def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path
     now = [200.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
     poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
-    # #108: the empty DB records the answered review cancelled, never claimable.
     assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert _outcomes(queue)["ready-1"] == "answered-review"
     assert queue.claim("codex") is None
 
 
@@ -6568,6 +6574,30 @@ def test_71_a_late_verdict_that_cannot_act_does_not_answer_the_next_ready(
     assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
 
 
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+def test_71_a_late_verdict_for_a_later_round_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str
+) -> None:
+    """A verdict above the round a ready asks for is stale to T3 and T4, so
+    it answers no ready (Codex PR #112 r3 F1)."""
+    late = comment(
+        "future",
+        VERDICT.format(round="3/3", head=HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["future"] == f"stale-{verdict.lower()}"
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+    with queue.connect() as connection:
+        state = tuple(
+            connection.execute("SELECT workflow_state, review_round FROM ticket_state").fetchone()
+        )
+    assert state == ("review", 1)
+
+
 def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
     tmp_path: Path,
 ) -> None:
@@ -6587,3 +6617,302 @@ def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
     poll(ready, late_listed, revise)
     assert _outcomes(queue)["ready-b"] == "stale-ready-verdict"
     assert _reviews_71(queue) == [(HEAD_71, "done", 1)]
+
+
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+@pytest.mark.parametrize("late_head", [HEAD_71, NEW_HEAD_71], ids=["same-head", "new-head"])
+def test_71_a_late_verdict_for_a_completed_round_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str, late_head: str
+) -> None:
+    """A verdict for a round another verdict already closed is stale to T3
+    and T4, so it answers no ready, whatever head it names (Codex PR #112 r4 F1)."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    now[0] = 160
+    again = _ready_71("ready-2", late_head, 140)
+    late = comment(
+        "late-round-1",
+        VERDICT.format(round="1/3", head=late_head, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again, late, head=late_head)
+    now[0] = 200
+    poll(ready, revise, again, late, head=late_head)
+    outcomes = _outcomes(queue)
+    assert outcomes["late-round-1"] in (f"stale-{verdict.lower()}", "duplicate-verdict")
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (late_head, "queued", 1)]
+    with queue.connect() as connection:
+        state = tuple(
+            connection.execute("SELECT workflow_state, review_round FROM ticket_state").fetchone()
+        )
+    assert state == ("review", 1)
+
+
+@pytest.mark.parametrize("listed_first", [True, False], ids=["verdict-listed-first", "listed-together"])
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE", "BLOCKED"])
+def test_71_a_verdict_that_never_acted_does_not_answer_the_next_ready(
+    tmp_path: Path, verdict: str, listed_first: bool
+) -> None:
+    """A next-round verdict T3 and T4 did not act on, because the ticket was
+    still fixing or the dispatcher ignores its verdict, answers no ready
+    (Codex PR #112 r5 F1). Listed with the ready, a REVISE or APPROVE is the
+    verdict of the review that ready starts (#108 answered-review) and acts;
+    a BLOCKED answers no review."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    again = _ready_71("ready-2", NEW_HEAD_71, 140)
+    unacted = comment(
+        "unacted-2",
+        VERDICT.format(round="2/3", head=NEW_HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    now[0] = 160
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    if listed_first:
+        poll(ready, revise, unacted, head=NEW_HEAD_71)
+    now[0] = 200
+    poll(ready, revise, again, unacted, head=NEW_HEAD_71)
+    now[0] = 220
+    poll(ready, revise, again, unacted, head=NEW_HEAD_71)
+    answers = not listed_first and verdict != "BLOCKED"
+    outcomes = _outcomes(queue)
+    assert outcomes["ready-2"] == ("answered-review" if answers else "queued-review")
+    assert [head for head, _state, _attempt in _reviews_71(queue)] == [HEAD_71, NEW_HEAD_71]
+    if answers and verdict == "APPROVE":
+        assert outcomes["unacted-2"] == "merged"
+        return
+    with queue.connect() as connection:
+        active = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action IN ('fix', 'review') "
+            "AND state IN ('queued', 'running')"
+        ).fetchone()[0]
+    assert active >= 1
+
+
+@pytest.mark.parametrize("listed_first", [True, False], ids=["approve-listed-first", "listed-together"])
+def test_71_an_approve_for_an_unreviewed_head_does_not_answer_its_ready(
+    tmp_path: Path, listed_first: bool
+) -> None:
+    """T4 rejects an APPROVE for a head no review ran on, so it answers no
+    ready for that head (Codex PR #112 r6 F1)."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-a", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 160
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    again = _ready_71("ready-b", NEW_HEAD_71, 140)
+    approve = comment(
+        "approve-b",
+        VERDICT.format(round="1/3", head=NEW_HEAD_71, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    if listed_first:
+        poll(ready, approve, head=NEW_HEAD_71)
+    poll(ready, again, approve, head=NEW_HEAD_71)
+    now[0] = 180
+    poll(ready, again, approve, head=NEW_HEAD_71)
+    assert _outcomes(queue)["ready-b"] == (
+        "queued-review" if listed_first else "answered-review"
+    )
+    assert NEW_HEAD_71 in [head for head, _state, _attempt in _reviews_71(queue)]
+
+
+def _questions_71(comment_id: str, created_at: float, author: str = "claude-login") -> Comment:
+    return comment(
+        comment_id,
+        QUESTIONS + "\nDoes this need the optional behavior?\n",
+        author=author,
+        created_at=created_at,
+    )
+
+
+def _answers_71(comment_id: str, created_at: float) -> Comment:
+    return comment(comment_id, ANSWERS + "\nYes.\n", author="grok-login", created_at=created_at)
+
+
+def _review_state_71(queue: SQLiteJobQueue) -> tuple[tuple[str, int], int]:
+    with queue.connect() as connection:
+        state = tuple(connection.execute(
+            "SELECT workflow_state, review_round FROM ticket_state"
+        ).fetchone())
+        active = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action IN ('review', 'fix') "
+            "AND state IN ('queued', 'running')"
+        ).fetchone()[0]
+    return state, active
+
+
+def test_71_a_verdict_behind_an_unanswered_question_does_not_answer_its_ready(
+    tmp_path: Path,
+) -> None:
+    """T3 rejects a verdict that lands while the ticket waits on a question,
+    so it answers no ready posted before that question (Codex PR #112 r7 F1)."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    comments = (
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", 110),
+        _revise_71(120),
+        _answers_71("answer", 140),
+    )
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    outcomes = _outcomes(queue)
+    # #108: the thread answers the review the ready starts; T3 still
+    # rejects the verdict, and the ticket still reaches a review or fix.
+    assert outcomes["ready"] == "answered-review"
+    assert outcomes["answer"] == "resumed-review"
+    state, active = _review_state_71(queue)
+    assert state == ("review", 0)
+    assert active >= 1
+
+
+@pytest.mark.parametrize(
+    "question_at,answer_at",
+    [(110, 115), (90, 115), (90, 140)],
+    ids=["answered-before-verdict", "open-at-ready", "open-at-ready-answered-after-verdict"],
+)
+def test_71_a_question_pause_between_ready_and_verdict_keeps_the_ready(
+    tmp_path: Path, question_at: float, answer_at: float
+) -> None:
+    """T5 pauses on the question, so with the ready unreviewed its answers
+    resume clarify and T3 rejects the verdict: it answers no ready, and the
+    ticket still reaches a review or fix (Codex PR #112 r8 F1)."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    comments = (
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", question_at),
+        _answers_71("answer", answer_at),
+        _revise_71(120),
+    )
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    assert _outcomes(queue)["ready"] == "answered-review"
+    state, active = _review_state_71(queue)
+    assert state[0] in ("review", "fixing")
+    assert active >= 1
+
+
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+@pytest.mark.parametrize("ready_at", [105, 115], ids=["ready-before-question", "ready-after-question"])
+def test_71_a_ready_while_waiting_max_never_lets_its_verdict_resume_review(
+    tmp_path: Path, ship: str, verdict: str, ready_at: float
+) -> None:
+    """A verdict T3 rejects behind an unanswered question must not reach T3
+    or T4 through another ready: the ticket stays at waiting-max with no fix
+    and no ship until Max answers (Codex PR #112 r9 F1)."""
+    now = [100.0]
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, now, review_actions=actions)
+
+    def poll(*comments: Comment) -> None:
+        snapshot = replace(
+            ticket(*comments, head=HEAD_71, ci={HEAD_71: CIResult("success")},
+                   factory_config=factory(ship=ship)),
+            ready_starts_review=True,
+        )
+        dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    question = comment(
+        "question",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
+        "Does Max approve this scope change?\n",
+        author="codex-login",
+        created_at=110,
+    )
+    now[0] = 110
+    poll(ready, question)
+    queue.finish(review.id, owner="codex", handoff_comment_id=question.id)
+    answer = comment(
+        "verdict",
+        VERDICT.format(round="1/3", head=HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=120,
+    )
+    now[0] = 130
+    again = _ready_71("ready-2", HEAD_71, ready_at)
+    poll(ready, question, again, answer)
+    assert _outcomes(queue)["ready-2"] == "stale-ready-verdict"
+    assert _review_state_71(queue) == (("waiting-max", 0), 0)
+    assert not actions.merges and not actions.handoffs
+    now[0] = 150
+    poll(ready, question, again, answer, _answers_71("max", 140))
+    assert _outcomes(queue)["max"] == "resumed-review"
+    assert _review_state_71(queue) == (("review", 0), 1)
+    assert not actions.merges and not actions.handoffs
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [(), (("question", 80), ("answer", 90))],
+    ids=["bare", "answered-before-ready"],
+)
+def test_71_a_ready_its_verdict_answers_leaves_the_verdict_acted_on(
+    tmp_path: Path, extra: tuple[tuple[str, float], ...]
+) -> None:
+    """With no pause from the ready to its verdict, the ready stays answered
+    and T3 acts on that verdict: a fix, not a stall at review round 0."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    comments = tuple(
+        _questions_71(name, at) if name == "question" else _answers_71(name, at)
+        for name, at in extra
+    ) + (_ready_71("ready", HEAD_71, 100), _revise_71(120))
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    outcomes = _outcomes(queue)
+    assert outcomes["ready"] == "answered-review"
+    assert outcomes["revise-1"] == "queued-review-fix"
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert _review_state_71(queue) == (("fixing", 1), 1)
+
+
+def test_71_an_untrusted_question_does_not_stop_a_verdict_answering_its_ready(
+    tmp_path: Path,
+) -> None:
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(
+        _ready_71("ready", HEAD_71, 100),
+        _questions_71("question", 110, author="stranger"),
+        _revise_71(120),
+    )
+    assert _outcomes(queue)["ready"] == "answered-review"
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]

@@ -11,6 +11,7 @@ review:
     high: 3
   verify: none
 ship: handoff
+finish_line: merge
 skills: []
 ---
 
@@ -18,7 +19,7 @@ skills: []
 One reviewer from a different model family than the builder (Codex Bot) gives the verdict. `review.verify` is `none`; the reviewer reads the diff and the CI result. Low-risk changes get one round. High-risk changes (anything touching ship, handoff, trust or the poller install) get up to three rounds; every extra round needs Max's own words.
 
 ## Ship
-`ship: handoff`. On APPROVE of the covered head with green CI, the poller marks a draft PR ready, labels it `orch:state/handed-off` and wakes Grok Bot (Factory) with a `done` wake. Factory merges. The poller never merges this repo.
+`ship: handoff`, `finish_line: merge`. On APPROVE of the covered head with green CI, the poller marks a draft PR ready and labels it `orch:state/merge-queue`. It then keeps watching the PR until it merges or closes. When the PR conflicts with `main`, the poller queues a Claude `update-from-main` job; an update that only takes one side of each conflict keeps the approval, and any other update goes back to Codex for review. The poller squash-merges approved PRs one at a time, oldest approval first, and wakes Grok Bot (Factory) with a `done` wake once a PR is merged. Do not merge these PRs by hand. Two failed updates mark the ticket stuck (`update-failed-2`) and ask Max.
 
 ## Context
 - PRs target `main`. `orch.yml` lists this repo with `ready_starts_review: true`: PRs here are built outside the queue (a Claude session working from a packet Max approved), so the builder's trusted `ready` starts review with no `go` and no build job.
