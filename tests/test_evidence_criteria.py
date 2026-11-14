@@ -211,3 +211,66 @@ def test_acceptance_heading_inside_a_code_example_is_not_the_section():
     body = "Template:\n```md\n## Acceptance criteria\n- [ ] Example.\n```\n\n## Acceptance criteria\n- [ ] Real.\n"
     bundle = _bundle(issue_body=body)
     assert bundle.criteria == (Criterion("ac-1", "Real."),)
+
+
+def _feeder_brief(ticket: str, prose: str) -> Comment:
+    from lib.factory_md import FactoryConfig, FactoryContext
+    from lib.feeder import IntakeIssue, _brief as feeder_brief
+
+    issue = IntakeIssue(
+        repo="o/r", tracker="github", key="162", title="Test", body=ticket, labels=(),
+        created_at=1, applied_by="max", url="https://github.com/o/r/issues/162",
+    )
+    config = FactoryConfig(
+        base_branch="main", tickets="github", builder_harness="claude", reviewer_harness="codex",
+        rounds_low=1, rounds_high=3, verify="none", ship="handoff", skills=(),
+    )
+    body = feeder_brief(
+        issue, FactoryContext(config=config, body=prose), number=7, branch="factory/issue-162",
+        risk="low", state="building", visible=False,
+    )
+    return Comment(id="1", author="factory-app[bot]", body=body, created_at=1)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "# Acceptance criteria\n- [ ] Factory example.",
+        "## Acceptance criteria\n- [ ] Factory example.",
+        "Notes\n- [ ] Factory checkbox.",
+    ],
+)
+@pytest.mark.parametrize(
+    "ticket, expected",
+    [
+        ("## Acceptance criteria\n- [ ] Real requirement.", ["Real requirement."]),
+        ("Intro\n- [ ] Real box.", ["Real box."]),
+        ("## Acceptance criteria\n- [ ] Run:\n```sh\n# step\n```\n- [ ] Second.", ["Run:", "Second."]),
+    ],
+)
+def test_feeder_brief_criteria_come_from_the_quoted_ticket_only(prose, ticket, expected):
+    bundle = _bundle(comments=(_feeder_brief(ticket, prose),))
+    assert bundle.source == "brief"
+    assert [c.text for c in bundle.criteria] == expected
+    assert "Factory" not in bundle.text
+
+
+@pytest.mark.parametrize(
+    "example",
+    ["```text\n~~~\n```", "~~~text\n```\n~~~", "```\n````md\n```", "````\n```\n````", "```text\n```py\n```"],
+)
+def test_other_fence_markers_inside_a_code_example_are_literal(example):
+    body = f"## Acceptance criteria\n- [ ] Print sample:\n{example}\n- [ ] Second.\n## Notes\n- Not a criterion.\n"
+    bundle = _bundle(issue_body=body)
+    assert [c.text for c in bundle.criteria] == ["Print sample:", "Second."]
+    assert "Not a criterion" not in bundle.text
+
+
+def test_longer_closing_fence_closes_the_example():
+    body = "## Acceptance criteria\n- [ ] A:\n```\nx\n`````\n- [ ] B.\n## Notes\n- Not a criterion.\n"
+    assert [c.text for c in _bundle(issue_body=body).criteria] == ["A:", "B."]
+
+
+def test_template_with_stray_fence_marker_is_not_the_section():
+    body = "Template:\n```md\n~~~\n## Acceptance criteria\n- [ ] Example.\n```\n\n## Acceptance criteria\n- [ ] Real.\n"
+    assert _bundle(issue_body=body).criteria == (Criterion("ac-1", "Real."),)
