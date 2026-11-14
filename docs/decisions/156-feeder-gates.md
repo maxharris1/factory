@@ -26,11 +26,11 @@ Defaults the builder picked for issue #156, listed in the plan on PR #157 (Appen
 - **When:** 2026-11-13 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/157
 
-- **Decision:** A `Touches:` path ending in `/` is a folder and collides with every path inside it; other paths collide only when equal.
+- **Decision:** A `Touches:` path ending in `/` is a folder and collides with every path inside it; other paths collide only when equal. Paths collide only within one repo; a `Conflicts with` edge holds across repos.
 - **When:** 2026-11-13 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/157
 
-- **Decision:** An issue closed with no state reason counts as completed (GitHub's old default for a plain close), and an issue with a merged linked PR is done whatever its state.
+- **Decision:** An issue closed with no state reason counts as completed (GitHub's old default for a plain close), and an issue with a merged linked PR is done whatever its state. Every page of an issue's linked PRs is read until a merged one is found; past the page cap the read fails and the dependent waits.
 - **When:** 2026-11-13 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/157
 

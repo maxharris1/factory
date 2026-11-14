@@ -318,7 +318,7 @@ class Holds:
         for holder, names, held, note in self.held:
             if names & own:
                 continue
-            for path in sorted(lines.touches):
+            for path in sorted(lines.touches) if holder.repo == ref.repo else ():
                 for other in sorted(held.touches):
                     if paths_collide(path, other):
                         shared = path if len(path) >= len(other) else other

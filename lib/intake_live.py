@@ -71,11 +71,22 @@ LINEAR_INTAKE_QUERY = (
 # reads, so a long chain costs one GraphQL call per repo, not one per ticket.
 REF_STATUS_CACHE = "60s"
 REF_STATUS_CHUNK = 50
+# An issue's linked PRs are paged until one is merged; past the cap the read fails.
+LINKED_PULLS_PAGE = 100
+LINKED_PULLS_MAX_PAGES = 20
+_LINKED_PULLS = (
+    f"closedByPullRequestsReferences(first: {LINKED_PULLS_PAGE}, includeClosedPrs: true"
+    "{after}) { nodes { merged } pageInfo { hasNextPage endCursor } }"
+)
 REF_STATUS_FIELDS = (
     "__typename "
     "... on PullRequest { state merged } "
-    "... on Issue { state stateReason "
-    "closedByPullRequestsReferences(first: 10, includeClosedPrs: true) { nodes { merged } } }"
+    "... on Issue { state stateReason " + _LINKED_PULLS.replace("{after}", "") + " }"
+)
+LINKED_PULLS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $after: String!) "
+    "{ repository(owner: $owner, name: $name) { issue(number: $number) { "
+    + _LINKED_PULLS.replace("{after}", ", after: $after") + " } } }"
 )
 _ISSUE_UNFINISHED = {"NOT_PLANNED": "closed as not planned", "DUPLICATE": "closed as duplicate"}
 # 40 pages of 50: past that the read fails, rather than feed from a partial
@@ -211,7 +222,35 @@ class GitHubIntakeClient(GitHubReviewActions):
             return {ref: RefStatus(Progress.MISSING) for ref in refs}
         if not isinstance(nodes, dict):
             raise GitHubAdapterError("ref status read has no repository")
-        return {ref: _ref_status(nodes.get(f"r{index}")) for index, ref in enumerate(refs)}
+        found: dict[Ref, RefStatus] = {}
+        for index, ref in enumerate(refs):
+            node = nodes.get(f"r{index}")
+            merged, cursor = _linked_page(node)
+            if cursor is not None:
+                merged = self._merged_after(owner, name, int(ref.key), cursor)
+            found[ref] = _ref_status(node, merged)
+        return found
+
+    def _merged_after(self, owner: str, name: str, number: int, cursor: str) -> bool:
+        """Whether a linked PR past cursor is merged, reading the remaining pages."""
+        for _ in range(LINKED_PULLS_MAX_PAGES):
+            document = self._json(
+                "graphql", "-f", f"query={LINKED_PULLS_QUERY}", "-f", f"owner={owner}",
+                "-f", f"name={name}", "-F", f"number={number}", "-f", f"after={cursor}",
+                cache_ttl=REF_STATUS_CACHE,
+            )
+            data = document.get("data") if isinstance(document, dict) else None
+            repository = data.get("repository") if isinstance(data, dict) else None
+            issue = repository.get("issue") if isinstance(repository, dict) else None
+            if not isinstance(issue, dict) or not isinstance(
+                issue.get("closedByPullRequestsReferences"), dict
+            ):
+                raise GitHubAdapterError("linked pull request read returned no issue")
+            merged, following = _linked_page(issue)
+            if merged or following is None:
+                return merged
+            cursor = following
+        raise GitHubAdapterError("linked pull requests exceed the page cap")
 
     def branch_sha(self, repo: str, branch: str) -> str | None:
         if not _BRANCH.fullmatch(branch):
@@ -340,7 +379,25 @@ def _linear_blockers(relations: Sequence[object]) -> tuple[tuple[str, str | None
     return tuple(found)
 
 
-def _ref_status(node: object) -> RefStatus:
+def _linked_page(node: object) -> tuple[bool, str | None]:
+    """Whether this page of an issue's linked PRs has a merged one, and the
+    cursor of the next page when none does and more remain."""
+    linked = node.get("closedByPullRequestsReferences") if isinstance(node, dict) else None
+    if not isinstance(linked, dict):
+        return False, None
+    pulls = linked.get("nodes") or []
+    if any(isinstance(pull, dict) and pull.get("merged") is True for pull in pulls):
+        return True, None
+    page = linked.get("pageInfo") or {}
+    if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+        return False, None
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise GitHubAdapterError("linked pull request page has no cursor")
+    return False, cursor
+
+
+def _ref_status(node: object, linked_merged: bool) -> RefStatus:
     if node is None:
         return RefStatus(Progress.MISSING)
     if not isinstance(node, dict):
@@ -355,8 +412,7 @@ def _ref_status(node: object) -> RefStatus:
         if state == "OPEN":
             return RefStatus(Progress.OPEN, is_pull=True)
     elif kind == "Issue":
-        linked = ((node.get("closedByPullRequestsReferences") or {}).get("nodes")) or []
-        if any(isinstance(pull, dict) and pull.get("merged") is True for pull in linked):
+        if linked_merged:
             return RefStatus(Progress.DONE)
         reason = node.get("stateReason")
         if state == "CLOSED" and reason in _ISSUE_UNFINISHED:

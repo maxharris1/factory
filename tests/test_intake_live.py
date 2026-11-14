@@ -381,6 +381,77 @@ def test_ref_statuses_marks_a_missing_repo_and_fails_on_other_errors() -> None:
         GitHubIntakeClient(down).ref_statuses([github_ref("owner/app", 1)])
 
 
+
+class LinkedPullsGh:
+    """One open issue, #1, with linked PRs served the way GitHub pages a
+    connection: honoring first and after, with pageInfo."""
+
+    def __init__(self, merged: list[bool]):
+        self.merged = merged
+        self.queries: list[dict[str, str]] = []
+
+    def page(self, first: int, after: str | None) -> dict:
+        start = int(after) if after else 0
+        end = min(start + first, len(self.merged))
+        return {"nodes": [{"merged": m} for m in self.merged[start:end]],
+                "pageInfo": {"hasNextPage": end < len(self.merged), "endCursor": str(end)}}
+
+    def __call__(self, argv, timeout: float) -> GhResult:
+        fields = dict(arg.split("=", 1) for arg in argv if "=" in arg and not arg.startswith("--"))
+        self.queries.append(fields)
+        query = fields["query"]
+        first = int(re.search(r"closedByPullRequestsReferences\(first: (\d+)", query)[1])
+        issue = {"__typename": "Issue", "state": "OPEN", "stateReason": None,
+                 "closedByPullRequestsReferences": self.page(first, fields.get("after"))}
+        aliases = re.findall(r"(r\d+): issueOrPullRequest\(number: 1\)", query)
+        repository = {alias: issue for alias in aliases} if aliases else {"issue": issue}
+        return GhResult(0, json.dumps({"data": {"repository": repository}}), "")
+
+
+@pytest.mark.parametrize("count", [11, 101, 250, 1000])
+def test_ref_statuses_finds_a_merged_linked_pr_on_any_page(count: int) -> None:
+    from lib.feeder_gates import Progress, github_ref
+
+    gh = LinkedPullsGh([False] * count)
+    blocker = github_ref("owner/app", 1)
+    assert GitHubIntakeClient(gh).ref_statuses([blocker])[blocker].progress is Progress.OPEN
+    gh.merged[-1] = True
+    gh.queries.clear()
+    assert GitHubIntakeClient(gh).ref_statuses([blocker])[blocker].progress is Progress.DONE
+    assert all(query["owner"] == "owner" and query["name"] == "app" for query in gh.queries)
+
+
+def test_ref_statuses_stops_paging_at_the_first_merged_linked_pr() -> None:
+    from lib.feeder_gates import Progress, github_ref
+
+    gh = LinkedPullsGh([True] + [False] * 500)
+    blocker = github_ref("owner/app", 1)
+    assert GitHubIntakeClient(gh).ref_statuses([blocker])[blocker].progress is Progress.DONE
+    assert len(gh.queries) == 1
+
+
+def test_ref_statuses_fails_past_the_linked_pr_page_cap() -> None:
+    from lib.feeder_gates import github_ref
+
+    gh = LinkedPullsGh([False] * 5000)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(gh).ref_statuses([github_ref("owner/app", 1)])
+
+
+def test_feeder_releases_a_dependent_once_a_late_linked_pr_merges(tmp_path) -> None:
+    from tests.test_feeder import issue, make_feeder, rows
+
+    feeder, _, github, _ = make_feeder(tmp_path)
+    gh = LinkedPullsGh([False] * 150)
+    github.ref_statuses = GitHubIntakeClient(gh).ref_statuses
+    github.issues["owner/app"] = [issue(2, body="Blocked by #1")]
+    first = feeder.feed_once()
+    assert first.fed == () and first.blocked == 1
+    assert rows(tmp_path / "orch.db")["2"]["waiting_reason"] == "waiting on #1"
+    gh.merged[-1] = True
+    second = feeder.feed_once()
+    assert len(second.fed) == 1 and second.blocked == 0
+
 def test_linear_intake_reads_blocks_relations() -> None:
     node = linear_node(8)
     node["inverseRelations"] = {"nodes": [

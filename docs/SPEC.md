@@ -547,7 +547,8 @@ the claim order of tickets already fed each poll. A ticket not fed yet is
 gated by its own lines (issue #156): every `Blocked by` ref (and, on Linear,
 every blocks relation) must be done (a PR merged; an issue closed completed or
 with a merged linked PR; a Linear issue completed), and no ticket in flight
-may share a `Touches:` path or a `Conflicts with` edge with it, the earlier
+in the same repo may share a `Touches:` path, and none may share a
+`Conflicts with` edge with it (across repos too), the earlier
 ticket in feed order keeping the path. A ticket that waits is
 `waiting-blocked` with its reason, takes no room and is re-checked every
 poll; a blocker cycle, a blocker closed without finishing and a blocker that

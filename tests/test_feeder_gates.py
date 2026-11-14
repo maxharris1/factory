@@ -26,6 +26,7 @@ from lib.feeder_gates import (
     paths_collide,
 )
 from tests.test_feeder import (
+    GITHUB_ORCH,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
     FakeGitHub,
@@ -252,6 +253,34 @@ def test_holds_collide_on_paths_and_conflicts_with_either_side() -> None:
     assert holds.collision(ref(8), GateLines(touches=frozenset({"lib/x.py"}))) is None
     assert holds.collision(ref(13), GateLines(touches=frozenset({"docs/a.md"}))) is None
 
+
+
+def test_holds_scope_paths_to_the_repo_and_keep_cross_repo_conflicts() -> None:
+    holds = Holds()
+    holds.take(ref(1), (), GateLines(touches=frozenset({"lib/x.py"})))
+    holds.take(ref(9, "owner/lib"), (), GateLines(conflicts_with=frozenset({ref(5)})))
+    assert holds.collision(ref(2, "owner/other-app"), GateLines(touches=frozenset({"lib/x.py"}))) is None
+    same = holds.collision(ref(3), GateLines(touches=frozenset({"lib/"})))
+    assert same is not None and same.reason == "waiting on file lib/x.py held by #1"
+    across = holds.collision(ref(5), GateLines())
+    assert across is not None and across.reason == "waiting on owner/lib#9 (conflicts with it)"
+    named = holds.collision(ref(4, "owner/other-app"), GateLines(conflicts_with=frozenset({ref(1)})))
+    assert named is not None and named.reason == "waiting on owner/app#1 (conflicts with it)"
+
+
+def test_equal_paths_in_distinct_repos_feed_together(tmp_path: Path) -> None:
+    orch = GITHUB_ORCH + (
+        "  - repo: owner/other-app\n    factory_ref: main\n"
+        "    intake:\n      label: factory:ready\n"
+    )
+    feeder, _, github, _ = make_feeder(tmp_path, orch=orch, box=3)
+    github.issues[HOME] = [issue(1, body="Touches: lib/x.py", created_at=1)]
+    github.issues["owner/other-app"] = [
+        replace(issue(2, body="Touches: lib/x.py", created_at=2), repo="owner/other-app")
+    ]
+    report = feeder.feed_once()
+    assert sorted(item.repo for item in report.fed) == ["owner/app", "owner/other-app"]
+    assert report.blocked == 0
 
 # --- the blocked-by gate in the feed loop -------------------------------------
 
