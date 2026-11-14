@@ -649,6 +649,35 @@ def test_legacy_marker_on_a_pinned_copy_is_owned(tmp_path: Path) -> None:
     assert "file: " in marker.read_text(encoding="utf-8")
 
 
+def test_legacy_marker_on_a_pre_notice_copy_upgrades(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    noticed = [name for name in skill_names() if name not in ROUTERS]
+    copies = []
+    for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
+        for name in noticed:
+            copy = project / rel / name
+            shutil.copytree(skill_source(name), copy)
+            (copy / ".orch-owned").write_text(
+                f"installer: orch-install-skills\ncommit: {load_pin(ROOT).commit}\n", encoding="utf-8"
+            )
+            copies.append(copy)
+    assert install_skills(ROOT, project, "cloud") == []
+    for copy in copies:
+        assert (copy / "LICENSE").is_file()
+        assert "file: " in (copy / ".orch-owned").read_text(encoding="utf-8")
+
+
+def test_legacy_marker_on_an_edited_pre_notice_copy_is_refused(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    copy = project / ".claude" / "skills" / "poteto-mode"
+    shutil.copytree(skill_source("poteto-mode"), copy)
+    (copy / "SKILL.md").write_text("my edits\n", encoding="utf-8")
+    (copy / ".orch-owned").write_text(f"installer: orch-install-skills\ncommit: {'a' * 40}\n", encoding="utf-8")
+    assert install_skills(ROOT, project, "cloud") == [f"refusing to replace unowned path {copy}"]
+    assert (copy / "SKILL.md").read_text(encoding="utf-8") == "my edits\n"
+    assert not (copy / "LICENSE").exists()
+
+
 def test_doctor_cloud_rejects_a_symlinked_harness_dir(tmp_path: Path) -> None:
     project = tmp_path / "project"
     assert install_skills(ROOT, project, "cloud") == []

@@ -853,10 +853,13 @@ def _marker_matches_contents(dest: Path, name: str, pinned: Mapping[str, str]) -
     listed = _marker_files(dest / _MARKER)
     if listed is None:
         return False
-    if not listed:
-        prefix = f"skills/{name}/"
-        listed = {rel.removeprefix(prefix): digest for rel, digest in pinned.items() if rel.startswith(prefix)}
-    return bool(listed) and _content_hashes(dest) == listed
+    found = _content_hashes(dest)
+    if listed:
+        return found == listed
+    prefix = f"skills/{name}/"
+    expected = {rel.removeprefix(prefix): digest for rel, digest in pinned.items() if rel.startswith(prefix)}
+    before_notice = {rel: digest for rel, digest in expected.items() if rel != _NOTICE}
+    return bool(before_notice) and found in (expected, before_notice)
 
 
 def _marker_files(path: Path) -> dict[str, str] | None:
