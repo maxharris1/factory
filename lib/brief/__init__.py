@@ -117,7 +117,7 @@ def render_brief(
         review_rules(),
         rules(),
         data_section(job, detail),
-        context_section(facts, context, context_ref, context_note),
+        context_section(facts, context, context_ref, context_note, kind),
     ]
     return "\n\n".join(part.rstrip() for part in parts) + "\n"
 

@@ -242,7 +242,7 @@ def test_factory_md_is_appended_as_an_additional_context_section() -> None:
     section = text.index("## Additional context from factory.md")
     assert "owner/repo factory.md at dev" in text[section:]
     assert "Never apply migrations on a hosted Supabase project" in text[section:]
-    assert "The reviewer runs `verify-cleffy`." in text[section:]
+    assert "The reviewer runs `verify-cleffy`." not in text[section:]
     # The standard parts come first; the repo's prose only adds to them.
     assert text.index("## Review rules") < section
     assert text.index("orch job done") < section
