@@ -38,6 +38,17 @@
 # taken by its loop just before starting it. A child whose loop was killed
 # keeps holding it, so stop (and restart, which self-heal runs) still finds
 # and ends it, and a new loop starts no second child while it lives.
+# Real OpenSSH closes inherited descriptors, so the lock alone cannot prove
+# an ssh gone (issue #244). Each loop therefore also records its child as
+# `PID STARTTIME PIDNS` in linear-webhook-{listener,tunnel}-child.pid
+# (STARTTIME: field 22 of /proc/PID/stat). A recorded pid counts as the
+# child only while it runs with that start time and its argv is still the
+# child's (`-R 127.0.0.1:N:127.0.0.1:N`, or `linear-webhook serve`), so a
+# reused pid is never signalled. Before starting a child, a loop ends the
+# one recorded by an earlier loop (SIGTERM, SIGKILL after
+# LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives. A record
+# from another PID namespace cannot be checked, so a loop keeps it and
+# starts nothing until stop run in that namespace ends the child.
 #
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
@@ -50,9 +61,11 @@
 # script) and whose state directory (its --state argument, else its
 # ORCH_STATE_DIR or HOME) is this one, plus every process holding a loop
 # or child lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
-# having the file open does not count). It ends each with its children. If a
-# lock is still held afterwards (a loop in a PID namespace this shell cannot
-# see), stop says so and exits 1.
+# having the file open does not count), plus each recorded child that is
+# still ours. It ends each with its children. If a lock is still held
+# afterwards (a loop in a PID namespace this shell cannot see), a recorded
+# child still runs (its forward may still be held), or a child record comes
+# from another PID namespace, stop says so and exits 1, and so does restart.
 #
 # Settings, from the environment:
 #   LINEAR_WEBHOOK_PORT          listener and forwarded port (default 8787)
@@ -64,7 +77,7 @@
 #   ORCH_CONFIG                  orch.yml for serve (default: the checkout's)
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
-# linear-webhook-{listener,tunnel}-child.lock,
+# linear-webhook-{listener,tunnel}-child.{lock,pid},
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
 # (serializes start/stop/ensure) and linear-webhook-service.log (autostart).
 #
@@ -184,22 +197,38 @@ leave_loop() {
     fi
 }
 
-# Run "$@" holding loop $1's child lock (fd 7) and wait for it. Returns 1,
-# starting nothing, while a child orphaned by an earlier loop still holds it.
+# Run "$@" as loop $1's child and wait for it. First end the child an earlier
+# loop recorded, if it still runs (real OpenSSH closes inherited descriptors,
+# so its child lock alone does not prove it gone). Returns 1, starting
+# nothing, when that child survives, cannot be verified from this PID
+# namespace, or still holds the child lock (fd 7).
 run_locked() {
+    end_child "$1" || return 1
     exec 7>>"$(lock_file "$1-child")"
     if ! flock -n 7; then
         exec 7>&-
         return 1
     fi
-    run_child "${@:2}"
+    spawn_child "${@:2}"
+    record_child "$1" "$CHILD"
+    wait_child
+    forget_child "$1" "$LAST_CHILD"
     exec 7>&-
 }
 
 # Run "$@" without the loop lock and wait for it; its exit status is STATUS.
 run_child() {
+    spawn_child "$@"
+    wait_child
+}
+
+spawn_child() {
     "$@" 8>&- &
     CHILD=$!
+}
+
+wait_child() {
+    LAST_CHILD="$CHILD"
     STATUS=0
     wait "$CHILD" || STATUS=$?
     while kill -0 "$CHILD" 2>/dev/null; do
@@ -239,7 +268,7 @@ listener_loop() {
         say "starting orch linear-webhook serve on 127.0.0.1:${PORT}"
         if ! run_locked listener "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
             ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}; then
-            say "serve from an earlier loop still holds $(lock_file listener-child); not starting serve"
+            say "serve from an earlier loop may still run; not starting serve"
             pause "$delay"
             delay="$(doubled "$delay")"
             continue
@@ -266,7 +295,8 @@ tunnel_loop() {
         if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
             -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"; then
-            say "ssh from an earlier loop still holds $(lock_file tunnel-child); not starting ssh"
+            cat "$errors" >&2 2>/dev/null || true
+            say "ssh from an earlier loop may still run; not starting ssh"
             pause "$delay"
             delay="$(doubled "$delay")"
             continue
@@ -419,12 +449,113 @@ wait_gone() {
     done
 }
 
+# --- owned children ------------------------------------------------------------
+
+child_file() { printf '%s/linear-webhook-%s-child.pid' "$STATE" "$1"; }
+
+pid_ns() { readlink "${PROC}/self/ns/pid" 2>/dev/null || true; }
+
+start_time() {
+    local stat
+    local -a fields=()
+    stat="$(cat "${PROC}/$1/stat" 2>/dev/null)" || return 1
+    read -r -a fields <<<"${stat##*) }"
+    [[ -n "${fields[19]:-}" ]] || return 1
+    printf '%s\n' "${fields[19]}"
+}
+
+# Is pid $2's argv still loop $1's child: `-R 127.0.0.1:N:127.0.0.1:N` for
+# the tunnel, `linear-webhook serve` for the listener?
+child_argv() {
+    local i
+    local -a argv=()
+    mapfile -d '' -t argv 2>/dev/null <"${PROC}/$2/cmdline" || return 1
+    for ((i = 0; i + 1 < ${#argv[@]}; i++)); do
+        case "$1" in
+            tunnel)
+                [[ "${argv[i]}" == -R && "${argv[i + 1]}" =~ ^127\.0\.0\.1:[0-9]+:127\.0\.0\.1:[0-9]+$ ]] &&
+                    return 0
+                ;;
+            listener)
+                [[ "${argv[i]}" == linear-webhook && "${argv[i + 1]}" == serve ]] && return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+record_child() {
+    local file start
+    file="$(child_file "$1")"
+    start="$(start_time "$2")" || return 0
+    printf '%s %s %s\n' "$2" "$start" "$(pid_ns)" >"${file}.tmp"
+    mv -f "${file}.tmp" "$file"
+}
+
+forget_child() {
+    local file pid rest
+    file="$(child_file "$1")"
+    read -r pid rest 2>/dev/null <"$file" || return 0
+    [[ "$pid" != "$2" ]] || rm -f "$file"
+}
+
+# Print the pid loop $1 recorded for its child while that process still runs
+# and is still that child (same start time and argv). Returns 1 when there is
+# none (removing a stale record), 2 when the record is from another PID
+# namespace and cannot be checked here.
+owned_child() {
+    local file pid start ns
+    file="$(child_file "$1")"
+    [[ -e "$file" ]] || return 1
+    read -r pid start ns 2>/dev/null <"$file" || true
+    if [[ -n "$ns" && "$ns" != "$(pid_ns)" ]]; then
+        return 2
+    fi
+    if [[ "$pid" =~ ^[0-9]+$ ]] && alive "$pid" &&
+        [[ "$(start_time "$pid")" == "$start" ]] && child_argv "$1" "$pid"; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+    rm -f "$file"
+    return 1
+}
+
+owned_children() {
+    local mode
+    for mode in listener tunnel; do
+        owned_child "$mode" || true
+    done
+}
+
+# End the child loop $1 recorded, if it still runs: SIGTERM, SIGKILL after
+# STOP_WAIT, and return 1 unless it is verifiably gone. A record from another
+# PID namespace cannot be checked here, so it stays and this returns 1.
+end_child() {
+    local pid status=0
+    pid="$(owned_child "$1")" || status=$?
+    if ((status == 2)); then
+        say "$(child_file "$1") names a process in another PID namespace; cannot verify it is gone; not starting another" >&2
+        return 1
+    fi
+    ((status == 0)) || return 0
+    say "ending $1 child pid ${pid} left by an earlier loop"
+    kill -TERM "$pid" 2>/dev/null || true
+    if ! wait_gone "$STOP_WAIT" "$pid"; then
+        kill -KILL "$pid" 2>/dev/null || true
+        if ! wait_gone 5 "$pid"; then
+            say "$1 child pid ${pid} is still running after SIGKILL; not starting another" >&2
+            return 1
+        fi
+    fi
+    rm -f "$(child_file "$1")"
+}
+
 stop() {
-    local mode status=0 pid
+    local mode status=0 pid found
     local -a roots=() pids=() left=()
     mkdir -p "$STATE"
     : >"$STOPPED"
-    mapfile -t roots < <({ loop_pids; lock_holders; } | grep -vx "$$" | sort -un)
+    mapfile -t roots < <({ loop_pids; lock_holders; owned_children; } | grep -vx "$$" | sort -un)
     if ((${#roots[@]} == 0)); then
         say "no linear webhook loop is running"
     else
@@ -440,6 +571,17 @@ stop() {
         fi
         say "stopped linear webhook loop(s) ${roots[*]}"
     fi
+    for mode in listener tunnel; do
+        found=0
+        pid="$(owned_child "$mode")" || found=$?
+        if ((found == 0)); then
+            say "${mode} child pid ${pid} is still running after SIGKILL; its forward or port may still be held" >&2
+            status=1
+        elif ((found == 2)); then
+            say "$(child_file "$mode") names a process in another PID namespace; cannot verify it is gone; run stop there" >&2
+            status=1
+        fi
+    done
     for mode in listener tunnel listener-child tunnel-child; do
         if lock_held "$mode"; then
             say "$(lock_file "$mode") is still held by a process this shell cannot see (another PID namespace?); run stop from the host" >&2
