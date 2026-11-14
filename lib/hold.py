@@ -15,8 +15,9 @@ green CI does not merge while the PR is held:
 The hold clears on a kind=ok head=<40-char sha> comment from the approver
 whose head covers the current head by the ship rule (the same commit, or
 an equal git patch-id --stable), or, for a label-only hold, by the
-approver removing the label. Neither clears unless the approver is a
-trusted_logins key. Anything unread fails closed.
+approver removing the label. Neither clears unless the approver may
+approve: a trusted_logins key, or, once the GitHub App switch is on, a
+login in orch.yml's approver_logins (#122). Anything unread fails closed.
 
 Globs are matched against repo-relative paths: ``*`` and ``?`` never
 cross ``/``; ``**`` matches any number of whole directories (``a/**``
@@ -109,7 +110,7 @@ def decide(
     changed_files: Sequence[str] | None,
     label_events: Sequence[LabelEvent] | None,
     comments: Iterable[object],
-    approver_trusted: bool,
+    approver_allowed: bool,
     covers: Callable[[str], bool],
 ) -> HoldDecision:
     """Whether the hold blocks a merge of the current head.
@@ -128,7 +129,7 @@ def decide(
     on_pr = any(label.casefold() == wanted for label in labels)
     latest = _latest_label_event(label_events, wanted)
     removed_by_approver = (
-        approver_trusted
+        approver_allowed
         and latest is not None
         and latest.action == "unlabeled"
         and latest.actor.casefold() == approver
@@ -141,7 +142,7 @@ def decide(
     if not reasons:
         cleared = "label-removed" if removed_by_approver and not on_pr else None
         return HoldDecision(cleared=cleared)
-    if approver_trusted and _approver_ok(comments, approver, covers):
+    if approver_allowed and _approver_ok(comments, approver, covers):
         return HoldDecision(reasons=reasons, paths=paths, cleared="ok")
     return HoldDecision(reasons=reasons, paths=paths)
 

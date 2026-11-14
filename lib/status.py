@@ -82,13 +82,23 @@ class DeviceRow:
 
 
 @dataclass(frozen=True)
+class FeederItem:
+    repo: str
+    issue: str
+    state: str
+    pr: str | None = None
+    reason: str | None = None  # why a waiting-blocked ticket waits (#156)
+
+
+@dataclass(frozen=True)
 class FeederState:
     """The backlog feeder at its last poll (issue #85)."""
 
     eligible: int
     fed: int
     waiting_capacity: int
-    items: tuple[tuple[str, str, str, str | None], ...] = ()  # repo, issue, state, PR
+    waiting_blocked: int = 0
+    items: tuple[FeederItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -173,12 +183,14 @@ class SQLiteStatusReader:
             eligible=counts["eligible"],
             fed=counts["fed"],
             waiting_capacity=counts["waiting_capacity"],
+            waiting_blocked=counts["waiting_blocked"],
             items=tuple(
-                (
-                    str(item["repo"]),
-                    str(item["issue"]),
-                    str(item["state"]),
-                    str(item["pr_number"]) if item["pr_number"] is not None else None,
+                FeederItem(
+                    repo=str(item["repo"]),
+                    issue=str(item["issue"]),
+                    state=str(item["state"]),
+                    pr=str(item["pr_number"]) if item["pr_number"] is not None else None,
+                    reason=str(item["waiting_reason"]) if item["waiting_reason"] else None,
                 )
                 for item in items
             ),
@@ -570,17 +582,19 @@ def render(status: Status) -> str:
             (
                 "",
                 f"Feeder — eligible {feeder.eligible}, fed {feeder.fed}, "
-                f"waiting for capacity {feeder.waiting_capacity}",
+                f"waiting for capacity {feeder.waiting_capacity}, "
+                f"waiting on blockers or files {feeder.waiting_blocked}",
             )
         )
-        for repo, issue, state, pr in feeder.items:
+        for item in feeder.items:
             label = {
                 "waiting-capacity": "waiting for capacity",
+                "waiting-blocked": item.reason or "waiting on a blocker",
                 "done": "fed, job queued",
                 "closed": "PR closed, not fed",
-            }.get(state, state)
-            where = f" -> PR #{pr}" if pr else ""
-            lines.append(f"  {repo}#{issue} {label}{where}")
+            }.get(item.state, item.state)
+            where = f" -> PR #{item.pr}" if item.pr else ""
+            lines.append(f"  {item.repo}#{item.issue} {label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))

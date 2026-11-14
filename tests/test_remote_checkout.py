@@ -535,7 +535,9 @@ def test_without_worktree_a_remote_job_still_runs_under_a_login_shell(tmp_path: 
     assert proc.returncode == 0, proc.stderr
     assert device.seen()["PATH"] == str(device.bin)
     assert device.seen()["ORCH_JOB_WORKTREE"] is None
-    assert len(device.ssh.calls()) == 2  # the start and the gone check, as before
+    # the launch, its polls (#128) and the gone check: no preflight or checkout
+    assert len(starts(device)) == 1
+    assert not [item for item in scripts(device) if item.startswith("exec bash -lc")]
 
 
 # --- the box is unchanged ----------------------------------------------------

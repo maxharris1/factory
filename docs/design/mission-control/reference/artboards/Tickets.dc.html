@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tickets</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#c0caf5;text-decoration:none}a:hover{color:#9ece6a}
+</style>
+</helmet>
+<div style="min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; background: #1a1b26; color: #c0caf5; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 14px; line-height: 1.5">
+<dc-import name="TopBar" current="tickets" hint-size="100%,116px"></dc-import>
+<main style="flex: 1 0 auto; box-sizing: border-box; width: 100%; max-width: 1600px; margin: 0 auto; padding: 20px 24px 32px; display: flex; flex-direction: column; gap: 16px">
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+<div role="group" aria-label="Project" style="display: flex; flex-wrap: wrap; gap: 8px">
+<button type="button" aria-pressed="true" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #9ece6a; background: rgba(158,206,106,0.09); color: #9ece6a">all 34</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">factory 26</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">cleffy 6</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">aut0 2</button>
+</div>
+<span style="flex-grow: 1"></span>
+<div role="group" aria-label="View" style="display: flex; gap: 8px">
+<button type="button" aria-pressed="true" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #9ece6a; background: rgba(158,206,106,0.09); color: #9ece6a">board</button>
+<button type="button" aria-pressed="false" style="height: 44px; padding: 0 14px; font-family: inherit; font-size: 12px; cursor: pointer; border: 1px solid #414868; background: #1f2230; color: #c0caf5">table</button>
+</div>
+</div>
+
+<section style="min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Pipeline</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">34 tracked · 13 in flight</span></h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 12px; align-items: start; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="twinkle" tint="#a9b1d6" cell="2" strip-height="16" seed="71" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Ask</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">0</span>
+</div>
+<span style="font-size: 11px; color: #8b93b8">intake · questions · waiting-max</span>
+</div>
+<div style="padding: 16px; border: 1px dashed #414868; font-size: 12px; color: #8b93b8">nothing waiting on questions</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="field" tint="#a9b1d6" cell="2" strip-height="16" seed="72" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Plan</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">2</span>
+</div>
+<span style="font-size: 11px; color: #8b93b8">planning · plan-check</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="field" tint="#e0af68" cell="4" strip-height="8" seed="61" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#129</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>planning</span><span style="font-size: 11px; color: #8b93b8">round —</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 1m 13s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; border: 1px solid rgba(247,118,142,0.45)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="static" tint="#f7768e" cell="4" strip-height="8" seed="62" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">cleffy#103</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>planning</span><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(247,118,142,0.4); background: rgba(247,118,142,0.09); color: #f7768e; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">stuck</span></div>
+<div style="font-size: 12px; color: #a9b1d6; overflow-wrap: anywhere">cancelled: superseded by sanctioned intake (Factory 2026-11-13)</div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="fill" tint="#a9b1d6" progress="0.6" cell="2" strip-height="16" seed="73" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Build</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">7</span>
+</div>
+<span style="font-size: 11px; color: #8b93b8">building · fixing</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">aut0#AUT-2284</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">linear</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>building</span></div>
+<div style="font-size: 12px; color: #8b93b8">no job running</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">aut0#AUT-2286</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">linear</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>building</span></div>
+<div style="font-size: 12px; color: #8b93b8">no job running</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="fill" tint="#e0af68" progress="0.14" cell="4" strip-height="8" seed="63" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#124</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>building</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/1</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ box</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 06s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="fill" tint="#e0af68" progress="0.14" cell="4" strip-height="8" seed="64" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#125</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>building</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/1</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ mac</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 06s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="patch" tint="#e0af68" cell="4" strip-height="8" seed="65" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">Cleffy#107</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>fixing</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #c0caf5"></span><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 2/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ box</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 06s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="patch" tint="#e0af68" cell="4" strip-height="8" seed="66" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#113</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>fixing</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #c0caf5"></span><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 2/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 07s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="patch" tint="#e0af68" cell="4" strip-height="8" seed="67" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#112</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>fixing</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #c0caf5"></span><span style="width: 6px; height: 6px; background: #c0caf5"></span><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 3/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(224,175,104,0.4); background: rgba(224,175,104,0.09); color: #e0af68; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">claude</span><span style="color: #8b93b8">@ mac</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 07s</span></div>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; border-bottom: 1px solid #24283b">
+<div style="display: flex; align-items: center; gap: 8px">
+<span aria-hidden="true" style="display: block; width: 16px"><dc-import name="PixelStrip" effect="scan" tint="#a9b1d6" cell="2" strip-height="16" seed="74" hint-size="16px,16px"></dc-import></span>
+<span style="font-size: 13px; font-weight: 600; color: #c0caf5">Review</span>
+<span style="margin-left: auto; font-size: 12px; color: #8b93b8">4</span>
+</div>
+<span style="font-size: 11px; color: #8b93b8">review · capped</span>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="scan" tint="#7aa2f7" cell="4" strip-height="8" seed="68" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#114</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 7m 40s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="scan" tint="#7aa2f7" cell="4" strip-height="8" seed="69" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#126</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span><span style="width: 6px; height: 6px; background: #414868"></span><span style="width: 6px; height: 6px; background: #414868"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/3</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 7m 37s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div aria-hidden="true" style="display: block"><dc-import name="PixelStrip" effect="scan" tint="#7aa2f7" cell="4" strip-height="8" seed="70" hint-size="100%,8px"></dc-import></div>
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#123</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span aria-hidden="true" style="display: flex; gap: 2px"><span style="width: 6px; height: 6px; background: #7dcfff"></span></span><span style="font-size: 11px; color: #8b93b8">round 1/1</span></div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(122,162,247,0.4); background: rgba(122,162,247,0.09); color: #7aa2f7; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">codex</span><span style="color: #8b93b8">@ pc</span><span style="margin-left: auto; color: #8b93b8; font-variant-numeric: tabular-nums">T+ 4m 06s</span></div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; min-width: 0; background: #24283b; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px">
+<div style="display: flex; align-items: baseline; gap: 8px"><a href="Job.dc.html" style="font-size: 13px; font-weight: 600; overflow-wrap: anywhere">factory#100</a><span style="font-size: 10px; line-height: 1.5; padding: 0 4px; border: 1px solid #414868; color: #8b93b8">github</span></div>
+<div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a9b1d6"><span>review</span><span style="font-size: 11px; color: #8b93b8">round 4</span></div>
+<div style="font-size: 12px; color: #8b93b8">no job running</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px"><span style="display: inline-block; padding: 0 6px; border: 1px solid rgba(125,207,255,0.4); background: rgba(125,207,255,0.09); color: #7dcfff; font-size: 11px; line-height: 1.6; font-weight: 500; letter-spacing: 0.02em; white-space: nowrap">routed</span><span style="color: #a9b1d6">queued-review</span></div>
+</div>
+</div>
+</div>
+
+</div>
+</section>
+
+<section style="min-width: 0; padding: 14px 16px 16px; background: #1f2230; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)">
+<h2 style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; color: #c0caf5"><span style="display: flex; align-items: center; gap: 9px"><span aria-hidden="true" style="width: 7px; height: 7px; background: #9ece6a"></span>Shipped</span><span style="font-weight: 400; font-size: 12px; color: #8b93b8">21 tickets</span></h2>
+<div style="display: flex; flex-direction: column; gap: 16px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93b8">handed-off · ready for review (9)</div>
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ handedOff }}" as="t" hint-placeholder-count="9">
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)"><span aria-hidden="true" style="width: 8px; height: 8px; background: #9ece6a"></span><span style="font-size: 12px; color: #c0caf5">{{ t.id }}</span><span style="font-size: 11px; color: #8b93b8">{{ t.r }}</span></span>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93b8">merged (12)</div>
+<div style="display: flex; flex-wrap: wrap; gap: 6px">
+<sc-for list="{{ merged }}" as="t" hint-placeholder-count="12">
+<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: #1a1b26; box-shadow: 0 0 0 1px rgba(255,255,255,0.07)"><span aria-hidden="true" style="width: 8px; height: 8px; background: #9ece6a"></span><span style="font-size: 12px; color: #c0caf5">{{ t.id }}</span><span style="font-size: 11px; color: #8b93b8">{{ t.r }}</span></span>
+</sc-for>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px">
+<div style="font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93b8">stopped (0)</div>
+<div style="font-size: 12px; color: #8b93b8">nothing refused, abandoned, blocked or capped</div>
+</div>
+
+</div>
+</section>
+
+</main>
+<dc-import name="StatusLine" hint-size="100%,32px"></dc-import>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1400}}'>
+class Component extends DCLogic {
+  renderVals() {
+    /* revise rounds before ship, per shipped ticket */
+    var handedOff = [
+      { id: 'cleffy#98', r: 'r1' },
+      { id: 'cleffy#99', r: 'r0' },
+      { id: 'factory#110', r: 'r1' },
+      { id: 'factory#111', r: 'r1' },
+      { id: 'factory#116', r: 'r1' },
+      { id: 'factory#65', r: 'r0' },
+      { id: 'factory#89', r: 'r0' },
+      { id: 'factory#95', r: 'r1' },
+      { id: 'factory#97', r: 'r1' }
+    ];
+    var merged = [
+      { id: 'cleffy#96', r: 'r0' },
+      { id: 'cleffy#97', r: 'r0' },
+      { id: 'factory#104', r: 'r1' },
+      { id: 'factory#72', r: 'r0' },
+      { id: 'factory#74', r: 'r2' },
+      { id: 'factory#77', r: 'r1' },
+      { id: 'factory#81', r: 'r0' },
+      { id: 'factory#82', r: 'r2' },
+      { id: 'factory#87', r: 'r2' },
+      { id: 'factory#88', r: 'r2' },
+      { id: 'factory#98', r: 'r3' },
+      { id: 'factory#99', r: 'r3' }
+    ];
+    return { handedOff: handedOff, merged: merged };
+  }
+}
+</script>
+</body>
+</html>

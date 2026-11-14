@@ -56,6 +56,13 @@ worker. The remote POSIX shell scripts sent as the SSH command:
 check and stop run as `exec sh -c '<script>'`, so they are POSIX sh whatever
 the bot's login shell is (bash on Linux, zsh on macOS).
 
+#128: the start is not sent as the SSH command any more. The launch call
+(`launch_script`) starts it detached under setsid, with a wrapper that
+keeps its files in `<workdir>/jobs/<job-id>.run/<tag>/`, and the box follows
+it with `poll_script` (lib/remote_follow.py). check and stop are unchanged:
+they find the detached start by its tag or record as before; the stop of
+a cancelled run escalates to SIGKILL.
+
 On a device whose `uname -s` is Darwin (macOS: no /proc, and no way to read
 another process's environment) the same contract holds through the record,
 one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
@@ -65,7 +72,11 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   create the record with noclobber (O_EXCL) holding
   `<process group> <boot session> <tag> <leader start time>` (the leader's
   `ps -o lstart=` in the C locale and UTC), refusing if it already exists,
-  and exec as above;
+  and exec as above. Before the record it starts the keeper in its group
+  and writes the keeper's pid and start time as the first snapshot (below):
+  the keeper ignores SIGTERM and stays until it is alone in the group, so
+  the group is never empty, nor its number reused, while any process of
+  the start lives (Codex PR #129 r3);
 * check: with no record the start may still be on its way, so the check
   creates the record itself as the fence `fenced` (O_EXCL as well: the start
   or the check creates it, never both) and exits 3; the fenced start can
@@ -73,18 +84,29 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   0 too for a record from an earlier boot session or no process left in the
   recorded group, read from a `ps -A -o pgid=,pid=,uid=` that exited 0; 1
   while the group holds only this user's processes and is led by the
-  recorded leader (same start time); 3 for a malformed record or one naming
+  recorded leader (same start time), or (Codex PR #129 r2) its leader has
+  exited but it still holds a process from the snapshot with that
+  process's recorded start time; 3 for a malformed record or one naming
   another tag, a group holding another user's process, a group whose leader
-  has exited (nothing ties the processes left to this start: the number may
-  have been reused while the group was empty), a leader whose start time
-  differs (the number was reused), a fence that could not be written, and
-  when there is no boot session id or ps fails or lists nothing;
-* stop: SIGTERM to the recorded group exactly when the check would exit 1;
-  nothing else is signalled (with no record it writes the fence as well).
-  A process that left the job's group (setsid), or that stays in it after
-  the leader exits, is never signalled here: macOS gives no way to find it
-  by its tag. A group left without its leader keeps the slot until it is
-  empty.
+  has exited and holds no snapshot process (nothing ties the processes left
+  to this start: the number may have been reused while the group was
+  empty), a leader whose start time differs (the number was reused), a
+  fence that could not be written, and when there is no boot session id or
+  ps fails or lists nothing;
+* stop: SIGTERM (SIGKILL when asked to kill) to the recorded group exactly
+  when the check would exit 1; nothing else is signalled (with no record it
+  writes the fence as well). While the leader is verified, it first writes
+  the snapshot `.orch-worker-<tag>.members.pid` (`<pid> <start time>` per
+  member of the group, from one listing, kept only when the leader is
+  verified again after it), so a cancel that kills the leader but not a
+  child still finds and kills the child. The keeper, in the snapshot from
+  the start on, ties the group to the start after its leader exits, so a
+  child born later (one the harness forks as it shuts down included) is
+  signalled as well. A process that left the job's group (setsid) is never
+  signalled here: macOS gives no way to find it by its tag;
+* poll (#128): the check without the fence. The wrapper writes `pid` before
+  its start writes the record, so no record is only unsure: a poll never
+  fences the start it follows.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
 password prompt), a connect timeout and server keepalives. Tests replace
@@ -101,7 +123,7 @@ import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
@@ -125,6 +147,15 @@ PREFLIGHT_TOOLS = ("git", "gh")
 _PREFLIGHT_MARK = "orch-preflight: missing"
 _CHECKOUT_MARK = "orch-checkout:"
 TAG_ENV = "ORCH_WORKER_TAG"
+# #100 r5: with telemetry on, the start reports the harness's own
+# environment (after the login profile) as one line just before the exec:
+# WORKER_ENV_MARK, a space, then hex of NUL-separated NAME=value entries
+# ending with WORKER_ENV_END. lib/telemetry.py scrubs that environment's
+# secret values from a remote run's summary and never stores the line.
+# The login profile's stdout goes to stderr (#100 r6), so the report is the
+# first thing on stdout whatever the profile prints.
+WORKER_ENV_MARK = "ORCH-WORKER-ENV"
+WORKER_ENV_END = "ORCH-WORKER-ENV-END"
 # The start script's own exit status when it cannot make or enter the job
 # directory, or record the worker: the harness never ran.
 START_REFUSED = 125
@@ -132,8 +163,12 @@ START_REFUSED = 125
 # The start writes its worker tag to the launch record (`launch_record`)
 # just before the exec into the harness, once the harness is found under
 # the login PATH; a start with no record of its tag never ran the harness.
+# A login profile's tracing (set -x or -v, a DEBUG trap) would echo the
+# job's and the worker's environment values to stderr, so the start turns it
+# off first.
+_UNTRACE = "set +xvT; trap - DEBUG; "
 _START_ENTER = (
-    f'cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
+    f'{_UNTRACE}cd -- "$1" || exit {START_REFUSED}; r=$2; shift 2; '
     f'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do export "$1" || exit {START_REFUSED}; shift; done; '
     f"shift; "
 )
@@ -141,9 +176,28 @@ _START_EXEC = (
     'command -v "$1" >/dev/null 2>&1 '
     '|| { printf "%s: %s: not found on the login PATH\\n" "$0" "$1" >&2; exit 127; }; '
     f'printf "%s\\n" "${TAG_ENV}" > "$r" || exit {START_REFUSED}; '
-    'exec "$@"'
 )
-_START_HARNESS = _START_ENTER + _START_EXEC
+_REPORT_ENV = (
+    f'printf "%s " {WORKER_ENV_MARK}; '
+    'names=$(compgen -e) && { for n in $names; do printf "%s=%s\\0" "$n" "${!n}"; done; '
+    f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
+    "echo; "
+)
+
+
+def _report_env(env_file: str | None) -> str:
+    """The report on stdout, or (#128) written to env_file, mode 600, whole or not at all,
+    with only its line break left on stdout, so a profile's unended output stays apart."""
+    if env_file is None:
+        return _REPORT_ENV
+    f = shlex.quote(env_file)
+    part = shlex.quote(f"{env_file}.tmp")
+    return (
+        f"(umask 077 && {{ {_REPORT_ENV}}} > {part}) 2>/dev/null "
+        f"&& mv -f -- {part} {f} || rm -f -- {part}; echo; "
+    )
+
+
 # Factory, Nov 13: a harness's `--add-dir` directories are given only where
 # the device has them. After `--` come k (where the kept `--add-dir <dir>`
 # pairs go in the command), n, then n pairs of (path to test, directory as
@@ -157,7 +211,6 @@ _GUARD_DIRS = (
     'shift 2; n=$((n-1)); done; '
     'c=("$@"); set -- "${c[@]:0:k}" "${a[@]}" "${c[@]:k}"; '
 )
-_START_GUARDED = _START_ENTER + _GUARD_DIRS + _START_EXEC
 SSH_UNREACHABLE = 255
 
 GONE = "gone"
@@ -208,6 +261,48 @@ _DARWIN_GROUP = (
     "$1 == p { n = 1; if ($3 != u) x = 1; if ($2 == p) k = 1 } "
     "END { if (e || NR != w) exit 1; print n + 0, x + 0, k + 0 }'"
 )
+# The stop's snapshot of the recorded group, in $m: one `<pid> <start time>`
+# line per member, from one listing taken while the leader is verified
+# alive, kept only when the leader is verified again after it (so the group
+# was the start's for the whole listing).
+_DARWIN_SNAPSHOT = (
+    'LC_ALL=C TZ=UTC0 ps -A -o pgid= -o pid= -o lstart= 2>/dev/null | awk -v p="$p" '
+    "'$1 == p && $2 ~ /^[0-9]+$/ { l = $2; for (i = 3; i <= NF; i++) l = l \" \" $i; print l }' "
+    '> "$m.$$" 2>/dev/null; '
+    f'{_LSTART}; if [ "$*" = "$s" ]; then mv -f -- "$m.$$" "$m"; else rm -f -- "$m.$$"; fi'
+)
+# Whether a member of the snapshot in $m is still in group $p with its
+# recorded start time: then the group has not been empty since the snapshot,
+# so its number was never reused and every process in it is the start's.
+# Sets v=1 when one is.
+_DARWIN_MEMBER = (
+    'v=; if [ -f "$m" ]; then while read -r q a; do '
+    'case "$q" in ""|*[!0-9]*) continue;; esac; '
+    'y=$(LC_ALL=C TZ=UTC0 ps -o pgid= -o lstart= -p "$q" 2>/dev/null); '
+    'set -f; set -- $y; set +f; '
+    '[ "$#" -gt 1 ] && [ "$1" = "$p" ] || continue; shift; '
+    '[ "$*" = "$a" ] && { v=1; break; }; '
+    'done < "$m"; fi'
+)
+# Codex PR #129 r3: the keeper, which the start leaves in its own group ($1)
+# so that the group is never empty while any process of the start lives: its
+# number cannot be reused, and the keeper (a member of the snapshot) proves it
+# to a check after the leader has exited. It ignores SIGTERM, SIGINT and
+# SIGHUP (SIGKILL ends it with the group) and exits once a listing it is on
+# shows no other member of the group but its own children. The listing goes
+# to the file $2, so ps is the keeper's own child, never a grandchild. The
+# start forks it from a subshell that exits at once, so it is not the
+# harness's child: a harness that waits for all its children never waits
+# on it.
+_DARWIN_KEEPER = (
+    'trap "" TERM INT HUP; '
+    "while sleep 1; do "
+    'ps -A -o pgid= -o pid= -o ppid= > "$2" 2>/dev/null || continue; '
+    '[ "$(awk -v p="$1" -v k="$$" '
+    "'$2 == k { s = 1 } $1 == p && $2 != k && $3 != k { n = 1 } END { print s + 0, n + 0 }' "
+    '"$2")" = "1 0" ] && break; '
+    'done; rm -f -- "$2"'
+)
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
 # refuses (125) without running anything.
@@ -220,7 +315,14 @@ def darwin_record(tag: str) -> str:
 
 
 def _darwin_worker(
-    target: RemoteTarget, *, gone: str, unsure: str, running: str, blind: str
+    target: RemoteTarget,
+    *,
+    gone: str,
+    unsure: str,
+    running: str,
+    blind: str,
+    fence: bool = True,
+    snapshot: bool = False,
 ) -> str:
     """Darwin: decide whether the record of tag $t names a live worker.
 
@@ -228,33 +330,46 @@ def _darwin_worker(
     noclobber (O_EXCL) before it runs anything. With no record the start may
     still be on its way, so the check writes the fence record in its place
     (also O_EXCL: exactly one of the two creates the file) and is unsure this
-    time; the start then cannot record itself and refuses.
+    time; the start then cannot record itself and refuses. Without fence (a
+    poll following that start, #128) no record is only unsure: nothing is
+    written, so the start it follows still records itself.
 
     gone: the fence (that start can never run), a record from an earlier
     boot session, or no process left in the recorded group, all read from a
     ps that exited 0. unsure: no record yet (fence just written), a fence
     that could not be written, a malformed record or one naming another tag,
     a group holding another user's process, a group whose leader has exited
-    (nothing ties the members left to this start: the number may have been
-    reused while the group was empty), or a leader whose start time is not
-    the recorded one, or a record whose boot session is not a UUID.
-    running: the recorded group holds only this user's processes and is led
-    by the recorded leader. blind: the device cannot tell (no boot session
-    id, a user id that is not a number, ps failed or listed nothing, a
-    listing line that is not three numbers, awk read less than the whole
-    listing, failed, or printed anything but three fields of 0 or 1).
+    and that holds no snapshot member (nothing ties the members left to
+    this start: the number may have been reused while the group was empty),
+    or a leader whose start time is not the recorded one, or a record whose
+    boot session is not a UUID.
+    running: the recorded group holds only this user's processes and is
+    either led by the recorded leader or (#129 r2) still holds a member of
+    the snapshot `$d/.orch-worker-$t.members.pid` (the start's keeper, then
+    each stop's listing) with its recorded start time. With snapshot (a
+    stop), a group led by its leader is snapshotted before running. blind:
+    the device cannot tell (no boot session id, a user id that is not a
+    number, ps failed or listed nothing, a listing line that is not three
+    numbers, awk read less than the whole listing, failed, or printed
+    anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
-    return (
-        f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
-        f"{_DARWIN_BOOT} || {blind}; "
-        f"u=$(id -u) || {blind}; "
-        f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
+    no_record = (
         'if [ ! -e "$f" ]; then '
         'mkdir -p -- "$d" 2>/dev/null; '
         f'if (set -C; echo {_FENCE} > "$f") 2>/dev/null; then {unsure}; fi; '
         f'[ -e "$f" ] || {unsure}; '
         "fi; "
+        if fence
+        else f'[ -e "$f" ] || {unsure}; '
+    )
+    return (
+        f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
+        'm="$d/.orch-worker-$t.members.pid"; '
+        f"{_DARWIN_BOOT} || {blind}; "
+        f"u=$(id -u) || {blind}; "
+        f'case "$u" in ""|*[!0-9]*) {blind};; esac; '
+        f"{no_record}"
         f'{{ read -r p b g s < "$f"; }} 2>/dev/null || {unsure}; '
         f'if [ "$p" = {_FENCE} ]; then {gone}; fi; '
         f'case "$p" in {_BAD_GROUP}) {unsure};; esac; '
@@ -269,8 +384,10 @@ def _darwin_worker(
         f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
         f'[ "$1" = 1 ] || {gone}; '
         f'[ "$2" = 0 ] || {unsure}; '
-        f'[ "$3" = 1 ] || {unsure}; '
+        f'if [ "$3" = 1 ]; then '
         f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
+        f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}"
+        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {unsure}; fi; "
         f"{running}"
     )
 
@@ -343,6 +460,8 @@ def start_script(
     guarded_dirs: Sequence[str] = (),
     insert_at: int = 0,
     cd: str | None = None,
+    report_env: bool = False,
+    env_file: str | None = None,
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
@@ -351,6 +470,8 @@ def start_script(
     the device when the job starts. A relative dir is tested under cd (the
     directory the command resolves it against, itself relative to the job
     directory) when one is given. With none, the command runs as given.
+    With report_env, the start first prints the WORKER_ENV_MARK line, or
+    writes it to env_file (mode 600) when one is given.
     """
     tag = target.require_tag()
     if not command:
@@ -368,18 +489,27 @@ def start_script(
     # claude, codex) is loaded. #99 A6: the job's environment and directory
     # are applied after the profile ran, so a profile can change neither.
     # Every step execs, so the start's pid and group are the harness's.
-    script, guard = _START_HARNESS, ""
+    guard = ""
     if guarded_dirs:
         # Factory, Nov 13: each --add-dir only where the device has it.
         pairs = " ".join(
             f"{shlex.quote(posixpath.join(cd or '', path))} {shlex.quote(path)}"
             for path in guarded_dirs
         )
-        script, guard = _START_GUARDED, f"{insert_at} {len(guarded_dirs)} {pairs} "
+        guard = f"{insert_at} {len(guarded_dirs)} {pairs} "
+    script = (
+        ("exec 1>&3 3>&-; " if report_env else "")
+        + _START_ENTER
+        + (_GUARD_DIRS if guarded_dirs else "")
+        + _START_EXEC
+        + (_report_env(env_file) if report_env else "")
+        + 'exec "$@"'
+    )
     login = (
         f"exec {LOGIN_SHELL} -lc {shlex.quote(script)} {LOGIN_NAME} "
         f'"$d" {shlex.quote(launch_record(target))} {assignments} '
         f'ORCH_JOB_WORKDIR="$d" {TAG_ENV}={tag} -- {guard}{argv}'
+        + (" 3>&1 1>&2" if report_env else "")
     )
     directory = shlex.quote(target.job_dir)
     pid_file = shlex.quote(PID_FILE)
@@ -390,8 +520,13 @@ def start_script(
         f'[ "$1" = "$$" ] || exit {START_REFUSED}; '
         f'p=$$; {_LSTART}; s="$*"; [ -n "$s" ] || exit {START_REFUSED}; '
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
-        f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
-        f"|| exit {START_REFUSED}; "
+        f"k=$(sh -c {shlex.quote(_DARWIN_KEEPER)} orch-keeper $$ "
+        f"{shlex.quote(f'.orch-worker-{tag}.keeper.pid')} "
+        "< /dev/null > /dev/null 2>&1 & echo $!); "
+        f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
+        f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
+        f'&& (set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
+        f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
         f"{login}"
     )
     inner = (
@@ -409,13 +544,17 @@ def start_script(
 
 def check_script(target: RemoteTarget) -> str:
     """Exit 1 while the job's worker runs, 0 once it is gone, 3 when unsure."""
-    tag = target.require_tag()
+    return _sh(f"t={target.require_tag()}; {_check_body(target)}")
+
+
+def _check_body(target: RemoteTarget, *, fence: bool = True) -> str:
+    """check_script's test for the worker whose tag is in $t (fence: _darwin_worker)."""
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
-        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3"
+        target, gone="exit 0", unsure="exit 3", running="exit 1", blind="exit 3", fence=fence
     )
-    return _sh(
-        f"t={tag}; f={pid_file}; "
+    return (
+        f"f={pid_file}; "
         f"if {_IS_DARWIN}; then {darwin}; fi; "
         f"{_CAN_SCAN} || exit 3; "
         "[ -r /proc/self/stat ] || exit 3; "
@@ -435,16 +574,18 @@ def check_script(target: RemoteTarget) -> str:
     )
 
 
-def stop_script(target: RemoteTarget) -> str:
-    """SIGTERM every process carrying the job's tag, and each group holding one."""
+def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
+    """SIGTERM (SIGKILL with kill) each process carrying the job's tag, and its group."""
     tag = target.require_tag()
+    sig = "KILL" if kill else "TERM"
     pid_file = shlex.quote(f"{target.job_dir}/{PID_FILE}")
     darwin = _darwin_worker(
         target,
         gone="exit 0",
         unsure="exit 0",
-        running='{ kill -TERM -"$p" 2>/dev/null; exit 0; }',
+        running=f'{{ kill -{sig} -"$p" 2>/dev/null; exit 0; }}',
         blind="exit 3",
+        snapshot=True,
     )
     return _sh(
         f"t={tag}; f={pid_file}; "
@@ -454,9 +595,214 @@ def stop_script(target: RemoteTarget) -> str:
         "q=${e#/proc/}; q=${q%/environ}; "
         '{ read -r s < "/proc/$q/stat"; } 2>/dev/null || continue; '
         "set -- ${s##*) }; "
-        f'case "$3" in {_BAD_GROUP}) ;; *) kill -TERM -"$3" 2>/dev/null;; esac; '
-        'kill -TERM "$q" 2>/dev/null; '
+        f'case "$3" in {_BAD_GROUP}) ;; *) kill -{sig} -"$3" 2>/dev/null;; esac; '
+        f'kill -{sig} "$q" 2>/dev/null; '
         "done; "
+        "exit 0"
+    )
+
+
+# --- #128: a detached start, followed with short calls -----------------------
+#
+# The launch call starts the harness under setsid, apart from its own SSH
+# session, so a dropped link costs the box a retry, not the job. The run's
+# files live in `<workdir>/jobs/<job-id>.run/<tag>/` (mode 700): `stdin` (the
+# brief), `pid` (`<wrapper pid> <start pid>`), `log` (the harness's output),
+# `handoff` (HANDOFF_AWK's line), `exit` (its exit status, moved into place
+# once it has ended) and, with telemetry, `env` (the start's
+# WORKER_ENV_MARK report, mode 600, which the follower relays once and
+# removes: it never enters the log).
+LAUNCH_MARK = "orch-launch:"
+FOLLOW_MARK = "orch-follow:"
+LAUNCH_STARTED = ("started", "already", "pending")
+LAUNCH_BUSY = "busy"
+LAUNCH_SHORT = "short"
+ENV_FILE = "env"
+
+# The run's handoff, by the box's rule for what it relays: a line that is a
+# JSON object is a stream event (lib/telemetry.py), whose final message
+# (`result`, or a completed `agent_message`) gives its ORCH-HANDOFF line
+# (telemetry.handoff_line) at the next end event (`result`,
+# `turn.completed`) or the end of the log; any other non-blank line is
+# relayed as is. Prints the last line relayed when it is an ORCH-HANDOFF line.
+HANDOFF_AWK = r"""
+function value(line, key,    i, n, c, h, out) {
+    found = 0
+    if (!match(line, "\"" key "\"[ \t]*:[ \t]*\"")) return ""
+    n = length(line); out = ""
+    for (i = RSTART + RLENGTH; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { found = 1; return out }
+        if (c == "\\") {
+            c = substr(line, ++i, 1)
+            if (c == "n") c = "\n"
+            else if (c == "r") c = "\r"
+            else if (c == "t" || c == "b" || c == "f") c = " "
+            else if (c == "u") {
+                h = tolower(substr(line, i + 1, 4)); i += 4
+                c = (h == "000a" || h == "000d") ? "\n" : (h == "0009" ? " " : "?")
+            }
+        }
+        out = out c
+    }
+    return ""
+}
+function handoff(text,    parts, k, line) {
+    gsub(/\r/, "\n", text)
+    for (k = split(text, parts, "\n"); k > 0; k--) {
+        line = parts[k]
+        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+        if (line != "") break
+    }
+    return (k > 0 && line ~ /^ORCH-HANDOFF:/ && length(line) <= 113) ? line : ""
+}
+function emit(line) { if (line != "") { last = line; ok = 1 } }
+/^[ \t]*\{.*\}[ \t\r]*$/ {
+    if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
+    else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
+    else found = 0
+    if (found) { final = text; pending = 1 }
+    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { emit(handoff(final)); pending = 0 }
+    next
+}
+NF { last = $0; ok = 0 }
+END {
+    if (pending) emit(handoff(final))
+    if (ok || last ~ /^[ \t]*ORCH-HANDOFF: /) print last
+}
+"""
+
+# Detach "$@" from the session (setsid, else perl's POSIX::setsid on a Mac
+# without one) with the worker tag in its environment, by exec: the caller
+# runs it as an asynchronous list, so $! is the detached process.
+_DETACH = (
+    'detach() { if [ "$S" = setsid ]; then exec env "ORCH_WORKER_TAG=$t" setsid "$@"; fi; '
+    'exec env "ORCH_WORKER_TAG=$t" perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@"; }; '
+)
+
+# The wrapper: the run's own monitor, detached by the launch. $1 the run's
+# directory, $2 the detacher, $3 the start script. It starts the start
+# (lib/remote.py start_script, which records the worker and execs the
+# harness) in a session of its own with the brief as its stdin and its
+# output in `log`, records both pids, waits for it (again after a SIGTERM,
+# which it catches so the start keeps default handling), then writes
+# `handoff` and `exit`, each through a temporary file.
+_WRAPPER = (
+    'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
+    + _DETACH
+    + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
+    'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
+    'while :; do s=; wait "$c"; r=$?; '
+    'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
+    f"awk {shlex.quote(HANDOFF_AWK)} "
+    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
+    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+)
+
+
+def run_dir(target: RemoteTarget) -> str:
+    """Beside the job directory: one directory per start, named by its tag."""
+    return f"{target.job_dir}.run"
+
+
+def run_file(target: RemoteTarget, name: str) -> str:
+    """One of this start's files in its run directory."""
+    return f"{run_dir(target)}/{target.require_tag()}/{name}"
+
+
+def env_clear_script(target: RemoteTarget) -> str:
+    """Remove the start's environment report once the box has it."""
+    return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
+
+
+def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int) -> str:
+    """The short call that starts `start` detached, once per tag.
+
+    The brief (exactly `size` bytes) comes on stdin. Prints one
+    `orch-launch: <word>` line: `started` (the wrapper recorded itself),
+    `already` (this tag was launched before: nothing is started twice),
+    `pending` (no record within 10 seconds), `short` (the brief came in
+    short, nothing done: send it again), `busy` (another tag of the job is
+    the current run and not confirmed gone) or `refused <why>` (nothing
+    ran). A launch that reaches the device after not_after (the box's epoch
+    seconds) is refused unless its tag already ran. Like the start, it runs
+    under `exec env ORCH_WORKER_TAG=<tag>`, so a check finds it running.
+    """
+    tag = target.require_tag()
+    if size < 0 or not_after <= 0:
+        raise RemoteError("a launch needs the brief's size and a deadline")
+    mark = LAUNCH_MARK
+    launcher = (
+        f"t={tag}; R={shlex.quote(run_dir(target))}; T=\"$R/$t\"; "
+        f"say() {{ printf '{mark} %s\\n' \"$*\"; }}; "
+        '[ -d "$T" ] && { say already; exit 0; }; '
+        'n=$(date +%s 2>/dev/null); case "$n" in ""|*[!0-9]*) say refused clock; exit 0;; esac; '
+        f'[ "$n" -le {not_after} ] || {{ say refused late; exit 0; }}; '
+        "if command -v setsid >/dev/null 2>&1; then S=setsid; "
+        "elif command -v perl >/dev/null 2>&1; then S=perl; "
+        "else say refused setsid; exit 0; fi; "
+        'mkdir -p -- "$R" || { say refused rundir; exit 0; }; '
+        'i="$R/.$t.$$"; '
+        '(umask 077 && cat > "$i") 2>/dev/null || { rm -f -- "$i"; say short; exit 0; }; '
+        f'w=$(wc -c < "$i"); [ "$((w + 0))" -eq {size} ] || {{ rm -f -- "$i"; say short; exit 0; }}; '
+        'if ! (umask 077 && mkdir -- "$T") 2>/dev/null; then rm -f -- "$i"; '
+        '[ -d "$T" ] && { say already; exit 0; }; say refused tagdir; exit 0; fi; '
+        f'mv -f -- "$i" "$T/stdin" || {{ echo {START_REFUSED} > "$T/exit"; say refused stdin; exit 0; }}; '
+        'c="$R/current"; '
+        'if { read -r o < "$c"; } 2>/dev/null && [ -n "$o" ] && [ "$o" != "$t" ] '
+        '&& [ ! -e "$R/$o/exit" ]; then '
+        f'(t=$o; {_check_body(target)}) || {{ echo {START_REFUSED} > "$T/exit"; say busy; exit 0; }}; '
+        "fi; "
+        'printf "%s\\n" "$t" > "$c.$$" && mv -f -- "$c.$$" "$c" '
+        f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
+        + _DETACH
+        + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
+        "< /dev/null > /dev/null 2>&1 & "
+        "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
+        "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "
+        'if [ -e "$T/pid" ]; then say started; '
+        'elif [ -e "$T/exit" ]; then say refused "exit $(cat "$T/exit")"; '
+        "else say pending; fi"
+    )
+    return f"exec env {TAG_ENV}={tag} sh -c {shlex.quote(launcher)}"
+
+
+def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
+    """Read-only: the run's state, and up to chunk bytes of its log from offset.
+
+    Prints `orch-follow: <log size> <state> [<exit>]` on stderr, then on
+    stdout exactly min(chunk, size - offset) bytes of the log (none when
+    offset is past it). The state is `exited` (with its status), `running`,
+    `gone` (no exit status and the worker confirmed gone), `unsure` (not
+    yet recorded, or the check cannot tell) or `none` (no such start).
+    `exit` is read before and after the worker check, so a run that ends in
+    between reads as exited. The start's `env` report, when there is one,
+    comes on stderr too, read after the log's size: a log that holds the
+    harness's output holds no byte the report did not precede. Never starts or signals anything, and never
+    writes: on Darwin a start not yet recorded is unsure, never fenced.
+    """
+    tag = target.require_tag()
+    if offset < 0 or chunk <= 0:
+        raise RemoteError("a poll needs an offset and a chunk size")
+    return _sh(
+        f"t={tag}; T={shlex.quote(run_dir(target))}/$t; "
+        f"say() {{ printf '{FOLLOW_MARK} %s\\n' \"$*\" >&2; }}; "
+        '[ -d "$T" ] || { say 0 none; exit 0; }; '
+        'e=; [ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
+        'if [ -n "$e" ]; then st=exited; '
+        'elif [ ! -f "$T/pid" ]; then st=unsure; '
+        f'else ({_check_body(target, fence=False)}); '
+        'case $? in 0) st=gone;; 1) st=running;; *) st=unsure;; esac; '
+        '[ -f "$T/exit" ] && { read -r e < "$T/exit"; } 2>/dev/null; '
+        'if [ -n "$e" ]; then st=exited; '
+        'elif [ "$st" = gone ] && { read -r w _ < "$T/pid"; } 2>/dev/null '
+        '&& kill -0 "$w" 2>/dev/null; then st=unsure; fi; '
+        "fi; "
+        'z=0; [ -f "$T/log" ] && z=$(wc -c < "$T/log"); z=$((z + 0)); '
+        f'[ -f "$T/{ENV_FILE}" ] && cat -- "$T/{ENV_FILE}" >&2; '
+        f"n=$((z - {offset})); [ \"$n\" -gt {chunk} ] && n={chunk}; "
+        'say "$z" "$st" $e; '
+        f'[ "$n" -gt 0 ] && tail -c +{offset + 1} "$T/log" | head -c "$n"; '
         "exit 0"
     )
 
@@ -669,12 +1015,40 @@ class CaptureTransport(Transport, Protocol):
     ) -> Called: ...
 
 
-class SshTransport:
-    """The real transport for checks: the `ssh` on PATH, argv only, never a shell.
+@dataclass(frozen=True)
+class Exchanged:
+    """One call's exit status, its stdout as bytes and its stderr as text."""
 
-    The start itself is spawned by `orch job run` (lib/job_run.py) with the
-    argv from `ssh_argv`, so it is heartbeated and gets forwarded signals.
-    """
+    code: int
+    stdout: bytes
+    stderr: str
+
+
+@runtime_checkable
+class ByteTransport(Transport, Protocol):
+    def exchange(
+        self, argv: Sequence[str], *, timeout: float, input: bytes = b""
+    ) -> Exchanged: ...
+
+
+class SshTransport:
+    """The real transport: the `ssh` on PATH, argv only, never a shell."""
+
+    def exchange(
+        self, argv: Sequence[str], *, timeout: float, input: bytes = b""
+    ) -> Exchanged:
+        """Run argv with input on stdin; a timeout or a failed spawn is unreachable."""
+        try:
+            completed = subprocess.run(
+                list(argv), input=input, capture_output=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired:
+            return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
+        except OSError as exc:
+            return Exchanged(SSH_UNREACHABLE, b"", type(exc).__name__)
+        return Exchanged(
+            completed.returncode, completed.stdout, completed.stderr.decode("utf-8", "replace")
+        )
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         try:
@@ -755,9 +1129,11 @@ def check_worker(transport: Transport, target: RemoteTarget) -> str:
     return UNKNOWN
 
 
-def stop_worker(transport: Transport, target: RemoteTarget) -> bool:
-    """Ask the device to SIGTERM the worker. True when the device answered."""
-    code = transport.run(ssh_argv(target, stop_script(target)), timeout=PROBE_TIMEOUT_SECONDS)
+def stop_worker(transport: Transport, target: RemoteTarget, *, kill: bool = False) -> bool:
+    """Ask the device to SIGTERM (SIGKILL with kill) the worker. True when it answered."""
+    code = transport.run(
+        ssh_argv(target, stop_script(target, kill=kill)), timeout=PROBE_TIMEOUT_SECONDS
+    )
     return code == 0
 
 
