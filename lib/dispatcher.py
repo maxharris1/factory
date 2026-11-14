@@ -1978,14 +1978,19 @@ class Dispatcher:
 
         With #108, next_round is the round this ready would start. A verdict
         for a later round answers none either: T3 and T4 call it stale. One
-        for next_round answers this ready only once a review job is recorded;
+        for next_round answers this ready only once that round's review job
+        for head is recorded;
         on a thread read whole with none (an empty DB) it is the verdict of
         the review this ready starts, which _enqueue_step records as answered
         (answered-review, no claimable job) so that verdict can then act.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         cap = self._effective_cap(ticket)
-        last_round = next_round if self._has_review_job(ticket) else next_round - 1
+        last_round = (
+            next_round
+            if self._has_review_job(ticket, head, next_round)
+            else next_round - 1
+        )
         before: set[int] = set()
         after: set[int] = set()
         for item in ticket.comments:
@@ -3111,17 +3116,20 @@ class Dispatcher:
         )
         return state, int(row["review_round"])
 
-    def _has_review_job(self, ticket: TrackedTicket) -> bool:
+    def _has_review_job(self, ticket: TrackedTicket, head: str, round_number: int) -> bool:
         with self._connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT 1 FROM jobs
+                SELECT head, detail FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-                LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone()
-        return row is not None
+            ).fetchall()
+        return any(
+            _detail_round_number(row["detail"]) == round_number
+            and _matching_head(str(row["head"] or ""), head) is not None
+            for row in rows
+        )
 
     def _latest_review_head(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:

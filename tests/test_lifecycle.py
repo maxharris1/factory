@@ -1289,3 +1289,59 @@ def test_a_restored_second_failure_unanswered_goes_stuck_only_after_a_read(
 
     assert flow.state()["stuck"]
     assert _claims(pool) == []
+
+
+
+def _thread(flow: Flow, rounds: int) -> list:
+    steps = [flow.go, lambda: flow.finish("claude")]
+    for number in range(1, rounds + 1):
+        steps += [
+            lambda n=number: flow.ready(HEADS[n]),
+            lambda: flow.finish("codex"),
+        ]
+        if number < rounds:
+            steps += [
+                lambda n=number: flow.revise(f"{n}/3"),
+                lambda: flow.finish("claude"),
+            ]
+    steps.append(lambda: flow.approve(f"{rounds}/3"))
+    return steps
+
+
+def _last_head_backups(rounds: int) -> list[tuple[int, int]]:
+    first = 0 if rounds == 1 else 4 * (rounds - 1)
+    return [(rounds, index) for index in range(first, 4 * rounds + 1)]
+
+
+@pytest.mark.parametrize(
+    ("rounds", "saved_after"),
+    [point for rounds in (1, 2, 3) for point in _last_head_backups(rounds)],
+)
+def test_a_restore_before_the_last_round_repeats_no_work(
+    tmp_path: Path, rounds: int, saved_after: int
+) -> None:
+    """A backup taken in the last round, or after the round before it queued
+    its fix, of a thread that later handed off: the restored database holds
+    earlier rounds' review jobs, and the pass still replays the rest as
+    answered, keeps the handoff, and leaves no completed step claimable."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    saved = tmp_path / "backup" / "orch.db"
+    for index, step in enumerate(_thread(flow, rounds)):
+        step()
+        if index == saved_after:
+            backup(flow.queue.path, saved)
+    assert flow.state()["workflow_state"] == "handed-off"
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config_of(machines_file(state)))
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert flow.state()["workflow_state"] == "handed-off"
+    assert pool.claim("claude") is None
+    assert pool.claim("codex") is None
+    assert [state for _, state in _harness_jobs(flow.queue) if state == "queued"] == []
