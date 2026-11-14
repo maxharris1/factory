@@ -77,7 +77,10 @@ with jobs in flight) names another commit than the one this waiter loaded,
 it reaps and recovers as usual but claims nothing, and writes
 waiter-<bot>.drain.ack naming that commit from a step that has already
 decided not to claim. Self-heal restarts it only with that ack and no
-running job; a waiter already on that commit ignores the marker.
+running job. A waiter already on that commit ignores the marker until an
+ack names it: then it too claims nothing, so an ack stays true when the
+service respawns the waiter that wrote it, until a service start or
+self-heal removes the marker (once the waiter no longer runs stale code).
 """
 
 from __future__ import annotations
@@ -171,6 +174,15 @@ def default_state_dir(bot: str) -> Path:
 
 
 DRAIN_ENV = "ORCH_WAITER_DRAIN"
+
+
+def _first_line(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def drain_marker(bot: str, environ: Mapping[str, str] | None = None) -> Path:
@@ -554,14 +566,11 @@ class Waiter:
         return self._start(job, placement)
 
     def _draining(self) -> bool:
-        """The drain marker names another commit than this waiter's."""
-        target = None
-        if self.drain is not None:
-            try:
-                target = self.drain.read_text(encoding="utf-8").strip() or None
-            except OSError:
-                target = None
-        if target == self.version:
+        """The drain marker names another commit than this waiter's, or an
+        ack names the marker's commit: a waiter that took over from the one
+        that acknowledged keeps the drain until the marker goes."""
+        target = _first_line(self.drain)
+        if target == self.version and _first_line(self._ack_path()) != target:
             target = None
         if target is not None and target != self._draining_for:
             self.log(f"draining for {target}: no new claims until restarted "
@@ -571,16 +580,16 @@ class Waiter:
             self._acknowledge(target)
         return target is not None
 
+    def _ack_path(self) -> Path | None:
+        return None if self.drain is None else self.drain.with_name(self.drain.name + ".ack")
+
     def _acknowledge(self, target: str) -> None:
         """Tell self-heal this waiter claims nothing more for `target`:
         written only from a step that has already decided not to claim."""
-        assert self.drain is not None
-        ack = self.drain.with_name(self.drain.name + ".ack")
-        try:
-            if ack.read_text(encoding="utf-8").strip() == target:
-                return
-        except OSError:
-            pass
+        ack = self._ack_path()
+        assert ack is not None
+        if _first_line(ack) == target:
+            return
         try:
             temp = ack.with_name(f".{ack.name}.{os.getpid()}.tmp")
             temp.write_text(target + "\n", encoding="utf-8")

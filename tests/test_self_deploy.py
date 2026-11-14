@@ -475,6 +475,94 @@ def test_a_local_path_in_the_way_of_an_upstream_addition_is_refused_untouched(
     assert len(posts.calls) == 1
 
 
+def ignored_in_directory(r: Repo) -> str:
+    write(r.box, ".git/info/exclude", "*.local\n")
+    write(r.box, "lib/data.local", "precious local data\n")
+    return "lib/data.local"
+
+
+def untracked_in_directory(r: Repo) -> str:
+    write(r.box, "lib/scratch.py", "local scratch\n")
+    return "lib/scratch.py"
+
+
+def directory_becomes_file(r: Repo) -> None:
+    (r.upstream / "lib/code.py").unlink()
+    (r.upstream / "lib").rmdir()
+    write(r.upstream, "lib", "upstream replaces directory with file\n")
+
+
+def directory_becomes_symlink(r: Repo) -> None:
+    (r.upstream / "lib/code.py").unlink()
+    (r.upstream / "lib").rmdir()
+    (r.upstream / "lib").symlink_to("elsewhere")
+
+
+@pytest.mark.parametrize("local", [ignored_in_directory, untracked_in_directory])
+@pytest.mark.parametrize("change", [directory_becomes_file, directory_becomes_symlink])
+def test_a_directory_upstream_replaces_is_refused_while_it_holds_local_files(
+        repo: Repo, local, change) -> None:
+    in_the_way = local(repo)
+    change(repo)
+    repo.commit("replace a directory")
+    old = repo.head()
+    before = tree(repo.box)
+    outcome, _, posts = run(repo)
+    assert (outcome.kind, outcome.detail) == (
+        "refused", f"local path in the way of upstream: {in_the_way}")
+    assert repo.head() == old
+    assert tree(repo.box) == before
+    assert len(posts.calls) == 1
+
+
+def test_a_directory_upstream_replaces_holding_only_tracked_files_deploys(repo: Repo) -> None:
+    directory_becomes_file(repo)
+    new = repo.commit("replace a directory")
+    outcome, _, _ = run(repo)
+    assert outcome.kind == "deployed"
+    assert repo.head() == new
+
+
+def kept_file_becomes_symlink(r: Repo) -> None:
+    (r.upstream / "orch.yml").unlink()
+    (r.upstream / "orch.yml").symlink_to("../shared-orch.yml")
+
+
+def kept_parent_becomes_symlink(r: Repo) -> None:
+    (r.upstream / "deploy/install.sh").unlink()
+    (r.upstream / "deploy").rmdir()
+    (r.upstream / "deploy").symlink_to("../shared-deploy")
+
+
+@pytest.mark.parametrize("change, kept, at", [
+    (kept_file_becomes_symlink, "orch.yml", "orch.yml"),
+    (kept_parent_becomes_symlink, "deploy/install.sh", "deploy"),
+])
+@pytest.mark.parametrize("edit", ["mode", "content"])
+def test_an_edited_kept_file_upstream_turns_into_a_non_file_is_refused_untouched(
+        repo: Repo, change, kept, at, edit) -> None:
+    shared = repo.box.parent / "shared-orch.yml"
+    shared.write_text("precious shared local data\n")
+    write(repo.box.parent, "shared-deploy/install.sh", "#!/bin/sh\necho shared\n")
+    outside = {**tree(repo.box.parent / "shared-deploy"), "orch": shared.read_bytes()}
+    if edit == "mode":
+        (repo.box / kept).chmod(0o755)
+    else:
+        with open(repo.box / kept, "a", encoding="utf-8") as out:
+            out.write("# local\n")
+    change(repo)
+    repo.commit("kept path becomes a symlink")
+    old = repo.head()
+    before = tree(repo.box)
+    outcome, _, posts = run(repo)
+    assert (outcome.kind, outcome.detail) == (
+        "refused", f"upstream changes the file type at {at}, which has local edits")
+    assert repo.head() == old
+    assert tree(repo.box) == before
+    assert {**tree(repo.box.parent / "shared-deploy"), "orch": shared.read_bytes()} == outside
+    assert len(posts.calls) == 1
+
+
 # --- orch heal deploy -------------------------------------------------------------------------
 
 

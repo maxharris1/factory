@@ -24,9 +24,12 @@ One pass, in order; the first guard that fails ends it:
 4. HEAD is origin/main: nothing to do.
 5. HEAD is not an ancestor of origin/main (local commits), or a local
    path the old HEAD does not track (untracked, ignored, a directory or a
-   symlink) sits where upstream adds one: left alone, escalated once. So
-   the merge and a rollback's reset only ever touch tracked paths and the
-   backed-up kept files.
+   symlink) sits where upstream adds one, or inside a directory upstream
+   turns into a file or symlink: left alone, escalated once. So is a kept
+   file with local edits that upstream turns (itself or a parent) into
+   anything but a regular file under directories. So the merge and a
+   rollback's reset only ever touch tracked paths and the backed-up kept
+   files, and merged kept files are written only to regular files.
 6. Fast-forward keeping the local edits to KEPT files: each dirty kept
    file and `git diff HEAD` are backed up under self-deploy/<stamp>/ in
    the state directory; a kept file upstream also changed gets a 3-way
@@ -243,6 +246,43 @@ def _in_the_way(git: Git, old: str, new: str) -> str | None:
     return None
 
 
+def _tree(git: Git, rev: str) -> dict[str, tuple[str, str]]:
+    """Every path `rev` tracks, directories included: (mode, object type)."""
+    entries: dict[str, tuple[str, str]] = {}
+    for line in git.names("ls-tree", "-r", "-t", "-z", rev):
+        meta, _, name = line.partition("\t")
+        mode, kind, _ = meta.split(" ", 2)
+        entries[name] = (mode, kind)
+    return entries
+
+
+def _type_change(git: Git, old: str, new: str, dirty: Sequence[str]) -> tuple[str, str] | None:
+    """Why a type change upstream could lose local data, as (kind of
+    refusal, path): a directory the old HEAD tracks that becomes a file or
+    a symlink while it holds a path the old HEAD does not track (git would
+    delete it), or a kept file with local edits that is, or sits under, a
+    path upstream turns into anything but a regular file and directories
+    (the merged edit would be written through it)."""
+    before = _tree(git, old)
+    after = _tree(git, new)
+    for name, (_, kind) in sorted(after.items()):
+        if kind != "tree" and before.get(name, ("", ""))[1] == "tree":
+            local = git.names("ls-files", "--others", "-z", "--", name)
+            if local:
+                return "in-the-way", sorted(local)[0]
+    for name in dirty:
+        parts = name.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            mode, kind = after.get(prefix, ("", ""))
+            if not kind:
+                break
+            leaf = depth == len(parts)
+            if not (mode in ("100644", "100755") if leaf else kind == "tree"):
+                return "kept-type", prefix
+    return None
+
+
 def _merge_kept(git: Git, files: Sequence[str], old: str, new: str
                 ) -> tuple[dict[str, bytes], list[str]]:
     """3-way merge each kept file's local edit onto upstream's change:
@@ -338,6 +378,15 @@ def run_pass(
         return Outcome(REFUSED, f"git unreadable ({exc})", old, new), {}
     if blocker is not None:
         return Outcome(REFUSED, f"local path in the way of upstream: {blocker}", old, new), {}
+    try:
+        changed_type = _type_change(git, old, new, dirty)
+    except GitError as exc:
+        return Outcome(REFUSED, f"git unreadable ({exc})", old, new), {}
+    if changed_type is not None:
+        kind, path = changed_type
+        detail = (f"local path in the way of upstream: {path}" if kind == "in-the-way"
+                  else f"upstream changes the file type at {path}, which has local edits")
+        return Outcome(REFUSED, detail, old, new), {}
     if dry_run:
         return Outcome(WOULD_DEPLOY, f"{old[:12]}..{new[:12]}", old, new), {}
     started = clock()

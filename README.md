@@ -1293,7 +1293,10 @@ Only the account that owns the checkout pulls:
   restores the backups. A kept file that is a directory or symlink (or
   sits under a symlinked directory), or any local path, tracked or not,
   where upstream adds a file, also leaves the checkout unchanged, so a
-  rollback never deletes local data. A fetch failing for 30 minutes escalates; its log
+  rollback never deletes local data. So does an untracked or ignored file
+  inside a directory upstream turns into a file or symlink, and a kept
+  file with local edits that upstream turns (or a directory above it)
+  into a symlink, so the merged edit is never written through it. A fetch failing for 30 minutes escalates; its log
   line holds only the exit code.
 - When the merge changed `deploy/` or `requirements.txt` it runs
   `deploy/install.sh --update`, which installs requirements into the
@@ -1303,8 +1306,10 @@ Only the account that owns the checkout pulls:
   pass: the poller through `poller-service.sh restart`, a waiter through
   `waiter-service.sh <bot> restart`. A stale waiter is drained first:
   `waiter-<bot>.drain` makes it claim nothing, and it confirms in
-  `waiter-<bot>.drain.ack`. It is restarted only after that confirmation,
-  with no job running: an idle waiter within the same pass, a busy one once
+  `waiter-<bot>.drain.ack`. Once confirmed, the drain holds for any
+  waiter the service respawns in its place, even one on the new commit,
+  until the restart or a later heal pass removes the marker. It is
+  restarted only after that confirmation, with no job running: an idle waiter within the same pass, a busy one once
   its last job ends. A waiter started before #219 never confirms, so it
   stays drained and escalates after 2 hours; restart it by hand once. A
   running `orch job run` is never stopped.

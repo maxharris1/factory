@@ -46,7 +46,10 @@ claiming (lib/waiter.py); the waiter then writes waiter-<bot>.drain.ack
 naming the same commit, after its last claim. A pass reads the ack before
 it counts running jobs (orch.db, by harness; a count that cannot be read
 counts as busy), so a restart decided on an ack and a zero count cannot
-race a claim. Writing a new marker removes the old ack. A pass that finds
+race a claim. The ack holds across a respawn: a waiter on the marked
+commit honours an acknowledged marker too (lib/waiter.py), so its
+replacement cannot claim before the restart. Writing a new marker removes
+the old ack. A pass that finds
 an idle waiter without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for
 it, so an idle waiter still restarts in the same pass; a busy one restarts
 on the first pass after its last job. A drain longer than

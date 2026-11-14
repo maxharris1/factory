@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from lib import heal
 from lib.heal import DRAIN, ESCALATE, RESTART
 from tests.test_heal import CHECKOUT, NOW, Posts, Runs, component, facts, log_lines, report
@@ -229,3 +231,53 @@ def test_a_stale_ack_from_an_earlier_drain_does_not_count(tmp_path: Path) -> Non
     heal.drain_ack_path(tmp_path, "claude-bot").write_text(f"{CHECKOUT}\n")
     calls = heal_with_waiter(tmp_path, db)
     assert [c for c in calls if c[0] == "waiter-service.sh"] == []
+
+
+# --- an acknowledged drain holds across a waiter's replacement ---------------------------------
+
+
+def replacement(tmp_path: Path, queue, db, version: str):
+    from tests.test_waiter import FakeSpawn, make_waiter
+
+    fresh = make_waiter(tmp_path, queue, db, FakeSpawn())
+    fresh.drain, fresh.version = heal.drain_path(tmp_path, "claude-bot"), version
+    return fresh
+
+
+def acknowledged_then_replaced(tmp_path: Path, version: str):
+    db, queue, old = real_waiter(tmp_path)
+    heal._mark_drain(tmp_path, "claude-bot", CHECKOUT)
+    assert old.step() is None
+    assert heal.drain_ack_path(tmp_path, "claude-bot").read_text() == f"{CHECKOUT}\n"
+    return db, queue, replacement(tmp_path, queue, db, version)
+
+
+@pytest.mark.parametrize("version", [CHECKOUT, "bbbbbbbbbbbb"])
+def test_a_replacement_waiter_claims_nothing_while_the_drain_is_acknowledged(
+        tmp_path: Path, version: str) -> None:
+    from tests.test_waiter import enqueue, state
+
+    db, queue, fresh = acknowledged_then_replaced(tmp_path, version)
+    job = enqueue(queue, "after-respawn")
+    assert fresh.step() is None
+    assert state(db, job) == "queued"
+    heal.drain_path(tmp_path, "claude-bot").unlink()
+    heal.drain_ack_path(tmp_path, "claude-bot").unlink()
+    assert fresh.step() == job
+
+
+@pytest.mark.parametrize("version", [CHECKOUT, "bbbbbbbbbbbb"])
+def test_a_replacement_waiter_never_claims_into_a_restart_its_predecessor_acknowledged(
+        tmp_path: Path, version: str) -> None:
+    from tests.test_waiter import enqueue
+
+    db, queue, fresh = acknowledged_then_replaced(tmp_path, version)
+    enqueue(queue, "respawn-before-restart")
+
+    def claim_during_poller_restart(argv):
+        if argv[0].endswith("poller-service.sh"):
+            fresh.step()
+
+    calls = heal_with_waiter(tmp_path, db, on_service=claim_during_poller_restart)
+    assert ("waiter-service.sh", 0) in calls
+    assert busy_restarts(calls) == []
