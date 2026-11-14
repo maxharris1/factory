@@ -30,10 +30,12 @@ FAKE_ORCH = """#!/usr/bin/env python3
 import os, signal, sys, time
 from pathlib import Path
 
+args = sys.argv[1:]
+if args[:1] not in (["poll"], ["wait"]):
+    sys.exit(0)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 with (Path(os.environ["HOME"]) / "starts").open("a") as handle:
     handle.write(f"{os.getpid()}\\n")
-args = sys.argv[1:]
 if args[:2] == ["poll", "--pidfile"]:
     Path(args[2]).write_text(f"{os.getpid()}\\n")
 while True:

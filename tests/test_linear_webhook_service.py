@@ -526,6 +526,16 @@ def test_listener_serves_the_orch_config_named_by_orch_config(
     _wait_for(lambda: _accepts(_port_of(home)), timeout=20, what="serve on the port")
 
 
+def _open_files(pid: int) -> set[str]:
+    found = set()
+    for entry in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            found.add(os.readlink(entry))
+        except OSError:
+            continue
+    return found
+
+
 def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> None:
     lock = _state(home) / "linear-webhook-listener.lock"
     lock.parent.mkdir(parents=True)
@@ -533,10 +543,7 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
     reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
     try:
         _wait_for(
-            lambda: any(
-                os.path.realpath(f"/proc/{reader.pid}/fd/{fd}") == str(lock.resolve())
-                for fd in os.listdir(f"/proc/{reader.pid}/fd")
-            ),
+            lambda: str(lock.resolve()) in _open_files(reader.pid),
             what="the reader to open the lock file",
         )
         result = _service(home, "stop")
