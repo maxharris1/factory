@@ -2131,6 +2131,10 @@ class Dispatcher:
             if max(answered) > review_round and state in (None, "questions"):
                 self._set_workflow_state(ticket, "review")
             return True, "stale-ready-verdict"
+        if state == "waiting-max" and self._verdict_behind_question(
+            ticket, comment, head, review_round
+        ):
+            return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
             return False, "ci-pending"
@@ -2336,6 +2340,55 @@ class Dispatcher:
                 else:
                     after.add(round_number)
         return after - before
+
+    def _verdict_behind_question(
+        self,
+        ticket: TrackedTicket,
+        ready: Comment,
+        head: str,
+        review_round: int,
+    ) -> bool:
+        """Whether T5 holds a review of head at waiting-max and a trusted
+        REVISE or APPROVE for head and a round past review_round follows the
+        ready.
+
+        _verdict_after skips that verdict, but the review this ready would
+        queue takes it as answered (_answered_by), so T2 would clear the
+        pause and T3 or T4 would act on it with no trusted answer. Max's
+        answer resumes the paused review instead (Codex PR #112 r9 F1)."""
+        with self._connect() as connection:
+            paused = connection.execute(
+                """
+                SELECT paused_action, paused_head FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if (
+            paused is None
+            or paused["paused_action"] != "review"
+            or _matching_head(str(paused["paused_head"] or ""), head) is None
+        ):
+            return False
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        for item in ticket.comments:
+            if _comment_order(item) <= _comment_order(ready):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            round_number = _round_number(fields.get("round"))
+            if (
+                round_number is not None
+                and round_number > review_round
+                and fields.get("kind") == "verdict"
+                and fields.get("verdict") in ("REVISE", "APPROVE")
+                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and _matching_head(fields.get("head") or "", head) is not None
+            ):
+                return True
+        return False
 
     def _paused_between(
         self, ticket: TrackedTicket, ready: Comment, verdict: Comment

@@ -6810,6 +6810,60 @@ def test_71_a_question_pause_between_ready_and_verdict_keeps_the_ready(
     assert active >= 1
 
 
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+@pytest.mark.parametrize("verdict", ["REVISE", "APPROVE"])
+@pytest.mark.parametrize("ready_at", [105, 115], ids=["ready-before-question", "ready-after-question"])
+def test_71_a_ready_while_waiting_max_never_lets_its_verdict_resume_review(
+    tmp_path: Path, ship: str, verdict: str, ready_at: float
+) -> None:
+    """A verdict T3 rejects behind an unanswered question must not reach T3
+    or T4 through another ready: the ticket stays at waiting-max with no fix
+    and no ship until Max answers (Codex PR #112 r9 F1)."""
+    now = [100.0]
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, now, review_actions=actions)
+
+    def poll(*comments: Comment) -> None:
+        snapshot = replace(
+            ticket(*comments, head=HEAD_71, ci={HEAD_71: CIResult("success")},
+                   factory_config=factory(ship=ship)),
+            ready_starts_review=True,
+        )
+        dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    question = comment(
+        "question",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
+        "Does Max approve this scope change?\n",
+        author="codex-login",
+        created_at=110,
+    )
+    now[0] = 110
+    poll(ready, question)
+    queue.finish(review.id, owner="codex", handoff_comment_id=question.id)
+    answer = comment(
+        "verdict",
+        VERDICT.format(round="1/3", head=HEAD_71, verdict=verdict, risk="high"),
+        author="codex-login",
+        created_at=120,
+    )
+    now[0] = 130
+    again = _ready_71("ready-2", HEAD_71, ready_at)
+    poll(ready, question, again, answer)
+    assert _outcomes(queue)["ready-2"] == "stale-ready-verdict"
+    assert _review_state_71(queue) == (("waiting-max", 0), 0)
+    assert not actions.merges and not actions.handoffs
+    now[0] = 150
+    poll(ready, question, again, answer, _answers_71("max", 140))
+    assert _outcomes(queue)["max"] == "resumed-review"
+    assert _review_state_71(queue) == (("review", 0), 1)
+    assert not actions.merges and not actions.handoffs
+
+
 @pytest.mark.parametrize(
     "extra",
     [(), (("question", 80), ("answer", 90))],
