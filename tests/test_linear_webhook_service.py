@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from lib import heal
 from lib.queue import SQLiteJobQueue
 from tests.procs import alive
 
@@ -36,13 +37,25 @@ assert sys.argv[1:3] == ["linear-webhook", "serve"], sys.argv
 time.sleep(300)
 """
 
+# Like OpenSSH it closes every inherited descriptor, so the loop's child lock
+# (fd 7) does not outlive the loop. The remote forward is an exclusive flock
+# on $HOME/remote-forward.lock; its holder's pid is in $HOME/forward-owner.
 FAKE_SSH = """#!/usr/bin/env python3
-import os, sys, time
-with open(os.path.join(os.environ["HOME"], "ssh-calls.log"), "a") as log:
+import fcntl, os, sys, time
+os.closerange(3, 1024)
+home = os.environ["HOME"]
+with open(os.path.join(home, "ssh-calls.log"), "a") as log:
     log.write(" ".join(sys.argv[1:]) + "\\n")
-if os.environ.get("FAKE_SSH_FORWARD_FAIL"):
+forward = open(os.path.join(home, "remote-forward.lock"), "a")
+try:
+    if os.environ.get("FAKE_SSH_FORWARD_FAIL"):
+        raise BlockingIOError
+    fcntl.flock(forward, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
     print("Error: remote port forwarding failed for listen port 8787", file=sys.stderr)
     raise SystemExit(255)
+with open(os.path.join(home, "forward-owner"), "w") as owner:
+    owner.write(str(os.getpid()))
 time.sleep(300)
 """
 
@@ -614,3 +627,154 @@ def test_restart_and_stop_end_children_orphaned_by_a_killed_loop(
         assert not set(_children(home).values()) & set(orphans.values())
     else:
         assert _processes_of(home) == []
+
+
+def _forward_owner(home: Path) -> int | None:
+    path = home / "forward-owner"
+    return int(path.read_text()) if path.exists() and path.read_text() else None
+
+
+def _ssh_children(home: Path) -> list[int]:
+    return [pid for pid in _processes_of(home) if any(a.endswith("/ssh") for a in _argv(pid)[:2])]
+
+
+def _orphan_an_ssh_that_closed_its_fds(home: Path) -> int:
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: "ssh" in _children(home), what="ssh")
+    orphan = _children(home)["ssh"]
+    _wait_for(lambda: _forward_owner(home) == orphan, what="the forward")
+    (loop,) = _loops(home, MODES[1])
+    os.kill(loop, signal.SIGKILL)
+    _wait_for(lambda: not alive(loop), what="the killed tunnel loop")
+    assert alive(orphan)
+    assert not Path(f"/proc/{orphan}/fd/7").exists()
+    assert _lock_free(_state(home) / "linear-webhook-tunnel-child.lock")
+    return orphan
+
+
+def test_ensure_and_self_heal_replace_an_orphaned_ssh_that_closed_its_fds(home: Path) -> None:
+    orphan = _orphan_an_ssh_that_closed_its_fds(home)
+    state = _state(home)
+
+    assert _service(home, "ensure").returncode == 0
+    actions = heal.heal(
+        {"known": True, "components": [{
+            "component": "tunnel", "bot": "", "device": "box", "configured": True,
+            "label": "tunnel @ box", "state": "down", "reason": "probe failed",
+            "pid": orphan, "started_at": 0,
+        }]},
+        facts=heal.Facts("box", frozenset({"linear-webhook"})), state_dir=state,
+        deploy=SERVICE.parent, webhook=heal.Webhook(), environ=_env(home), now=time.time(),
+    )
+    assert [action.kind for action in actions] == [heal.RESTART]
+    assert "restart tunnel @ box (down: probe failed) exit=0" in (state / "self-heal.log").read_text()
+
+    _wait_for(lambda: not alive(orphan), what="the orphaned ssh to be ended")
+    _wait_for(lambda: len(_ssh_children(home)) == 1
+              and _forward_owner(home) == _ssh_children(home)[0], what="the new forward")
+    assert _ssh_children(home) != [orphan]
+    assert "forward refused" not in (state / "linear-webhook-tunnel.log").read_text()
+
+
+def test_stop_ends_an_orphaned_ssh_that_closed_its_fds(home: Path) -> None:
+    orphan = _orphan_an_ssh_that_closed_its_fds(home)
+    result = _service(home, "stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not alive(orphan)
+    assert _lock_free(home / "remote-forward.lock")
+    assert _processes_of(home) == []
+
+
+NO_SUCH_PID = 4194305  # above Linux's largest pid_max, so no process has it
+PID_NS = "pid:[4026531836]"
+
+
+def _fake_proc(tmp_path: Path, pid: int, start: int, argv: list[str]) -> Path:
+    proc = tmp_path / "proc"
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    fields = ["S"] + ["0"] * 18 + [str(start)] + ["0"] * 30
+    (entry / "stat").write_text(f"{pid} (ssh) {' '.join(fields)}\n")
+    (entry / "cmdline").write_bytes(b"".join(arg.encode() + b"\0" for arg in argv))
+    (proc / "self" / "ns").mkdir(parents=True)
+    os.symlink(PID_NS, proc / "self" / "ns" / "pid")
+    return proc
+
+
+@pytest.mark.parametrize("command", ["stop", "restart"])
+def test_stop_and_restart_fail_while_an_owned_child_survives(
+    home: Path, tmp_path: Path, command: str
+) -> None:
+    # The fake /proc shows the recorded ssh alive whatever is sent to it.
+    proc = _fake_proc(tmp_path, NO_SUCH_PID, 777,
+                      ["ssh", "-N", "-R", "127.0.0.1:1:127.0.0.1:1", "test-host"])
+    record = _state(home) / "linear-webhook-tunnel-child.pid"
+    record.parent.mkdir(parents=True)
+    record.write_text(f"{NO_SUCH_PID} 777 {PID_NS}\n")
+    result = _service(home, command, ORCH_PROC_DIR=str(proc), LINEAR_WEBHOOK_STOP_WAIT="1")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"tunnel child pid {NO_SUCH_PID} is still running after SIGKILL" in result.stderr
+    if command == "restart":
+        assert not (_state(home) / "linear-webhook.stopped").exists()
+
+
+def test_stop_fails_on_a_child_record_from_another_pid_namespace(home: Path) -> None:
+    record = _state(home) / "linear-webhook-tunnel-child.pid"
+    record.parent.mkdir(parents=True)
+    record.write_text("4242 777 pid:[1]\n")
+    result = _service(home, "stop")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{record} names a process in another PID namespace" in result.stderr
+    assert record.exists()
+
+
+def test_child_records_name_the_running_serve_and_ssh(home: Path) -> None:
+    state = _state(home)
+
+    def recorded(mode: str) -> int | None:
+        path = state / f"linear-webhook-{mode}-child.pid"
+        return int(path.read_text().split()[0]) if path.exists() else None
+
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
+    children = _children(home)
+    _wait_for(lambda: recorded("listener") == children["serve"]
+              and recorded("tunnel") == children["ssh"], what="the child records")
+    result = _service(home, "stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert recorded("listener") is None and recorded("tunnel") is None
+
+
+def _start_time(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()[19])
+
+
+@pytest.mark.parametrize("mismatch", ["start time", "argv"])
+def test_stop_spares_a_reused_pid(home: Path, mismatch: str) -> None:
+    tunnel_argv = ["-R", "127.0.0.1:1:127.0.0.1:1"]
+    argv = (["sleep", "60"] if mismatch == "argv"
+            else [sys.executable, "-c", "import time; time.sleep(60)", *tunnel_argv])
+    stranger = subprocess.Popen(argv)
+    try:
+        _wait_for(lambda: tunnel_argv[1] in _argv(stranger.pid) or mismatch == "argv",
+                  what="the stranger's argv")
+        start = _start_time(stranger.pid) + (1 if mismatch == "start time" else 0)
+        ns = os.readlink("/proc/self/ns/pid")
+        record = _state(home) / "linear-webhook-tunnel-child.pid"
+        record.parent.mkdir(parents=True)
+        record.write_text(f"{stranger.pid} {start} {ns}\n")
+        result = _service(home, "stop")
+        time.sleep(0.3)
+        assert stranger.poll() is None, "stop killed a process that only reuses the pid"
+    finally:
+        stranger.kill()
+        stranger.wait()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not record.exists()
+
+
+def test_ensure_is_silent_while_everything_runs(home: Path) -> None:
+    assert _service(home, "start").returncode == 0
+    _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
+    result = _service(home, "ensure")
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
