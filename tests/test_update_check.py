@@ -30,7 +30,7 @@ class Repo:
         ).stdout.strip()
 
     def write(self, path: str, text: str) -> None:
-        (self.root / path).write_text(text)
+        (self.root / path).write_bytes(text.encode())
 
     def commit(self, message: str) -> str:
         self.git("add", "-A")
@@ -39,7 +39,7 @@ class Repo:
 
     def edit(self, path: str, old: str, new: str) -> None:
         target = self.root / path
-        target.write_text(target.read_text().replace(old, new))
+        target.write_bytes(target.read_bytes().replace(old.encode(), new.encode()))
 
     def branches(self, pr_edits, main_edits) -> tuple[str, str]:
         """PR branch and main, each with its edits on top of base."""
@@ -229,33 +229,41 @@ def test_unknown_commit_is_not_trivial(repo: Repo) -> None:
     assert not result.trivial
 
 
-def _marker_fixture(size: int) -> str:
+def _marker_fixture(size: int, eol: str = "\n") -> str:
     return (
-        "<" * size + " fixture\nKEEP_FIRST\n" + "|" * size + " base\nKEEP_BASE\n"
-        + "=" * size + "\nKEEP_SECOND\n" + ">" * size + " fixture\n"
+        "prefix" + eol + "<" * size + " fixture" + eol + "KEEP_FIRST" + eol
+        + "|" * size + " base" + eol + "KEEP_BASE" + eol
+        + "=" * size + eol + "KEEP_SECOND" + eol + ">" * size + " fixture\n"
     )
 
 
-@pytest.mark.parametrize("size", [7, 61, 80])
-def test_marker_lines_already_in_the_file_never_hide_an_edit(repo: Repo, size: int) -> None:
-    repo.write("app.py", _marker_fixture(size) + BASE)
+MARKER_CASES = [(size, eol) for size in (7, 61, 80) for eol in ("\n", "\r", "\r\n")]
+
+
+@pytest.mark.parametrize(("size", "eol"), MARKER_CASES)
+def test_marker_lines_already_in_the_file_never_hide_an_edit(
+    repo: Repo, size: int, eol: str
+) -> None:
+    repo.write("app.py", _marker_fixture(size, eol) + BASE)
     repo.base = repo.commit("marker fixture")
     approved, _ = repo.branches(
         [("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")]
     )
     head = repo.merge_main(
-        lambda r: r.write("app.py", "KEEP_FIRST\n" + BASE.replace("line 5\n", "line 5 pr\n"))
+        lambda r: r.write(
+            "app.py", "prefix" + eol + "KEEP_FIRST" + eol + BASE.replace("line 5\n", "line 5 pr\n")
+        )
     )
     result = run(repo, approved, head)
     assert not result.trivial
     assert "not resolved to exactly one side" in result.reason
 
 
-@pytest.mark.parametrize("size", [7, 61, 80])
+@pytest.mark.parametrize(("size", "eol"), MARKER_CASES)
 def test_marker_lines_already_in_the_file_still_allow_a_one_side_resolution(
-    repo: Repo, size: int
+    repo: Repo, size: int, eol: str
 ) -> None:
-    repo.write("app.py", _marker_fixture(size) + BASE)
+    repo.write("app.py", _marker_fixture(size, eol) + BASE)
     repo.base = repo.commit("marker fixture")
     approved, _ = repo.branches(
         [("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")]

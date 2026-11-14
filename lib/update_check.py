@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_SIZE = 61
-_MARKER_RUN = re.compile(rb"^([<|=>])\1*", re.MULTILINE)
+_MARKER_RUN = re.compile(rb"([<|=>])\1*")
+_LINE = re.compile(rb"[^\n]*\n|[^\n]+")
 TIMEOUT_SECONDS = 120.0
 _REGULAR_MODES = ("100644", "100755")
 
@@ -135,7 +136,8 @@ def _marker_size(*texts: bytes) -> int:
     """Longer than any run of marker characters that starts a line in the
     inputs, so text already in a file never reads as a conflict marker."""
     longest = max(
-        (len(run.group(0)) for text in texts for run in _MARKER_RUN.finditer(text)),
+        (len(run.group(0)) for text in texts for line in _lines(text)
+         if (run := _MARKER_RUN.match(line))),
         default=0,
     )
     return max(MARKER_SIZE, longest + 1)
@@ -148,7 +150,7 @@ def _parse_markers(text: bytes, size: int) -> list[tuple[bytes, ...]]:
     ours: list[bytes] = []
     theirs: list[bytes] = []
     state = "text"
-    for line in text.splitlines(keepends=True):
+    for line in _lines(text):
         bare = line.rstrip(b"\r\n")
         if state == "text" and _is_marker(bare, start):
             segments.append((b"".join(plain),))
@@ -171,6 +173,11 @@ def _parse_markers(text: bytes, size: int) -> list[tuple[bytes, ...]]:
         raise _NotTrivial("unterminated conflict hunk")
     segments.append((b"".join(plain),))
     return segments
+
+
+def _lines(text: bytes) -> list[bytes]:
+    """Lines as git's xdiff sees them: ended by LF only, never by a bare CR."""
+    return _LINE.findall(text)
 
 
 def _is_marker(line: bytes, marker: bytes) -> bool:
