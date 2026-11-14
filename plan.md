@@ -109,32 +109,32 @@ call, its `task_started` event and its `task_notification` event.
 ## Work
 
 ### W1. Schema and migration (`lib/telemetry.py`)
-- [ ] Add `plan`, `current_task`, `last_finished` and `subagents` to `COLUMNS` and `DDL`, all nullable `TEXT`.
-- [ ] Have `ensure_table` add any missing column with `ALTER TABLE ... ADD COLUMN`, tolerating `duplicate column name`.
+- [x] Add `plan`, `current_task`, `last_finished` and `subagents` to `COLUMNS` and `DDL`, all nullable `TEXT`.
+- [x] Have `ensure_table` add any missing column with `ALTER TABLE ... ADD COLUMN`, tolerating `duplicate column name`.
   Evidence: `test_an_old_table_gains_the_live_run_columns` builds the #93 table by hand, runs a `Session.flush`, and asserts the
   row is written with the new columns. `test_two_runners_migrating_at_once_both_write` runs `ensure_table` twice on one old table.
 
 ### W2. Capture in `Summary` (`lib/telemetry.py`)
-- [ ] `Summary(harness, scrub, *, text=True)` gets a small `LiveRun` helper that holds the plan, a pending Tasks-v2 id map, the
+- [x] `Summary(harness, scrub, *, text=True)` gets a small `LiveRun` helper that holds the plan, a pending Tasks-v2 id map, the
   sub-agents keyed by `tool_use_id`, and the last finished task.
-- [ ] Claude path:
+- [x] Claude path:
   - `_claude_tool` captures `TodoWrite` and `TaskCreate`/`TaskUpdate`, plus `Agent`/`Task` (kind = `subagent_type`, defaulting to
     `general-purpose`; description = `description`).
   - The user `tool_result` branch finishes non-background sub-agents and reads the `Task #<id> created` id with a regex. The text
     is never stored.
   - A new `system` branch handles `task_started`, `task_progress` and `task_notification` for sub-agents it knows. It reads only
     `tool_use_id`, `task_id`, `status` and `is_backgrounded`.
-- [ ] Codex path: `_codex_item` reads `todo_list` on `item.started`, `item.updated` and `item.completed`. A sub-agent item is added
+- [x] Codex path: `_codex_item` reads `todo_list` on `item.started`, `item.updated` and `item.completed`. A sub-agent item is added
   only if W5 finds one with a non-prompt description field.
-- [ ] `row()` emits the four columns. With `text=False` it emits `None` for all four and the helper is never fed.
+- [x] `row()` emits the four columns. With `text=False` it emits `None` for all four and the helper is never fed.
   Evidence: the fixture tests in W5.
 
 ### W3. Text safety (`lib/telemetry.py`)
-- [ ] Every stored string goes through `self.scrub(value, TASK_TEXT_LIMIT)`, or `LABEL_LIMIT` for `kind`. This gives one line, env
+- [x] Every stored string goes through `self.scrub(value, TASK_TEXT_LIMIT)`, or `LABEL_LIMIT` for `kind`. This gives one line, env
   secrets replaced, `redact`, the cap, and hiding whole when blind or longer than 16 KiB.
-- [ ] Statuses are always mapped onto the fixed enums, never copied from the stream. Timestamps are the runner's `now`, never
+- [x] Statuses are always mapped onto the fixed enums, never copied from the stream. Timestamps are the runner's `now`, never
   stream text.
-- [ ] Never read: `prompt`, `description` of Bash or TaskCreate, `summary`, `result`, `output_file`, `content` of tool results
+- [x] Never read: `prompt`, `description` of Bash or TaskCreate, `summary`, `result`, `output_file`, `content` of tool results
   (beyond the TaskCreate id regex), or assistant text.
   Evidence: `test_live_run_text_is_scrubbed_capped_and_one_line` (a task holding `@@GH_TOKEN@@`, an env secret, a URL and a
   newline, plus a 500-character item). `test_prompts_results_and_summaries_never_reach_the_row` puts sentinel strings in every
@@ -142,16 +142,16 @@ call, its `task_started` event and its `task_notification` event.
   new string is `[redacted-env]` before the worker environment report arrives.
 
 ### W4. The setting (`lib/telemetry.py`, `lib/cli.py`)
-- [ ] Add `text_enabled(environ)`: false for `ORCH_TELEMETRY=counters`.
-- [ ] Thread it through `start_session` → `Session` → `Summary(text=...)`.
-- [ ] Update the `orch job run` help text in `lib/cli.py`.
+- [x] Add `text_enabled(environ)`: false for `ORCH_TELEMETRY=counters`.
+- [x] Thread it through `start_session` → `Session` → `Summary(text=...)`.
+- [x] Update the `orch job run` help text in `lib/cli.py`.
   Evidence: `test_counters_only_stores_no_live_run_text` feeds the sub-agent fixture with `ORCH_TELEMETRY=counters`. It asserts
   the four columns are `NULL`, every counter equals the full-mode run, and no fixture task or description string appears anywhere
   in the row. `test_counters_only_still_adds_the_stream_flags` covers the argv. `test_start_session_is_off_with_orch_telemetry_off`
   and the `cli job run ... telemetry off` tests stay unchanged and passing.
 
 ### W5. Fixtures from real streams (`tests/fixtures/telemetry/`)
-- [ ] `claude_subagents_stream.jsonl`, redacted from a real Claude Code 2.1.322 `events.jsonl`. Source: this plan job
+- [x] `claude_subagents_stream.jsonl`, redacted from a real Claude Code 2.1.322 `events.jsonl`. Source: this plan job
   (`0184c2dc…`) on the box, or any recent claude-bot job that used `Agent`. Grep only tool names and event subtypes first, then
   copy only the event shapes. It contains:
   - one background `Agent` with its `task_started`, launch acknowledgement and `task_notification` `completed`;
@@ -159,21 +159,21 @@ call, its `task_started` event and its `task_notification` event.
   - one resumed task that notifies twice;
   - a `TodoWrite` list in three snapshots.
   Prompt, result and summary text is replaced with sentinels; ids and paths are replaced with fakes.
-- [ ] `claude_tasks_v2_stream.jsonl`: `TaskCreate` ×3, `TaskUpdate` to in_progress, completed and deleted.
-- [ ] `codex_todo_exec.jsonl`: `todo_list` started, updated and completed. If the current Codex emits a sub-agent item, it is
+- [x] `claude_tasks_v2_stream.jsonl`: `TaskCreate` ×3, `TaskUpdate` to in_progress, completed and deleted.
+- [x] `codex_todo_exec.jsonl`: `todo_list` started, updated and completed. If the current Codex emits a sub-agent item, it is
   included too.
-- [ ] If a box `events.jsonl` with `TodoWrite` or `TaskCreate` exists, use it. If none does (this harness has neither tool
+- [x] If a box `events.jsonl` with `TodoWrite` or `TaskCreate` exists, use it. If none does (this harness has neither tool
   enabled), build those lines from the 2.1.322 tool schemas above. The PR names which lines are real and which are
   schema-derived, and gives the CLI versions. Secret-shaped values use the existing `@@GH_TOKEN@@` and `@@API_KEY@@`
   placeholders, so no literal token sits in the repo.
   Evidence: the fixtures, and the PR body's "evidence" section with the CLI versions and the Codex sub-agent answer.
 
 ### W6. Docs
-- [ ] `lib/telemetry.py` module docstring: the r10 paragraph and the "Secrets" paragraph now list the one exception and the
+- [x] `lib/telemetry.py` module docstring: the r10 paragraph and the "Secrets" paragraph now list the one exception and the
   `counters` setting.
-- [ ] `docs/SPEC.md` §11 (line ~624 and ~640): update the same two statements, and add a decision-log row citing STATUS.md
+- [x] `docs/SPEC.md` §11 (line ~624 and ~640): update the same two statements, and add a decision-log row citing STATUS.md
   decision 7 (Max, 2026-11-13 6:10 PM ET).
-- [ ] The §4.3 table row mentions `ORCH_TELEMETRY=counters`.
+- [x] The §4.3 table row mentions `ORCH_TELEMETRY=counters`.
   Evidence: the diff.
 
 ## Criterion → work map
@@ -195,10 +195,10 @@ call, its `task_started` event and its `task_notification` event.
 
 ## Verify
 
-- [ ] **V1 Unit.** `env -u ORCH_DB python -m pytest -q` passes in full. Record the counts in the PR.
-- [ ] **V2 Revert.** Restore `lib/telemetry.py` from `main` and keep the new tests. Every new test fails, and the reason is the
+- [x] **V1 Unit.** `env -u ORCH_DB python -m pytest -q` passes in full. Record the counts in the PR.
+- [x] **V2 Revert.** Restore `lib/telemetry.py` from `main` and keep the new tests. Every new test fails, and the reason is the
   missing capture or column, not an import error. Record this in the PR.
-- [ ] **V3 Old database.** In a throwaway copy, create a #93-shaped `job_telemetry` with one existing row, run
+- [x] **V3 Old database.** In a throwaway copy, create a #93-shaped `job_telemetry` with one existing row, run
   `orch job run` with a fake stream, and confirm that the row is rewritten with the new columns and that the dashboard's current
   `read_telemetry` still renders it.
 - [ ] **V4 CI.** `.github/workflows/ci.yml` is green on the PR head (pytest, `check-config`, statechart). `git diff main --stat`

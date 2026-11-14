@@ -173,7 +173,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
   beside the database), capped at 20 MB and rotated,
   and a scrubbed summary goes to the job_telemetry table with each
-  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
+  heartbeat and at exit, with the agent's plan, current and last finished
+  task and sub-agents (issue #147). ORCH_TELEMETRY=counters keeps the
+  counters but stores no such text; ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
