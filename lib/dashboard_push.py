@@ -34,10 +34,21 @@ LIVE_MIN_SECONDS, never while the previous one runs, and a change that
 arrives meanwhile is pushed as soon as both allow, so the last change is
 never dropped. The full set (the pages too) still goes out at the
 `PollPusher` cadence.
+
+#106: a dead link fails fast. SSH gives up connecting after 5 s and drops a
+silent connection after about 10 s, and each upload or rename is killed
+after SEND_TIMEOUT_SECONDS (20). Both pushers read each push child's exit
+status. After the k-th failure in a row they start no push until
+`backoff_seconds(k)` (30 s doubling up to 10 min) after the failed one
+started, with one log line per failure; a success clears it. A live
+pusher's pending change is kept, so it goes out once the backoff ends.
+With `record`, each push's outcome goes to the `dashboard-push` Health
+component (lib/health.py `push_result`).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
@@ -63,8 +74,14 @@ NOT_CONFIGURED = (
     "dashboard push: not configured (dashboard.push.transport is none); "
     "nothing pushed"
 )
-SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
-SEND_TIMEOUT_SECONDS = 60
+SSH_OPTIONS = (
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=2",
+)
+SEND_TIMEOUT_SECONDS = 20
+RSYNC_IO_TIMEOUT_SECONDS = 10
 TEMP_SUFFIX = ".push-tmp"
 # Names of the files sent (status.json and the pages): plain, no leading '-'.
 FILE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
@@ -136,7 +153,7 @@ class SshTransport:
             upload = [
                 "rsync",
                 "--quiet",
-                "--timeout=30",
+                f"--timeout={RSYNC_IO_TIMEOUT_SECONDS}",
                 "--chmod=F644",
                 "-e",
                 "ssh " + " ".join(options),
@@ -258,8 +275,18 @@ CHILD_ENV = (
     "ORCH_DASHBOARD_DIR",
 )
 STILL_RUNNING = "dashboard push: previous push still running; skipped this cycle"
+BACKOFF_FIRST_SECONDS = 30.0
+BACKOFF_MAX_SECONDS = 600.0
+BACKOFF_MAX_DOUBLINGS = math.ceil(math.log2(BACKOFF_MAX_SECONDS / BACKOFF_FIRST_SECONDS))
 
 Spawn = Callable[..., object]
+Record = Callable[[bool], None]
+
+
+def backoff_seconds(failures: int) -> float:
+    """How long pushes pause after the failures-th failed push in a row."""
+    doublings = min(failures - 1, BACKOFF_MAX_DOUBLINGS)
+    return min(BACKOFF_FIRST_SECONDS * 2**doublings, BACKOFF_MAX_SECONDS)
 
 
 class PollPusher:
@@ -267,9 +294,10 @@ class PollPusher:
 
     At most every `every_seconds` (0: every call) it starts `argv` (`orch
     dashboard push --once ...`) as a separate process and returns at once.
-    While the previous push is still running it skips. It never raises: a
-    failure to start is one redacted log line, and a failed push is the
-    child's own redacted line on the shared stderr (poller.log).
+    While the previous push is still running it skips, and after a failed
+    push it backs off (`backoff_seconds`). It never raises: a failure to
+    start is one redacted log line, and a failed push is the child's own
+    redacted line on the shared stderr (poller.log) plus one line here.
     """
 
     def __init__(
@@ -281,6 +309,7 @@ class PollPusher:
         spawn: Spawn = subprocess.Popen,
         clock: Callable[[], float] = time.monotonic,
         log: Callable[[str], None],
+        record: Record | None = None,
     ):
         self.argv = list(argv)
         self.env = dict(env)
@@ -288,8 +317,11 @@ class PollPusher:
         self.spawn = spawn
         self.clock = clock
         self.log = log
+        self.record = record
         self._child: object | None = None
         self._last: float | None = None
+        self._failures = 0
+        self._retry_at: float | None = None
 
     def __call__(self) -> None:
         try:
@@ -298,12 +330,41 @@ class PollPusher:
             text = " ".join(str(exc).split()) or type(exc).__name__
             self.log(f"dashboard push: {redact(text)}")
 
+    def _running(self) -> bool:
+        """True while the last push runs; otherwise settle its exit status once."""
+        if self._child is None:
+            return False
+        code = self._child.poll()
+        if code is None:
+            return True
+        self._child = None
+        if code == 0:
+            self._failures = 0
+            self._retry_at = None
+        else:
+            self._failures += 1
+            pause = backoff_seconds(self._failures)
+            # From the failed push's start: its end is seen only a cycle later.
+            started = self._last if self._last is not None else self.clock()
+            self._retry_at = started + pause
+            self.log(
+                f"dashboard push: failed (exit {code}), {self._failures} in a row; "
+                f"pushes paused for {pause:g}s"
+            )
+        if self.record is not None:
+            self.record(code == 0)
+        return False
+
+    def _backing_off(self, now: float) -> bool:
+        return self._retry_at is not None and now < self._retry_at
+
     def _tick(self) -> None:
-        if self._child is not None and self._child.poll() is None:
+        if self._running():
             self.log(STILL_RUNNING)
             return
-        self._child = None
         now = self.clock()
+        if self._backing_off(now):
+            return
         if self._last is not None and now - self._last < self.every_seconds:
             return
         self._last = now
@@ -329,12 +390,14 @@ def poll_pusher_for(
     fingerprint: "Fingerprint | None" = None,
     log: Callable[[str], None],
     poll_seconds: int | None = None,
+    record: Record | None = None,
 ) -> PollPusher | None:
     """The poll loop's push hook, or None when dashboard.push is not set.
 
     With `live: true` it is a `LivePusher`; `orch poll` starts its watcher.
     `poll_seconds` is the poller's own orch.yml poll_seconds (30 or 60); each
     push passes it as `--poll-seconds` so poll health uses that interval.
+    `record` gets each finished push's outcome (True: it succeeded).
     """
     if config.transport == "none":
         return None
@@ -365,8 +428,9 @@ def poll_pusher_for(
             wall=wall,
             fingerprint=fingerprint if fingerprint is not None else db_fingerprint,
             log=log,
+            record=record,
         )
-    return PollPusher(argv, env, every, spawn=spawn, clock=clock, log=log)
+    return PollPusher(argv, env, every, spawn=spawn, clock=clock, log=log, record=record)
 
 
 # --- real-time pushes -------------------------------------------------------------
@@ -426,8 +490,11 @@ class LivePusher(PollPusher):
         fingerprint: Fingerprint = db_fingerprint,
         log: Callable[[str], None],
         min_interval: float = LIVE_MIN_SECONDS,
+        record: Record | None = None,
     ):
-        super().__init__(argv, env, every_seconds, spawn=spawn, clock=clock, log=log)
+        super().__init__(
+            argv, env, every_seconds, spawn=spawn, clock=clock, log=log, record=record
+        )
         self.db = db
         self.wall = wall
         self.fingerprint = fingerprint
@@ -472,10 +539,11 @@ class LivePusher(PollPusher):
     def _pump(self) -> None:
         if not (self._pending_status or self._pending_full):
             return
-        if self._child is not None and self._child.poll() is None:
+        if self._running():
             return
-        self._child = None
         now = self.clock()
+        if self._backing_off(now):
+            return  # the pending push waits; it is not dropped
         if self._last is not None and now - self._last < self.min_interval:
             return
         full = self._pending_full

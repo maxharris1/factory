@@ -1,10 +1,12 @@
 import ast
+import contextlib
 import json
 import os
 import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -18,7 +20,9 @@ from lib.dispatcher import (
     TrackedTicket,
     ship_mode,
 )
+from lib.dashboard import collect_snapshot
 from lib.factory_md import FactoryConfig
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.orch_yml import load_orch_yml
 from lib.queue import Job, JobRequest, SQLiteJobQueue
@@ -2392,6 +2396,300 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     second = delivery.jobs[0]
     assert second.id != first.id
     assert second.request.generation > first.request.generation
+
+
+class CycleSource(FakeSource):
+    def __init__(self, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.ended = 0
+
+    def end_cycle(self) -> None:
+        self.ended += 1
+
+
+def mark_stuck(
+    queue: SQLiteJobQueue,
+    repo: str,
+    ticket_id: str,
+    *,
+    source_comment_id: str | None,
+    timeout_seconds: int | None,
+) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds, generation
+            ) VALUES (?, ?, 0, 1, 'cancelled by hand', ?, ?, 1)
+            """,
+            (repo, ticket_id, source_comment_id, timeout_seconds),
+        )
+
+
+def stuck_wakes(queue: SQLiteJobQueue) -> dict[tuple[str, str], sqlite3.Row]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    return {(row["repo"], row["ticket_id"]): row for row in rows}
+
+
+def test_stuck_row_with_null_timeout_and_source_wakes_with_defaults(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    mark_stuck(queue, "owner/cleffy", "103", source_comment_id=None, timeout_seconds=None)
+    mark_stuck(queue, "owner/repo", "200", source_comment_id="c-200", timeout_seconds=900)
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    wakes = stuck_wakes(queue)
+    assert wakes[("owner/cleffy", "103")]["timeout_seconds"] == 3600
+    assert wakes[("owner/cleffy", "103")]["source_comment_id"] == "-"
+    assert wakes[("owner/repo", "200")]["timeout_seconds"] == 900
+    assert wakes[("owner/repo", "200")]["source_comment_id"] == "c-200"
+    assert source.ended == 1
+    with queue.connect() as connection:
+        assert connection.execute("SELECT count(*) FROM poll_errors").fetchone()[0] == 0
+
+
+def test_one_failing_stuck_wake_is_recorded_and_the_rest_still_wake(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    mark_stuck(queue, "owner/bad", "1", source_comment_id="c-1", timeout_seconds=600)
+    mark_stuck(queue, "owner/repo", "2", source_comment_id="c-2", timeout_seconds=600)
+    ensure = dispatcher._ensure_stuck_wake
+
+    def failing(repo: str, ticket_id: str) -> None:
+        if repo == "owner/bad":
+            raise TypeError("stuck row is broken")
+        ensure(repo, ticket_id)
+
+    dispatcher._ensure_stuck_wake = failing  # type: ignore[method-assign]
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    assert set(stuck_wakes(queue)) == {("owner/repo", "2")}
+    assert [job.request.ticket_id for job in delivery.jobs] == ["2"]
+    assert source.ended == 1
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchall()
+    assert [(row["repo"], row["ticket_id"], row["error"]) for row in errors] == [
+        ("owner/bad", "1", "stuck-wake:TypeError")
+    ]
+    assert "Traceback (most recent call last)" in errors[0]["detail"]
+    assert "in failing" in errors[0]["detail"]
+    assert errors[0]["detail"].endswith("TypeError: stuck row is broken")
+    assert "TypeError: stuck row is broken" in capsys.readouterr().err
+
+
+def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenGithub(CycleSource):
+        def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
+            raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
+
+    dispatcher.poll_once(BrokenGithub())
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("github", "-", "RuntimeError")
+    assert "in github_candidates" in row["detail"]
+    assert "RuntimeError: gh exploded" in row["detail"]
+    assert "ghp_abcdefghijklmnop" not in row["detail"]
+
+
+def test_poll_loop_error_writes_its_traceback_to_poll_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenEnd(CycleSource):
+        def end_cycle(self) -> None:
+            raise ValueError("end of cycle failed")
+
+    PollLoop(dispatcher, BrokenEnd(), sleep=lambda _seconds: None).run(
+        max_polls=1,
+        on_error=lambda exc: dispatcher.record_poll_exception("poll", "-", exc),
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("poll", "-", "ValueError")
+    assert "in end_cycle" in row["detail"]
+    assert row["detail"].endswith("ValueError: end of cycle failed")
+    assert "ValueError: end of cycle failed" in capsys.readouterr().err
+
+
+def test_poll_errors_gains_a_detail_column_on_an_existing_database(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE poll_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                error TEXT NOT NULL,
+                recorded_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO poll_errors (repo, ticket_id, error, recorded_at) "
+            "VALUES ('poll', '-', 'TypeError', 1)"
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.record_poll_exception("poll", "-", RuntimeError("after migration"))
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT error, detail FROM poll_errors ORDER BY id"
+        ).fetchall()
+    assert rows[0]["error"] == "TypeError"
+    assert rows[0]["detail"] is None
+    assert rows[1]["error"] == "RuntimeError"
+    assert rows[1]["detail"] == "RuntimeError: after migration"
+
+
+def test_poll_error_detail_keeps_the_newest_frames_within_the_cap(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    def recurse(depth: int) -> None:
+        if depth == 0:
+            raise RuntimeError("bottom " + "x" * 10000)
+        recurse(depth - 1)
+
+    try:
+        recurse(50)
+    except RuntimeError as exc:
+        dispatcher.record_poll_exception("poll", "-", exc)
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert len(detail) <= 4000
+    assert detail.endswith("x" * 100)
+
+
+CANARY = "hunter" + "2"
+CREDENTIAL_BODIES = (
+    json.dumps({"password": CANARY}),
+    json.dumps({"client_secret": CANARY, "message": "Bad credentials"}),
+    json.dumps({"token": f"{CANARY} with spaces"}),
+    repr({"api_key": CANARY}),
+    f"Authorization: Bearer {CANARY}",
+    f"password={CANARY}",
+    json.dumps({"credentials": {"password": CANARY}}),
+    json.dumps({"credentials": [CANARY]}),
+    json.dumps({"auth": {"user": "bot", "pass": CANARY}}),
+    json.dumps({"errors": [{"extensions": {"secret": CANARY}}]}, indent=2),
+    repr({"credentials": {"password": CANARY}}),
+    f"<html><input name=pass value={CANARY}></html>",
+    json.dumps(json.dumps({"credentials": {"password": CANARY}}))
+    .replace("{", r"\u007b")
+    .replace("}", r"\u007d"),
+    json.dumps(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}}), safe='{}":, '),
+    "%7B%22credentials%22: %7B%22password%22: %22" + CANARY + "%22%7D%7D",
+    "&#123;&quot;credentials&quot;: &#123;&quot;password&quot;: &quot;"
+    + CANARY
+    + "&quot;&#125;&#125;",
+    r"\x7b'credentials': \x7b'password': '" + CANARY + r"'\x7d\x7d",
+    f"credentials: password = {CANARY}",
+    f"token: password = {CANARY}",
+    f"session cookie: auth key {CANARY}",
+    f"bad credentials for user bot pass {CANARY}",
+)
+
+
+class GhFailure(FakeSource):
+    def __init__(self, body: str, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.body = body
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        try:
+            raise RuntimeError(f"inner {self.body}")
+        except RuntimeError as inner:
+            raise ValueError(f"outer {self.body}") from inner
+
+
+def assert_canary_hidden(queue: SQLiteJobQueue, log: Path) -> None:
+    with queue.connect() as connection:
+        details = [
+            row["detail"]
+            for row in connection.execute("SELECT detail FROM poll_errors").fetchall()
+        ]
+    assert details and all(details)
+    assert not [detail for detail in details if CANARY in detail]
+    assert CANARY not in log.read_text()
+    snapshot = collect_snapshot(queue.path, log, now=100)
+    assert snapshot["poller"]["log"]["tail"]
+    assert CANARY not in json.dumps(snapshot)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(GhFailure(body))
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert "The above exception was the direct cause" in detail
+    assert "RuntimeError: inner" in detail
+    assert "ValueError: outer" in detail
+    assert_canary_hidden(queue, log)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_github_adapter_error_body_stays_out_of_detail_stderr_and_dashboard(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    actions = GitHubReviewActions(runner=lambda *_: GhResult(1, "", body))
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    tracked = ticket(comment("go", GO.format(state="building"), author="grok-login"))
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo','42','github',0)")
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(FakeSource(tracked))
+
+    with queue.connect() as connection:
+        error = connection.execute("SELECT error FROM poll_errors").fetchone()[0]
+    assert error == "RetryableStateError"
+    assert_canary_hidden(queue, log)
 
 
 def test_duplicate_ready_for_one_head_does_not_increment_gate_twice(
@@ -5055,3 +5353,221 @@ def test_t5_fenced_block_first_under_questions_queues_clarify(
     queue = _process_t5_questions(tmp_path, header, author, body)
 
     _assert_t5_waiting_max(queue)
+
+
+# --- #71: discovery never reviews a head that already has its verdict ----------
+
+HEAD_71 = "d7df4f9" + "5" * 33
+NEW_HEAD_71 = "b0b0b0b" + "6" * 33
+
+
+def _poll_71(tmp_path: Path, now: list[float]):
+    """A ready_starts_review PR, polled through poll_once (discovery included)."""
+    from dataclasses import replace
+
+    dispatcher, queue = setup(tmp_path, now)
+
+    def poll(*comments: Comment, head: str = HEAD_71) -> None:
+        ci = {HEAD_71: CIResult("success"), NEW_HEAD_71: CIResult("success")}
+        snapshot = replace(ticket(*comments, head=head, ci=ci), ready_starts_review=True)
+        dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+
+    return dispatcher, queue, poll
+
+
+def _reviews_71(queue: SQLiteJobQueue) -> list[tuple[str, str, int]]:
+    with queue.connect() as connection:
+        return [
+            (str(row["head"]), str(row["state"]), int(row["attempt"]))
+            for row in connection.execute(
+                "SELECT * FROM jobs WHERE action = 'review' ORDER BY created_at, rowid"
+            )
+        ]
+
+
+def _ready_71(comment_id: str, head: str, created_at: float) -> Comment:
+    return comment(comment_id, READY.format(head=head), author="claude-login", created_at=created_at)
+
+
+def _revise_71(created_at: float, round_: str = "1/3") -> Comment:
+    return comment(
+        f"revise-{round_[0]}",
+        VERDICT.format(round=round_, head=HEAD_71, verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=created_at,
+    )
+
+
+def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path) -> None:
+    """The #65 case: after a restart, an r1 ready its review already answered.
+
+    Failed on main before #106: discovery queued a round-1 review of a head
+    whose REVISE was posted after the ready.
+    """
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
+    # #108: the empty DB records the answered review cancelled, never claimable.
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert queue.claim("codex") is None
+
+
+def test_71_a_ready_for_a_replaced_head_queues_no_review(tmp_path: Path) -> None:
+    """Passed on main before #106 (stale-ready-head); kept as a regression test."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120), head=NEW_HEAD_71)
+    assert _reviews_71(queue) == []
+
+
+def test_71_a_ready_posted_after_the_verdict_is_reviewed_as_the_next_round(
+    tmp_path: Path,
+) -> None:
+    """A fix that changed nothing re-readies the same head: round 2 runs.
+
+    Passed on main before #106; it guards the stale-ready rule above.
+    """
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+    now[0] = 140
+    again = _ready_71("ready-2", HEAD_71, 140)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again)
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+    with queue.connect() as connection:
+        detail = connection.execute(
+            "SELECT detail FROM jobs WHERE action = 'review' ORDER BY created_at DESC, rowid DESC"
+        ).fetchone()[0]
+    assert json.loads(detail)["round"] == "2/3"
+
+
+def test_71_a_failed_review_of_a_replaced_head_is_not_retried(tmp_path: Path) -> None:
+    """T6 never retries a review for a head that is no longer the PR head.
+
+    Failed on main before #106: with no fix job open, T6 queued the retry
+    review of the old head.
+    """
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 150
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    poll(ready, head=NEW_HEAD_71)  # the builder pushed; no ready for it yet
+    assert _reviews_71(queue) == [(HEAD_71, "failed", 1)]
+    assert queue.unhandled_failures() == ()
+    with queue.connect() as connection:
+        events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
+    assert events == ["retry-skipped"]
+
+
+def _round_two_ready_then(tmp_path: Path, late: Comment) -> SQLiteJobQueue:
+    """Round 1 REVISE, a no-change fix readies the head again, then `late` lands."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    now[0] = 160
+    again = _ready_71("ready-2", HEAD_71, 140)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again, late)
+    return queue
+
+
+def _outcomes(queue: SQLiteJobQueue) -> dict[str, str]:
+    with queue.connect() as connection:
+        return dict(connection.execute("SELECT comment_id, outcome FROM handled_comments"))
+
+
+def test_71_a_late_duplicate_verdict_does_not_answer_the_next_ready(tmp_path: Path) -> None:
+    """Codex PR #112 r1 F1: a repeat of the round-1 REVISE is not round 2's verdict."""
+    late = comment("revise-dup", _revise_71(120).body, author="codex-login", created_at=150)
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["revise-dup"] == "duplicate-verdict"
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_late_verdict_for_an_earlier_round_does_not_answer_the_next_ready(
+    tmp_path: Path,
+) -> None:
+    """Any verdict below the round a ready asks for answered an earlier ready."""
+    late = comment(
+        "approve-1",
+        VERDICT.format(round="1/3", head=HEAD_71, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    assert _outcomes(queue)["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+@pytest.mark.parametrize(
+    ("header", "outcome"),
+    [
+        (f"head={HEAD_71} verdict=REVISE", "stale-revise"),
+        (f"round=4/3 head={HEAD_71} verdict=REVISE", "rejected-over-cap"),
+        (f"round=4/3 head={HEAD_71} verdict=APPROVE", "rejected-over-cap"),
+    ],
+    ids=["roundless", "over-cap-revise", "over-cap-approve"],
+)
+def test_71_a_late_verdict_that_cannot_act_does_not_answer_the_next_ready(
+    tmp_path: Path, header: str, outcome: str
+) -> None:
+    """T3 and T4 act on no verdict without a round or above the cap, so none
+    answers a ready (Codex PR #112 r2 F1)."""
+    late = comment(
+        "late",
+        f"<!-- orch:v1 kind=verdict from=codex-bot role=reviewer {header} risk=high -->"
+        "\nVerdict.\n",
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["late"] == outcome
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A second ready for the head, listed only once its round-1 REVISE was
+    handled, is still answered by that REVISE: no round-2 review of it."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    late_listed = _ready_71("ready-b", HEAD_71, 110)
+    poll(ready, late_listed, revise)
+    assert _outcomes(queue)["ready-b"] == "stale-ready-verdict"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1)]
