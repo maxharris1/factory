@@ -63,6 +63,7 @@ from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
+from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.job_state import (
@@ -115,7 +116,7 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
-ATTENTION_REASONS = ("ship-failed", "dedupe-dropped")
+ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
     "scripted = jobs for claude, codex or cursor that `orch wait` claimed and "
@@ -1216,6 +1217,7 @@ def _read_db(
                     "issue": _clean(item["issue"], 64),
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
+                    "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
                 }
                 for item in items
             ],
