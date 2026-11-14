@@ -10,12 +10,14 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from lib.queue import SQLiteJobQueue
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -388,3 +390,71 @@ def test_unknown_command(home: Path) -> None:
     result = _service(home, "bogus")
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+def _real_orch(home: Path) -> None:
+    wrapper = home / ".local" / "bin" / "orch"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {ROOT / 'bin' / 'orch'} \"$@\"\n")
+    wrapper.chmod(0o755)
+
+
+def _accepts(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+    except OSError:
+        return False
+    return True
+
+
+def test_listener_serves_the_orch_config_named_by_orch_config(
+    home: Path, tmp_path: Path
+) -> None:
+    _real_orch(home)
+    secret = tmp_path / "linear-webhook.secret"
+    secret.write_text("s" * 40, encoding="utf-8")
+    secret.chmod(0o600)
+    config = tmp_path / "custom-orch.yml"
+    config.write_text(
+        "poll_seconds: 60\n"
+        "linear:\n  api_key_env: LINEAR_KEY\n"
+        "projects:\n"
+        "  - repo: acme/widgets\n"
+        "    factory_ref: main\n"
+        "    linear_project_id: project-1\n"
+        "linear_webhook:\n"
+        "  bind: 127.0.0.1:8787\n"
+        f"  secret_file: {secret}\n",
+        encoding="utf-8",
+    )
+    database = tmp_path / "orch.db"
+    SQLiteJobQueue(database, clock=time.time)
+
+    result = _service(
+        home, "ensure", LINEAR_WEBHOOK_TUNNEL_HOST="",
+        ORCH_CONFIG=str(config), ORCH_DB=str(database),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    _wait_for(lambda: _accepts(_port_of(home)), timeout=20, what="serve on the port")
+
+
+def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> None:
+    lock = _state(home) / "linear-webhook-listener.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
+    try:
+        _wait_for(
+            lambda: any(
+                os.path.realpath(f"/proc/{reader.pid}/fd/{fd}") == str(lock.resolve())
+                for fd in os.listdir(f"/proc/{reader.pid}/fd")
+            ),
+            what="the reader to open the lock file",
+        )
+        result = _service(home, "stop")
+        time.sleep(0.3)
+        assert reader.poll() is None, "stop killed a process that holds no lock"
+    finally:
+        reader.kill()
+        reader.wait()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no linear webhook loop is running" in result.stdout

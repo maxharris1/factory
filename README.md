@@ -539,7 +539,8 @@ two loops up on the box (issue #134). `deploy/install.sh` copies it to
 `~/.local/share/factory/linear-webhook-service.sh`; run that copy, not the
 checkout's file, so a `git pull` never rewrites a script a running loop reads.
 
-- `_listener-loop` runs `orch linear-webhook serve --bind 127.0.0.1:PORT`. It
+- `_listener-loop` runs `orch linear-webhook serve --bind 127.0.0.1:PORT`,
+  adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
   starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
   line per streak while the port is taken.
 - `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
@@ -567,7 +568,9 @@ which makes the installed `profile.sh` run `ensure` in the background in each
 bot shell). `stop` ends every loop for this state directory, from any copy
 of the script (argv `.../linear-webhook-service.sh _listener-loop` or
 `_tunnel-loop` whose `--state`, `ORCH_STATE_DIR` or `HOME` points here) and
-every process holding a loop lock, each with its children. If a lock is
+every process holding a loop lock (its `/proc/PID/fdinfo` shows the lock; a
+process that only has the lock file open is left alone), each with its
+children. If a lock is
 still held afterwards, by a loop in a PID namespace this shell cannot see,
 `stop` says so and exits 1: run it from a host shell.
 
@@ -939,8 +942,10 @@ changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.
 
-`start` and `ensure` also probe `orch.db.lock` (beside `ORCH_DB`) with
-`flock` before launching: while it is held, a poller runs even if its pid is
+`start` and `ensure` also probe `orch.db.lock` with `flock` before
+launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
+sourcing its env files (`run-poller.sh --print-db`), else the caller's
+`ORCH_DB`: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
 [`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by

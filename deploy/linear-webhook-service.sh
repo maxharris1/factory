@@ -16,7 +16,8 @@
 #   linear-webhook-service.sh remove-autostart   remove it
 #
 # Two loops run, each a singleton per state directory (issue #134):
-#   _listener-loop runs `orch linear-webhook serve --bind 127.0.0.1:PORT`;
+#   _listener-loop runs `orch linear-webhook serve --bind 127.0.0.1:PORT`
+#   (with `--orch "$ORCH_CONFIG"` when ORCH_CONFIG is set);
 #   _tunnel-loop runs `ssh -N -R 127.0.0.1:PORT:127.0.0.1:PORT HOST`.
 # Each loop holds an exclusive flock(1) on its own lock file for its whole
 # life (linear-webhook-listener.lock, linear-webhook-tunnel.lock) and exits 0
@@ -35,8 +36,10 @@
 # `.../linear-webhook-service.sh _listener-loop|_tunnel-loop` (any copy of the
 # script) and whose state directory (its --state argument, else its
 # ORCH_STATE_DIR or HOME) is this one, plus every process holding a loop
-# lock. It ends each with its children. If a lock is still held afterwards
-# (a loop in a PID namespace this shell cannot see), stop says so and exits 1.
+# lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
+# having the file open does not count). It ends each with its children. If a
+# lock is still held afterwards (a loop in a PID namespace this shell cannot
+# see), stop says so and exits 1.
 #
 # Settings, from the environment:
 #   LINEAR_WEBHOOK_PORT          listener and forwarded port (default 8787)
@@ -45,6 +48,7 @@
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
 #   ORCH_STATE_DIR               state directory (default ~/.local/state/factory)
 #   ORCH_DB                      default: the state directory's orch.db
+#   ORCH_CONFIG                  orch.yml for serve (default: the checkout's)
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
@@ -199,7 +203,8 @@ listener_loop() {
         busy=""
         started="$SECONDS"
         say "starting orch linear-webhook serve on 127.0.0.1:${PORT}"
-        run_child "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}"
+        run_child "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
+            ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
         say "orch linear-webhook serve exited ${STATUS}; retry in ${delay}s"
@@ -322,13 +327,16 @@ loop_pids() {
 }
 
 lock_holders() {
-    local mode file
+    local mode file fd
     for mode in listener tunnel; do
         file="$(lock_file "$mode")"
         [[ -e "$file" ]] || continue
         file="$(readlink -f "$file")"
-        find "$PROC" -mindepth 3 -maxdepth 3 -path "${PROC}/[0-9]*/fd/*" -lname "$file" 2>/dev/null |
-            awk -F/ '{ print $(NF - 2) }'
+        while IFS= read -r fd; do
+            grep -q '^lock:.*FLOCK' "${fd%/fd/*}/fdinfo/${fd##*/}" 2>/dev/null || continue
+            fd="${fd%/fd/*}"
+            printf '%s\n' "${fd##*/}"
+        done < <(find "$PROC" -mindepth 3 -maxdepth 3 -path "${PROC}/[0-9]*/fd/*" -lname "$file" 2>/dev/null)
     done
     return 0
 }
