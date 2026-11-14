@@ -9,6 +9,7 @@ import os
 import shutil
 import signal
 import sqlite3
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -43,13 +44,21 @@ from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
-from lib.orch_yml import OrchConfig, load_orch_yml, parse_bind
+from lib.orch_yml import (
+    OrchConfig,
+    approvals,
+    hold_approver_findings,
+    load_approvals,
+    load_orch_yml,
+    parse_bind,
+)
 from lib.poll_source import LivePollSource, PollSourceError
-from lib.pstack_pin import Mode, doctor, install_skills
+from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.update_check import UpdateClass, classify as classify_update
+from lib.status import main as status_main
 from lib.wait import (
     WaitError,
     open_queue,
@@ -73,7 +82,7 @@ usage: orch <command> [options]
 
 commands:
   check-config     validate orch.yml, machines.yml and factory.md
-  install-skills   install the pinned pstack skills
+  install-skills   install the pinned pstack and router skills
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
@@ -87,6 +96,7 @@ commands:
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report, beat or forget (issue #92)
+  status           read-only snapshot of the queue, devices and paused tickets
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -96,7 +106,7 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
-install-skills [--home PATH] [--project PATH] [--cloud]
+install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checkout]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
   and ~/.cursor/skills. --cloud copies them into the project at
   .claude/skills, .agents/skills, and .cursor/skills.
@@ -167,7 +177,7 @@ wait <bot> --autostart [--db PATH] [--machines PATH] [--harness-config PATH]
 
 job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
         [--worktree] [--work-root DIR] [--git-url-template URL]
-        [--status-file PATH] -- COMMAND [ARG ...]
+        [--status-file PATH] [--follow-grace SECONDS] -- COMMAND [ARG ...]
   Run COMMAND (the harness) with an orch-owned heartbeat: one heartbeat
   before it starts (a job that is not running is refused and nothing
   runs), then one every --interval seconds (default 15, or a third of the
@@ -182,12 +192,23 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
   beside the database), capped at 20 MB and rotated,
   and a scrubbed summary goes to the job_telemetry table with each
-  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
+  heartbeat and at exit, with the agent's plan, current and last finished
+  task and sub-agents (issue #147). ORCH_TELEMETRY=counters keeps the
+  counters but stores no such text; ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
   in <workdir_root>/jobs/<job-id>, with ORCH_JOB_ID, ORCH_JOB_BOT,
-  ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR; stdin is forwarded. When COMMAND
+  ORCH_JOB_DEVICE and ORCH_JOB_WORKDIR. There it is launched detached
+  (setsid) with its own files in <workdir_root>/jobs/<job-id>.run/<tag>/
+  (stdin, pid, log, handoff, exit), and its stdin is the brief: the file
+  $ORCH_JOB_BRIEF, else this process's stdin when that is a regular file.
+  orch job run follows it with short ssh calls, relays its log to stdout,
+  and rides out a dropped link, retrying with backoff; SIGTERM, SIGHUP,
+  Ctrl-C or the job ending elsewhere stop the remote worker. It is
+  recorded as run-died only when the device confirms the worker gone
+  without an exit status, or gives no certain answer for --follow-grace
+  seconds (default 1800). When COMMAND
   ends the slot is released once the worker is confirmed gone (a remote
   worker still running is sent SIGTERM first); otherwise it stays held for
   the poller to confirm.
@@ -267,6 +288,13 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
+
+status [--db PATH] [--machines PATH] [--orch PATH]
+  Print the queue, each device's slots and running jobs, Grok wakes,
+  paused and stuck tickets, the feeder, the webhook and component health,
+  read-only. A database without the dispatcher tables shows the empty
+  state. --db defaults to ORCH_DB. Exits 1 when the database or a given
+  config file cannot be read, else 0.
 """
 
 
@@ -306,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_linear_webhook, argv[1:])
     if argv[0] == "health":
         return health.main(argv[1:])
+    if argv[0] == "status":
+        return _call(status_main, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -338,13 +368,11 @@ def _check_config(argv: list[str]) -> int:
     else:
         factory_paths = [ROOT / relative for relative in EXAMPLE_PATHS]
 
-    failed = _report(
+    orch_config, orch_findings = load_orch_yml(
         orch_path,
-        load_orch_yml(
-            orch_path,
-            allow_placeholders=args.allow_placeholders,
-        )[1],
+        allow_placeholders=args.allow_placeholders,
     )
+    failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:
         machines_path = ROOT / "machines.yml"
@@ -357,7 +385,10 @@ def _check_config(argv: list[str]) -> int:
             )[1],
         ) or failed
     for path in factory_paths:
-        failed = _report(path, load_factory_md(path)[1]) or failed
+        factory, findings = load_factory_md(path)
+        if orch_config is not None and factory is not None:
+            findings = findings + hold_approver_findings(orch_config, factory.hold)
+        failed = _report(path, findings) or failed
     if failed:
         return 1
     print("ok")
@@ -456,7 +487,7 @@ def _wait(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         with beats:
-            wait_for_job(queue, recipient, sys.stdout, pool=pool)
+            wait_for_job(queue, recipient, sys.stdout, pool=pool, keep_ignored=True)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -487,6 +518,16 @@ def _wait_autostart(
 
     if note is not None:
         log(f"factory.md context is off: {note}")
+    if config is not None:
+        policy = approvals(config)
+    else:
+        policy, approval_findings = load_approvals(orch_path)
+        if policy is None:
+            print(
+                f"orch wait: {orch_path}: approval settings: {approval_findings[0].message}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         run = waiter.Waiter(
             bot=args.bot,
@@ -498,6 +539,7 @@ def _wait_autostart(
             db=_db_path(args.db),
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
+            approvals=policy,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -557,10 +599,8 @@ def _poll(argv: list[str]) -> int:
                 beats = health.poller_beats(path, args.machines).start()
                 try:
                     loop.run(
-                        on_error=lambda exc: dispatcher.record_poll_error(
-                            "poll",
-                            "-",
-                            type(exc).__name__,
+                        on_error=lambda exc: dispatcher.record_poll_exception(
+                            "poll", "-", exc
                         ),
                         after_poll=after_poll,
                     )
@@ -608,13 +648,22 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     config, findings = load_orch_yml(config_path, allow_placeholders=True)
     if config is None or any(item.severity == "error" for item in findings):
         return None
+    push = config.dashboard.push
+    # How often a push starts while all is well: the dashboard writer's interval.
+    every = (push.every_minutes or 0) * 60
+    interval = every if every and not push.live else config.poll_seconds
+
+    def log(line: str) -> None:
+        print(line, file=sys.stderr, flush=True)
+
     return poll_pusher_for(
-        config.dashboard.push,
+        push,
         db=db_path,
         orch=orch_path,
         environ=os.environ,
-        log=lambda line: print(line, file=sys.stderr, flush=True),
+        log=log,
         poll_seconds=config.poll_seconds,
+        record=lambda ok: health.push_result(db_path, ok, interval=interval, log=log),
     )
 
 
@@ -745,6 +794,7 @@ def _runtime(
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
         update_classifier=_classify_update,
+        approvals=approvals(config),
     )
     source.error_sink = dispatcher.record_poll_error
     source.deferral_sink = dispatcher.record_poll_deferral
@@ -1132,9 +1182,13 @@ def _job_run_command(argv: list[str]) -> int:
     parser.add_argument("--work-root", type=Path)
     parser.add_argument("--git-url-template")
     parser.add_argument("--status-file", type=Path)  # read and written by _job_run
+    parser.add_argument("--follow-grace", type=float)
     args = parser.parse_args(own)
     if not command:
         print(f"{prog}: pass the command to run after --", file=sys.stderr)
+        return 2
+    if args.follow_grace is not None and not args.follow_grace > 0:
+        print(f"{prog}: --follow-grace must be a number above 0", file=sys.stderr)
         return 2
     try:
         database = _db_path(args.db).absolute()
@@ -1238,6 +1292,9 @@ def _job_run_command(argv: list[str]) -> int:
         command = session.argv
     checkout: list[worktrees.JobCheckout] = []
     box_brief = os.environ.get(waiter.BRIEF_ENV) or None
+    brief: list[bytes] = []
+    if args.follow_grace is not None:
+        placed.grace = args.follow_grace
     remote_env = {
         "ORCH_JOB_ID": args.job_id,
         "ORCH_JOB_BOT": args.bot,
@@ -1248,6 +1305,9 @@ def _job_run_command(argv: list[str]) -> int:
     }
 
     def setup() -> Path | None:
+        if placed.remote:
+            # #128: the brief is the detached harness's stdin on the device.
+            brief.append(_read_brief(box_brief) or _stdin_brief())
         if args.worktree and placed.remote:
             # #94: the same --worktree, on the placed device: preflight and
             # checkout there before any worker is recorded or started.
@@ -1257,7 +1317,7 @@ def _job_run_command(argv: list[str]) -> int:
                 head=head,
                 detail=detail,
                 url_template=worktrees.url_template(args.git_url_template),
-                brief=_read_brief(box_brief),
+                brief=brief[0] if box_brief is not None else None,
             )
         placed.before_start()
         if not args.worktree or placed.remote:
@@ -1286,7 +1346,7 @@ def _job_run_command(argv: list[str]) -> int:
     harness = command
     if placed.remote:
         # A remote device has no orch.db (the waiter finishes its job on the
-        # box), so no box state dir is added; placed.argv runs a codex
+        # box), so no box state dir is added; placed.follow runs a codex
         # command by its bare name on the device's login PATH and keeps
         # each --add-dir only where the device has it (Factory, Nov 13).
         device = codex_sandbox.for_device(command)
@@ -1307,18 +1367,35 @@ def _job_run_command(argv: list[str]) -> int:
                 f"so orch job done can write {database.name}")
     code: int | None = None  # #91: how the command ended, for ended() and finish()
     try:
-        code = job_run.run(
-            placed.argv(harness, remote_env, report_env=session is not None),
-            beat=beat,
-            interval=interval,
-            log=log,
-            env=environment,
-            setup=setup,
-            teardown=teardown,
-            started=placed.started,
-            output=session.consume if session is not None else None,
-            execed=placed.execed,
-        )
+        if placed.remote:
+            code = job_run.follow(
+                lambda control: placed.follow(
+                    harness,
+                    remote_env,
+                    brief[0],
+                    control,
+                    report_env=session is not None,
+                    output=session.consume if session is not None else None,
+                ),
+                beat=beat,
+                interval=interval,
+                log=log,
+                setup=setup,
+                teardown=teardown,
+            )
+        else:
+            code = job_run.run(
+                harness,
+                beat=beat,
+                interval=interval,
+                log=log,
+                env=environment,
+                setup=setup,
+                teardown=teardown,
+                started=placed.started,
+                output=session.consume if session is not None else None,
+                execed=placed.execed,
+            )
         return code
     except placed_run.CheckoutError as exc:
         reason = " ".join(str(exc).split())
@@ -1402,6 +1479,22 @@ def _retry_of(detail: str | None) -> str | None:
         return None
     retry_of = value.get("retry_of") if isinstance(value, dict) else None
     return retry_of if isinstance(retry_of, str) else None
+
+
+def _stdin_brief() -> bytes:
+    """This process's stdin as the remote brief, when it is a regular file (#128).
+
+    A pipe or terminal is never read: it may never end.
+    """
+    try:
+        if not stat.S_ISREG(os.fstat(0).st_mode):
+            return b""
+        data = sys.stdin.buffer.read(MAX_BRIEF_BYTES + 1)
+    except (OSError, ValueError, AttributeError):
+        return b""
+    if len(data) > MAX_BRIEF_BYTES:
+        raise placed_run.CheckoutError(f"the brief on stdin is over {MAX_BRIEF_BYTES} bytes")
+    return data
 
 
 def _read_brief(path: str | None) -> bytes | None:
@@ -1535,12 +1628,17 @@ def _install_skills(argv: list[str]) -> int:
     parser.add_argument("--home", type=Path)
     parser.add_argument("--project", type=Path)
     parser.add_argument("--cloud", action="store_true")
+    parser.add_argument("--allow-unstable-checkout", action="store_true")
     args = parser.parse_args(argv)
     try:
         anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
+    unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
+    if unstable:
+        print(f"orch install-skills: {unstable}", file=sys.stderr)
+        return 1
     errors = install_skills(ROOT, anchor, mode)
     if errors:
         for message in errors:

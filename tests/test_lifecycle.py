@@ -326,7 +326,8 @@ def test_handed_off_ticket_moves_to_merged_when_merged_by_hand(tmp_path: Path) -
         flow.dispatcher.poll_once(source)
 
     assert flow.state()["workflow_state"] == "merged"
-    assert attention(flow.queue) == []
+    # Flow's handoff ids are not real comments, so #18 flags them.
+    assert attention(flow.queue) == ["unverified-handoff"]
     reads = [refs for refs in source.refs if TICKET in refs]
     assert len(reads) == 1
     for _ in range(10):

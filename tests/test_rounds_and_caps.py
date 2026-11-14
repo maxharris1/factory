@@ -360,7 +360,10 @@ def _events(queue) -> list[tuple[str, str]]:
     with queue.connect() as connection:
         return [
             (str(row["event"]), str(row["detail"]))
-            for row in connection.execute("SELECT event, detail FROM job_events ORDER BY id")
+            for row in connection.execute(
+                "SELECT event, detail FROM job_events "
+                "WHERE event NOT LIKE 'handoff-%' ORDER BY id"
+            )
         ]
 
 
@@ -407,6 +410,33 @@ def test_failed_build_with_a_posted_ready_is_done_from_ready(tmp_path: Path) -> 
     flow.ci = "success"
     flow.dispatcher.process(flow.snapshot())
     assert outcome(flow.queue, ready_id) == "queued-review"
+
+
+def test_a_ready_whose_review_already_answered_is_done_from_ready(tmp_path: Path) -> None:
+    """#71 with #105: T2 records the review as answered, yet the ready was the fix's handoff."""
+    flow = Flow(tmp_path)
+    fix = _failed_fix(flow)
+    flow.head = HEADS[2]
+    ready_id = f"ready-{HEADS[2][:6]}"
+    flow.comments.append(
+        comment(ready_id, READY.format(head=HEADS[2]), author="claude-login", created_at=flow.now[0] + 10)
+    )
+    flow.comments.append(
+        comment(
+            "revise-2/3",
+            VERDICT.format(round="2/3", head=HEADS[2], verdict="REVISE", risk="high"),
+            author="codex-login",
+            created_at=flow.now[0] + 20,
+        )
+    )
+    flow.now[0] += 30
+    flow.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.reconcile_jobs()
+    assert outcome(flow.queue, ready_id) == "answered-review"
+    assert _jobs(flow.queue, "fix")[0] == ("done", 1, ready_id)
+    assert all(attempt == 1 for _state, attempt, _handoff in _jobs(flow.queue, "fix"))
+    assert [event for event, _detail in _events(flow.queue)] == ["cancelled", "done-from-ready"]
 
 
 def _unvalidated_ready(tmp_path: Path) -> tuple[Flow, Job, TrackedTicket]:

@@ -72,6 +72,7 @@ devices:
     harnesses: {{claude: claude-bot, codex: codex-bot, cursor: cursor-bot}}
     workdir_root: {tmp_path}/remote/{{bot}}/work
     ssh_alias: fakepc-{{bot}}
+    factory_root: /srv/factory
 """.lstrip(),
         encoding="utf-8",
     )
@@ -112,6 +113,12 @@ class Ssh:
 
     def offline(self, alias: str) -> Path:
         return self.hosts / f"{alias}.offline"
+
+    def fault(self, alias: str, kind: str, seconds: float) -> Path:
+        """Set a link fault (tests/fake_ssh.py: delay, delay-detached, drop-after)."""
+        path = self.hosts / f"{alias}.{kind}"
+        path.write_text(str(seconds), encoding="utf-8")
+        return path
 
 
 def enqueue(queue: SQLiteJobQueue, recipient: str, key: str, *, timeout: int = 60) -> str:
@@ -167,6 +174,7 @@ def _remote_yaml(**fields: str) -> str:
         "harnesses": "{codex: codex-bot}",
         "workdir_root": "/home/work",
         "ssh_alias": "pc-wsl-{bot}",
+        "factory_root": "/home/{bot}/factory",
         **fields,
     }
     lines = ["devices:", "  - name: pc"]
@@ -384,17 +392,18 @@ def test_remote_job_starts_over_the_bots_own_alias_as_that_bot(tmp_path: Path, b
         "ORCH_DB": None,
     }
     calls = ssh.calls()
-    # the start, the check that the worker is gone, then (exit 3) whether it ran the harness
-    assert len(calls) == 3
+    # the launch (#128), its polls, the check that the worker is gone, then
+    # (exit 3) whether it ran the harness
+    assert len(calls) >= 4
     for call in calls:
         assert (call["user"], call["alias"]) == (bot, f"fakepc-{bot}")
         assert "BatchMode=yes" in call["options"]
     assert sys.executable in calls[0]["script"]
     tag = calls[0]["script"].split()[2].removeprefix("ORCH_WORKER_TAG=")
     assert len(tag) == 32  # the start runs under a fresh worker tag ...
-    assert f"t={tag};" in calls[1]["script"]  # ... and the check looks for that tag
-    assert f"= {tag} ]" in calls[2]["script"]  # ... as does the launch record probe
-    assert [call["words"] for call in calls] == [1, 1, 1]  # one remote command string each
+    assert f"t={tag};" in calls[-2]["script"]  # ... and the check looks for that tag
+    assert f"= {tag} ]" in calls[-1]["script"]  # ... as does the launch record probe
+    assert {call["words"] for call in calls} == {1}  # one remote command string each
     assert pool.placement(job_id) is None  # released: the worker is gone
     assert state(queue, job_id) == "running"  # job run never finishes the job
 
@@ -481,11 +490,11 @@ def test_an_unreachable_device_after_the_job_keeps_the_slot(tmp_path: Path) -> N
     offline = ssh.offline("fakepc-codex-bot")
     proc = orch(
         "job", "run", "codex-bot", job_id, "--db", str(tmp_path / "orch.db"),
-        "--machines", str(machines), "--", "touch", str(offline),
+        "--machines", str(machines), "--follow-grace", "2", "--", "touch", str(offline),
         env=ssh.env(),
     )
     _, err = proc.communicate(timeout=20)
-    assert proc.returncode == 0, err
+    assert proc.returncode == 255, err  # #128: no exit status came back
     assert "not confirmed gone (unreachable); slot held" in err
     assert pool.placement(job_id) is not None
 

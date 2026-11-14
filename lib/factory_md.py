@@ -11,7 +11,10 @@ family rule, also in the README, is fail closed:
   refused.
 - A cursor harness takes its family only from the model hint.
   claude*, sonnet*, opus*, and haiku* are Anthropic. gpt*, codex*,
-  and o<digit> (o3, o4-mini) are OpenAI.
+  and o<digit> (o3, o4-mini) are OpenAI. The family word must end the
+  name or be followed by one of -._: or a digit, so haikus and
+  magnum-opus resolve to nothing. opus-mt*, gpt-j* and gpt-neo* are
+  other model lines and resolve to nothing.
 - If either side's family cannot be resolved, the check refuses. A
   cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
@@ -57,7 +60,10 @@ EXAMPLE_PATHS = (
 # Prefixes drawn from names the spec uses. This is not an allow-list.
 ADVISORY_MODEL_PREFIXES = ("claude", "codex", "cursor", "gpt", "grok")
 
-_OPENAI_O_SERIES = re.compile(r"^o[0-9]")
+_ANTHROPIC_WORD = re.compile(r"^(?:claude|sonnet|opus|haiku)(?=$|[-._:0-9])")
+_OPENAI_WORD = re.compile(r"^(?:gpt|codex)(?=$|[-._:0-9])")
+_OPENAI_O_SERIES = re.compile(r"^o[0-9]+(?=$|[-._:])")
+_OTHER_MODEL_LINES = ("opus-mt", "gpt-j", "gpt-neo")
 _SKILL = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -186,7 +192,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
-            _family_findings(
+            family_findings(
                 builder_harness,
                 builder_model,
                 reviewer_harness,
@@ -362,15 +368,15 @@ def _round(rounds: dict, name: str, findings: list[Finding]) -> int | None:
     return int(value)
 
 
-def _family_findings(
+def family_findings(
     builder_harness: str,
     builder_model: str | None,
     reviewer_harness: str,
     reviewer_model: str | None,
 ) -> list[Finding]:
     findings: list[Finding] = []
-    builder_family, builder_hint_family = _resolved_family(builder_harness, builder_model)
-    reviewer_family, reviewer_hint_family = _resolved_family(
+    builder_family, builder_hint_family = resolved_family(builder_harness, builder_model)
+    reviewer_family, reviewer_hint_family = resolved_family(
         reviewer_harness, reviewer_model
     )
     findings.extend(
@@ -432,7 +438,7 @@ def _contradiction(
     ]
 
 
-def _resolved_family(harness: str, model: str | None) -> tuple[str | None, str | None]:
+def resolved_family(harness: str, model: str | None) -> tuple[str | None, str | None]:
     """Return (family, hint family).
 
     For claude and codex the harness family is authoritative. The hint
@@ -451,11 +457,12 @@ def _resolved_family(harness: str, model: str | None) -> tuple[str | None, str |
 
 def _family_name(name: str) -> str | None:
     lowered = name.lower()
-    if lowered.startswith(("claude", "sonnet", "opus", "haiku")):
+    if lowered.startswith(_OTHER_MODEL_LINES):
+        return None
+    if _ANTHROPIC_WORD.match(lowered) is not None:
         return "anthropic"
     if (
-        lowered.startswith("gpt")
-        or lowered.startswith("codex")
+        _OPENAI_WORD.match(lowered) is not None
         or _OPENAI_O_SERIES.match(lowered) is not None
     ):
         return "openai"

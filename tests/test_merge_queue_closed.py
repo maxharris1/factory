@@ -187,7 +187,7 @@ def test_no_later_comment_in_the_pass_acts_after_a_fresh_read_abandons(
     board.poll()
 
     assert board.outcome(abandoning) == "ready-on-closed-pr"
-    assert board.outcome(follower) == "after-close"
+    assert board.outcome(follower) == "ticket-abandoned"
     assert_abandoned(board)
     assert board.queue.claim("codex") is None
     assert board.queue.claim("claude") is None
@@ -208,7 +208,7 @@ def test_a_shippers_fresh_closed_read_abandons_before_a_later_go(
     board.poll()
     board.poll()
 
-    assert board.outcome("late-go") in (None, "after-close")
+    assert board.outcome("late-go") in (None, "ticket-abandoned")
     assert_abandoned(board)
     assert board.queue.claim("claude") is None
     assert board.queue.claim("codex") is None

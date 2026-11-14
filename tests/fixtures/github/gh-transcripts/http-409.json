@@ -1,0 +1,11 @@
+{
+  "captured_with": "gh version 2.103.0, 2026-11-13",
+  "argv": [
+    "gh",
+    "api",
+    "repos/Rosy-Dev/rose/commits?per_page=1"
+  ],
+  "returncode": 1,
+  "stdout": "{\"message\":\"Git Repository is empty.\",\"documentation_url\":\"https://docs.github.com/rest/commits/commits#list-commits\",\"status\":\"409\"}",
+  "stderr": "gh: Git Repository is empty. (HTTP 409)\n"
+}

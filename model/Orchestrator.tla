@@ -5,7 +5,7 @@
 
 EXTENDS Integers
 
-CONSTANTS AllowPostMerge, HarnessExec, Omit
+CONSTANTS AllowPostMerge, Omit
 
 VARIABLES state, paused, cap, configOk, flags, counts
 
@@ -31,8 +31,10 @@ MergeFrom == {
   "merge-queue", "updating"
 }
 
-\* Phase 1 jobs. post-merge is T9, which Phase 1 leaves off, so it is not a job
-\* and has no edge to stuck.
+\* States whose job T6 times out. post-merge is not here because T9 is not
+\* built: no post-merge job exists to time out. TODO(T9): when T9 is
+\* scheduled, add post-merge here and PostMerge --> Stuck to section 4.1 and
+\* CHART_TRANSITIONS.
 JobStates == {"planning", "building", "review", "fixing"}
 
 AfterGo == {
@@ -47,19 +49,20 @@ ReviewAndAfter == {
   "done"
 }
 
-\* Approved and past ship: the head these states hold is covered (or merged by hand).
+\* Past ship: the head these states hold is covered (or merged by hand). In
+\* ship and awaiting-ok a new head can uncover it (T4HeadMoves).
 Covered == {
-  "ship", "merged", "handed-off", "merge-queue", "updating", "waiting-external",
-  "awaiting-ok", "post-merge", "done"
+  "merged", "handed-off", "merge-queue", "updating", "waiting-external",
+  "post-merge", "done"
 }
 
 Decided == {"T1", "T1P", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
 
-KindGo == "go"
+\* A fixture may also drop T4ShipMerge's covered guard.
+Guards == {"ShipGuard"}
 
 ASSUME AllowPostMerge \in BOOLEAN
-ASSUME HarnessExec \in BOOLEAN
-ASSUME Omit \subseteq Decided
+ASSUME Omit \subseteq Decided \cup Guards
 
 TypeOK ==
   /\ state \in States
@@ -153,7 +156,6 @@ T5Abandon ==
 \* T1. kind=go handoff (orch:go) after Questions. Over 3 files: queue plan.
 T1KindGoPlan ==
   /\ "T1" \notin Omit
-  /\ KindGo = "go"
   /\ state = "questions"
   /\ state' = "planning"
   /\ paused' = "none"
@@ -165,7 +167,6 @@ T1KindGoPlan ==
 \* T1. kind=go handoff. 3 files or fewer: queue build.
 T1KindGoBuild ==
   /\ "T1" \notin Omit
-  /\ KindGo = "go"
   /\ state = "questions"
   /\ state' = "building"
   /\ paused' = "none"
@@ -293,7 +294,7 @@ T3Revise ==
   /\ "T3" \notin Omit
   /\ state \in {"review", "awaiting-ok"}
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ \/ /\ counts.acUnmet = 1
         /\ state' = "capped"
         /\ counts' = [counts EXCEPT !.acUnmet = 2, !.deaths = 0]
@@ -341,7 +342,7 @@ T4PatchDiffers ==
 T4ShipMerge ==
   /\ "T4" \notin Omit
   /\ state = "ship"
-  /\ flags.covered
+  /\ flags.covered \/ "ShipGuard" \in Omit
   /\ state' = "merged"
   /\ keep
   /\ flags' = flags
@@ -374,6 +375,17 @@ T4ShipAfter ==
   /\ state' = "waiting-external"
   /\ keep
   /\ flags' = flags
+  /\ counts' = counts
+
+\* A new head is pushed while the ticket ships or waits for the approver's OK.
+\* The APPROVE no longer covers the PR head.
+T4HeadMoves ==
+  /\ "T4" \notin Omit
+  /\ state \in {"ship", "awaiting-ok"}
+  /\ flags.covered
+  /\ state' = state
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = counts
 
 \* T4H (issue #86). ship = merge and the PR is held (hold label or hold.paths):
@@ -421,7 +433,7 @@ T8Decline ==
   /\ counts.declines < 2
   /\ state' = "fixing"
   /\ keep
-  /\ flags' = flags
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = [counts EXCEPT !.declines = @ + 1, !.deaths = 0, !.gate = 0]
 
 T8DeclineStuck ==
@@ -536,7 +548,6 @@ QueueClosed ==
 \* mapped plan, and every counter cleared.
 GoFresh ==
   /\ "T1" \notin Omit
-  /\ KindGo = "go"
   /\ state = "merge-queue"
   /\ paused' = "none"
   /\ cap' = 0
@@ -600,7 +611,8 @@ Next ==
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck
   \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
   \/ T3Revise \/ T7Blocked
-  \/ T4Approve \/ T4PatchDiffers \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
+  \/ T4Approve \/ T4HeadMoves \/ T4PatchDiffers
+  \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
   \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
@@ -652,9 +664,6 @@ CapAtReview ==
 Phase1T9Off ==
   ~AllowPostMerge => state # "post-merge"
 
-OrchDoesNotExec ==
-  ~HarnessExec
-
 \* Each decided row is enabled in the state the table names.
 \* A fixture that puts "T1" in Omit makes T1KindGo false.
 
@@ -678,12 +687,12 @@ T3Decided ==
 
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve
-  /\ state = "ship" =>
-       ENABLED T4PatchDiffers /\ ENABLED T4ShipMerge
-         /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter /\ ENABLED T4Hold
-         /\ ENABLED T4ShipQueue
-  /\ state = "awaiting-ok" =>
-       ENABLED T4HoldOk /\ ENABLED T4HoldPatchDiffers
+  /\ state = "ship" => ENABLED T4PatchDiffers
+  /\ state = "ship" /\ flags.covered =>
+       ENABLED T4ShipMerge /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter
+         /\ ENABLED T4Hold /\ ENABLED T4ShipQueue
+  /\ state = "awaiting-ok" => ENABLED T4HoldPatchDiffers
+  /\ state = "awaiting-ok" /\ flags.covered => ENABLED T4HoldOk
 
 T5Decided ==
   /\ state \in {"questions", "building", "fixing"} => ENABLED T5Ask

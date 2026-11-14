@@ -1,0 +1,11 @@
+{
+  "captured_with": "gh version 2.103.0, 2026-11-13",
+  "argv": [
+    "gh",
+    "api",
+    "repos/torvalds/linux/collaborators"
+  ],
+  "returncode": 1,
+  "stdout": "{\"message\":\"Must have push access to view repository collaborators.\",\"documentation_url\":\"https://docs.github.com/rest/collaborators/collaborators#list-repository-collaborators\",\"status\":\"403\"}",
+  "stderr": "gh: Must have push access to view repository collaborators. (HTTP 403)\n"
+}

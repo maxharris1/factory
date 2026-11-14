@@ -85,13 +85,23 @@ class DeviceRow:
 
 
 @dataclass(frozen=True)
+class FeederItem:
+    repo: str
+    issue: str
+    state: str
+    pr: str | None = None
+    reason: str | None = None  # why a waiting-blocked ticket waits (#156)
+
+
+@dataclass(frozen=True)
 class FeederState:
     """The backlog feeder at its last poll (issue #85)."""
 
     eligible: int
     fed: int
     waiting_capacity: int
-    items: tuple[tuple[str, str, str, str | None], ...] = ()  # repo, issue, state, PR
+    waiting_blocked: int = 0
+    items: tuple[FeederItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,12 +188,14 @@ class SQLiteStatusReader:
             eligible=counts["eligible"],
             fed=counts["fed"],
             waiting_capacity=counts["waiting_capacity"],
+            waiting_blocked=counts["waiting_blocked"],
             items=tuple(
-                (
-                    str(item["repo"]),
-                    str(item["issue"]),
-                    str(item["state"]),
-                    str(item["pr_number"]) if item["pr_number"] is not None else None,
+                FeederItem(
+                    repo=str(item["repo"]),
+                    issue=str(item["issue"]),
+                    state=str(item["state"]),
+                    pr=str(item["pr_number"]) if item["pr_number"] is not None else None,
+                    reason=str(item["waiting_reason"]) if item["waiting_reason"] else None,
                 )
                 for item in items
             ),
@@ -243,30 +255,36 @@ class SQLiteStatusReader:
             approved_at = (
                 "state.approved_at" if "approved_at" in columns else "NULL"
             )
-            tracker_rows = connection.execute(
-                f"""
-                SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                       COALESCE(state.workflow_state, 'intake') AS workflow_state,
-                       state.paused_action, COALESCE(state.stuck, 0) AS stuck,
-                       state.stuck_reason, {approved_at} AS approved_at
-                FROM tracked_tickets AS tracked
-                LEFT JOIN ticket_state AS state
-                  ON state.repo = tracked.repo
-                 AND state.ticket_id = tracked.ticket_id
-                """
-            ).fetchall()
-            job_rows = connection.execute(
-                """
-                SELECT id, repo, ticket_id, action, recipient, state,
-                       created_at, last_activity_at
-                FROM jobs
-                WHERE state IN ('queued', 'running')
-                """
-            ).fetchall()
-            has_slots = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (SLOTS_TABLE,),
-            ).fetchone()
+            tracker_rows = (
+                connection.execute(
+                    f"""
+                    SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
+                           COALESCE(state.workflow_state, 'intake') AS workflow_state,
+                           state.paused_action, COALESCE(state.stuck, 0) AS stuck,
+                           state.stuck_reason, {approved_at} AS approved_at
+                    FROM tracked_tickets AS tracked
+                    LEFT JOIN ticket_state AS state
+                      ON state.repo = tracked.repo
+                     AND state.ticket_id = tracked.ticket_id
+                    """
+                ).fetchall()
+                if _has_table(connection, "tracked_tickets")
+                and _has_table(connection, "ticket_state")
+                else []
+            )
+            job_rows = (
+                connection.execute(
+                    """
+                    SELECT id, repo, ticket_id, action, recipient, state,
+                           created_at, last_activity_at
+                    FROM jobs
+                    WHERE state IN ('queued', 'running')
+                    """
+                ).fetchall()
+                if _has_table(connection, "jobs")
+                else []
+            )
+            has_slots = _has_table(connection, SLOTS_TABLE)
             placements = (
                 {
                     str(row[0]): str(row[1])
@@ -333,6 +351,8 @@ class SQLiteStatusReader:
         if not self.path.is_file():
             raise StatusError(f"database does not exist: {self.path}")
         wal_path = Path(f"{self.path}-wal")
+        # A -wal that appears or goes after this check, or a -wal with no
+        # -shm, at worst fails or shows the last checkpoint; it never writes.
         query = "?mode=ro" if wal_path.exists() else "?mode=ro&immutable=1"
         uri = self.path.resolve().as_uri() + query
         connection: sqlite3.Connection | None = None
@@ -347,13 +367,19 @@ class SQLiteStatusReader:
             raise StatusError(f"cannot read database: {exc}") from exc
 
 
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _ticket_key(ticket_id: str) -> tuple[int, int | str]:
+    return (0, int(ticket_id)) if ticket_id.isdigit() else (1, ticket_id.casefold())
+
+
 def _hold_approvers(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
     """(repo, ticket id) -> approver of the ticket's latest hold, if any."""
-    present = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (SHIP_HOLDS_TABLE,),
-    ).fetchone()
-    if not present:
+    if not _has_table(connection, SHIP_HOLDS_TABLE):
         return {}
     return {
         (str(row[0]), str(row[1])): str(row[2])
@@ -443,7 +469,7 @@ def build_status(
         key=lambda row: (
             row.recipient,
             row.repo.casefold(),
-            row.ticket_id,
+            _ticket_key(row.ticket_id),
             row.id,
         ),
     )
@@ -524,7 +550,7 @@ def build_status(
                 ),
                 key=lambda row: (
                     row.repo.casefold(),
-                    row.ticket_id,
+                    _ticket_key(row.ticket_id),
                     row.tracker,
                 ),
             )
@@ -602,17 +628,19 @@ def render(status: Status) -> str:
             (
                 "",
                 f"Feeder — eligible {feeder.eligible}, fed {feeder.fed}, "
-                f"waiting for capacity {feeder.waiting_capacity}",
+                f"waiting for capacity {feeder.waiting_capacity}, "
+                f"waiting on blockers or files {feeder.waiting_blocked}",
             )
         )
-        for repo, issue, state, pr in feeder.items:
+        for item in feeder.items:
             label = {
                 "waiting-capacity": "waiting for capacity",
+                "waiting-blocked": item.reason or "waiting on a blocker",
                 "done": "fed, job queued",
                 "closed": "PR closed, not fed",
-            }.get(state, state)
-            where = f" -> PR #{pr}" if pr else ""
-            lines.append(f"  {repo}#{issue} {label}{where}")
+            }.get(item.state, item.state)
+            where = f" -> PR #{item.pr}" if item.pr else ""
+            lines.append(f"  {item.repo}#{item.issue} {label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
@@ -644,7 +672,7 @@ def _webhook_line(health: WebhookHealth, observed_at: float) -> str:
 def main(
     argv: list[str] | None = None,
     *,
-    stdout: TextIO = sys.stdout,
+    stdout: TextIO | None = None,
     clock: Callable[[], float] = time.time,
 ) -> int:
     parser = argparse.ArgumentParser(prog="orch status")
@@ -708,7 +736,7 @@ def main(
     except (sqlite3.Error, StatusError) as exc:
         print(f"orch status: {exc}", file=sys.stderr)
         return 1
-    print(report, end="", file=stdout)
+    print(report, end="", file=stdout or sys.stdout)
     return 0
 
 

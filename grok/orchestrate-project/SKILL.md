@@ -19,25 +19,29 @@ The dispatcher queues work. This skill does not start a harness.
 - Do not add `orch:v1` keys. The keys already on main are the only keys.
 - Do not invent a third risk class. The classes are `low` and `high`.
 - Do not post `orch:go` twice for one intake, and do not post it again when a mid-work answer resumes the same step.
-- Read `factory.md` from the project's base branch. Do not read it from a pull request head.
+- Read `factory.md` from the project's `factory_ref` in `orch.yml`, the trusted base branch the poller reads. Do not read it from a pull request head or the repository's default branch.
 
 ## Interface
 
 `lib.orchestrate` is the stable interface. F1-08 imports these names and does not rename them. Do not add a required field to `RouteRequest`.
 
-RouteRequest fields: `config`, `risk`, `urgent`, `summary`, `likely_files`, `scope_changed`
+RouteRequest fields: `config`, `risk`, `urgent`, `summary`, `likely_files`, `scope_changed`, `built_by`
 
 FitChoice fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`
 
-RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`, `builder_family`, `reviewer_family`, `job`, `urgent`, `risk`, `file_count`, `scope_changed`
+RouteDecision fields: `builder_harness`, `builder_model`, `reviewer_harness`, `reviewer_model`, `builder_family`, `reviewer_family`, `job`, `urgent`, `risk`, `file_count`, `scope_changed`, `builder_using_reserve`, `reviewer_using_reserve`, `builder_fallback`, `reviewer_fallback`, `built_by`
 
-F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False) -> JobRoute`
+F1-08 entry point: `lib.usage.route_job(config, *, usage=None, resumed_paused_step=False, past_ship=False, marked_urgent=False, built_by=None) -> JobRoute`
 
 `JobRoute` has `builder`, `reviewer`, `reason`, and `ok`. `ok` is true only when both sides are set and `reason` is none. Each side has `harness` and `model`.
 
 F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route_from_fit(request, fit) -> RouteDecision`, `assert_cross_family(builder_harness, builder_model, reviewer_harness, reviewer_model)`
 
-`choose_route(request)` calls `route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. A usage source passed as `usage` is forwarded and is the only extra argument. This skill does not pass one. A route that is not ok raises `RouteError`. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
+`choose_route(request)` first checks the factory.md pair with `assert_cross_family`, so a pair `orch check-config` would refuse raises `RouteError` instead of being routed around. It then calls `route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. A usage source passed as `usage` is forwarded, and so is `request.built_by`. This skill does not pass a usage source. A route that is not ok raises `RouteError`.
+
+`built_by` is optional. On a later round, set it to the `(harness, model)` that actually built, so the builder is that one and the reviewer is outside its family.
+
+`builder_using_reserve`, `reviewer_using_reserve`, `builder_fallback` and `reviewer_fallback` record what the route did: a side in its usage reserve, or a side that is not factory.md's harness. When any is true, the `orch:go` body ends with a **Routing** paragraph. It is for information: the dispatcher runs factory.md's pair. They are not header keys. `lib.usage` must not import `FitChoice`. This skill does not rank harnesses and does not read a usage source.
 
 Webhook wakes contain `action`, `attempt`, `detail`, `generation`, `head`,
 `job_id`, `logical_key`, `repo`, `source_comment_id`, `target_bot`, and
@@ -67,7 +71,7 @@ Question classes: `observable`, `default-able`, `product`
 ## Intake
 
 1. Take the ticket Max handed over (a GitHub issue, a Linear issue, or a description that will become one on that project's tracker). A ticket the backlog feeder took in (it has the feeder's brief and `orch:go` already) needs no intake from you; see Brief.
-2. Resolve `factory.md` from the project's `base_branch`, not from a pull request head. In a checkout of that branch, the path is the repo-root `factory.md`. Otherwise fetch that file with `env -u GH_TOKEN gh` from `base_branch`.
+2. Resolve `factory.md` the way the poller does. Look up the project in `orch.yml` and read its `projects[].factory_ref`. If the project has no `factory_ref`, stop and report `blocked`. In a checkout of that branch, the path is the repo-root `factory.md`. Otherwise fetch that file with `env -u GH_TOKEN gh` from `factory_ref`, never from a pull request head. After `read_factory`, if `project.config.base_branch` is not `factory_ref`, refuse: report `blocked` with both names as the evidence, and post no brief, questions or `orch:go`.
 3. Call `read_factory(path)`. The path's filename must be `factory.md`.
 4. If the result has a stop, the config is refused. Report that stop once (below) and stop. Do not post a brief, questions, or `orch:go`.
 5. If the result has warnings, keep them on the ticket notes. An unknown model name does not refuse the project.
@@ -146,7 +150,7 @@ Build a `RouteRequest` from `project.config`, the brief's risk, the likely files
 
 Call `choose_route(request)`. It calls `route_job(config, marked_urgent=urgent)`. If the route is not ok, or the reviewer family matches the builder that will actually do the work, `choose_route` raises `RouteError`. Do not post `orch:go`. Report stop `blocked` once, with the error as the evidence. `assert_cross_family` uses the same rule as `orch check-config`.
 
-Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. The verify value is the skill name from `factory.md`, or `none`.
+Call `TicketFlow.post_go(decision, project.config.verify)` only after the questions step has run and every product question has an answer. `post_go` raises `GoBlocked` otherwise. `TicketFlow` keeps its record in memory only, so first read the ticket's comments: if a trusted `grok-bot` `kind=go` with the same `state` (the same action) is already there, do not post another; that intake already went. The verify value is the skill name from `factory.md`, or `none`.
 
 `post_go` writes `builder`, `risk`, and `state` (`planning` or `building`). The reviewer, models, verify skill, job, and file count are in the body. Do not add a header key for them.
 
@@ -162,7 +166,7 @@ The dispatcher enforces the round cap from `factory.md`. This skill does not.
 
 A `kind=questions` comment from a builder or reviewer is a T5 wake. Classify those questions the same way. Decide each `default-able` question and post `answers_comment` with the decision. Ask each product question one at a time, then post `answers_comment` with Max's words. Do not post another `orch:go`. The dispatcher resumes the same step. That resume is not a review round.
 
-If an answer changes the scope of the ticket, set `scope_changed` on any later `RouteRequest`. That is this skill's judgment. The job becomes `plan`.
+If an answer changes the scope of the ticket (this skill's judgment), post the `answers_comment`, then call `choose_route` once more with `scope_changed=True` on the `RouteRequest` and post one go for that decision, which has `job=plan` (`state=planning`). A plan go has its own T1 dedupe key, so T1 queues the plan even after a build go. If the ticket already has a plan go, do not post another.
 
 ## Stops
 
@@ -174,13 +178,20 @@ Call `StopLedger.report` for that ticket and stop. A second report of the same s
 - `stuck` — also post `stuck_comment` when this ticket has no `kind=stuck` comment yet.
 - `blocked` — a `verdict=BLOCKED`, a `RouteError`, or anything unparsed. Evidence is the verdict or the text that did not parse.
 - `capped` — revise at the cap, or a second acceptance-criterion-unmet verdict.
-- `abandoned` — Max dropped the ticket.
+- `go-not-from-approver` — with the GitHub App switch on (#122), a `go` on a capped ticket came from a login not in `approver_logins`, so no extra round was granted. Tell Max once; an extra round still needs his own words.
+
+Never post `kind=ok` as Max. A hold `ok` is Max's alone: he posts it himself, and `lib.orchestrate.approver_go_post` refuses every kind but `go`. The one exception is short-term: post a capped-ticket `go` as `maxharris1` only through `approver_go_post`, quoting Max's exact words for that ticket, given `lib.orch_yml.approvals(config)`'s `app_trust` and `gh_config_dir`. Its limit: a capped ticket, one `go` per extra round Max asked for, Max's words quoted unchanged, nothing else. With the switch on it uses only Max's approver profile; when it raises, ask Max to post it himself. Never post a capped `go` as the app bot. `approver_gh_config_dir` is removed once T02f (#173) lands and Max confirms its `/go`, and this path with it.
+- `abandoned` — Max dropped the ticket. Also post the `kind=answers` comment below with `state=abandoned`, quoting Max's words, so the dispatcher records the ticket as abandoned and stops reading it.
 
 ```
 <!-- orch:v1 kind=stuck from=grok-bot role=orchestrator state=stuck -->
 ```
 
-Do not invent a comment kind for refused, blocked, capped, or abandoned. Those four are chat reports. Apart from the initial `orch:state/intake` discovery label above, this skill does not apply GitHub labels. On a GitHub-issue repo the dispatcher applies later `orch:state`, `orch:round`, `orch:risk`, and `orch:builder` values from the header. On Linear and on Aut0 the header carries those facts and no label is written.
+```
+<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->
+```
+
+Do not invent a comment kind for refused, blocked or capped. Those three are chat reports. Apart from the initial `orch:state/intake` discovery label above, this skill does not apply GitHub labels. On a GitHub-issue repo the dispatcher applies later `orch:state`, `orch:round`, `orch:risk`, and `orch:builder` values from the header. On Linear and on Aut0 the header carries those facts and no label is written.
 
 Recommended next steps:
 

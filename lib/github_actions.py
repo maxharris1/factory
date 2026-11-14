@@ -462,8 +462,12 @@ class GitHubReviewActions:
 
         success needs at least one check run that concluded success, or a
         success combined status, and nothing failing or pending. All
-        neutral or skipped, nothing reported, or fewer runs received than
-        total_count is pending.
+        neutral or skipped, nothing reported, or runs received that do not
+        match total_count on every page is pending.
+
+        A short read is pending even when a run in view failed: a rerun on
+        an unread page may supersede that failure, so pending is the safe
+        answer, at the cost of one poll.
         """
         head = _sha(head, "head")
         commit = f"{_repo_path(repo)}/commits/{head}"
@@ -509,9 +513,17 @@ class GitHubReviewActions:
             return CIResult("failure", "failed: " + ", ".join(failed))
         return CIResult("success" if passed and not pending else "pending")
 
-    def _call(self, *args: str) -> str:
+    def _call(
+        self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
+    ) -> str:
+        """One gh api call. cache_ttl caches this call even when it is a
+        GraphQL query (gh caches POSTs to graphql too), so pass it only for
+        a read. partial_graphql returns GraphQL data that came back with
+        errors (gh exits 1 then); the caller checks the errors."""
         argv = [*self.gh, "api"]
-        if self.cache_ttl is not None and _is_read(args):
+        if cache_ttl is not None:
+            argv.extend(("--cache", cache_ttl))
+        elif self.cache_ttl is not None and _is_read(args):
             argv.extend(("--cache", self.cache_ttl))
         argv.extend(args)
         try:
@@ -528,6 +540,8 @@ class GitHubReviewActions:
                 f"gh could not run: {type(exc).__name__}",
                 safe_detail=f"gh api {_route(args)} could not run: {type(exc).__name__}",
             ) from exc
+        if result.returncode != 0 and partial_graphql and _has_graphql_data(result.stdout):
+            return result.stdout
         if result.returncode != 0:
             detail = " ".join(f"{result.stderr} {result.stdout}".split())[:500]
             safe = f"gh api {_route(args)} exited {result.returncode}"
@@ -543,8 +557,10 @@ class GitHubReviewActions:
             )
         return result.stdout
 
-    def _json(self, *args: str) -> object:
-        text = self._call(*args)
+    def _json(
+        self, *args: str, cache_ttl: str | None = None, partial_graphql: bool = False
+    ) -> object:
+        text = self._call(*args, cache_ttl=cache_ttl, partial_graphql=partial_graphql)
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
@@ -770,6 +786,14 @@ def _route(args: Sequence[str]) -> str:
     return f"{method} {route or '<route>'}"
 
 
+def _has_graphql_data(text: str) -> bool:
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(document, dict) and isinstance(document.get("data"), dict)
+
+
 def _graphql_detail(text: str) -> str:
     """GraphQL error types only, such as NOT_FOUND. Never messages."""
     types = sorted(set(_GRAPHQL_ERROR_TYPE.findall(text)))[:3]
@@ -929,10 +953,14 @@ def _comment(item: object) -> Comment:
     url = raw.get("html_url")
     if url is not None and not isinstance(url, str):
         raise GitHubAdapterError(f"comment {comment_id} has a bad html_url")
+    created_at = _created_at(raw.get("created_at"))
+    updated = raw.get("updated_at")
+    updated_at = created_at if updated is None else _created_at(updated)
     return Comment(
         id=str(comment_id),
         author=login,
         body=body,
-        created_at=_created_at(raw.get("created_at")),
+        created_at=created_at,
         url=url,
+        edited_at=updated_at if updated_at > created_at else None,
     )

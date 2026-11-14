@@ -25,13 +25,14 @@ the branch ref, the draft PR, the PR labels, PR comments, Linear comments.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
 from lib.dispatcher import Comment
 from lib.feeder import IntakeIssue
+from lib.feeder_gates import Progress, Ref, RefStatus
 from lib.github_actions import (
     GitHubAdapterError,
     GitHubReviewActions,
@@ -41,6 +42,20 @@ from lib.github_actions import (
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+# Every page of an issue's blocks relations is read (#157 review): a blocker
+# past the first page still holds the ticket. Past the cap the read fails.
+# The intake query reads the first 10 (it pages 50 issues at once); a further
+# page is one request for that issue alone.
+LINEAR_INTAKE_RELATIONS = 10
+LINEAR_RELATIONS_PAGE = 50
+LINEAR_RELATIONS_MAX_PAGES = 20
+_RELATION_FIELDS = (
+    "{ nodes { type issue { identifier state { type } } } pageInfo { hasNextPage endCursor } }"
+)
+LINEAR_RELATIONS_QUERY = (
+    "query($issue: String!, $after: String) { issue(id: $issue) { "
+    f"inverseRelations(first: {LINEAR_RELATIONS_PAGE}, after: $after) {_RELATION_FIELDS} }} }}"
+)
 # Linear's Issue field is branchName; it is read under the alias the poller
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 LINEAR_INTAKE_QUERY = (
@@ -48,9 +63,32 @@ LINEAR_INTAKE_QUERY = (
     "filter: { project: { id: { eq: $project } }, state: { name: { eq: $state } } }) "
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
     "labels(first: 20) { nodes { name } } "
-    "history(first: 25) { nodes { createdAt actor { id } toState { name } } } } "
+    "history(first: 25) { nodes { createdAt actor { id } toState { name } } } "
+    f"inverseRelations(first: {LINEAR_INTAKE_RELATIONS}) {_RELATION_FIELDS} }} "
     "pageInfo { hasNextPage endCursor } } }"
 )
+# One aliased read per blocker repo per poll (#156), cached like the poller's
+# reads, so a long chain costs one GraphQL call per repo, not one per ticket.
+REF_STATUS_CACHE = "60s"
+REF_STATUS_CHUNK = 50
+# An issue's linked PRs are paged until one is merged; past the cap the read fails.
+LINKED_PULLS_PAGE = 100
+LINKED_PULLS_MAX_PAGES = 20
+_LINKED_PULLS = (
+    f"closedByPullRequestsReferences(first: {LINKED_PULLS_PAGE}, includeClosedPrs: true"
+    "{after}) { nodes { merged } pageInfo { hasNextPage endCursor } }"
+)
+REF_STATUS_FIELDS = (
+    "__typename "
+    "... on PullRequest { state merged } "
+    "... on Issue { state stateReason " + _LINKED_PULLS.replace("{after}", "") + " }"
+)
+LINKED_PULLS_QUERY = (
+    "query($owner: String!, $name: String!, $number: Int!, $after: String!) "
+    "{ repository(owner: $owner, name: $name) { issue(number: $number) { "
+    + _LINKED_PULLS.replace("{after}", ", after: $after") + " } } }"
+)
+_ISSUE_UNFINISHED = {"NOT_PLANNED": "closed as not planned", "DUPLICATE": "closed as duplicate"}
 # 40 pages of 50: past that the read fails, rather than feed from a partial
 # list that could hide an urgent ticket.
 LINEAR_INTAKE_MAX_PAGES = 40
@@ -140,6 +178,79 @@ class GitHubIntakeClient(GitHubReviewActions):
                     actor = login if isinstance(login, str) else None
         self._applied[key] = actor
         return actor
+
+    def ref_statuses(self, refs: Collection[Ref]) -> dict[Ref, RefStatus]:
+        """Whether each GitHub issue or PR is done: one cached GraphQL read
+        per repo (chunks of 50). A number that does not exist is MISSING;
+        any other error fails the read."""
+        by_repo: dict[str, list[Ref]] = {}
+        for ref in refs:
+            if ref.tracker == "github" and ref.key.isdigit():
+                by_repo.setdefault(ref.repo, []).append(ref)
+        found: dict[Ref, RefStatus] = {}
+        for repo, items in sorted(by_repo.items()):
+            items.sort(key=Ref.sort_key)
+            for start in range(0, len(items), REF_STATUS_CHUNK):
+                found.update(self._ref_chunk(repo, items[start:start + REF_STATUS_CHUNK]))
+        return found
+
+    def _ref_chunk(self, repo: str, refs: list[Ref]) -> dict[Ref, RefStatus]:
+        owner, _, name = _repo_path(repo).removeprefix("repos/").partition("/")
+        fields = " ".join(
+            f"r{index}: issueOrPullRequest(number: {int(ref.key)}) {{ {REF_STATUS_FIELDS} }}"
+            for index, ref in enumerate(refs)
+        )
+        query = (
+            "query($owner: String!, $name: String!) "
+            f"{{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        )
+        document = self._json(
+            "graphql", "-f", f"query={query}", "-f", f"owner={owner}", "-f", f"name={name}",
+            cache_ttl=REF_STATUS_CACHE, partial_graphql=True,
+        )
+        if not isinstance(document, dict) or not isinstance(document.get("data"), dict):
+            raise GitHubAdapterError("ref status read returned no data")
+        missing_repo = False
+        for error in document.get("errors") or []:
+            path = error.get("path") if isinstance(error, dict) else None
+            if not isinstance(error, dict) or error.get("type") != "NOT_FOUND" or not path:
+                raise GitHubAdapterError("ref status read failed")
+            if path == ["repository"]:
+                missing_repo = True
+        nodes = document["data"].get("repository")
+        if nodes is None and missing_repo:
+            return {ref: RefStatus(Progress.MISSING) for ref in refs}
+        if not isinstance(nodes, dict):
+            raise GitHubAdapterError("ref status read has no repository")
+        found: dict[Ref, RefStatus] = {}
+        for index, ref in enumerate(refs):
+            node = nodes.get(f"r{index}")
+            merged, cursor = _linked_page(node)
+            if cursor is not None:
+                merged = self._merged_after(owner, name, int(ref.key), cursor)
+            found[ref] = _ref_status(node, merged)
+        return found
+
+    def _merged_after(self, owner: str, name: str, number: int, cursor: str) -> bool:
+        """Whether a linked PR past cursor is merged, reading the remaining pages."""
+        for _ in range(LINKED_PULLS_MAX_PAGES):
+            document = self._json(
+                "graphql", "-f", f"query={LINKED_PULLS_QUERY}", "-f", f"owner={owner}",
+                "-f", f"name={name}", "-F", f"number={number}", "-f", f"after={cursor}",
+                cache_ttl=REF_STATUS_CACHE,
+            )
+            data = document.get("data") if isinstance(document, dict) else None
+            repository = data.get("repository") if isinstance(data, dict) else None
+            issue = repository.get("issue") if isinstance(repository, dict) else None
+            if not isinstance(issue, dict) or not isinstance(
+                issue.get("closedByPullRequestsReferences"), dict
+            ):
+                raise GitHubAdapterError("linked pull request read returned no issue")
+            merged, following = _linked_page(issue)
+            if merged or following is None:
+                return merged
+            cursor = following
+        raise GitHubAdapterError("linked pull requests exceed the page cap")
 
     def branch_sha(self, repo: str, branch: str) -> str | None:
         if not _BRANCH.fullmatch(branch):
@@ -253,6 +364,66 @@ class GitHubIntakeClient(GitHubReviewActions):
         return str(comment_id)
 
 
+def _linear_blockers(relations: Sequence[object]) -> tuple[tuple[str, str | None], ...]:
+    """(identifier, state type) of each issue whose `blocks` relation names this one."""
+    found: list[tuple[str, str | None]] = []
+    for relation in relations:
+        if not isinstance(relation, dict) or relation.get("type") != "blocks":
+            continue
+        blocker = relation.get("issue") or {}
+        identifier = blocker.get("identifier") if isinstance(blocker, dict) else None
+        if not isinstance(identifier, str):
+            continue
+        state = (blocker.get("state") or {}).get("type")
+        found.append((identifier, state if isinstance(state, str) else None))
+    return tuple(found)
+
+
+def _linked_page(node: object) -> tuple[bool, str | None]:
+    """Whether this page of an issue's linked PRs has a merged one, and the
+    cursor of the next page when none does and more remain."""
+    linked = node.get("closedByPullRequestsReferences") if isinstance(node, dict) else None
+    if not isinstance(linked, dict):
+        return False, None
+    pulls = linked.get("nodes") or []
+    if any(isinstance(pull, dict) and pull.get("merged") is True for pull in pulls):
+        return True, None
+    page = linked.get("pageInfo") or {}
+    if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+        return False, None
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor:
+        raise GitHubAdapterError("linked pull request page has no cursor")
+    return False, cursor
+
+
+def _ref_status(node: object, linked_merged: bool) -> RefStatus:
+    if node is None:
+        return RefStatus(Progress.MISSING)
+    if not isinstance(node, dict):
+        raise GitHubAdapterError("ref status node is not an object")
+    kind = node.get("__typename")
+    state = node.get("state")
+    if kind == "PullRequest":
+        if node.get("merged") is True or state == "MERGED":
+            return RefStatus(Progress.DONE, is_pull=True)
+        if state == "CLOSED":
+            return RefStatus(Progress.UNFINISHED, is_pull=True, detail="closed without merge")
+        if state == "OPEN":
+            return RefStatus(Progress.OPEN, is_pull=True)
+    elif kind == "Issue":
+        if linked_merged:
+            return RefStatus(Progress.DONE)
+        reason = node.get("stateReason")
+        if state == "CLOSED" and reason in _ISSUE_UNFINISHED:
+            return RefStatus(Progress.UNFINISHED, detail=_ISSUE_UNFINISHED[str(reason)])
+        if state == "CLOSED":
+            return RefStatus(Progress.DONE)
+        if state == "OPEN":
+            return RefStatus(Progress.OPEN)
+    raise GitHubAdapterError("ref status is not readable")
+
+
 class LinearIntakeClient:
     """The feeder's Linear reads and comments, on the poller's Linear path."""
 
@@ -325,9 +496,30 @@ class LinearIntakeClient:
                     linear_id=issue_id,
                     branch=_text(node.get("gitBranchName")) or None,
                     priority=priority if isinstance(priority, int) else None,
+                    blocked_by=_linear_blockers(self._relations(issue_id, node)),
                 )
             )
         return found
+
+    def _relations(self, issue_id: str, node: dict[str, Any]) -> list[object]:
+        """Every inverse relation of the issue: the intake page, then the rest."""
+        connection = node.get("inverseRelations") or {}
+        found: list[object] = []
+        for _ in range(LINEAR_RELATIONS_MAX_PAGES):
+            if not isinstance(connection, dict):
+                raise GitHubAdapterError("Linear relations is not an object")
+            found.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+                return found
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubAdapterError("Linear relations have a next page but no endCursor")
+            data = self._request(LINEAR_RELATIONS_QUERY, {"issue": issue_id, "after": cursor})
+            connection = (data.get("issue") or {}).get("inverseRelations")
+        raise GitHubAdapterError(
+            f"Linear relations have over {LINEAR_RELATIONS_MAX_PAGES} pages; not fed"
+        )
 
     def linear_comments(self, issue_id: str) -> list[Comment]:
         data = self._request(LINEAR_COMMENTS_QUERY, {"issue": issue_id})

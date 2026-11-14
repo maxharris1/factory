@@ -70,7 +70,7 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
 | `merge` | `GET pulls/<n>` (and for a draft the GraphQL `markPullRequestReadyForReview`), then `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | Marks a draft ready first (issue #83: GitHub refuses to merge a draft with 405). The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError`. A 405, a 5xx, a timeout or a mark-ready that did not land raises with `retryable=True`, so the dispatcher re-drives the ship once; anything else, or a failed re-drive, flags the ticket needs-attention |
 | `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
-| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or runs received that do not match `total_count` on every page is `pending`. A short read is `pending` even with a failure in view, since a rerun on an unread page may supersede it |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
@@ -83,8 +83,11 @@ fails closed: `ship-failed` and one Grok wake. `ship_intents.error` records
 the class and a safe detail, such as `GitHubAdapterError: gh api POST graphql
 exited 1 (HTTP 403) graphql errors: FORBIDDEN`. It never holds gh's output, a
 URL, a token or a body; the merge 409 and fast-forward 422 errors carry only
-the inner safe detail. A `handoff` that failed before any write was confirmed
-is re-driven once on a later poll, and only while its APPROVE is still the
+the inner safe detail. A target repo's branch protection or ruleset can
+reject the `fast_forward` ref update; that rejection is a
+`GitHubAdapterError` too, so the ship fails closed as `ship-failed`, and the
+factory never bypasses the protection. A `handoff` that failed before any
+write was confirmed is re-driven once on a later poll, and only while its APPROVE is still the
 latest trusted reviewer verdict on the ticket (a newer REVISE or APPROVE spends
 it with no write), the PR is still at the intent's head with green CI, and the
 ticket has not already been handed off, merged or finished, nor completed a
@@ -103,6 +106,14 @@ calls `heartbeat`, then calls `finish` with the handoff comment ID. Finishing
 without a handoff ID invokes T6. `claim` is intentionally non-blocking so
 `orch wait` can add blocking behavior without changing the queue contract. One
 clock is injected when the queue opens; all timestamps use that clock.
+
+`release`, `heartbeat` and `finish` take `owner=`, the recipient that claimed
+the job. Each refuses an owner that is not a recipient, a job that belongs to
+another recipient, and a job that is not running; a refused call changes
+nothing. A repeated `finish` with the same outcome and handoff ID returns the
+recorded job unchanged; one with a different outcome or handoff ID is refused
+and the first stays. `claim` takes a job in the issue #85 order: urgent, then a
+resumed paused step, then bug, then the oldest.
 
 Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, `stuck`,
 or the Grok wakes `blocked`, `capped`, `refused`, `unparsed` and `ship-failed`),
@@ -228,24 +239,43 @@ refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
 id (a UUID) and the start leads its own process group, then creates the record with
 noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
-UTC). A check that finds no record cannot tell whether the start is still on
-its way, so it creates the record itself as a fence (`fenced`) and cannot tell
-this time; the fenced start then refuses, and later checks read the fence as
-gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+UTC). Just before, it starts a keeper in its own group and writes the keeper's
+pid and start time as the first snapshot (below). The keeper ignores SIGTERM,
+SIGINT and SIGHUP and exits once no other process is in the group, so the group
+is never empty while any process of the start lives, and its number is never
+reused meanwhile (Codex PR #129 round 3). A check that finds no record cannot
+tell whether the start is still on its way, so it creates the record itself as
+a fence (`fenced`) and cannot tell this time; the fenced start then refuses,
+and later checks read the fence as gone. A start that never ran (unreachable,
+refused) so frees its slot one check later. The poll that follows a detached
+start (issue #128) never writes the fence: with no record it cannot tell, and
+the start it follows records itself.
+The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
 every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
 three 0/1 answers. Then a record from an earlier boot session or an empty group
 is gone; a group holding only the bot's own processes and led by the recorded
-leader is running; a malformed record, another tag, another user's process in the group,
-a group whose leader has exited (nothing ties the processes left to this start),
+leader is running, and so is one whose leader has exited while it still holds
+a process from the last stop's snapshot (below) with its recorded start time;
+a malformed record, another tag, another user's process in the group,
+a group whose leader has exited with no such process (nothing ties the
+processes left to this start),
 a leader with a different start time (the number was reused), or any failed or
 malformed step (no boot session UUID, a user id that is not a number, ps, awk)
-cannot tell. The stop sends SIGTERM to the recorded group only when the check
-would say running. A process that leaves the job's group (`setsid`), or stays in
-it after its leader exits, is never signalled on macOS; the latter keeps the
-slot until it ends. Every script runs under POSIX `sh` whatever the login shell
-(the Mac bots use zsh).
+cannot tell. The stop sends SIGTERM (SIGKILL when a cancel escalates) to the
+recorded group only when the check would say running. While the leader is
+verified alive, the stop first writes a snapshot of the group
+(`.orch-worker-<tag>.members.pid`: each member's pid and start time, from one
+`ps -A -o pgid=,pid=,lstart=` listing, kept only when the leader is verified
+again after it). A snapshot member still in the group with the same start time
+proves the group was never empty since, so its number was never reused: a
+cancelled run whose harness dies on SIGTERM but leaves a child that ignores it
+is still killed (Codex PR #129 round 2). With the keeper, so is a child born
+after the snapshot, even one the harness forks while it shuts down, and a child
+left in the group after a normal exit is stopped before the slot is released,
+as on Linux (round 3). A process that leaves the job's group (`setsid`) is
+never signalled on macOS. Every script runs under POSIX `sh` whatever the login
+shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
@@ -257,7 +287,12 @@ device one SSH check looks for the tag: any process of the bot user carrying it
 still in the recorded group from this boot means it cannot tell; otherwise the
 worker is gone. A worker still running is sent SIGTERM (every tagged process
 and each group holding one; a stored number alone is never signalled) and
-checked again for up to 10 seconds. An unreachable device, a check that cannot
+checked again for up to 10 seconds. A cancelled run (a signal to `orch job
+run`, or its job ended elsewhere) is not left running: the follow sends
+SIGTERM, then SIGKILL to the same processes from 60 seconds on, and follows
+the worker until it is gone, for up to two minutes; if it is still not
+confirmed gone, the final check sends SIGKILL after its SIGTERM too (issue
+#128). An unreachable device, a check that cannot
 tell, or a worker that will not stop keeps the slot and is logged. A new
 `orch job run` for a job whose runner died is refused (exit 2, nothing started)
 while that runner's worker is not confirmed gone, so its identity is never
@@ -413,6 +448,14 @@ backoff (writes are never retried); a ref that still times out records a retryab
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated
 row per cycle to `poll_deferrals`, not `poll_errors`.
+A poll step's exception, and one that escapes a whole cycle, keeps its class in
+`poll_errors.error` and stores its message and newest ten frames, redacted and
+capped at 4,000 characters, in `poll_errors.detail`; each message in the chain
+is cut at its first character outside letters, digits, spaces and `_.,:;()'/=+-`,
+so no response body, escaped or not, is kept.
+The same text goes to the poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
+`ticket_state` row records a `stuck-wake:<class>` error and the rest of the
+cycle still runs.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
@@ -540,7 +583,53 @@ Max creates the webhook in Linear (Issue and Comment resource types, scoped
 to the Aut0 team) with the Funnel URL, and saves its signing secret to
 `~/.config/factory/linear-webhook.secret` with `chmod 600`. Tailscale Network
 owns the Funnel that exposes only the listener path. This repository
-installs no service for the listener and changes no network configuration.
+changes no network configuration.
+
+### Listener service without systemd
+
+[`deploy/linear-webhook-service.sh`](deploy/linear-webhook-service.sh) keeps
+two loops up on the box (issue #134). `deploy/install.sh` copies it to
+`~/.local/share/factory/linear-webhook-service.sh`; run that copy, not the
+checkout's file, so a `git pull` never rewrites a script a running loop reads.
+
+- `_listener-loop` runs `orch linear-webhook serve --bind 127.0.0.1:PORT`,
+  adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
+  starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
+  line per streak while the port is taken.
+- `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
+  127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
+  `forward refused: port PORT already forwarded on HOST; retry in Ns`.
+- After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
+  (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
+  longer run resets the wait.
+- `LINEAR_WEBHOOK_PORT` defaults to 8787 and `LINEAR_WEBHOOK_TUNNEL_HOST` to
+  `pc-wsl-cursor-bot`; an empty host runs no tunnel.
+
+Each loop is a singleton per state directory: it holds an exclusive `flock`
+on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its
+whole life and exits 0 at once if the lock is held. Locks belong to the open
+file, not a pid, so they hold across PID namespaces (sandboxed bot shells
+share the state directory but not pids). `ensure`, `start` and `status`
+decide from the locks; the pidfiles are for people only. `flock(1)` is
+required.
+
+Commands: `start` (clears a stop), `stop` (holds them stopped), `restart`,
+`status` (exit 3 unless every loop runs), `ensure` (start what is missing
+unless held stopped; silent when all run), `install-autostart` and
+`remove-autostart` (write or remove `~/.config/factory/linear-webhook-autostart`,
+which makes the installed `profile.sh` run `ensure` in the background in each
+bot shell). `stop` ends every loop for this state directory, from any copy
+of the script (argv `.../linear-webhook-service.sh _listener-loop` or
+`_tunnel-loop` whose `--state`, `ORCH_STATE_DIR` or `HOME` points here) and
+every process holding a loop lock (its `/proc/PID/fdinfo` shows the lock; a
+process that only has the lock file open is left alone), each with its
+children. If a lock is
+still held afterwards, by a loop in a PID namespace this shell cannot see,
+`stop` says so and exits 1: run it from a host shell.
+
+Deploy: re-run `deploy/install.sh`, then run
+`~/.local/share/factory/linear-webhook-service.sh restart` once from a host
+shell, so the new `stop` clears loops started by the old copy.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
 tickets with queued or running jobs each Linear cycle (every cycle at
@@ -583,14 +672,18 @@ jobs the same way (#108).
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
-`codex`, `cursor`). It checks for a job once a second, claims the oldest
-through the device pool (`--machines`, default the checkout's `machines.yml`,
+`codex`, `cursor`). It checks for a job once a second, claims the next one
+in the queue's claim order (urgent, resumed, bug, then oldest) through the
+device pool (`--machines`, default the checkout's `machines.yml`,
 placeholders accepted and never scheduled), and prints one JSON line with the
 job's `device` and `remote` and, on a remote device, its `workdir`. With no free
 slot on an eligible device the job stays queued and the waiter keeps waiting. While the poller holds a write, a claim that sees
 `database is locked` (after a 5-second SQLite busy timeout) keeps waiting with
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
+SIGINT and SIGTERM are held from each claim until its line is printed, so a
+signal may wait up to the 5-second busy timeout, or until stdout drains,
+before it takes effect; SIGKILL always works.
 If that line cannot be printed, the job is finished as
 failed so T6 retries it at once, and its slot is released (no bot got it). Plain `orch wait` never starts a harness:
 the bot that ran the shell call starts its own, through `orch job run`, or its autostart waiter does (below). `orch` never chooses a harness on its own. `job heartbeat` and `job done` refuse a job that
@@ -616,7 +709,7 @@ and records itself on the slot, so the job reads `running` within seconds of
 the claim, with no model turn and no message to any bot. The harness posts its
 `orch:v1` handoff and runs `orch job done` as the brief says.
 
-- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+- **Brief.** [`lib/brief/`](lib/brief/) renders one standard brief per
   job kind from the job row: implement (`build`, `plan`), fix, review, and
   merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
   repo, PR or ticket, head, round and cap, risk, the section 8 review rules
@@ -761,7 +854,9 @@ and at a third of the timeout, so a live job never shows as stale; see "Job
 states"). The heartbeat stops when
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
-locked or failed writes are logged and retried at the next beat. SIGTERM and
+locked or failed writes are logged and retried at the next beat. A heartbeat
+error never aborts the command: it runs on, and if the job then times out, T6
+retries it once (see "Job states"). SIGTERM and
 SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
 reaches the command directly, and the exit status is the command's; a signal
 that arrives before the command starts means it never runs.
@@ -913,6 +1008,17 @@ changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.
 
+`start` and `ensure` also probe `orch.db.lock` with `flock` before
+launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
+sourcing its env files (`run-poller.sh --print-db`), else the caller's
+`ORCH_DB`: while it is held, a poller runs even if its pid is
+not visible from this shell, so they launch nothing (`start` says
+`orch poll already running (poll lock held)`).
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
+hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+(default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
+0 at once when another copy holds it.
+
 ## Status
 
 ```sh
@@ -972,7 +1078,11 @@ interval or `every_minutes`, up to a day). The poller also probes each
 enabled, non-placeholder remote device in `machines.yml` over SSH every 60
 seconds (`device-probe`, through the device's first bot alias, `ssh -o
 BatchMode=yes ... exit 0`), each device in its own thread so one that hangs
-never delays another; only a device that answered counts as seen. The
+never delays another; only a device that answered counts as seen. `orch
+poll` also records whether each dashboard push it started succeeded
+(`dashboard-push`, issue #106): stale after one failed push ("push
+failing, last pushed … ago"), down once no push has succeeded for 8 push
+intervals. It is listed once a push has finished. The
 listener checks its tunnel (`tunnel`) every 15 seconds by a GET of
 `linear_webhook.public_url`, its Funnel URL: only the listener's own 405
 for its path counts as seen, so a Funnel that is off, a gateway error or a
@@ -1055,6 +1165,15 @@ written to a temp file in the same directory and fsynced, then renamed into
 place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
+
+`status.json`'s `projects` lists each `orch.yml` project in order with its
+tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
+round caps (`rounds.low`, `rounds.high`), as the poller last read its
+`factory.md` (issue #152). The dashboard has no copy of any `factory.md`:
+each poll cycle the dispatcher stores what `LivePollSource` parsed in the
+`project_rules` table (`lib/project_rules.py`), and the snapshot reads it
+back. A `factory.md` the poller could not read, or has not read yet, is
+`status: unknown` with the `reason`, never a default.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
@@ -1319,21 +1438,22 @@ sends it); with an older copy of that server the browser blocks the poll
 and the page falls back to reloading.
 
 *How it publishes.* Each file is first uploaded to a dot-prefixed temp name
-in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
-ConnectTimeout=10 -- status.json
+in the served directory (`scp -q -B [-F ssh_config] <options> -- status.json
 pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
-for each page; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
-"ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
-temp names). Only after every upload succeeds does one `ssh [-F ssh_config]
--o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
+for each page; with `rsync`, `rsync --quiet --timeout=10 --chmod=F644 -e
+"ssh [-F ssh_config] <options>" --` to the same temp names). Only after
+every upload succeeds does one `ssh [-F ssh_config] <options> --
+pc-wsl-cursor-bot 'cd --
 factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
 .index.html.push-tmp index.html && ...'` rename them all over the live
 names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
 mismatched for at most the instants between local `rename(2)` calls. The static server
-never serves the temp names. Every command is an argv list (no local shell)
-with a 60-second timeout; the remote shell sees only the validated
+never serves the temp names. `<options>` are `-o BatchMode=yes -o
+ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`, so a
+dead link fails in seconds (issue #106). Every command is an argv list (no
+local shell) with a 20-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
 bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
 path, absolute or relative to the remote login's home, with no leading `-`,
@@ -1341,7 +1461,15 @@ path, absolute or relative to the remote login's home, with no leading `-`,
 ssh_config file, and a name that looks like a key (`id_*`, `*.pem`,
 `*.key`, `*.pub`, `*.ppk`) is refused. SSH uses the login Max provisions;
 the factory never reads, names or passes a key, and never reads the
-ssh_config file itself. `check-config` validates the section. Tests use a
+ssh_config file itself. `check-config` validates the section.
+
+*When a push fails* (issue #106), `orch poll` reads the push child's exit
+status. After the k-th failure in a row it starts no push until
+min(30·2^(k-1), 600) seconds after the failed one started, with one
+`dashboard push: failed (exit N), k in a row; pushes paused for Ss` line;
+a success clears the backoff. A live push's pending change waits and goes
+out when the backoff ends. Each push's outcome is the `dashboard-push`
+Health component (below). Tests use a
 fake transport and a fake spawn; nothing in this repository runs ssh, scp
 or rsync against a real host.
 
@@ -1402,11 +1530,11 @@ always named on stderr and does not fail the check.
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` refuses a factory.md pair that fails `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
 
 ## pstack pin
 
-[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
+[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file, plus the sha256 of each file under [`skills/factory`](skills/factory), the factory's router skills, in its `factory:` section. A pin bump, or any edit to `skills/factory`, regenerates that lock in the same PR.
 
 ```sh
 bin/orch install-skills
@@ -1415,9 +1543,9 @@ bin/orch doctor --print-canary
 bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
+`install-skills` symlinks each pinned skill, and each router skill in `skills/factory` (`factory-builder`, `factory-reviewer`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
-`doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+`doctor` checks every installed skill and router against the lock, then prints a canary that asks the harness to read the installed `factory-builder` skill, name it, and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot and Codex Bot each start their own harness and write the reply; Cursor is not asked. `doctor` fails if either harness did not load that version. It does not start `claude` or `codex`.
 
 ## Usage reserve
 
@@ -1431,14 +1559,14 @@ The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to t
 bin/orch eval-report --input tests/fixtures/eval/week
 ```
 
-The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
 
 - A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
-- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI. The family word must end the name or be followed by `-`, `.`, `_`, `:` or a digit, so `haikus`, `claudette` and `magnum-opus` resolve to no family. `opus-mt*`, `gpt-j*` and `gpt-neo*` are other model lines and resolve to no family.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
 

@@ -50,6 +50,7 @@ devices:
       codex: codex-bot
     workdir_root: /home/{bot}/factory-work
     ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
   - name: mac
     enabled: false
     tailscale_name: mac.example.ts.net
@@ -58,6 +59,7 @@ devices:
       claude: claude-bot
     workdir_root: /Users/{bot}/factory-work
     ssh_alias: mac-{bot}
+    factory_root: /Users/{bot}/factory
 """
 
 
@@ -89,8 +91,9 @@ def store(db: Path, clock: float = NOW) -> health.HealthStore:
 
 
 def orch(*, listener: bool = False, push: bool = False) -> SimpleNamespace:
-    """What lib/health.py reads of an OrchConfig."""
+    """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
+        projects=(),
         linear_webhook=SimpleNamespace(public_url=None) if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
     )
@@ -1001,6 +1004,7 @@ MANY_DEVICES = MACHINES + "".join(
       codex: codex-bot
     workdir_root: /home/{{bot}}/factory-work
     ssh_alias: {name}-{{bot}}
+    factory_root: /home/{{bot}}/factory
 """
     for name in ("hang1", "hang2", "hang3")
 )
@@ -1340,3 +1344,55 @@ def test_a_check_shows_its_latest_result_across_restarts(
     report = health.build_report(health.read_heartbeats(db), NOW,
                                  expected=health.Expected((), frozenset()))
     assert [(c.pid, c.state, c.reason) for c in report.components] == expected
+
+
+# --- #106: dashboard push failures -------------------------------------------------------
+
+
+def push_row(**overrides) -> health.Heartbeat:
+    return row(component="dashboard-push", bot="", interval_seconds=30.0, **overrides)
+
+
+def pushes(report: health.HealthReport) -> list[health.Component]:
+    return [c for c in report.components if c.component == "dashboard-push"]
+
+
+POLLER_UP = row(component="poller", bot="", pid=1)
+
+
+def test_one_failed_push_makes_dashboard_push_stale_with_how_long() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=NOW - 40, checked_at=NOW - 5)), NOW)
+    (item,) = pushes(report)
+    assert (item.state, item.reason) == ("stale", "push failing, last pushed 40s ago")
+    assert report.down == ()
+
+
+def test_pushes_failing_for_eight_intervals_are_down_and_need_attention() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=NOW - 300, checked_at=NOW - 5)), NOW)
+    (item,) = pushes(report)
+    assert (item.state, item.reason) == ("down", "push failing, last pushed 5m ago")
+    assert [c.label for c in report.down] == ["dashboard-push @ box"]
+    assert "  dashboard-push @ box down (push failing, last pushed 5m ago)" in "\n".join(
+        health.render_lines(report, NOW))
+
+
+def test_a_push_that_never_succeeded_is_down() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=None, checked_at=NOW - 5)), NOW)
+    assert [(c.state, c.reason) for c in pushes(report)] == [("down", "never pushed")]
+
+
+def test_a_success_clears_dashboard_push(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 300).beat("dashboard-push", "box", pid=7, interval=30)
+    store(db, NOW - 10).checked("dashboard-push", "box", pid=7, interval=30)
+    assert [c.state for c in pushes(health.load_report(db, NOW))] == ["down"]
+    store(db, NOW - 1).beat("dashboard-push", "box", pid=7, interval=30)
+    assert [(c.state, c.reason) for c in pushes(health.load_report(db, NOW))] == [("up", "")]
+
+
+def test_a_restarted_pollers_failure_outranks_the_old_pollers_success(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 20).beat("dashboard-push", "box", pid=7, interval=30)  # the old poller
+    store(db, NOW - 5).checked("dashboard-push", "box", pid=8, interval=30)  # after a restart
+    (item,) = pushes(health.load_report(db, NOW))
+    assert (item.state, item.reason) == ("stale", "push failing, last pushed 20s ago")

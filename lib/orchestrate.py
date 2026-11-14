@@ -4,8 +4,10 @@ Stable names for F1-08, which owns best fit and the usage reserve:
 
 - `RouteRequest` — input. Do not add a required field.
 - `FitChoice` — harness pair built from a `route_job` result.
-- `RouteDecision` — what `orch:go` posts. Families and `job` are set here.
-- `choose_route(request)` — calls `lib.usage.route_job(config, marked_urgent=urgent)`.
+- `RouteDecision` — what `orch:go` posts. Families and `job` are set here,
+  with the reserve and fallback flags `choose_route` read from the route.
+- `choose_route(request)` — checks the factory.md pair with
+  `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once.
 - `route_from_fit(request, fit)` — cross-family check, then a decision.
 - `assert_cross_family(...)` — the check-config family rule. Same family raises.
 
@@ -18,14 +20,14 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lib.factory_md import (
     FactoryConfig,
-    _family_findings,
-    _resolved_family,
+    family_findings,
     load_factory_md,
+    resolved_family,
 )
 from lib.handoff import Handoff, format_comment
 from lib.load import Finding, split_front_matter
@@ -77,9 +79,14 @@ class RouteRequest:
     summary: str
     likely_files: tuple[str, ...]
     scope_changed: bool = False
+    built_by: tuple[str, str | None] | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.likely_files, str):
+            raise RouteError("likely_files must be a sequence of paths, not a string")
         object.__setattr__(self, "likely_files", tuple(self.likely_files))
+        if self.built_by is not None:
+            object.__setattr__(self, "built_by", tuple(self.built_by))
 
 
 @dataclass(frozen=True)
@@ -103,6 +110,11 @@ class RouteDecision:
     risk: str
     file_count: int
     scope_changed: bool
+    builder_using_reserve: bool = False
+    reviewer_using_reserve: bool = False
+    builder_fallback: bool = False
+    reviewer_fallback: bool = False
+    built_by: tuple[str, str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,7 +150,7 @@ class ClassifiedQuestion:
             object.__setattr__(
                 self,
                 "answer",
-                _one_line(self.answer, "answer", QuestionError),
+                _text(self.answer, "answer", QuestionError),
             )
 
 
@@ -234,7 +246,7 @@ class TicketFlow:
         if not self._questions_posted:
             raise QuestionError("questions step has not run")
         text = _one_line(text, "question text", QuestionError)
-        answer = _one_line(answer, "answer", QuestionError)
+        answer = _text(answer, "answer", QuestionError)
         current = next_product_question(self._questions)
         if current is None:
             raise QuestionError("no open product question")
@@ -312,21 +324,30 @@ def choose_route(
 ) -> RouteDecision:
     """Adapt `lib.usage.route_job(config, marked_urgent=urgent)` into a decision.
 
+    The factory.md pair must pass `assert_cross_family` first, so a config
+    check-config would refuse is refused here rather than routed around.
     The import is lazy so this module does not cycle with `lib.usage`.
     `lib.usage` must not import `FitChoice`. A route that is not ok raises
-    `RouteError`. `usage`, when given, is forwarded and is the only extra
-    argument.
+    `RouteError`. `usage` and `request.built_by` are forwarded.
     """
     _check_request(request)
+    config = request.config
+    assert_cross_family(
+        config.builder_harness,
+        config.builder_model,
+        config.reviewer_harness,
+        config.reviewer_model,
+    )
     usage_mod = importlib.import_module("lib.usage")
-    if usage is None:
-        route = usage_mod.route_job(request.config, marked_urgent=request.urgent)
-    else:
+    try:
         route = usage_mod.route_job(
-            request.config,
+            config,
             usage=usage,
             marked_urgent=request.urgent,
+            built_by=request.built_by,
         )
+    except ValueError as exc:
+        raise RouteError(str(exc)) from exc
     if not route.ok:
         reason = route.reason
         if not isinstance(reason, str) or reason.strip() == "":
@@ -334,15 +355,21 @@ def choose_route(
         raise RouteError(reason)
     builder = route.builder
     reviewer = route.reviewer
-    if builder is None or reviewer is None:
-        raise RouteError("route not ok")
     fit = FitChoice(
         builder_harness=builder.harness,
         builder_model=builder.model,
         reviewer_harness=reviewer.harness,
         reviewer_model=reviewer.model,
     )
-    return route_from_fit(request, fit)
+    return replace(
+        route_from_fit(request, fit),
+        builder_using_reserve=builder.using_reserve,
+        reviewer_using_reserve=reviewer.using_reserve,
+        builder_fallback=(
+            request.built_by is None and builder.harness != config.builder_harness
+        ),
+        reviewer_fallback=reviewer.harness != config.reviewer_harness,
+    )
 
 
 def route_from_fit(request: RouteRequest, fit: FitChoice) -> RouteDecision:
@@ -368,6 +395,7 @@ def route_from_fit(request: RouteRequest, fit: FitChoice) -> RouteDecision:
         risk=request.risk,
         file_count=file_count,
         scope_changed=request.scope_changed,
+        built_by=request.built_by,
     )
 
 
@@ -378,7 +406,7 @@ def assert_cross_family(
     reviewer_model: str | None,
 ) -> tuple[str, str]:
     """Return (builder family, reviewer family) using the check-config rule."""
-    findings = _family_findings(
+    findings = family_findings(
         builder_harness,
         builder_model,
         reviewer_harness,
@@ -387,8 +415,8 @@ def assert_cross_family(
     errors = [finding.message for finding in findings if finding.severity == "error"]
     if errors:
         raise RouteError(errors[0])
-    builder_family, _builder_hint = _resolved_family(builder_harness, builder_model)
-    reviewer_family, _reviewer_hint = _resolved_family(reviewer_harness, reviewer_model)
+    builder_family, _builder_hint = resolved_family(builder_harness, builder_model)
+    reviewer_family, _reviewer_hint = resolved_family(reviewer_harness, reviewer_model)
     if builder_family is None or reviewer_family is None:
         raise RouteError("same-family reviewer: family not established")
     if builder_family == reviewer_family:
@@ -500,9 +528,9 @@ def answers_comment(
     *,
     visible: bool = False,
 ) -> str:
-    _one_line(question, "question text", QuestionError)
-    _one_line(answer, "answer", QuestionError)
-    body = f"**Question**\n{question.strip()}\n\n**Answer**\n{answer.strip()}\n"
+    question = _one_line(question, "question text", QuestionError)
+    answer = _text(answer, "answer", QuestionError)
+    body = f"**Question**\n{question}\n\n**Answer**\n{answer}\n"
     return _comment(
         {"kind": "answers", "from": FROM, "role": ROLE},
         body,
@@ -522,9 +550,29 @@ def go_comment(
         raise RouteError("risk must be low or high")
     if decision.builder_harness not in HARNESSES:
         raise RouteError("builder harness must be claude, codex or cursor")
+    if decision.reviewer_harness not in HARNESSES:
+        raise RouteError("reviewer harness must be claude, codex or cursor")
     _one_line(verify, "verify", RouteError)
     if decision.job not in JOBS:
         raise RouteError(f"unknown job {decision.job!r}")
+    families = assert_cross_family(
+        decision.builder_harness,
+        decision.builder_model,
+        decision.reviewer_harness,
+        decision.reviewer_model,
+    )
+    if families != (decision.builder_family, decision.reviewer_family):
+        raise RouteError(
+            f"builder family {decision.builder_family!r} and reviewer family "
+            f"{decision.reviewer_family!r} do not match the harnesses"
+        )
+    expected = job_for_file_count(
+        decision.file_count, scope_changed=decision.scope_changed
+    )
+    if decision.job != expected:
+        raise RouteError(
+            f"job {decision.job!r} does not match {decision.file_count} files"
+        )
     body = _go_body(decision, verify.strip())
     return _comment(
         {
@@ -538,6 +586,57 @@ def go_comment(
         body,
         visible=visible,
     )
+
+
+APPROVAL_TOKEN_VARIABLES = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
+
+@dataclass(frozen=True)
+class ApproverGo:
+    body: str
+    env: dict[str, str]
+
+
+def approver_go_post(
+    kind: str,
+    max_words: str,
+    environ: Mapping[str, str],
+    *,
+    app_trust: bool,
+    gh_config_dir: Path | None,
+    visible: bool = False,
+) -> ApproverGo:
+    """Short-term (#172, until T02f #173): the capped-ticket go Grok posts
+    as maxharris1, quoting Max's exact words, with the gh environment from
+    orch.yml's approvals (lib.orch_yml.approvals). Any other kind, ok above
+    all, is refused: Max posts his own ok. Token variables are always
+    dropped. With the app switch on, gh reads only Max's approver profile;
+    with none configured this refuses."""
+    if kind != "go":
+        raise OrchestrateError(
+            f"never post kind={kind} as Max: only a capped-ticket go, and Max posts his own ok"
+        )
+    words = _text(max_words, "Max's exact words")
+    quoted = "\n".join(f"> {line}".rstrip() for line in words.splitlines())
+    body = _comment(
+        {"kind": "go", "from": FROM, "role": ROLE, "state": "building"},
+        f"**Max's words**\n{quoted}\n",
+        visible=visible,
+    )
+    env = {key: value for key, value in environ.items() if key not in APPROVAL_TOKEN_VARIABLES}
+    if not app_trust:
+        return ApproverGo(body, env)
+    if gh_config_dir is None:
+        raise OrchestrateError(
+            "no approver_gh_config_dir in orch.yml: post it from maxharris1 by hand"
+        )
+    env["GH_CONFIG_DIR"] = str(gh_config_dir)
+    return ApproverGo(body, env)
 
 
 def format_stop_report(report: StopReport) -> str:
@@ -575,6 +674,13 @@ def _check_request(request: RouteRequest) -> None:
         raise RouteError("summary is empty")
     for path in request.likely_files:
         _one_line(path, "likely file", RouteError)
+    if request.built_by is not None:
+        if len(request.built_by) != 2:
+            raise RouteError("built_by must be (harness, model)")
+        harness, model = request.built_by
+        _one_line(harness, "built_by harness", RouteError)
+        if model is not None:
+            _one_line(model, "built_by model", RouteError)
 
 
 def _check_fit(fit: FitChoice) -> None:
@@ -599,7 +705,22 @@ def _go_body(decision: RouteDecision, verify: str) -> str:
         f"**Reviewer model**\n{_or_none(decision.reviewer_model)}\n\n"
         f"**Verify**\n{verify}\n\n"
         f"**Files**\n{decision.file_count}\n"
+        f"{_routing(decision)}"
     )
+
+
+def _routing(decision: RouteDecision) -> str:
+    flags = (
+        (decision.builder_fallback, "Builder is a fallback from factory.md's builder."),
+        (decision.builder_using_reserve, "Builder is using its usage reserve."),
+        (decision.reviewer_fallback, "Reviewer is a fallback from factory.md's reviewer."),
+        (decision.reviewer_using_reserve, "Reviewer is using its usage reserve."),
+    )
+    lines = [text for flag, text in flags if flag]
+    if not lines:
+        return ""
+    lines.append("For information; the dispatcher runs factory.md's pair.")
+    return "\n**Routing**\n" + "\n".join(lines) + "\n"
 
 
 def _or_none(value: str | None) -> str:
@@ -644,6 +765,16 @@ def _comment(
         Handoff(fields=tuple(fields.items()), body=text),
         visible=visible,
     )
+
+
+def _text(
+    value: object,
+    label: str,
+    error: type[OrchestrateError] = OrchestrateError,
+) -> str:
+    if not isinstance(value, str) or value.strip() == "":
+        raise error(f"{label} must not be empty")
+    return value.strip()
 
 
 def _one_line(

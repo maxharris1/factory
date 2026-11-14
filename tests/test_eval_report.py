@@ -59,6 +59,9 @@ done 0
 stuck 0
 qa 0
 
+open states
+none
+
 wasted agent wakes
 count: 2
 2026-11-03T15:04:30Z maxharris1/Cleffy 12 claude-bot fix
@@ -93,6 +96,9 @@ intake 10
 questions 10
 building 100
 stuck 0
+
+open states
+none
 
 wasted agent wakes
 count: 0
@@ -197,20 +203,47 @@ def test_fixture_report_covers_every_f1_14_measure() -> None:
         assert heading in text
 
 
-def test_chart_edges_match_section_4_1() -> None:
-    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+SPEC_EDGE = re.compile(r"  (\[\*\]|[A-Za-z]+) --> (\[\*\]|[A-Za-z]+)(?:: .+)?")
+MMD_EDGE = re.compile(r"  s(\d+) --> s(\d+): .+")
+
+
+def spec_edges(spec: str) -> set[tuple[str, str]]:
     start = spec.index("stateDiagram-v2")
     block = spec[start : spec.index("```", start)]
     found: set[tuple[str, str]] = set()
     for line in block.splitlines():
-        match = re.search(r"(\[\*\]|[A-Za-z]+) --> (\[\*\]|[A-Za-z]+)", line)
-        if match is None:
+        if "-->" not in line:
             continue
-        src, dst = match.group(1), match.group(2)
+        match = SPEC_EDGE.fullmatch(line)
+        assert match is not None, f"unparsed section 4.1 edge: {line!r}"
+        src, dst = match.groups()
         if src == "[*]" or dst == "[*]":
             continue
         found.add((SPEC_STATE[src], SPEC_STATE[dst]))
-    assert found == CHART_TRANSITIONS
+    return found
+
+
+def mmd_edges(text: str) -> set[tuple[str, str]]:
+    names: dict[str, str] = {}
+    edges: set[tuple[str, str]] = set()
+    for line in text.splitlines():
+        state = re.fullmatch(r"  s(\d+): (.+)", line)
+        if state:
+            names[state.group(1)] = state.group(2)
+            continue
+        if "-->" not in line or line.startswith("  [*] -->"):
+            continue
+        edge = MMD_EDGE.fullmatch(line)
+        assert edge is not None, f"unparsed chart.mmd edge: {line!r}"
+        pair = (names[edge.group(1)], names[edge.group(2)])
+        assert pair not in edges, f"chart.mmd draws {pair} twice"
+        edges.add(pair)
+    return edges
+
+
+def test_chart_edges_match_section_4_1() -> None:
+    spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    assert spec_edges(spec) == CHART_TRANSITIONS
     assert set(SPEC_STATE.values()) == set(STATES)
     for src, dst in CHART_TRANSITIONS:
         assert src in STATES
@@ -219,18 +252,48 @@ def test_chart_edges_match_section_4_1() -> None:
 
 def test_chart_mmd_edges_match_transitions() -> None:
     text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
-    names: dict[str, str] = {}
-    edges: set[tuple[str, str]] = set()
-    for line in text.splitlines():
-        state = re.fullmatch(r"  s(\d+): (.+)", line)
-        if state:
-            names[state.group(1)] = state.group(2)
-            continue
-        edge = re.fullmatch(r"  s(\d+) --> s(\d+): .+", line)
-        if edge is None:
-            continue
-        edges.add((names[edge.group(1)], names[edge.group(2)]))
-    assert edges == CHART_TRANSITIONS
+    assert mmd_edges(text) == CHART_TRANSITIONS
+
+
+def test_t2_self_loops_are_charted() -> None:
+    tla = (ROOT / "model" / "Orchestrator.tla").read_text(encoding="utf-8")
+    start = tla.index("T2CiRed ==")
+    action = tla[start : tla.index("\n\n", start)]
+    assert "state' = state" in action
+    looped = re.search(r"state \\in \{([^}]*)\}", action)
+    assert looped is not None
+    states = re.findall(r'"([a-z-]+)"', looped.group(1))
+    assert states == ["building", "fixing"]
+    spec = spec_edges((ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8"))
+    chart = mmd_edges((ROOT / "model" / "chart.mmd").read_text(encoding="utf-8"))
+    for state in states:
+        assert (state, state) in CHART_TRANSITIONS
+        assert (state, state) in spec
+        assert (state, state) in chart
+
+
+@pytest.mark.parametrize(
+    ("source", "bad", "message"),
+    [
+        ("spec", "  Fixing -->Review: CI green", "unparsed section 4.1 edge"),
+        ("chart", "  s15 --> s9", "unparsed chart.mmd edge"),
+        ("chart", "  s3 --> s9: ready again", "draws .* twice"),
+    ],
+    ids=["spec-unparsed", "chart-unlabelled", "chart-duplicate"],
+)
+def test_chart_edges_fail_on_an_unparsed_line(
+    source: str, bad: str, message: str
+) -> None:
+    if source == "spec":
+        spec = (ROOT / "docs" / "SPEC.md").read_text(encoding="utf-8")
+        spec = spec.replace("  Done --> [*]", f"{bad}\n  Done --> [*]", 1)
+        with pytest.raises(AssertionError, match=message):
+            spec_edges(spec)
+    else:
+        text = (ROOT / "model" / "chart.mmd").read_text(encoding="utf-8")
+        text = text.replace("  class s0 ", f"{bad}\n  class s0 ", 1)
+        with pytest.raises(AssertionError, match=message):
+            mmd_edges(text)
 
 
 def test_week_window_uses_the_same_directory_shape() -> None:
@@ -275,42 +338,321 @@ def test_cli_week_window_flags() -> None:
     assert result.stdout == WINDOW
 
 
-def test_open_state_without_end_adds_no_seconds(tmp_path: Path) -> None:
+def test_open_state_is_listed_or_measured_to_until(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
         "\n".join(
             (
-                "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake",
-                "2026-11-03T15:01:00Z repo=maxharris1/Cleffy pr=1 enter state=questions",
+                "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 enter state=intake",
+                "2026-11-03T15:01:00Z repo=maxharris1/Cleffy ticket=1 enter state=questions",
                 "",
             )
         ),
     )
     text = render(build_report(tmp_path).report)
     assert "intake 60\nquestions 0\n" in text
+    assert "open states\nmaxharris1/Cleffy 1 questions\n" in text
+    text = render(build_report(tmp_path, until="2026-11-03T15:03:00Z").report)
+    assert "intake 60\nquestions 120\n" in text
+    assert "open states\nnone\n" in text
 
 
-def test_verdict_without_risk_skips_the_round_cap(tmp_path: Path) -> None:
+def verdict(round_: str | None = None, risk: str | None = None) -> str:
+    keys = "kind=verdict from=codex-bot role=reviewer"
+    if round_ is not None:
+        keys += f" round={round_}"
+    if risk is not None:
+        keys += f" risk={risk}"
+    return f"<!-- orch:v1 {keys} verdict=REVISE -->\nRevise.\n"
+
+
+def go(risk: str) -> str:
+    return f"<!-- orch:v1 kind=go from=grok-bot role=orchestrator risk={risk} -->\nGo.\n"
+
+
+def log(*lines: str) -> str:
+    return "".join(f"{line}\n" for line in lines)
+
+
+def row(at: str, rest: str, ticket: str = "4") -> str:
+    return f"2026-11-03T{at}Z repo=maxharris1/Cleffy ticket={ticket} {rest}"
+
+
+def test_verdict_without_risk_is_cap_unverified(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "\n".join(
-            (
-                "2026-11-03T18:00:00Z repo=maxharris1/Cleffy pr=4 enter state=review",
-                "2026-11-03T18:00:10Z repo=maxharris1/Cleffy pr=4 comment path=comments/verdict.txt",
-                "2026-11-03T18:00:10Z repo=maxharris1/Cleffy pr=4 end",
-                "",
-            )
+        log(
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/verdict.txt"),
+            row("18:00:10", "end"),
         ),
-        {
-            "comments/verdict.txt": (
-                "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
-                "round=5/5 verdict=REVISE -->\nRevise.\n"
-            )
-        },
+        {"comments/verdict.txt": verdict(round_="5/5")},
     )
     text = render(build_report(tmp_path).report)
     assert "maxharris1/Cleffy 4 5\n" in text
+    assert "maxharris1/Cleffy 4 cap-unverified 5\n" in text
     assert "round-over-cap" not in text
+
+
+def test_unnumbered_verdicts_take_risk_from_go(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "comment path=comments/go.txt"),
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/v1.txt"),
+            row("18:00:10", "enter state=fixing"),
+            row("18:00:20", "enter state=review"),
+            row("18:00:30", "comment path=comments/v2.txt"),
+            row("18:00:30", "end"),
+        ),
+        {
+            "comments/go.txt": go("low"),
+            "comments/v1.txt": verdict(),
+            "comments/v2.txt": verdict(risk="high"),
+        },
+    )
+    text = render(build_report(tmp_path).report)
+    assert "maxharris1/Cleffy 4 2\n" in text
+    assert "maxharris1/Cleffy 4 round-over-cap low 2 1\n" in text
+    assert "maxharris1/Cleffy 4 risk-mismatch low high\n" in text
+    assert "cap-unverified" not in text
+
+
+def test_extra_round_after_capped_is_authorized(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/v1.txt"),
+            row("18:00:10", "enter state=capped"),
+            row("18:01:00", "enter state=fixing"),
+            row("18:02:00", "enter state=review"),
+            row("18:02:10", "comment path=comments/v2.txt"),
+            row("18:02:10", "end"),
+        ),
+        {
+            "comments/v1.txt": verdict(round_="1/1", risk="low"),
+            "comments/v2.txt": verdict(round_="2/1", risk="low"),
+        },
+    )
+    text = render(build_report(tmp_path).report)
+    assert "maxharris1/Cleffy 4 round-extra-authorized low 2 1\n" in text
+    assert "round-over-cap" not in text
+
+
+def test_round_two_without_capped_is_over_cap(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/v1.txt"),
+            row("18:00:10", "enter state=fixing"),
+            row("18:01:00", "enter state=review"),
+            row("18:01:10", "comment path=comments/v2.txt"),
+            row("18:01:10", "end"),
+        ),
+        {
+            "comments/v1.txt": verdict(round_="1/1", risk="low"),
+            "comments/v2.txt": verdict(round_="2/2", risk="low"),
+        },
+    )
+    text = render(build_report(tmp_path).report)
+    assert "maxharris1/Cleffy 4 round-over-cap low 2 1\n" in text
+    assert "round-extra-authorized" not in text
+
+
+def test_high_risk_round_over_cap(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/v3.txt"),
+            row("18:00:20", "comment path=comments/v4.txt"),
+            row("18:00:20", "end"),
+        ),
+        {
+            "comments/v3.txt": verdict(round_="3/3", risk="high"),
+            "comments/v4.txt": verdict(round_="4/3", risk="high"),
+        },
+    )
+    text = render(build_report(tmp_path).report)
+    assert "chart mismatches\nmaxharris1/Cleffy 4 round-over-cap high 4 3\n" in text
+    assert text.count("round-over-cap") == 1
+
+
+def test_rounds_fall_back_to_verdict_count(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "enter state=review"),
+            row("18:00:10", "comment path=comments/v1.txt"),
+            row("18:00:20", "comment path=comments/v2.txt"),
+            row("18:00:20", "end"),
+        ),
+        {
+            "comments/v1.txt": verdict(risk="high"),
+            "comments/v2.txt": verdict(risk="high"),
+        },
+    )
+    text = render(build_report(tmp_path).report)
+    assert "review rounds per PR\nmaxharris1/Cleffy 4 2\n" in text
+
+
+@pytest.mark.parametrize(
+    "wake",
+    ["wake role=claude-bot reason=fix wasted=yes", "wake role=grok-bot reason=nobody"],
+    ids=["wasted-flag-alone", "reason-nobody-alone"],
+)
+def test_one_signal_alone_makes_a_wasted_wake(tmp_path: Path, wake: str) -> None:
+    write_bundle(tmp_path, log(row("18:00:00", wake), row("18:00:00", "end")))
+    text = render(build_report(tmp_path).report)
+    assert "wasted agent wakes\ncount: 1\n" in text
+
+
+def test_ticket_without_pr_is_reported_under_ticket_id(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("18:00:00", "enter state=intake", ticket="ENG-42"),
+            row("18:01:00", "enter state=questions", ticket="ENG-42"),
+            row("18:02:00", "enter state=planning", ticket="ENG-42"),
+            row("18:03:00", "wake role=grok-bot reason=nobody", ticket="ENG-42"),
+            row("18:03:00", "end", ticket="ENG-42"),
+            row("18:04:00", "enter state=review pr=7", ticket="9"),
+            row("18:05:00", "end pr=7", ticket="9"),
+        ),
+    )
+    text = render(build_report(tmp_path).report)
+    assert "runs: 2\n" in text
+    assert "2026-11-03T18:03:00Z maxharris1/Cleffy ENG-42 grok-bot nobody\n" in text
+    assert "review rounds per PR\nmaxharris1/Cleffy 9 0\nmaxharris1/Cleffy ENG-42 0\n" in text
+
+
+def test_row_without_ticket_is_refused(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n",
+    )
+    with pytest.raises(EvalError, match="missing repo or ticket"):
+        build_report(tmp_path)
+
+
+def test_window_clips_state_straddling_both_ends(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(row("10:00:00", "enter state=building"), row("12:00:00", "end")),
+    )
+    text = render(
+        build_report(
+            tmp_path, since="2026-11-03T11:00:00Z", until="2026-11-03T11:00:30Z"
+        ).report
+    )
+    assert "runs: 1\n" in text
+    assert "time in each state\nbuilding 30\n" in text
+
+
+def test_window_clips_state_straddling_since(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("10:00:00", "enter state=building"),
+            row("11:00:20", "enter state=review"),
+            row("11:00:30", "end"),
+        ),
+    )
+    text = render(build_report(tmp_path, since="2026-11-03T11:00:00Z").report)
+    assert "time in each state\nbuilding 20\nreview 10\n" in text
+
+
+def test_repeat_handled_across_since_is_wasted(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("10:00:00", "wake role=claude-bot reason=fix handled=c1"),
+            row("11:00:10", "wake role=claude-bot reason=fix handled=c1"),
+            row("11:00:20", "end"),
+        ),
+    )
+    text = render(build_report(tmp_path, since="2026-11-03T11:00:00Z").report)
+    assert (
+        "wasted agent wakes\ncount: 1\n"
+        "2026-11-03T11:00:10Z maxharris1/Cleffy 4 claude-bot fix\n"
+    ) in text
+
+
+def test_transition_across_since_is_checked(tmp_path: Path) -> None:
+    write_bundle(
+        tmp_path,
+        log(
+            row("10:00:00", "enter state=intake"),
+            row("11:00:10", "enter state=ship"),
+            row("11:00:20", "end"),
+        ),
+    )
+    text = render(build_report(tmp_path, since="2026-11-03T11:00:00Z").report)
+    assert "maxharris1/Cleffy 4 illegal-transition intake ship\n" in text
+
+
+@pytest.mark.parametrize("name", ["orch.yml", "dispatcher.log", "model-findings.txt"])
+def test_top_level_input_symlinked_outside_is_refused(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "week"
+    shutil.copytree(WEEK, root)
+    outside = tmp_path / "outside.txt"
+    outside.write_text(
+        (root / name).read_text(encoding="utf-8") + "credential-marker\n",
+        encoding="utf-8",
+    )
+    (root / name).unlink()
+    (root / name).symlink_to(outside)
+    with pytest.raises(EvalError, match="leaves the input directory") as raised:
+        build_report(root)
+    assert "credential-marker" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("where", "args"),
+    [
+        ("log", []),
+        ("since", ["--since", "2026-02-30T00:00:00Z"]),
+        ("until", ["--until", "2026-02-30T00:00:00Z"]),
+        ("findings", []),
+    ],
+)
+def test_impossible_date_is_bad_timestamp(
+    tmp_path: Path, where: str, args: list[str]
+) -> None:
+    root = tmp_path / "week"
+    shutil.copytree(WEEK, root)
+    if where == "log":
+        path = root / "dispatcher.log"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "2026-11-03T15:00:00Z", "2026-02-30T15:00:00Z", 1
+            ),
+            encoding="utf-8",
+        )
+    if where == "findings":
+        path = root / "model-findings.txt"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("2026-11-03", "2026-02-30"),
+            encoding="utf-8",
+        )
+    result = run(["eval-report", "--input", str(root), *args])
+    assert result.returncode == 1
+    assert "bad timestamp '2026-02-30T" in result.stderr
+    assert result.stdout == ""
+
+
+def test_missing_model_findings_is_none_supplied(tmp_path: Path) -> None:
+    root = tmp_path / "week"
+    shutil.copytree(WEEK, root)
+    (root / "model-findings.txt").write_text("", encoding="utf-8")
+    text = render(build_report(root).report)
+    assert "rule breaks the model finds\nnone\n" in text
+    (root / "model-findings.txt").unlink()
+    text = render(build_report(root).report)
+    assert "rule breaks the model finds\nnone supplied\n" in text
 
 
 def test_stuck_comment_without_the_state_is_still_a_stuck_job(tmp_path: Path) -> None:
@@ -318,8 +660,8 @@ def test_stuck_comment_without_the_state_is_still_a_stuck_job(tmp_path: Path) ->
         tmp_path,
         "\n".join(
             (
-                "2026-11-03T16:00:00Z repo=maxharris1/Cleffy pr=8 comment path=comments/stuck.txt",
-                "2026-11-03T16:00:00Z repo=maxharris1/Cleffy pr=8 end",
+                "2026-11-03T16:00:00Z repo=maxharris1/Cleffy ticket=8 comment path=comments/stuck.txt",
+                "2026-11-03T16:00:00Z repo=maxharris1/Cleffy ticket=8 end",
                 "",
             )
         ),
@@ -338,7 +680,7 @@ def test_stuck_comment_without_the_state_is_still_a_stuck_job(tmp_path: Path) ->
 def test_invalid_comment_is_refused(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 comment path=comments/bad.txt\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 comment path=comments/bad.txt\n",
         {"comments/bad.txt": "not a handoff\n"},
     )
     with pytest.raises(EvalError, match="not an orch:v1 header"):
@@ -351,7 +693,7 @@ def test_comment_path_cannot_leave_the_input_directory(tmp_path: Path) -> None:
     root = tmp_path / "week"
     write_bundle(
         root,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 comment path=comments/../../secret.txt\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 comment path=comments/../../secret.txt\n",
     )
     with pytest.raises(EvalError, match="leaves the input directory") as raised:
         build_report(root)
@@ -361,7 +703,7 @@ def test_comment_path_cannot_leave_the_input_directory(tmp_path: Path) -> None:
 def test_repo_missing_from_orch_yml_is_refused(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/other pr=1 enter state=intake\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/other ticket=1 enter state=intake\n",
     )
     with pytest.raises(EvalError, match="is not a project in orch.yml"):
         build_report(tmp_path)
@@ -370,12 +712,12 @@ def test_repo_missing_from_orch_yml_is_refused(tmp_path: Path) -> None:
 def test_missing_factory_md_is_refused(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 enter state=intake\n",
         orch="poll_seconds: 60\nprojects:\n  - repo: maxharris1/Cleffy\n  - repo: maxharris1/missing\n",
     )
     log = tmp_path / "dispatcher.log"
     log.write_text(
-        "2026-11-03T15:00:00Z repo=maxharris1/missing pr=1 enter state=intake\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/missing ticket=1 enter state=intake\n",
         encoding="utf-8",
     )
     with pytest.raises(EvalError, match="file not found"):
@@ -385,7 +727,7 @@ def test_missing_factory_md_is_refused(tmp_path: Path) -> None:
 def test_since_after_until_is_refused(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 enter state=intake\n",
     )
     with pytest.raises(EvalError, match="since is after until"):
         build_report(
@@ -398,7 +740,7 @@ def test_since_after_until_is_refused(tmp_path: Path) -> None:
 def test_invalid_orch_yml_is_refused(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 enter state=intake\n",
         orch="poll_seconds: 60\nprojects: []\nextra: true\n",
     )
     with pytest.raises(EvalError, match="unknown field"):
@@ -408,7 +750,7 @@ def test_invalid_orch_yml_is_refused(tmp_path: Path) -> None:
 def test_cli_refuses_a_bad_comment(tmp_path: Path) -> None:
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 comment path=comments/bad.txt\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 comment path=comments/bad.txt\n",
         {"comments/bad.txt": "nope\n"},
     )
     result = run(["eval-report", "--input", str(tmp_path)])
@@ -424,8 +766,8 @@ def test_unknown_model_warns_and_still_reports(tmp_path: Path) -> None:
     )
     write_bundle(
         tmp_path,
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 enter state=intake\n"
-        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy pr=1 end\n",
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 enter state=intake\n"
+        "2026-11-03T15:00:00Z repo=maxharris1/Cleffy ticket=1 end\n",
         factory=factory,
     )
     result = run(["eval-report", "--input", str(tmp_path)])

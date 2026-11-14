@@ -1,10 +1,12 @@
 import ast
+import contextlib
 import json
 import os
 import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -18,10 +20,14 @@ from lib.dispatcher import (
     TrackedTicket,
     ship_mode,
 )
+from lib.dashboard import collect_snapshot
+from lib.device_pool import DevicePool
 from lib.factory_md import FactoryConfig
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
+from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import load_orch_yml
-from lib.queue import Job, JobRequest, SQLiteJobQueue
+from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
 GO = (
     "<!-- orch:v1 kind=go from=grok-bot role=orchestrator "
@@ -1521,6 +1527,58 @@ def test_reconcile_does_not_pick_up_non_grok_jobs(tmp_path: Path) -> None:
     assert queue.outstanding() == (queued,)
 
 
+class RaisingSource(FakeSource):
+    def __init__(self, failing: str):
+        super().__init__()
+        self.failing = failing
+
+    def github_candidates(self, label_prefix: str, exclude=()) -> tuple[TrackedTicket, ...]:
+        if self.failing == "github_candidates":
+            raise RuntimeError("listing failed")
+        return super().github_candidates(label_prefix)
+
+    def tracked_tickets(
+        self,
+        refs: tuple[TicketRef, ...],
+    ) -> tuple[TrackedTicket, ...]:
+        if self.failing == "tracked_tickets":
+            raise RuntimeError("listing failed")
+        return super().tracked_tickets(refs)
+
+
+@pytest.mark.parametrize(
+    ("failing", "component"),
+    [("github_candidates", "github"), ("tracked_tickets", "tracked")],
+)
+def test_poll_records_an_error_when_listing_candidates_raises(
+    tmp_path: Path,
+    failing: str,
+    component: str,
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    grok = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="clarify",
+            recipient="grok",
+            source_comment_id="question-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="clarify:g1",
+    )
+
+    dispatcher.poll_once(RaisingSource(failing))
+
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error FROM poll_errors"
+        ).fetchall()
+    assert [tuple(row) for row in errors] == [(component, "-", "RuntimeError")]
+    assert [job.id for job in delivery.jobs] == [grok.id]
+
+
 def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
     tmp_path: Path,
 ) -> None:
@@ -2145,6 +2203,7 @@ def test_t2_refuses_ready_without_a_builder_job(tmp_path: Path) -> None:
     [
         ("codex-login", "claude-bot"),
         ("claude-login", "codex-bot"),
+        ("claude-bot", "claude-bot"),
     ],
 )
 def test_t2_refuses_wrong_sender_and_spoofed_from_field(
@@ -2335,7 +2394,15 @@ def test_stuck_short_circuit_does_not_requeue_completed_wake(
         count = connection.execute(
             "SELECT count(*) FROM jobs WHERE action = 'stuck'"
         ).fetchone()[0]
+        from_go = connection.execute(
+            "SELECT count(*) FROM jobs WHERE source_comment_id = 'go-after-stuck'"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'go-after-stuck'"
+        ).fetchone()[0]
     assert count == 1
+    assert from_go == 0
+    assert outcome == "ticket-stuck"
 
 
 def test_reconciles_do_not_requeue_completed_stuck_wake(tmp_path: Path) -> None:
@@ -2398,6 +2465,300 @@ def test_failed_stuck_wake_is_requeued_once(tmp_path: Path) -> None:
     second = delivery.jobs[0]
     assert second.id != first.id
     assert second.request.generation > first.request.generation
+
+
+class CycleSource(FakeSource):
+    def __init__(self, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.ended = 0
+
+    def end_cycle(self) -> None:
+        self.ended += 1
+
+
+def mark_stuck(
+    queue: SQLiteJobQueue,
+    repo: str,
+    ticket_id: str,
+    *,
+    source_comment_id: str | None,
+    timeout_seconds: int | None,
+) -> None:
+    with queue.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, gate_count, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds, generation
+            ) VALUES (?, ?, 0, 1, 'cancelled by hand', ?, ?, 1)
+            """,
+            (repo, ticket_id, source_comment_id, timeout_seconds),
+        )
+
+
+def stuck_wakes(queue: SQLiteJobQueue) -> dict[tuple[str, str], sqlite3.Row]:
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    return {(row["repo"], row["ticket_id"]): row for row in rows}
+
+
+def test_stuck_row_with_null_timeout_and_source_wakes_with_defaults(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    mark_stuck(queue, "owner/cleffy", "103", source_comment_id=None, timeout_seconds=None)
+    mark_stuck(queue, "owner/repo", "200", source_comment_id="c-200", timeout_seconds=900)
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    wakes = stuck_wakes(queue)
+    assert wakes[("owner/cleffy", "103")]["timeout_seconds"] == 3600
+    assert wakes[("owner/cleffy", "103")]["source_comment_id"] == "-"
+    assert wakes[("owner/repo", "200")]["timeout_seconds"] == 900
+    assert wakes[("owner/repo", "200")]["source_comment_id"] == "c-200"
+    assert source.ended == 1
+    with queue.connect() as connection:
+        assert connection.execute("SELECT count(*) FROM poll_errors").fetchone()[0] == 0
+
+
+def test_one_failing_stuck_wake_is_recorded_and_the_rest_still_wake(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    delivery = FakeGrokDelivery()
+    dispatcher, queue = setup(tmp_path, grok_delivery=delivery)
+    mark_stuck(queue, "owner/bad", "1", source_comment_id="c-1", timeout_seconds=600)
+    mark_stuck(queue, "owner/repo", "2", source_comment_id="c-2", timeout_seconds=600)
+    ensure = dispatcher._ensure_stuck_wake
+
+    def failing(repo: str, ticket_id: str) -> None:
+        if repo == "owner/bad":
+            raise TypeError("stuck row is broken")
+        ensure(repo, ticket_id)
+
+    dispatcher._ensure_stuck_wake = failing  # type: ignore[method-assign]
+    source = CycleSource()
+
+    dispatcher.poll_once(source)
+
+    assert set(stuck_wakes(queue)) == {("owner/repo", "2")}
+    assert [job.request.ticket_id for job in delivery.jobs] == ["2"]
+    assert source.ended == 1
+    with queue.connect() as connection:
+        errors = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchall()
+    assert [(row["repo"], row["ticket_id"], row["error"]) for row in errors] == [
+        ("owner/bad", "1", "stuck-wake:TypeError")
+    ]
+    assert "Traceback (most recent call last)" in errors[0]["detail"]
+    assert "in failing" in errors[0]["detail"]
+    assert errors[0]["detail"].endswith("TypeError: stuck row is broken")
+    assert "TypeError: stuck row is broken" in capsys.readouterr().err
+
+
+def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenGithub(CycleSource):
+        def github_candidates(self, label_prefix: str, exclude=()) -> tuple[TrackedTicket, ...]:
+            raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
+
+    dispatcher.poll_once(BrokenGithub())
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("github", "-", "RuntimeError")
+    assert "in github_candidates" in row["detail"]
+    assert "RuntimeError: gh exploded" in row["detail"]
+    assert "ghp_abcdefghijklmnop" not in row["detail"]
+
+
+def test_poll_loop_error_writes_its_traceback_to_poll_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    class BrokenEnd(CycleSource):
+        def end_cycle(self) -> None:
+            raise ValueError("end of cycle failed")
+
+    PollLoop(dispatcher, BrokenEnd(), sleep=lambda _seconds: None).run(
+        max_polls=1,
+        on_error=lambda exc: dispatcher.record_poll_exception("poll", "-", exc),
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT repo, ticket_id, error, detail FROM poll_errors"
+        ).fetchone()
+    assert (row["repo"], row["ticket_id"], row["error"]) == ("poll", "-", "ValueError")
+    assert "in end_cycle" in row["detail"]
+    assert row["detail"].endswith("ValueError: end of cycle failed")
+    assert "ValueError: end of cycle failed" in capsys.readouterr().err
+
+
+def test_poll_errors_gains_a_detail_column_on_an_existing_database(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE poll_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                error TEXT NOT NULL,
+                recorded_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO poll_errors (repo, ticket_id, error, recorded_at) "
+            "VALUES ('poll', '-', 'TypeError', 1)"
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.record_poll_exception("poll", "-", RuntimeError("after migration"))
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT error, detail FROM poll_errors ORDER BY id"
+        ).fetchall()
+    assert rows[0]["error"] == "TypeError"
+    assert rows[0]["detail"] is None
+    assert rows[1]["error"] == "RuntimeError"
+    assert rows[1]["detail"] == "RuntimeError: after migration"
+
+
+def test_poll_error_detail_keeps_the_newest_frames_within_the_cap(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+
+    def recurse(depth: int) -> None:
+        if depth == 0:
+            raise RuntimeError("bottom " + "x" * 10000)
+        recurse(depth - 1)
+
+    try:
+        recurse(50)
+    except RuntimeError as exc:
+        dispatcher.record_poll_exception("poll", "-", exc)
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert len(detail) <= 4000
+    assert detail.endswith("x" * 100)
+
+
+CANARY = "hunter" + "2"
+CREDENTIAL_BODIES = (
+    json.dumps({"password": CANARY}),
+    json.dumps({"client_secret": CANARY, "message": "Bad credentials"}),
+    json.dumps({"token": f"{CANARY} with spaces"}),
+    repr({"api_key": CANARY}),
+    f"Authorization: Bearer {CANARY}",
+    f"password={CANARY}",
+    json.dumps({"credentials": {"password": CANARY}}),
+    json.dumps({"credentials": [CANARY]}),
+    json.dumps({"auth": {"user": "bot", "pass": CANARY}}),
+    json.dumps({"errors": [{"extensions": {"secret": CANARY}}]}, indent=2),
+    repr({"credentials": {"password": CANARY}}),
+    f"<html><input name=pass value={CANARY}></html>",
+    json.dumps(json.dumps({"credentials": {"password": CANARY}}))
+    .replace("{", r"\u007b")
+    .replace("}", r"\u007d"),
+    json.dumps(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}})),
+    quote(json.dumps({"credentials": {"password": CANARY}}), safe='{}":, '),
+    "%7B%22credentials%22: %7B%22password%22: %22" + CANARY + "%22%7D%7D",
+    "&#123;&quot;credentials&quot;: &#123;&quot;password&quot;: &quot;"
+    + CANARY
+    + "&quot;&#125;&#125;",
+    r"\x7b'credentials': \x7b'password': '" + CANARY + r"'\x7d\x7d",
+    f"credentials: password = {CANARY}",
+    f"token: password = {CANARY}",
+    f"session cookie: auth key {CANARY}",
+    f"bad credentials for user bot pass {CANARY}",
+)
+
+
+class GhFailure(FakeSource):
+    def __init__(self, body: str, *tickets: TrackedTicket):
+        super().__init__(*tickets)
+        self.body = body
+
+    def linear_candidates(
+        self,
+        query: str,
+        *,
+        exclude: frozenset[str],
+        reserve: int,
+    ) -> tuple[TrackedTicket, ...]:
+        try:
+            raise RuntimeError(f"inner {self.body}")
+        except RuntimeError as inner:
+            raise ValueError(f"outer {self.body}") from inner
+
+
+def assert_canary_hidden(queue: SQLiteJobQueue, log: Path) -> None:
+    with queue.connect() as connection:
+        details = [
+            row["detail"]
+            for row in connection.execute("SELECT detail FROM poll_errors").fetchall()
+        ]
+    assert details and all(details)
+    assert not [detail for detail in details if CANARY in detail]
+    assert CANARY not in log.read_text()
+    snapshot = collect_snapshot(queue.path, log, now=100)
+    assert snapshot["poller"]["log"]["tail"]
+    assert CANARY not in json.dumps(snapshot)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(GhFailure(body))
+
+    with queue.connect() as connection:
+        detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
+    assert "The above exception was the direct cause" in detail
+    assert "RuntimeError: inner" in detail
+    assert "ValueError: outer" in detail
+    assert_canary_hidden(queue, log)
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_github_adapter_error_body_stays_out_of_detail_stderr_and_dashboard(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    actions = GitHubReviewActions(runner=lambda *_: GhResult(1, "", body))
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    tracked = ticket(comment("go", GO.format(state="building"), author="grok-login"))
+    with queue.connect() as connection:
+        connection.execute("INSERT INTO tracked_tickets VALUES ('owner/repo','42','github',0)")
+    log = tmp_path / "poller.log"
+    with log.open("w") as stream, contextlib.redirect_stderr(stream):
+        dispatcher.poll_once(FakeSource(tracked))
+
+    with queue.connect() as connection:
+        error = connection.execute("SELECT error FROM poll_errors").fetchone()[0]
+    assert error == "RetryableStateError"
+    assert_canary_hidden(queue, log)
 
 
 def test_duplicate_ready_for_one_head_does_not_increment_gate_twice(
@@ -5061,3 +5422,1163 @@ def test_t5_fenced_block_first_under_questions_queues_clarify(
     queue = _process_t5_questions(tmp_path, header, author, body)
 
     _assert_t5_waiting_max(queue)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "<!-- orch:v1 kind=go from=claude-bot role=orchestrator state=building -->",
+        "<!-- orch:v1 kind=go from=grok-bot role=builder state=building -->",
+    ],
+    ids=["wrong-from", "wrong-role"],
+)
+def test_t1_rejects_a_go_whose_from_or_role_is_wrong(
+    tmp_path: Path,
+    header: str,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    dispatcher.process(
+        ticket(comment("go-1", f"{header}\nGo.\n", author="grok-login"))
+    )
+
+    assert queue.claim("claude") is None
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'go-1'"
+        ).fetchone()[0]
+    assert outcome == "rejected-go-author"
+
+
+def test_discover_ignores_a_ticket_from_the_wrong_tracker(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    candidate = ticket(
+        comment("go-1", GO.format(state="building"), author="grok-login"),
+        tickets="linear",
+    )
+    source = FakeSource(candidate, github=(candidate,))
+
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    assert queue.claim("claude") is None
+
+
+def test_t2_does_not_match_a_six_char_pr_head(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "abcdef"
+    dispatcher.process(
+        ticket(
+            comment("ready-1", READY.format(head=head + "1"), author="claude-login"),
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+
+    assert queue.claim("codex") is None
+
+
+def test_failed_stuck_job_is_not_retried(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="stuck",
+            recipient="grok",
+            source_comment_id="stuck-source",
+            timeout_seconds=60,
+        ),
+        dedupe_key="stuck:direct",
+    )
+    wake = queue.claim("grok")
+    assert wake is not None
+    queue.finish(wake.id, owner="grok", handoff_comment_id=None)
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT attempt, state, failure_handled FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [(1, "failed", 1)]
+
+
+def test_t1_same_action_twice_is_deduped(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    body = GO.format(state="building")
+    dispatcher.process(
+        ticket(
+            comment("go-1", body, author="grok-login", created_at=1),
+            comment("go-2", body, author="grok-login", created_at=2),
+        )
+    )
+
+    with queue.connect() as connection:
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+        builds = connection.execute(
+            "SELECT count(*) FROM jobs WHERE action = 'build'"
+        ).fetchone()[0]
+    assert outcomes == {"go-1": "queued-build", "go-2": "deduped-build"}
+    assert builds == 1
+
+
+def _failed_job(queue: SQLiteJobQueue) -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=60,
+        ),
+        dedupe_key="build:g1",
+    )
+    job = queue.claim("claude")
+    assert job is not None
+    queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    return job
+
+
+def _retry_of(job: Job) -> JobRequest:
+    return replace(job.request, generation=2, attempt=2)
+
+
+def test_enqueue_retry_refuses_an_already_handled_failure(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    job = _failed_job(queue)
+    queue.mark_failure_handled(job.id)
+
+    with pytest.raises(QueueError, match="one unhandled failed job"):
+        queue.enqueue_retry(job.id, _retry_of(job), dedupe_key="retry:1")
+
+    with queue.connect() as connection:
+        rows = connection.execute("SELECT attempt FROM jobs").fetchall()
+    assert [row["attempt"] for row in rows] == [1]
+
+
+def test_enqueue_retry_runs_in_one_write_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _dispatcher, queue = setup(tmp_path)
+    job = _failed_job(queue)
+    statements: list[str] = []
+    original = queue._connect
+
+    def traced() -> sqlite3.Connection:
+        connection = original()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(queue, "_connect", traced)
+    retry, inserted = queue.enqueue_retry(
+        job.id, _retry_of(job), dedupe_key="retry:1"
+    )
+
+    assert inserted and retry.request.attempt == 2
+    writes = [
+        index
+        for index, statement in enumerate(statements)
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE"))
+    ]
+    assert statements[0] == "BEGIN IMMEDIATE"
+    assert "COMMIT" not in statements[: writes[-1]]
+
+
+def test_stuck_wake_column_migrates_an_old_schema(tmp_path: Path) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE ticket_state (
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                gate_count INTEGER NOT NULL DEFAULT 0,
+                stuck INTEGER NOT NULL DEFAULT 0,
+                stuck_reason TEXT,
+                stuck_source_comment_id TEXT,
+                timeout_seconds INTEGER,
+                generation INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (repo, ticket_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO ticket_state (
+                repo, ticket_id, stuck, stuck_reason,
+                stuck_source_comment_id, timeout_seconds
+            ) VALUES ('owner/repo', '42', 1, 'job-failed-2', 'go-1', 60)
+            """
+        )
+    dispatcher, queue = setup(tmp_path)
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(ticket_state)")
+        }
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state"
+        ).fetchone()[0]
+    assert "stuck_wake_job_id" in columns
+    assert wake is not None
+
+
+def _stuck_by_three_reds(dispatcher: Dispatcher) -> None:
+    for number in range(1, 4):
+        head = str(number) * 7
+        dispatcher.process(
+            ticket(
+                comment(
+                    f"ready-{number}",
+                    READY.format(head=head),
+                    author="claude-login",
+                ),
+                head=head,
+                ci={head: CIResult("failure")},
+            )
+        )
+
+
+def test_failing_stuck_wake_stops_after_two_and_flags_attention(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    delivery = RaisingGrokDelivery(RuntimeError("delivery unavailable"))
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    for fix in iter(lambda: queue.claim("claude"), None):
+        queue.finish(fix.id, owner="claude", handoff_comment_id=f"ready-{fix.id}")
+
+    for window in range(1, 6):
+        now[0] = 100.0 + window * 3600
+        dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        stuck = connection.execute(
+            "SELECT state FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+        attention = connection.execute(
+            "SELECT reason FROM needs_attention"
+        ).fetchall()
+    assert [row["state"] for row in stuck] == ["failed", "failed"]
+    assert [row["reason"] for row in attention] == ["stuck-wake-failing"]
+
+
+def test_missing_stuck_wake_row_is_regenerated(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM jobs WHERE action = 'stuck'")
+
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        rows = connection.execute(
+            "SELECT id FROM jobs WHERE action = 'stuck'"
+        ).fetchall()
+        wake = connection.execute(
+            "SELECT stuck_wake_job_id FROM ticket_state"
+        ).fetchone()[0]
+    assert [row["id"] for row in rows] == [wake]
+
+
+def _done_build(queue: SQLiteJobQueue, handoff: str) -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="build:verify",
+    )
+    job = queue.claim("claude")
+    assert job is not None
+    return queue.finish(job.id, owner="claude", handoff_comment_id=handoff)
+
+
+def _handoff_events(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [
+            row["event"]
+            for row in connection.execute(
+                "SELECT event FROM job_events WHERE event LIKE 'handoff-%' ORDER BY id"
+            )
+        ]
+
+
+def _attention(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [
+            row["reason"]
+            for row in connection.execute(
+                "SELECT reason FROM needs_attention ORDER BY reason"
+            )
+        ]
+
+
+def _poll_with(dispatcher: Dispatcher, *comments: Comment) -> None:
+    snapshot = ticket(*comments)
+    with dispatcher._connect() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    dispatcher.poll_once(FakeSource(snapshot))
+
+
+@pytest.mark.parametrize(
+    ("author", "body"),
+    [
+        ("someone-else", READY.format(head="a" * 40)),
+        ("codex-login", READY.format(head="a" * 40)),
+        ("claude-login", "Ready, no header.\n"),
+    ],
+    ids=["untrusted-login", "other-bot", "no-header"],
+)
+def test_done_with_an_untrusted_handoff_flags_attention(
+    tmp_path: Path,
+    author: str,
+    body: str,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
+    now[0] = 200.0
+
+    _poll_with(dispatcher, comment("ready-x", body, author=author, created_at=150))
+    _poll_with(dispatcher, comment("ready-x", body, author=author, created_at=150))
+
+    assert _handoff_events(queue) == ["handoff-unverified"]
+    assert _attention(queue) == ["unverified-handoff"]
+    with queue.connect() as connection:
+        state = connection.execute("SELECT state FROM jobs").fetchone()[0]
+    assert state == "done"
+
+
+def test_done_with_a_missing_handoff_flags_attention(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
+    now[0] = 200.0
+
+    _poll_with(dispatcher)
+
+    assert _handoff_events(queue) == ["handoff-unverified"]
+    assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_done_with_a_trusted_handoff_is_quiet(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
+    now[0] = 200.0
+
+    _poll_with(
+        dispatcher,
+        comment(
+            "ready-x",
+            READY.format(head="a" * 40),
+            author="claude-login",
+            created_at=150,
+        ),
+    )
+
+    assert _handoff_events(queue) == ["handoff-verified"]
+    assert _attention(queue) == []
+
+
+def test_handoff_finished_after_the_read_waits_for_the_next_poll(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+
+    class FinishingSource(FakeSource):
+        def tracked_tickets(self, refs):
+            found = super().tracked_tickets(refs)
+            if not _handoff_events(queue) and queue.claim("claude") is not None:
+                with queue.connect() as connection:
+                    job_id = connection.execute("SELECT id FROM jobs").fetchone()[0]
+                queue.finish(job_id, owner="claude", handoff_comment_id="ready-x")
+            return found
+
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="build:verify",
+    )
+    with dispatcher._connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    dispatcher.poll_once(FinishingSource(ticket()))
+
+    assert _handoff_events(queue) == []
+    assert _attention(queue) == []
+
+
+def test_a_job_finished_after_its_ticket_shipped_is_still_verified(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    seed_builder_job(queue)
+    head = "a" * 40
+    snapshot = ticket(
+        comment("ready", READY.format(head=head), author="claude-login", created_at=1),
+        comment(
+            "approve",
+            VERDICT.format(round="1/3", head=head, verdict="APPROVE", risk="high"),
+            author="codex-login",
+            created_at=2,
+        ),
+        head=head,
+        ci={head: CIResult("success")},
+    )
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    dispatcher.process(replace(snapshot, comments=snapshot.comments[:1]))
+    review = queue.claim("codex")
+    assert review is not None
+    dispatcher.process(snapshot)
+    assert dispatcher._tracked_refs() == ()
+    now[0] = 200
+    queue.finish(review.id, owner="codex", handoff_comment_id="nonexistent")
+    now[0] = 300
+    source = FakeSource(snapshot)
+
+    dispatcher.poll_once(source)
+    assert [ref.allow_merged for ref in source.last_refs] == [True]
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    with queue.connect() as connection:
+        events = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event FROM job_events WHERE job_id = ? AND event LIKE 'handoff-%'",
+                (review.id,),
+            )
+        ]
+    assert events == ["handoff-unverified"]
+    assert _attention(queue) == ["unverified-handoff"]
+
+
+def test_a_shipped_ticket_with_nothing_to_verify_is_not_read(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _done_build(queue, "ready-x")
+    now[0] = 200.0
+    _poll_with(
+        dispatcher,
+        comment("ready-x", READY.format(head="a" * 40), author="claude-login", created_at=150),
+    )
+    dispatcher.record_terminal("owner/repo", "42", "merged")
+    source = FakeSource(ticket())
+
+    dispatcher.poll_once(source)
+
+    assert source.calls == 1
+    assert source.last_refs == ()
+    assert _handoff_events(queue) == ["handoff-verified"]
+
+
+def test_off_loop_verification_reads_the_newest_tickets_first_and_is_capped(
+    tmp_path: Path,
+) -> None:
+    from lib.dispatcher import OFF_LOOP_VERIFY_READS
+
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    numbers = [str(50 + index) for index in range(OFF_LOOP_VERIFY_READS + 2)]
+    for number in numbers:
+        queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id=number,
+                action="build",
+                recipient="claude",
+                source_comment_id=f"go-{number}",
+                timeout_seconds=3600,
+            ),
+            dedupe_key=f"build:{number}",
+        )
+        job = queue.claim("claude")
+        now[0] += 1
+        queue.finish(job.id, owner="claude", handoff_comment_id=f"ready-{number}")
+        dispatcher.record_terminal("owner/repo", number, "merged")
+        with queue.connect() as connection:
+            connection.execute(
+                "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+                "VALUES ('owner/repo', ?, 'github', 0)",
+                (number,),
+            )
+    now[0] += 1
+    source = FakeSource(
+        *(
+            ticket(
+                comment(
+                    f"ready-{number}",
+                    READY.format(head="a" * 40),
+                    author="claude-login",
+                ),
+                ticket_id=number,
+            )
+            for number in numbers
+        )
+    )
+
+    dispatcher.poll_once(source)
+    assert [ref.ticket_id for ref in source.last_refs] == numbers[::-1][
+        :OFF_LOOP_VERIFY_READS
+    ]
+    dispatcher.poll_once(source)
+    assert [ref.ticket_id for ref in source.last_refs] == numbers[:2][::-1]
+    dispatcher.poll_once(source)
+
+    assert source.last_refs == ()
+    assert _handoff_events(queue) == ["handoff-verified"] * len(numbers)
+    assert _attention(queue) == []
+
+
+@pytest.mark.parametrize(
+    ("author", "attention"),
+    [("grok-login", ["edited-comment"]), ("someone-else", [])],
+)
+def test_edited_orch_comment_is_rejected(
+    tmp_path: Path,
+    author: str,
+    attention: list[str],
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    edited = replace(
+        comment("go-1", GO.format(state="building"), author=author, created_at=1),
+        edited_at=5,
+    )
+
+    dispatcher.process(ticket(edited))
+
+    assert queue.claim("claude") is None
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'go-1'"
+        ).fetchone()[0]
+    assert outcome == "rejected-edited"
+    assert _attention(queue) == attention
+
+
+def test_edit_after_handling_is_not_reread(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment("go-1", GO.format(state="building"), author="grok-login")
+    dispatcher.process(ticket(go))
+    dispatcher.process(ticket(replace(go, edited_at=5)))
+
+    assert queue.claim("claude") is not None
+    assert _attention(queue) == []
+
+
+def _busy_dispatcher(
+    tmp_path: Path,
+    now: list[float],
+    slot_max: int,
+) -> tuple[Dispatcher, SQLiteJobQueue]:
+    from lib.machines_yml import Device, MachinesConfig
+
+    class Devices:
+        config = MachinesConfig(
+            devices=(
+                Device(name="box", slot_max=slot_max, harnesses={"claude": "claude-bot"}, local=True),
+            )
+        )
+
+        def reconcile(self, now, on_offline):
+            return None
+
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: now[0])
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        devices=Devices(),
+    )
+    return dispatcher, queue
+
+
+def _queue_two_builds(queue: SQLiteJobQueue) -> tuple[Job, Job]:
+    def build(number: int) -> Job:
+        return queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id=str(number),
+                action="build",
+                recipient="claude",
+                source_comment_id=f"go-{number}",
+                timeout_seconds=60,
+            ),
+            dedupe_key=f"build:{number}",
+        )
+
+    first = build(1)
+    running = queue.claim("claude")
+    assert running is not None and running.id == first.id
+    return running, build(2)
+
+
+def test_queued_job_waits_without_timing_out_while_the_bot_is_busy(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    dispatcher, queue = _busy_dispatcher(tmp_path, now, slot_max=1)
+    running, waiting = _queue_two_builds(queue)
+    queue.heartbeat(running.id, owner="claude")
+
+    for minute in (1, 2, 3):
+        now[0] = minute * 60
+        queue.heartbeat(running.id, owner="claude")
+        dispatcher.reconcile_jobs()
+
+    states = {job.id: job.state for job in queue.outstanding()}
+    assert states == {running.id: "running", waiting.id: "queued"}
+    queue.finish(running.id, owner="claude", handoff_comment_id="ready-1")
+    now[0] = 3 * 60 + 59
+    dispatcher.reconcile_jobs()
+    assert queue.claim("claude").id == waiting.id
+
+
+def test_queued_job_times_out_when_a_slot_is_free(tmp_path: Path) -> None:
+    now = [0.0]
+    dispatcher, queue = _busy_dispatcher(tmp_path, now, slot_max=2)
+    running, waiting = _queue_two_builds(queue)
+
+    now[0] = 60
+    queue.heartbeat(running.id, owner="claude")
+    dispatcher.reconcile_jobs()
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT state FROM jobs WHERE id = ?", (waiting.id,)
+        ).fetchone()[0]
+    assert state == "failed"
+
+
+ABANDONED = (
+    "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator state=abandoned -->\n"
+    "Max dropped it.\n"
+)
+
+
+def test_answers_abandoned_from_grok_ends_the_ticket(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets (repo, ticket_id, tracker, tracked_at) "
+            "VALUES ('owner/repo', '42', 'github', 0)"
+        )
+
+    dispatcher.process(
+        ticket(comment("abandon-1", ABANDONED, author="grok-login", created_at=9))
+    )
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state"
+        ).fetchone()[0]
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'abandon-1'"
+        ).fetchone()[0]
+    assert (state, outcome) == ("abandoned", "abandoned")
+    assert actions.states[-1] == "abandoned"
+    assert dispatcher._tracked_refs() == ()
+
+
+@pytest.mark.parametrize("with_approve", [True, False], ids=["approve", "ready-only"])
+def test_handoffs_after_an_accepted_abandonment_do_nothing(
+    tmp_path: Path, with_approve: bool
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    seed_builder_job(queue)
+    head = "a" * 40
+    later = [
+        comment("ready", READY.format(head=head), author="claude-login", created_at=2),
+    ]
+    if with_approve:
+        later.append(
+            comment(
+                "approve",
+                VERDICT.format(round="1/3", head=head, verdict="APPROVE", risk="high"),
+                author="codex-login",
+                created_at=3,
+            )
+        )
+
+    dispatcher.process(
+        ticket(
+            comment("drop", ABANDONED, author="grok-login", created_at=1),
+            *later,
+            head=head,
+            ci={head: CIResult("success")},
+        )
+    )
+    dispatcher.process(
+        ticket(
+            comment("go-2", GO.format(state="building"), author="grok-login", created_at=4),
+            head=head,
+        )
+    )
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state"
+        ).fetchone()[0]
+        outcomes = dict(
+            connection.execute(
+                "SELECT comment_id, outcome FROM handled_comments"
+            ).fetchall()
+        )
+    assert state == "abandoned"
+    assert actions.merges == []
+    assert actions.states[-1] == "abandoned"
+    assert queue.claim("codex") is None
+    assert queue.claim("claude") is None
+    assert outcomes == {
+        "drop": "abandoned",
+        **{item.id: "ticket-abandoned" for item in later},
+        "go-2": "ticket-abandoned",
+    }
+
+
+def _go_poll(dispatcher: Dispatcher, queue: SQLiteJobQueue) -> Comment:
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO tracked_tickets VALUES ('owner/repo', '42', 'github', 0)"
+        )
+    go = comment("go", GO.format(state="building"), author="grok-login", created_at=1)
+    dispatcher.poll_once(FakeSource(ticket(go)))
+    return go
+
+
+def _drop_poll(dispatcher: Dispatcher, *before: Comment) -> None:
+    drop = comment("drop", ABANDONED, author="grok-login", created_at=9)
+    dispatcher.poll_once(FakeSource(ticket(*before, drop)))
+
+
+def _abandon_while_attempt_1_runs(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    running = queue.claim("claude")
+    assert running is not None
+    _drop_poll(dispatcher, go)
+    queue.finish(running.id, owner="claude", handoff_comment_id=None)
+
+
+def _abandon_while_attempt_2_runs(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    first = queue.claim("claude")
+    assert first is not None
+    queue.finish(first.id, owner="claude", handoff_comment_id=None)
+    dispatcher.poll_once(FakeSource(ticket(go)))
+    second = queue.claim("claude")
+    assert second is not None and second.request.attempt == 2
+    _drop_poll(dispatcher, go)
+    queue.finish(second.id, owner="claude", handoff_comment_id=None)
+
+
+def _abandon_with_a_build_still_queued(dispatcher, queue, delivery) -> None:
+    go = _go_poll(dispatcher, queue)
+    _drop_poll(dispatcher, go)
+
+
+def _abandon_with_a_failing_stuck_wake(dispatcher, queue, delivery) -> None:
+    seed_builder_job(queue)
+    _stuck_by_three_reds(dispatcher)
+    for fix in iter(lambda: queue.claim("claude"), None):
+        queue.finish(fix.id, owner="claude", handoff_comment_id=f"ready-{fix.id}")
+    dispatcher.reconcile_jobs()
+    assert delivery.jobs
+    dispatcher.process(
+        ticket(comment("drop", ABANDONED, author="grok-login", created_at=9))
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        _abandon_while_attempt_1_runs,
+        _abandon_while_attempt_2_runs,
+        _abandon_with_a_build_still_queued,
+        _abandon_with_a_failing_stuck_wake,
+    ],
+    ids=["attempt-1-fails", "attempt-2-fails", "queued-build", "failing-stuck-wake"],
+)
+def test_reconciliation_starts_no_work_on_an_abandoned_ticket(
+    tmp_path: Path, scenario
+) -> None:
+    now = [100.0]
+    delivery = RaisingGrokDelivery(RuntimeError("delivery unavailable"))
+    dispatcher, queue = setup(tmp_path, now, grok_delivery=delivery)
+    scenario(dispatcher, queue, delivery)
+    with queue.connect() as connection:
+        known = {row[0] for row in connection.execute("SELECT id FROM jobs")}
+    delivered = len(delivery.jobs)
+
+    for window in range(6):
+        now[0] = 100.0 + window * 7200
+        dispatcher.poll_once(FakeSource())
+        assert all(
+            queue.claim(recipient) is None for recipient in ("claude", "codex", "grok")
+        )
+
+    with queue.connect() as connection:
+        workflow = connection.execute(
+            "SELECT workflow_state, stuck FROM ticket_state"
+        ).fetchone()
+        new = [
+            tuple(row)
+            for row in connection.execute("SELECT id, action, state FROM jobs")
+            if row["id"] not in known
+        ]
+        live = connection.execute(
+            "SELECT action, state FROM jobs WHERE state IN ('queued', 'running')"
+        ).fetchall()
+    assert workflow["workflow_state"] == "abandoned"
+    assert new == []
+    assert [tuple(row) for row in live] == []
+    assert len(delivery.jobs) == delivered
+    if scenario is _abandon_while_attempt_2_runs:
+        assert not workflow["stuck"]
+
+
+def _queue_claim(queue: SQLiteJobQueue) -> Job | None:
+    return queue.claim("claude")
+
+
+def _pool_claim(queue: SQLiteJobQueue) -> Job | None:
+    pool = DevicePool(
+        queue,
+        MachinesConfig(
+            devices=(
+                Device(
+                    name="box",
+                    slot_max=2,
+                    harnesses={"claude": "claude-bot"},
+                    local=True,
+                ),
+            )
+        ),
+    )
+    claimed = pool.claim("claude")
+    return None if claimed is None else claimed[0]
+
+
+@pytest.mark.parametrize("claim", [_queue_claim, _pool_claim], ids=["queue", "pool"])
+def test_no_claim_takes_queued_work_once_abandonment_commits(
+    tmp_path: Path, claim
+) -> None:
+    seen: list[tuple[Job | None, list[tuple]]] = []
+
+    def jobs() -> list[tuple]:
+        with queue.connect() as connection:
+            return [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT action, state, failure_handled FROM jobs"
+                )
+            ]
+
+    class ClaimOnAbandon(FakeReviewActions):
+        def set_state(self, ticket: TrackedTicket, state: str) -> None:
+            super().set_state(ticket, state)
+            if state == "abandoned":
+                seen.append((claim(queue), jobs()))
+
+    dispatcher, queue = setup(tmp_path, review_actions=ClaimOnAbandon())
+    go = _go_poll(dispatcher, queue)
+    _drop_poll(dispatcher, go)
+
+    assert seen == [(None, [("build", "failed", 1)])]
+    assert jobs() == [("build", "failed", 1)]
+
+
+@pytest.mark.parametrize("claim", [_queue_claim, _pool_claim], ids=["queue", "pool"])
+def test_a_released_claim_on_an_abandoned_ticket_is_never_reclaimed(
+    tmp_path: Path, claim
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = _go_poll(dispatcher, queue)
+    held = queue.claim("claude")
+    assert held is not None
+    _drop_poll(dispatcher, go)
+
+    queue.release(held.id, owner="claude")
+
+    assert claim(queue) is None
+
+
+def test_answers_abandoned_from_an_untrusted_login_is_ignored(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+
+    dispatcher.process(
+        ticket(comment("abandon-1", ABANDONED, author="someone-else"))
+    )
+
+    with queue.connect() as connection:
+        state = connection.execute(
+            "SELECT workflow_state FROM ticket_state"
+        ).fetchone()
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'abandon-1'"
+        ).fetchone()[0]
+    assert state is None or state[0] != "abandoned"
+    assert outcome == "rejected-answers-author"
+    assert "abandoned" not in actions.states
+
+
+# --- #71: discovery never reviews a head that already has its verdict ----------
+
+HEAD_71 = "d7df4f9" + "5" * 33
+NEW_HEAD_71 = "b0b0b0b" + "6" * 33
+
+
+def _poll_71(tmp_path: Path, now: list[float]):
+    """A ready_starts_review PR, polled through poll_once (discovery included)."""
+    from dataclasses import replace
+
+    dispatcher, queue = setup(tmp_path, now)
+
+    def poll(*comments: Comment, head: str = HEAD_71) -> None:
+        ci = {HEAD_71: CIResult("success"), NEW_HEAD_71: CIResult("success")}
+        snapshot = replace(ticket(*comments, head=head, ci=ci), ready_starts_review=True)
+        dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+
+    return dispatcher, queue, poll
+
+
+def _reviews_71(queue: SQLiteJobQueue) -> list[tuple[str, str, int]]:
+    with queue.connect() as connection:
+        return [
+            (str(row["head"]), str(row["state"]), int(row["attempt"]))
+            for row in connection.execute(
+                "SELECT * FROM jobs WHERE action = 'review' ORDER BY created_at, rowid"
+            )
+        ]
+
+
+def _ready_71(comment_id: str, head: str, created_at: float) -> Comment:
+    return comment(comment_id, READY.format(head=head), author="claude-login", created_at=created_at)
+
+
+def _revise_71(created_at: float, round_: str = "1/3") -> Comment:
+    return comment(
+        f"revise-{round_[0]}",
+        VERDICT.format(round=round_, head=HEAD_71, verdict="REVISE", risk="high"),
+        author="codex-login",
+        created_at=created_at,
+    )
+
+
+def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path) -> None:
+    """The #65 case: after a restart, an r1 ready its review already answered.
+
+    Failed on main before #106: discovery queued a round-1 review of a head
+    whose REVISE was posted after the ready.
+    """
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert _outcomes(queue)["ready-1"] == "answered-review"
+
+
+def test_71_a_ready_for_a_replaced_head_queues_no_review(tmp_path: Path) -> None:
+    """Passed on main before #106 (stale-ready-head); kept as a regression test."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120), head=NEW_HEAD_71)
+    assert _reviews_71(queue) == []
+
+
+def test_71_a_ready_posted_after_the_verdict_is_reviewed_as_the_next_round(
+    tmp_path: Path,
+) -> None:
+    """A fix that changed nothing re-readies the same head: round 2 runs.
+
+    Passed on main before #106; it guards the stale-ready rule above.
+    """
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None and review.request.action == "review"
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None and fix.request.action == "fix"
+    now[0] = 140
+    again = _ready_71("ready-2", HEAD_71, 140)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again)
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+    with queue.connect() as connection:
+        detail = connection.execute(
+            "SELECT detail FROM jobs WHERE action = 'review' ORDER BY created_at DESC, rowid DESC"
+        ).fetchone()[0]
+    assert json.loads(detail)["round"] == "2/3"
+
+
+def test_71_a_failed_review_of_a_replaced_head_is_not_retried(tmp_path: Path) -> None:
+    """T6 never retries a review for a head that is no longer the PR head.
+
+    Failed on main before #106: with no fix job open, T6 queued the retry
+    review of the old head.
+    """
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 150
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    poll(ready, head=NEW_HEAD_71)  # the builder pushed; no ready for it yet
+    assert _reviews_71(queue) == [(HEAD_71, "failed", 1)]
+    assert queue.unhandled_failures() == ()
+    with queue.connect() as connection:
+        events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
+    assert events == ["retry-skipped"]
+
+
+def _round_two_ready_then(tmp_path: Path, late: Comment) -> SQLiteJobQueue:
+    """Round 1 REVISE, a no-change fix readies the head again, then `late` lands."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    fix = queue.claim("claude")
+    assert fix is not None
+    now[0] = 160
+    again = _ready_71("ready-2", HEAD_71, 140)
+    queue.finish(fix.id, owner="claude", handoff_comment_id=again.id)
+    poll(ready, revise, again, late)
+    return queue
+
+
+def _outcomes(queue: SQLiteJobQueue) -> dict[str, str]:
+    with queue.connect() as connection:
+        return dict(connection.execute("SELECT comment_id, outcome FROM handled_comments"))
+
+
+def test_71_a_late_duplicate_verdict_does_not_answer_the_next_ready(tmp_path: Path) -> None:
+    """Codex PR #112 r1 F1: a repeat of the round-1 REVISE is not round 2's verdict."""
+    late = comment("revise-dup", _revise_71(120).body, author="codex-login", created_at=150)
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["revise-dup"] == "duplicate-verdict"
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_late_verdict_for_an_earlier_round_does_not_answer_the_next_ready(
+    tmp_path: Path,
+) -> None:
+    """Any verdict below the round a ready asks for answered an earlier ready."""
+    late = comment(
+        "approve-1",
+        VERDICT.format(round="1/3", head=HEAD_71, verdict="APPROVE", risk="high"),
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    assert _outcomes(queue)["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+@pytest.mark.parametrize(
+    ("header", "outcome"),
+    [
+        (f"head={HEAD_71} verdict=REVISE", "stale-revise"),
+        (f"round=4/3 head={HEAD_71} verdict=REVISE", "rejected-over-cap"),
+        (f"round=4/3 head={HEAD_71} verdict=APPROVE", "rejected-over-cap"),
+    ],
+    ids=["roundless", "over-cap-revise", "over-cap-approve"],
+)
+def test_71_a_late_verdict_that_cannot_act_does_not_answer_the_next_ready(
+    tmp_path: Path, header: str, outcome: str
+) -> None:
+    """T3 and T4 act on no verdict without a round or above the cap, so none
+    answers a ready (Codex PR #112 r2 F1)."""
+    late = comment(
+        "late",
+        f"<!-- orch:v1 kind=verdict from=codex-bot role=reviewer {header} risk=high -->"
+        "\nVerdict.\n",
+        author="codex-login",
+        created_at=150,
+    )
+    queue = _round_two_ready_then(tmp_path, late)
+    outcomes = _outcomes(queue)
+    assert outcomes["late"] == outcome
+    assert outcomes["ready-2"] == "queued-review"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1), (HEAD_71, "queued", 1)]
+
+
+def test_71_a_ready_first_seen_after_its_verdict_moved_the_round_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A second ready for the head, listed only once its round-1 REVISE was
+    handled, is still answered by that REVISE: no round-2 review of it."""
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    now[0] = 120
+    revise = _revise_71(120)
+    queue.finish(review.id, owner="codex", handoff_comment_id=revise.id)
+    poll(ready, revise)
+    late_listed = _ready_71("ready-b", HEAD_71, 110)
+    poll(ready, late_listed, revise)
+    assert _outcomes(queue)["ready-b"] == "stale-ready-verdict"
+    assert _reviews_71(queue) == [(HEAD_71, "done", 1)]

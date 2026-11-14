@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import (
@@ -383,13 +383,17 @@ class DevicePool:
         start: str | None,
         alive: Callable[[int | None, str | None], bool],
         token_hash: str | None = None,
-    ) -> None:
+    ) -> Placement:
         """Record the box process (`orch job run`) that runs a placed job.
 
         Refused while another recorded runner is still alive, so two runners
         never share one slot (the later one could release it under the other).
         `token_hash` (#96) is written in the same update, replacing any
         earlier run's, so only this run's token can finish the job.
+
+        Returns the slot as read inside that transaction, with this runner
+        on it (#70 F2.1): a worker an earlier runner recorded after the
+        caller's own read is on it, so takeover is decided on this row.
         """
 
         def guard(row: sqlite3.Row) -> None:
@@ -404,13 +408,14 @@ class DevicePool:
                     "a second run of a running job is refused and nothing was started"
                 )
 
-        self._update_slot(
+        row = self._update_slot(
             job_id,
             owner,
             "runner_pid = ?, runner_start = ?, run_token_hash = ?",
             (pid, start, token_hash),
             guard=guard,
         )
+        return replace(_placement(row), runner_pid=pid, runner_start=start)
 
     def attach_worker(
         self,
@@ -421,27 +426,44 @@ class DevicePool:
         start: str | None = None,
         remote: bool = False,
         tag: str | None = None,
+        runner: int | None = None,
     ) -> str | None:
         """Record the worker: a local command's pid, or that a remote start began.
 
         A remote start is recorded, with its worker tag (a fresh one unless
         given), before ssh is spawned, so a runner that dies mid-spawn still
         leaves the device to confirm the worker gone. Returns the tag.
+
+        With `runner` (#70 F2.1), refused unless that runner still runs the
+        slot and the slot names no worker yet: a worker's identity is never
+        overwritten.
         """
+
+        def guard(row: sqlite3.Row) -> None:
+            slot = _placement(row)
+            if slot.runner_pid != runner:
+                raise QueueError(
+                    f"job {job_id} is now run by pid {slot.runner_pid}, not {runner}; "
+                    "its worker was not recorded"
+                )
+            if slot.worker_pid is not None or slot.remote_started:
+                named = slot.worker_pid if slot.worker_pid is not None else f"tag {slot.worker_tag}"
+                raise QueueError(
+                    f"job {job_id}'s slot already names worker {named}; "
+                    "it is never overwritten"
+                )
+
+        checked = guard if runner is not None else None
         if remote:
             worker_tag = tag if tag is not None else new_tag()
             self._update_slot(
-                job_id, owner, "remote_started = 1, worker_tag = ?", (worker_tag,)
+                job_id, owner, "remote_started = 1, worker_tag = ?", (worker_tag,), guard=checked
             )
             return worker_tag
-        else:
-            self._update_slot(
-                job_id,
-                owner,
-                "worker_pid = ?, worker_start = ?",
-                (pid, start),
-            )
-            return None
+        self._update_slot(
+            job_id, owner, "worker_pid = ?, worker_start = ?", (pid, start), guard=checked
+        )
+        return None
 
     def forget_worker(self, job_id: str, *, owner: str, runner: int, earlier: Placement) -> None:
         """Drop the record of an earlier runner's worker, now confirmed gone.
@@ -556,7 +578,8 @@ class DevicePool:
         values: tuple[object, ...],
         *,
         guard: Callable[[sqlite3.Row], None] | None = None,
-    ) -> None:
+    ) -> sqlite3.Row:
+        """Update one slot in its own transaction; returns the row read before the update."""
         if owner not in HARNESSES:
             raise QueueError(f"unknown owner {owner!r}")
         with self.queue.connect() as connection:
@@ -579,6 +602,7 @@ class DevicePool:
                 (*values, job_id),
             )
             connection.commit()
+        return row
 
     def used(self) -> dict[str, int]:
         with self.queue.connect() as connection:

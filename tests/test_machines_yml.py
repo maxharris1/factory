@@ -37,6 +37,7 @@ def remote(**fields: str) -> str:
         "harnesses": "{codex: codex-bot}",
         "workdir_root": "/home/work",
         "ssh_alias": "pc-{bot}",
+        "factory_root": "/srv/factory",
         **fields,
     }
     lines = [f"  - name: {values.pop('name')}"]

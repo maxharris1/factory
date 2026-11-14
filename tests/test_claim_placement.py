@@ -21,7 +21,7 @@ import pytest
 from lib.dashboard import collect_snapshot
 from lib.device_pool import DevicePool, used_slots
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
-from lib.queue import JobRequest, SQLiteJobQueue
+from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 from lib.status import build_status, device_rows, render
 from lib.wait import WaitError, claim_once, wait_for_job
 from tests.test_dashboard import NOW, add_job, seeded
@@ -198,3 +198,113 @@ def test_the_dashboard_counts_an_unplaced_job_on_the_box_device(tmp_path: Path) 
     box = next(device for device in slots["devices"] if device["name"] == "box")
     assert box["held"] == 4  # 2 placed + 2 with no placement: one count, over slot_max
     assert slots["box"] == {"running": 4, "slot_max": 3}
+
+
+# --- #70 F2.1: takeover is decided on the row attach_runner read ------------
+
+
+class _CheckTransport:
+    """A device whose check answers `code` (1: the tagged worker runs)."""
+
+    def __init__(self, code: int):
+        self.code = code
+        self.calls = 0
+
+    def run(self, argv, *, timeout: float) -> int:
+        self.calls += 1
+        return self.code
+
+
+def _pc_machines(tmp_path: Path) -> MachinesConfig:
+    path = tmp_path / "machines-pc.yml"
+    path.write_text(
+        "devices:\n"
+        "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 1\n"
+        "    harnesses: {codex: codex-bot}\n"
+        f"    workdir_root: {tmp_path}/work\n    ssh_alias: pc-{{bot}}\n"
+        "    factory_root: /srv/factory\n",
+        encoding="utf-8",
+    )
+    config, findings = load_machines_yml(path, allow_placeholders=True)
+    assert config is not None, findings
+    return config
+
+
+RUNNER_A, RUNNER_B, WORKER_W = 1001, 2002, 3003
+WORKER_TAG = "a" * 32
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["box", "remote"])
+def test_overlapping_runner_refuses_after_worker_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: bool
+) -> None:
+    """Runner B reads the slot; A records worker W and dies; B resumes.
+
+    B must refuse, and W's identity must stay on the slot.
+    """
+    from lib import placed_run
+
+    if remote:
+        db = tmp_path / "orch.db"
+        queue = SQLiteJobQueue(db, clock=time.time)
+        config = _pc_machines(tmp_path)
+        pool = DevicePool(queue, config)
+        owner, bot = "codex", "codex-bot"
+    else:
+        queue, pool, _ = setup(tmp_path)
+        config = pool.config
+        owner, bot = "claude", "claude-bot"
+    job_id = enqueue(queue, "a", recipient=owner)
+    assert pool.claim(owner) is not None
+    dead: set[int] = set()
+
+    def alive(pid: int | None, _start: str | None) -> bool:
+        return pid is not None and pid not in dead
+
+    pool.attach_runner(job_id, owner=owner, pid=RUNNER_A, start=None, alive=alive)
+    real_placement = pool.placement
+
+    def paused_after_read(read_job_id: str):
+        snapshot = real_placement(read_job_id)
+        # B is paused here: A records its worker W, then dies.
+        if remote:
+            pool.attach_worker(job_id, owner=owner, remote=True, tag=WORKER_TAG)
+        else:
+            pool.attach_worker(job_id, owner=owner, pid=WORKER_W, start=None)
+        dead.add(RUNNER_A)
+        return snapshot
+
+    monkeypatch.setattr(pool, "placement", paused_after_read)
+    transport = _CheckTransport(1)
+
+    with pytest.raises(placed_run.PlacementError, match="earlier worker"):
+        placed_run.prepare(
+            pool, config, job_id=job_id, bot=bot, owner=owner, worktree=False,
+            log=[].append, transport=transport, alive=alive, pid=RUNNER_B,
+        )
+
+    slot = real_placement(job_id)
+    assert slot is not None
+    if remote:
+        assert (slot.remote_started, slot.worker_tag) == (True, WORKER_TAG)
+        assert transport.calls == 1
+    else:
+        assert slot.worker_pid == WORKER_W
+
+
+def test_attach_worker_refuses_to_overwrite_another_worker(tmp_path: Path) -> None:
+    queue, pool, _ = setup(tmp_path)
+    job_id = enqueue(queue, "a")
+    assert pool.claim("claude") is not None
+    pool.attach_runner(job_id, owner="claude", pid=RUNNER_A, start=None, alive=lambda *_: False)
+    pool.attach_worker(job_id, owner="claude", pid=WORKER_W, start=None, runner=RUNNER_A)
+
+    with pytest.raises(QueueError, match="already names worker"):
+        pool.attach_worker(job_id, owner="claude", pid=4004, start=None, runner=RUNNER_A)
+    pool.attach_runner(job_id, owner="claude", pid=RUNNER_B, start=None, alive=lambda *_: False)
+    with pytest.raises(QueueError, match="run by"):
+        pool.attach_worker(job_id, owner="claude", remote=True, tag="t" * 32, runner=RUNNER_A)
+
+    slot = pool.placement(job_id)
+    assert slot is not None
+    assert (slot.worker_pid, slot.remote_started) == (WORKER_W, False)

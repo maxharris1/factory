@@ -24,6 +24,7 @@ from lib.feeder import (
     feeder_items,
     go_state_for,
 )
+from lib.feeder_gates import Progress, Ref, RefStatus
 from lib.handoff import Handoff, format_comment, parse_comment
 from lib.machines_yml import load_machines_yml
 from lib.orch_yml import load_orch_yml
@@ -116,6 +117,7 @@ def machines(tmp_path: Path, *, box: int = 3, pc: int = 0, mac: int = 0):
                 "    harnesses: {claude: claude-bot, codex: codex-bot}",
                 "    workdir_root: /home/{bot}/factory-work",
                 f"    ssh_alias: {name}-{{bot}}",
+                "    factory_root: /home/{bot}/factory",
             ]
     path = tmp_path / "machines.yml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -136,6 +138,8 @@ class FakeGitHub:
         self.posted: dict[tuple[str, int], list[Comment]] = {}
         self.calls: list[str] = []
         self.fail: dict[str, int] = {}
+        self.statuses: dict[Ref, RefStatus] = {}
+        self.status_reads: list[frozenset[Ref]] = []
         self._next_pr = 500
         self._next_comment = 9000
 
@@ -201,6 +205,11 @@ class FakeGitHub:
 
     def comments(self, repo: str, number: int) -> list[Comment]:
         return list(self.posted.get((repo, number), []))
+
+    def ref_statuses(self, refs) -> dict[Ref, RefStatus]:
+        self._maybe_fail("statuses")
+        self.status_reads.append(frozenset(refs))
+        return {ref: self.statuses.get(ref, RefStatus(Progress.MISSING)) for ref in refs}
 
     def post_comment(self, repo: str, number: int, body: str) -> str:
         self._maybe_fail("comment")
@@ -670,7 +679,7 @@ def test_feeder_counts_eligible_fed_and_waiting(tmp_path: Path) -> None:
     feeder.feed_once()
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         counts = feeder_counts(connection)
-    assert counts == {"eligible": 2, "fed": 1, "waiting_capacity": 1}
+    assert counts == {"eligible": 2, "fed": 1, "waiting_capacity": 1, "waiting_blocked": 0}
 
 
 def test_orch_status_shows_feeder_state(tmp_path: Path) -> None:
@@ -1008,7 +1017,9 @@ def test_an_empty_intake_poll_shows_zero_eligible(tmp_path: Path) -> None:
     now[0] += 60
     assert feeder.feed_once().eligible == 0
     with queue.connect() as connection:
-        assert feeder_counts(connection) == {"eligible": 0, "fed": 0, "waiting_capacity": 0}
+        assert feeder_counts(connection) == {
+            "eligible": 0, "fed": 0, "waiting_capacity": 0, "waiting_blocked": 0
+        }
         assert feeder_items(connection) == []
 
 
@@ -1031,4 +1042,6 @@ def test_status_and_dashboard_show_an_empty_latest_poll(tmp_path: Path) -> None:
     assert "Feeder — eligible 0, fed 0, waiting for capacity 0" in text
     assert "owner/app#1" not in text
     snapshot = collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=20_000.0)
-    assert snapshot["feeder"] == {"eligible": 0, "fed": 0, "waiting_capacity": 0, "items": []}
+    assert snapshot["feeder"] == {
+        "eligible": 0, "fed": 0, "waiting_capacity": 0, "waiting_blocked": 0, "items": []
+    }

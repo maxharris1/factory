@@ -372,7 +372,8 @@ def test_the_autostart_waiter_claims_remote_slots_too(tmp_path: Path) -> None:
         "    harnesses: {claude: claude-bot}\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot}\n"
-        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n",
+        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n"
+        "    factory_root: /home/{bot}/factory\n",
         encoding="utf-8",
     )
     db, queue = make_queue(tmp_path)
@@ -474,8 +475,11 @@ def test_a_job_row_with_a_hostile_id_is_failed_and_never_started(tmp_path: Path)
 
 
 def test_waiter_and_brief_name_no_harness_and_use_no_shell() -> None:
-    for name in ("waiter.py", "brief.py"):
-        tree = ast.parse((ROOT / "lib" / name).read_text(encoding="utf-8"))
+    sources = [ROOT / "lib" / "waiter.py", *sorted((ROOT / "lib" / "brief").glob("*.py"))]
+    assert len(sources) > 1
+    for path in sources:
+        name = path.name
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         literals = {
             node.value
             for node in ast.walk(tree)
@@ -487,7 +491,8 @@ def test_waiter_and_brief_name_no_harness_and_use_no_shell() -> None:
                 assert isinstance(node.value, ast.Constant) and node.value.value is False
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 assert f"{node.value.id}.{node.attr}" not in ("os.system", "os.popen"), name
-    assert "subprocess" not in _imports(ROOT / "lib" / "brief.py")
+    for path in sources[1:]:
+        assert "subprocess" not in _imports(path), path.name
 
 
 # --- factory.md is read from the trusted base branch, without tokens --------
@@ -938,14 +943,15 @@ def test_autostart_runs_with_only_remote_devices(tmp_path: Path) -> None:
         "devices:\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot}\n"
-        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n",
+        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n"
+        "    factory_root: /home/{bot}/factory\n",
         encoding="utf-8",
     )
     env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
     proc = subprocess.Popen(
         [sys.executable, str(ORCH), "wait", "claude-bot", "--autostart", "--db", str(db),
          "--machines", str(machines), "--harness-config", str(config),
-         "--state-dir", str(tmp_path / "state"), "--orch", str(tmp_path / "missing.yml")],
+         "--state-dir", str(tmp_path / "state"), "--orch", str(ROOT / "orch.yml")],
         env=env, text=True, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
     )
     try:

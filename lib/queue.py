@@ -9,6 +9,8 @@ resuming a paused step (its detail says `"resume": true`), then a job on a
 ticket marked bug, then the oldest. `ticket_priority` holds the urgent and
 bug marks (the backlog feeder writes them from the issue's labels or Linear
 priority); a database without that table orders on resume and age alone.
+A queued job on a ticket whose `ticket_state` is abandoned is never claimed
+(issue #109).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ ACTIONS = (
     "stale",
     "done",
     "awaiting-ok",
+    "go-not-from-approver",
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed", "cancelled")
@@ -242,14 +245,16 @@ class SQLiteJobQueue:
             if row is None:
                 connection.commit()
                 return None
-            connection.execute(
+            changed = connection.execute(
                 """
                 UPDATE jobs
                 SET state = 'running', last_activity_at = ?
                 WHERE id = ? AND state = 'queued'
                 """,
                 (now, row["id"]),
-            )
+            ).rowcount
+            if changed != 1:
+                raise QueueError(f"job {row['id']} is no longer queued")
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (row["id"],),
@@ -580,10 +585,22 @@ def is_resume(detail: str | None) -> bool:
 
 def claim_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.Row]:
     """Queued jobs for recipient in claim order (see the module doc)."""
-    rows = connection.execute(
+    abandoned = (
         """
+        AND NOT EXISTS (
+            SELECT 1 FROM ticket_state AS ticket
+            WHERE ticket.repo = lower(jobs.repo)
+              AND ticket.ticket_id = jobs.ticket_id
+              AND ticket.workflow_state = 'abandoned'
+        )
+        """
+        if _has_table(connection, "ticket_state")
+        else ""
+    )
+    rows = connection.execute(
+        f"""
         SELECT * FROM jobs
-        WHERE state = 'queued' AND recipient = ?
+        WHERE state = 'queued' AND recipient = ? {abandoned}
         ORDER BY created_at, id
         """,
         (recipient,),

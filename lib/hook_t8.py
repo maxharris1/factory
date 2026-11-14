@@ -25,9 +25,9 @@ Shipper.ship at most once. If ship raises, or a later poll finds the
 ok's claim still marked shipping, the preview is marked ship-failed and
 Grok Bot is woken once. A result is written only over shipping, so a
 recorded shipped is never overwritten; shipped also replaces a
-ship-failed that a racing dispatcher wrote while ship() was running. The dispatcher never ships the
-same request again. Three stored declines mark the ticket stuck before
-any ok or decline is read, even after a crash.
+ship-failed that a racing dispatcher wrote while ship() was running. The
+dispatcher never ships the same request again. Three stored declines mark
+the ticket stuck before any ok or decline is read, even after a crash.
 
 The approver posts with from=<approver> role=approver from a login that
 trusted_logins maps to <approver>. T8 queues no post-merge job (T9 is
@@ -138,8 +138,12 @@ class T8Hook:
             if reported != previewed:
                 return True, f"refused-{kind}-wrong-sha"
         if kind == "ok":
-            return self._ok(dispatcher, ticket, comment, approver, approve_id, previewed)
-        return _decline(dispatcher, ticket, comment, approver, approve_id, previewed)
+            return self._ok(
+                dispatcher, ticket, comment, approver, approve_id, previewed
+            )
+        return _decline(
+            dispatcher, ticket, comment, approver, approve_id, previewed
+        )
 
     def _ok(
         self,
@@ -155,7 +159,9 @@ class T8Hook:
         if self.shipper is None:
             return False, "ship-unwired"
         with dispatcher.queue.connect() as connection:
-            won = _claim(connection, ticket, approve_id, previewed, "shipping", comment.id)
+            won = _claim(
+                connection, ticket, approve_id, previewed, "shipping", comment.id
+            )
         if not won:
             claimed = _claimed_by(dispatcher, ticket, approve_id)
             if claimed is None or claimed[0] != comment.id:

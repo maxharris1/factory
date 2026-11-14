@@ -189,6 +189,37 @@ def test_poll_refuses_a_missing_database(tmp_path: Path) -> None:
     assert not database.exists()
 
 
+def test_poll_refuses_a_sqlite_file_without_a_jobs_table(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE other (id INTEGER)")
+    connection.close()
+    orch = tmp_path / "orch.yml"
+    orch.write_text(
+        """
+poll_seconds: 60
+projects:
+  - repo: owner/name
+    factory_ref: main
+grok:
+  webhook_url_env: FACTORY_WEBHOOK_URL
+  webhook_key_env: FACTORY_WEBHOOK_KEY
+trusted_logins:
+  someone:
+    - grok-bot
+""".lstrip(),
+        encoding="utf-8",
+    )
+    before = database.read_bytes()
+
+    result = run(["poll", "--db", str(database), "--orch", str(orch), "--once"])
+
+    assert result.returncode == 1
+    assert "no jobs table" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert database.read_bytes() == before
+
+
 def test_poll_lock_refuses_a_second_poller(tmp_path: Path) -> None:
     database = tmp_path / "orch.db"
     database.write_bytes(b"database")

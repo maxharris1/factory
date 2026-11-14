@@ -522,6 +522,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "feeder",
         "statechart",
         "telemetry",
+        "projects",  # per-project ship mode and round caps (#152)
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)
@@ -687,6 +688,7 @@ devices:
     harnesses: {claude: claude-bot}
     workdir_root: REPLACE_WITH_PC_WORKDIR_ROOT
     ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
 """,
         encoding="utf-8",
     )

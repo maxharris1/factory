@@ -63,7 +63,7 @@ def test_a_replayed_go_queues_no_second_job(tmp_path: Path) -> None:
         connection.execute("DELETE FROM handled_comments WHERE comment_id = 'go-again'")
     board.poll()
     assert len(board.jobs("build")) == builds
-    assert board.outcome("go-again") == "queued-build"
+    assert board.outcome("go-again") == "deduped-build"
 
 
 def test_an_untrusted_go_is_rejected_and_the_ticket_stays_queued(tmp_path: Path) -> None:
@@ -121,5 +121,5 @@ def test_go_on_a_ready_for_review_after_ticket_keeps_its_generation_key(tmp_path
     builds = len(board.jobs("build"))
     board.go(pr, "go-again")
     board.poll()
-    assert board.outcome("go-again") == "queued-build"
+    assert board.outcome("go-again") == "deduped-build"
     assert len(board.jobs("build")) == builds
