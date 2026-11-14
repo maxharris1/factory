@@ -263,6 +263,17 @@ stop() {
     return 1
 }
 
+# A restart whose stop times out drops the hold that stop just wrote, so
+# ensure and self-heal still see a service to recover; a hold that was
+# already there (an operator's stop) stays.
+restart() {
+    local held=""
+    [[ -e "$STOPPED" ]] && held=1
+    stop && start && return 0
+    [[ -n "$held" ]] || rm -f "$STOPPED"
+    return 1
+}
+
 status() {
     local pid
     if pid="$(running_pid)"; then
@@ -403,7 +414,7 @@ remove_autostart() {
 case "${1:-}" in
     start) service_lock && start ;;
     stop) service_lock && stop ;;
-    restart) service_lock && stop && start ;;
+    restart) service_lock && restart ;;
     status) status ;;
     ensure) service_lock && ensure ;;
     install-autostart) install_autostart ;;

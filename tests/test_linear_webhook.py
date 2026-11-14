@@ -565,12 +565,22 @@ def test_unsigned_body_fails_the_signature_before_any_parse(
     database: Path,
     logs: list[str],
     raw: bytes,
+    monkeypatch,
 ) -> None:
+    """#69 F2.2: a bad signature is refused before json.loads ever runs."""
+    parsed: list[bytes] = []
+
+    def counting(value, *args, **kwargs):
+        parsed.append(value)
+        return json.JSONDecoder().decode(value.decode() if isinstance(value, bytes) else value)
+
+    monkeypatch.setattr("lib.linear_webhook.json.loads", counting)
     result = post(app, None, raw=raw, signature="0" * 64)
 
     assert (result.status, result.reason) == (401, "signature")
     assert logs == ["linear-webhook: rejected signature"]
     assert dirty_rows(database) == []
+    assert parsed == []
 
 
 def test_signed_body_that_is_not_json_is_rejected(app: WebhookApp) -> None:
@@ -921,3 +931,106 @@ def test_serve_binds_the_configured_address_and_creates_its_tables(
         }
     assert {"linear_dirty", "linear_webhook_health"} <= tables
 
+
+
+# --- #79, #69 F2.1, #107 g ---------------------------------------------------------------------
+
+
+def _health_row(database: Path) -> tuple:
+    with sqlite3.connect(database) as connection:
+        return connection.execute(
+            "SELECT last_received_at, last_event FROM linear_webhook_health"
+        ).fetchone()
+
+
+def _seen(database: Path) -> dict[str, float]:
+    with sqlite3.connect(database) as connection:
+        return dict(connection.execute("SELECT issue_id, received_at FROM linear_webhook_seen"))
+
+
+@pytest.mark.parametrize(
+    "raw_or_event",
+    [b"not json", issue_event(timestamp_ms=int((NOW - 600) * 1000))],
+    ids=["malformed", "stale-timestamp"],
+)
+def test_any_signed_delivery_counts_as_received(
+    app: WebhookApp, database: Path, raw_or_event
+) -> None:
+    raw = raw_or_event if isinstance(raw_or_event, bytes) else None
+    result = post(app, None if raw else raw_or_event, raw=raw)
+
+    assert result.outcome == "rejected"
+    assert _health_row(database) == (NOW, "-")
+
+
+def test_an_unsigned_delivery_does_not_count_as_received(app: WebhookApp, database: Path) -> None:
+    post(app, issue_event(), signature="0" * 64)
+    assert _health_row(database) == (None, None)
+
+
+def test_an_ignored_event_type_still_counts(app: WebhookApp, database: Path) -> None:
+    event = issue_event()
+    event["type"] = "Attachment"
+    assert post(app, event).outcome == "ignored"
+    assert _health_row(database) == (NOW, "Attachment.update")
+
+
+def test_each_signed_fresh_delivery_records_its_issue_as_seen(
+    app: WebhookApp, database: Path
+) -> None:
+    post(app, issue_event(project="project-2", issue_id="other-issue"))
+    post(app, comment_event(issue_id="commented-issue"))
+    post(app, issue_event())
+    assert _seen(database) == {"other-issue": NOW, "commented-issue": NOW, "issue-uuid-42": NOW}
+
+
+def test_a_handoff_comment_on_a_project_no_longer_configured_is_ignored(
+    database: Path,
+) -> None:
+    """#69 F2.1: the stored project is checked against the current orch.yml."""
+    first = WebhookApp(secret=SECRET.encode(), project_ids=frozenset({"project-1", "project-2"}),
+                       db_path=database, clock=lambda: NOW, log=lambda line: None)
+    assert post(first, issue_event(action="create")).outcome == "accepted"
+    _clear_dirty(database)
+
+    restarted = WebhookApp(secret=SECRET.encode(), project_ids=frozenset({"project-2"}),
+                           db_path=database, clock=lambda: NOW, log=lambda line: None)
+    result = post(restarted, comment_event(body=HANDOFF_BODY))
+
+    assert (result.outcome, result.reason) == ("ignored", "not a configured project")
+    assert dirty_rows(database) == []
+
+
+def test_a_legacy_membership_row_without_a_project_is_not_admitted(
+    database: Path, app: WebhookApp
+) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE linear_project_issues SET project_id = NULL")
+        connection.execute(
+            "INSERT INTO linear_project_issues (issue_id, seen_at) VALUES ('issue-uuid-42', ?)",
+            (NOW,),
+        )
+    assert post(app, comment_event(body=HANDOFF_BODY)).outcome == "ignored"
+
+
+def test_an_old_membership_table_gains_its_project_column(tmp_path: Path) -> None:
+    database = tmp_path / "orch.db"
+    SQLiteJobQueue(database, clock=lambda: NOW)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE linear_project_issues (issue_id TEXT PRIMARY KEY, seen_at REAL NOT NULL)"
+        )
+        ensure_tables(connection)
+        ensure_tables(connection)
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(linear_project_issues)")]
+    assert columns == ["issue_id", "seen_at", "project_id"]
+
+
+def test_log_lines_carry_a_utc_timestamp(capsys, monkeypatch) -> None:
+    from lib import linear_webhook
+
+    monkeypatch.setattr(linear_webhook.time, "time", lambda: NOW)
+    linear_webhook.utc_log("linear-webhook: accepted Issue.update AUT-42")
+    assert capsys.readouterr().out == (
+        "2027-01-15T08:00:00Z linear-webhook: accepted Issue.update AUT-42\n"
+    )

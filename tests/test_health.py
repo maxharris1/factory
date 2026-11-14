@@ -90,12 +90,17 @@ def store(db: Path, clock: float = NOW) -> health.HealthStore:
     return health.HealthStore(db, devices=DEVICES, clock=lambda: clock)
 
 
-def orch(*, listener: bool = False, push: bool = False) -> SimpleNamespace:
+TUNNEL_URL = "https://box.example.ts.net/linear-webhook"
+
+
+def orch(*, listener: bool = False, push: bool = False, public_url: str | None = TUNNEL_URL,
+         refused: tuple[str, ...] = ()) -> SimpleNamespace:
     """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
         projects=(),
-        linear_webhook=SimpleNamespace(public_url=None) if listener else None,
+        linear_webhook=SimpleNamespace(public_url=public_url) if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
+        refused_harnesses=refused,
     )
 
 
@@ -1346,6 +1351,117 @@ def test_a_check_shows_its_latest_result_across_restarts(
     assert [(c.pid, c.state, c.reason) for c in report.components] == expected
 
 
+# --- #107: expectations and stale code ---------------------------------------------------------
+
+
+def test_a_refused_harness_has_no_waiter_slot(tmp_path: Path) -> None:
+    """#107 c: a refused harness's leftover waiter row is not configured, not down."""
+    rows = (row(component="poller", bot="", pid=1),
+            row(bot="cursor-bot", pid=2, last_seen=NOW - 900))
+    report = health.build_report(rows, NOW, expected=health.expected_components(
+        machines_config(tmp_path), orch(refused=("cursor",))))
+    cursor = [c for c in report.components if c.bot == "cursor-bot"]
+    assert [(c.state, c.configured) for c in cursor] == [("down", False)]
+    assert sorted(c.label for c in report.down if c.component == "waiter") == [
+        "waiter claude-bot @ box", "waiter codex-bot @ box"]
+
+
+def test_the_tunnel_is_expected_only_with_a_public_url(tmp_path: Path) -> None:
+    """#107 d: a listener without linear_webhook.public_url has no tunnel row."""
+    machines = machines_config(tmp_path)
+    without = health.expected_components(machines, orch(listener=True, public_url=None))
+    with_url = health.expected_components(machines, orch(listener=True))
+    assert {s.component for s in without.slots} >= {"linear-listener"}
+    assert "tunnel" not in {s.component for s in without.slots}
+    assert "tunnel" in {s.component for s in with_url.slots}
+
+
+def test_heartbeats_record_the_commit_the_process_loaded(tmp_path: Path) -> None:
+    """#107 b: a beat names the HEAD loaded at import, not the HEAD at beat time."""
+    db, _ = make_db(tmp_path)
+    beater = health.Beater(db, "poller", devices=["box"], store=store(db), log=lambda line: None)
+    assert beater.version == health.LOADED_VERSION
+    beater.beat_now()
+    (beat,) = health.read_heartbeats(db) or ()
+    assert beat.version == health.LOADED_VERSION
+
+
+@pytest.mark.parametrize(
+    "component, version, checkout, stale",
+    [
+        ("poller", "0123456789ab", "ba9876543210", True),
+        ("waiter", "0123456789ab", "ba9876543210", True),
+        ("linear-listener", "0123456789ab", "ba9876543210", True),
+        ("poller", "0123456789ab", "0123456789ab", False),
+        ("poller", "unknown", "ba9876543210", False),
+        ("poller", "0123456789ab", "unknown", False),
+        ("device-probe", "0123456789ab", "ba9876543210", False),
+        ("tunnel", "0123456789ab", "ba9876543210", False),
+        ("dashboard", "0123456789ab", "ba9876543210", False),
+    ],
+)
+def test_stale_code_is_a_running_process_on_another_commit(
+    component: str, version: str, checkout: str, stale: bool
+) -> None:
+    rows = (row(component=component, bot="codex-bot" if component == "waiter" else "",
+                device="pc" if component == "device-probe" else "box", version=version),)
+    report = health.build_report(rows, NOW, checkout_version=checkout)
+    (item,) = [c for c in report.components if c.component == component]
+    assert item.stale_code is stale
+    assert item.state == "up"
+    assert report.down == () or component != "poller"
+
+
+def test_stale_code_is_shown_in_text_and_json_but_is_not_down() -> None:
+    rows = (row(component="poller", bot="", pid=7, version="0123456789ab"),)
+    report = health.build_report(rows, NOW, checkout_version="ba9876543210")
+    lines = health.render_lines(report, NOW)
+    assert lines[0] == "Health (1 components, 0 down, 1 stale code)"
+    assert "poller @ box up, stale code (running 0123456789ab, checkout ba9876543210)" in lines[1]
+    data = health.report_json(report, NOW)
+    assert data["code_version"] == "ba9876543210"
+    assert data["stale_code"] == 1
+    (poller,) = data["components"]
+    assert poller["stale_code"] is True
+    assert poller["started_at"] == NOW - 600
+    assert data["down"] == 0
+
+
+def test_orch_status_shows_stale_code(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_wait import dispatcher_for
+
+    db, _ = make_db(tmp_path)
+    dispatcher_for(db)
+    store(db, NOW - 5).beat("poller", "box", pid=101, version="0123456789ab")
+    monkeypatch.setattr(health, "factory_version", lambda root=health.ROOT: "ba9876543210")
+    out = io.StringIO()
+    assert status_main(["--db", str(db), "--machines", str(machines_file(tmp_path, ONLY_CODEX)),
+                        "--orch", str(ORCH_EXAMPLE)], stdout=out, clock=lambda: NOW) == 0
+    assert "stale code (running 0123456789ab, checkout ba9876543210)" in out.getvalue()
+
+
+def test_the_health_tab_marks_stale_code_without_raising_attention(tmp_path: Path, monkeypatch) -> None:
+    from tests.test_dashboard_layout import BAR, NODE, _run_page
+
+    monkeypatch.setattr(health, "factory_version", lambda root=health.ROOT: "ba9876543210")
+    db, _ = make_db(tmp_path, PAGE_NOW)
+    store(db, PAGE_NOW - 5).beat("poller", "box", pid=101, started_at=PAGE_NOW - 900,
+                                 version="0123456789ab")
+    store(db, PAGE_NOW - 5).beat("waiter", "box", bot="codex-bot", pid=102,
+                                 started_at=PAGE_NOW - 900, version="ba9876543210")
+    data = snapshot(tmp_path, db, PAGE_NOW, machines=ONLY_CODEX)
+    components = {c["component"]: c for c in data["health"]["components"]}
+    assert components["poller"]["stale_code"] is True
+    assert components["waiter"]["stale_code"] is False
+    assert data["attention"]["count"] == 0
+    page = render_pages(data)["health.html"]
+    assert "0123456789ab<span class=\"warn\"> stale code</span>" in page
+    if NODE is None:
+        return
+    (tmp_path / "health").mkdir()
+    rendered = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "components"])
+    assert "0123456789ab stale code" in rendered["text"]["components"]
+    assert rendered["text"]["attention-count"] == "0"
 # --- #106: dashboard push failures -------------------------------------------------------
 
 

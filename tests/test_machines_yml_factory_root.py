@@ -212,3 +212,10 @@ def test_example_documents_factory_root_apart_from_workdir_root():
     assert any("not workdir_root" in line for line in factory_lines)
     assert "#   workdir_root: /home/{bot}/factory-work" in comments
     assert "#   factory_root: /home/{bot}/factory" in comments
+
+
+def test_a_factory_root_with_a_backtick_is_refused(tmp_path):
+    config, findings = _two_devices(tmp_path, pc_extra="    factory_root: '/home/a`b/factory'\n")
+    assert config is None
+    [message] = _errors(findings)
+    assert message.startswith("devices[1].factory_root ")

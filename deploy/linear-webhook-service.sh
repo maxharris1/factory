@@ -12,8 +12,15 @@
 #   linear-webhook-service.sh ensure             start what is not running, unless
 #                                                held stopped (what autostart runs;
 #                                                prints nothing when all run)
-#   linear-webhook-service.sh install-autostart  write the autostart flag
-#   linear-webhook-service.sh remove-autostart   remove it
+#   linear-webhook-service.sh install-autostart  write the autostart flag (and
+#                                                cron lines, see below)
+#   linear-webhook-service.sh remove-autostart   remove them
+#
+# deploy/self-heal.sh restarts a down or stale-code listener or tunnel with
+# `linear-webhook-service.sh restart` (issue #107). A restart whose stop
+# fails drops the hold that stop just wrote, so ensure and self-heal still
+# see a service to recover; a hold that was already there (an operator's
+# stop) stays.
 #
 # Two loops run, each a singleton per state directory (issue #134):
 #   _listener-loop runs `orch linear-webhook serve --bind 127.0.0.1:PORT`
@@ -26,6 +33,12 @@
 # the state directory but not pids). ensure, start and status decide from
 # the locks; the pidfiles are for people only. flock(1) is required.
 #
+# Each serve or ssh child also holds a lock of its own
+# (linear-webhook-listener-child.lock, linear-webhook-tunnel-child.lock),
+# taken by its loop just before starting it. A child whose loop was killed
+# keeps holding it, so stop (and restart, which self-heal runs) still finds
+# and ends it, and a new loop starts no second child while it lives.
+#
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
 # LINEAR_WEBHOOK_RETRY_SEC (default 5) doubles up to
@@ -36,7 +49,7 @@
 # `.../linear-webhook-service.sh _listener-loop|_tunnel-loop` (any copy of the
 # script) and whose state directory (its --state argument, else its
 # ORCH_STATE_DIR or HOME) is this one, plus every process holding a loop
-# lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
+# or child lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
 # having the file open does not count). It ends each with its children. If a
 # lock is still held afterwards (a loop in a PID namespace this shell cannot
 # see), stop says so and exits 1.
@@ -51,12 +64,18 @@
 #   ORCH_CONFIG                  orch.yml for serve (default: the checkout's)
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
+# linear-webhook-{listener,tunnel}-child.lock,
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
 # (serializes start/stop/ensure) and linear-webhook-service.log (autostart).
 #
 # Autostart: install-autostart writes ~/.config/factory/linear-webhook-autostart,
 # which makes the profile written by deploy/install.sh run `ensure` in the
-# background whenever a bot shell starts.
+# background whenever a bot shell starts. When `crontab` exists it also
+# installs an @reboot line and a 5-minute `ensure` watchdog, tagged
+# "# factory-linear-webhook" and replaced, never duplicated, on every run
+# (issue #107). ORCH_CRONTAB names the crontab command (default: crontab on
+# PATH). If the current crontab cannot be read (anything but "no crontab for
+# <user>"), install-autostart and remove-autostart change nothing and exit 1.
 set -euo pipefail
 
 COMMAND="${1:-}"
@@ -71,6 +90,9 @@ CONFIG="${HOME}/.config/factory"
 AUTOSTART="${CONFIG}/linear-webhook-autostart"
 STOPPED="${STATE}/linear-webhook.stopped"
 SERVICE_LOCK="${STATE}/linear-webhook-service.lock"
+SERVICE_LOG="${STATE}/linear-webhook-service.log"
+MARKER="# factory-linear-webhook"
+CRONTAB="${ORCH_CRONTAB:-crontab}"
 ORCH="${ORCH_BIN:-${HOME}/.local/bin/orch}"
 PORT="${LINEAR_WEBHOOK_PORT:-8787}"
 TUNNEL_HOST="${LINEAR_WEBHOOK_TUNNEL_HOST-pc-wsl-cursor-bot}"
@@ -162,6 +184,18 @@ leave_loop() {
     fi
 }
 
+# Run "$@" holding loop $1's child lock (fd 7) and wait for it. Returns 1,
+# starting nothing, while a child orphaned by an earlier loop still holds it.
+run_locked() {
+    exec 7>>"$(lock_file "$1-child")"
+    if ! flock -n 7; then
+        exec 7>&-
+        return 1
+    fi
+    run_child "${@:2}"
+    exec 7>&-
+}
+
 # Run "$@" without the loop lock and wait for it; its exit status is STATUS.
 run_child() {
     "$@" 8>&- &
@@ -203,8 +237,13 @@ listener_loop() {
         busy=""
         started="$SECONDS"
         say "starting orch linear-webhook serve on 127.0.0.1:${PORT}"
-        run_child "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
-            ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}
+        if ! run_locked listener "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
+            ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}; then
+            say "serve from an earlier loop still holds $(lock_file listener-child); not starting serve"
+            pause "$delay"
+            delay="$(doubled "$delay")"
+            continue
+        fi
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
         say "orch linear-webhook serve exited ${STATUS}; retry in ${delay}s"
@@ -224,9 +263,14 @@ tunnel_loop() {
     while ! stopping; do
         started="$SECONDS"
         say "starting ssh -R 127.0.0.1:${PORT}:127.0.0.1:${PORT} ${TUNNEL_HOST}"
-        run_child ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"
+            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"; then
+            say "ssh from an earlier loop still holds $(lock_file tunnel-child); not starting ssh"
+            pause "$delay"
+            delay="$(doubled "$delay")"
+            continue
+        fi
         cat "$errors" >&2 2>/dev/null || true
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
@@ -328,7 +372,7 @@ loop_pids() {
 
 lock_holders() {
     local mode file fd
-    for mode in listener tunnel; do
+    for mode in listener tunnel listener-child tunnel-child; do
         file="$(lock_file "$mode")"
         [[ -e "$file" ]] || continue
         file="$(readlink -f "$file")"
@@ -396,13 +440,22 @@ stop() {
         fi
         say "stopped linear webhook loop(s) ${roots[*]}"
     fi
-    for mode in listener tunnel; do
+    for mode in listener tunnel listener-child tunnel-child; do
         if lock_held "$mode"; then
             say "$(lock_file "$mode") is still held by a process this shell cannot see (another PID namespace?); run stop from the host" >&2
             status=1
         fi
     done
     return "$status"
+}
+
+# See the header: a failed restart leaves no stop hold of its own.
+restart() {
+    local held=""
+    [[ -e "$STOPPED" ]] && held=1
+    stop && start && return 0
+    [[ -n "$held" ]] || rm -f "$STOPPED"
+    return 1
 }
 
 status() {
@@ -420,22 +473,86 @@ status() {
     return "$status"
 }
 
+# --- autostart ---------------------------------------------------------------
+
+plain_path() {
+    [[ "$1" =~ ^/[A-Za-z0-9/._-]+$ ]] || {
+        echo "linear-webhook-service: refusing to write ${1} into a crontab" >&2
+        return 1
+    }
+}
+
+crontab_without_marker() {
+    local current errors status=0
+    errors="$(mktemp "${TMPDIR:-/tmp}/linear-webhook-service.XXXXXX")" || return 1
+    current="$("$CRONTAB" -l 2>"$errors")" || status=$?
+    if ((status != 0)); then
+        if grep -q "no crontab for" "$errors"; then
+            current=""
+        else
+            echo "linear-webhook-service: cannot read the crontab (${CRONTAB} -l exited ${status}); changed nothing:" >&2
+            cat "$errors" >&2
+            rm -f "$errors"
+            return 1
+        fi
+    fi
+    rm -f "$errors"
+    [[ -n "$current" ]] || return 0
+    grep -vF -- "$MARKER" <<<"$current" || true
+}
+
+have_crontab() {
+    command -v "$CRONTAB" >/dev/null 2>&1
+}
+
+install_autostart() {
+    local kept="" job="${SELF} ensure >>${SERVICE_LOG} 2>&1 ${MARKER}"
+    if have_crontab; then
+        plain_path "$SELF"
+        plain_path "$SERVICE_LOG"
+        kept="$(crontab_without_marker)" || exit 1
+    fi
+    mkdir -p "$CONFIG" "$STATE"
+    : >"$AUTOSTART"
+    echo "linear webhook autostart on: bot shells run '${SELF} ensure' (${AUTOSTART})"
+    if ! have_crontab; then
+        echo "crontab not found; autostart uses the bot-shell profile hook only"
+        return 0
+    fi
+    {
+        [[ -z "$kept" ]] || printf '%s\n' "$kept"
+        printf '@reboot %s\n' "$job"
+        printf '*/5 * * * * %s\n' "$job"
+    } | "$CRONTAB" -
+    echo "installed crontab @reboot and 5-minute ensure lines"
+}
+
+remove_autostart() {
+    local kept=""
+    if have_crontab; then
+        kept="$(crontab_without_marker)" || exit 1
+    fi
+    rm -f "$AUTOSTART"
+    echo "linear webhook autostart off"
+    if have_crontab; then
+        if [[ -n "$kept" ]]; then
+            printf '%s\n' "$kept" | "$CRONTAB" -
+        else
+            "$CRONTAB" - </dev/null
+        fi
+        echo "removed crontab lines tagged ${MARKER}"
+    fi
+}
+
 case "$COMMAND" in
     _listener-loop) check_settings && need_flock && listener_loop ;;
     _tunnel-loop) check_settings && need_flock && tunnel_loop ;;
     start) check_settings && need_flock && service_lock && start ;;
     stop) need_flock && service_lock && stop ;;
-    restart) check_settings && need_flock && service_lock && stop && start ;;
+    restart) check_settings && need_flock && service_lock && restart ;;
     status) need_flock && status ;;
     ensure) check_settings && need_flock && service_lock && ensure ;;
-    install-autostart)
-        mkdir -p "$CONFIG"
-        : >"$AUTOSTART"
-        echo "linear webhook autostart on: bot shells run '${SELF} ensure' (${AUTOSTART})"
-        ;;
-    remove-autostart)
-        rm -f "$AUTOSTART"
-        echo "linear webhook autostart off"
-        ;;
+    install-autostart) install_autostart ;;
+    remove-autostart) remove_autostart ;;
     *) usage ;;
 esac
