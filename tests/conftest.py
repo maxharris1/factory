@@ -59,10 +59,17 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
-def _ssh_control_dir(monkeypatch: pytest.MonkeyPatch):
+def _ssh_control_dir():
     """#222: each test gets its own short ControlMaster socket directory, so
-    no fake master outlives its test and a socket path stays bindable."""
+    no fake master outlives its test and a socket path stays bindable. It
+    takes no monkeypatch, so a test's own patches are undone before this
+    teardown runs."""
     directory = tempfile.mkdtemp(prefix="orch-ssh-", dir="/tmp")
-    monkeypatch.setenv("ORCH_SSH_CONTROL_DIR", directory)
+    previous = os.environ.get("ORCH_SSH_CONTROL_DIR")
+    os.environ["ORCH_SSH_CONTROL_DIR"] = directory
     yield directory
+    if previous is None:
+        os.environ.pop("ORCH_SSH_CONTROL_DIR", None)
+    else:
+        os.environ["ORCH_SSH_CONTROL_DIR"] = previous
     shutil.rmtree(directory, ignore_errors=True)
