@@ -10,14 +10,14 @@ import time
 import traceback
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
 from lib import attention, project_rules
 from lib.device_pool import free_slots, used_slots
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, family_findings
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import HoldDecision, LabelEvent, decide
@@ -150,6 +150,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #206: factory.md's config when a go routed this ticket to other
+    # harnesses; factory then holds the routed pair.
+    factory_md: FactoryConfig | None = None
     # #108 (#42 N3): the PR is merged. A fresh read never records the merge
     # itself: its caller decides.
     merged: bool = False
@@ -865,6 +868,7 @@ class Dispatcher:
         return prior is None or prior["workflow_state"] != "merged"
 
     def process(self, ticket: TrackedTicket) -> None:
+        ticket = self._routed(ticket)
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         comments = sorted(ticket.comments, key=_comment_order)
         try:
@@ -1679,6 +1683,11 @@ class Dispatcher:
         if not trusted:
             return True, "rejected-go-author"
         generation = self._generation(ticket.repo, ticket.ticket_id)
+        if action is not None:
+            routed = _route_go(ticket, fields)
+            if routed is None:
+                return True, "rejected-go-same-family"
+            ticket = routed
         if action is None:
             self.queue.enqueue(
                 JobRequest(
@@ -1731,6 +1740,7 @@ class Dispatcher:
         )
         if job.request.source_comment_id != comment.id:
             return True, f"deduped-{action}"
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         self._set_workflow_state(ticket, state)
         return True, f"answered-{action}" if answered else f"queued-{action}"
 
@@ -3074,7 +3084,8 @@ class Dispatcher:
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        return self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        fresh = self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
+        return None if fresh is None else self._routed(fresh)
 
     def _enqueue_or_flag(
         self,
@@ -4132,6 +4143,28 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, state),
             )
 
+    def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
+        """The ticket with the builder and reviewer its latest plan, build or
+        fix job was routed to (issue #206), or as read when that job names
+        no routing."""
+        if ticket.factory_md is not None:
+            return ticket
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND action IN ('plan', 'build', 'fix')
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        routing = _detail_routing(None if row is None else row["detail"])
+        if routing is None:
+            return ticket
+        return _route(ticket, *routing)
+
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -4825,6 +4858,11 @@ class Dispatcher:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if ticket.factory_md is not None:
+            context["routing"] = {
+                "builder": ticket.factory.builder_harness,
+                "reviewer": ticket.factory.reviewer_harness,
+            }
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
@@ -5673,7 +5711,7 @@ class ReviewShipper:
         ]
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
-        return found[0]
+        return self.dispatcher._routed(found[0])
 
 
 class PollLoop:
@@ -5862,6 +5900,66 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _detail_routing(detail: str | None) -> tuple[str, str] | None:
+    """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    routing = context.get("routing") if isinstance(context, dict) else None
+    if not isinstance(routing, dict):
+        return None
+    builder, reviewer = routing.get("builder"), routing.get("reviewer")
+    if builder not in HARNESSES or reviewer not in HARNESSES:
+        return None
+    return builder, reviewer
+
+
+def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
+    """ticket with factory.md's harnesses swapped for builder and reviewer.
+    A model hint is kept only for a side whose harness stays factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    return replace(
+        ticket,
+        factory_md=base,
+        factory=replace(
+            base,
+            builder_harness=builder,
+            builder_model=base.builder_model if builder == base.builder_harness else None,
+            reviewer_harness=reviewer,
+            reviewer_model=(
+                base.reviewer_model if reviewer == base.reviewer_harness else None
+            ),
+        ),
+    )
+
+
+def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket | None:
+    """The ticket routed as a go names it (#206), or None when the pair
+    fails factory.md's cross-family rule. A go naming neither harness
+    routes back to factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    if "builder" not in fields and "reviewer" not in fields:
+        return replace(ticket, factory=base, factory_md=None)
+    routed = _route(
+        ticket,
+        fields.get("builder", base.builder_harness),
+        fields.get("reviewer", base.reviewer_harness),
+    )
+    config = routed.factory
+    findings = family_findings(
+        config.builder_harness,
+        config.builder_model,
+        config.reviewer_harness,
+        config.reviewer_model,
+    )
+    if any(finding.severity == "error" for finding in findings):
+        return None
+    return routed
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

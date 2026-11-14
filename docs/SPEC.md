@@ -275,6 +275,7 @@ Max can read everything on the ticket and the PR. Nothing else is needed to resu
 The `orch:v1` header keys in the example are `kind`, `from`, `role`, `round`, `head`, `ac`, `verdict` and `risk`.
 In `round=<n>/<cap>`, `cap` is the effective cap (section 8). Any `n` parses, even one over its own `cap`; the dispatcher judges it against the effective cap (issue #105). `risk=` counts only from a comment whose author is trusted for its `from`.
 A `plan` uses `ac=met|unmet` and `round=<n>/2`: `n=1` for the first plan and `n=2` after one gap. The round is checked against the persisted plan-gap count. Extra keys are added only when a real run needs them (Factory decided (technical), 10:19 AM ET).
+A `go` may name `builder=<harness>` and `reviewer=<harness>` (issue #206). T1 queues the step to that builder and records the pair in the job detail as `routing`; later steps of the ticket use the pair. A side it leaves out is factory.md's. A pair whose families are the same, or whose family cannot be resolved (the section 6 rule, with factory.md's model hint only for a side whose harness matches factory.md's), is refused with no job.
 
 ## 6. `factory.md` schema
 
