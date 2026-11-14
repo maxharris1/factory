@@ -380,6 +380,86 @@ def test_no_broken_state_ever_animates(tmp_path: Path) -> None:
     assert out["pending"] == 0
 
 
+@needs_node
+def test_a_broken_strip_never_moves_whatever_one_shot_arrives(tmp_path: Path) -> None:
+    out = _node(tmp_path, r"""
+      const shots = [
+        {'data-hb': '1'}, {'data-burst': '1'}, {'data-done': 'true'},
+        {'data-hb': '1', 'data-burst': '2', 'data-done': 'true'},
+      ];
+      const before = {'data-hb': '20', 'data-burst': '0'};
+      out.images = [];
+      out.pending = [];
+      ['fill', 'static'].forEach((from, i) => shots.forEach((shot, j) => {
+        const key = 'k' + i + j;
+        const base = (px) => ({class: 'px', 'data-px': px, 'data-tint': '#f7768e', 'data-progress': '0.5', 'data-px-key': key});
+        found = [canvas(Object.assign(base(from), before), 160, 16)]; PX.bind();
+        frame(clock + 50);
+        found = [canvas(Object.assign(base('static'), before, shot), 160, 16)]; PX.bind();
+        const el = found[0], seen = new Set([JSON.stringify(el.ops)]);
+        for (let n = 0; n < 30; n++) { const start = el.ops.length; frame(clock + 50); seen.add(JSON.stringify(el.ops.slice(start))); }
+        seen.delete('[]');
+        out.images.push(seen.size);
+        out.pending.push(rafQueue.length);
+        found = []; PX.bind(); frame(clock + 50);
+      }));
+      const row = {job: 'ab12', job_state: 'running', action: 'build', recipient: 'codex',
+        overdue: false, elapsed_seconds: 225, timeout_seconds: 3600, heartbeat_age_seconds: 20};
+      found = [PX.jobStrip(row)]; PX.bind();
+      clock += 1500; row.job_state = 'dead'; row.heartbeat_age_seconds = 1;
+      found = [PX.jobStrip(row)]; PX.bind();
+      const dead = found[0], images = new Set([JSON.stringify(dead.ops)]);
+      for (let n = 0; n < 12; n++) { const start = dead.ops.length; frame(clock + 50); images.add(JSON.stringify(dead.ops.slice(start))); }
+      images.delete('[]');
+      out.deadJob = images.size;
+    """)
+    assert out["images"] == [1] * 8
+    assert out["pending"] == [0] * 8
+    assert out["deadJob"] == 1
+
+
+@needs_node
+@pytest.mark.parametrize("how", ["hidden", "offscreen"])
+@pytest.mark.parametrize(("path", "canvas"), [("bind", "same"), ("bind", "replaced"), ("motion", "same")])
+def test_no_paint_path_draws_a_hidden_or_off_screen_strip(tmp_path: Path, how: str, canvas: str, path: str) -> None:
+    out = _node(tmp_path, r"""
+      const el = (p) => canvas({class: 'px', 'data-px': 'fill', 'data-tint': 'claude', 'data-progress': p,
+        'data-px-key': 'j'}, 160, 16);
+      found = [el('0.5')]; PX.bind(); frame(2000);
+      const how = '""" + how + r"""', replaced = """ + str(canvas == "replaced").lower() + r""";
+      if (how === 'hidden') document.hidden = true;
+      else observers[0].cb([{target: found[0], isIntersecting: false}]);
+      frame(2100);
+      const old = found[0], before = draws(old);
+      clock = 2500;
+      if (replaced) found = [el('0.6')]; else old.attrs['data-progress'] = '0.6';
+      if ('""" + path + r"""' === 'bind') PX.bind();
+      else mqListeners.forEach(fn => fn());
+      for (let t = 2550; t <= 3000; t += 50) frame(t);
+      out.extra = draws(found[0]) - (found[0] === old ? before : 0);
+      if (how === 'hidden') { document.hidden = false; (docListeners.visibilitychange || []).forEach(fn => fn()); }
+      else observers[0].cb([{target: found[0], isIntersecting: true}]);
+      frame(3100);
+      out.resumed = draws(found[0]) - (found[0] === old ? before : 0);
+    """)
+    assert out["extra"] == 0
+    assert out["resumed"] >= 1
+
+
+PROGRESS = sorted({k / 3600 for k in range(3601)} | {k / 16 for k in range(17)} | {k / 2000 for k in range(2001)}
+                  | {k / 7 for k in range(8)} | {0.0625, 0.1875, 0.0005, 0.9995, 1 / 3, 2 / 3})
+
+
+@needs_node
+def test_server_and_script_round_progress_the_same(tmp_path: Path) -> None:
+    out = _node(tmp_path, "out.html = " + json.dumps(PROGRESS)
+                + ".map(p => serialize(PX.strip('k', {state: 'build', bot: 'codex', progress: p})));")
+    server = [page.px_strip("k", state="build", bot="codex", progress=p) for p in PROGRESS]
+    mismatched = [p for p, a, b in zip(PROGRESS, server, out["html"]) if a != b]
+    assert mismatched == []
+    assert 'data-progress="0.063"' in page.px_strip("k", state="build", progress=225 / 3600)
+
+
 # --- the table ---------------------------------------------------------------------------
 
 def test_effects_and_one_shots() -> None:

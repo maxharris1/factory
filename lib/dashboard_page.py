@@ -50,6 +50,7 @@ import functools
 import html
 import json
 import re
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
@@ -1360,7 +1361,7 @@ PX_SCRIPT = r"""
     var p = {
       effect: TABLE.effects.hasOwnProperty(effect) ? effect : 'off',
       tint: tintOf(el.getAttribute('data-tint')),
-      tintMix: 1, cell: 4, fps: FPS, still: false, beat: beats
+      tintMix: 1, cell: 4, fps: FPS, still: effect === 'static', beat: beats
     };
     DATA.forEach(function (k) {
       var v = el.getAttribute('data-' + k);
@@ -1684,7 +1685,7 @@ PX_SCRIPT = r"""
   };
 
   function paint(s, now) {
-    if (s._dead) return;
+    if (s._dead || !s.onScreen || document.hidden) return;
     try { s._draw(now); } catch (e) { s._dead = true; }
   }
 
@@ -1982,7 +1983,7 @@ def px_strip(
     ]
     style = f"--px:{f'var(--{tint})' if tint in PX_BOT_TINTS else tint};"
     if progress is not None:
-        value = f"{max(0.0, min(1.0, float(progress))):.3f}"
+        value = str(Decimal(max(0.0, min(1.0, float(progress)))).quantize(Decimal("0.001"), ROUND_HALF_UP))
         attrs.append(("data-progress", value))
         style += f"--p:{value};"
     if heartbeat is not None:
