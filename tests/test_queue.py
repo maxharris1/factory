@@ -1,5 +1,6 @@
 import inspect
 import sqlite3
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from lib.dispatcher import Dispatcher
+from lib import queue as queue_module
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
 
 
@@ -41,6 +43,14 @@ class _SingleRow:
 
 
 class _InterleavingConnection(sqlite3.Connection):
+    """Runs `interleave` at one point inside a queue operation.
+
+    The hook points match SQL text: before `BEGIN IMMEDIATE`, and after a
+    `SELECT * FROM jobs WHERE id = ?` read outside a transaction. Rewording
+    either statement in lib/queue.py silently skips the interleave, so
+    test_finish_races_t6_timeout_threaded backs these tests with a real race.
+    """
+
     interleave: Callable[[], None] | None = None
 
     def execute(self, sql: str, parameters=()):
@@ -308,3 +318,147 @@ def test_queue_refuses_empty_or_garbage_database(
         make_queue(path, [10.0])
 
     assert path.read_bytes() == contents
+
+
+def _dispatcher(path: Path, queue: SQLiteJobQueue) -> Dispatcher:
+    return Dispatcher(
+        path,
+        queue,
+        trusted_logins={"github": {"grok-bot": {"grok"}}, "linear": {}},
+        review_actions=Mock(),
+        grok_delivery=Mock(),
+    )
+
+
+def test_finish_with_a_different_handoff_is_refused(tmp_path: Path) -> None:
+    queue = make_queue(tmp_path / "queue.sqlite3", [10.0])
+    queue.enqueue(request(), dedupe_key="build")
+    running = queue.claim("claude")
+    assert running is not None
+    first = queue.finish(running.id, owner="claude", handoff_comment_id="handoff-9")
+
+    with pytest.raises(QueueError, match="running"):
+        queue.finish(running.id, owner="claude", handoff_comment_id="handoff-10")
+    with pytest.raises(QueueError, match="running"):
+        queue.finish(running.id, owner="claude", handoff_comment_id=None)
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (first.id,)
+        ).fetchone()
+    assert (row["state"], row["handoff_comment_id"]) == ("done", "handoff-9")
+
+
+def test_heartbeat_refuses_the_wrong_owner(tmp_path: Path) -> None:
+    now = [10.0]
+    queue = make_queue(tmp_path / "queue.sqlite3", now)
+    queue.enqueue(request(), dedupe_key="build")
+    now[0] = 20
+    running = queue.claim("claude")
+    assert running is not None
+
+    now[0] = 30
+    with pytest.raises(QueueError, match="belongs to claude, not codex"):
+        queue.heartbeat(running.id, owner="codex")
+
+    assert queue.outstanding()[0].last_activity_at == 20
+
+
+@pytest.mark.parametrize("operation", ["release", "heartbeat", "finish"])
+def test_queue_ops_refuse_an_unknown_owner(tmp_path: Path, operation: str) -> None:
+    queue = make_queue(tmp_path / "queue.sqlite3", [10.0])
+    queue.enqueue(request(recipient="grok"), dedupe_key="wake")
+    running = queue.claim("grok")
+    assert running is not None
+    with queue.connect() as connection:
+        connection.execute("UPDATE jobs SET recipient = 'grok-bot'")
+    calls = {
+        "release": lambda: queue.release(running.id, owner="grok-bot"),
+        "heartbeat": lambda: queue.heartbeat(running.id, owner="grok-bot"),
+        "finish": lambda: queue.finish(
+            running.id, owner="grok-bot", handoff_comment_id="handoff-9"
+        ),
+    }
+
+    with pytest.raises(QueueError, match="unknown owner 'grok-bot'"):
+        calls[operation]()
+
+    assert [(job.state, job.last_activity_at) for job in queue.outstanding()] == [
+        ("running", 10.0)
+    ]
+
+
+def test_finish_races_t6_timeout_threaded(tmp_path: Path) -> None:
+    for round_index in range(50):
+        path = tmp_path / f"round-{round_index}.sqlite3"
+        queue = SQLiteJobQueue(path, clock=lambda: 10.0)
+        queue.enqueue(request(), dedupe_key="build")
+        running = queue.claim("claude")
+        assert running is not None
+        dispatcher = _dispatcher(path, queue)
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def finish() -> None:
+            finisher = SQLiteJobQueue(path, clock=lambda: 10.0)
+            barrier.wait()
+            try:
+                finisher.finish(running.id, owner="claude", handoff_comment_id="handoff-9")
+            except QueueError:
+                pass
+            except BaseException as exc:
+                errors.append(exc)
+
+        def time_out() -> None:
+            barrier.wait()
+            try:
+                queue.mark_timed_out(running)
+                dispatcher.reconcile_jobs()
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=finish), threading.Thread(target=time_out)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert errors == []
+        with queue.connect() as connection:
+            state = connection.execute(
+                "SELECT state FROM jobs WHERE id = ?", (running.id,)
+            ).fetchone()["state"]
+            retries = connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE attempt = 2"
+            ).fetchone()[0]
+        assert (state, retries) in {("done", 0), ("failed", 1)}
+
+
+def test_claim_refuses_a_row_that_is_no_longer_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = make_queue(tmp_path / "queue.sqlite3", [10.0])
+    queue.enqueue(request(), dedupe_key="build")
+    running = queue.claim("claude")
+    assert running is not None
+
+    def stale_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.Row]:
+        return connection.execute("SELECT * FROM jobs").fetchall()
+
+    monkeypatch.setattr(queue_module, "claim_order", stale_order)
+    with pytest.raises(QueueError, match="no longer queued"):
+        queue.claim("claude")
+
+
+def test_queued_timeout_fails_closed_after_a_same_tick_claim(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    now = [10.0]
+    queue = make_queue(path, now)
+    queue.enqueue(request(), dedupe_key="build")
+    (stale,) = queue.outstanding()
+    assert stale.state == "queued"
+    running = make_queue(path, now).claim("claude")
+    assert running is not None
+    assert running.last_activity_at == stale.last_activity_at
+
+    assert queue.mark_timed_out(stale) is False
+    assert [job.state for job in queue.outstanding()] == ["running"]

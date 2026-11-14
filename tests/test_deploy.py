@@ -1,5 +1,7 @@
 import os
+import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -523,3 +525,49 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
         time.sleep(0.2)
         if pidfile.exists():
             os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
+    tmp_path: Path,
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    installed = tmp_path / ".local/share/factory/linear-webhook-service.sh"
+    assert installed.read_bytes() == (ROOT / "deploy/linear-webhook-service.sh").read_bytes()
+    assert installed.stat().st_mode & 0o777 == 0o755
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {
+        **_profile_env(tmp_path),
+        "LINEAR_WEBHOOK_PORT": str(port),
+        "LINEAR_WEBHOOK_TUNNEL_HOST": "",
+    }
+    source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
+    lock = tmp_path / ".local/state/factory/linear-webhook-listener.lock"
+
+    off = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                         capture_output=True, timeout=30, check=False)
+    assert off.returncode == 0 and off.stdout == "ok", off.stderr
+    time.sleep(0.5)
+    assert not lock.exists()
+
+    (tmp_path / ".config/factory/linear-webhook-autostart").touch()
+    on = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                        capture_output=True, timeout=30, check=False)
+    assert on.returncode == 0 and on.stdout == "ok", on.stderr
+    try:
+        deadline = time.monotonic() + 15
+        while not (tmp_path / ".local/state/factory/linear-webhook-listener.pid").exists():
+            assert time.monotonic() < deadline, "the profile hook never started the listener loop"
+            time.sleep(0.1)
+        status = subprocess.run([str(installed), "status"], env=env, text=True,
+                                capture_output=True, timeout=30, check=False)
+        assert status.returncode == 0, status.stdout + status.stderr
+    finally:
+        stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
+                                 capture_output=True, timeout=60, check=False)
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
