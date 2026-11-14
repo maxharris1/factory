@@ -35,6 +35,22 @@ def _dedupe_keys(path: Path) -> list[str]:
         return [row[0] for row in connection.execute("SELECT dedupe_key FROM jobs")]
 
 
+def _dump(path: Path) -> list[str]:
+    connection = sqlite3.connect(path)
+    try:
+        return list(connection.iterdump())
+    finally:
+        connection.close()
+
+
+def _checkpoint(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+
 class OneCycle:
     def __init__(self, dispatcher, source) -> None:
         del dispatcher, source
@@ -92,13 +108,14 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
     _dispatcher, queue = _seeded(tmp_path)
     dest = tmp_path / "share" / "orch.db"
     backup(queue.path, dest)
-    before = queue.path.read_bytes()
+    before = (queue.path.stat().st_ino, _dump(queue.path))
 
     code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
+    _checkpoint(queue.path)
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert queue.path.read_bytes() == before
+    assert (queue.path.stat().st_ino, _dump(queue.path)) == before
 
 
 def test_restore_db_rejects_a_corrupt_backup(tmp_path: Path, capsys) -> None:

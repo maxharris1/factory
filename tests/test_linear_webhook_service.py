@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from lib.queue import SQLiteJobQueue
-from tests.procs import alive
+from tests.procs import alive, open_files
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "linear-webhook-service.sh"
@@ -444,10 +444,7 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
     reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
     try:
         _wait_for(
-            lambda: any(
-                os.path.realpath(f"/proc/{reader.pid}/fd/{fd}") == str(lock.resolve())
-                for fd in os.listdir(f"/proc/{reader.pid}/fd")
-            ),
+            lambda: str(lock.resolve()) in open_files(reader.pid),
             what="the reader to open the lock file",
         )
         result = _service(home, "stop")
