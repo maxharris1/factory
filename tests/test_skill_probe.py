@@ -39,6 +39,7 @@ devices:
     harnesses: {claude: claude-bot, codex: codex-bot}
     workdir_root: /Users/{bot}/factory-work
     ssh_alias: mac-{bot}
+    factory_root: /Users/{bot}/factory
   - name: pc
     enabled: false
     tailscale_name: pc.example.ts.net
@@ -46,12 +47,14 @@ devices:
     harnesses: {claude: claude-bot, codex: codex-bot}
     workdir_root: /home/{bot}/factory-work
     ssh_alias: pc-{bot}
+    factory_root: /home/{bot}/factory
   - name: spare
     tailscale_name: spare.example.ts.net
     slot_max: 1
     harnesses: {claude: claude-bot}
     workdir_root: REPLACE_WITH_SPARE_WORKDIR
     ssh_alias: REPLACE_WITH_SPARE_ALIAS
+    factory_root: REPLACE_WITH_SPARE_FACTORY_ROOT
 """
 
 

@@ -25,13 +25,19 @@ PIN_COMMIT = "c742dd61706fbacc1b95f1a20b7b988cf096ce6c"
 OWNERS = {
     "claude": "claude-bot",
     "codex": "codex-bot",
-    "cursor": "cursor-bot",
 }
+ROUTERS = ("factory-builder", "factory-reviewer")
 
 
 def skill_names() -> list[str]:
     base = ROOT / "skills" / "pstack" / "skills"
-    return sorted(path.name for path in base.iterdir() if path.is_dir())
+    return sorted([path.name for path in base.iterdir() if path.is_dir()] + list(ROUTERS))
+
+
+def skill_source(name: str) -> Path:
+    if name in ROUTERS:
+        return ROOT / "skills" / "factory" / name
+    return ROOT / "skills" / "pstack" / "skills" / name
 
 
 def write_replies(
@@ -48,13 +54,14 @@ def write_replies(
         if harness == skip:
             continue
         who = (started_by or {}).get(harness, owner)
-        name = (skill or {}).get(harness, "poteto-mode")
+        name = (skill or {}).get(harness, "factory-builder")
         quoted = (token_for or {}).get(harness, token)
         text = f"started-by: {who}\nskill: {name}\ntoken: {quoted}\n"
         (directory / harness).write_text(text, encoding="utf-8")
 
 
 OLD_SKILL = "---\nname: poteto-mode\ndescription: token-one\n---\n\n"
+ROUTER_SKILL = "---\nname: factory-builder\ndescription: router\n---\n\n"
 
 
 def tiny_tree(tmp_path: Path) -> Path:
@@ -68,6 +75,9 @@ def tiny_tree(tmp_path: Path) -> Path:
         "### Orchestrate\n\n**token-one** the rest.\n",
         encoding="utf-8",
     )
+    router = root / "skills" / "factory" / "factory-builder"
+    router.mkdir(parents=True)
+    (router / "SKILL.md").write_text(ROUTER_SKILL, encoding="utf-8")
     manifest = '{"name": "pstack", "version": "0.15.36"}\n'
     for rel in (".cursor-plugin/plugin.json", "plugin.json"):
         path = root / "skills" / "pstack" / rel
@@ -100,11 +110,12 @@ def test_lock_pins_pstack_0_15_36() -> None:
     assert "skills/statechart/SKILL.md" in pin.hashes()
 
 
-def test_canary_asks_for_poteto_mode_and_a_token_from_the_skill() -> None:
+def test_canary_asks_for_factory_builder_and_a_token_from_poteto_mode() -> None:
     result = run(["doctor", "--print-canary"])
     assert result.returncode == 0, result.stderr
     prompt = result.stdout
     token = pinned_token(ROOT)
+    assert "skill: factory-builder" in prompt
     assert "poteto-mode" in prompt
     assert "playbooks/orchestrate.md" in prompt
     assert "whole first bold passage" in prompt
@@ -112,7 +123,7 @@ def test_canary_asks_for_poteto_mode_and_a_token_from_the_skill() -> None:
     assert "without the ** markers" in prompt
     assert "claude-bot" in prompt
     assert "codex-bot" in prompt
-    assert "cursor-bot" in prompt
+    assert "cursor-bot" not in prompt
     playbook = ROOT / "skills" / "pstack" / "skills" / "poteto-mode" / "playbooks" / "orchestrate.md"
     assert token in playbook.read_text(encoding="utf-8")
     assert token not in prompt
@@ -133,7 +144,7 @@ def test_install_symlinks_each_skill_into_the_local_harness_paths(tmp_path: Path
         for name in names:
             link = home / rel / name
             assert link.is_symlink()
-            assert link.resolve() == (ROOT / "skills" / "pstack" / "skills" / name).resolve()
+            assert link.resolve() == skill_source(name).resolve()
     assert not (home / ".codex").exists()
     assert not (home / ".cursor" / "plugins").exists()
 
@@ -143,7 +154,9 @@ def test_install_vendors_each_skill_into_the_cloud_project_paths(tmp_path: Path)
     result = run(["install-skills", "--cloud", "--project", str(project)], cwd=tmp_path)
     assert result.returncode == 0, result.stderr
     names = skill_names()
-    pinned = {rel: digest for rel, digest in load_pin(ROOT).hashes().items() if rel.startswith("skills/")}
+    pin = load_pin(ROOT)
+    pinned = {rel: digest for rel, digest in pin.hashes().items() if rel.startswith("skills/")}
+    pinned |= {f"skills/{rel}": digest for rel, digest in pin.factory_hashes().items() if rel.split("/")[0] in ROUTERS}
     for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
         installed = sorted(path.name for path in (project / rel).iterdir())
         assert installed == names
@@ -178,7 +191,7 @@ def test_doctor_passes_when_each_owning_bot_quotes_the_pinned_token(tmp_path: Pa
     write_replies(replies, token)
     result = run(["doctor", "--home", str(home), "--responses", str(replies)])
     assert result.returncode == 0, result.stderr
-    assert "poteto-mode" in result.stdout
+    assert "factory-builder" in result.stdout
     assert result.stdout.endswith("ok\n")
 
 
@@ -196,21 +209,21 @@ def test_doctor_fails_when_a_harness_response_is_missing(tmp_path: Path) -> None
     home = tmp_path / "home"
     assert run(LOCAL_INSTALL + [str(home)]).returncode == 0
     replies = tmp_path / "replies"
-    write_replies(replies, pinned_token(ROOT), skip="cursor")
+    write_replies(replies, pinned_token(ROOT), skip="codex")
     result = run(["doctor", "--home", str(home), "--responses", str(replies)])
     assert result.returncode == 1
-    assert "cursor: did not load the pinned version" in result.stderr
+    assert "codex: did not load the pinned version" in result.stderr
     assert "ok" not in result.stdout.splitlines()
 
 
-def test_doctor_fails_when_the_reply_does_not_name_poteto_mode(tmp_path: Path) -> None:
+def test_doctor_fails_when_the_reply_does_not_name_factory_builder(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert run(LOCAL_INSTALL + [str(home)]).returncode == 0
     replies = tmp_path / "replies"
     write_replies(replies, pinned_token(ROOT), skill={"codex": "other-skill"})
     result = run(["doctor", "--home", str(home), "--responses", str(replies)])
     assert result.returncode == 1
-    assert "codex: did not load the pinned version (did not name poteto-mode)" in result.stderr
+    assert "codex: did not load the pinned version (did not name factory-builder)" in result.stderr
 
 
 def test_doctor_fails_when_the_token_is_not_the_pinned_skill(tmp_path: Path) -> None:
@@ -664,7 +677,8 @@ def test_cli_local_install_refuses_a_worktree_checkout(
     bump_pin(root, "a" * 40, "0.15.36")
     if why == "worktree":
         (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
-        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "not-temp"))
+    temp = tmp_path / "not-temp" if why == "worktree" else tmp_path
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
     monkeypatch.setattr(cli, "ROOT", root)
     home = tmp_path / "home"
     assert cli.main(["install-skills", "--home", str(home)]) == 1

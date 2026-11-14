@@ -34,6 +34,11 @@ stdout on a pipe and hands the pipe to a `Session` here:
   no command line, tool argument, pattern, path, query or error message is
   ever stored (#100 r10, Max: "Hide those fields in the job modal instead").
   File paths are only counted.
+* The one exception (#147, Max, 2026-11-13): the live run (`LiveRun`), so
+  the agent's task-list text, its current and last finished task, and its
+  sub-agents' description and type. Never a prompt, a result, a summary or
+  assistant text. `ORCH_TELEMETRY=counters` keeps the r10 behaviour: the
+  live run is never read and its four columns stay NULL.
 * `Session.flush` writes the summary to the `job_telemetry` table in
   orch.db; `orch job run` calls it right after each job heartbeat (every
   ~15 seconds), and `Session.finish` writes it once more when the harness
@@ -50,13 +55,15 @@ stdout on a pipe and hands the pipe to a `Session` here:
   telemetry row, per harness, bot and device.
 
 Secrets: the only free text that goes into the table is the harness's tool
-names (as tool call counts and step labels). Defense in depth, they are
+names (as tool call counts and step labels) and the live run's texts (each
+with an absolute path and the rest of the text after it cut to `[path]`, and capped at TASK_TEXT_LIMIT). They are
 scrubbed first (`Scrubber`): the values of the
 harness's environment variables whose names look secret, and always its
 ORCH_JOB_PROOF and ORCH_WORKER_TAG, are replaced,
 whatever their length and however the text quotes or escapes them (each
 value is matched against the text as written and as read after up to three
-rounds of shell unquoting or JSON, Python and C string-escape decoding, with
+rounds of shell unquoting (bash's `$'...'` and `$"..."` too) or JSON, Python
+and C string-escape decoding, with
 quote and backslash characters ignored, so a shell-quoted
 `'walrus'"'"'harbor'` and the JSON `"walrus\\u00e9harbor"` go like the plain
 value; each line of a multi-line value is matched on its own), keeping
@@ -71,9 +78,9 @@ start prints it as one report line before the harness (lib/remote.py
 WORKER_ENV_MARK), which is never logged or copied. The profile's own stdout
 goes to stderr, so the report starts the stream; text before the mark on
 its line is kept, the report itself never. Until a whole report is read
-the scrubber is blind and every tool name is stored as `[redacted-env]`.
-Assistant text and tool output are never stored; tool output is only
-read for test counts. The dashboard (lib/dashboard_telemetry.py) shows
+the scrubber is blind and every tool name and live run text is stored as
+`[redacted-env]`. Assistant text and tool output are never stored; tool
+output is only read for test counts and a TaskCreate's new task id. The dashboard (lib/dashboard_telemetry.py) shows
 only these summaries and step labels.
 
 Counters are clamped to 0..MAX_COUNT and a cost must be finite, so every
@@ -118,6 +125,10 @@ MAX_LINE_BYTES = 1024 * 1024
 RECENT_STEPS = 20
 MAX_TOOL_TYPES = 40
 LABEL_LIMIT = 40
+TASK_TEXT_LIMIT = 120
+PLAN_ITEMS = 12
+SUBAGENTS = 8
+MAX_TRACKED = 200
 SCRUB_LIMIT = 16 * 1024
 HIDDEN = "[redacted-env]"
 SCAN_BYTES = 64 * 1024
@@ -125,6 +136,7 @@ MAX_COUNT = 2**53 - 1
 
 HARNESS_BY_BOT = {"claude-bot": "claude", "codex-bot": "codex", "cursor-bot": "cursor"}
 _OFF = frozenset({"0", "off", "no", "false"})
+COUNTERS_ONLY = "counters"
 
 Log = Callable[[str], None]
 Connect = Callable[[], sqlite3.Connection]
@@ -154,7 +166,12 @@ COLUMNS = (
     "exit_code",
     "exit_reason",
     "steps",
+    "plan",
+    "current_task",
+    "last_finished",
+    "subagents",
 )
+LIVE_RUN_COLUMNS = ("plan", "current_task", "last_finished", "subagents")
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -181,15 +198,32 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     cost_usd REAL,
     exit_code INTEGER,
     exit_reason TEXT,
-    steps TEXT NOT NULL
+    steps TEXT NOT NULL,
+    plan TEXT,
+    current_task TEXT,
+    last_finished TEXT,
+    subagents TEXT
 )
 """
 INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_updated ON {TABLE} (updated_at)"
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
+    """Create the table, or add the live run columns (#147) to an older one.
+
+    Two runners can migrate one database at once: the one that loses the
+    race gets `duplicate column name`, which means the column is there."""
     connection.execute(DDL)
     connection.execute(INDEX)
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+    for name in LIVE_RUN_COLUMNS:
+        if name in present:
+            continue
+        try:
+            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
 
 def last_seen(connection: sqlite3.Connection, job_id: str) -> float | None:
@@ -255,6 +289,11 @@ def enabled(environ: Mapping[str, str]) -> bool:
     return environ.get(TELEMETRY_ENV, "").strip().lower() not in _OFF
 
 
+def text_enabled(environ: Mapping[str, str]) -> bool:
+    """False for ORCH_TELEMETRY=counters: counters only, no live run text (#100 r10)."""
+    return environ.get(TELEMETRY_ENV, "").strip().lower() != COUNTERS_ONLY
+
+
 def state_dir(job_id: str, bot: str, database: Path, environ: Mapping[str, str]) -> Path:
     """Where the job's raw log goes: $ORCH_JOB_STATE_DIR (the waiter sets it to
     the job's own directory), else `telemetry-<bot>/<job-id>` beside orch.db
@@ -277,7 +316,7 @@ _RUN_SECRETS = frozenset({PROOF_ENV, TAG_ENV})
 _FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
 _QUOTING = frozenset("'\"\\")
 _ESCAPES = {
-    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "a": "\a",
+    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "a": "\a", "e": "\x1b", "E": "\x1b",
     "/": "/", "\\": "\\", "'": "'", '"': '"',
 }
 _HEX_WIDTH = {"x": 2, "u": 4, "U": 8}
@@ -330,14 +369,29 @@ def _unescape(reading: Reading) -> Reading:
 
 def _unshell(reading: Reading) -> Reading:
     """`reading` as the shell reads its words: quotes dropped, single-quoted
-    text literal, and backslash escapes read as the character they escape."""
+    text literal, and backslash escapes read as the character they escape.
+    Bash's `$'...'` keeps its escapes for a later `_unescape` round, and
+    `$"..."` reads as `"..."`."""
     out: Reading = []
     quote = None
     index = 0
     while index < len(reading):
         char, start, _ = reading[index]
         escaped = index + 1 < len(reading) and (quote is None or reading[index + 1][0] in '"\\$`')
-        if quote == "'":
+        if quote is None and char == "$" and index + 1 < len(reading) and reading[index + 1][0] in "'\"":
+            quote = "$'" if reading[index + 1][0] == "'" else '"'
+            index += 2
+            continue
+        if quote == "$'":
+            if char == "\\" and index + 1 < len(reading):
+                out += reading[index : index + 2]
+                index += 2
+                continue
+            if char == "'":
+                quote = None
+            else:
+                out.append(reading[index])
+        elif quote == "'":
             if char == "'":
                 quote = None
             else:
@@ -607,12 +661,279 @@ def _command_text(command: object) -> str:
     return str(command or "")
 
 
-class Summary:
-    """Everything the dashboard shows of one run, from its events."""
+# --- the live run: what the agent says it is doing (#147) ---------------------------
 
-    def __init__(self, harness: str, scrub: Callable[..., str]):
+# Claude Code's sub-agent tool; it was `Task` before 2.1, when it ran in the foreground.
+_SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
+_TASK_EVENTS = frozenset({"task_started", "task_progress", "task_notification"})
+_TASK_CREATED = re.compile(r"\bTask #([\w-]{1,40}) created successfully")
+_PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "done"}
+_SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed"}
+_RELATIVE_PATH = re.compile(r"""[(\['"`]*(?!-)[\w.-]+(?:[/\\][\w.-]+)*[/\\]?[.,;:!?)\]'"`]*""")
+
+
+def _is_path(token: str) -> bool:
+    return bool(re.search(r"[/\\]", token)) and bool(token.strip("/\\")) and not _RELATIVE_PATH.fullmatch(token)
+
+
+def _cut_paths(text: str) -> str:
+    """Every word with a slash is a path unless it reads as a plain relative one
+    (`lib/x.py`, `../y`, `and/or`) or is only slashes (`a / b`). A shell word
+    joined by escaped spaces (`/\\ my\\ dir/x`) is judged as it unescapes. Where
+    a path ends cannot be told from text (quotes, spaces, escapes), so
+    everything from the first such word to the end goes."""
+    for shell_word in re.finditer(r"(?:\\[\s\S]?|[^\s\\])+", text):
+        if _is_path(re.sub(r"\\([\s\S])", r"\1", shell_word.group())):
+            return text[: shell_word.start()] + "[path]"
+        for word in re.finditer(r"\S+", shell_word.group()):
+            if _is_path(word.group()):
+                return text[: shell_word.start() + word.start()] + "[path]"
+    return text
+
+
+def _str(value: object) -> str | None:
+    """A non-blank string as given, kept just long enough for the scrubber to
+    hide an overlong one whole; None for anything else."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value[: SCRUB_LIMIT + 1]
+
+
+def _drop_oldest(mapping: dict, limit: int) -> None:
+    while len(mapping) > limit:
+        del mapping[next(iter(mapping))]
+
+
+class LiveRun:
+    """The agent's plan, current and last finished task, and sub-agents.
+
+    Only these texts are ever read from the stream: a task-list item's text
+    and active form, and a sub-agent's description and type. Never a prompt,
+    a result, a summary or a TaskCreate description. They stay in memory as
+    given; `row` scrubs each one, then cuts every path and what follows it to `[path]`."""
+
+    def __init__(self) -> None:
+        self.plan: list[dict] = []
+        self.last_done: str | None = None
+        self.subagents: dict[str, dict] = {}  # by the tool_use id that started each
+        self._tasks: dict[str, str] = {}  # a stream task id -> the sub-agent's tool_use id
+        self._creating: dict[str, dict] = {}  # a TaskCreate call -> its item, until its id comes back
+
+    # -- Claude Code --
+
+    def tool_use(self, name: str, call_id: str, data: dict, now: float) -> None:
+        if name == "TodoWrite":
+            self._todo_write(data.get("todos"))
+        elif name == "TaskCreate":
+            self._task_create(call_id, data)
+        elif name == "TaskUpdate":
+            self._task_update(data)
+        elif name in _SUBAGENT_TOOLS:
+            self._subagent(call_id, name, data, now)
+
+    def tool_result(self, call_id: str, error: bool, output: str, now: float) -> None:
+        item = self._creating.pop(call_id, None)
+        if item is not None:
+            found = None if error else _TASK_CREATED.search(output)
+            if found is not None:
+                item["id"] = found.group(1)
+            elif error:
+                self._drop(item)
+            return
+        agent = self.subagents.get(call_id)
+        if agent is None:
+            return
+        if error:
+            self._end(agent, "failed", now)
+        elif not agent["background"]:  # a background call's result only says it launched
+            self._end(agent, "finished", now)
+
+    def task_event(self, subtype: str, event: dict, now: float) -> None:
+        """A `system` task event, for a sub-agent this run started. Tasks that
+        are not sub-agents (background shells, monitors) are not in the map."""
+        call_id = event.get("tool_use_id")
+        task_id = event.get("task_id")
+        task_id = task_id if isinstance(task_id, str) else None
+        if not isinstance(call_id, str) or call_id not in self.subagents:
+            call_id = self._tasks.get(task_id) if task_id else None
+        agent = self.subagents.get(call_id) if call_id else None
+        if agent is None:
+            return
+        if subtype == "task_started":
+            if task_id:
+                self._tasks[task_id] = call_id
+                _drop_oldest(self._tasks, MAX_TRACKED)
+            backgrounded = event.get("is_backgrounded")
+            if isinstance(backgrounded, bool):
+                agent["background"] = backgrounded
+            self._resume(agent)
+        elif subtype == "task_progress":
+            if agent["background"]:
+                self._resume(agent)
+        else:
+            status = event.get("status")
+            end = _SUBAGENT_END.get(status) if isinstance(status, str) else None
+            if end is not None:
+                self._end(agent, end, now)
+
+    def _todo_write(self, todos: object) -> None:
+        if not isinstance(todos, list):
+            return
+        items = []
+        for todo in todos[:MAX_TRACKED]:
+            if not isinstance(todo, dict):
+                continue
+            text = _str(todo.get("content"))
+            status = todo.get("status")
+            status = _PLAN_STATUS.get(status) if isinstance(status, str) else None
+            if text is not None and status is not None:
+                items.append({"text": text, "active": _str(todo.get("activeForm")), "status": status})
+        self._replace(items)
+
+    def _task_create(self, call_id: str, data: dict) -> None:
+        subject = _str(data.get("subject"))
+        if subject is None or len(self.plan) >= MAX_TRACKED:
+            return
+        item = {"text": subject, "active": _str(data.get("activeForm")), "status": "pending", "id": None}
+        self.plan.append(item)
+        self._creating[call_id] = item
+        _drop_oldest(self._creating, MAX_TRACKED)
+
+    def _task_update(self, data: dict) -> None:
+        ident = data.get("taskId")
+        if isinstance(ident, bool) or not isinstance(ident, (str, int)):
+            return
+        item = next((item for item in self.plan if item.get("id") == str(ident)), None)
+        if item is None:
+            return
+        status = data.get("status")
+        if status == "deleted":
+            self._drop(item)
+            return
+        item["text"] = _str(data.get("subject")) or item["text"]
+        item["active"] = _str(data.get("activeForm")) or item["active"]
+        mapped = _PLAN_STATUS.get(status) if isinstance(status, str) else None
+        if mapped is not None:
+            if mapped == "done" and item["status"] != "done":
+                self.last_done = item["text"]
+            item["status"] = mapped
+
+    def _drop(self, item: dict) -> None:
+        self.plan = [kept for kept in self.plan if kept is not item]
+
+    def _subagent(self, call_id: str, name: str, data: dict, now: float) -> None:
+        background = data.get("run_in_background")
+        if not isinstance(background, bool):
+            background = name == "Agent"  # Claude Code 2.1 runs sub-agents in the background by default
+        self.subagents[call_id] = {
+            "kind": _str(data.get("subagent_type")) or "general-purpose",
+            "description": _str(data.get("description")) or "",
+            "status": "running",
+            "started_at": now,
+            "finished_at": None,
+            "background": background,
+        }
+        if len(self.subagents) > MAX_TRACKED:
+            done = next((key for key, agent in self.subagents.items() if agent["status"] != "running"), None)
+            del self.subagents[done if done is not None else next(iter(self.subagents))]
+
+    @staticmethod
+    def _end(agent: dict, status: str, now: float) -> None:
+        agent["status"] = status
+        agent["finished_at"] = now
+
+    @staticmethod
+    def _resume(agent: dict) -> None:
+        agent["status"] = "running"
+        agent["finished_at"] = None
+
+    # -- Codex --
+
+    def codex_todo(self, entries: object) -> None:
+        """A `todo_list` item's whole list. Codex has no in-progress state:
+        the first item not completed is the one in progress."""
+        if not isinstance(entries, list):
+            return
+        items, started = [], False
+        for entry in entries[:MAX_TRACKED]:
+            text = _str(entry.get("text")) if isinstance(entry, dict) else None
+            if text is None:
+                continue
+            done = entry.get("completed") is True
+            status = "done" if done else "pending" if started else "in_progress"
+            started = started or not done
+            items.append({"text": text, "active": None, "status": status})
+        self._replace(items)
+
+    def _replace(self, items: list[dict]) -> None:
+        """A new whole list; its last item newly done is the last finished task.
+        Items with the same text are told apart by how many of them are done."""
+        before = Counter(item["text"] for item in self.plan if item["status"] == "done")
+        seen: Counter[str] = Counter()
+        for item in items:
+            if item["status"] == "done":
+                seen[item["text"]] += 1
+                if seen[item["text"]] > before[item["text"]]:
+                    self.last_done = item["text"]
+        self.plan = items
+
+    # -- out --
+
+    def row(self, scrub: Callable[..., str]) -> dict[str, Any]:
+        def text(value: str | None, limit: int = TASK_TEXT_LIMIT) -> str:
+            return _cut_paths(scrub(value, limit)) if value else ""
+
+        current = next((item for item in self.plan if item["status"] == "in_progress"), None)
+        running = [agent for agent in self.subagents.values() if agent["status"] == "running"]
+        if current is not None:
+            current_task = current["active"] or current["text"]
+        else:
+            current_task = running[-1]["description"] if running else None
+        return {
+            "plan": json.dumps([{"text": text(item["text"]), "status": item["status"]} for item in self._window()]),
+            "current_task": text(current_task),
+            "last_finished": text(self.last_done),
+            "subagents": json.dumps(
+                [
+                    {
+                        "kind": text(agent["kind"], LABEL_LIMIT),
+                        "description": text(agent["description"]),
+                        "status": agent["status"],
+                        "started_at": agent["started_at"],
+                        "finished_at": agent["finished_at"],
+                    }
+                    for agent in self._kept_subagents()
+                ]
+            ),
+        }
+
+    def _window(self) -> list[dict]:
+        """PLAN_ITEMS items: from up to two before the one in progress, else the first."""
+        at = next((index for index, item in enumerate(self.plan) if item["status"] == "in_progress"), 0)
+        start = max(0, min(at - 2, len(self.plan) - PLAN_ITEMS))
+        return self.plan[start : start + PLAN_ITEMS]
+
+    def _kept_subagents(self) -> list[dict]:
+        """Up to SUBAGENTS, in the order they started: the newest running ones,
+        then the most recently finished."""
+        agents = list(self.subagents.values())
+        kept = [agent for agent in agents if agent["status"] == "running"][-SUBAGENTS:]
+        ended = sorted((agent for agent in agents if agent["status"] != "running"), key=lambda agent: agent["finished_at"])
+        room = SUBAGENTS - len(kept)
+        chosen = {id(agent) for agent in kept + (ended[len(ended) - room :] if room else [])}
+        return [agent for agent in agents if id(agent) in chosen]
+
+
+class Summary:
+    """Everything the dashboard shows of one run, from its events.
+
+    text=False (ORCH_TELEMETRY=counters) keeps the counters only: no live
+    run text is read into memory or stored, and its columns stay NULL."""
+
+    def __init__(self, harness: str, scrub: Callable[..., str], *, text: bool = True):
         self.harness = harness
         self.scrub = scrub
+        self.live = LiveRun() if text else None
         self.events = 0
         self.turns = 0
         self.tool_calls: Counter[str] = Counter()
@@ -696,6 +1017,11 @@ class Summary:
         if kind == "result":
             self._claude_result(event, now)
             return
+        if kind == "system":
+            subtype = event.get("subtype")
+            if self.live is not None and isinstance(subtype, str) and subtype in _TASK_EVENTS:
+                self.live.task_event(subtype, event, now)
+            return
         if not isinstance(message, dict):
             return
         content = message.get("content")
@@ -718,11 +1044,12 @@ class Summary:
             return
         for block in blocks:  # user: tool results
             if isinstance(block, dict) and block.get("type") == "tool_result":
-                self._finished(
-                    str(block.get("tool_use_id")),
-                    bool(block.get("is_error")),
-                    _text_of(block.get("content")),
-                )
+                call_id = str(block.get("tool_use_id"))
+                error = bool(block.get("is_error"))
+                output = _text_of(block.get("content"))
+                self._finished(call_id, error, output)
+                if self.live is not None:
+                    self.live.tool_result(call_id, error, output, now)
 
     @staticmethod
     def _claude_usage(usage: dict) -> tuple[int, int, int]:
@@ -749,6 +1076,8 @@ class Summary:
                 self._touch(data.get("file_path") or data.get("notebook_path"))
             step = self._step(now, "tool", label, "running")
         self._open[call_id] = (step, command)
+        if self.live is not None:
+            self.live.tool_use(name, call_id, data, now)
 
     def _claude_result(self, event: dict, now: float) -> None:
         self._totals = True
@@ -799,6 +1128,8 @@ class Summary:
 
     def _codex_item(self, item: dict, now: float, *, done: bool) -> None:
         item_type = item.get("type")
+        if item_type == "todo_list" and self.live is not None:
+            self.live.codex_todo(item.get("items"))
         ident = str(item.get("id") or f"item-{self.events}")
         if ident not in self._seen_items:
             self._seen_items.add(ident)
@@ -855,6 +1186,7 @@ class Summary:
             "cost_usd": self.cost_usd,
             "last_event_at": self.last_event_at,
             "steps": json.dumps(list(self.steps)),
+            **(dict.fromkeys(LIVE_RUN_COLUMNS) if self.live is None else self.live.row(self.scrub)),
         }
 
 
@@ -936,6 +1268,7 @@ class Session:
         worker_env: bool = False,
         device: str = "box",
         rollout_home: str | None = None,
+        text: bool = True,
     ):
         self.connect = connect
         self.device = device
@@ -952,7 +1285,7 @@ class Session:
         self.stdout = stdout
         self.clock = clock
         self.monotonic = monotonic
-        self.summary = Summary(harness, scrub)
+        self.summary = Summary(harness, scrub, text=text)
         self.started_at = clock()
         self._started = monotonic()
         self._lock = threading.Lock()
@@ -1189,4 +1522,5 @@ def start_session(
         worker_env=worker_env,
         device=device,
         rollout_home=codex_home(dict(env)) if harness == "codex" and not worker_env else None,
+        text=text_enabled(env),
     )

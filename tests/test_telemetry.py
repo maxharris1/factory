@@ -581,6 +581,22 @@ def test_the_scrubber_hides_an_escaped_env_secret(secret: str) -> None:
         assert not readable(secret, text), (command, text)
 
 
+def test_the_scrubber_reads_bash_ansi_c_and_locale_quoting() -> None:
+    """A sub-agent description is free text (#147), so a secret written in
+    bash's $'...' (with its \\E escape) or $"..." quoting goes too."""
+    esc, plain = "walrus\x1bharbor-pin", "otter" + "lantern-key"
+    scrub = Scrubber({"DEPLOY_PASSWORD": esc, "DEPLOY_TOKEN": plain})
+    for word in (
+        "$'walrus\\Eharbor-pin'",
+        "$'walrus\\eharbor-pin'",
+        "$'walr'$'us\x1bh'$'arbo'$'r-pi'$'n'",
+        '$"otte"$"rlan"$"tern"$"-key"',
+        "$'otter\\x6cantern-key'",
+    ):
+        assert scrub(f"check {word} now", 200) == "check [redacted-env] now", word
+    assert scrub("echo $'it\\'s' $\"HOME\" $5", 200) == "echo $'it\\'s' $\"HOME\" $5"
+
+
 def test_escape_decoding_keeps_text_that_holds_no_secret() -> None:
     scrub = Scrubber({"DEPLOY_PASSWORD": "walrus\u00e9harbor"})
     command = 'printf "a\\tb\\u00e9" --json \'{"k": "v\\n"}\''
@@ -840,12 +856,12 @@ def _running_job(tmp_path: Path):
     return queue, pool_claim(queue, "claude")
 
 
-def _fake_claude(tmp_path: Path) -> Path:
+def _fake_claude(tmp_path: Path, fixture: str = "claude_stream.jsonl") -> Path:
     path = tmp_path / "bin" / "claude"
     path.parent.mkdir()
     path.write_text(
         FAKE_CLAUDE.format(
-            python=sys.executable, fixture=str(FIXTURES / "claude_stream.jsonl"), token=GH_TOKEN
+            python=sys.executable, fixture=str(FIXTURES / fixture), token=GH_TOKEN
         ),
         encoding="utf-8",
     )
@@ -1107,3 +1123,525 @@ def test_an_oversized_report_is_dropped_whole_and_the_session_stays_blind(tmp_pa
     assert out.getvalue() == b"after\n"
     assert (tmp_path / "state" / "events.jsonl").read_bytes() == b"after\n"
     assert row["exit_reason"] == "exit 3"
+
+
+# --- the live run: plan, current and last task, sub-agents (#147) ------------------------
+
+LIVE_RUN = ("plan", "current_task", "last_finished", "subagents")
+LIVE_FIXTURES = [
+    ("claude_subagents_stream.jsonl", "claude"),
+    ("claude_tasks_v2_stream.jsonl", "claude"),
+    ("codex_todo_exec.jsonl", "codex"),
+]
+# Text the fixtures hold in fields telemetry must never read: prompts, results,
+# summaries, output files, a Bash description, a TaskCreate description, assistant text.
+SENTINELS = ("SENTINEL",)
+# The #93 table, as an older runner created it.
+OLD_DDL = """
+CREATE TABLE job_telemetry (
+    job_id TEXT PRIMARY KEY, bot TEXT NOT NULL, harness TEXT NOT NULL, repo TEXT NOT NULL,
+    started_at REAL NOT NULL, updated_at REAL NOT NULL, last_event_at REAL, finished_at REAL,
+    elapsed_seconds REAL NOT NULL, events INTEGER NOT NULL, turns INTEGER NOT NULL,
+    tool_calls TEXT NOT NULL, files_touched INTEGER NOT NULL, commands INTEGER NOT NULL,
+    test_runs INTEGER NOT NULL, tests_passed INTEGER, tests_failed INTEGER,
+    tokens_in INTEGER NOT NULL, tokens_cached INTEGER NOT NULL, tokens_out INTEGER NOT NULL,
+    cost_usd REAL, exit_code INTEGER, exit_reason TEXT, steps TEXT NOT NULL
+)
+"""
+
+
+def _feed(summary: Summary, *events: dict) -> Summary:
+    for index, event in enumerate(events):
+        summary.feed(event, 1000.0 + index)
+    return summary
+
+
+def _use(call_id: str, name: str, data: object) -> dict:
+    return {"type": "assistant", "message": {"id": f"m-{call_id}", "content": [
+        {"type": "tool_use", "id": call_id, "name": name, "input": data}]}}
+
+
+def _result(call_id: str, text: str = "ok", *, error: bool = False) -> dict:
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": call_id, "content": text, "is_error": error}]}}
+
+
+def _todos(*items: tuple[str, str]) -> dict:
+    return {"todos": [{"content": text, "status": status, "activeForm": f"Doing {text}"} for text, status in items]}
+
+
+def _live(summary: Summary) -> dict:
+    row = summary.row()
+    return {
+        "plan": json.loads(row["plan"]),
+        "current_task": row["current_task"],
+        "last_finished": row["last_finished"],
+        "subagents": json.loads(row["subagents"]),
+    }
+
+
+def test_claude_subagents_fixture_fills_the_live_run() -> None:
+    summary = parse("claude_subagents_stream.jsonl", "claude")
+    live = _live(summary)
+    assert live["plan"] == [
+        {"text": "Read the telemetry module", "status": "done"},
+        {"text": "Write the fixture tests in [path]", "status": "done"},
+        {"text": "Push with GH_TOKEN=[redacted-token]", "status": "in_progress"},
+    ]
+    assert live["current_task"] == "Pushing with GH_TOKEN=[redacted-token]"  # the item's active form
+    assert live["last_finished"] == "Write the fixture tests in [path]"
+    assert live["subagents"] == [
+        # background: the launch acknowledgement leaves it running; task_notification finishes it
+        {"kind": "Explore", "description": "Find the stream parser", "status": "finished",
+         "started_at": 1003.0, "finished_at": 1015.0},
+        # run_in_background false: its tool_result is the finish, an error result is a failure
+        {"kind": "general-purpose", "description": "Check the CI config", "status": "failed",
+         "started_at": 1012.0, "finished_at": 1013.0},
+        # finished, resumed by SendMessage (matched by task id), then stopped
+        {"kind": "Plan", "description": "Review the diff", "status": "failed",
+         "started_at": 1016.0, "finished_at": 1023.0},
+        # no subagent_type: Claude Code's default; still running when the stream ends
+        {"kind": "general-purpose", "description": "Summarize the run", "status": "running",
+         "started_at": 1024.0, "finished_at": None},
+    ]
+    assert json.loads(summary.row()["tool_calls"]) == {"Agent": 4, "TodoWrite": 3, "Bash": 1, "SendMessage": 1}
+    no_secret(summary.row())
+
+
+def test_a_resumed_subagent_runs_again_until_its_next_notification() -> None:
+    lines = [json.loads(line) for line in fixture_lines("claude_subagents_stream.jsonl")]
+    resumed = next(index for index, event in enumerate(lines) if event.get("tool_use_id") == "toolu_send")
+    summary = _feed(Summary("claude", Scrubber({})), *lines[: resumed + 1])
+    review = [agent for agent in _live(summary)["subagents"] if agent["description"] == "Review the diff"]
+    assert review == [{"kind": "Plan", "description": "Review the diff", "status": "running",
+                       "started_at": 1016.0, "finished_at": None}]
+
+
+def test_claude_tasks_v2_fixture_fills_the_plan() -> None:
+    live = _live(parse("claude_tasks_v2_stream.jsonl", "claude"))
+    assert live == {
+        # task 3 was deleted; the create that failed never became an item
+        "plan": [{"text": "Add the columns", "status": "done"}, {"text": "Parse the stream", "status": "in_progress"}],
+        "current_task": "Parsing the stream",
+        "last_finished": "Add the columns",
+        "subagents": [],
+    }
+
+
+def test_codex_todo_list_fixture_fills_the_plan_and_derives_in_progress() -> None:
+    summary = parse("codex_todo_exec.jsonl", "codex")
+    live = _live(summary)
+    assert live["plan"] == [
+        {"text": "Inspect the repo layout", "status": "done"},
+        {"text": "Write tests for [redacted-token] rotation", "status": "done"},
+        {"text": "Run pytest", "status": "in_progress"},  # the first item not completed
+    ]
+    assert (live["current_task"], live["last_finished"]) == ("Run pytest", "Write tests for [redacted-token] rotation")
+    assert summary.commands == 1 and summary.turns == 1
+    no_secret(summary.row())
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_newly_finished_item_counts_even_when_its_text_repeats(harness: str) -> None:
+    def snapshot(last_done: bool) -> dict:
+        items = [("repeat", True), ("another", True), ("repeat", last_done)]
+        if harness == "claude":
+            return _use("t", "TodoWrite", _todos(*((text, "completed" if done else "pending") for text, done in items)))
+        return {"type": "item.updated", "item": {"id": "t", "type": "todo_list",
+                "items": [{"text": text, "completed": done} for text, done in items]}}
+
+    summary = _feed(Summary(harness, Scrubber({})), snapshot(False))
+    assert _live(summary)["last_finished"] == "another"
+    assert _live(_feed(summary, snapshot(True)))["last_finished"] == "repeat"
+
+
+def test_codex_reports_no_subagents() -> None:
+    """Codex's collab_tool_call (spawn_agent) carries only a prompt and agent
+    messages, no description or type: sub-agents are not available for codex."""
+    summary = parse("codex_todo_exec.jsonl", "codex")
+    assert _live(summary)["subagents"] == []
+    assert "PROMPT-SENTINEL" not in json.dumps(summary.row())
+
+
+def test_codex_first_list_puts_its_first_item_in_progress_and_finishes_nothing() -> None:
+    item = {"id": "item_1", "type": "todo_list", "items": [
+        {"text": "one", "completed": False}, {"text": "two", "completed": False}]}
+    live = _live(_feed(Summary("codex", Scrubber({})), {"type": "item.started", "item": item}))
+    assert live["plan"] == [{"text": "one", "status": "in_progress"}, {"text": "two", "status": "pending"}]
+    assert (live["current_task"], live["last_finished"]) == ("one", "")
+
+
+@pytest.mark.parametrize("name, harness", LIVE_FIXTURES)
+def test_prompts_results_and_summaries_never_reach_the_row(name: str, harness: str) -> None:
+    lines = fixture_lines(name)
+    assert any(sentinel in line for line in lines for sentinel in SENTINELS)
+    row = parse(name, harness).row()
+    for sentinel in SENTINELS:
+        assert sentinel not in json.dumps(row)
+    no_secret(row)
+
+
+def test_live_run_text_is_scrubbed_capped_and_one_line() -> None:
+    scrub = Scrubber({"DEPLOY_SECRET": ENV_SECRET})
+    long = "word " * 100
+    summary = _feed(
+        Summary("claude", scrub),
+        _use("t1", "TodoWrite", _todos(
+            (f"Rotate {GH_TOKEN} and\nthe {ENV_SECRET} key", "completed"),
+            ("Call https://api.example.com/v1 as ops@example.com from ~/bin/run and /etc/hosts", "in_progress"),
+            (long, "pending"),
+            ("x" * (telemetry.SCRUB_LIMIT + 5), "pending"),
+        )),
+        _use("a1", "Agent", {"description": f"Check {API_KEY}\nfor leaks", "subagent_type": "k" * 80}),
+    )
+    row = summary.row()
+    no_secret(row)
+    live = _live(summary)
+    texts = [item["text"] for item in live["plan"]]
+    assert texts[0] == "Rotate [redacted-token] and the [redacted-env] key"
+    assert texts[1] == "Call [redacted-url] as [redacted-email] from [path]"
+    assert len(texts[2]) == telemetry.TASK_TEXT_LIMIT == 120 and texts[2].endswith("…")
+    assert texts[3] == telemetry.HIDDEN  # longer than the scrubber reads: hidden whole
+    assert live["current_task"] == "Doing Call [redacted-url] as [redacted-email] from [path]"
+    agent = live["subagents"][0]
+    assert agent["description"] == "Check [redacted-token] for leaks"
+    assert len(agent["kind"]) == telemetry.LABEL_LIMIT
+    for text in [*texts, live["current_task"], live["last_finished"], agent["description"], agent["kind"]]:
+        assert "\n" not in text and len(text) <= telemetry.TASK_TEXT_LIMIT
+
+
+ABSOLUTE_PATHS = [
+    "/home/bot/private/deployment.txt",
+    "//home/bot/private/deployment.txt",
+    "~/private/deployment.txt",
+    "~bot/private/deployment.txt",
+    r"C:\Users\bot\private\deployment.txt",
+    "C:/Users/bot/private/deployment.txt",
+    r"c:\private",
+    r"\\fileserver\bot\private\deployment.txt",
+    r"\Users\bot\private\deployment.txt",
+]
+
+
+PATH_CUTS = [
+    *((f"Inspect {path}", "Inspect [path]") for path in ABSOLUTE_PATHS),
+    *((f"Inspect {path} then report", "Inspect [path]") for path in ABSOLUTE_PATHS),
+    ("Inspect build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect bot@build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect bot@[2001:db8::1]:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect [2001:db8::1]:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect file:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    (r"Inspect build-host:C:\Users\bot\private\deployment.txt", "Inspect [path]"),
+    ("Inspect path=/srv/factory/private/deployment.txt now", "Inspect [path]"),
+    ("Inspect (/srv/factory/private/deployment.txt)", "Inspect [path]"),
+    (r"Inspect %USERPROFILE%\private\deployment.txt", "Inspect [path]"),
+    ('Read "/Users/John Doe/private/deployment.txt"', "Read [path]"),
+    ("Read '/Users/John Doe/private/deployment.txt' first", "Read [path]"),
+    ("Read `~/My Files/private/deployment.txt` first", "Read [path]"),
+    (r'Read "C:\Users\John Doe\private\deployment.txt"', "Read [path]"),
+    ('Read "build-host:/srv/John Doe/private/deployment.txt"', "Read [path]"),
+    ('Read "/Users/John Doe/private/deployment.txt', "Read [path]"),
+    (r'Read "/Users/John \"The Builder\" Doe/private/deployment.txt"', "Read [path]"),
+    ("Read '/Users/John O'Brien/private/deployment.txt'", "Read [path]"),
+    ("Read \u201c/Users/John Doe/private/deployment.txt\u201d", "Read [path]"),
+    ("Read /Users/John\tDoe/private/deployment.txt", "Read [path]"),
+    (r"Read /Users/John\ Doe/private/deployment.txt", "Read [path]"),
+    ("/Users/John Doe/private/deployment.txt", "[path]"),
+    ("Compile with -I/home/bot/private/include", "Compile with [path]"),
+    ("Compile with --sysroot=/home/bot/private", "Compile with [path]"),
+    (r"Compile with /I\home\bot\private", "Compile with [path]"),
+    ('Read "/ company secrets/private.txt"', "Read [path]"),
+    (r"Read '\ company secrets\private.txt'", "Read [path]"),
+    ("Inspect lib/x,/home/bot/private/deployment.txt", "Inspect [path]"),
+    ("Inspect x:/home/bot/private/deployment.txt", "Inspect [path]"),
+    ("Inspect <~/private/deployment.txt>", "Inspect [path]"),
+    (r"Read /\ company\ secrets/private.txt", "Read [path]"),
+    (r"Read /\ company\ secrets/private.txt then report", "Read [path]"),
+    ("Read /\\\tcompany/private.txt", "Read [path]"),
+    (r"Read \\\ company\ secrets\private.txt", "Read [path]"),
+    (r"Read //\ company/private.txt", "Read [path]"),
+]
+
+
+def _persisted_live(tmp_path: Path, harness: str, text: str, environ: dict | None = None) -> dict:
+    if harness == "claude":
+        events = [
+            _use("t1", "TodoWrite", {"todos": [{"content": text, "status": "in_progress", "activeForm": text}]}),
+            _use("a1", "Agent", {"description": text, "subagent_type": "general-purpose"}),
+        ]
+    else:
+        events = [{"type": "item.started", "item": {
+            "id": "t", "type": "todo_list", "items": [{"text": text, "completed": False}]}}]
+    db = tmp_path / f"{harness}.db"
+    session = Session(
+        connect=lambda: sqlite3.connect(db), job_id=harness, bot=f"{harness}-bot", repo="acme/widgets",
+        harness=harness, argv=[], raw_log=None, scrub=Scrubber(environ or {}), log=lambda _: None, stdout=io.BytesIO(),
+    )
+    session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
+    session.finish(0)
+    row = _row(db, harness)
+    return {**row, "plan": json.loads(row["plan"]), "subagents": json.loads(row["subagents"])}
+
+
+@pytest.mark.parametrize(("text", "cut"), PATH_CUTS)
+def test_every_absolute_path_form_is_cut_whole_before_it_is_stored(tmp_path: Path, text: str, cut: str) -> None:
+    claude = _persisted_live(tmp_path, "claude", text)
+    codex = _persisted_live(tmp_path, "codex", text)
+    for live in (claude, codex):
+        assert [item["text"] for item in live["plan"]] == [cut]
+        assert live["current_task"] == cut
+        assert "private" not in json.dumps(live)
+    assert claude["subagents"][0]["description"] == cut
+
+
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", r"Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call", "edit lib/telemetry.py.", "see (lib/x.py)", "use ../x/y", "a // b"])
+def test_relative_slashes_are_not_paths(text: str) -> None:
+    live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
+    assert "[path]" not in live["plan"][0]["text"]
+
+
+@pytest.mark.parametrize("secret", ["correct horse /battery staple", "/srv/deploy key", "hunter2 -I/x"])
+def test_an_environment_secret_with_a_slash_is_hidden_whole(tmp_path: Path, secret: str) -> None:
+    for harness in ("claude", "codex"):
+        live = _persisted_live(tmp_path, harness, f"Rotate {secret} now", {"DEPLOY_SECRET": secret})
+        assert [item["text"] for item in live["plan"]] == ["Rotate [redacted-env] now"]
+        assert live["current_task"] == "Rotate [redacted-env] now"
+
+
+def test_a_blind_remote_session_hides_task_text(tmp_path: Path) -> None:
+    session, db, _, _ = _session(tmp_path, worker_env=True)
+    session.consume(io.BytesIO("".join(line + "\n" for line in fixture_lines("claude_subagents_stream.jsonl")).encode()))
+    session.finish(0)
+    row = _row(db)
+    plan, agents = json.loads(row["plan"]), json.loads(row["subagents"])
+    assert {item["text"] for item in plan} == {telemetry.HIDDEN}
+    assert {agent["description"] for agent in agents} == {agent["kind"] for agent in agents} == {telemetry.HIDDEN}
+    assert row["current_task"] == row["last_finished"] == telemetry.HIDDEN
+    assert [item["status"] for item in plan] == ["done", "done", "in_progress"]
+
+
+def test_current_task_falls_back_to_the_running_subagent_then_none() -> None:
+    summary = Summary("claude", Scrubber({}))
+    assert _live(summary) == {"plan": [], "current_task": "", "last_finished": "", "subagents": []}
+    _feed(
+        summary,
+        _use("a1", "Agent", {"description": "Older helper"}),
+        _use("a2", "Agent", {"description": "Newer helper"}),
+        _use("b1", "Bash", {"command": "make", "description": "Bash text is never a task"}),
+    )
+    assert _live(summary)["current_task"] == "Newer helper"
+    summary.feed({"type": "system", "subtype": "task_notification", "tool_use_id": "a2", "status": "completed"}, 2000.0)
+    assert _live(summary)["current_task"] == "Older helper"
+    summary.feed({"type": "system", "subtype": "task_notification", "tool_use_id": "a1", "status": "failed"}, 2001.0)
+    assert _live(summary)["current_task"] == ""
+    summary.feed(_use("t1", "TodoWrite", _todos(("Plan it", "pending"))), 2002.0)
+    assert _live(summary)["current_task"] == ""  # a list with nothing in progress, and no running sub-agent
+
+
+def test_a_long_plan_keeps_twelve_items_around_the_one_in_progress() -> None:
+    items = [(f"step {n}", "completed" if n < 15 else "in_progress" if n == 15 else "pending") for n in range(30)]
+    plan = _live(_feed(Summary("claude", Scrubber({})), _use("t", "TodoWrite", _todos(*items))))["plan"]
+    assert [item["text"] for item in plan] == [f"step {n}" for n in range(13, 25)]
+    near_end = [(f"step {n}", "in_progress" if n == 28 else "pending") for n in range(30)]
+    plan = _live(_feed(Summary("claude", Scrubber({})), _use("t", "TodoWrite", _todos(*near_end))))["plan"]
+    assert [item["text"] for item in plan] == [f"step {n}" for n in range(18, 30)]
+    none_started = [(f"step {n}", "pending") for n in range(30)]
+    plan = _live(_feed(Summary("claude", Scrubber({})), _use("t", "TodoWrite", _todos(*none_started))))["plan"]
+    assert [item["text"] for item in plan] == [f"step {n}" for n in range(12)]
+
+
+def test_subagents_keep_the_running_ones_then_the_latest_finished() -> None:
+    summary = Summary("claude", Scrubber({}))
+    for n in range(12):
+        summary.feed(_use(f"a{n}", "Agent", {"description": f"agent {n}"}), 1000.0 + n)
+    for n in (0, 1, 2, 3, 4, 5):
+        summary.feed({"type": "system", "subtype": "task_notification", "tool_use_id": f"a{n}", "status": "completed"},
+                     2000.0 - n)  # a0 finished last
+    agents = _live(summary)["subagents"]
+    assert [agent["description"] for agent in agents] == ["agent 0", "agent 1"] + [f"agent {n}" for n in range(6, 12)]
+    for n in range(6, 12):
+        summary.feed({"type": "system", "subtype": "task_notification", "tool_use_id": f"a{n}", "status": "completed"}, 3000.0)
+    for n in range(12, 22):
+        summary.feed(_use(f"a{n}", "Agent", {"description": f"agent {n}"}), 4000.0 + n)
+    agents = _live(summary)["subagents"]
+    assert [agent["description"] for agent in agents] == [f"agent {n}" for n in range(14, 22)]
+    assert {agent["status"] for agent in agents} == {"running"}
+
+
+def test_a_task_that_is_not_a_subagent_is_not_counted() -> None:
+    summary = _feed(
+        Summary("claude", Scrubber({})),
+        _use("b1", "Bash", {"command": "sleep 9", "run_in_background": True}),
+        {"type": "system", "subtype": "task_started", "task_id": "b1", "tool_use_id": "b1",
+         "description": "sleep", "task_type": "local_bash"},
+        {"type": "system", "subtype": "task_notification", "task_id": "b1", "tool_use_id": "b1", "status": "completed"},
+    )
+    assert _live(summary)["subagents"] == []
+
+
+def test_the_old_task_tool_finishes_on_its_result() -> None:
+    summary = _feed(
+        Summary("claude", Scrubber({})),
+        _use("t1", "Task", {"description": "Legacy helper", "subagent_type": "general-purpose", "prompt": "PROMPT-SENTINEL"}),
+        _result("t1", "RESULT-SENTINEL"),
+    )
+    assert _live(summary)["subagents"] == [{"kind": "general-purpose", "description": "Legacy helper",
+                                            "status": "finished", "started_at": 1000.0, "finished_at": 1001.0}]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"todos": "not a list"},
+        {"todos": [None, 3, {"content": ["x"], "status": "pending"}, {"content": "x", "status": {"a": 1}},
+                   {"content": "y", "status": "weird"}]},
+        {"todos": {"content": "x"}},
+    ],
+)
+def test_a_malformed_todo_input_is_dropped_and_counters_still_update(data: dict) -> None:
+    summary = Summary("claude", Scrubber({}))
+    summary.feed(_use("t0", "TodoWrite", _todos(("Kept", "in_progress"))), 999.0)
+    _feed(
+        summary,
+        _use("t1", "TodoWrite", data),
+        _use("u1", "TaskUpdate", {"taskId": ["1"], "status": "completed"}),
+        _use("a1", "Agent", {"description": 7, "subagent_type": None, "run_in_background": "yes"}),
+        {"type": "system", "subtype": "task_notification", "tool_use_id": ["a1"], "task_id": {}, "status": ["completed"]},
+        {"type": "item.updated", "item": {"id": "i", "type": "todo_list", "items": "nope"}},
+        {"type": "item.updated", "item": {"id": "j", "type": "todo_list", "items": [None, {"text": 4}]}},
+    )
+    assert summary.events == 7
+    assert json.loads(summary.row()["tool_calls"]) == {"TodoWrite": 2, "TaskUpdate": 1, "Agent": 1}
+    live = _live(summary)
+    assert live["subagents"] == [{"kind": "general-purpose", "description": "", "status": "running",
+                                  "started_at": 1002.0, "finished_at": None}]
+
+
+def test_counters_only_setting_reads_counters_and_stores_no_text() -> None:
+    assert telemetry.text_enabled({}) and telemetry.text_enabled({"ORCH_TELEMETRY": "on"})
+    assert not telemetry.text_enabled({"ORCH_TELEMETRY": " Counters "})
+    assert telemetry.enabled({"ORCH_TELEMETRY": "counters"})
+
+
+@pytest.mark.parametrize("name, harness", LIVE_FIXTURES)
+def test_counters_only_stores_no_live_run_text(tmp_path: Path, name: str, harness: str) -> None:
+    rows = {}
+    for mode in ("full", "counters"):
+        session = start_session(
+            connect=lambda: sqlite3.connect(tmp_path / f"{mode}.db"),
+            database=tmp_path / f"{mode}.db",
+            job_id="job-abc",
+            bot=f"{harness}-bot",
+            repo="acme/widgets",
+            command=[harness, "-p"] if harness == "claude" else [harness, "exec", "-"],
+            log=lambda line: None,
+            environ={"ORCH_TELEMETRY": mode, "ORCH_JOB_STATE_DIR": str(tmp_path / mode)},
+            stdout=io.BytesIO(),
+        )
+        assert session.summary.live is None if mode == "counters" else session.summary.live is not None
+        stream = "".join(line + "\n" for line in fixture_lines(name)).encode()
+        session.consume(io.BytesIO(stream))
+        session.finish(0)
+        rows[mode] = _row(tmp_path / f"{mode}.db")
+    full, counters = rows["full"], rows["counters"]
+    assert all(counters[name] is None for name in LIVE_RUN)
+    assert all(full[name] is not None for name in LIVE_RUN)
+    same = [name for name in telemetry.COLUMNS if name not in LIVE_RUN + ("started_at", "updated_at",
+                                                                          "finished_at", "elapsed_seconds", "last_event_at", "steps")]
+    assert {name: counters[name] for name in same} == {name: full[name] for name in same}
+    texts = {item["text"] for item in json.loads(full["plan"])}
+    texts |= {agent["description"] for agent in json.loads(full["subagents"])}
+    texts |= {full["current_task"], full["last_finished"]}
+    texts.discard("")
+    stored = json.dumps(counters)
+    assert texts and not [text for text in texts if text in stored]
+
+
+def test_counters_only_still_adds_the_stream_flags(tmp_path: Path) -> None:
+    session = start_session(
+        connect=lambda: sqlite3.connect(tmp_path / "orch.db"),
+        database=tmp_path / "orch.db",
+        job_id="j1",
+        bot="claude-bot",
+        repo="acme/widgets",
+        command=["claude", "-p"],
+        log=lambda line: None,
+        environ={"ORCH_TELEMETRY": "counters"},
+    )
+    assert session.argv == ["claude", "--output-format", "stream-json", "--verbose", "-p"]
+
+
+def test_an_old_table_gains_the_live_run_columns(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+        connection.execute(
+            "INSERT INTO job_telemetry VALUES ('old', 'b', 'claude', 'r', 1, 2, NULL, NULL, 1, 0, 0, '{}',"
+            " 0, 0, 0, NULL, NULL, 0, 0, 0, NULL, NULL, NULL, '[]')"
+        )
+    session, _, _, messages = _session(tmp_path)
+    session.consume(io.BytesIO("".join(line + "\n" for line in fixture_lines("claude_tasks_v2_stream.jsonl")).encode()))
+    session.flush()
+    assert messages == []
+    row = _row(db)
+    assert json.loads(row["plan"])[1] == {"text": "Parse the stream", "status": "in_progress"}
+    assert row["current_task"] == "Parsing the stream" and json.loads(row["subagents"]) == []
+    old = _row(db, "old")
+    assert all(old[name] is None for name in LIVE_RUN)  # NULL: an older runner recorded nothing
+
+
+def test_two_runners_migrating_at_once_both_write(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(OLD_DDL)
+    first, second = sqlite3.connect(db), sqlite3.connect(db)
+    try:
+        stale = {row[1] for row in second.execute("PRAGMA table_info(job_telemetry)")}
+        telemetry.ensure_table(first)
+        first.commit()
+
+        class Stale:  # the loser read the old columns before the winner added them
+            def execute(self, sql, *args):
+                if sql.startswith("PRAGMA"):
+                    return [(0, name) for name in stale]
+                return second.execute(sql, *args)
+
+        telemetry.ensure_table(Stale())
+        second.commit()
+    finally:
+        first.close()
+        second.close()
+    for job in ("one", "two"):
+        session, _, _, messages = _session(tmp_path)
+        session.job_id = job
+        session.consume(io.BytesIO(b'{"type":"turn.started"}\n'))
+        session.finish(0)
+        assert messages == []
+        assert json.loads(_row(db, job)["plan"]) == []
+    with sqlite3.connect(db) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(job_telemetry)")]
+    assert columns == list(telemetry.COLUMNS)
+
+
+def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path: Path) -> None:
+    rows = {}
+    for mode in ("on", "counters"):
+        root = tmp_path / mode
+        root.mkdir()
+        _, job = _running_job(root)
+        with sqlite3.connect(root / "orch.db") as connection:
+            connection.execute(OLD_DDL)  # an orch.db an older runner made
+        claude = _fake_claude(root, "claude_subagents_stream.jsonl")
+        done = _orch(
+            "job", "run", "claude-bot", job.id, "--db", str(root / "orch.db"), "--interval", "0.2",
+            "--", str(claude), "-p", "--dangerously-skip-permissions",
+            env={"ORCH_JOB_STATE_DIR": str(root / "state"), "ORCH_TELEMETRY": mode},
+        )
+        assert done.returncode == 0, done.stderr
+        assert "telemetry" not in done.stderr
+        rows[mode] = _row(root / "orch.db", job.id)
+    assert rows["on"]["current_task"] == "Pushing with GH_TOKEN=[redacted-token]"
+    assert len(json.loads(rows["on"]["subagents"])) == 4
+    no_secret(rows["on"])
+    assert all(rows["counters"][name] is None for name in LIVE_RUN)
+    assert rows["counters"]["events"] == rows["on"]["events"] == 31

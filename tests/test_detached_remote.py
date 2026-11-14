@@ -8,6 +8,7 @@ follower's timing (backoff, grace) runs on an injected clock.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import sys
 import time
@@ -224,14 +225,19 @@ def test_without_setsid_the_launch_detaches_with_perl(
             continue
         for name in os.listdir(directory):
             link = bare / name
-            if name != "setsid" and not link.exists():
+            if name not in ("setsid", "perl") and not link.exists():
                 link.symlink_to(os.path.join(directory, name))
-    assert not (bare / "setsid").exists() and (bare / "perl").exists()
+    perl = shutil.which("perl")
+    assert perl and not (bare / "setsid").exists()
+    (bare / "perl").write_text(f'#!/bin/sh\nsleep 0.5\nexec {perl} "$@"\n')
+    (bare / "perl").chmod(0o755)
     monkeypatch.setenv("FAKE_SSH_PATH", str(bare))
     result = box.send(box.launch(lines=10, pause=0.1))
     assert word(result) == "started"
+    harness = int(wait_file(box.count).split()[0])
     wrapper, start = (int(x) for x in (box.run_dir() / "pid").read_text().split())
     assert os.getsid(start) == start and os.getsid(wrapper) == wrapper
+    assert os.getsid(harness) == start
     assert box.wait_exit() == "0"
     assert len(box.starts()) == 1
 

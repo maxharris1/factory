@@ -17,9 +17,10 @@ def task_lines(facts: dict) -> list[str]:
         f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer.",
         "1. Read the whole diff and the CI result on that head.",
         verify_line,
-        "3. You may run code in a throwaway copy. Block only on a demonstrated failure, with a repro.",
-        "4. Post the verdict handoff below on the head you reviewed. Do not merge. "
-        "Do not push to the PR.",
+        "3. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
+        "and seen it fail, and give the repro.",
+        "4. Pick `ac` and the verdict by the definitions in the Review rules below. "
+        "Post the verdict handoff below on the head you reviewed. Do not merge. Do not push to the PR.",
     ]
 
 
