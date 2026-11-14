@@ -22,6 +22,10 @@
 # job's `orch job run`. Exits 0 and 3 from health are normal; anything else
 # but 1 (an unreadable health file, still reported) fails the pass.
 #
+# Where no systemd user timer runs the token broker (#171), each pass first
+# runs deploy/app-token-service.sh once when ~/.config/factory/
+# app-token-autostart exists.
+#
 # Files, in ~/.local/state/factory (ORCH_STATE_DIR): self-heal.lock (one
 # pass at a time), self-heal.pid (the loop), self-heal.stopped (the stop
 # hold), self-heal-service.lock, and self-heal-service.log (this script's
@@ -127,6 +131,9 @@ once() {
     fi
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     export PYTHONUNBUFFERED=1
+    if [[ -f "${CONFIG}/app-token-autostart" && -x "${HERE}/app-token-service.sh" ]]; then
+        "${HERE}/app-token-service.sh" once 8>&- || say "token broker pass exited $?" >>"$LOG"
+    fi
     set +e
     "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
