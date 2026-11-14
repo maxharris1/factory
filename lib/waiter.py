@@ -96,9 +96,10 @@ from lib.brief import BriefError, render_brief
 from lib.device_pool import DevicePool, Placement
 from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
-from lib.machines_yml import MachinesConfig
+from lib.machines_yml import Device, MachinesConfig
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.orch_yml import Approvals, OrchConfig
+from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
@@ -558,7 +559,11 @@ class Waiter:
                 worktree=not remote,  # worktrees are box-only
                 status_file=job_dir / STATUS_FILE if remote else None,
             )
-            brief = self._brief(job, remote_device=device.name if remote else None)
+            brief = self._brief(
+                job,
+                remote_device=device.name if remote else None,
+                factory_root=self._factory_root(device),
+            )
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
             offset = 0
@@ -598,7 +603,18 @@ class Waiter:
         self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
 
-    def _brief(self, job: Job, *, remote_device: str | None = None) -> str:
+    def _factory_root(self, device: Device | None) -> str | None:
+        """The placed device's deployed factory checkout, never the job's worktree.
+
+        A remote device names its own; the box falls back to this checkout."""
+        root = device.factory_root_for(self.recipient) if device is not None else None
+        if root is None and (device is None or device.local):
+            return str(FACTORY_CHECKOUT)
+        return root
+
+    def _brief(
+        self, job: Job, *, remote_device: str | None = None, factory_root: str | None = None
+    ) -> str:
         try:
             result = self.context.load(job.request.repo)
         except Exception as exc:  # a context failure never blocks the start
@@ -610,6 +626,7 @@ class Waiter:
             context_ref=result.ref,
             context_note=result.note,
             remote_device=remote_device,
+            factory_root=factory_root,
         )
 
     def _job_dir(self, job_id: str) -> Path:

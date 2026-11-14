@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from lib.queue import SQLiteJobQueue
-from tests.procs import alive, open_files
+from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "linear-webhook-service.sh"
@@ -153,6 +153,7 @@ def _env(home: Path, **extra: str) -> dict[str, str]:
         "LINEAR_WEBHOOK_TUNNEL_HOST": "test-host",
         "LINEAR_WEBHOOK_START_WAIT": "10",
         "LINEAR_WEBHOOK_STOP_WAIT": "10",
+        "ORCH_CRONTAB": str(home / "no-such-crontab"),
         **extra,
     }
 
@@ -375,6 +376,94 @@ def test_autostart_flag(home: Path) -> None:
     assert not flag.exists()
 
 
+def _invisible_listener_lock(home: Path) -> subprocess.Popen:
+    lock = _state(home) / "linear-webhook-listener.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "60"])
+    _wait_for(lambda: not _lock_free(lock), what="the holder")
+    return holder
+
+
+def test_a_restart_whose_stop_fails_leaves_no_hold(home: Path, tmp_path: Path) -> None:
+    # #107 review: self-heal and ensure read a leftover hold as an operator's
+    # stop and would never retry or escalate.
+    holder = _invisible_listener_lock(home)
+    empty = tmp_path / "proc"
+    empty.mkdir()
+    try:
+        result = _service(home, "restart", ORCH_PROC_DIR=str(empty))
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1
+    assert "is still held" in result.stderr
+    assert not (_state(home) / "linear-webhook.stopped").exists()
+
+
+def test_a_failed_restart_keeps_an_operators_hold(home: Path, tmp_path: Path) -> None:
+    assert _service(home, "stop").returncode == 0
+    holder = _invisible_listener_lock(home)
+    empty = tmp_path / "proc"
+    empty.mkdir()
+    try:
+        result = _service(home, "restart", ORCH_PROC_DIR=str(empty))
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1
+    assert (_state(home) / "linear-webhook.stopped").exists()
+
+
+def _fake_crontab(tmp_path: Path, table: Path) -> Path:
+    crontab = tmp_path / "crontab"
+    crontab.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\nfrom pathlib import Path\n"
+        f"table = Path({str(table)!r})\n"
+        "if sys.argv[1:] == ['-l']:\n"
+        "    sys.stdout.write(table.read_text()) if table.exists() else sys.exit(1)\n"
+        "elif sys.argv[1:] == ['-']:\n"
+        "    table.write_text(sys.stdin.read())\n",
+        encoding="utf-8",
+    )
+    crontab.chmod(0o755)
+    return crontab
+
+
+def test_install_autostart_adds_tagged_cron_lines_and_remove_drops_them(
+    home: Path, tmp_path: Path
+) -> None:
+    table = tmp_path / "crontab.txt"
+    table.write_text("0 1 * * * keep-me\n", encoding="utf-8")
+    crontab = str(_fake_crontab(tmp_path, table))
+    for _ in range(2):
+        result = _service(home, "install-autostart", ORCH_CRONTAB=crontab)
+        assert result.returncode == 0, result.stderr
+    lines = table.read_text().splitlines()
+    tagged = [line for line in lines if line.endswith("# factory-linear-webhook")]
+    assert len(tagged) == 2
+    assert any(line.startswith("@reboot ") for line in tagged)
+    assert any(line.startswith("*/5 * * * * ") for line in tagged)
+    assert all("linear-webhook-service.sh ensure" in line for line in tagged)
+    assert "0 1 * * * keep-me" in lines
+    assert (home / ".config/factory/linear-webhook-autostart").exists()
+
+    assert _service(home, "remove-autostart", ORCH_CRONTAB=crontab).returncode == 0
+    assert table.read_text().splitlines() == ["0 1 * * * keep-me"]
+    assert not (home / ".config/factory/linear-webhook-autostart").exists()
+
+
+def test_an_unreadable_crontab_changes_nothing(home: Path, tmp_path: Path) -> None:
+    crontab = tmp_path / "crontab"
+    crontab.write_text("#!/bin/sh\necho 'crontab: permission denied' >&2\nexit 1\n",
+                       encoding="utf-8")
+    crontab.chmod(0o755)
+    result = _service(home, "install-autostart", ORCH_CRONTAB=str(crontab))
+    assert result.returncode == 1
+    assert "cannot read the crontab" in result.stderr
+    assert not (home / ".config/factory/linear-webhook-autostart").exists()
+
+
 @pytest.mark.parametrize("extra", [
     {"LINEAR_WEBHOOK_TUNNEL_HOST": "-oProxyCommand=evil"},
     {"port": "87a"},
@@ -437,6 +526,16 @@ def test_listener_serves_the_orch_config_named_by_orch_config(
     _wait_for(lambda: _accepts(_port_of(home)), timeout=20, what="serve on the port")
 
 
+def _open_files(pid: int) -> set[str]:
+    found = set()
+    for entry in Path(f"/proc/{pid}/fd").iterdir():
+        try:
+            found.add(os.readlink(entry))
+        except OSError:
+            continue
+    return found
+
+
 def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> None:
     lock = _state(home) / "linear-webhook-listener.lock"
     lock.parent.mkdir(parents=True)
@@ -444,7 +543,7 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
     reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
     try:
         _wait_for(
-            lambda: str(lock.resolve()) in open_files(reader.pid),
+            lambda: str(lock.resolve()) in _open_files(reader.pid),
             what="the reader to open the lock file",
         )
         result = _service(home, "stop")
@@ -455,3 +554,63 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
         reader.wait()
     assert result.returncode == 0, result.stdout + result.stderr
     assert "no linear webhook loop is running" in result.stdout
+
+
+def _children(home: Path) -> dict[str, int]:
+    found = {}
+    for pid in _processes_of(home):
+        argv = _argv(pid)
+        if argv[-2:] == ["linear-webhook", "serve"] or argv[2:4] == ["linear-webhook", "serve"]:
+            found["serve"] = pid
+        elif any(arg.endswith("/ssh") for arg in argv[:2]):
+            found["ssh"] = pid
+    return found
+
+
+def _port_owner(port: int, home: Path) -> subprocess.Popen:
+    script = (
+        "import socket, time\n"
+        f"s = socket.socket(); s.bind(('127.0.0.1', {port})); s.listen()\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert owner.stdout.readline() == "ready\n"
+    return owner
+
+
+@pytest.mark.parametrize("command", ["restart", "stop"])
+def test_restart_and_stop_end_children_orphaned_by_a_killed_loop(
+    home: Path, tmp_path: Path, command: str
+) -> None:
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
+    orphans = _children(home)
+    for mode in MODES:
+        for loop in _loops(home, mode):
+            os.kill(loop, signal.SIGKILL)
+    _wait_for(lambda: not _loops(home, MODES[0]) and not _loops(home, MODES[1]), what="loops dead")
+    assert all(alive(pid) for pid in orphans.values()), "the children outlive their loops"
+
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: len(_loops(home, MODES[0])) == 1, what="a new listener loop")
+
+    unrelated_home = tmp_path / "unrelated"
+    unrelated_home.mkdir()
+    unrelated = _port_owner(_free_port(), unrelated_home)
+    try:
+        result = _service(home, command)
+        assert result.returncode == 0, result.stdout + result.stderr
+        _wait_for(lambda: not any(alive(pid) for pid in orphans.values()), what="orphans gone")
+        assert unrelated.poll() is None, "an unrelated port owner was killed"
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+    if command == "restart":
+        _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="new serve and ssh")
+        assert not set(_children(home).values()) & set(orphans.values())
+    else:
+        assert _processes_of(home) == []

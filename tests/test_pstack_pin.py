@@ -27,16 +27,19 @@ OWNERS = {
     "codex": "codex-bot",
 }
 ROUTERS = ("factory-builder", "factory-reviewer")
+KIT_SKILLS = ("deslop",)
 
 
 def skill_names() -> list[str]:
     base = ROOT / "skills" / "pstack" / "skills"
-    return sorted([path.name for path in base.iterdir() if path.is_dir()] + list(ROUTERS))
+    return sorted([path.name for path in base.iterdir() if path.is_dir()] + list(ROUTERS) + list(KIT_SKILLS))
 
 
 def skill_source(name: str) -> Path:
     if name in ROUTERS:
         return ROOT / "skills" / "factory" / name
+    if name in KIT_SKILLS:
+        return ROOT / "skills" / "cursor-team-kit" / name
     return ROOT / "skills" / "pstack" / "skills" / name
 
 
@@ -78,6 +81,9 @@ def tiny_tree(tmp_path: Path) -> Path:
     router = root / "skills" / "factory" / "factory-builder"
     router.mkdir(parents=True)
     (router / "SKILL.md").write_text(ROUTER_SKILL, encoding="utf-8")
+    kit = root / "skills" / "cursor-team-kit" / "deslop"
+    kit.mkdir(parents=True)
+    (kit / "SKILL.md").write_text("---\nname: deslop\ndescription: tiny\n---\n", encoding="utf-8")
     manifest = '{"name": "pstack", "version": "0.15.36"}\n'
     for rel in (".cursor-plugin/plugin.json", "plugin.json"):
         path = root / "skills" / "pstack" / rel
@@ -157,6 +163,10 @@ def test_install_vendors_each_skill_into_the_cloud_project_paths(tmp_path: Path)
     pin = load_pin(ROOT)
     pinned = {rel: digest for rel, digest in pin.hashes().items() if rel.startswith("skills/")}
     pinned |= {f"skills/{rel}": digest for rel, digest in pin.factory_hashes().items() if rel.split("/")[0] in ROUTERS}
+    pinned |= {f"skills/{rel}": digest for rel, digest in pin.kit_hashes().items() if rel.split("/")[0] in KIT_SKILLS}
+    pstack_license = pin.hashes()["LICENSE"]
+    pinned |= {f"skills/{name}/LICENSE": pstack_license for name in names if name not in ROUTERS + KIT_SKILLS}
+    pinned |= {f"skills/{name}/LICENSE": pin.kit_hashes()["LICENSE"] for name in KIT_SKILLS}
     for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
         installed = sorted(path.name for path in (project / rel).iterdir())
         assert installed == names
@@ -639,6 +649,35 @@ def test_legacy_marker_on_a_pinned_copy_is_owned(tmp_path: Path) -> None:
     assert "file: " in marker.read_text(encoding="utf-8")
 
 
+def test_legacy_marker_on_a_pre_notice_copy_upgrades(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    noticed = [name for name in skill_names() if name not in ROUTERS]
+    copies = []
+    for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
+        for name in noticed:
+            copy = project / rel / name
+            shutil.copytree(skill_source(name), copy)
+            (copy / ".orch-owned").write_text(
+                f"installer: orch-install-skills\ncommit: {load_pin(ROOT).commit}\n", encoding="utf-8"
+            )
+            copies.append(copy)
+    assert install_skills(ROOT, project, "cloud") == []
+    for copy in copies:
+        assert (copy / "LICENSE").is_file()
+        assert "file: " in (copy / ".orch-owned").read_text(encoding="utf-8")
+
+
+def test_legacy_marker_on_an_edited_pre_notice_copy_is_refused(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    copy = project / ".claude" / "skills" / "poteto-mode"
+    shutil.copytree(skill_source("poteto-mode"), copy)
+    (copy / "SKILL.md").write_text("my edits\n", encoding="utf-8")
+    (copy / ".orch-owned").write_text(f"installer: orch-install-skills\ncommit: {'a' * 40}\n", encoding="utf-8")
+    assert install_skills(ROOT, project, "cloud") == [f"refusing to replace unowned path {copy}"]
+    assert (copy / "SKILL.md").read_text(encoding="utf-8") == "my edits\n"
+    assert not (copy / "LICENSE").exists()
+
+
 def test_doctor_cloud_rejects_a_symlinked_harness_dir(tmp_path: Path) -> None:
     project = tmp_path / "project"
     assert install_skills(ROOT, project, "cloud") == []
@@ -681,6 +720,7 @@ def test_cli_local_install_refuses_a_worktree_checkout(
         temp = tmp_path / "not-temp"
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
     monkeypatch.setattr(cli, "ROOT", root)
+    monkeypatch.setattr(cli, "rules_text", lambda _root: "# pstack model configuration.\n")
     home = tmp_path / "home"
     assert cli.main(["install-skills", "--home", str(home)]) == 1
     assert "install from a stable checkout" in capsys.readouterr().err

@@ -21,6 +21,7 @@ from lib.queue import Job, JobRequest  # noqa: E402
 SNAPSHOTS = ROOT / "tests" / "snapshots" / "brief"
 HEAD = "3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
 REMOTE_DEVICE = "mac"
+BOX_FACTORY_ROOT = "/srv/orch/factory"
 
 FACTORY_MD = """---
 base_branch: dev
@@ -117,13 +118,16 @@ def render_snapshot(kind: str) -> str:
     job = _job(action, recipient, attempt, head, extra)
     context, findings = parse_factory_context(FACTORY_MD)
     assert context is not None, findings
-    box = render_brief(job, bot=f"{recipient}-bot", context=context, context_ref="dev")
+    box = render_brief(
+        job, bot=f"{recipient}-bot", context=context, context_ref="dev", factory_root=BOX_FACTORY_ROOT
+    )
     remote = render_brief(
         job,
         bot=f"{recipient}-bot",
         context=None,
         context_note="no factory.md on dev",
         remote_device=REMOTE_DEVICE,
+        factory_root=f"/home/{recipient}-bot/factory",
     )
     return f"===== box =====\n{box}===== remote ({REMOTE_DEVICE}) =====\n{remote}"
 
