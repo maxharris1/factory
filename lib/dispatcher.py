@@ -2313,7 +2313,11 @@ class Dispatcher:
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
-            if (result is None or not result.reported) and ticket.mergeable_state == "dirty":
+            if (
+                (result is None or not result.reported)
+                and ticket.mergeable_state == "dirty"
+                and state not in WATCHED_STATES
+            ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
             return False, "ci-pending"
         if reentry is not None:
@@ -3171,7 +3175,8 @@ class Dispatcher:
         if ticket.factory.finish_line != "merge":
             return
         if ticket.mergeable_state in ("dirty", "behind"):
-            self._queue_update(ticket, row)
+            if not self._base_update_out(ticket):
+                self._queue_update(ticket, row)
             return
         head = ticket.current_head
         ci = ticket.ci.get(head) if head is not None else None
@@ -3328,6 +3333,24 @@ class Dispatcher:
             self._write_state_label(ticket, "abandoned")
         except RetryableStateError:
             self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
+
+    def _base_update_out(self, ticket: TrackedTicket) -> bool:
+        """A #255 base update for the current head is queued or running, so
+        the merge queue must not queue a second update job for that head."""
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM jobs
+                    WHERE dedupe_key = ? AND state IN ('queued', 'running')
+                    """,
+                    (
+                        f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{ticket.current_head}",
+                    ),
+                ).fetchone()
+                is not None
+            )
 
     def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
         """An update-from-main job for the conflicting queue head (#130)."""

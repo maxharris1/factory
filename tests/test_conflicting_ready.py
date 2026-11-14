@@ -84,3 +84,51 @@ def test_no_base_update_while_ci_runs_or_the_pr_merges_cleanly(tmp_path: Path) -
     board.poll()
     assert _merge_only_jobs(board) == []
     assert board.outcome(ready) is None
+
+
+def _update_jobs(board: Board) -> list:
+    return [
+        (row["action"], row["head"])
+        for row in board.jobs(number="42")
+        if row["state"] == "queued" and row["action"] in ("fix", "update-from-main")
+    ]
+
+
+def test_a_conflicting_ready_on_an_approved_pr_queues_one_update(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=None)
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    board.ready(pr, sha(2))
+    board.now[0] += BASE_UPDATE_GRACE_SECONDS
+    board.poll()
+
+    assert _update_jobs(board) == [("update-from-main", sha(2))]
+    assert _merge_only_jobs(board) == []
+
+
+def test_the_merge_queue_skips_a_head_with_a_base_update_out(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = _built(board, sha(1))
+    pr.conflict()
+    del pr.ci[sha(1)]
+    board.ready(pr, sha(1))
+    board.now[0] += BASE_UPDATE_GRACE_SECONDS
+    board.poll()
+    assert len(_merge_only_jobs(board)) == 1
+
+    with board.queue.connect() as connection:
+        connection.execute(
+            """
+            UPDATE ticket_state
+            SET workflow_state = 'merge-queue', approved_head = ?, approved_at = 1
+            WHERE ticket_id = '42'
+            """,
+            (sha(1),),
+        )
+        connection.commit()
+    board.poll()
+
+    assert _update_jobs(board) == [("fix", sha(1))]
+    assert board.state("42")["workflow_state"] == "merge-queue"
