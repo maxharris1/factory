@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib import attention
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -4307,18 +4308,7 @@ class Dispatcher:
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS needs_attention (
-                    repo TEXT NOT NULL,
-                    ticket_id TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    detail TEXT,
-                    raised_at REAL NOT NULL,
-                    PRIMARY KEY (repo, ticket_id, reason)
-                )
-                """
-            )
+            attention.ensure_table(connection)
             # #75: what the poller did to a job because of its state
             # (released-claimed, dead; #94 requeued-unstarted from orch job run), one row each, for the log and audit.
             connection.execute(

@@ -263,3 +263,145 @@ def test_pull_state_refuses_an_unreadable_pull() -> None:
     gh.route((f"{REPO}/pulls/90",), ok({"number": 90}))
     with pytest.raises(GitHubAdapterError):
         GitHubIntakeClient(gh).pull_state("owner/app", 90)
+
+
+# --- #156: blocker statuses and Linear blocks relations -----------------------
+
+
+class GraphQLGh:
+    """gh api graphql for ref_statuses: answers by repo from served nodes."""
+
+    def __init__(self, served: dict[str, dict | None], *, errors: dict[str, list] | None = None,
+                 returncode: int = 0):
+        self.served = served
+        self.errors = errors or {}
+        self.returncode = returncode
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, timeout: float) -> GhResult:
+        argv = list(argv)
+        self.calls.append(argv)
+        fields = dict(arg.split("=", 1) for arg in argv if "=" in arg and not arg.startswith("--"))
+        repo = f"{fields['owner']}/{fields['name']}"
+        numbers = re.findall(r"(r\d+): issueOrPullRequest\(number: (\d+)\)", fields["query"])
+        nodes = self.served[repo]
+        data = {"repository": None if nodes is None else {
+            alias: nodes.get(int(number)) for alias, number in numbers
+        }}
+        document: dict = {"data": data}
+        if repo in self.errors:
+            document["errors"] = self.errors[repo]
+        return GhResult(self.returncode if "errors" in document else 0, json.dumps(document), "")
+
+
+def pull_node(state: str, merged: bool = False) -> dict:
+    return {"__typename": "PullRequest", "state": state, "merged": merged}
+
+
+def issue_node(state: str, reason: str | None = None, linked: tuple[bool, ...] = ()) -> dict:
+    return {"__typename": "Issue", "state": state, "stateReason": reason,
+            "closedByPullRequestsReferences": {"nodes": [{"merged": m} for m in linked]}}
+
+
+def test_ref_statuses_reads_issue_and_pr_kinds() -> None:
+    from lib.feeder_gates import Progress, github_ref
+
+    gh = GraphQLGh({"owner/app": {
+        1: pull_node("MERGED", merged=True),
+        2: pull_node("CLOSED"),
+        3: pull_node("OPEN"),
+        4: issue_node("CLOSED", "COMPLETED"),
+        5: issue_node("CLOSED", "NOT_PLANNED"),
+        6: issue_node("CLOSED", "DUPLICATE"),
+        7: issue_node("CLOSED", None),
+        8: issue_node("OPEN", linked=(False, True)),
+        9: issue_node("CLOSED", "NOT_PLANNED", linked=(True,)),
+        10: issue_node("OPEN", "REOPENED", linked=(False,)),
+    }}, errors={"owner/app": [{"type": "NOT_FOUND", "path": ["repository", "r10"]}]},
+        returncode=1)
+    refs = [github_ref("owner/app", n) for n in range(1, 12)]
+    found = GitHubIntakeClient(gh).ref_statuses(refs)
+    assert {int(ref.key): (status.progress, status.is_pull) for ref, status in found.items()} == {
+        1: (Progress.DONE, True),
+        2: (Progress.UNFINISHED, True),
+        3: (Progress.OPEN, True),
+        4: (Progress.DONE, False),
+        5: (Progress.UNFINISHED, False),
+        6: (Progress.UNFINISHED, False),
+        7: (Progress.DONE, False),
+        8: (Progress.DONE, False),
+        9: (Progress.DONE, False),
+        10: (Progress.OPEN, False),
+        11: (Progress.MISSING, False),
+    }
+    assert found[github_ref("owner/app", 2)].detail == "closed without merge"
+    assert found[github_ref("owner/app", 5)].detail == "closed as not planned"
+
+
+def test_ref_statuses_is_one_cached_graphql_read_per_repo() -> None:
+    from lib.feeder_gates import github_ref
+
+    gh = GraphQLGh({
+        "owner/app": {n: issue_node("OPEN") for n in range(1, 61)},
+        "other/lib": {3: pull_node("OPEN")},
+    })
+    client = GitHubIntakeClient(gh)
+    refs = [github_ref("owner/app", n) for n in range(1, 61)] + [github_ref("other/lib", 3)]
+    assert len(client.ref_statuses(refs)) == 61
+    assert len(gh.calls) == 3  # owner/app in chunks of 50, then other/lib
+    for argv in gh.calls:
+        api = argv.index("api")
+        assert argv[api + 1:api + 4] == ["--cache", "60s", "graphql"]
+    # The client's other reads stay uncached: find_pull never sees a stale "no PR".
+    recorded = RecordedGh()
+    recorded.route(FIND, ok([]))
+    GitHubIntakeClient(recorded).find_pull("owner/app", "factory/issue-85")
+    assert "--cache" not in recorded.calls[0]
+
+
+def test_ref_statuses_marks_a_missing_repo_and_fails_on_other_errors() -> None:
+    from lib.feeder_gates import Progress, github_ref
+
+    gone = GraphQLGh({"gone/repo": None},
+                     errors={"gone/repo": [{"type": "NOT_FOUND", "path": ["repository"]}]},
+                     returncode=1)
+    found = GitHubIntakeClient(gone).ref_statuses([github_ref("gone/repo", 1)])
+    assert found[github_ref("gone/repo", 1)].progress is Progress.MISSING
+
+    limited = GraphQLGh({"owner/app": {}},
+                        errors={"owner/app": [{"type": "RATE_LIMITED", "path": ["repository"]}]},
+                        returncode=1)
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(limited).ref_statuses([github_ref("owner/app", 1)])
+
+    def down(argv, timeout: float) -> GhResult:
+        return GhResult(1, "", "gh: HTTP 502")
+
+    with pytest.raises(GitHubAdapterError):
+        GitHubIntakeClient(down).ref_statuses([github_ref("owner/app", 1)])
+
+
+def test_linear_intake_reads_blocks_relations() -> None:
+    node = linear_node(8)
+    node["inverseRelations"] = {"nodes": [
+        {"type": "blocks", "issue": {"identifier": "AUT-7", "state": {"type": "started"}}},
+        {"type": "related", "issue": {"identifier": "AUT-6", "state": {"type": "started"}}},
+        {"type": "blocks", "issue": {"identifier": "AUT-5", "state": {"type": "completed"}}},
+    ]}
+    found = LinearIntakeClient(PagedLinearSource([[node]]), {"proj-1": "acme/app"}).linear_intake(
+        "proj-1", "In Progress"
+    )
+    assert found[0].blocked_by == (("AUT-7", "started"), ("AUT-5", "completed"))
+    assert "inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } }" in (
+        LINEAR_INTAKE_QUERY
+    )
+
+
+def test_linear_relations_add_no_linear_request() -> None:
+    node = linear_node(8)
+    node["inverseRelations"] = {"nodes": [
+        {"type": "blocks", "issue": {"identifier": "AUT-7", "state": {"type": "started"}}},
+    ]}
+    source = PagedLinearSource([[node]])
+    LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
+    assert len(source.documents) == 1

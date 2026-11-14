@@ -43,6 +43,16 @@ room, a resumed one (some steps already done) as much as a new one; resumed
 tickets only go first. So the queue never holds more work for a harness
 than it has free slots.
 
+Gates (#156, lib/feeder_gates.py): a ticket not started yet is fed only
+once every ticket or PR its `Blocked by` lines (and, on Linear, its blocks
+relations) name is done, and nothing in flight shares a `Touches:` path or a
+`Conflicts with` edge with it. In flight is a fed ticket whose PR is still
+open, or one selected earlier in this poll. A ticket that waits is
+`waiting-blocked` with its reason and takes no room; it is re-checked every
+poll. Blocker and holder statuses come from one batched, cached read per
+poll, and none when no ticket has a gate line. A blocker cycle, a blocker
+closed without finishing and one that does not exist raise needs-attention.
+
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
 the feeder has a ticket id for, so an urgent or bug label added after the
 feed still moves its queued job.
@@ -53,15 +63,30 @@ GitHub and Linear clients it is given; tests pass fakes.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from lib import attention
 from lib.device_pool import free_slots, slots_in_use
 from lib.dispatcher import Comment, TicketRef, safe_ship_error
 from lib.factory_md import FactoryContext
+from lib.feeder_gates import (
+    ATTENTION_REASONS,
+    GateLines,
+    Holds,
+    Progress,
+    Ref,
+    RefStatus,
+    Wait,
+    blocker_waits,
+    github_ref,
+    linear_status,
+    parse_gate_lines,
+)
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project
@@ -78,11 +103,30 @@ POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 # eligible: seen this poll, not fed yet; waiting-capacity: no room for its
 # harness this poll; feeding: some steps done; error: a step failed (retried
 # next poll); fed: brief and go posted; done: fed and its job is queued;
-# closed: its recorded PR was closed or merged before the feed finished.
-STATES = ("eligible", "waiting-capacity", "feeding", "error", "fed", "done", "closed")
+# closed: its recorded PR was closed or merged before the feed finished;
+# waiting-blocked: a blocker is not done or an in-flight ticket holds one of
+# its paths or a conflicts-with edge (waiting_reason says which).
+STATES = (
+    "eligible",
+    "waiting-capacity",
+    "waiting-blocked",
+    "feeding",
+    "error",
+    "fed",
+    "done",
+    "closed",
+)
+UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
 FINAL = (*FED, "closed")
+HOLDING = (*IN_FLIGHT, *FED)
+_COLUMNS = (
+    ("waiting_reason", "TEXT"),
+    ("touches", "TEXT"),
+    ("conflicts", "TEXT"),
+    ("released", "INTEGER NOT NULL DEFAULT 0"),
+)
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
 URGENT_LABELS = frozenset({"urgent", "priority:urgent"})
@@ -123,6 +167,8 @@ class IntakeIssue:
     linear_id: str | None = None
     branch: str | None = None  # Linear's gitBranchName
     priority: int | None = None  # Linear priority (1 is Urgent)
+    # Linear blocks relations naming this issue: (blocker identifier, state type).
+    blocked_by: tuple[tuple[str, str | None], ...] = ()
 
     @property
     def urgent(self) -> bool:
@@ -165,6 +211,8 @@ class GitHubIntake(Protocol):
 
     def post_comment(self, repo: str, number: int, body: str) -> str: ...
 
+    def ref_statuses(self, refs: Collection[Ref]) -> Mapping[Ref, RefStatus]: ...
+
 
 class LinearIntake(Protocol):
     def linear_intake(self, project_id: str, state: str) -> Sequence[IntakeIssue]: ...
@@ -179,6 +227,7 @@ class FeedReport:
     fed: tuple[TicketRef, ...] = ()
     eligible: int = 0
     waiting: int = 0
+    blocked: int = 0
     errors: int = 0
 
 
@@ -188,13 +237,33 @@ class _Candidate:
     context: FactoryContext
     issue: IntakeIssue
 
+    lines: GateLines = GateLines()
+
     @property
     def harness(self) -> str:
         return self.context.config.builder_harness
 
-    def order(self) -> tuple[int, float, str]:
+    @property
+    def ref(self) -> Ref:
+        return Ref(self.issue.tracker, self.issue.repo.lower(), self.issue.key)  # type: ignore[arg-type]
+
+    def order(self) -> tuple[int, float, tuple[int, int, str]]:
         rank = priority_rank(urgent=self.issue.urgent, resume=False, bug=self.issue.bug)
-        return rank, self.issue.created_at, self.issue.key
+        return rank, self.issue.created_at, _key_order(self.issue.key)
+
+
+def _key_order(key: str) -> tuple[int, int, str]:
+    """A ticket number sorts as a number (9 before 10), an identifier as text."""
+    return (0, int(key), "") if key.isdigit() else (1, 0, key)
+
+
+def gate_lines(issue: IntakeIssue) -> GateLines:
+    """The ticket's gate lines, plus its Linear blocks relations."""
+    lines = parse_gate_lines(issue.body, issue.repo)
+    if not issue.blocked_by:
+        return lines
+    linear = {Ref("linear", issue.repo.lower(), key) for key, _ in issue.blocked_by}
+    return GateLines(lines.blocked_by | linear, lines.touches, lines.conflicts_with)
 
 
 def go_state_for(body: str) -> str:
@@ -237,10 +306,19 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             seen_at REAL NOT NULL,
             fed_at REAL,
             error TEXT,
+            waiting_reason TEXT,
+            touches TEXT,
+            conflicts TEXT,
+            released INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, issue)
         )
         """
     )
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
+    for name, kind in _COLUMNS:
+        if name not in present:
+            connection.execute(f"ALTER TABLE {FEEDER_TABLE} ADD COLUMN {name} {kind}")
+    attention.ensure_table(connection)
     connection.execute(
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
@@ -260,14 +338,17 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
 
 
 def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
-    """eligible, fed and waiting_capacity among tickets eligible at the last poll."""
-    counts = {"eligible": 0, "fed": 0, "waiting_capacity": 0}
+    """eligible, fed, waiting_capacity and waiting_blocked among tickets
+    eligible at the last poll."""
+    counts = {"eligible": 0, "fed": 0, "waiting_capacity": 0, "waiting_blocked": 0}
     for row in feeder_items(connection):
         counts["eligible"] += 1
         if row["state"] in FED:
             counts["fed"] += 1
         elif row["state"] == "waiting-capacity":
             counts["waiting_capacity"] += 1
+        elif row["state"] == "waiting-blocked":
+            counts["waiting_blocked"] += 1
     return counts
 
 
@@ -287,7 +368,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error
+               pr_number, issue_created_at, error, waiting_reason
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),
@@ -299,7 +380,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
             priority_rank(urgent=bool(row["urgent"]), resume=False, bug=bool(row["bug"])),
             float(row["issue_created_at"]),
             str(row["repo"]),
-            str(row["issue"]),
+            _key_order(str(row["issue"])),
         )
     )
     return items
@@ -335,26 +416,37 @@ class Feeder:
 
     def feed_once(self) -> FeedReport:
         now = self.queue.now()
-        candidates, read_errors = self._candidates()
+        candidates, read_repos, read_errors = self._candidates()
         self._record_seen(candidates, now)
         self._mark_done()
+        states = {candidate.ref: self._state(candidate) for candidate in candidates}
+        waits, holds, gate_read = self._gates(candidates, states)
+        if gate_read:
+            self._sync_attention(waits, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
         fed: list[TicketRef] = []
         waiting = 0
-        errors = read_errors
-        resumed = {(c.issue.repo.lower(), c.issue.key) for c in candidates if self._in_flight(c)}
+        blocked = 0
+        errors = read_errors + (0 if gate_read else 1)
         for candidate in sorted(candidates, key=lambda item: (
-            (item.issue.repo.lower(), item.issue.key) not in resumed, *item.order()
+            states[item.ref] not in IN_FLIGHT, *item.order()
         )):
             state = self._state(candidate)
             if state in FINAL:
                 continue
+            if state in UNSTARTED:
+                wait = waits.get(candidate.ref) or holds.collision(candidate.ref, candidate.lines)
+                if wait is not None:
+                    self._set_state(candidate, "waiting-blocked", reason=wait.reason)
+                    blocked += 1
+                    continue
             if room.get(candidate.harness, 0) <= 0:
                 if state not in IN_FLIGHT:
                     self._set_state(candidate, "waiting-capacity")
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
+            holds.take(candidate.ref, (), candidate.lines)
             try:
                 ref = self._feed(candidate, now)
             except Exception as exc:  # one ticket's failure never stops the poll
@@ -374,10 +466,17 @@ class Feeder:
                 continue
             fed.append(ref)
             self.log(f"feeder: fed {candidate.issue.repo}#{candidate.issue.key} as {ref.ticket_id}")
-        return FeedReport(fed=tuple(fed), eligible=len(candidates), waiting=waiting, errors=errors)
+        return FeedReport(
+            fed=tuple(fed),
+            eligible=len(candidates),
+            waiting=waiting,
+            blocked=blocked,
+            errors=errors,
+        )
 
-    def _candidates(self) -> tuple[list[_Candidate], int]:
+    def _candidates(self) -> tuple[list[_Candidate], set[str], int]:
         found: list[_Candidate] = []
+        read: set[str] = set()
         errors = 0
         for project in self.projects:
             intake = project.intake
@@ -396,14 +495,114 @@ class Feeder:
                 errors += 1
                 self.log(f"feeder: cannot read intake for {project.repo}: {safe_ship_error(exc)}")
                 continue
+            read.add(project.repo.lower())
             trusted = intake_trusted(self.config, project)
             for issue in issues:
                 if issue.repo.lower() != project.repo.lower() or not _KEY.fullmatch(issue.key):
                     continue
                 if issue.applied_by is None or issue.applied_by not in trusted:
                     continue
-                found.append(_Candidate(project=project, context=context, issue=issue))
-        return found, errors
+                found.append(
+                    _Candidate(project=project, context=context, issue=issue, lines=gate_lines(issue))
+                )
+        return found, read, errors
+
+    # -- gates (#156) ----------------------------------------------------------------
+
+    def _gates(
+        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
+    ) -> tuple[dict[Ref, Wait], Holds, bool]:
+        """Blocker waits, the holds of tickets in flight, and whether the
+        status read (when one was needed) succeeded."""
+        unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
+        gated = {c.ref: c.lines for c in unstarted if c.lines.blocked_by}
+        conflicts = {ref for c in unstarted for ref in c.lines.conflicts_with}
+        rows = self._feeder_rows()
+        pull_of = {ref: pull for ref, (_, pull, _) in rows.items() if pull is not None}
+        known = set(rows) | set(pull_of.values()) | {c.ref for c in candidates}
+        holders = {
+            ref: (lines, pull)
+            for ref, (lines, pull, released) in rows.items()
+            if not released and (lines or ref in conflicts or pull in conflicts)
+        }
+        blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
+        via = {ref: pull_of[ref] for ref in blockers if ref in pull_of}
+        linear = {
+            Ref("linear", c.issue.repo.lower(), key): linear_status(state_type)
+            for c in unstarted
+            for key, state_type in c.issue.blocked_by
+        }
+        external = {ref for ref in conflicts if ref not in known}
+        needed = {ref for ref in blockers if ref.tracker == "github"}
+        needed |= set(via.values()) | external
+        needed |= {pull for _, pull in holders.values() if pull is not None}
+        statuses: dict[Ref, RefStatus] = {}
+        ok = True
+        if needed:
+            try:
+                statuses = dict(self.github.ref_statuses(needed))
+            except Exception as exc:
+                ok = False
+                self.log(f"feeder: cannot read blocker status: {safe_ship_error(exc)}")
+        statuses.update(linear)
+        for blocker, pull in via.items():
+            if _progress(statuses, pull) is Progress.DONE:
+                statuses[blocker] = statuses[pull]
+        holds = Holds()
+        released: list[Ref] = []
+        for ref, (lines, pull) in sorted(holders.items()):
+            if pull is not None and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
+                released.append(ref)
+                continue
+            holds.take(ref, () if pull is None else (pull,), lines)
+        for ref in sorted(external):
+            status = statuses.get(ref)
+            if status is not None and status.is_pull and status.progress is Progress.OPEN:
+                holds.take(ref, (), GateLines())
+        self._release(released)
+        return blocker_waits(gated, statuses), holds, ok
+
+    def _feeder_rows(self) -> dict[Ref, tuple[GateLines, Ref | None, bool]]:
+        """Tickets fed or feeding: their lines, PR ref and whether they were
+        released (their PR merged or closed)."""
+        with self.queue.connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT repo, issue, tracker, pr_number, touches, conflicts, released
+                FROM {FEEDER_TABLE}
+                WHERE state IN ({",".join("?" * len(HOLDING))})
+                """,
+                HOLDING,
+            ).fetchall()
+        found: dict[Ref, tuple[GateLines, Ref | None, bool]] = {}
+        for row in rows:
+            ref = Ref(row["tracker"], row["repo"], row["issue"])
+            pull = github_ref(row["repo"], row["pr_number"]) if row["pr_number"] else None
+            touches = frozenset(json.loads(row["touches"] or "[]"))
+            conflicts = frozenset(Ref(*item) for item in json.loads(row["conflicts"] or "[]"))
+            lines = GateLines(touches=touches, conflicts_with=conflicts)
+            found[ref] = (lines, pull, bool(row["released"]))
+        return found
+
+    def _release(self, refs: Sequence[Ref]) -> None:
+        """A holder whose PR merged or closed stops holding, for good."""
+        if not refs:
+            return
+        with self.queue.connect() as connection:
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET released = 1 WHERE repo = ? AND issue = ?",
+                [(ref.repo, ref.key) for ref in refs],
+            )
+
+    def _sync_attention(self, waits: Mapping[Ref, Wait], repos: set[str], now: float) -> None:
+        flags = {
+            (ref.repo, ref.key, wait.attention): wait.reason
+            for ref, wait in waits.items()
+            if wait.attention is not None
+        }
+        with self.queue.connect() as connection:
+            attention.sync(connection, ATTENTION_REASONS, repos, flags, now)
 
     # -- capacity --------------------------------------------------------------
 
@@ -444,10 +643,12 @@ class Feeder:
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
                         repo, issue, tracker, title, harness, state, urgent, bug,
-                        risk, issue_created_at, first_seen_at, seen_at
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?)
+                        risk, issue_created_at, first_seen_at, seen_at, touches, conflicts
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
+                        touches = excluded.touches,
+                        conflicts = excluded.conflicts,
                         urgent = excluded.urgent,
                         bug = excluded.bug,
                         risk = CASE WHEN state IN ('fed', 'done', 'closed') THEN risk
@@ -468,6 +669,10 @@ class Feeder:
                         issue.created_at,
                         now,
                         now,
+                        json.dumps(sorted(candidate.lines.touches)),
+                        json.dumps(
+                            [[ref.tracker, ref.repo, ref.key] for ref in sorted(candidate.lines.conflicts_with)]
+                        ),
                     ),
                 )
                 ticket = connection.execute(
@@ -488,7 +693,7 @@ class Feeder:
             connection.execute(
                 f"""
                 DELETE FROM {FEEDER_TABLE}
-                WHERE seen_at < ? AND state IN ('eligible', 'waiting-capacity')
+                WHERE seen_at < ? AND state IN ('eligible', 'waiting-capacity', 'waiting-blocked')
                 """,
                 (now,),
             )
@@ -520,17 +725,21 @@ class Feeder:
     def _state(self, candidate: _Candidate) -> str:
         return str(self._row(candidate)["state"])
 
-    def _in_flight(self, candidate: _Candidate) -> bool:
-        return self._state(candidate) in IN_FLIGHT
-
-    def _set_state(self, candidate: _Candidate, state: str, *, error: str | None = None) -> None:
+    def _set_state(
+        self,
+        candidate: _Candidate,
+        state: str,
+        *,
+        error: str | None = None,
+        reason: str | None = None,
+    ) -> None:
         with self.queue.connect() as connection:
             connection.execute(
                 f"""
-                UPDATE {FEEDER_TABLE} SET state = ?, error = ?
+                UPDATE {FEEDER_TABLE} SET state = ?, error = ?, waiting_reason = ?
                 WHERE repo = ? AND issue = ? AND state NOT IN ('fed', 'done', 'closed')
                 """,
-                (state, error, candidate.issue.repo.lower(), candidate.issue.key),
+                (state, error, reason, candidate.issue.repo.lower(), candidate.issue.key),
             )
 
     def _record(self, candidate: _Candidate, **values: object) -> None:
@@ -637,6 +846,11 @@ class Feeder:
                 return issue.branch
             return f"factory/{issue.key.lower()}"
         return f"factory/issue-{issue.key}"
+
+
+def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:
+    status = statuses.get(ref)
+    return None if status is None else status.progress
 
 
 def _ticket_name(issue: IntakeIssue) -> str:
