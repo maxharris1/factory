@@ -893,7 +893,9 @@ def test_cli_job_run_streams_claude_telemetry_into_the_table(tmp_path: Path) -> 
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout == "not json: a plain line\n"
-    assert "telemetry" not in done.stderr
+    assert [line for line in done.stderr.splitlines() if "telemetry" in line] == [
+        "orch job run: telemetry: stream flags added (claude)"
+    ]
     row = _row(tmp_path / "orch.db", job.id)
     assert row["bot"] == "claude-bot" and row["harness"] == "claude" and row["repo"] == "acme/widgets"
     assert row["exit_reason"] == "success; exit 0"
@@ -1638,7 +1640,9 @@ def test_cli_job_run_writes_the_live_run_and_counters_only_writes_none(tmp_path:
             env={"ORCH_JOB_STATE_DIR": str(root / "state"), "ORCH_TELEMETRY": mode},
         )
         assert done.returncode == 0, done.stderr
-        assert "telemetry" not in done.stderr
+        assert [line for line in done.stderr.splitlines() if "telemetry" in line] == [
+            "orch job run: telemetry: stream flags added (claude)"
+        ]
         rows[mode] = _row(root / "orch.db", job.id)
     assert rows["on"]["current_task"] == "Pushing with GH_TOKEN=[redacted-token]"
     assert len(json.loads(rows["on"]["subagents"])) == 4
