@@ -1,23 +1,32 @@
 """Skill preflight on the placed device (issue #179, SF-7).
 
-Before the waiter starts a harness, every file the pinned skills install
-must be on the device the job was placed on, with the sha256 that
-skills/skills.lock records. The lock decides the set: each pstack file under
-skills/<name>/, and each factory router (a skills/factory/<name>/ holding a
-SKILL.md), the same set install-skills places. They are looked for under
-the bot's skills directory: ~/.claude/skills for claude-bot,
-~/.agents/skills for codex-bot, ~/.cursor/skills for cursor-bot. The whole
-tree is checked, not a list of named files: the routers reach other skills
-by reference (interrogate runs arena; figure-it-out runs show-me-your-work
-and architect).
+Before the waiter starts a harness, every file skills/skills.lock pins
+must be on the device the job was placed on, with the sha256 the lock
+records, at both places the harness reads it from:
+
+* the bot's skills directory (~/.claude/skills for claude-bot,
+  ~/.agents/skills for codex-bot, ~/.cursor/skills for cursor-bot) holds
+  the set install-skills places: each pstack file under skills/<name>/ and
+  each factory router (a skills/factory/<name>/ holding a SKILL.md);
+* the device's deployed factory checkout holds the whole pinned tree,
+  skills/pstack/ and skills/factory/. The routers send the harness there
+  for pstack's docs/ and agents/ and for skills/factory/harness/, which are
+  never installed. On a remote device the checkout is its factory_root
+  (machines.yml); on the box it is factory_root when named, else this
+  checkout.
+
+The whole tree is checked, not a list of named files: the routers reach
+other skills by reference (interrogate runs arena; figure-it-out runs
+show-me-your-work and architect).
 
 On the box the files are read in place. On a remote device one ssh call
-sends the relative paths on stdin and reads back one `<sha256> <path>` line
-per file, or `- <path>` for a file that is not there. The first problem in
-path order fails the job before launch: `preflight-missing: <path>` or
-`preflight-hash: <path>`. Either way the job's detail gets a
-`skill_preflight` entry: the device, the skills directory, the lock commit,
-every path with the hash found there, and the error when there is one.
+sends the paths on stdin (relative to $HOME, or absolute) and reads back one
+`<sha256> <path>` line per file, or `- <path>` for a file that is not there.
+The first problem in path order fails the job before launch:
+`preflight-missing: <path>` or `preflight-hash: <path>`. Either way the
+job's detail gets a `skill_preflight` entry: the device, the skills
+directory, the checkout, the lock commit, every path with the hash found
+there, and the error when there is one.
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ from pathlib import Path
 from lib.device_monitor import remote_target
 from lib.device_pool import Placement
 from lib.machines_yml import Device
-from lib.pstack_pin import DIR_HARNESS, ROOT, load_pin
+from lib.pstack_pin import DIR_HARNESS, FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, ssh_argv
 from lib.wait import OWNING_BOTS, retry_locked
@@ -43,16 +52,18 @@ ABSENT = "-"
 
 _SKILLS_DIR = {harness: rel for rel, harness in DIR_HARNESS.items()}
 
-# $1: the skills directory under $HOME. Reads one relative path per line on
-# stdin and prints `<sha256> <path>`, or `- <path>` when the path is not a
-# readable regular file (a symlink to one counts: local installs link).
+HOME_PREFIX = "~/"
+
+# Reads one path per line on stdin, absolute or relative to $HOME, and prints
+# `<sha256> <path>`, or `- <path>` when the path is not a readable regular
+# file (a symlink to one counts: local installs link).
 _SCRIPT = (
-    'd="$HOME/$1"; '
     "if command -v sha256sum >/dev/null 2>&1; then s=sha256sum; "
     "elif command -v shasum >/dev/null 2>&1; then s='shasum -a 256'; "
     "else echo 'orch-skills: no sha256sum or shasum' >&2; exit 4; fi; "
     'while IFS= read -r p; do '
-    'if [ -f "$d/$p" ] && h=$($s < "$d/$p" 2>/dev/null); then '
+    'case $p in /*) f=$p ;; *) f="$HOME/$p" ;; esac; '
+    'if [ -f "$f" ] && h=$($s < "$f" 2>/dev/null); then '
     "printf '%s %s\\n' \"${h%% *}\" \"$p\"; "
     "else printf -- '- %s\\n' \"$p\"; fi; "
     "done"
@@ -67,6 +78,7 @@ class PreflightError(ValueError):
 class Report:
     device: str
     skills_dir: str
+    checkout: str
     commit: str
     found: dict[str, str]
     error: str | None
@@ -74,7 +86,8 @@ class Report:
     def entry(self) -> dict[str, object]:
         entry: dict[str, object] = {
             "device": self.device,
-            "root": f"~/{self.skills_dir}",
+            "root": f"{HOME_PREFIX}{self.skills_dir}",
+            "checkout": self.checkout,
             "commit": self.commit,
             "files": dict(sorted(self.found.items())),
         }
@@ -83,9 +96,18 @@ class Report:
         return entry
 
 
-def pinned_files(root: Path = ROOT) -> tuple[str, dict[str, str]]:
-    """The lock commit and {path under the skills dir: sha256} it pins."""
+@dataclass(frozen=True)
+class Pinned:
+    commit: str
+    installed: dict[str, str]
+    checkout: dict[str, str]
+
+
+def pinned_files(root: Path = ROOT) -> Pinned:
+    """The lock commit, {path under the skills dir: sha256} and {path under the checkout: sha256}."""
     pin = load_pin(root)
+    checkout = {f"{PSTACK_DIR.as_posix()}/{rel}": digest for rel, digest in pin.files}
+    checkout |= {f"{FACTORY_DIR.as_posix()}/{rel}": digest for rel, digest in pin.factory}
     files = {
         rel.removeprefix("skills/"): digest
         for rel, digest in pin.files
@@ -99,10 +121,10 @@ def pinned_files(root: Path = ROOT) -> tuple[str, dict[str, str]]:
     for rel, digest in pin.factory:
         if rel.split("/", 1)[0] in routers:
             files[rel] = digest
-    for rel in files:
+    for rel in checkout:
         if any(ord(c) < 32 for c in rel):
             raise ValueError(f"skills.lock path has a control character: {rel!r}")
-    return pin.commit, files
+    return Pinned(pin.commit, files, checkout)
 
 
 def skills_dir(bot: str) -> str:
@@ -112,50 +134,70 @@ def skills_dir(bot: str) -> str:
         raise PreflightError(f"preflight: no skills directory for {bot}") from None
 
 
-def local_hashes(home: Path, skills: str, paths: list[str]) -> dict[str, str]:
+def wanted(skills: str, checkout: str, pinned: Pinned) -> dict[str, str]:
+    """{path on the device: sha256}, ~/-prefixed under the home, else absolute."""
+    paths = {f"{HOME_PREFIX}{skills}/{rel}": digest for rel, digest in pinned.installed.items()}
+    paths |= {f"{checkout}/{rel}": digest for rel, digest in pinned.checkout.items()}
+    return paths
+
+
+def checkout_root(device: Device | None, placement: Placement | None, harness: str, root: Path) -> str:
+    configured = device.factory_root_for(harness) if device is not None else None
+    if device is None or device.local or placement is None:
+        return configured if configured is not None else str(root.resolve())
+    if configured is None:
+        raise PreflightError(f"preflight: {device.name} has no factory_root for {harness}")
+    return configured
+
+
+def _wire(path: str) -> str:
+    return path.removeprefix(HOME_PREFIX)
+
+
+def local_hashes(home: Path, paths: list[str]) -> dict[str, str]:
     found: dict[str, str] = {}
-    for rel in paths:
-        path = home / skills / rel
+    for key in paths:
+        path = home / _wire(key) if key.startswith(HOME_PREFIX) else Path(key)
         try:
             if path.is_file():
-                found[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                found[key] = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             continue
     return found
 
 
-def remote_script(skills: str) -> str:
-    return f"exec sh -c {shlex.quote(_SCRIPT)} orch-skills {shlex.quote(skills)}"
+def remote_script() -> str:
+    return f"exec sh -c {shlex.quote(_SCRIPT)} orch-skills"
 
 
 def remote_hashes(
-    transport: CaptureTransport, device: Device, placement: Placement, skills: str, paths: list[str]
+    transport: CaptureTransport, device: Device, placement: Placement, paths: list[str]
 ) -> dict[str, str]:
     """One ssh round trip: the hash of each path on the device, absent ones left out."""
     target = remote_target(device, placement.harness, placement.job_id)
     if target is None:
         raise PreflightError(f"preflight: {device.name} has no usable ssh_alias or workdir_root")
-    stdin = "".join(f"{rel}\n" for rel in paths).encode("utf-8")
-    result = transport.call(ssh_argv(target, remote_script(skills)), timeout=TIMEOUT_SECONDS, input=stdin)
+    by_wire = {_wire(key): key for key in paths}
+    stdin = "".join(f"{rel}\n" for rel in by_wire).encode("utf-8")
+    result = transport.call(ssh_argv(target, remote_script()), timeout=TIMEOUT_SECONDS, input=stdin)
     if result.code == SSH_UNREACHABLE:
         raise PreflightError(f"preflight-unreachable: {device.name} ({target.alias})")
     if result.code != 0:
         raise PreflightError(f"preflight-failed: {device.name} exited {result.code}")
-    wanted = set(paths)
     found: dict[str, str] = {}
     for line in result.stdout.splitlines():
         digest, _, rel = line.partition(" ")
-        if rel in wanted and digest != ABSENT:
-            found[rel] = digest
+        if rel in by_wire and digest != ABSENT:
+            found[by_wire[rel]] = digest
     return found
 
 
-def compare(skills: str, pinned: dict[str, str], found: dict[str, str]) -> str | None:
-    for rel in sorted(pinned):
-        if rel not in found:
-            return f"preflight-missing: ~/{skills}/{rel}"
-        if found[rel] != pinned[rel]:
-            return f"preflight-hash: ~/{skills}/{rel}"
+def compare(pinned: dict[str, str], found: dict[str, str]) -> str | None:
+    for path in sorted(pinned):
+        if path not in found:
+            return f"preflight-missing: {path}"
+        if found[path] != pinned[path]:
+            return f"preflight-hash: {path}"
     return None
 
 
@@ -170,17 +212,19 @@ def check(
 ) -> Report:
     skills = skills_dir(bot)
     try:
-        commit, pinned = pinned_files(root)
+        pinned = pinned_files(root)
     except (OSError, ValueError, UnicodeError) as exc:
         raise PreflightError(f"preflight: cannot read skills.lock: {exc}") from exc
-    paths = sorted(pinned)
+    checkout = checkout_root(device, placement, OWNING_BOTS[bot], root)
+    expected = wanted(skills, checkout, pinned)
+    paths = sorted(expected)
     if device is None or device.local or placement is None:
         name = device.name if device is not None else "box"
-        found = local_hashes(home, skills, paths)
+        found = local_hashes(home, paths)
     else:
         name = device.name
-        found = remote_hashes(transport, device, placement, skills, paths)
-    return Report(name, skills, commit, found, compare(skills, pinned, found))
+        found = remote_hashes(transport, device, placement, paths)
+    return Report(name, skills, checkout, pinned.commit, found, compare(expected, found))
 
 
 def record(queue: SQLiteJobQueue, job: Job, entry: dict[str, object]) -> None:
