@@ -277,7 +277,7 @@ _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
 )
 _PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
-_REDACTED_MARKS = {"<url>": "\ue000", "<host>": "\ue001", "<secret>": "\ue002"}
+_REDACTED_MARKS = {"\ue000": "<url>", "\ue001": "<host>", "\ue002": "<secret>"}
 _PLAIN_REDACTED = re.compile(r"[A-Za-z0-9_ .,:;()'/=+\ue000-\ue002-]*")
 _CREDENTIAL_WORD = re.compile(
     r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
@@ -289,10 +289,12 @@ _POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following
 _POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
 
 
-def _redact_spans(text: str) -> str:
-    text = _SECRET_URL.sub("<url>", text)
-    text = _SECRET_HOST_PATH.sub("<host>", text)
-    return _SECRET_TOKEN.sub("<secret>", text)
+def _redact_spans(
+    text: str, url: str = "<url>", host: str = "<host>", secret: str = "<secret>"
+) -> str:
+    text = _SECRET_URL.sub(url, text)
+    text = _SECRET_HOST_PATH.sub(host, text)
+    return _SECRET_TOKEN.sub(secret, text)
 
 
 def _redact(text: str) -> str:
@@ -390,11 +392,9 @@ def scrub_detail(detail: str) -> str:
     before the cut, which would drop the key and keep a quoted value's
     later words."""
     detail = "".join(char if char.isprintable() else " " for char in detail)
-    detail = _redact_spans(detail)
-    for placeholder, mark in _REDACTED_MARKS.items():
-        detail = detail.replace(placeholder, mark)
+    detail = _redact_spans(detail, *_REDACTED_MARKS)
     detail = _plain_prefix(detail, _PLAIN_REDACTED)
-    for placeholder, mark in _REDACTED_MARKS.items():
+    for mark, placeholder in _REDACTED_MARKS.items():
         detail = detail.replace(mark, placeholder)
     return " ".join(detail.split())
 

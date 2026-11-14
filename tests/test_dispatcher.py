@@ -2627,6 +2627,10 @@ CREDENTIAL_BODIES = (
     f'GITHUB_TOKEN: "first {CANARY}"',
     f"Authorization: 'Bearer first {CANARY}'",
     f"secret first {CANARY}",
+    f"<secret>{CANARY}</secret>",
+    f"<url>{CANARY}</url>",
+    f"<host> {CANARY}",
+    f"<secret> <url> {CANARY}",
 )
 
 
