@@ -1,6 +1,8 @@
 """The poller as a service: its own pidfile, SIGTERM cleanup, autostart."""
 
+import fcntl
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -488,3 +490,91 @@ def test_without_proc_the_poller_is_recognized_by_ps(home: Path, tmp_path: Path)
     assert _service(home, "status", **no_proc).stdout == f"running (pid {pid})\n"
     assert _service(home, "stop", **no_proc).returncode == 0
     assert not alive(pid)
+
+
+# --- issue #134: a poller this shell cannot see -----------------------------
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_ensure_and_start_launch_nothing_while_the_poll_lock_is_held(home: Path) -> None:
+    # orch poll in another PID namespace: no usable pidfile, but its lock is held.
+    database = home / ".local/state/factory/orch.db"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+    with database.with_name("orch.db.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        ensured = _service(home, "ensure")
+        started = _service(home, "start")
+    assert ensured.returncode == 0, ensured.stderr
+    assert ensured.stdout == ""
+    assert started.returncode == 0, started.stderr
+    assert "orch poll already running (poll lock held)" in started.stdout
+    assert not _pidfile(home).exists()
+    log = home / ".local/state/factory/poller.log"
+    assert not log.exists() or "polling as" not in log.read_text()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_poller_ensure_loop_is_a_singleton(home: Path, tmp_path: Path) -> None:
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    shutil.copy(ROOT / "deploy" / "poller-ensure-loop.sh", deploy)
+    calls = tmp_path / "ensure-calls"
+    fake = deploy / "poller-service.sh"
+    fake.write_text(f"#!/bin/sh\necho \"$1\" >>{calls}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "ORCH_POLL_ENSURE_SEC": "60"}
+    loop = [str(deploy / "poller-ensure-loop.sh")]
+    lock = home / ".local/state/factory/poller-ensure-loop.lock"
+    pidfile = lock.with_suffix(".pid")
+
+    first = subprocess.Popen(loop, env=env, text=True, stdout=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while not calls.exists():
+            assert time.monotonic() < deadline, "the first loop never ran ensure"
+            time.sleep(0.05)
+        assert calls.read_text() == "ensure\n"
+        assert pidfile.read_text() == f"{first.pid}\n"
+
+        second = subprocess.run(
+            loop, env=env, text=True, capture_output=True, timeout=5, check=False
+        )
+        assert second.returncode == 0, second.stderr
+        assert "already running (lock held)" in second.stdout
+        assert calls.read_text() == "ensure\n"
+        assert pidfile.read_text() == f"{first.pid}\n"
+    finally:
+        first.terminate()
+        first.communicate(timeout=10)
+    assert not pidfile.exists()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_ensure_probes_the_database_orch_poll_env_names(home: Path, tmp_path: Path) -> None:
+    # run-poller.sh sources orch-poll.env, so its ORCH_DB is the one the
+    # poller locks, whatever ORCH_DB the caller has.
+    configured = tmp_path / "configured.db"
+    configured.write_bytes(b"")
+    callers = tmp_path / "callers.db"
+    callers.write_bytes(b"")
+    (home / ".config/factory/orch-poll.env").write_text(
+        f"ORCH_DB='{configured}'\n", encoding="utf-8"
+    )
+    log = home / ".local/state/factory/poller.log"
+
+    with configured.with_name("configured.db.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        runs = [_service(home, "ensure"), _service(home, "ensure", ORCH_DB=str(callers))]
+    for run in runs:
+        assert run.returncode == 0, run.stderr
+        assert run.stdout == ""
+    assert not _pidfile(home).exists()
+    assert not log.exists() or "polling as" not in log.read_text()
+
+    with callers.with_name("callers.db.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = _service(home, "ensure", ORCH_DB=str(callers))
+    assert started.returncode == 0, started.stderr
+    assert "started orch poll" in started.stdout
+    assert _pidfile(home).exists()

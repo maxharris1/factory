@@ -573,7 +573,53 @@ Max creates the webhook in Linear (Issue and Comment resource types, scoped
 to the Aut0 team) with the Funnel URL, and saves its signing secret to
 `~/.config/factory/linear-webhook.secret` with `chmod 600`. Tailscale Network
 owns the Funnel that exposes only the listener path. This repository
-installs no service for the listener and changes no network configuration.
+changes no network configuration.
+
+### Listener service without systemd
+
+[`deploy/linear-webhook-service.sh`](deploy/linear-webhook-service.sh) keeps
+two loops up on the box (issue #134). `deploy/install.sh` copies it to
+`~/.local/share/factory/linear-webhook-service.sh`; run that copy, not the
+checkout's file, so a `git pull` never rewrites a script a running loop reads.
+
+- `_listener-loop` runs `orch linear-webhook serve --bind 127.0.0.1:PORT`,
+  adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
+  starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
+  line per streak while the port is taken.
+- `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
+  127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
+  `forward refused: port PORT already forwarded on HOST; retry in Ns`.
+- After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
+  (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
+  longer run resets the wait.
+- `LINEAR_WEBHOOK_PORT` defaults to 8787 and `LINEAR_WEBHOOK_TUNNEL_HOST` to
+  `pc-wsl-cursor-bot`; an empty host runs no tunnel.
+
+Each loop is a singleton per state directory: it holds an exclusive `flock`
+on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its
+whole life and exits 0 at once if the lock is held. Locks belong to the open
+file, not a pid, so they hold across PID namespaces (sandboxed bot shells
+share the state directory but not pids). `ensure`, `start` and `status`
+decide from the locks; the pidfiles are for people only. `flock(1)` is
+required.
+
+Commands: `start` (clears a stop), `stop` (holds them stopped), `restart`,
+`status` (exit 3 unless every loop runs), `ensure` (start what is missing
+unless held stopped; silent when all run), `install-autostart` and
+`remove-autostart` (write or remove `~/.config/factory/linear-webhook-autostart`,
+which makes the installed `profile.sh` run `ensure` in the background in each
+bot shell). `stop` ends every loop for this state directory, from any copy
+of the script (argv `.../linear-webhook-service.sh _listener-loop` or
+`_tunnel-loop` whose `--state`, `ORCH_STATE_DIR` or `HOME` points here) and
+every process holding a loop lock (its `/proc/PID/fdinfo` shows the lock; a
+process that only has the lock file open is left alone), each with its
+children. If a lock is
+still held afterwards, by a loop in a PID namespace this shell cannot see,
+`stop` says so and exits 1: run it from a host shell.
+
+Deploy: re-run `deploy/install.sh`, then run
+`~/.local/share/factory/linear-webhook-service.sh restart` once from a host
+shell, so the new `stop` clears loops started by the old copy.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
 tickets with queued or running jobs each Linear cycle (every cycle at
@@ -944,6 +990,17 @@ precedence over the standard directories the script appends. `deploy/install.sh`
 changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.
+
+`start` and `ensure` also probe `orch.db.lock` with `flock` before
+launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
+sourcing its env files (`run-poller.sh --print-db`), else the caller's
+`ORCH_DB`: while it is held, a poller runs even if its pid is
+not visible from this shell, so they launch nothing (`start` says
+`orch poll already running (poll lock held)`).
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
+hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+(default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
+0 at once when another copy holds it.
 
 ## Status
 
