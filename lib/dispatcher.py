@@ -2178,10 +2178,22 @@ class Dispatcher:
             assert fresh is not None
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
-        next_round = (reentry if reentry is not None else review_round) + 1
-        if self._verdict_after(ticket, comment, head, next_round=next_round):
+        answered = self._verdict_after(
+            ticket,
+            comment,
+            head,
+            reentry if reentry is not None else review_round,
+            reentry=reentry is not None,
+        )
+        if answered:
             # #71: that review already ran. A ready posted after the verdict
             # (a fix that changed nothing) is still reviewed, as round N+1.
+            if max(answered) > review_round and state in (None, "questions"):
+                self._set_workflow_state(ticket, "review")
+            return True, "stale-ready-verdict"
+        if state == "waiting-max" and self._verdict_behind_question(
+            ticket, comment, head, review_round
+        ):
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
@@ -2294,31 +2306,71 @@ class Dispatcher:
         ticket: TrackedTicket,
         ready: Comment,
         head: str,
+        review_round: int,
         *,
-        next_round: int,
-    ) -> bool:
-        """A trusted reviewer verdict for head, posted after the ready, that
-        is the first for its round (#71).
+        reentry: bool = False,
+    ) -> set[int]:
+        """The rounds of trusted reviewer verdicts for head, posted after the
+        ready, that are the first for their round (#71).
 
         A verdict whose round already had one at or before the ready (a late
-        duplicate) answered an earlier ready. One with no round, or a round
-        above the cap, answers none: T3 and T4 act on no such verdict.
+        duplicate) answered an earlier ready. One with no round, a round
+        above the cap, or a round past the one this ready asks for answers
+        none: T3 and T4 act on no such verdict. Nor does one for a completed
+        round that T3 did not act on: another verdict closed that round.
+        A verdict for the next round answers it only if T3 or T4 could act
+        on it once T2 moves the ticket to review: not BLOCKED, not while the
+        ticket is in a state other than none, questions, review or
+        awaiting-ok, not an APPROVE for a head other than the last reviewed
+        one, not one they already handled without acting, and not one behind
+        a question pause from the ready on.
 
-        With #108, next_round is the round this ready would start. A verdict
-        for a later round answers none either: T3 and T4 call it stale. One
-        for next_round answers this ready only once that round's review job
-        for head is recorded;
-        on a thread read whole with none (an empty DB) it is the verdict of
-        the review this ready starts, which _enqueue_step records as answered
-        (answered-review, no claimable job) so that verdict can then act.
+        With #108, review_round is the last completed round (the approved
+        round for a ready that re-enters review after handoff, which T2 moves
+        to review), so this ready would start review_round + 1. A verdict for
+        that round answers this ready only once that round's review job for
+        head is recorded; on a thread read whole with none (an empty DB) it
+        is the verdict of the review this ready starts, which _enqueue_step
+        records as answered (answered-review, no claimable job) so that
+        verdict can then act.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
-        cap = self._effective_cap(ticket)
-        last_round = (
+        next_round = review_round + 1
+        last_round = min(
+            self._effective_cap(ticket),
             next_round
             if self._has_review_job(ticket, head, next_round)
-            else next_round - 1
+            else review_round,
         )
+        actable = self._review_context(ticket)[0] in (
+            None, "questions", "review", "awaiting-ok"
+        ) or reentry
+        review_head = self._latest_review_head(ticket)
+        approvable = (
+            review_head is not None and _matching_head(head, review_head) is not None
+        )
+        with self._connect() as connection:
+            handled = {
+                str(row["comment_id"]): str(row["outcome"])
+                for row in connection.execute(
+                    """
+                    SELECT comment_id, outcome FROM handled_comments
+                    WHERE repo = ? AND ticket_id = ?
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
+            round_closers = {
+                str(row["comment_id"])
+                for row in connection.execute(
+                    """
+                    SELECT comment_id FROM review_events
+                    WHERE repo = ? AND ticket_id = ?
+                    AND outcome IN ('queued-review-fix', 'capped-review')
+                    """,
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
         before: set[int] = set()
         after: set[int] = set()
         for item in ticket.comments:
@@ -2329,9 +2381,17 @@ class Dispatcher:
             round_number = _round_number(fields.get("round"))
             if (
                 round_number is not None
-                and round_number <= cap
                 and round_number <= last_round
+                and (
+                    item.id in round_closers
+                    if round_number <= review_round
+                    else actable
+                    and (item.id not in handled or _acted_verdict(handled[item.id]))
+                    and (approvable or fields.get("verdict") != "APPROVE")
+                    and not self._paused_between(ticket, ready, item)
+                )
                 and fields.get("kind") == "verdict"
+                and fields.get("verdict") in ("REVISE", "APPROVE")
                 and self._trusted(ticket, item, fields, reviewer, role="reviewer")
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
@@ -2339,7 +2399,91 @@ class Dispatcher:
                     before.add(round_number)
                 else:
                     after.add(round_number)
-        return bool(after - before)
+        return after - before
+
+    def _verdict_behind_question(
+        self,
+        ticket: TrackedTicket,
+        ready: Comment,
+        head: str,
+        review_round: int,
+    ) -> bool:
+        """Whether T5 holds a review of head at waiting-max and a trusted
+        REVISE or APPROVE for head and a round past review_round follows the
+        ready.
+
+        _verdict_after skips that verdict, but the review this ready would
+        queue takes it as answered (_answered_by), so T2 would clear the
+        pause and T3 or T4 would act on it with no trusted answer. Max's
+        answer resumes the paused review instead (Codex PR #112 r9 F1)."""
+        with self._connect() as connection:
+            paused = connection.execute(
+                """
+                SELECT paused_action, paused_head FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if (
+            paused is None
+            or paused["paused_action"] != "review"
+            or _matching_head(str(paused["paused_head"] or ""), head) is None
+        ):
+            return False
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        for item in ticket.comments:
+            if _comment_order(item) <= _comment_order(ready):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            round_number = _round_number(fields.get("round"))
+            if (
+                round_number is not None
+                and round_number > review_round
+                and fields.get("kind") == "verdict"
+                and fields.get("verdict") in ("REVISE", "APPROVE")
+                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and _matching_head(fields.get("head") or "", head) is not None
+            ):
+                return True
+        return False
+
+    def _paused_between(
+        self, ticket: TrackedTicket, ready: Comment, verdict: Comment
+    ) -> bool:
+        """Whether T5 holds the ticket at waiting-max at any point from ready
+        to verdict. With the ready unreviewed, answers resume clarify, not
+        review, so T3 and T4 act on no such verdict (#112 r7, r8)."""
+        start, end = _comment_order(ready), _comment_order(verdict)
+        waiting = held = False
+        for item in sorted(ticket.comments, key=_comment_order):
+            order = _comment_order(item)
+            if order >= end:
+                break
+            held = held or (waiting and order >= start)
+            try:
+                handoff = parse_comment(item.body)
+            except HandoffError:
+                continue
+            fields = handoff.as_dict()
+            if fields.get("kind") == "questions":
+                waiting = waiting or (
+                    self._trusted_session(ticket, item, fields)
+                    and (
+                        fields.get("state") == "waiting-max"
+                        or (
+                            fields.get("role") != "orchestrator"
+                            and _has_questions(handoff.body)
+                        )
+                    )
+                )
+            elif fields.get("kind") == "answers" and self._trusted(
+                ticket, item, fields, "grok-bot", role="orchestrator"
+            ):
+                waiting = False
+        return held or waiting
 
     def _t3(
         self,
@@ -3219,8 +3363,8 @@ class Dispatcher:
 
         Only the answer that job's step accepts counts: a plan for a plan, a
         ready for a build or fix (at a new head when the job has one, as
-        _posted_handoff reads it), and for a review a verdict naming head at
-        round_number. It must come from a login trusted for recipient's bot
+        _posted_handoff reads it), and for a review a REVISE or APPROVE
+        naming head at round_number. It must come from a login trusted for recipient's bot
         and role, and not have been handled as rejected. With an intact
         database no such answer exists yet when a comment is handled; it is
         found on a replay (a lost or restored database) or when both
@@ -3244,7 +3388,10 @@ class Dispatcher:
                 if (
                     _matching_head(reported, head) is None
                     or _round_number(fields.get("round")) != round_number
+                    or fields.get("verdict") not in ("REVISE", "APPROVE")
                 ):
+                    # #71: T3 and T4 act on no other verdict (BLOCKED), so
+                    # it answers no review (Codex PR #112 r5 F1).
                     continue
             elif head is not None and _matching_head(reported, head) is not None:
                 continue
