@@ -39,6 +39,7 @@ from lib.queue import (
     QueueError,
     SQLiteJobQueue,
     _job,
+    restored_claim,
     retire_requeued,
 )
 from lib.state_backup import RESTORED
@@ -3660,6 +3661,8 @@ class Dispatcher:
         if handoff is not None:
             self._done_from_handoff(job, handoff)
             return
+        if self._restored_failure_waits(job):
+            return
         if job.request.attempt == 1:
             if job.request.action == "review" and self._review_retry_waits(job):
                 return
@@ -3700,6 +3703,45 @@ class Dispatcher:
             ),
         )
         self.queue.mark_failure_handled(job.id)
+
+    def _restored_failure_waits(self, job: Job) -> bool:
+        """#108: settle a failed job restore() marked against its thread
+        before T6 retries it or calls the ticket stuck.
+
+        The backup may predate the job's answer. Until a poll reads the
+        ticket, T6 waits. A read that shows the job's step answered marks it
+        done with that answer. True when T6 does no more with the job now.
+        """
+        with self._connect() as connection:
+            if not restored_claim(connection, job.id):
+                return False
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if ticket is None:
+            self._record_job_event_once(
+                job,
+                "restore-deferred",
+                "restored from a backup that may predate its answer; T6 waits "
+                "for a poll to read the thread",
+            )
+            return True
+        source = next(
+            (item for item in ticket.comments if item.id == job.request.source_comment_id),
+            None,
+        )
+        if source is None:
+            return False
+        answer = self._answered_by(
+            ticket,
+            source,
+            job.request.action,
+            job.request.recipient,
+            head=job.request.head,
+            round_number=_detail_round_number(job.request.detail),
+        )
+        if answer is None:
+            return False
+        self._done_from_handoff(job, answer)
+        return True
 
     def _posted_handoff(self, job: Job) -> Comment | object | None:
         """The handoff a failed review, build or fix job already posted.
@@ -3765,11 +3807,8 @@ class Dispatcher:
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""
-        event, kind = (
-            ("done-from-verdict", "verdict")
-            if job.request.action == "review"
-            else ("done-from-ready", "ready")
-        )
+        kind = _ANSWERS[job.request.action][0]
+        event = f"done-from-{kind}"
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

@@ -173,8 +173,6 @@ class SQLiteJobQueue:
                 ).rowcount
                 if handled != 1:
                     raise QueueError("retry requires one unhandled failed job")
-                if _restored_claim(connection, failed_job_id):
-                    _mark_restored_claim(connection, job.id, now=self.now())
                 if retire_requeued(connection, job.id, "t6-retry", now=self.now()):
                     job = _job(
                         connection.execute("SELECT * FROM jobs WHERE id = ?", (job.id,)).fetchone()
@@ -729,7 +727,7 @@ def retire_requeued(
         detail = f"finished:{reason}"
     elif connection.execute(
         f"SELECT 1 FROM jobs WHERE {harness}", (job_id,)
-    ).fetchone() is not None and _restored_claim(connection, job_id):
+    ).fetchone() is not None and restored_claim(connection, job_id):
         detail = RESTORED
     else:
         return None
@@ -752,9 +750,9 @@ def retire_requeued(
     return detail
 
 
-def _restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
-    """True when restore() copied job_id running (RESTORED_CLAIM) and no
-    RESTORED hold has cancelled it since."""
+def restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
+    """True when restore() marked job_id RESTORED_CLAIM (copied running, or
+    failed with T6 still to come) and no RESTORED hold has cancelled it since."""
     if not _has_table(connection, "job_events"):
         return False
     return connection.execute(
@@ -769,21 +767,6 @@ def _restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
         """,
         (job_id, RESTORED_CLAIM, RESTORED),
     ).fetchone() is not None
-
-
-def _mark_restored_claim(connection: sqlite3.Connection, job_id: str, *, now: float) -> None:
-    """A T6 retry of restored work inherits its RESTORED_CLAIM: the backup
-    may predate the failed job's answer, so the retry is held like it."""
-    connection.execute(
-        """
-        INSERT INTO job_events (
-            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
-        )
-        SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
-        FROM jobs WHERE id = ?
-        """,
-        (RESTORED_CLAIM, RESTORED, now, job_id),
-    )
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

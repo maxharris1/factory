@@ -114,15 +114,16 @@ def restore(backup_path: Path, db: Path) -> datetime:
 
 def _hold_steps(connection: sqlite3.Connection) -> None:
     """Cancel the copy's queued plan, build, fix and review jobs as RESTORED,
-    and mark its running ones RESTORED_CLAIM, before the copy is renamed into
-    place (#108).
+    and mark its running ones and its failed ones T6 has yet to handle
+    RESTORED_CLAIM, before the copy is renamed into place (#108).
 
     The backup is up to a cycle old: such a step may since have run and been
     answered. Restored queued, an `orch wait` could claim it before the
     poller reads its thread. Held, it waits for the dispatcher's next pass
     over the ticket, which queues it again unless the thread answered it. A
     running one is left to its runner; if it is released back to the queue,
-    queue.retire_requeued holds it the same way.
+    queue.retire_requeued holds it the same way. T6 settles a marked failed
+    one against its thread before it retries it or calls the ticket stuck.
     """
     tables = {
         str(row[0])
@@ -143,6 +144,16 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
         SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ? {steps}
         """,
         (RESTORED_CLAIM, RESTORED, now, "running", *STEPS),
+    )
+    connection.execute(
+        f"""
+        INSERT INTO job_events (
+            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+        )
+        SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ? {steps}
+          AND failure_handled = 0
+        """,
+        (RESTORED_CLAIM, RESTORED, now, "failed", *STEPS),
     )
     connection.execute(
         f"""

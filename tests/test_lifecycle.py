@@ -1215,3 +1215,77 @@ def test_a_restored_dead_unanswered_job_is_retried_after_a_pass(
     flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
 
     assert _claims(pool) == [(action, 2)]
+
+
+def _restored_failed(tmp_path: Path, action: str, attempt: int):
+    """A cycle backup holds a plan or build that already failed with T6 still
+    to handle it (#108 round 7): its runner posted the answer and exited
+    without returning the comment ID after the poll's reconcile. The state
+    directory was then lost and restored."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.post("go-1", GO.format(state="planning" if action == "plan" else "building"), "grok-login")
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    job, _ = pool.claim("claude")
+    if attempt == 2:
+        flow.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+        flow.dispatcher.reconcile_jobs()
+        job, _ = pool.claim("claude")
+        assert job.request.attempt == 2
+    flow.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    return flow, DevicePool(flow.queue, config)
+
+
+@pytest.mark.parametrize("attempt", (1, 2))
+@pytest.mark.parametrize("read", ("full", "deferred"))
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_failed_job_answered_before_the_backup_is_settled_by_its_answer(
+    tmp_path: Path, action: str, read: str, attempt: int
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, attempt)
+    _answer(flow, action)
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()) if read == "full" else FakeSource())
+
+    assert (action, 2) not in _claims(pool)
+    assert not flow.state()["stuck"]
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert (action, 2) not in _claims(pool)
+    assert (action, "queued") not in _harness_jobs(flow.queue)
+    assert not flow.state()["stuck"]
+    assert outcome(flow.queue, "answer-1") is not None
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_failed_unanswered_job_is_retried_after_a_read(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, 1)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert _claims(pool) == []
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert _claims(pool) == [(action, 2)]
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_second_failure_unanswered_goes_stuck_only_after_a_read(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, 2)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert not flow.state()["stuck"]
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert flow.state()["stuck"]
+    assert _claims(pool) == []
