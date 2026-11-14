@@ -30,6 +30,7 @@ ACTIONS = (
     "build",
     "review",
     "fix",
+    "update-from-main",
     "clarify",
     "stuck",
     "blocked",
@@ -297,6 +298,8 @@ class SQLiteJobQueue:
                     f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?",
                     (job_id,),
                 )
+            if changed == 1:
+                retire_requeued(connection, job_id, "released", now=self.now())
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
@@ -417,38 +420,7 @@ class SQLiteJobQueue:
     def _cancel(
         self, connection: sqlite3.Connection, job_id: str, reason: str
     ) -> Job:
-        now = self.now()
-        changed = connection.execute(
-            """
-            UPDATE jobs
-            SET state = 'cancelled', finished_at = ?, last_activity_at = ?
-            WHERE id = ? AND state = 'queued'
-            """,
-            (now, now, job_id),
-        ).rowcount
-        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if row is None:
-            raise QueueError(f"unknown job {job_id!r}")
-        if changed != 1:
-            raise QueueError(f"job {job_id} is {row['state']}; only a queued job can be cancelled")
-        if _has_table(connection, "job_events"):
-            connection.execute(
-                """
-                INSERT INTO job_events (
-                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, 'cancelled', ?, ?)
-                """,
-                (
-                    job_id,
-                    str(row["repo"]).lower(),
-                    row["ticket_id"],
-                    row["action"],
-                    row["recipient"],
-                    reason,
-                    now,
-                ),
-            )
-        return _job(row)
+        return cancel_queued(connection, job_id, reason, self.now())
 
     def requeue(
         self, job_id: str, reason: str, *, connection: sqlite3.Connection
@@ -710,6 +682,43 @@ def _no_remote_start(connection: sqlite3.Connection) -> str:
     )
 
 
+def cancel_queued(
+    connection: sqlite3.Connection, job_id: str, reason: str, now: float
+) -> Job:
+    """queued -> cancelled, in the caller's transaction (SQLiteJobQueue.cancel)."""
+    changed = connection.execute(
+        """
+        UPDATE jobs
+        SET state = 'cancelled', finished_at = ?, last_activity_at = ?
+        WHERE id = ? AND state = 'queued'
+        """,
+        (now, now, job_id),
+    ).rowcount
+    row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        raise QueueError(f"unknown job {job_id!r}")
+    if changed != 1:
+        raise QueueError(f"job {job_id} is {row['state']}; only a queued job can be cancelled")
+    if _has_table(connection, "job_events"):
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, 'cancelled', ?, ?)
+            """,
+            (
+                job_id,
+                str(row["repo"]).lower(),
+                row["ticket_id"],
+                row["action"],
+                row["recipient"],
+                reason,
+                now,
+            ),
+        )
+    return _job(row)
+
+
 def retire_requeued(
     connection: sqlite3.Connection, job_id: str, reason: str, *, now: float
 ) -> str | None:
@@ -719,7 +728,7 @@ def retire_requeued(
 
     Every write that returns a job to queued (a released claim, an unstarted
     requeue, a step whose answer was rejected, a T6 retry) calls this before
-    it commits. A merged or done ticket's job is cancelled
+    it commits. A merged, done or abandoned ticket's job is cancelled
     `finished:<reason>`, so a finished ticket never regains claimable work. A step restore() copied
     running (RESTORED_CLAIM) and not held since is cancelled RESTORED, as
     restore() holds a queued step: the backup may predate its answer, and
@@ -735,7 +744,7 @@ def retire_requeued(
             SELECT 1 FROM ticket_state
             WHERE ticket_state.repo = lower(jobs.repo)
               AND ticket_state.ticket_id = jobs.ticket_id
-              AND ticket_state.workflow_state IN ('merged', 'done')
+              AND ticket_state.workflow_state IN ('merged', 'done', 'abandoned')
           )
         """,
         (job_id,),

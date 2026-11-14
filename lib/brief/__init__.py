@@ -8,8 +8,9 @@ brief per job kind:
 * implement: a `build` or `plan` job (the builder);
 * fix: a `fix` job (CI red, or a REVISE verdict);
 * review: a `review` job (the cross-family reviewer);
-* merge-only: a `fix` job whose detail says `"kind": "merge-only"` (bring the
-  base branch in by a merge commit, nothing else).
+* merge-only: an `update-from-main` job (#130), or a `fix` job whose detail
+  says `"kind": "merge-only"` (bring the base branch in by a merge commit,
+  nothing else).
 
 Each brief is rendered from the job row alone: repo, PR or ticket, head sha,
 round and cap, risk, the review rules (docs/SPEC.md section 8) and the
@@ -68,7 +69,13 @@ __all__ = [
 
 KINDS = ("implement", "fix", "review", "merge-only")
 
-_ACTION_KINDS = {"build": "implement", "plan": "implement", "fix": "fix", "review": "review"}
+_ACTION_KINDS = {
+    "build": "implement",
+    "plan": "implement",
+    "fix": "fix",
+    "review": "review",
+    "update-from-main": "merge-only",
+}
 
 
 def brief_kind(job: Job) -> str:

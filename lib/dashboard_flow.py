@@ -43,6 +43,7 @@ JOB_STATES = {
     "build": "building",
     "review": "review",
     "fix": "fixing",
+    "update-from-main": "updating",
     "clarify": "questions",
     "stuck": "stuck",
     "blocked": "blocked",
@@ -56,6 +57,8 @@ GLOSS = {
     "intake": "ticket",
     "fixing": "revise",
     "handed-off": "ready for review",
+    "merge-queue": "approved, waiting to merge",
+    "updating": "merging base in",
     "done": "shipped",
     "awaiting-ok": "waiting on a human OK",
 }

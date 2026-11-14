@@ -34,8 +34,10 @@ stateDiagram-v2
   s15: fixing
   s16: awaiting-ok
   s17: handed-off
-  s18: waiting-external
-  s19: capped
+  s18: merge-queue
+  s19: waiting-external
+  s20: updating
+  s21: capped
   [*] --> s0
   s0 --> s2: project config invalid
   s0 --> s1: brief and acceptance criteria posted
@@ -62,8 +64,9 @@ stateDiagram-v2
   s14 --> s9: head changed and the patch differs
   s14 --> s16: ship = merge and the PR is held
   s14 --> s17: ship = handoff
+  s14 --> s18: APPROVE, finish_line merge
   s14 --> s7: ship = merge
-  s14 --> s18: ship = after an approver
+  s14 --> s19: ship = after an approver
   s15 --> s5: a product question
   s15 --> s9: ready, CI green
   s15 --> s10: device offline 60 minutes or job dies twice (T6) or CI red three times
@@ -73,13 +76,22 @@ stateDiagram-v2
   s16 --> s7: approver's OK at the head, or approver removes a label-only hold
   s17 --> s7: PR merged
   s17 --> s9: trusted ready at a new head, within the effective cap
-  s18 --> s7: OK names the previewed SHA
-  s18 --> s15: declined
+  s18 --> s3: trusted kind=go, queue build
+  s18 --> s4: trusted kind=go, queue plan
+  s18 --> s7: poller squash-merges the queue head (clean, CI green, approval covers the head), or the merge is observed
+  s18 --> s9: trusted ready at a new head, within the effective cap
+  s18 --> s6: PR closed unmerged
+  s18 --> s20: PR conflicts with base, update-from-main queued
+  s19 --> s7: OK names the previewed SHA
+  s19 --> s15: declined
   s8 --> s10: gaps a second time
-  s9 --> s19: REVISE at the cap
-  s19 --> s15: Max okays one more round
-  s16 --> s19: REVISE at the cap
-  s18 --> s10: 3rd decline
+  s20 --> s9: non-trivial update, cross-family re-review
+  s20 --> s18: trivial update, approval carried
+  s20 --> s10: two failed updates (update-failed-2)
+  s9 --> s21: REVISE at the cap
+  s21 --> s15: Max okays one more round
+  s16 --> s21: REVISE at the cap
+  s19 --> s10: 3rd decline
   s3 --> s3: CI red, fix
   s15 --> s15: CI red, fix
   class s0 blue
@@ -101,4 +113,6 @@ stateDiagram-v2
   class s16 teal
   class s17 teal
   class s18 teal
-  class s19 yellow
+  class s19 teal
+  class s20 teal
+  class s21 yellow
