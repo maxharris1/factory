@@ -10,6 +10,9 @@ harness detached on the device, and a `Follower` on the box:
   log to its own stdout byte for byte (only a whole poll's bytes, from the
   offset it already has: a transfer cut by a drop is fetched again), and
   backs off on an unreachable device (2, 4, 8 ... 60 seconds);
+* relays the start's environment report (the device's private `env` file,
+  never its log) once, ahead of the log bytes that came with it, and then
+  removes it from the device;
 * ends only on the device's `exit` file, a worker the device confirms gone
   with no exit status, or `grace` seconds without one certain answer. A
   dropped call is never an end;
@@ -34,10 +37,12 @@ from lib.remote import (
     LAUNCH_SHORT,
     LAUNCH_STARTED,
     START_REFUSED,
+    WORKER_ENV_MARK,
     ByteTransport,
     Exchanged,
     RemoteTarget,
     _marked,
+    env_clear_script,
     poll_script,
     ssh_argv,
     stop_script,
@@ -86,6 +91,7 @@ class _Poll:
     state: str
     code: int | None
     data: bytes
+    env: str | None = None
 
 
 def backoff(failures: int) -> float:
@@ -115,6 +121,7 @@ class Follower:
         self.clock = clock
         self._sleep = sleep
         self.offset = 0
+        self._env_relayed = False
         self._logged: set[bool] = set()
 
     def run(self, launch: str, brief: bytes, control: Control) -> FollowEnd:
@@ -186,6 +193,8 @@ class Follower:
             if failures:
                 self.log(f"reattached to {self.target.device} at log byte {self.offset}")
             failures = 0
+            if poll.env is not None:
+                self._relay_env(poll.env)
             if poll.data:
                 self.sink.write(poll.data)
                 self.sink.flush()
@@ -205,6 +214,15 @@ class Follower:
                 self._stop(kill=self.clock() - stopped_at >= KILL_AFTER_SECONDS)
             sleep(pause)
             pause = min(pause * 2, POLL_SECONDS)
+
+    def _relay_env(self, report: str) -> None:
+        if not self._env_relayed:
+            self._env_relayed = True
+            self.sink.write(report.encode("ascii", "replace") + b"\n")
+            self.sink.flush()
+        self.transport.run(
+            ssh_argv(self.target, env_clear_script(self.target)), timeout=self.call_timeout
+        )
 
     def _stop(self, *, kill: bool) -> None:
         if kill not in self._logged:
@@ -235,4 +253,8 @@ class Follower:
         expected = max(0, min(CHUNK_BYTES, size - self.offset))
         if len(result.stdout) != expected:
             return None
-        return _Poll(size, state, code, result.stdout)
+        env = next(
+            (line for line in result.stderr.splitlines() if line.startswith(WORKER_ENV_MARK + " ")),
+            None,
+        )
+        return _Poll(size, state, code, result.stdout, env)

@@ -92,6 +92,7 @@ from lib.job_state import (
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
+    ENV_FILE,
     GONE,
     RUNNING,
     ByteTransport,
@@ -107,6 +108,7 @@ from lib.remote import (
     new_tag,
     plain_branch,
     preflight,
+    run_file,
     start_script,
     stop_worker,
 )
@@ -244,9 +246,10 @@ class PlacedRun:
         worker is gone without a status or the device went quiet for the
         grace window; for a stop, the status the device recorded.
 
-        With report_env, the start first prints the WORKER_ENV_MARK line
-        (#93). `output` (lib/telemetry.py) then takes the relayed output in
-        place of stdout, as job_run.run's `output` does for a local command.
+        With report_env, the start writes the WORKER_ENV_MARK line (#93) to
+        its private `env` file, which the follower relays ahead of the log.
+        `output` (lib/telemetry.py) then takes the relayed output in place
+        of stdout, as job_run.run's `output` does for a local command.
         """
         assert self.target is not None
         # Factory, Nov 13: the waiter config is shared by every device, so a
@@ -261,6 +264,7 @@ class PlacedRun:
             insert_at=device.insert_at,
             cd=device.cd,
             report_env=report_env,
+            env_file=run_file(self.target, ENV_FILE) if report_env else None,
         )
         launch = launch_script(
             self.target,

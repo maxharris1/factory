@@ -183,6 +183,21 @@ _REPORT_ENV = (
     f'printf "%s\\0" {WORKER_ENV_END}; }} | od -An -v -tx1 | tr -d " \\n"; '
     "echo; "
 )
+
+
+def _report_env(env_file: str | None) -> str:
+    """The report on stdout, or (#128) written to env_file, mode 600, whole or not at all,
+    with only its line break left on stdout, so a profile's unended output stays apart."""
+    if env_file is None:
+        return _REPORT_ENV
+    f = shlex.quote(env_file)
+    part = shlex.quote(f"{env_file}.tmp")
+    return (
+        f"(umask 077 && {{ {_REPORT_ENV}}} > {part}) 2>/dev/null "
+        f"&& mv -f -- {part} {f} || rm -f -- {part}; echo; "
+    )
+
+
 # Factory, Nov 13: a harness's `--add-dir` directories are given only where
 # the device has them. After `--` come k (where the kept `--add-dir <dir>`
 # pairs go in the command), n, then n pairs of (path to test, directory as
@@ -446,6 +461,7 @@ def start_script(
     insert_at: int = 0,
     cd: str | None = None,
     report_env: bool = False,
+    env_file: str | None = None,
 ) -> str:
     """The remote script that runs command as the job's tagged worker.
 
@@ -454,7 +470,8 @@ def start_script(
     the device when the job starts. A relative dir is tested under cd (the
     directory the command resolves it against, itself relative to the job
     directory) when one is given. With none, the command runs as given.
-    With report_env, the start first prints the WORKER_ENV_MARK line.
+    With report_env, the start first prints the WORKER_ENV_MARK line, or
+    writes it to env_file (mode 600) when one is given.
     """
     tag = target.require_tag()
     if not command:
@@ -485,7 +502,7 @@ def start_script(
         + _START_ENTER
         + (_GUARD_DIRS if guarded_dirs else "")
         + _START_EXEC
-        + (_REPORT_ENV if report_env else "")
+        + (_report_env(env_file) if report_env else "")
         + 'exec "$@"'
     )
     login = (
@@ -589,15 +606,71 @@ def stop_script(target: RemoteTarget, *, kill: bool = False) -> str:
 #
 # The launch call starts the harness under setsid, apart from its own SSH
 # session, so a dropped link costs the box a retry, not the job. The run's
-# files live in `<workdir>/jobs/<job-id>.run/<tag>/`: `stdin` (the brief),
-# `pid` (`<wrapper pid> <start pid>`), `log` (the harness's output), `handoff`
-# (its last non-blank line when that is an ORCH-HANDOFF line) and `exit`
-# (its exit status, moved into place once it has ended).
+# files live in `<workdir>/jobs/<job-id>.run/<tag>/` (mode 700): `stdin` (the
+# brief), `pid` (`<wrapper pid> <start pid>`), `log` (the harness's output),
+# `handoff` (HANDOFF_AWK's line), `exit` (its exit status, moved into place
+# once it has ended) and, with telemetry, `env` (the start's
+# WORKER_ENV_MARK report, mode 600, which the follower relays once and
+# removes: it never enters the log).
 LAUNCH_MARK = "orch-launch:"
 FOLLOW_MARK = "orch-follow:"
 LAUNCH_STARTED = ("started", "already", "pending")
 LAUNCH_BUSY = "busy"
 LAUNCH_SHORT = "short"
+ENV_FILE = "env"
+
+# The run's handoff, by the box's rule for what it relays: a line that is a
+# JSON object is a stream event (lib/telemetry.py), whose final message
+# (`result`, or a completed `agent_message`) gives its ORCH-HANDOFF line
+# (telemetry.handoff_line) at the next end event (`result`,
+# `turn.completed`) or the end of the log; any other non-blank line is
+# relayed as is. Prints the last line relayed when it is an ORCH-HANDOFF line.
+HANDOFF_AWK = r"""
+function value(line, key,    i, n, c, h, out) {
+    found = 0
+    if (!match(line, "\"" key "\"[ \t]*:[ \t]*\"")) return ""
+    n = length(line); out = ""
+    for (i = RSTART + RLENGTH; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { found = 1; return out }
+        if (c == "\\") {
+            c = substr(line, ++i, 1)
+            if (c == "n") c = "\n"
+            else if (c == "r") c = "\r"
+            else if (c == "t" || c == "b" || c == "f") c = " "
+            else if (c == "u") {
+                h = tolower(substr(line, i + 1, 4)); i += 4
+                c = (h == "000a" || h == "000d") ? "\n" : (h == "0009" ? " " : "?")
+            }
+        }
+        out = out c
+    }
+    return ""
+}
+function handoff(text,    parts, k, line) {
+    gsub(/\r/, "\n", text)
+    for (k = split(text, parts, "\n"); k > 0; k--) {
+        line = parts[k]
+        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+        if (line != "") break
+    }
+    return (k > 0 && line ~ /^ORCH-HANDOFF:/ && length(line) <= 113) ? line : ""
+}
+function emit(line) { if (line != "") { last = line; ok = 1 } }
+/^[ \t]*\{.*\}[ \t\r]*$/ {
+    if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
+    else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
+    else found = 0
+    if (found) { final = text; pending = 1 }
+    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { emit(handoff(final)); pending = 0 }
+    next
+}
+NF { last = $0; ok = 0 }
+END {
+    if (pending) emit(handoff(final))
+    if (ok || last ~ /^[ \t]*ORCH-HANDOFF: /) print last
+}
+"""
 
 # Detach "$@" from the session (setsid, else perl's POSIX::setsid on a Mac
 # without one) with the worker tag in its environment, by exec: the caller
@@ -621,7 +694,7 @@ _WRAPPER = (
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    "awk 'NF { l = $0 } END { if (l ~ /^[ \\t]*ORCH-HANDOFF: /) print l }' "
+    f"awk {shlex.quote(HANDOFF_AWK)} "
     '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
     'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
 )
@@ -630,6 +703,16 @@ _WRAPPER = (
 def run_dir(target: RemoteTarget) -> str:
     """Beside the job directory: one directory per start, named by its tag."""
     return f"{target.job_dir}.run"
+
+
+def run_file(target: RemoteTarget, name: str) -> str:
+    """One of this start's files in its run directory."""
+    return f"{run_dir(target)}/{target.require_tag()}/{name}"
+
+
+def env_clear_script(target: RemoteTarget) -> str:
+    """Remove the start's environment report once the box has it."""
+    return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
 
 
 def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int) -> str:
@@ -662,7 +745,7 @@ def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int
         'i="$R/.$t.$$"; '
         '(umask 077 && cat > "$i") 2>/dev/null || { rm -f -- "$i"; say short; exit 0; }; '
         f'w=$(wc -c < "$i"); [ "$((w + 0))" -eq {size} ] || {{ rm -f -- "$i"; say short; exit 0; }}; '
-        'if ! mkdir -- "$T" 2>/dev/null; then rm -f -- "$i"; '
+        'if ! (umask 077 && mkdir -- "$T") 2>/dev/null; then rm -f -- "$i"; '
         '[ -d "$T" ] && { say already; exit 0; }; say refused tagdir; exit 0; fi; '
         f'mv -f -- "$i" "$T/stdin" || {{ echo {START_REFUSED} > "$T/exit"; say refused stdin; exit 0; }}; '
         'c="$R/current"; '
@@ -693,7 +776,9 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
     `gone` (no exit status and the worker confirmed gone), `unsure` (not
     yet recorded, or the check cannot tell) or `none` (no such start).
     `exit` is read before and after the worker check, so a run that ends in
-    between reads as exited. Never starts or signals anything, and never
+    between reads as exited. The start's `env` report, when there is one,
+    comes on stderr too, read after the log's size: a log that holds the
+    harness's output holds no byte the report did not precede. Never starts or signals anything, and never
     writes: on Darwin a start not yet recorded is unsure, never fenced.
     """
     tag = target.require_tag()
@@ -714,6 +799,7 @@ def poll_script(target: RemoteTarget, offset: int, chunk: int) -> str:
         '&& kill -0 "$w" 2>/dev/null; then st=unsure; fi; '
         "fi; "
         'z=0; [ -f "$T/log" ] && z=$(wc -c < "$T/log"); z=$((z + 0)); '
+        f'[ -f "$T/{ENV_FILE}" ] && cat -- "$T/{ENV_FILE}" >&2; '
         f"n=$((z - {offset})); [ \"$n\" -gt {chunk} ] && n={chunk}; "
         'say "$z" "$st" $e; '
         f'[ "$n" -gt 0 ] && tail -c +{offset + 1} "$T/log" | head -c "$n"; '
