@@ -331,3 +331,21 @@ def test_heading_after_a_list_item_code_example_ends_the_section():
     bundle = _bundle(issue_body=body)
     assert [c.text for c in bundle.criteria] == ["A:"]
     assert "Not a criterion" not in bundle.text
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("Usage example:\n- ```md\n  - [ ] Example, not a requirement.\n  ```\n\n- [ ] Pass the test.\n", ["Pass the test."]),
+        ("## Acceptance criteria\n- ```md\n  - [ ] Example.\n  ```\n- [ ] Pass the test.\n", ["Pass the test."]),
+        ("    ```\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+        ("    - [ ] Sample checkbox.\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+        ("## Acceptance criteria\n\n--help\n\n    - [ ] Literal example.\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+        ("--help\n\n    - [ ] Literal example.\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+        ("> Quote:\n>\n>     - [ ] Quoted code.\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+    ],
+)
+def test_code_examples_follow_commonmark(body, expected):
+    bundle = _bundle(issue_body=body)
+    assert [(c.id, c.text) for c in bundle.criteria] == [(f"ac-{n}", text) for n, text in enumerate(expected, 1)]
+    assert bundle.cut is None

@@ -15,17 +15,15 @@ A brief that quotes the ticket in a code block under a "Ticket" heading, as
 the feeder's does, is read as that quoted ticket alone, so the factory.md
 prose after it never supplies criteria.
 
-When the source has an "Acceptance criteria" heading outside any code block,
-the text is the first such section, up to the next heading of the same or a
-higher level outside any code block. Code blocks follow CommonMark: they do
-not nest, and a fence closes only on the opening character, at least as long,
-with no info string. A fence or list marker indented four or more spaces past
-its list item's content is indented code, and a fence opened in a list item
-ends with the item. A code example inside the section stays in the text, and
-a heading or list item inside a code example is ignored. Its list items are
-the criteria. Without one, the text is the whole source and only its checkbox
-items outside code blocks are criteria. Criteria are numbered `ac-1`, `ac-2`,
-... in order, so the same text always gets the same ids.
+The source is parsed as CommonMark. When it has an "Acceptance criteria"
+heading outside any list, quote or code block, the text is the first such
+section, up to the next such heading of the same or a higher level. A code
+example inside the section stays in the text. The criteria are the section's
+list items, each read from the first line of its leading paragraph; an item
+that opens with a code block, and any item inside a code block, is not one.
+Without the heading, the text is the whole source and only its bulleted
+checkbox items are criteria. Criteria are numbered `ac-1`, `ac-2`, ... in
+order, so the same text always gets the same ids.
 
 The text is capped at TEXT_LIMIT characters, the cap lib/brief.py holds.
 A longer text is cut from the end, at a line break when there is one, and
@@ -38,6 +36,9 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
+
 from lib.brief import TEXT_LIMIT
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
@@ -45,13 +46,11 @@ from lib.handoff import HandoffError, parse_comment
 ORCHESTRATOR = "grok-bot"
 SOURCES = ("brief", "issue", "pr", "none")
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _AC_HEADING = re.compile(r"^acceptance criteria\b", re.IGNORECASE)
 _TICKET_HEADING = re.compile(r"^ticket$", re.IGNORECASE)
-_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
-_CHECKBOX = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$")
-_ITEM = re.compile(r"^\s*(?:[-*+]\s+(?:\[[ xX]\]\s+)?|[0-9]+[.)]\s+)(.+?)\s*$")
-_MARKER = re.compile(r"^([-*+]|[0-9]{1,9}[.)])( *)(?=\S|$)")
+_CHECKBOX = re.compile(r"^\[[ xX]\]\s+(.+)$")
+_BULLETS = frozenset("-*+")
+_MARKDOWN = MarkdownIt("commonmark")
 _NOTE_ROOM = 80
 
 
@@ -122,16 +121,16 @@ def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | 
     lines = body.splitlines()
     section = _section(lines)
     if section is None:
-        text, pattern = "\n".join(lines).strip(), _CHECKBOX
+        text, checkboxes = _trim(lines), True
     else:
-        text, pattern = "\n".join(section).strip(), _ITEM
-    total = _items(text, pattern)
+        text, checkboxes = _trim(section), False
+    total = _items(text, checkboxes)
     cut = None
     if len(text) > limit:
         budget = max(limit - _NOTE_ROOM, 0)
         end = text.rfind("\n", 0, budget + 1)
         kept = text[: end if end > 0 else budget].rstrip()
-        items = _items(kept, pattern)
+        items = _items(kept, checkboxes)
         cut = f"[cut {len(text) - len(kept)} characters and {len(total) - len(items)} criteria from the end]"
         text = f"{kept}\n{cut}"
     else:
@@ -140,94 +139,66 @@ def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | 
     return text, criteria, cut
 
 
+def _trim(lines: list[str]) -> str:
+    """The lines without blank lines at either end, keeping the first line's indentation."""
+    kept = list(lines)
+    while kept and not kept[0].strip():
+        kept.pop(0)
+    return "\n".join(kept).rstrip()
+
+
+def _parse(lines: list[str]) -> list[Token]:
+    return _MARKDOWN.parse("\n".join(lines))
+
+
+def _headings(tokens: list[Token]) -> list[tuple[int, int, int, str]]:
+    """Each top-level heading as (token index, first line, level, title)."""
+    return [
+        (index, token.map[0], int(token.tag[1]), tokens[index + 1].content.strip())
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.level == 0 and token.map is not None
+    ]
+
+
 def _quoted_ticket(body: str) -> str:
-    lines = body.splitlines()
-    code, blocks = _scan(lines)
-    for index, line in enumerate(lines):
-        heading = _HEADING.match(line)
-        if heading is not None and not code[index] and _TICKET_HEADING.match(heading.group(2)) and index + 1 in blocks:
-            return "\n".join(lines[index + 2 : blocks[index + 1]])
+    tokens = _parse(body.splitlines())
+    for index, line, _, title in _headings(tokens):
+        quote = tokens[index + 3] if index + 3 < len(tokens) else None
+        if (
+            _TICKET_HEADING.match(title)
+            and quote is not None
+            and quote.type == "fence"
+            and quote.map is not None
+            and quote.map[0] == line + 1
+        ):
+            return quote.content.rstrip("\n")
     return body
 
 
 def _section(lines: list[str]) -> list[str] | None:
-    code, _ = _scan(lines)
-    headings = [(index, _HEADING.match(line)) for index, line in enumerate(lines)]
-    starts = [index for index, heading in headings if heading and not code[index] and _AC_HEADING.match(heading.group(2))]
+    headings = _headings(_parse(lines))
+    starts = [(line, level) for _, line, level, title in headings if _AC_HEADING.match(title)]
     if not starts:
         return None
-    start = starts[0]
-    level = len(headings[start][1].group(1))
-    for index in range(start + 1, len(lines)):
-        heading = headings[index][1]
-        if heading is not None and not code[index] and len(heading.group(1)) <= level:
-            return lines[start:index]
+    start, level = starts[0]
+    for _, line, other, _ in headings:
+        if line > start and other <= level:
+            return lines[start:line]
     return lines[start:]
 
 
-def _scan(lines: list[str]) -> tuple[list[bool], dict[int, int]]:
-    """Which lines start no list item or heading, and each fenced block's opening line to its end.
-
-    Those lines are code and lazy paragraph lines. A fence or list marker
-    counts only when indented at most three spaces past the content column of
-    the list item it sits in; deeper, it is indented code or paragraph text.
-    A fence opened inside a list item ends with that item. A block's end is
-    its closing fence line, else the first line past it; an unclosed block
-    runs to the end.
-    """
-    inert = [False] * len(lines)
-    blocks: dict[int, int] = {}
-    columns: list[int] = []
-    fence: tuple[int, str, int] | None = None
-    blank_before = True
-    for index, raw in enumerate(lines):
-        line = raw.expandtabs(4)
-        stripped = line.lstrip(" ")
-        indent = len(line) - len(stripped)
-        blank = not stripped
-        if fence is not None:
-            start, marker, column = fence
-            if blank or indent >= column:
-                inert[index] = True
-                close = _FENCE.match(stripped)
-                if (
-                    close is not None
-                    and indent - column <= 3
-                    and close.group(1)[0] == marker[0]
-                    and len(close.group(1)) >= len(marker)
-                    and not close.group(2).strip()
-                ):
-                    blocks[start] = index
-                    fence = None
-                continue
-            blocks[start] = index
-            fence = None
-        if blank:
-            blank_before = True
+def _items(text: str, checkboxes: bool) -> list[str]:
+    tokens = _parse(text.splitlines())
+    items = []
+    for index, token in enumerate(tokens[:-2]):
+        if token.type != "list_item_open" or tokens[index + 1].type != "paragraph_open":
             continue
-        opener = _FENCE.match(stripped)
-        item = _MARKER.match(stripped)
-        outer = [column for column in columns if column <= indent]
-        if blank_before or (
-            (opener or item or _HEADING.match(stripped)) and indent - (outer[-1] if outer else 0) <= 3
-        ):
-            columns = outer
-        blank_before = False
-        base = columns[-1] if columns else 0
-        if indent < base or indent - base > 3:
-            inert[index] = True
-        elif opener is not None and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
-            inert[index] = True
-            fence = (index, opener.group(1), base)
-        elif item is not None:
-            gap = len(item.group(2))
-            columns.append(indent + len(item.group(1)) + (gap if 1 <= gap <= 4 else 1))
-    if fence is not None:
-        blocks[fence[0]] = len(lines)
-    return inert, blocks
-
-
-def _items(text: str, pattern: re.Pattern[str]) -> list[str]:
-    lines = text.splitlines()
-    inert, _ = _scan(lines)
-    return [match.group(1) for line, skip in zip(lines, inert) if not skip and (match := pattern.match(line))]
+        if checkboxes and token.markup not in _BULLETS:
+            continue
+        first = tokens[index + 2].content.split("\n", 1)[0].strip()
+        box = _CHECKBOX.match(first)
+        if box is not None:
+            items.append(box.group(1).strip())
+        elif not checkboxes and first:
+            items.append(first)
+    return items
