@@ -8,6 +8,7 @@ from lib.dispatcher import CIResult, ReviewShipper, RouteError, ShipError, ShipR
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import comment, factory, setup, ticket
+from tests.merge_queue_support import Board, sha
 from tests.test_rounds_and_caps import Flow
 
 HEAD = "a" * 40
@@ -271,3 +272,119 @@ def test_restored_same_family_pair_is_refused_by_the_shipper(tmp_path: Path) -> 
     request = ShipRequest(fresh.repo, fresh.ticket_id, HEAD, "max", "ok-1", "verdict-1")
     with pytest.raises(ShipError, match="same-family"):
         ReviewShipper(dispatcher, Source())._ticket(request)
+
+
+def test_old_builder_retry_does_not_replace_new_plan_route(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    old_go = comment(
+        "old-go", _go("builder=codex reviewer=claude "), author="grok-login", created_at=100
+    )
+    dispatcher.process(ticket(old_go))
+    old_build = queue.claim("codex")
+    assert old_build is not None
+    now[0] = 110
+    new_go = comment(
+        "new-go",
+        _go("builder=claude reviewer=codex ").replace("state=building", "state=planning"),
+        author="grok-login",
+        created_at=110,
+    )
+    dispatcher.process(ticket(old_go, new_go))
+    assert _outcome(queue, "new-go") == "queued-plan"
+    plan = queue.claim("claude")
+    assert plan is not None and plan.request.action == "plan"
+    now[0] = 120
+    queue.finish(old_build.id, owner="codex", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+    queue.finish(plan.id, owner="claude", handoff_comment_id="new-plan")
+    now[0] = 130
+    plan_comment = comment(
+        "new-plan",
+        "<!-- orch:v1 kind=plan from=claude-bot role=builder round=1/2 ac=met -->\nGood",
+        author="claude-login",
+        created_at=130,
+    )
+    dispatcher.process(ticket(old_go, new_go, plan_comment))
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+    assert json.loads(build.request.detail)["routing"] == {
+        "builder": "claude",
+        "reviewer": "codex",
+    }
+    queue.finish(build.id, owner="claude", handoff_comment_id="new-ready")
+    now[0] = 140
+    ready = comment("new-ready", _ready("claude"), author="claude-login", created_at=140)
+    dispatcher.process(
+        ticket(old_go, new_go, plan_comment, ready, head=HEAD, ci={HEAD: CIResult("success")})
+    )
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT recipient FROM jobs WHERE action = 'review' "
+            "AND source_comment_id = 'new-ready'"
+        ).fetchone()
+    assert row is not None and row["recipient"] == "codex"
+
+
+def _routed_board(tmp_path: Path, *, conflict: bool):
+    board = Board(tmp_path)
+    board.factory = replace(board.factory, reviewer_harness="cursor", reviewer_model="gpt-5")
+    board.dispatcher.trusted_logins["github"]["cursor-login"] = frozenset({"cursor-bot"})
+    pr = board.open("42", sha(1))
+    if conflict:
+        pr.mergeable = False
+        pr.mergeable_state = "dirty"
+    board.post(
+        pr,
+        "go-route",
+        "<!-- orch:v1 kind=go from=grok-bot role=orchestrator state=building "
+        "builder=claude -->\nGo.",
+        "grok-login",
+    )
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    return board, pr
+
+
+def _drift(board) -> None:
+    board.factory = replace(
+        board.factory, builder_harness="codex", reviewer_model="claude-sonnet-4"
+    )
+
+
+def test_route_rejection_cancels_an_already_queued_job(tmp_path: Path) -> None:
+    board, _ = _routed_board(tmp_path, conflict=False)
+    assert board.jobs("review")[0]["state"] == "queued"
+    _drift(board)
+
+    board.poll()
+
+    assert board.state("42")["stuck_reason"] == "route-same-family"
+    assert board.jobs("review")[0]["state"] == "cancelled"
+    assert board.queue.claim("cursor") is None
+
+
+def test_closed_routed_pr_with_drift_still_ends_watch(tmp_path: Path) -> None:
+    board, pr = _routed_board(tmp_path, conflict=True)
+    board.finish("cursor")
+    board.post(
+        pr,
+        "approve-route",
+        "<!-- orch:v1 kind=verdict from=cursor-bot role=reviewer round=1/3 "
+        f"head={pr.head} ac=met verdict=APPROVE risk=high -->\nApproved.",
+        "cursor-login",
+    )
+    board.poll()
+    assert board.state("42")["workflow_state"] == "updating"
+    assert board.jobs("update-from-main")[0]["state"] == "queued"
+    _drift(board)
+    pr.closed = True
+
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "abandoned"
+    assert board.jobs("update-from-main")[0]["state"] == "cancelled"
+    assert board.queue.claim("claude") is None
