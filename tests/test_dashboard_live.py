@@ -508,7 +508,7 @@ def _run_poll(tmp_path: Path, monkeypatch, *flags: str) -> tuple[dict, list[str]
     events: list[str] = []
 
     class Loop:
-        def __init__(self, dispatcher, source) -> None:
+        def __init__(self, dispatcher, source, **_kwargs) -> None:
             pass
 
         def run(self, **kwargs) -> None:

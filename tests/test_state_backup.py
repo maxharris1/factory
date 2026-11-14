@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,14 @@ def _seeded(tmp_path: Path):
         dedupe_key="t1:build",
     )
     return dispatcher, queue
+
+
+def _snapshot(path: Path) -> tuple[int, list[str]]:
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return path.stat().st_ino, list(connection.iterdump())
+    finally:
+        connection.close()
 
 
 def _dedupe_keys(path: Path) -> list[str]:
@@ -89,29 +98,19 @@ def test_restore_db_restores_a_missing_db(tmp_path: Path, capsys) -> None:
     assert _dedupe_keys(lost) == ["t1:build"]
 
 
-def _identity_and_rows(path: Path) -> tuple[int, list[str]]:
-    connection = sqlite3.connect(path)
-    try:
-        return path.stat().st_ino, list(connection.iterdump())
-    finally:
-        connection.close()
-
-
 def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
-    dispatcher, queue = _seeded(tmp_path)
-    db = queue.path
+    _dispatcher, queue = _seeded(tmp_path)
     dest = tmp_path / "share" / "orch.db"
-    backup(db, dest)
-    before = _identity_and_rows(db)
+    backup(queue.path, dest)
+    before = _snapshot(queue.path)
 
-    code = cli.main(["restore-db", "--db", str(db), "--backup", str(dest)])
-    del dispatcher, queue
+    code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
     gc.collect()
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert not db.with_name(db.name + "-wal").exists()
-    assert _identity_and_rows(db) == before
+    assert not queue.path.with_name(queue.path.name + "-wal").exists()
+    assert _snapshot(queue.path) == before
 
 
 def test_restore_db_rejects_a_corrupt_backup(tmp_path: Path, capsys) -> None:

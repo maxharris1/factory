@@ -1509,7 +1509,9 @@ def test_invalid_grok_receipt_is_recorded_and_released_for_retry(
             "SELECT attempt, state FROM jobs ORDER BY attempt"
         ).fetchall()
     assert original["state"] == "done"
-    assert [row["error"] for row in errors] == ["grok-delivery:ValueError"]
+    assert [row["error"] for row in errors] == [
+        "grok-delivery:ValueError: Grok delivery receipt must be a non-empty string"
+    ]
     assert len(delivery.jobs) == 2
     assert [(row["attempt"], row["state"]) for row in rows] == [(1, "done")]
 
@@ -1645,7 +1647,7 @@ def test_grok_delivery_error_does_not_starve_t6_or_stop_poll_loop(
         (claude.id, 1, "failed"),
         (claude_rows[1]["id"], 2, "queued"),
     ]
-    assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError"]
+    assert [row["error"] for row in errors] == ["grok-delivery:RuntimeError: delivery failed"]
 
 
 def test_failed_grok_job_does_not_block_newer_job_in_same_reconcile(
@@ -2698,6 +2700,16 @@ CREDENTIAL_BODIES = (
     f"token: password = {CANARY}",
     f"session cookie: auth key {CANARY}",
     f"bad credentials for user bot pass {CANARY}",
+    f"password='first {CANARY}'",
+    f'password="first {CANARY}"',
+    f"api_key = 'first second {CANARY}'",
+    f'GITHUB_TOKEN: "first {CANARY}"',
+    f"Authorization: 'Bearer first {CANARY}'",
+    f"secret first {CANARY}",
+    f"<secret>{CANARY}</secret>",
+    f"<url>{CANARY}</url>",
+    f"<host> {CANARY}",
+    f"<secret> <url> {CANARY}",
 )
 
 
@@ -4732,7 +4744,7 @@ def test_go_state_write_failure_does_not_stop_other_repos(
             """
             SELECT count(*) FROM poll_errors
             WHERE repo = 'owner/repo' AND ticket_id = '42'
-              AND error = 'RetryableStateError'
+              AND error LIKE 'RetryableStateError%'
             """
         ).fetchone()[0]
     assert good_builds == 1
@@ -5432,6 +5444,131 @@ def test_t5_fenced_block_first_under_questions_queues_clarify(
     queue = _process_t5_questions(tmp_path, header, author, body)
 
     _assert_t5_waiting_max(queue)
+
+
+# --- #107 h: poll_errors keep the message ------------------------------------------------------
+
+
+class _FailingSource:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()):
+        raise self.exc
+
+    def linear_candidates(self, query, *, exclude, reserve):
+        return ()
+
+    def tracked_tickets(self, refs):
+        return ()
+
+
+def _poll_errors(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [row["error"] for row in connection.execute("SELECT error FROM poll_errors ORDER BY id")]
+
+
+def test_a_poll_error_row_holds_the_exception_message(tmp_path: Path) -> None:
+    from lib.github_actions import GitHubAdapterError
+
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
+    # Merged with #135: a poll step's exception keeps its class in `error`
+    # and its message, redacted, in `detail` beside the traceback.
+    assert _poll_errors(queue) == ["GitHubAdapterError"]
+    with queue.connect() as connection:
+        (detail,) = connection.execute("SELECT detail FROM poll_errors").fetchone()
+    assert detail.endswith("GitHubAdapterError: gh pr list exited 1: HTTP 502")
+
+
+def test_a_poll_cycle_error_names_its_sources(tmp_path: Path) -> None:
+    from lib.poll_source import PollCycleError
+
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error(
+        "poll", "-", PollCycleError("poll cycle recorded 2 source error(s): github x1, linear x1"))
+    assert _poll_errors(queue) == [
+        "PollCycleError: poll cycle recorded 2 source error(s): github x1, linear x1"]
+
+
+def test_a_poll_error_message_is_scrubbed_and_capped(tmp_path: Path) -> None:
+    from lib.dispatcher import POLL_ERROR_LIMIT, poll_error_text
+
+    secret = "ghp_" + "A" * 36
+    text = poll_error_text(RuntimeError(
+        f"call https://api.example.com/x?token=abc failed with {secret} "
+        "FACTORY_WEBHOOK_AUTH=Bearer-value body {\"key\": \"value\"}"))
+    assert text.startswith("RuntimeError: call <url> failed with <secret> <credential omitted>")
+    for leaked in ("https://", "api.example.com", secret, "Bearer-value", '"value"'):
+        assert leaked not in text
+    assert len(poll_error_text(RuntimeError("x" * 2000))) == POLL_ERROR_LIMIT
+    assert poll_error_text(RuntimeError()) == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Authorization: Bearer synthetic-review-secret",
+        "authorization=Basic synthetic-review-secret",
+        "Authorization: token synthetic-review-secret",
+        "Proxy-Authorization: Bearer synthetic-review-secret",
+        'Authorization: "Bearer synthetic-review-secret"',
+        "header Authorization:Bearer synthetic-review-secret rejected",
+        "FACTORY_WEBHOOK_AUTH=Bearer synthetic-review-secret",
+        "token: bearer synthetic-review-secret",
+        "Bearer synthetic-review-secret",
+        "password = 'synthetic-review-secret'",
+        "X-Api-Key: synthetic-review-secret",
+    ],
+)
+def test_no_credential_value_reaches_a_poll_error_row(tmp_path: Path, message: str) -> None:
+    from lib.dispatcher import poll_error_text, safe_ship_error
+    from lib.poll_source import _safe_reason
+
+    error = RuntimeError(message)
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error("o/r", "1", error)
+    for text in (*_poll_errors(queue), poll_error_text(error), safe_ship_error(error),
+                 _safe_reason(error)):
+        assert "synthetic-review-secret" not in text
+        assert text.startswith("RuntimeError")
+
+
+class FailedDevices:
+    def __init__(self, body: str):
+        self.body = body
+
+    def reconcile(self, now: float, on_offline: object) -> None:
+        raise RuntimeError(f"device check failed: {self.body}")
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_no_credential_body_reaches_an_exception_message_formatter(
+    tmp_path: Path, body: str
+) -> None:
+    from lib.dispatcher import poll_error_text, safe_ship_error
+    from lib.poll_source import _safe_reason
+
+    dispatcher, queue = setup(tmp_path, [100.0])
+    dispatcher.devices = FailedDevices(body)
+    dispatcher.reconcile_jobs()
+    dispatcher.record_poll_error("o/r", "1", ValueError(body), prefix="job-states:")
+    with queue.connect() as connection:
+        rows = [dict(row) for row in connection.execute("SELECT error, detail FROM poll_errors")]
+    assert len(rows) == 2
+    error = RuntimeError(body)
+    for text in (json.dumps(rows), poll_error_text(error), safe_ship_error(error),
+                 _safe_reason(error)):
+        assert CANARY not in text
+    assert rows[0]["error"].startswith("RuntimeError: device check failed")
+
+
+def test_poll_error_prefixes_are_kept(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path, [0.0])
+    dispatcher.record_poll_error("o/r", "1", ValueError("bad row"), prefix="job-states:")
+    dispatcher.record_poll_error("o/r", "1", "PollSourceError:Linear returned HTTP 429")
+    assert _poll_errors(queue) == [
+        "job-states:ValueError: bad row", "PollSourceError:Linear returned HTTP 429"]
 
 
 @pytest.mark.parametrize(

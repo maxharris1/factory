@@ -1,0 +1,194 @@
+"""Issue #182 (T05b): the factory repo's own hold lives in factory.md.
+
+The root factory.md names hold.approver maxharris1 (the default max is no
+login and could never clear a hold) and holds the trust paths. The factory
+repo is ship: handoff, and _holds only acts on ship: merge, so until T05c
+the hold is recorded but not applied.
+"""
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from lib import cli
+from lib.dispatcher import _holds
+from lib.factory_md import HoldConfig, load_factory_md
+from lib.hold import decide, held_paths
+from lib.load import Finding
+from lib.orch_yml import hold_approver_findings, load_orch_yml
+from tests.test_ship_hold import (
+    HEAD,
+    approve,
+    grok_jobs,
+    ready,
+    setup,
+    snapshot,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+FACTORY_MD = ROOT / "factory.md"
+ORCH_YML = ROOT / "orch.yml"
+
+EXPECTED_PATHS = (
+    "skills/factory/**",
+    "skills/pstack/**",
+    "skills/skills.lock",
+    "grok/**",
+    "orch.yml",
+    "lib/hold.py",
+    "lib/orch_yml.py",
+    "lib/harness_env.py",
+    ".github/**",
+    "factory.md",
+    ".claude/skills/**",
+)
+
+HELD = (
+    "skills/factory/SKILL.md",
+    "skills/pstack/x/y.md",
+    "skills/skills.lock",
+    "grok/prompt.md",
+    "orch.yml",
+    "lib/hold.py",
+    "lib/orch_yml.py",
+    "lib/harness_env.py",
+    ".github/workflows/ci.yml",
+    "factory.md",
+    ".claude/skills/a/SKILL.md",
+)
+
+NOT_HELD = (
+    "lib/dispatcher.py",
+    "lib/hold_extra.py",
+    "skills/other/x.md",
+    "examples/cleffy/factory.md",
+    "docs/orch.yml",
+)
+
+
+def root_config():
+    config, findings = load_factory_md(FACTORY_MD)
+    assert config is not None
+    assert [f for f in findings if f.severity == "error"] == []
+    return config, findings
+
+
+def test_this_repos_factory_md_holds_the_trust_paths() -> None:
+    config, _ = root_config()
+
+    assert config.hold == HoldConfig(
+        label="factory:hold",
+        approver="maxharris1",
+        paths=EXPECTED_PATHS,
+    )
+
+
+def test_the_held_globs_cover_the_trust_files() -> None:
+    config, _ = root_config()
+
+    assert held_paths(config.hold.paths, HELD + NOT_HELD) == tuple(sorted(HELD))
+
+
+def test_check_config_accepts_the_factory_hold_approver(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, _ = root_config()
+    orch, _ = load_orch_yml(ORCH_YML, allow_placeholders=True)
+    assert orch is not None
+
+    assert hold_approver_findings(orch, config.hold) == []
+    assert (
+        cli._check_config(
+            [
+                "--orch",
+                str(ORCH_YML),
+                "--allow-placeholders",
+                "--factory",
+                str(FACTORY_MD),
+            ]
+        )
+        == 0
+    )
+    assert "ok" in capsys.readouterr().out.splitlines()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    ["  approver: max\n", ""],
+    ids=["explicit-max", "default-max"],
+)
+def test_check_config_still_refuses_approver_max(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    replacement: str,
+) -> None:
+    text = FACTORY_MD.read_text(encoding="utf-8")
+    assert text.count("  approver: maxharris1\n") == 1
+    factory = tmp_path / "factory.md"
+    factory.write_text(text.replace("  approver: maxharris1\n", replacement))
+
+    code = cli._check_config(
+        [
+            "--orch",
+            str(ORCH_YML),
+            "--allow-placeholders",
+            "--factory",
+            str(factory),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert code == 1
+    assert "hold.approver max is not in approver_logins" in output
+    assert "hold.approver max is not a trusted_logins key" in output
+
+
+def test_orch_yml_has_no_hold_block() -> None:
+    data = yaml.safe_load(ORCH_YML.read_text(encoding="utf-8"))
+
+    assert "hold" not in data
+    for project in data.get("projects") or []:
+        assert "hold" not in project
+
+
+def test_until_t05c_a_handoff_repo_records_the_hold_but_does_not_apply_it(
+    tmp_path: Path,
+) -> None:
+    """T05c makes _holds apply on ship: handoff; flip these assertions there."""
+    config, findings = root_config()
+
+    assert config.ship == "handoff"
+    assert config.hold is not None
+    assert Finding("warning", "hold has no effect unless ship is merge") in findings
+
+    would_block = decide(
+        config.hold,
+        labels=(),
+        changed_files=("orch.yml",),
+        label_events=(),
+        comments=(),
+        approver_allowed=True,
+        covers=lambda _head: False,
+    )
+    assert would_block.blocks is True
+
+    held = snapshot(
+        approve(),
+        factory=config,
+        labels=("factory:hold",),
+        files=("orch.yml",),
+    )
+    assert _holds(held) is False
+
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue, HEAD)
+    actions.states.clear()
+
+    dispatcher.process(held)
+
+    assert actions.handoffs == [HEAD]
+    assert actions.states == ["merge-queue"]
+    assert not any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
+    assert actions.merges == []

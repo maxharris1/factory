@@ -326,6 +326,7 @@ class AlreadyMergedShip(ShipError):
 
 
 SHIP_ERROR_LIMIT = 240
+POLL_ERROR_LIMIT = 500
 POLL_ERROR_STREAK = 3
 _UNVERIFIED_HANDOFF = """
     jobs.state = 'done' AND jobs.recipient != 'grok'
@@ -350,12 +351,16 @@ _SECRET_TOKEN = re.compile(
     r"|lin_(?:api|oauth)_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}"
     r"|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)*)"
 )
-_SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b(?:bearer|basic|token|authorization|password|passwd|secret"
-    r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
+_SECRET_NAME = (
+    r"(?:bearer|basic|token|authorization|password|passwd|secret"
+    r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))"
 )
-_SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
+)
 _PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
+_REDACTED_MARKS = {"\ue000": "<url>", "\ue001": "<host>", "\ue002": "<secret>"}
+_PLAIN_REDACTED = re.compile(r"[A-Za-z0-9_ .,:;()'/=+\ue000-\ue002-]*")
 _CREDENTIAL_WORD = re.compile(
     r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
     r"|cookie|signature|bearer|basic)"
@@ -366,11 +371,16 @@ _POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following
 _POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
 
 
+def _redact_spans(
+    text: str, url: str = "<url>", host: str = "<host>", secret: str = "<secret>"
+) -> str:
+    text = _SECRET_URL.sub(url, text)
+    text = _SECRET_HOST_PATH.sub(host, text)
+    return _SECRET_TOKEN.sub(secret, text)
+
+
 def _redact(text: str) -> str:
-    text = _SECRET_URL.sub("<url>", text)
-    text = _SECRET_HOST_PATH.sub("<host>", text)
-    text = _SECRET_TOKEN.sub("<secret>", text)
-    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+    return _SECRET_ASSIGNMENT.sub("<secret>", _redact_spans(text))
 
 
 def _without_body(exc: BaseException) -> str:
@@ -380,14 +390,17 @@ def _without_body(exc: BaseException) -> str:
     safe = getattr(exc, "safe_detail", None)
     if isinstance(safe, str) and safe:
         separator, message = ": ", safe
-    message = message.rstrip()
-    plain = _PLAIN_MESSAGE.match(message).group(0)
+    return name.rstrip() + separator + _plain_prefix(message.rstrip(), _PLAIN_MESSAGE) + "\n"
+
+
+def _plain_prefix(message: str, plain_pattern: re.Pattern[str]) -> str:
+    plain = plain_pattern.match(message).group(0)
     credential = _CREDENTIAL_WORD.search(plain)
     if credential is not None:
-        plain = plain[: credential.start()] + "<credential omitted>"
-    elif plain != message:
-        plain += "<body omitted>"
-    return name.rstrip() + separator + plain + "\n"
+        return plain[: credential.start()] + "<credential omitted>"
+    if plain != message:
+        return plain + " <body omitted>"
+    return plain
 
 
 def poll_error_detail(exc: BaseException) -> str:
@@ -435,17 +448,45 @@ def safe_ship_error(exc: BaseException) -> str:
     Either way, URLs, host paths, token shapes, credential assignments and
     everything from the first {, [ or < on are cut, and the text is capped.
     """
-    name = type(exc).__name__
     detail = getattr(exc, "safe_detail", None)
     if not isinstance(detail, str):
         detail = str(exc)
-    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
+    return _cap(_named(type(exc).__name__, scrub_detail(detail)), SHIP_ERROR_LIMIT)
+
+
+def poll_error_text(error: str | BaseException) -> str:
+    """A poll_errors row's text (#107), capped at POLL_ERROR_LIMIT: an
+    exception's class and its message, scrubbed as safe_ship_error scrubs,
+    or a text the caller built from safe parts."""
+    if isinstance(error, BaseException):
+        error = _named(type(error).__name__, scrub_detail(str(error)))
+    return _cap(error, POLL_ERROR_LIMIT)
+
+
+def scrub_detail(detail: str) -> str:
+    """`detail` with no URL, host path, token, credential value, body or
+    non-printable character.
+
+    URLs, host paths and token shapes are replaced; then the text is cut
+    as poll_error_detail cuts a message: at its first character outside
+    the plain set, so no encoded or escaped body survives, and at its
+    first credential-like word. Credential assignments are not redacted
+    before the cut, which would drop the key and keep a quoted value's
+    later words."""
     detail = "".join(char if char.isprintable() else " " for char in detail)
-    detail = " ".join(detail.split())
-    text = f"{name}: {detail}" if detail else name
-    if len(text) > SHIP_ERROR_LIMIT:
-        text = text[: SHIP_ERROR_LIMIT - 3].rstrip() + "..."
-    return text
+    detail = _redact_spans(detail, *_REDACTED_MARKS)
+    detail = _plain_prefix(detail, _PLAIN_REDACTED)
+    for mark, placeholder in _REDACTED_MARKS.items():
+        detail = detail.replace(mark, placeholder)
+    return " ".join(detail.split())
+
+
+def _named(name: str, detail: str) -> str:
+    return f"{name}: {detail}" if detail else name
+
+
+def _cap(text: str, limit: int) -> str:
+    return text[: limit - 3].rstrip() + "..." if len(text) > limit else text
 
 
 @dataclass(frozen=True)
@@ -782,11 +823,13 @@ class Dispatcher:
         self,
         repo: str,
         ticket_id: str,
-        error: str,
+        error: str | BaseException,
         detail: str | None = None,
+        *,
+        prefix: str = "",
     ) -> None:
         self._stopped_due.discard((repo.lower(), ticket_id))
-        self._source_errors[(repo.lower(), ticket_id)] = error
+        self._source_errors[(repo.lower(), ticket_id)] = poll_error_text(error)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -794,7 +837,13 @@ class Dispatcher:
                     repo, ticket_id, error, detail, recorded_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, error, detail, self.queue.now()),
+                (
+                    repo.lower(),
+                    ticket_id,
+                    prefix + poll_error_text(error),
+                    detail,
+                    self.queue.now(),
+                ),
             )
 
     def record_poll_exception(
@@ -1338,7 +1387,7 @@ class Dispatcher:
                 connection.commit()
         except Exception as exc:
             self.record_poll_error(
-                job.request.repo, job.request.ticket_id, f"timeout-held:{type(exc).__name__}"
+                job.request.repo, job.request.ticket_id, exc, prefix="timeout-held:"
             )
             return
         self._log_job_event(job, "timeout-held", detail)
@@ -1355,7 +1404,7 @@ class Dispatcher:
         try:
             self.devices.reconcile(self.queue.now(), self._device_offline)
         except Exception as exc:
-            self.record_poll_error("devices", "-", type(exc).__name__)
+            self.record_poll_error("devices", "-", exc)
 
     def _check_job_states(self) -> None:
         """#75: requeue jobs claimed but never started; fail dead jobs.
@@ -1384,7 +1433,7 @@ class Dispatcher:
                 placements = read_placements(connection)
                 connection.commit()
         except Exception as exc:
-            self.record_poll_error("job-states", "-", type(exc).__name__)
+            self.record_poll_error("job-states", "-", exc)
             return
         check = getattr(self.devices, "liveness", None)
         for row in rows:
@@ -1427,7 +1476,7 @@ class Dispatcher:
                     self._fail_died_run(job, now)
             except Exception as exc:
                 self.record_poll_error(
-                    job.request.repo, job.request.ticket_id, f"job-states:{type(exc).__name__}"
+                    job.request.repo, job.request.ticket_id, exc, prefix="job-states:"
                 )
 
     def _release_claimed(self, job: Job, placed_at: float, now: float) -> None:
@@ -1680,10 +1729,11 @@ class Dispatcher:
                     handoff_comment_id=receipt,
                 )
             except Exception as exc:
-                reason = type(exc).__name__
                 if isinstance(exc, GrokDeliveryError):
-                    reason = f"{reason}:{exc.detail}"
-                self._record_job_error(job, f"grok-delivery:{reason}")
+                    self._record_job_error(job, f"{type(exc).__name__}:{exc.detail}",
+                                           prefix="grok-delivery:")
+                else:
+                    self._record_job_error(job, exc, prefix="grok-delivery:")
                 try:
                     self.queue.release(
                         job.id,
@@ -1692,8 +1742,7 @@ class Dispatcher:
                     deferred.add(job.id)
                 except Exception as release_exc:
                     self._record_job_error(
-                        job,
-                        f"grok-delivery-release:{type(release_exc).__name__}",
+                        job, release_exc, prefix="grok-delivery-release:"
                     )
 
     def gate_count(self, ticket: TrackedTicket) -> int:
@@ -6088,7 +6137,9 @@ class Dispatcher:
         if row[0] >= POLL_ERROR_STREAK:
             self.clear_attention(*identity, "poll-errors")
 
-    def _record_job_error(self, job: Job, error: str) -> None:
+    def _record_job_error(
+        self, job: Job, error: str | BaseException, *, prefix: str = ""
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -6099,7 +6150,7 @@ class Dispatcher:
                 (
                     job.request.repo.lower(),
                     job.request.ticket_id,
-                    error,
+                    prefix + poll_error_text(error),
                     self.queue.now(),
                 ),
             )

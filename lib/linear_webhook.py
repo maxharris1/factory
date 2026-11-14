@@ -15,9 +15,17 @@ stdlib HTTP server. For each request it:
    now (replay guard; the timestamp is inside the signed body);
 6. for an Issue in a configured Linear project, or a Comment on a tracked
    issue, or a Comment carrying an `orch:v1` handoff marker on an issue a
-   signed Issue event placed in a configured project, upserts one
-   `linear_dirty` row per issue in the dispatcher database. Everything else
-   that is signed and fresh gets 200 and is ignored.
+   signed Issue event placed in a project that is still configured, upserts
+   one `linear_dirty` row per issue in the dispatcher database. Everything
+   else that is signed and fresh gets 200 and is ignored.
+
+Health (#79, #107): every delivery whose signature verifies, whatever
+happens to it next, updates `last_received_at`; it proves the path works.
+Each signed, fresh delivery that names an issue also records when that
+issue was last delivered (`linear_webhook_seen`). The poller's direct reads
+compare an issue's newest comment with that record (`missed_delivery`) and
+record a real miss in `linear_webhook_missed`. Only a miss in the last 24 h
+is a warning; a quiet hour with nothing missed is a soft note.
 
 At most MAX_WORKERS requests are worked on at once (a connection beyond
 that is closed unread), and each must arrive within one total deadline of
@@ -50,6 +58,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from lib.health import age_text
+
 # https://linear.app/docs/security ("source IP addresses for all outbound
 # traffic (webhooks, integrations, etc.)"), also published as
 # https://linear.app/.well-known/appspecific/app.linear.ips.json.
@@ -77,11 +87,18 @@ REQUEST_TIMEOUT_SECONDS = 10
 REQUEST_DEADLINE_SECONDS = 10
 MAX_WORKERS = 8
 BUSY_LOG_SECONDS = 60
-SILENCE_WARNING_SECONDS = 3600
+QUIET_NOTE_SECONDS = 3600
+MISSED_WINDOW_SECONDS = 86400
+MISSED_KEEP_SECONDS = 7 * 86400
+MISS_AFTER_START_SECONDS = 60
+MISS_GRACE_SECONDS = 120
+MISS_SLACK_SECONDS = 60
 DIRTY_TABLE = "linear_dirty"
 HEALTH_TABLE = "linear_webhook_health"
 MEMBER_TABLE = "linear_project_issues"
 POLLING_TABLE = "linear_webhook_polling"
+SEEN_TABLE = "linear_webhook_seen"
+MISSED_TABLE = "linear_webhook_missed"
 HANDOFF_MARKER = "orch:v1"
 
 _TOKEN = re.compile(r"^[A-Za-z]{1,40}$")
@@ -117,24 +134,57 @@ class WebhookHealth:
     dirty: int
     active_linear: int = 0
     # When the poller first ran in webhook mode on this database; the
-    # silence clock for a listener that never started.
+    # quiet clock for a listener that never started.
     polling_since: float | None = None
+    # Missed deliveries the poller found, newest first: (identifier, found_at).
+    missed: tuple[tuple[str | None, float], ...] = ()
 
-    def silence_warning(self, now: float) -> str | None:
-        """Over an hour with no delivery while Linear tickets are active."""
-        if self.active_linear < 1:
+    def warning(self, now: float) -> str | None:
+        """A delivery the poller's reconcile found missing in the last 24 h."""
+        recent = [item for item in self.missed if now - item[1] <= MISSED_WINDOW_SECONDS]
+        if not recent:
+            return None
+        identifier, found_at = recent[0]
+        count = len(recent)
+        return (
+            f"Linear webhook missed {count} deliver{'y' if count == 1 else 'ies'} in 24h "
+            f"(newest {identifier or 'an issue'}, found {age_text(now - found_at)} ago)"
+        )
+
+    def quiet_note(self, now: float) -> str | None:
+        """Over an hour with no delivery while Linear tickets are active, and
+        nothing missed: Linear may simply have had nothing to send."""
+        if self.active_linear < 1 or self.warning(now) is not None:
             return None
         since = self.last_received_at
         if since is None:
             since = self.started_at
         if since is None:
             since = self.polling_since
-        if since is None or now - since <= SILENCE_WARNING_SECONDS:
+        if since is None or now - since <= QUIET_NOTE_SECONDS:
             return None
         return (
-            "no Linear webhook for over 1h while "
-            f"{self.active_linear} Linear ticket(s) are active"
+            f"quiet: no Linear webhook for {age_text(now - since)} "
+            "(nothing missed by the last reconcile)"
         )
+
+
+def missed_delivery(
+    newest_comment_at: float | None,
+    seen_at: float | None,
+    listener_started_at: float | None,
+    now: float,
+) -> bool:
+    """A comment the listener should have been sent and was not: made at
+    least a minute after the listener started, at least two minutes ago,
+    and no delivery for its issue since a minute before it."""
+    if newest_comment_at is None or listener_started_at is None:
+        return False
+    if newest_comment_at < listener_started_at + MISS_AFTER_START_SECONDS:
+        return False
+    if now - newest_comment_at < MISS_GRACE_SECONDS:
+        return False
+    return seen_at is None or seen_at < newest_comment_at - MISS_SLACK_SECONDS
 
 
 def read_secret(path: Path) -> bytes:
@@ -193,13 +243,40 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
-    # Issues a signed Issue event last placed in a configured project: the
-    # only scope proof for a Comment on an issue the factory does not track.
+    # Issues a signed Issue event last placed in a configured project, and
+    # which project: the only scope proof for a Comment on an issue the
+    # factory does not track, valid while that project is still configured.
     connection.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MEMBER_TABLE} (
             issue_id TEXT PRIMARY KEY,
-            seen_at REAL NOT NULL
+            seen_at REAL NOT NULL,
+            project_id TEXT
+        )
+        """
+    )
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({MEMBER_TABLE})")}
+    if "project_id" not in columns:
+        connection.execute(f"ALTER TABLE {MEMBER_TABLE} ADD COLUMN project_id TEXT")
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SEEN_TABLE} (
+            issue_id TEXT PRIMARY KEY,
+            received_at REAL NOT NULL
+        )
+        """
+    )
+    _ensure_missed(connection)
+
+
+def _ensure_missed(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {MISSED_TABLE} (
+            issue_id TEXT PRIMARY KEY,
+            identifier TEXT,
+            event_at REAL NOT NULL,
+            found_at REAL NOT NULL
         )
         """
     )
@@ -288,8 +365,19 @@ def read_health(connection: sqlite3.Connection) -> WebhookHealth | None:
         else 0
     )
     active = _active_linear(connection)
+    missed = (
+        tuple(
+            (str(identifier) if identifier is not None else None, float(found_at))
+            for identifier, found_at in connection.execute(
+                f"SELECT identifier, found_at FROM {MISSED_TABLE} "
+                "ORDER BY found_at DESC, issue_id LIMIT 100"
+            )
+        )
+        if _has_table(connection, MISSED_TABLE)
+        else ()
+    )
     if row is None:
-        return WebhookHealth(None, None, None, dirty, active, polling_since)
+        return WebhookHealth(None, None, None, dirty, active, polling_since, missed)
     return WebhookHealth(
         started_at=_float(row[0]),
         last_received_at=_float(row[1]),
@@ -297,6 +385,7 @@ def read_health(connection: sqlite3.Connection) -> WebhookHealth | None:
         dirty=dirty,
         active_linear=active,
         polling_since=polling_since,
+        missed=missed,
     )
 
 
@@ -357,6 +446,59 @@ class LinearDirtyQueue:
                 connection.execute(
                     f"INSERT OR IGNORE INTO {POLLING_TABLE} (id, since) VALUES (1, ?)",
                     (now,),
+                )
+        finally:
+            connection.close()
+
+    def seen_at(self, issue_id: str) -> float | None:
+        """When a signed, fresh delivery last named this issue."""
+        connection = _connect_existing(self.path)
+        try:
+            if not _has_table(connection, SEEN_TABLE):
+                return None
+            row = connection.execute(
+                f"SELECT received_at FROM {SEEN_TABLE} WHERE issue_id = ?", (issue_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        return _float(row[0]) if row is not None else None
+
+    def listener_started_at(self) -> float | None:
+        connection = _connect_existing(self.path)
+        try:
+            if not _has_table(connection, HEALTH_TABLE):
+                return None
+            row = connection.execute(
+                f"SELECT started_at FROM {HEALTH_TABLE} WHERE id = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        return _float(row[0]) if row is not None else None
+
+    def record_missed(
+        self, issue_id: str, identifier: str | None, event_at: float, found_at: float
+    ) -> None:
+        """Record a missed delivery once per comment: a later read of the
+        same miss keeps its first found_at."""
+        connection = _connect_existing(self.path)
+        try:
+            with connection:
+                _ensure_missed(connection)
+                connection.execute(
+                    f"""
+                    INSERT INTO {MISSED_TABLE} (issue_id, identifier, event_at, found_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(issue_id) DO UPDATE SET
+                      identifier = COALESCE(excluded.identifier, {MISSED_TABLE}.identifier),
+                      found_at = CASE WHEN excluded.event_at > {MISSED_TABLE}.event_at
+                                 THEN excluded.found_at ELSE {MISSED_TABLE}.found_at END,
+                      event_at = MAX(excluded.event_at, {MISSED_TABLE}.event_at)
+                    """,
+                    (issue_id, identifier, event_at, found_at),
+                )
+                connection.execute(
+                    f"DELETE FROM {MISSED_TABLE} WHERE found_at < ?",
+                    (found_at - MISSED_KEEP_SECONDS,),
                 )
         finally:
             connection.close()
@@ -464,6 +606,7 @@ class WebhookApp:
         if not self._signed(raw, lowered.get("linear-signature")):
             self.log("linear-webhook: rejected signature")
             return WebhookResult(401, "rejected", "signature")
+        self._received(self.clock())
         try:
             event = json.loads(raw)
         except (UnicodeDecodeError, ValueError):
@@ -476,6 +619,24 @@ class WebhookApp:
             self.log("linear-webhook: rejected stale timestamp")
             return WebhookResult(401, "rejected", "timestamp")
         return self._record(event, now)
+
+    def _received(self, now: float) -> None:
+        """A verified signature proves the path works, whatever comes next."""
+        connection = _connect_existing(self.db_path)
+        try:
+            with connection:
+                connection.execute(
+                    f"""
+                    INSERT INTO {HEALTH_TABLE} (id, started_at, last_received_at, last_event)
+                    VALUES (1, ?, ?, '-')
+                    ON CONFLICT(id) DO UPDATE SET
+                      last_received_at = excluded.last_received_at,
+                      last_event = excluded.last_event
+                    """,
+                    (now, now),
+                )
+        finally:
+            connection.close()
 
     def _source_allowed(self, peer: str, forwarded: str | None) -> bool:
         address = _ip(peer)
@@ -529,6 +690,14 @@ class WebhookApp:
                     issue_id, identifier, reason = self._comment(connection, data)
                 else:
                     issue_id, identifier, reason = None, None, "event type"
+                if issue_id is not None:
+                    connection.execute(
+                        f"""
+                        INSERT INTO {SEEN_TABLE} (issue_id, received_at) VALUES (?, ?)
+                        ON CONFLICT(issue_id) DO UPDATE SET received_at = excluded.received_at
+                        """,
+                        (issue_id, now),
+                    )
                 if reason is not None or issue_id is None:
                     shown = identifier or "-"
                     self.log(
@@ -594,10 +763,11 @@ class WebhookApp:
         ):
             connection.execute(
                 f"""
-                INSERT INTO {MEMBER_TABLE} (issue_id, seen_at) VALUES (?, ?)
-                ON CONFLICT(issue_id) DO UPDATE SET seen_at = excluded.seen_at
+                INSERT INTO {MEMBER_TABLE} (issue_id, seen_at, project_id) VALUES (?, ?, ?)
+                ON CONFLICT(issue_id) DO UPDATE SET
+                  seen_at = excluded.seen_at, project_id = excluded.project_id
                 """,
-                (issue_id, now),
+                (issue_id, now, project),
             )
         else:
             connection.execute(
@@ -629,7 +799,7 @@ class WebhookApp:
         body = data.get("body")
         if not (isinstance(body, str) and HANDOFF_MARKER in body):
             return issue_id, identifier, "untracked issue"
-        if not _in_configured_project(connection, issue_id):
+        if not _in_configured_project(connection, issue_id, self.project_ids):
             return issue_id, identifier, "not a configured project"
         return issue_id, identifier, None
 
@@ -646,13 +816,14 @@ def _is_tracked(connection: sqlite3.Connection, identifier: str) -> bool:
     )
 
 
-def _in_configured_project(connection: sqlite3.Connection, issue_id: str) -> bool:
-    return (
-        connection.execute(
-            f"SELECT 1 FROM {MEMBER_TABLE} WHERE issue_id = ?", (issue_id,)
-        ).fetchone()
-        is not None
-    )
+def _in_configured_project(
+    connection: sqlite3.Connection, issue_id: str, project_ids: frozenset[str]
+) -> bool:
+    """A signed Issue event placed it in a project that is still configured."""
+    row = connection.execute(
+        f"SELECT project_id FROM {MEMBER_TABLE} WHERE issue_id = ?", (issue_id,)
+    ).fetchone()
+    return row is not None and row[0] in project_ids
 
 
 def _fresh(value: object, now: float) -> bool:
@@ -811,6 +982,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         del format, args  # WebhookApp logs outcomes; never the request line
+
+
+def utc_log(line: str) -> None:
+    """Print one log line with a UTC ISO 8601 prefix (#79)."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
+    print(f"{stamp} {line}", flush=True)
 
 
 def make_server(

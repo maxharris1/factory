@@ -37,7 +37,7 @@ Follow `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md` as written, with 
 ## Before ready
 
 1. `<pstack>/skills/principle-prove-it-works/SKILL.md`. Run the real check and paste its output in the handoff.
-2. `deslop`. Skipped until T07 vendors it. Say so in the handoff.
+2. `deslop`: read `skills/cursor-team-kit/deslop/SKILL.md`, beside `<pstack>` in the deployed factory checkout, and follow it over the diff.
 3. `<pstack>/skills/no-comments/SKILL.md`, which spawns `<pstack>/agents/comment-sicko.md` over the diff.
 
 The handoff lists every SKILL.md you read, by path, under "Skills read:".
@@ -54,5 +54,6 @@ The handoff lists every SKILL.md you read, by path, under "Skills read:".
 | `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "A subagent that opens a PR runs `/deslop` and `/no-comments`, and posts the URL." | Helpers never open a PR, post or push | One writer per branch. The main job owns the handoff. |
 | `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Conventional Commits `type(scope): subject`" | Title is `#<issue>: type(scope): subject`, for example `#115: fix(titles): …`. Edit the feeder's PR. | Max's rule, factory #115. The `#<issue>: ` prefix goes before the Conventional Commits title and does not replace it. The feeder opened the PR. |
 | `<pstack>/skills/poteto-mode/playbooks/opening-a-pr.md`, "Open every PR ready, never as a draft." | Leave the PR draft and never mark it ready yourself. The poller marks it ready on APPROVE. | pstack opens a PR when the work is done. The feeder opens it before any work exists (`lib/feeder.py:576`). On Aut0, marking ready is the handoff to people. |
-| `<pstack>/skills/poteto-mode/SKILL.md`, "Before commit → the `deslop` skill" | Name it and skip it | Not in the pin until T07. |
+| `<pstack>/skills/poteto-mode/SKILL.md`, "Before commit → the `deslop` skill" | Read `skills/cursor-team-kit/deslop/SKILL.md` and follow it | pstack names `deslop` but does not ship it. The factory vendors it from cursor-team-kit (MIT), hash-pinned in `skills/skills.lock`. |
+| `<pstack>/docs/harness/claude-code.md`, "`pstack:poteto-agent`, `pstack:comment-sicko`" | Claude spawns `poteto-agent` and `comment-sicko`, unprefixed | `orch install-skills` links pstack's agents into `~/.claude/agents/` instead of loading pstack with `--plugin-dir`, so the names carry no plugin prefix (`docs/decisions/178-plugin-dir-and-deslop.md`). |
 | `<pstack>/skills/figure-it-out/SKILL.md`, "commit the trail so the reviewer can read it in the PR" | Commit the trail to `docs/decisions/<issue>-trail.tsv` | One file per ticket, so two PRs never edit the same lines (`docs/decisions/README.md`). |
