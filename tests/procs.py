@@ -19,3 +19,14 @@ def alive(pid: int) -> bool:
     except FileNotFoundError:
         return not Path("/proc/self/stat").exists()
     return stat.rpartition(")")[2].split()[0] != "Z"
+
+
+def open_files(pid: int) -> set[str]:
+    """The paths pid holds open, skipping an fd that closes mid-scan."""
+    found: set[str] = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            found.add(os.readlink(f"/proc/{pid}/fd/{fd}"))
+        except FileNotFoundError:
+            continue
+    return found

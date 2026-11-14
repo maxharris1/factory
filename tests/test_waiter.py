@@ -386,7 +386,9 @@ def test_the_autostart_waiter_claims_remote_slots_too(tmp_path: Path) -> None:
     waiter.pool = DevicePool(queue, config)
     assert waiter.step() == first
     assert waiter.step() == second
-    assert slots(db) == {first: "pc", second: "pc"}  # least loaded: pc has 3 free
+    # Lowest utilization, ties off-box (issue #223): pc on the 0% tie, then
+    # the box at 0/1 beats the pc at 1/3.
+    assert slots(db) == {first: "pc", second: "box"}
 
 
 def test_serve_runs_until_stopped_and_leaves_running_jobs_alone(tmp_path: Path) -> None:

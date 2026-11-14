@@ -45,11 +45,6 @@ def _dedupe_keys(path: Path) -> list[str]:
         return [row[0] for row in connection.execute("SELECT dedupe_key FROM jobs")]
 
 
-def _dump(path: Path) -> list[str]:
-    with closing(sqlite3.connect(path)) as connection:
-        return list(connection.iterdump())
-
-
 class OneCycle:
     def __init__(self, dispatcher, source) -> None:
         del dispatcher, source
@@ -118,17 +113,15 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
         ),
         dedupe_key="t2:build",
     )
-    inode = queue.path.stat().st_ino
-    before = _dump(queue.path)
+    before = _snapshot(queue.path)
 
     code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
     gc.collect()
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert queue.path.stat().st_ino == inode
-    assert _dump(queue.path) == before
-    assert _dedupe_keys(queue.path) == ["t1:build", "t2:build"]
+    assert sorted(_dedupe_keys(queue.path)) == ["t1:build", "t2:build"]
+    assert _snapshot(queue.path) == before
 
 
 def test_restore_db_rejects_a_corrupt_backup(tmp_path: Path, capsys) -> None:

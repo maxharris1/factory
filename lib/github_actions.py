@@ -476,7 +476,8 @@ class GitHubReviewActions:
         success needs at least one check run that concluded success, or a
         success combined status, and nothing failing or pending. All
         neutral or skipped, nothing reported, or runs received that do not
-        match total_count on every page is pending.
+        match total_count on every page is pending. Nothing reported at
+        all is pending with reported=False (#255).
 
         A short read is pending even when a run in view failed: a rerun on
         an unread page may supersede that failure, so pending is the safe
@@ -496,6 +497,8 @@ class GitHubReviewActions:
         total = _count(combined.get("total_count"), "combined status")
         if counted != {len(runs)}:
             return CIResult("pending")
+        if not runs and not total:
+            return CIResult("pending", reported=False)
         runs = _latest_attempts(runs)
         failed: list[str] = []
         pending = False

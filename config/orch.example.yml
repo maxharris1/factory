@@ -37,18 +37,41 @@ dashboard:
 # job_states:
 #   stale_minutes: 2
 #   release_claimed_minutes: 5
-# Optional approval credential (#122, docs/decisions/122-approver-credential.md).
-# The bots post as a GitHub App; a capped-ticket go and a hold ok then count
+# Optional approval credential (#122, docs/decisions/122-approver-credential.md)
+# and per-bot GitHub Apps (#170, docs/decisions/170-four-github-apps.md).
+# Each bot posts as its own App; a capped-ticket go and a hold ok then count
 # only from approver_logins. enabled: false (the default) keeps today's
-# single-login trust. orch never opens private_key_file. The numbers below
-# are fake.
+# trusted_logins trust. With enabled: true, each App's bot_login must be a
+# trusted_logins key for its own bot alone, apps.grok-bot is required, and
+# every App needs an installation for each project owner. orch never opens
+# private_key_file. The numbers below are fake.
 # approver_logins:
 #   - maxharris1
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver
 # github_app:
-#   app_id: 123456
-#   installations:
-#     maxharris1: 1111111
-#   private_key_file: /home/box/.config/factory/github-app-bots.pem
-#   bot_login: factory-bots[bot]
 #   enabled: false
+#   apps:
+#     grok-bot:
+#       bot_login: factory-grok[bot]
+#       app_id: 111111
+#       installations:
+#         maxharris1: 1000001
+#       private_key_file: /home/box/.config/factory/apps/factory.pem
+#     claude-bot:
+#       bot_login: factory-claude[bot]
+#       app_id: 222222
+#       installations:
+#         maxharris1: 2000001
+#       private_key_file: /home/box/.config/factory/apps/claude.pem
+#     codex-bot:
+#       bot_login: factory-codex[bot]
+#       app_id: 333333
+#       installations:
+#         maxharris1: 3000001
+#       private_key_file: /home/box/.config/factory/apps/codex.pem
+#     cursor-bot:
+#       bot_login: factory-cursor[bot]
+#       app_id: 444444
+#       installations:
+#         maxharris1: 4000001
+#       private_key_file: /home/box/.config/factory/apps/cursor.pem

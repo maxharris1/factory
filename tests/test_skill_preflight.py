@@ -142,8 +142,9 @@ class Device:
         monkeypatch.setenv("FAKE_SSH_HOME", str(self.home))
         if not remote:
             monkeypatch.setenv("HOME", str(self.home))
-        # The least loaded device takes the job: the pc (3 free) or the box (5).
-        machines = remote_machines(tmp_path, box_enabled=not remote, box_slots=5)
+        # Only the device under test is enabled, so it takes the job (issue
+        # #223 sends an empty-pool tie off-box).
+        machines = remote_machines(tmp_path, box_enabled=not remote, box_slots=5, pc=remote)
         self.checkout = tmp_path / "pc-factory"
         text = machines.read_text(encoding="utf-8")
         line = "    factory_root: /srv/factory\n"
