@@ -46,7 +46,9 @@
 # child's (`-R 127.0.0.1:N:127.0.0.1:N`, or `linear-webhook serve`), so a
 # reused pid is never signalled. Before starting a child, a loop ends the
 # one recorded by an earlier loop (SIGTERM, SIGKILL after
-# LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives.
+# LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives. A record
+# from another PID namespace cannot be checked, so a loop keeps it and
+# starts nothing until stop run in that namespace ends the child.
 #
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
@@ -198,7 +200,8 @@ leave_loop() {
 # Run "$@" as loop $1's child and wait for it. First end the child an earlier
 # loop recorded, if it still runs (real OpenSSH closes inherited descriptors,
 # so its child lock alone does not prove it gone). Returns 1, starting
-# nothing, when that child survives or still holds the child lock (fd 7).
+# nothing, when that child survives, cannot be verified from this PID
+# namespace, or still holds the child lock (fd 7).
 run_locked() {
     end_child "$1" || return 1
     exec 7>>"$(lock_file "$1-child")"
@@ -265,7 +268,7 @@ listener_loop() {
         say "starting orch linear-webhook serve on 127.0.0.1:${PORT}"
         if ! run_locked listener "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
             ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}; then
-            say "serve from an earlier loop still holds $(lock_file listener-child); not starting serve"
+            say "serve from an earlier loop may still run; not starting serve"
             pause "$delay"
             delay="$(doubled "$delay")"
             continue
@@ -292,7 +295,8 @@ tunnel_loop() {
         if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
             -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"; then
-            say "ssh from an earlier loop still holds $(lock_file tunnel-child); not starting ssh"
+            cat "$errors" >&2 2>/dev/null || true
+            say "ssh from an earlier loop may still run; not starting ssh"
             pause "$delay"
             delay="$(doubled "$delay")"
             continue
@@ -524,10 +528,15 @@ owned_children() {
 }
 
 # End the child loop $1 recorded, if it still runs: SIGTERM, SIGKILL after
-# STOP_WAIT, and return 1 unless it is verifiably gone.
+# STOP_WAIT, and return 1 unless it is verifiably gone. A record from another
+# PID namespace cannot be checked here, so it stays and this returns 1.
 end_child() {
     local pid status=0
     pid="$(owned_child "$1")" || status=$?
+    if ((status == 2)); then
+        say "$(child_file "$1") names a process in another PID namespace; cannot verify it is gone; not starting another" >&2
+        return 1
+    fi
     ((status == 0)) || return 0
     say "ending $1 child pid ${pid} left by an earlier loop"
     kill -TERM "$pid" 2>/dev/null || true

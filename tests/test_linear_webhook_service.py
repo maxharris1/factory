@@ -728,6 +728,68 @@ def test_stop_fails_on_a_child_record_from_another_pid_namespace(home: Path) -> 
     assert record.exists()
 
 
+def test_ensure_starts_no_ssh_over_a_child_record_from_another_pid_namespace(home: Path) -> None:
+    record = _state(home) / "linear-webhook-tunnel-child.pid"
+    record.parent.mkdir(parents=True)
+    record.write_text("4242 777 pid:[1]\n")
+    assert _service(home, "ensure").returncode == 0
+    log = _state(home) / "linear-webhook-tunnel.log"
+    _wait_for(lambda: log.exists() and "another PID namespace" in log.read_text(),
+              what="the tunnel loop to refuse the unverifiable record")
+    time.sleep(0.5)
+    assert _calls(home, "ssh") == []
+    assert record.read_text() == "4242 777 pid:[1]\n"
+    result = _service(home, "stop")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert record.exists()
+
+
+def _pid_namespaces_work() -> bool:
+    if shutil.which("unshare") is None:
+        return False
+    probe = subprocess.run(["unshare", "--user", "--map-root-user", "--pid", "--fork", "--mount-proc", "true"],
+                           capture_output=True, check=False)
+    return probe.returncode == 0
+
+
+INNER_ENSURE_THEN_STOP = """
+bash "$1" ensure; echo "ensure=$?"
+for _ in $(seq 100); do
+    grep -qE 'forward refused|another PID namespace' "$2" 2>/dev/null && break
+    sleep 0.1
+done
+bash "$1" stop; echo "stop=$?"
+"""
+
+
+@pytest.mark.skipif(not _pid_namespaces_work(), reason="needs unprivileged user and PID namespaces")
+def test_another_pid_namespace_keeps_the_record_of_an_orphaned_ssh_it_cannot_verify(home: Path) -> None:
+    orphan = _orphan_an_ssh_that_closed_its_fds(home)
+    listener = _loops(home, MODES[0]) + [_children(home)["serve"]]
+    for pid in listener:
+        os.kill(pid, signal.SIGKILL)
+    _wait_for(lambda: not any(alive(pid) for pid in listener), what="the listener to die")
+    record = _state(home) / "linear-webhook-tunnel-child.pid"
+    original = record.read_text()
+
+    inner = subprocess.run(
+        ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--mount-proc",
+         "bash", "-c", INNER_ENSURE_THEN_STOP, "inner", str(SERVICE),
+         str(_state(home) / "linear-webhook-tunnel.log")],
+        env=_env(home), text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert "ensure=0" in inner.stdout, inner.stdout + inner.stderr
+    assert "stop=1" in inner.stdout, inner.stdout + inner.stderr
+    assert f"{record} names a process in another PID namespace" in inner.stderr
+    assert record.read_text() == original
+    assert len(_calls(home, "ssh")) == 1
+
+    result = _service(home, "stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not alive(orphan)
+    assert _lock_free(home / "remote-forward.lock")
+
+
 def test_child_records_name_the_running_serve_and_ssh(home: Path) -> None:
     state = _state(home)
 
