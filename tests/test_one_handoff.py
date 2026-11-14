@@ -30,6 +30,7 @@ import pytest
 from lib import waiter as waiter_module
 from lib.dispatcher import CIResult
 from lib.queue import SQLiteJobQueue
+from tests.handoff_store import harness_comment_id, serve_job
 from tests.test_dispatcher import (
     VERDICT,
     FakeReviewActions,
@@ -280,28 +281,30 @@ def test_a_second_run_of_a_running_job_is_refused(tmp_path: Path) -> None:
 
 def test_job_done_with_the_same_handoff_again_is_a_no_op_success(tmp_path: Path) -> None:
     db, _queue, job_id = claimed(tmp_path)
-    first = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "c-1")
+    serve_job(db, job_id, "1001", "1002", "1009")
+    first = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
     assert first.returncode == 0, first.stderr
     assert first.stdout.strip() == f"done {job_id}"
-    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "c-1")
+    again = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1001")
     assert again.returncode == 0, again.stderr
     assert again.stdout.startswith(f"done {job_id}")
     assert "nothing changed" in again.stdout
-    assert job_row(db, job_id) == ("done", "c-1")
+    assert job_row(db, job_id) == ("done", "1001")
 
 
-@pytest.mark.parametrize("second", [["--handoff", "c-2"], ["--failed"]])
+@pytest.mark.parametrize("second", [["--handoff", "1002"], ["--failed"]])
 def test_a_conflicting_second_job_done_is_refused_and_changes_nothing(
     tmp_path: Path, second: list[str]
 ) -> None:
     db, _queue, job_id = claimed(tmp_path)
+    serve_job(db, job_id, "1001", "1002", "1009")
     assert orch("job", "done", "claude-bot", job_id, "--db", str(db),
-                "--handoff", "c-1").returncode == 0
+                "--handoff", "1001").returncode == 0
     with sqlite3.connect(db) as connection:
         before = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *second)
     assert result.returncode == 1
-    assert f"job {job_id} is already done with handoff c-1" in result.stderr
+    assert f"job {job_id} is already done with handoff 1001" in result.stderr
     assert "nothing changed" in result.stderr
     with sqlite3.connect(db) as connection:
         assert connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone() == before
@@ -309,10 +312,11 @@ def test_a_conflicting_second_job_done_is_refused_and_changes_nothing(
 
 def test_a_repeated_failed_is_a_no_op_and_a_handoff_after_it_is_refused(tmp_path: Path) -> None:
     db, _queue, job_id = claimed(tmp_path)
+    serve_job(db, job_id, "1001", "1002", "1009")
     assert orch("job", "done", "claude-bot", job_id, "--db", str(db), "--failed").returncode == 0
     again = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--failed")
     assert again.returncode == 0 and "nothing changed" in again.stdout
-    late = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "c-9")
+    late = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "1009")
     assert late.returncode == 1
     assert "already failed" in late.stderr
     assert job_row(db, job_id) == ("failed", None)
@@ -338,12 +342,13 @@ CREATE TABLE device_slots (
 """
 
 
-@pytest.mark.parametrize("outcome", [["--handoff", "c-1"], ["--failed"]])
+@pytest.mark.parametrize("outcome", [["--handoff", "1001"], ["--failed"]])
 def test_job_done_tolerates_a_round_1_slots_table(tmp_path: Path, outcome: list[str]) -> None:
     db, queue = make_queue(tmp_path)
     job_id = enqueue(queue, "a")
     taken = queue.claim("claude")
     assert taken is not None and taken.id == job_id
+    serve_job(db, job_id, "1001")
     with sqlite3.connect(db) as connection:
         connection.execute(ROUND_1_SLOTS)
         connection.execute(
@@ -353,7 +358,7 @@ def test_job_done_tolerates_a_round_1_slots_table(tmp_path: Path, outcome: list[
         )
     result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome)
     assert result.returncode == 0, result.stderr
-    expected = ("done", "c-1") if outcome[0] == "--handoff" else ("failed", None)
+    expected = ("done", "1001") if outcome[0] == "--handoff" else ("failed", None)
     assert job_row(db, job_id) == expected
     with sqlite3.connect(db) as connection:  # read only: nothing was migrated
         columns = {row[1] for row in connection.execute("PRAGMA table_info(device_slots)")}
@@ -378,14 +383,14 @@ def test_a_bot_turn_cannot_finish_a_job_the_autostart_waiter_runs(
     # The harness inside the run finishes it with its own handoff.
     (autostart["harness_dir"] / f"{job_id}.go").touch()
     _wait_for(lambda: state(db, job_id) == "done", 20, proc)
-    assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+    assert job_row(db, job_id) == ("done", harness_comment_id(job_id))
     # Afterwards the same handoff again is a no-op; a bot turn's is refused.
     same = orch("job", "done", "claude-bot", job_id, "--db", str(db),
-                "--handoff", "c-" + job_id[:6])
+                "--handoff", harness_comment_id(job_id))
     assert same.returncode == 0 and "nothing changed" in same.stdout
     other = orch("job", "done", "claude-bot", job_id, "--db", str(db), "--handoff", "c-other")
     assert other.returncode == 1
-    assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+    assert job_row(db, job_id) == ("done", harness_comment_id(job_id))
 
 
 # --- #96: the run's token, not its process tree, proves it is the run ---------
@@ -436,7 +441,7 @@ def _codex_shell_env(env: dict[str, str]) -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("outcome", [["--handoff", "c-sandbox"], ["--failed"]])
+@pytest.mark.parametrize("outcome", [["--handoff", "1077"], ["--failed"]])
 @pytest.mark.parametrize("proof", ["env", "codex-filtered-env", "pid-namespace"])
 def test_the_run_finishes_its_job_with_its_token_whatever_the_process_tree(
     autostart: dict, outcome: list[str], proof: str
@@ -448,6 +453,7 @@ def test_the_run_finishes_its_job_with_its_token_whatever_the_process_tree(
     _wait_for(lambda: _running(db, job_id), 20, proc)
     record = _harness_record(autostart, job_id)
     assert _proof(record)
+    serve_job(db, job_id, "1077")
     # This test process is not in the run's process tree, nor is its child.
     assert not descends_from(os.getpid(), int(_slot(db, job_id)["runner_pid"]))
     extra, prefix = {PROOF: _proof(record)}, ()
@@ -459,7 +465,7 @@ def test_the_run_finishes_its_job_with_its_token_whatever_the_process_tree(
     result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome,
                   extra_env=extra, prefix=prefix)
     assert result.returncode == 0, result.stderr
-    expected = ("done", "c-sandbox") if outcome[0] == "--handoff" else ("failed", None)
+    expected = ("done", "1077") if outcome[0] == "--handoff" else ("failed", None)
     assert job_row(db, job_id) == expected
     (autostart["harness_dir"] / f"{job_id}.crash").touch()
     _wait_for(lambda: _released(db, job_id), 20, proc)
@@ -530,7 +536,7 @@ def test_the_token_is_kept_only_as_its_hash_and_never_written_out(
     assert token not in status.stdout + status.stderr
     (autostart["harness_dir"] / f"{job_id}.go").touch()
     _wait_for(lambda: _released(db, job_id), 20, proc)
-    assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+    assert job_row(db, job_id) == ("done", harness_comment_id(job_id))
     for path in tmp_path.rglob("*"):
         if path.is_file() and autostart["harness_dir"] not in path.parents:
             assert token.encode() not in path.read_bytes(), path
@@ -565,7 +571,7 @@ deadline = time.time() + 60
 while not go.exists() and time.time() < deadline:
     time.sleep(0.05)
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
-                os.environ["ORCH_JOB_BOT"], job, "--handoff", "c-" + job[:6]], check=True)
+                os.environ["ORCH_JOB_BOT"], job, "--handoff", subprocess.check_output([sys.executable, os.environ["FAKE_POST_HANDOFF"], os.environ["ORCH_DB"], job], text=True).strip()], check=True)
 """
 
 
@@ -610,7 +616,7 @@ def test_the_runs_proof_never_reaches_its_persisted_or_published_summary(
         assert not any(piece in text for piece in _proof_pieces(proof)), text
     (autostart["harness_dir"] / f"{job_id}.go").touch()
     _wait_for(lambda: _released(db, job_id), 20, proc)
-    assert job_row(db, job_id) == ("done", "c-" + job_id[:6])
+    assert job_row(db, job_id) == ("done", harness_comment_id(job_id))
     for text in _telemetry_texts(db, job_id):
         assert not readable(proof, text), text
         assert not any(piece in text for piece in _proof_pieces(proof)), text

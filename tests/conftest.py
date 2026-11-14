@@ -1,4 +1,5 @@
-"""Suite-wide guard: no test may reach a real host over SSH (F2-02).
+"""Suite-wide guard: no test may reach a real host over SSH (F2-02), or
+GitHub through gh (#191).
 
 A refusing `ssh` is put first on PATH for the whole run. It exits 255 (an
 unreachable device) and touches nothing. Tests that exercise remote start
@@ -8,7 +9,10 @@ put tests/fake_ssh.py in front of it instead.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,6 +31,50 @@ def _no_real_ssh(tmp_path_factory: pytest.TempPathFactory):
     os.environ["PATH"] = f"{guard}{os.pathsep}{previous}"
     yield Path(guard)
     os.environ["PATH"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_gh(_no_real_ssh: Path, tmp_path_factory: pytest.TempPathFactory):
+    """No test reaches GitHub through `gh` (#191: `orch job done` reads its
+    handoff comment). tests/fake_gh.py answers from $FAKE_GH_STORE and
+    refuses without one; tests/handoff_store.py writes a store. The basetemp
+    may be on a noexec /dev/shm, where PATH would skip the script; then it
+    goes in its own directory under /tmp."""
+    guard = tmp_path_factory.mktemp("no-real-gh")
+    script = _write_gh(guard)
+    fallback = None
+    if not os.access(script, os.X_OK):
+        fallback = Path(tempfile.mkdtemp(prefix="pytest-no-real-gh-", dir="/tmp"))
+        guard, script = fallback, _write_gh(fallback)
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{guard}{os.pathsep}{previous}"
+    yield script
+    os.environ["PATH"] = previous
+    if fallback is not None:
+        shutil.rmtree(fallback, ignore_errors=True)
+
+
+def _write_gh(directory: Path) -> Path:
+    script = directory / "gh"
+    script.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).with_name("fake_gh.py")}" "$@"\n',
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return script
+
+
+@pytest.fixture(autouse=True)
+def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Each test's fake gh answers from its own store, empty until a test
+    serves a comment (tests/handoff_store.py); a fake harness posts one with
+    $FAKE_POST_HANDOFF."""
+    store = tmp_path_factory.mktemp("fake-gh") / "fake-gh.json"
+    store.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("FAKE_GH_STORE", str(store))
+    monkeypatch.setenv("FAKE_POST_HANDOFF", str(Path(__file__).with_name("post_handoff.py")))
+    monkeypatch.setenv("FAKE_GH_HANDOFFS", str(Path(__file__).with_name("fake_gh.py")))
+    yield store
 
 
 @pytest.fixture(autouse=True, scope="session")
