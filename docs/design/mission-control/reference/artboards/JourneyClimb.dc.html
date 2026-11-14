@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Journey climb</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 1000px; background: #0e0e14; color: #c0caf5; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace">
+<div style="position: relative; width: 1000px; height: 336px">
+<canvas id="{{ cid }}" ref="{{ setCanvas }}" role="img" aria-label="{{ summary }}" style="display: block; width: 1000px; height: 336px; background: #0e0e14"></canvas>
+<sc-for list="{{ lanes }}" as="l" hint-placeholder-count="7"><div aria-hidden="true" style="position: absolute; left: 10px; top: {{ l.top }}; font-size: 11px; line-height: 1.3; letter-spacing: 0.08em; text-transform: uppercase; color: {{ l.color }}">{{ l.label }}</div></sc-for>
+<sc-for list="{{ bars }}" as="b" hint-placeholder-count="14"><div aria-hidden="true" style="position: absolute; left: {{ b.left }}; top: {{ b.top }}; overflow: hidden; white-space: nowrap; font-size: 10px; line-height: 14px; font-weight: {{ b.weight }}; color: {{ b.color }}">{{ b.label }}</div></sc-for>
+<sc-for list="{{ ruler }}" as="r" hint-placeholder-count="10"><div aria-hidden="true" style="position: absolute; left: {{ r.left }}; top: 304px; width: {{ r.width }}; overflow: hidden; white-space: nowrap; text-align: center; font-size: 10px; line-height: 14px; color: {{ r.color }}">{{ r.label }}</div></sc-for>
+<div aria-hidden="true" style="position: absolute; left: 10px; top: 304px; font-size: 10px; line-height: 14px; color: #a9b1d6">{{ startClock }}</div>
+<div aria-hidden="true" style="position: absolute; left: {{ nowTagLeft }}; top: 0; padding: 0 4px; background: #7dcfff; color: #0c0e10; font-size: 10px; line-height: 14px; font-weight: 700; white-space: nowrap">NOW · {{ nowClock }}</div>
+<div aria-hidden="true" style="position: absolute; left: {{ aheadLeft }}; top: 304px; font-size: 10px; line-height: 14px; white-space: nowrap; color: #8b93b8">{{ aheadText }}</div>
+<sc-for list="{{ cols }}" as="c" hint-placeholder-count="10"><button type="button" onClick="{{ c.pick }}" aria-label="{{ c.aria }}" aria-pressed="{{ c.on }}" style="position: absolute; left: {{ c.left }}; top: 0; width: {{ c.width }}; height: 300px; padding: 0; border: 0; background: transparent; cursor: pointer"></button></sc-for>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; border-top: 1px solid #24283b; font-size: 12px; line-height: 1.5">
+<span style="color: #8b93b8">{{ capIndex }}</span>
+<span style="font-size: 13px; font-weight: 600; color: {{ capColor }}">{{ capState }}</span>
+<span style="padding: 0 6px; border: 1px solid {{ capWhoColor }}; color: {{ capWhoColor }}; font-size: 11px; line-height: 1.6; white-space: nowrap">{{ capWho }}</span>
+<span style="color: #c0caf5; white-space: nowrap">{{ capDur }}</span>
+<span style="flex: 1 1 240px; min-width: 0; font-family: 'Geist', ui-sans-serif, system-ui, sans-serif; font-size: 13px; color: #a9b1d6">{{ capNote }}</span>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 0 12px 12px; font-size: 12px; line-height: 1.5; color: #8b93b8">
+<div role="group" aria-label="Time axis" style="display: flex; gap: 0">
+<button type="button" onClick="{{ setSteps }}" aria-pressed="{{ stepsOn }}" style="height: 44px; padding: 0 12px; font-family: inherit; font-size: 12px; cursor: pointer; background: {{ stepsBg }}; color: {{ stepsFg }}; border: 1px solid {{ stepsBd }}">even steps</button>
+<button type="button" onClick="{{ setTime }}" aria-pressed="{{ timeOn }}" style="height: 44px; padding: 0 12px; font-family: inherit; font-size: 12px; cursor: pointer; background: {{ timeBg }}; color: {{ timeFg }}; border: 1px solid {{ timeBd }}">to scale</button>
+</div>
+<button type="button" onClick="{{ replay }}" style="height: 44px; padding: 0 12px; font-family: inherit; font-size: 12px; cursor: pointer; background: #1f2230; color: #c0caf5; border: 1px solid #414868">replay</button>
+<span style="flex: 1 1 0"></span>
+<span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 12px; height: 8px; background: #a9b1d6"></span>script</span>
+<span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 12px; height: 8px; background: #e0af68"></span>claude</span>
+<span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 12px; height: 8px; background: #7aa2f7"></span>codex</span>
+<span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 12px; height: 8px; background: #f7768e"></span>stopped</span>
+<span style="display: flex; align-items: center; gap: 6px"><span aria-hidden="true" style="width: 4px; height: 12px; background-image: repeating-linear-gradient(180deg, #c0caf5 0 4px, transparent 4px 8px)"></span>off-chart hop</span>
+<span>timings are sample values</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"scale":{"editor":"enum","options":["steps","time"],"default":"steps"},"motion":{"editor":"enum","options":["lively","calm"],"default":"lively"},"still":{"editor":"boolean","default":false},"path":{"editor":null},"who":{"editor":null},"jumps":{"editor":null},"future":{"editor":null},"notes":{"editor":null},"durs":{"editor":null},"sel":{"editor":null},"onPick":{"editor":null},"$preview":{"width":1000,"height":456}}'>
+class Component extends DCLogic {
+  /*
+   * JourneyClimb: one ticket's journey through time, on a 250 x 84 cell grid.
+   * x = time (even steps, or to scale), y = how close to shipped; stop states are the floor.
+   * Each visit is a bar in its lane, coloured by who did the work, with the state name inside.
+   * Only the bar the ticket is in right now moves.
+   */
+  renderVals() {
+    var self = this;
+    if (!this._setCanvas) {
+      this._cid = 'jc-' + Math.random().toString(36).slice(2, 10);
+      this._setCanvas = function (el) {
+        self._el = el || null;
+        self._ctx = null;
+      };
+      this._replay = function () {
+        self._tPlay = performance.now();
+      };
+      this._setSteps = function () {
+        self._tPlay = performance.now();
+        self.setState({ scale: 'steps' });
+      };
+      this._setTime = function () {
+        self._tPlay = performance.now();
+        self.setState({ scale: 'time' });
+      };
+    }
+    var s = this.state || {};
+    var p = this.props;
+    this._scale = s.scale || (p.scale === 'time' ? 'time' : 'steps');
+    var m = this._model();
+    /* a page can own the selection (sel + onPick) so a log beside the chart stays in step */
+    var want = (p.sel === undefined || p.sel === null || p.sel === '') ? s.sel : Number(p.sel);
+    var sel = (want === undefined || want === null || !(want >= 0) || want >= m.n) ? m.n - 1 : want;
+    this._sel = sel;
+    var cols = [];
+    for (var i = 0; i < m.n; i++) cols.push(this._col(i, sel, m));
+    var v = m.visits[sel];
+    var isNow = sel === m.n - 1;
+    var stepsOn = this._scale === 'steps';
+    /* the current visit keeps counting */
+    var nowDur = m.n ? this._fmt(m.visits[m.n - 1].dur + (s.sec || 0)) : '';
+    var ruler = m.rulerLabels;
+    if (m.nowLabelIdx >= 0) {
+      ruler = m.rulerLabels.slice();
+      ruler[m.nowLabelIdx] = { label: nowDur, left: ruler[m.nowLabelIdx].left, width: ruler[m.nowLabelIdx].width, color: '#7dcfff' };
+    }
+    var on = ['rgba(158,206,106,0.09)', '#9ece6a', '#9ece6a'], off = ['#1f2230', '#c0caf5', '#414868'];
+    return {
+      cid: this._cid,
+      setCanvas: this._setCanvas,
+      summary: m.summary,
+      lanes: m.laneLabels,
+      bars: m.barLabels,
+      ruler: ruler,
+      cols: cols,
+      startClock: m.startClock,
+      nowClock: m.nowClock,
+      nowTagLeft: (m.nowX * 4 - 20) + 'px',
+      aheadLeft: (m.nowX * 4 + 12) + 'px',
+      aheadText: m.hops > 0 ? 'ahead · ' + m.hops + '+ hops to shipped' : '',
+      capIndex: (sel < 9 ? '0' : '') + (sel + 1) + ' of ' + m.n,
+      capState: v.name + (isNow ? ' · now' : ''),
+      capColor: isNow ? '#7dcfff' : '#c0caf5',
+      capWho: v.who,
+      capWhoColor: v.whoHex,
+      capDur: isNow ? nowDur + ' so far' : 'took ' + v.durText,
+      capNote: v.note,
+      replay: this._replay,
+      setSteps: this._setSteps,
+      setTime: this._setTime,
+      stepsOn: stepsOn,
+      timeOn: !stepsOn,
+      stepsBg: stepsOn ? on[0] : off[0], stepsFg: stepsOn ? on[1] : off[1], stepsBd: stepsOn ? on[2] : off[2],
+      timeBg: stepsOn ? off[0] : on[0], timeFg: stepsOn ? off[1] : on[1], timeBd: stepsOn ? off[2] : on[2]
+    };
+  }
+
+  _col(i, sel, m) {
+    var self = this;
+    return {
+      left: (m.visits[i].x * 4) + 'px',
+      width: (m.visits[i].w * 4) + 'px',
+      on: i === sel,
+      aria: 'visit ' + (i + 1) + ', ' + m.visits[i].name + ', ' + m.visits[i].durText,
+      pick: function () {
+        self._selAt = performance.now();
+        self.setState({ sel: i });
+        if (typeof self.props.onPick === 'function') self.props.onPick(i);
+      }
+    };
+  }
+
+  componentDidMount() {
+    var self = this;
+    this._dead = false;
+    this._t0 = performance.now();
+    this._last = 0;
+    var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+    this._sysStill = !!(mq && mq.matches);
+    this._iv = window.setInterval(function () {
+      var p = self.props;
+      if (self._sysStill || p.still === true || p.still === 'true') return;
+      self.setState({ sec: ((self.state && self.state.sec) || 0) + 1 });
+    }, 1000);
+    var loop = function (now) {
+      if (self._dead) return;
+      self._raf = window.requestAnimationFrame(loop);
+      if (now - self._last < 47) return;
+      self._last = now;
+      try { self._draw(now); } catch (e) { self._dead = true; }
+    };
+    try { this._draw(performance.now()); } catch (e) { this._dead = true; }
+    this._raf = window.requestAnimationFrame(loop);
+  }
+
+  componentWillUnmount() {
+    this._dead = true;
+    if (this._raf) window.cancelAnimationFrame(this._raf);
+    if (this._iv) window.clearInterval(this._iv);
+  }
+
+  _split(v, fallback, sep) {
+    var raw = String(v === undefined || v === null || v === '' ? fallback : v).split(sep), out = [];
+    for (var i = 0; i < raw.length; i++) out.push(raw[i].replace(/^\s+|\s+$/g, ''));
+    return out;
+  }
+
+  _rgb(hex) {
+    var h = String(hex).replace('#', '');
+    return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)];
+  }
+
+  _mix(a, b, k) {
+    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * k) + ',' + Math.round(a[1] + (b[1] - a[1]) * k) + ',' + Math.round(a[2] + (b[2] - a[2]) * k) + ')';
+  }
+
+  /* 248 -> "4m 08s", 3720 -> "1h 02m" */
+  _fmt(sec) {
+    sec = Math.round(sec);
+    if (sec < 60) return sec + 's';
+    var m = Math.floor(sec / 60), s = sec % 60;
+    if (sec < 3600) return (s && m < 10) ? m + 'm ' + (s < 10 ? '0' : '') + s + 's' : m + 'm';
+    var h = Math.floor(m / 60);
+    m = m % 60;
+    return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+  }
+
+  _bayer() {
+    if (this._bay) return this._bay;
+    var m = [0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26,
+      12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+      3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+      15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21];
+    var out = [];
+    for (var i = 0; i < 64; i++) out.push((m[i] + 0.5) / 64);
+    this._bay = out;
+    return out;
+  }
+
+  _model() {
+    var p = this.props;
+    var scale = this._scale || 'steps';
+    var names = this._split(p.path, 'intake,questions,planning,plan-check,building,planning,review,fixing,stuck,fixing', ',');
+    var whos = this._split(p.who, 'script,script,claude,script,claude,claude,codex,claude,grok,claude', ',');
+    var jumps = this._split(p.jumps, '5,6,9', ',');
+    var future = this._split(p.future, 'review,ship,merged,done', ',');
+    var durRaw = this._split(p.durs, '20,70,360,30,1320,240,540,720,3720,248', ',');
+    var notes = this._split(p.notes, 'ticket arrives|brief and acceptance criteria posted|kind=go, queue plan|trusted builder posts kind=plan|every acceptance criterion mapped|off-chart: building → planning has no transition on the chart|off-chart: planning → review has no transition on the chart|REVISE, under the round cap|device offline 60 minutes, or job dies twice (T6), or CI red three times|off-chart: back from stuck by verdict authorized-unstick-fix', '|');
+    var key = [names.join(','), whos.join(','), jumps.join(','), future.join(','), durRaw.join(','), scale].join('|');
+    if (this._m && this._mKey === key) return this._m;
+
+    var laneOf = {
+      intake: 'ask', questions: 'ask', 'waiting-max': 'ask', planning: 'plan', 'plan-check': 'plan',
+      building: 'build', fixing: 'build', review: 'review', capped: 'review',
+      ship: 'ship', 'awaiting-ok': 'ship', 'waiting-external': 'ship',
+      merged: 'shipped', 'post-merge': 'shipped', done: 'shipped', 'handed-off': 'shipped',
+      refused: 'stop', abandoned: 'stop', stuck: 'stop', blocked: 'stop'
+    };
+    var laneY = { shipped: 4, ship: 13, review: 22, build: 31, plan: 40, ask: 49, stop: 62 };
+    var tints = { script: '#a9b1d6', claude: '#e0af68', codex: '#7aa2f7', cursor: '#bb9af7', grok: '#73daca', human: '#ff9e64' };
+    var bg = [14, 14, 20], white = [255, 255, 255];
+    var LX0 = 24, PW = 176;
+    var n = names.length, i, d, x, lane, hex, rgb;
+
+    /* widths: even steps, or proportional to time with a 3-cell minimum */
+    var durs = [], total = 0, w = [], sum = 0, big = 0;
+    for (i = 0; i < n; i++) {
+      d = Number(durRaw[i]);
+      if (!isFinite(d) || d <= 0) d = 60;
+      durs.push(d);
+      total += d;
+    }
+    for (i = 0; i < n; i++) {
+      if (scale === 'time') w.push(Math.max(3, Math.round(PW * durs[i] / total)));
+      else w.push(Math.max(6, Math.min(24, Math.floor(PW / Math.max(1, n)))));
+      sum += w[i];
+      if (w[i] > w[big]) big = i;
+    }
+    if (sum > PW) w[big] -= (sum - PW);
+
+    var visits = [], cols = [], barLabels = [], rulerLabels = [], ticks = [], nowIdx = -1;
+    x = LX0;
+    for (i = 0; i < n; i++) {
+      lane = laneOf[names[i]] || 'ask';
+      hex = lane === 'stop' ? '#f7768e' : (tints[whos[i]] || tints.script);
+      rgb = this._rgb(hex);
+      visits.push({
+        name: names[i], lane: lane, y0: laneY[lane], x: x, w: w[i],
+        who: whos[i] || 'script', whoHex: tints[whos[i]] || tints.script,
+        jump: jumps.indexOf(String(i)) >= 0, dur: durs[i], durText: this._fmt(durs[i]), note: notes[i] || ''
+      });
+      cols.push({ lit: hex, dim: this._mix(bg, rgb, 0.3), crest: this._mix(rgb, white, 0.5) });
+      if (names[i].length * 6 + 4 <= (w[i] - 1) * 4) {
+        barLabels.push({
+          label: names[i],
+          left: (x * 4 + 5) + 'px',
+          top: (laneY[lane] * 4 + 11) + 'px',
+          weight: i === n - 1 ? 700 : 500,
+          color: i === n - 1 ? '#0c0e10' : this._mix(rgb, white, 0.35)
+        });
+      }
+      if (scale !== 'time') {
+        ticks.push(x);
+        rulerLabels.push({ label: this._fmt(durs[i]), left: (x * 4) + 'px', width: (w[i] * 4) + 'px', color: i === n - 1 ? '#7dcfff' : '#8b93b8' });
+        if (i === n - 1) nowIdx = rulerLabels.length - 1;
+      }
+      x += w[i];
+    }
+    var nowX = x;
+    ticks.push(nowX);
+
+    /* to scale: a tick every 15 minutes, placed through the same bars so it stays true */
+    if (scale === 'time') {
+      var acc = 0, k = 1, tx;
+      for (i = 0; i < n; i++) {
+        while (k * 900 <= acc + durs[i]) {
+          tx = Math.round(visits[i].x + (k * 900 - acc) / durs[i] * visits[i].w);
+          ticks.push(tx);
+          if (nowX - tx > 10) rulerLabels.push({ label: '+' + this._fmt(k * 900), left: (tx * 4 - 30) + 'px', width: '60px', color: '#8b93b8' });
+          k += 1;
+        }
+        acc += durs[i];
+      }
+    }
+
+    /* the shortest way to shipped from here: outlined, not timed */
+    var ghosts = [], gx = nowX + 49;
+
+    var laneNames = [['shipped', 4, '#9ece6a'], ['ship', 13, '#8b93b8'], ['review', 22, '#8b93b8'], ['build', 31, '#8b93b8'], ['plan', 40, '#8b93b8'], ['ask', 49, '#8b93b8'], ['stopped', 62, '#f7768e']];
+    var laneLabels = [];
+    for (i = 0; i < laneNames.length; i++) {
+      laneLabels.push({ label: laneNames[i][0], top: (laneNames[i][1] * 4 + 10) + 'px', color: laneNames[i][2] });
+    }
+
+    this._mKey = key;
+    this._m = {
+      n: n, visits: visits, cols: cols, ghosts: ghosts, ticks: ticks, nowX: nowX, endX: gx,
+      barLabels: barLabels, rulerLabels: rulerLabels, laneLabels: laneLabels, nowLabelIdx: nowIdx, hops: future.length,
+      green: this._mix(bg, this._rgb('#9ece6a'), 0.34), red: this._mix(bg, this._rgb('#f7768e'), 0.3),
+      startClock: '1:47 PM', nowClock: '3:48 PM',
+      summary: 'Journey of this ticket through time: ' + names.join(', ') + '. Now: ' + (n ? names[n - 1] : 'none') + ', ' + this._fmt(total) + ' after intake. Shortest way to shipped: ' + future.join(', ') + '.'
+    };
+    return this._m;
+  }
+
+  _draw(now) {
+    var el = this._el || (this._cid ? document.getElementById(this._cid) : null);
+    if (!el || !el.getContext) return;
+    var cssW = el.clientWidth, cssH = el.clientHeight;
+    if (!cssW || !cssH) return;
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    var W = Math.round(cssW * dpr), H = Math.round(cssH * dpr);
+    if (el.width !== W || el.height !== H) {
+      el.width = W;
+      el.height = H;
+    }
+    var ctx = this._ctx || (this._ctx = el.getContext('2d'));
+    if (!ctx) return;
+
+    var p = this.props;
+    var still = p.still === true || p.still === 'true' || this._sysStill;
+    var m = this._model();
+    var bay = this._bayer();
+    var t = (now - this._t0) / 1000;
+    if (this._tPlay === undefined) this._tPlay = now;
+    /* the journey draws itself once, left to right, then rests at "now" */
+    var frac = still ? 1 : Math.min(1, (now - this._tPlay) / 3000);
+    var arrived = frac >= 1;
+    var px = (cssW / 250) * dpr;
+    var block = function (x, y, w, h) {
+      ctx.fillRect(Math.round(x * px), Math.round(y * px), Math.ceil(w * px), Math.ceil(h * px));
+    };
+    var i, x, y, v, nx, col, g, k, a, b, step, bw, prevMid;
+    var n = m.n, last = n - 1;
+    var marchK = Math.floor(t * 8);
+    var slow = Math.floor(t * 3);
+    var lively = !still && p.motion !== 'calm';
+    if (!arrived) this._tArr = undefined;
+    else if (this._tArr === undefined) this._tArr = now;
+    /* one beat every 7 s: it runs along the journey, then rings at "now" */
+    var beatT = (lively && arrived) ? ((now - this._tArr) / 1000) % 7 : -1;
+    var beatX = beatT >= 0 ? 24 + beatT * 90 : -99;
+    var ringAge, rr, e, ph;
+
+    ctx.fillStyle = '#0e0e14';
+    ctx.fillRect(0, 0, W, H);
+
+    /* quiet lanes: a dotted rule under each one */
+    ctx.fillStyle = '#1c1f2e';
+    var rules = [12, 21, 30, 39, 48, 57];
+    for (i = 0; i < rules.length; i++) {
+      for (x = 24; x < 248; x += 3) block(x, rules[i], 1, 1);
+    }
+    /* the goal glows a little, ahead of the ticket only; the floor is red */
+    ctx.fillStyle = m.green;
+    for (y = 4; y < 12; y++) {
+      for (x = m.nowX + 1; x < 248; x++) {
+        if ((lively ? 0.15 + 0.11 * Math.sin(t * 0.9 + ((x * 73 + y * 151) % 64) * 0.098) : 0.16) > bay[((y & 7) << 3) | (x & 7)]) block(x, y, 1, 1);
+      }
+    }
+    ctx.fillStyle = m.red;
+    for (y = 62; y < 71; y++) {
+      for (x = 24; x < 248; x++) {
+        if (0.11 > bay[((y & 7) << 3) | (x & 7)]) block(x, y, 1, 1);
+      }
+    }
+    ctx.fillStyle = '#24283b';
+    for (x = 24; x < 248; x += 2) block(x, 60, 1, 1);
+
+    /* time axis */
+    ctx.fillStyle = '#414868';
+    block(24, 74, m.nowX - 24, 1);
+    for (x = m.nowX + 2; x < 248; x += 3) block(x, 74, 1, 1);
+    for (i = 0; i < m.ticks.length; i++) block(m.ticks[i], 73, 1, 3);
+
+    if (arrived) {
+      /* now line */
+      ctx.fillStyle = '#3c6f8c';
+      for (y = 4; y < 74; y++) {
+        if (lively ? ((y + slow) % 4) < 2 : y % 2 === 0) block(m.nowX, y, 1, 1);
+      }
+
+      /* what is ahead: outlined bars, dotted links, a flag at the summit */
+      ctx.fillStyle = '#6b7399';
+      prevMid = n ? m.visits[last].y0 + 4 : 53;
+      for (i = 0; i < m.ghosts.length; i++) {
+        g = m.ghosts[i];
+        a = prevMid;
+        b = g.y0 + 4;
+        step = b > a ? 1 : -1;
+        for (y = a, k = 0; y !== b; y += step, k++) {
+          if (lively ? ((((k - slow) % 3) + 3) % 3) !== 0 : k % 2 === 0) block(g.x - 1, y, 1, 1);
+        }
+        /* the way ahead drifts toward the summit */
+        for (x = g.x; x < g.x + g.w - 1; x++) {
+          if (lively ? ((((x - slow) % 3) + 3) % 3) === 0 : (x - g.x) % 2 === 1) continue;
+          block(x, g.y0 + 2, 1, 1);
+          block(x, g.y0 + 6, 1, 1);
+        }
+        for (y = g.y0 + 2; y <= g.y0 + 6; y += 2) {
+          block(g.x, y, 1, 1);
+          block(g.x + g.w - 2, y, 1, 1);
+        }
+        prevMid = b;
+      }
+      if (m.hops > 0) {
+        /* what is ahead: one faint dotted line from the ticket up to the flag */
+        var tx0 = m.nowX + 4, tx1 = m.endX - 2;
+        for (x = tx0, k = 0; x <= tx1; x++, k++) {
+          if ((lively ? (((k - slow) % 3) + 3) % 3 : k % 3) !== 0) continue;
+          y = Math.round(prevMid + (7 - prevMid) * (k / Math.max(1, tx1 - tx0)));
+          ctx.fillStyle = y < 13 ? '#5c7a45' : '#565d80';
+          block(x, y, 1, 1);
+        }
+        ctx.fillStyle = '#9ece6a';
+        block(m.endX, 4, 1, 7);
+        if (lively && Math.floor(t * 2) % 2 === 1) {
+          block(m.endX + 1, 4, 2, 3);
+          block(m.endX + 3, 5, 1, 2);
+        } else {
+          block(m.endX + 1, 4, 3, 3);
+        }
+      }
+    }
+
+    /* visits: one bar each, in the colour of who did the work */
+    var revealX = arrived ? m.nowX : 24 + frac * (m.nowX - 24);
+    var tokenX = 24, tokenY = n ? m.visits[0].y0 : 49;
+    for (i = 0; i < n; i++) {
+      v = m.visits[i];
+      if (v.x >= revealX) break;
+      col = m.cols[i];
+      bw = Math.max(1, Math.min(v.w - 1, Math.ceil(revealX - v.x)));
+      tokenX = v.x + bw;
+      tokenY = v.y0;
+      if (arrived && i === last) {
+        ctx.fillStyle = col.lit;
+        block(v.x, v.y0 + 2, bw, 5);
+        /* the work strip: the only thing that keeps moving */
+        for (x = v.x; x < v.x + bw; x++) {
+          ctx.fillStyle = (still || ((((x - marchK) % 6) + 6) % 6) < 3) ? col.crest : col.dim;
+          block(x, v.y0 + 6, 1, 1);
+        }
+      } else {
+        ctx.fillStyle = col.dim;
+        block(v.x, v.y0 + 2, bw, 5);
+        ctx.fillStyle = col.lit;
+        block(v.x, v.y0 + 2, bw, 1);
+        /* each bar flashes as it lands during the draw-in */
+        if (!arrived && lively && revealX >= v.x + v.w - 1 && revealX - (v.x + v.w - 1) < 7) {
+          ctx.fillStyle = col.crest;
+          block(v.x, v.y0 + 2, bw, 5);
+        }
+        /* the beat lights the top edge as it passes */
+        if (beatX >= v.x && beatX < v.x + bw + 6) {
+          ctx.fillStyle = col.crest;
+          for (x = Math.max(v.x, Math.floor(beatX) - 5); x < Math.min(v.x + bw, Math.floor(beatX) + 1); x++) block(x, v.y0 + 2, 1, 1);
+        }
+      }
+      /* link to the next visit; dotted when the chart has no such transition */
+      if (i < last && revealX >= m.visits[i + 1].x) {
+        nx = m.visits[i + 1];
+        ctx.fillStyle = (beatX >= v.x + v.w - 3 && beatX < v.x + v.w + 5) ? m.cols[i + 1].crest : m.cols[i + 1].lit;
+        a = v.y0 + 4;
+        b = nx.y0 + 4;
+        step = b > a ? 1 : -1;
+        x = v.x + v.w - 1;
+        if (a === b) block(x, a, 1, 1);
+        for (y = a, k = 0; y !== b + step && a !== b; y += step, k++) {
+          if (!(nx.jump && k % 2 === 1)) block(x, y, 1, 1);
+        }
+      }
+    }
+
+    /* selected visit: a thin frame */
+    var sel = this._sel === undefined ? last : this._sel;
+    if (this._selPrev !== undefined && this._selPrev !== sel) this._selAt = now;
+    this._selPrev = sel;
+    if (arrived && sel >= 0 && sel < n && sel !== last) {
+      v = m.visits[sel];
+      ctx.fillStyle = '#c0caf5';
+      block(v.x - 1, v.y0 + 1, v.w + 1, 1);
+      block(v.x - 1, v.y0 + 7, v.w + 1, 1);
+      block(v.x - 1, v.y0 + 1, 1, 7);
+      block(v.x + v.w - 1, v.y0 + 1, 1, 7);
+    }
+
+    /* a picked bar flashes once */
+    if (this._selAt !== undefined && now - this._selAt < 260 && sel >= 0 && sel < n) {
+      v = m.visits[sel];
+      ctx.fillStyle = m.cols[sel].crest;
+      block(v.x, v.y0 + 2, v.w - 1, 5);
+    }
+
+    /* the ticket itself: a cyan marker at the leading edge */
+    if (n) {
+      if (arrived) {
+        v = m.visits[last];
+        ctx.fillStyle = '#7dcfff';
+        block(v.x - 1, v.y0 + 1, v.w + 1, 1);
+        block(v.x - 1, v.y0 + 7, v.w + 1, 1);
+        block(v.x - 1, v.y0 + 1, 1, 7);
+        tokenX = m.nowX - 1;
+        tokenY = v.y0;
+        if (lively) {
+          /* sparks drift up from the leading edge */
+          ctx.fillStyle = '#7dcfff';
+          for (k = 0; k < 3; k++) {
+            ph = (t * 0.9 + k * 0.37) % 1;
+            if (ph < 0.75) block(m.nowX + 2 + k * 2, v.y0 + 1 - Math.floor(ph * 7), 1, 1);
+          }
+        }
+      }
+      ctx.fillStyle = (still || Math.floor(t * 2) % 2 === 0) ? '#b8e5ff' : '#7dcfff';
+      block(tokenX, tokenY + 1, 2, 7);
+    }
+  }
+}
+</script>
+</body>
+</html>

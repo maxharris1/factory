@@ -521,6 +521,8 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "health",  # component heartbeats (#92)
         "feeder",
         "statechart",
+        "telemetry",
+        "projects",  # per-project ship mode and round caps (#152)
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
     json.dumps(snapshot)

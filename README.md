@@ -228,24 +228,43 @@ refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
 id (a UUID) and the start leads its own process group, then creates the record with
 noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
-UTC). A check that finds no record cannot tell whether the start is still on
-its way, so it creates the record itself as a fence (`fenced`) and cannot tell
-this time; the fenced start then refuses, and later checks read the fence as
-gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+UTC). Just before, it starts a keeper in its own group and writes the keeper's
+pid and start time as the first snapshot (below). The keeper ignores SIGTERM,
+SIGINT and SIGHUP and exits once no other process is in the group, so the group
+is never empty while any process of the start lives, and its number is never
+reused meanwhile (Codex PR #129 round 3). A check that finds no record cannot
+tell whether the start is still on its way, so it creates the record itself as
+a fence (`fenced`) and cannot tell this time; the fenced start then refuses,
+and later checks read the fence as gone. A start that never ran (unreachable,
+refused) so frees its slot one check later. The poll that follows a detached
+start (issue #128) never writes the fence: with no record it cannot tell, and
+the start it follows records itself.
+The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
 every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
 three 0/1 answers. Then a record from an earlier boot session or an empty group
 is gone; a group holding only the bot's own processes and led by the recorded
-leader is running; a malformed record, another tag, another user's process in the group,
-a group whose leader has exited (nothing ties the processes left to this start),
+leader is running, and so is one whose leader has exited while it still holds
+a process from the last stop's snapshot (below) with its recorded start time;
+a malformed record, another tag, another user's process in the group,
+a group whose leader has exited with no such process (nothing ties the
+processes left to this start),
 a leader with a different start time (the number was reused), or any failed or
 malformed step (no boot session UUID, a user id that is not a number, ps, awk)
-cannot tell. The stop sends SIGTERM to the recorded group only when the check
-would say running. A process that leaves the job's group (`setsid`), or stays in
-it after its leader exits, is never signalled on macOS; the latter keeps the
-slot until it ends. Every script runs under POSIX `sh` whatever the login shell
-(the Mac bots use zsh).
+cannot tell. The stop sends SIGTERM (SIGKILL when a cancel escalates) to the
+recorded group only when the check would say running. While the leader is
+verified alive, the stop first writes a snapshot of the group
+(`.orch-worker-<tag>.members.pid`: each member's pid and start time, from one
+`ps -A -o pgid=,pid=,lstart=` listing, kept only when the leader is verified
+again after it). A snapshot member still in the group with the same start time
+proves the group was never empty since, so its number was never reused: a
+cancelled run whose harness dies on SIGTERM but leaves a child that ignores it
+is still killed (Codex PR #129 round 2). With the keeper, so is a child born
+after the snapshot, even one the harness forks while it shuts down, and a child
+left in the group after a normal exit is stopped before the slot is released,
+as on Linux (round 3). A process that leaves the job's group (`setsid`) is
+never signalled on macOS. Every script runs under POSIX `sh` whatever the login
+shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
@@ -257,7 +276,12 @@ device one SSH check looks for the tag: any process of the bot user carrying it
 still in the recorded group from this boot means it cannot tell; otherwise the
 worker is gone. A worker still running is sent SIGTERM (every tagged process
 and each group holding one; a stored number alone is never signalled) and
-checked again for up to 10 seconds. An unreachable device, a check that cannot
+checked again for up to 10 seconds. A cancelled run (a signal to `orch job
+run`, or its job ended elsewhere) is not left running: the follow sends
+SIGTERM, then SIGKILL to the same processes from 60 seconds on, and follows
+the worker until it is gone, for up to two minutes; if it is still not
+confirmed gone, the final check sends SIGKILL after its SIGTERM too (issue
+#128). An unreachable device, a check that cannot
 tell, or a worker that will not stop keeps the slot and is logged. A new
 `orch job run` for a job whose runner died is refused (exit 2, nothing started)
 while that runner's worker is not confirmed gone, so its identity is never
@@ -403,6 +427,14 @@ backoff (writes are never retried); a ref that still times out records a retryab
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated
 row per cycle to `poll_deferrals`, not `poll_errors`.
+A poll step's exception, and one that escapes a whole cycle, keeps its class in
+`poll_errors.error` and stores its message and newest ten frames, redacted and
+capped at 4,000 characters, in `poll_errors.detail`; each message in the chain
+is cut at its first character outside letters, digits, spaces and `_.,:;()'/=+-`,
+so no response body, escaped or not, is kept.
+The same text goes to the poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
+`ticket_state` row records a `stuck-wake:<class>` error and the rest of the
+cycle still runs.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
@@ -599,7 +631,7 @@ and records itself on the slot, so the job reads `running` within seconds of
 the claim, with no model turn and no message to any bot. The harness posts its
 `orch:v1` handoff and runs `orch job done` as the brief says.
 
-- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+- **Brief.** [`lib/brief/`](lib/brief/) renders one standard brief per
   job kind from the job row: implement (`build`, `plan`), fix, review, and
   merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
   repo, PR or ticket, head, round and cap, risk, the section 8 review rules
@@ -1042,6 +1074,15 @@ written to a temp file in the same directory and fsynced, then renamed into
 place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
+
+`status.json`'s `projects` lists each `orch.yml` project in order with its
+tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
+round caps (`rounds.low`, `rounds.high`), as the poller last read its
+`factory.md` (issue #152). The dashboard has no copy of any `factory.md`:
+each poll cycle the dispatcher stores what `LivePollSource` parsed in the
+`project_rules` table (`lib/project_rules.py`), and the snapshot reads it
+back. A `factory.md` the poller could not read, or has not read yet, is
+`status: unknown` with the `reason`, never a default.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state

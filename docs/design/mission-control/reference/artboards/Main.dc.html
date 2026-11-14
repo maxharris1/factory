@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slot card states</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 1520px; height: 672px; box-sizing: border-box; padding: 40px; background: #1a1b26; color: #c0caf5; font-family: 'Geist', system-ui, sans-serif; display: flex; flex-direction: column; gap: 28px">
+<div style="display: flex; align-items: center; gap: 12px">
+<h1 style="margin: 0; font-size: 20px; font-weight: 600; color: #c0caf5">Lanes and slots — slot card states</h1>
+<span style="flex-grow: 1"></span>
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.08em">
+<span style="padding: 2px 6px; border: 1px solid #e0af68; color: #e0af68">CLAUDE</span>
+<span style="padding: 2px 6px; border: 1px solid #7aa2f7; color: #7aa2f7">CODEX</span>
+<span style="padding: 2px 6px; border: 1px solid #bb9af7; color: #bb9af7">CURSOR · PLAN</span>
+<span style="padding: 2px 6px; border: 1px solid #f7768e; color: #f7768e">TROUBLE · STATIC</span>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px 20px">
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · plan</div>
+<dc-import name="SlotCard" mode="plan" bot="cursor" label="#488 · T-1201" seed="1" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · build · 20% of timeout</div>
+<dc-import name="SlotCard" mode="build" bot="claude" progress="0.2" label="#482 · T-1193" seed="2" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · build · 60%</div>
+<dc-import name="SlotCard" mode="build" bot="claude" progress="0.6" label="#483 · T-1195" seed="3" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · build · 95%</div>
+<dc-import name="SlotCard" mode="build" bot="claude" progress="0.95" label="#479 · T-1188" seed="4" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · review</div>
+<dc-import name="SlotCard" mode="review" bot="codex" label="#481 · T-1190" seed="5" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Running · fix</div>
+<dc-import name="SlotCard" mode="fix" bot="claude" label="#480 · T-1189" seed="6" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Claimed, not started</div>
+<dc-import name="SlotCard" mode="claimed" bot="codex" label="#489 · T-1203" seed="7" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Stale heartbeat · decaying</div>
+<dc-import name="SlotCard" mode="stale" bot="claude" label="#476 · T-1184" seed="8" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Dead · overdue · stuck</div>
+<dc-import name="SlotCard" mode="dead" bot="codex" label="#471 · T-1179" seed="9" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Idle slot</div>
+<dc-import name="SlotCard" mode="idle" seed="10" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Held slot</div>
+<dc-import name="SlotCard" mode="held" seed="11" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<div style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #8d95bd">Done · settled</div>
+<dc-import name="SlotCard" mode="review" bot="codex" done="true" label="#477 · T-1186" seed="12" cell="{{ cell }}" tint-mix="{{ tintMix }}" verbs="{{ verbs }}" still="{{ still }}" hint-size="100%,131px"></dc-import>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"cell":{"editor":"int","min":2,"max":8,"default":4,"unit":"px","section":"Pixel grid"},"tintMix":{"editor":"range","min":0,"max":1,"step":0.05,"default":1,"section":"Pixel grid"},"verbs":{"editor":"boolean","default":true,"section":"Motion"},"still":{"editor":"boolean","default":false,"section":"Motion"},"$preview":{"width":1520,"height":672}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var p = this.props;
+    var cell = Number(p.cell);
+    var tintMix = Number(p.tintMix);
+    return {
+      cell: isFinite(cell) && cell > 0 ? cell : 4,
+      tintMix: isFinite(tintMix) ? tintMix : 1,
+      verbs: !(p.verbs === false || p.verbs === 'false'),
+      still: p.still === true || p.still === 'true'
+    };
+  }
+}
+</script>
+</body>
+</html>

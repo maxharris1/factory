@@ -37,6 +37,7 @@ ACTIONS = (
     "stale",
     "done",
     "awaiting-ok",
+    "go-not-from-approver",
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed")
