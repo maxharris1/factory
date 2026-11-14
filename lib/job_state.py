@@ -57,7 +57,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib.device_pool import Placement
-from lib.queue import SLOTS_TABLE, retire_if_finished
+from lib.queue import SLOTS_TABLE, retire_requeued
 
 CLAIMED = "claimed"
 RUNNING = "running"
@@ -369,9 +369,9 @@ def requeue_unstarted(
     slot row, with slot_params). Requeued: the same job row goes back to
     queued with its queue-wait clock restarted, so no round and no T6
     attempt is charged. Once the row has used MAX_FREE_REQUEUES it is failed
-    instead, for T6. A finished ticket's job is cancelled, not requeued
-    (#108). Returns (event, detail), or None when the guard did not match and
-    nothing changed.
+    instead, for T6. A finished ticket's job, or a restored claim, is
+    cancelled, not requeued (retire_requeued, #108). Returns (event,
+    detail), or None when the guard did not match and nothing changed.
     """
     activity = "" if last_activity_at is None else " AND last_activity_at = ?"
     params: tuple[object, ...] = (job_id,) if last_activity_at is None else (
@@ -395,8 +395,9 @@ def requeue_unstarted(
             "UPDATE jobs SET state = 'queued', last_activity_at = ? WHERE id = ?",
             (now, job_id),
         )
-        if retire_if_finished(connection, job_id, reason, now=now):
-            return "cancelled", f"finished:{reason}"
+        retired = retire_requeued(connection, job_id, reason, now=now)
+        if retired is not None:
+            return "cancelled", retired
         outcome = event
         detail = (
             f"{reason}; requeued, no round charged "

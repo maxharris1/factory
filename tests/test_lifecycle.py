@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
 from lib.dispatcher import CIResult, Comment, TrackedTicket
 from lib.job_state import REQUEUED_EARLY_EXIT, requeue_unstarted
 from lib.queue import Job, JobRequest
@@ -37,6 +39,7 @@ from tests.test_dispatcher import (
     track,
 )
 from tests.test_job_state import Poller
+from tests.test_remote_start import FakeTransport, config_of, machines_file
 
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
@@ -1071,3 +1074,72 @@ def test_a_replayed_answers_resume_is_never_claimable_once_answered(
 
     assert "build" not in waiter.claimed
     assert {state for action, state in _harness_jobs(flow.queue)} == {"cancelled"}
+
+
+def _restored_claim(tmp_path: Path, release: str):
+    """A cycle backup holds the build claimed (#108 round 5); the builder
+    then finished it, and the state directory was lost and restored."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.go()
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    build = claimed[0]
+    if release != "claimed":
+        pool.attach_runner(build.id, owner="claude", pid=11, start=None, alive=lambda *_: False)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.now[0] += 400
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config)
+    flow.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(), alive=lambda *_: False
+    )
+    return flow, pool, build
+
+
+def _release(flow: Flow, pool: DevicePool, build: Job, release: str) -> None:
+    if release == "start-failed":
+        assert pool.requeue_unstarted(build.id, owner="claude", runner=11, reason="start failed")
+    else:
+        flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+
+RELEASES = ("claimed", "unstarted", "start-failed")
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_a_restored_claim_answered_after_the_backup_is_never_claimable(
+    tmp_path: Path, release: str
+) -> None:
+    flow, pool, build = _restored_claim(tmp_path, release)
+    flow.head = HEADS[1]
+    flow.add("ready-1", READY.format(head=flow.head), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+
+    _release(flow, pool, build, release)
+
+    assert pool.claim("claude") is None
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert pool.claim("claude") is None
+    assert ("build", "cancelled") in _harness_jobs(flow.queue)
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_a_restored_unanswered_claim_is_queued_again_by_the_next_pass(
+    tmp_path: Path, release: str
+) -> None:
+    flow, pool, build = _restored_claim(tmp_path, release)
+
+    _release(flow, pool, build, release)
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    rerun = pool.claim("claude")
+    assert rerun is not None and rerun[0].id == build.id

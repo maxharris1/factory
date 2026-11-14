@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from lib.state_backup import RESTORED, RESTORED_CLAIM
+
 ACTIONS = (
     "plan",
     "build",
@@ -448,7 +450,7 @@ class SQLiteJobQueue:
         Only for the dispatcher's answered-by cancel (#108), when the answer
         it relied on was then rejected: the step was never done. The write
         joins the caller's transaction. A finished ticket's job is cancelled
-        again instead (retire_if_finished) and this returns False.
+        again instead (retire_requeued) and this returns False.
         """
         now = self.now()
         changed = connection.execute(
@@ -459,7 +461,7 @@ class SQLiteJobQueue:
             """,
             (now, job_id),
         ).rowcount
-        if changed != 1 or retire_if_finished(connection, job_id, reason, now=now):
+        if changed != 1 or retire_requeued(connection, job_id, reason, now=now) is not None:
             return False
         connection.execute(
             """
@@ -687,22 +689,27 @@ def _no_remote_start(connection: sqlite3.Connection) -> str:
     )
 
 
-def retire_if_finished(
+def retire_requeued(
     connection: sqlite3.Connection, job_id: str, reason: str, *, now: float
-) -> bool:
+) -> str | None:
     """Cancel job_id, just put back in the queue in the caller's open
-    transaction, when it is harness work on a merged or done ticket (#108).
+    transaction, when it is harness work that must not be claimable (#108).
+    Returns the cancel's job_events detail, or None when it stays queued.
 
     Every write that returns a job to queued (a released claim, an unstarted
-    requeue, a step whose answer was rejected) calls this before it commits,
-    so a finished ticket never regains claimable work. True when cancelled.
+    requeue, a step whose answer was rejected) calls this before it commits.
+    A merged or done ticket's job is cancelled `finished:<reason>`, so a
+    finished ticket never regains claimable work. A step restore() copied
+    running (RESTORED_CLAIM) and not held since is cancelled RESTORED, as
+    restore() holds a queued step: the backup may predate its answer, and
+    the dispatcher's next pass queues it again only if nothing answered it.
     """
     if not _has_table(connection, "ticket_state"):
-        return False
-    changed = connection.execute(
-        """
-        UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ?
-        WHERE id = ? AND state = 'queued' AND recipient != 'grok'
+        return None
+    harness = "id = ? AND state = 'queued' AND recipient != 'grok'"
+    finished = connection.execute(
+        f"""
+        SELECT 1 FROM jobs WHERE {harness}
           AND EXISTS (
             SELECT 1 FROM ticket_state
             WHERE ticket_state.repo = lower(jobs.repo)
@@ -710,10 +717,33 @@ def retire_if_finished(
               AND ticket_state.workflow_state IN ('merged', 'done')
           )
         """,
+        (job_id,),
+    ).fetchone()
+    if finished is not None:
+        detail = f"finished:{reason}"
+    elif _has_table(connection, "job_events") and connection.execute(
+        f"""
+        SELECT 1 FROM jobs WHERE {harness}
+          AND EXISTS (
+            SELECT 1 FROM job_events AS mark
+            WHERE mark.job_id = jobs.id AND mark.event = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM job_events AS hold
+                WHERE hold.job_id = jobs.id AND hold.event = 'cancelled'
+                  AND hold.detail = ? AND hold.id > mark.id
+              )
+          )
+        """,
+        (job_id, RESTORED_CLAIM, RESTORED),
+    ).fetchone() is not None:
+        detail = RESTORED
+    else:
+        return None
+    connection.execute(
+        "UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ? "
+        "WHERE id = ?",
         (now, now, job_id),
-    ).rowcount
-    if changed != 1:
-        return False
+    )
     if _has_table(connection, "job_events"):
         connection.execute(
             """
@@ -723,9 +753,9 @@ def retire_if_finished(
             SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ?
             FROM jobs WHERE id = ?
             """,
-            (f"finished:{reason}", now, job_id),
+            (detail, now, job_id),
         )
-    return True
+    return detail
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

@@ -54,7 +54,7 @@ from lib.queue import (
     SQLiteJobQueue,
     _job,
     claim_order,
-    retire_if_finished,
+    retire_requeued,
 )
 from lib.remote import new_tag
 from lib.schema import HARNESSES
@@ -316,8 +316,9 @@ class DevicePool:
         place in line), its slot is freed, and nothing else changes: no
         round, no attempt, no failure. Records a `requeued-unstarted` job
         event when the dispatcher's job_events table exists. On a finished
-        ticket the job is cancelled instead (#108). False (nothing changed)
-        when the guard does not hold.
+        ticket, or for a restored claim, the job is cancelled instead
+        (retire_requeued, #108). False (nothing changed) when the guard does
+        not hold.
         """
         if owner not in HARNESSES:
             raise QueueError(f"unknown owner {owner!r}")
@@ -340,7 +341,7 @@ class DevicePool:
                 connection.commit()
                 return False
             connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
-            if not retire_if_finished(connection, job_id, reason, now=now) and _has_table(
+            if retire_requeued(connection, job_id, reason, now=now) is None and _has_table(
                 connection, "job_events"
             ):
                 job = connection.execute(

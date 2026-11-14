@@ -21,6 +21,9 @@ BACKUP_ENV = "ORCH_DB_BACKUP"
 # The job_events detail of a step restore() holds; the dispatcher's first
 # pass over the ticket queues it again unless the thread answered it (#108).
 RESTORED = "restored"
+# The job_events event restore() records on each running step it copies: a
+# claim that later goes back to the queue is held as RESTORED (#108).
+RESTORED_CLAIM = "restored-claim"
 STEPS = ("plan", "build", "fix", "review")
 
 
@@ -111,12 +114,15 @@ def restore(backup_path: Path, db: Path) -> datetime:
 
 def _hold_steps(connection: sqlite3.Connection) -> None:
     """Cancel the copy's queued plan, build, fix and review jobs as RESTORED,
-    before the copy is renamed into place (#108).
+    and mark its running ones RESTORED_CLAIM, before the copy is renamed into
+    place (#108).
 
     The backup is up to a cycle old: such a step may since have run and been
     answered. Restored queued, an `orch wait` could claim it before the
     poller reads its thread. Held, it waits for the dispatcher's next pass
-    over the ticket, which queues it again unless the thread answered it.
+    over the ticket, which queues it again unless the thread answered it. A
+    running one is left to its runner; if it is released back to the queue,
+    queue.retire_requeued holds it the same way.
     """
     tables = {
         str(row[0])
@@ -125,8 +131,8 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
     if not {"jobs", "job_events"} <= tables:
         return
     now = time.time()
-    held = f"""
-        FROM jobs WHERE state = 'queued' AND recipient != 'grok'
+    steps = f"""
+        FROM jobs WHERE state = ? AND recipient != 'grok'
           AND action IN ({", ".join("?" for _ in STEPS)})
     """
     connection.execute(
@@ -134,14 +140,23 @@ def _hold_steps(connection: sqlite3.Connection) -> None:
         INSERT INTO job_events (
             job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
         )
-        SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ? {held}
+        SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ? {steps}
         """,
-        (RESTORED, now, *STEPS),
+        (RESTORED_CLAIM, RESTORED, now, "running", *STEPS),
+    )
+    connection.execute(
+        f"""
+        INSERT INTO job_events (
+            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+        )
+        SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ? {steps}
+        """,
+        (RESTORED, now, "queued", *STEPS),
     )
     connection.execute(
         f"UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ? "
-        f"WHERE id IN (SELECT id {held})",
-        (now, now, *STEPS),
+        f"WHERE id IN (SELECT id {steps})",
+        (now, now, "queued", *STEPS),
     )
     connection.commit()
 

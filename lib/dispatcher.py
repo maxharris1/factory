@@ -39,7 +39,7 @@ from lib.queue import (
     QueueError,
     SQLiteJobQueue,
     _job,
-    retire_if_finished,
+    retire_requeued,
 )
 from lib.state_backup import RESTORED
 
@@ -944,8 +944,8 @@ class Dispatcher:
         finds the job queued and refuses it before anything starts. Its
         queue-wait clock (last_activity_at) restarts now, so the timeout
         sweep never fails it for time spent before the release; created_at
-        is kept, so it keeps its place in line. On a finished ticket the job
-        is cancelled instead (#108).
+        is kept, so it keeps its place in line. On a finished ticket, or for
+        a restored claim, the job is cancelled instead (retire_requeued, #108).
         """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -968,8 +968,9 @@ class Dispatcher:
                 f"{job.request.recipient} claimed it {int((now - placed_at) // 60)} "
                 "minutes ago and never started it"
             )
-            if retire_if_finished(connection, job.id, reason, now=now):
-                event, detail = "cancelled", f"finished:{reason}"
+            retired = retire_requeued(connection, job.id, reason, now=now)
+            if retired is not None:
+                event, detail = "cancelled", retired
             else:
                 event, detail = "released-claimed", f"{reason}; requeued, no round charged"
                 self._record_job_event(connection, job, event, detail, now)
