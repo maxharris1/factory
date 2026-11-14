@@ -45,7 +45,8 @@ def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = T
         "    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot}\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot}\n"
-        f"    workdir_root: {tmp_path}/remote/{{bot}}/work\n    ssh_alias: fakepc-{{bot}}\n",
+        f"    workdir_root: {tmp_path}/remote/{{bot}}/work\n    ssh_alias: fakepc-{{bot}}\n"
+        "    factory_root: /srv/factory\n",
         encoding="utf-8",
     )
     return path

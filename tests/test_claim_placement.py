@@ -221,7 +221,8 @@ def _pc_machines(tmp_path: Path) -> MachinesConfig:
         "devices:\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 1\n"
         "    harnesses: {codex: codex-bot}\n"
-        f"    workdir_root: {tmp_path}/work\n    ssh_alias: pc-{{bot}}\n",
+        f"    workdir_root: {tmp_path}/work\n    ssh_alias: pc-{{bot}}\n"
+        "    factory_root: /srv/factory\n",
         encoding="utf-8",
     )
     config, findings = load_machines_yml(path, allow_placeholders=True)

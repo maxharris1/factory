@@ -1,0 +1,15 @@
+{
+  "source": "maxharris1/factory#89 orch:v1 headers, read 2026-11-13; merged by hand at 2026-11-13T03:48:38Z",
+  "repo": "maxharris1/factory",
+  "ticket_id": "89",
+  "risk": "low",
+  "merged_at": "2026-11-13T03:48:38Z",
+  "comments": [
+    ["6841596811", "maxharris1", "2026-11-13T02:01:56Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder round=1/3 head=fb21c1285de0228b7347aea6de3faab15057d93d risk=low state=review builder=claude -->"],
+    ["6842148536", "maxharris1", "2026-11-13T02:37:29Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=1/1 head=fb21c1285de0228b7347aea6de3faab15057d93d verdict=APPROVE risk=low -->"],
+    ["6842672937", "maxharris1", "2026-11-13T03:12:10Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder round=2/2 head=f3dd05ac0e55bcc47ed52a04c5b0f18946439ceb risk=low state=review builder=claude -->"],
+    ["6842767592", "maxharris1", "2026-11-13T03:18:28Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/2 head=f3dd05ac0e55bcc47ed52a04c5b0f18946439ceb ac=unmet verdict=REVISE risk=low -->"],
+    ["6842950266", "maxharris1", "2026-11-13T03:30:44Z", "<!-- orch:v1 kind=ready from=claude-bot role=builder round=3/3 head=c25f537a9f2a5a3c2764e8540798a11d5bba8425 risk=low state=review builder=claude -->"],
+    ["6843217470", "maxharris1", "2026-11-13T03:47:51Z", "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=3/3 head=c25f537a9f2a5a3c2764e8540798a11d5bba8425 ac=met verdict=APPROVE risk=low -->"]
+  ]
+}

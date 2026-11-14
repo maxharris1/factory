@@ -127,6 +127,8 @@ CHART_TRANSITIONS = frozenset(
         ("waiting-max", "fixing"),
         ("waiting-max", "abandoned"),
         ("capped", "fixing"),
+        ("handed-off", "review"),
+        ("handed-off", "merged"),
     }
 )
 
@@ -576,7 +578,12 @@ def _mismatches(run: _Run, config: FactoryConfig) -> list[Mismatch]:
     for previous, state in run.transitions:
         if state not in STATES:
             found.append(Mismatch(run.repo, run.ticket, "unknown-state", state))
-        if previous is not None and (previous, state) not in CHART_TRANSITIONS:
+        # A merge seen in any state ends the ticket (#108).
+        if (
+            previous is not None
+            and (previous, state) not in CHART_TRANSITIONS
+            and state != "merged"
+        ):
             found.append(
                 Mismatch(run.repo, run.ticket, "illegal-transition", f"{previous} {state}")
             )

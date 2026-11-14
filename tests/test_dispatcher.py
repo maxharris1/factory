@@ -234,7 +234,7 @@ class FakeSource:
         self.linear_query: str | None = None
         self.last_refs: tuple[TicketRef, ...] = ()
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
         self.github_label = label_prefix
         return self.github
 
@@ -1526,10 +1526,12 @@ class RaisingSource(FakeSource):
         super().__init__()
         self.failing = failing
 
-    def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+    def github_candidates(
+        self, label_prefix: str, *, exclude=frozenset()
+    ) -> tuple[TrackedTicket, ...]:
         if self.failing == "github_candidates":
             raise RuntimeError("listing failed")
-        return super().github_candidates(label_prefix)
+        return super().github_candidates(label_prefix, exclude=exclude)
 
     def tracked_tickets(
         self,
@@ -2558,7 +2560,7 @@ def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
 
     class BrokenGithub(CycleSource):
-        def github_candidates(self, label_prefix: str) -> tuple[TrackedTicket, ...]:
+        def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
             raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
 
     dispatcher.poll_once(BrokenGithub())
@@ -6413,7 +6415,9 @@ def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path
     now = [200.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
     poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
-    assert _reviews_71(queue) == []
+    # #108: the empty DB records the answered review cancelled, never claimable.
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert queue.claim("codex") is None
 
 
 def test_71_a_ready_for_a_replaced_head_queues_no_review(tmp_path: Path) -> None:
@@ -6650,7 +6654,9 @@ def test_71_a_verdict_that_never_acted_does_not_answer_the_next_ready(
 ) -> None:
     """A next-round verdict T3 and T4 did not act on, because the ticket was
     still fixing or the dispatcher ignores its verdict, answers no ready
-    (Codex PR #112 r5 F1)."""
+    (Codex PR #112 r5 F1). Listed with the ready, a REVISE or APPROVE is the
+    verdict of the review that ready starts (#108 answered-review) and acts;
+    a BLOCKED answers no review."""
     now = [100.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
     ready = _ready_71("ready-1", HEAD_71, 100)
@@ -6678,8 +6684,13 @@ def test_71_a_verdict_that_never_acted_does_not_answer_the_next_ready(
     poll(ready, revise, again, unacted, head=NEW_HEAD_71)
     now[0] = 220
     poll(ready, revise, again, unacted, head=NEW_HEAD_71)
-    assert _outcomes(queue)["ready-2"] == "queued-review"
+    answers = not listed_first and verdict != "BLOCKED"
+    outcomes = _outcomes(queue)
+    assert outcomes["ready-2"] == ("answered-review" if answers else "queued-review")
     assert [head for head, _state, _attempt in _reviews_71(queue)] == [HEAD_71, NEW_HEAD_71]
+    if answers and verdict == "APPROVE":
+        assert outcomes["unacted-2"] == "merged"
+        return
     with queue.connect() as connection:
         active = connection.execute(
             "SELECT count(*) FROM jobs WHERE action IN ('fix', 'review') "
@@ -6714,7 +6725,9 @@ def test_71_an_approve_for_an_unreviewed_head_does_not_answer_its_ready(
     poll(ready, again, approve, head=NEW_HEAD_71)
     now[0] = 180
     poll(ready, again, approve, head=NEW_HEAD_71)
-    assert _outcomes(queue)["ready-b"] == "queued-review"
+    assert _outcomes(queue)["ready-b"] == (
+        "queued-review" if listed_first else "answered-review"
+    )
     assert NEW_HEAD_71 in [head for head, _state, _attempt in _reviews_71(queue)]
 
 
@@ -6760,7 +6773,9 @@ def test_71_a_verdict_behind_an_unanswered_question_does_not_answer_its_ready(
     now[0] = 220
     poll(*comments)
     outcomes = _outcomes(queue)
-    assert outcomes["ready"] == "queued-review"
+    # #108: the thread answers the review the ready starts; T3 still
+    # rejects the verdict, and the ticket still reaches a review or fix.
+    assert outcomes["ready"] == "answered-review"
     assert outcomes["answer"] == "resumed-review"
     state, active = _review_state_71(queue)
     assert state == ("review", 0)
@@ -6789,7 +6804,7 @@ def test_71_a_question_pause_between_ready_and_verdict_keeps_the_ready(
     poll(*comments)
     now[0] = 220
     poll(*comments)
-    assert _outcomes(queue)["ready"] == "queued-review"
+    assert _outcomes(queue)["ready"] == "answered-review"
     state, active = _review_state_71(queue)
     assert state[0] in ("review", "fixing")
     assert active >= 1
@@ -6815,9 +6830,9 @@ def test_71_a_ready_its_verdict_answers_leaves_the_verdict_acted_on(
     now[0] = 220
     poll(*comments)
     outcomes = _outcomes(queue)
-    assert outcomes["ready"] == "stale-ready-verdict"
+    assert outcomes["ready"] == "answered-review"
     assert outcomes["revise-1"] == "queued-review-fix"
-    assert _reviews_71(queue) == []
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
     assert _review_state_71(queue) == (("fixing", 1), 1)
 
 
@@ -6831,5 +6846,5 @@ def test_71_an_untrusted_question_does_not_stop_a_verdict_answering_its_ready(
         _questions_71("question", 110, author="stranger"),
         _revise_71(120),
     )
-    assert _outcomes(queue)["ready"] == "stale-ready-verdict"
-    assert _reviews_71(queue) == []
+    assert _outcomes(queue)["ready"] == "answered-review"
+    assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]

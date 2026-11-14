@@ -129,14 +129,15 @@ def test_each_kind_has_the_standard_parts(
     assert "round cap: 3" in text
     assert f"job id: {item.id}" in text
     assert f"bot: {bot}" in text
-    # The review-rules contract and the orch:v1 handoff format.
-    assert "factory-review-rules" in text
-    assert "Blocks only on a demonstrated failure" in text
+    # The review rules and the orch:v1 handoff format.
+    assert "## Review rules (docs/SPEC.md section 8)" in text
+    assert "factory-review-rules" not in text
+    assert "second AC-unmet" not in text
     assert "<!-- orch:v1 kind=" in text
     # How the job is finished.
     assert f"orch job done {bot} {item.id} --handoff <comment-id>" in text
     assert f"orch job done {bot} {item.id} --failed" in text
-    assert "env -u GH_TOKEN gh" in text
+    assert "env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh" in text
 
 
 def test_review_brief_states_the_round_and_the_verdict_header() -> None:
@@ -243,7 +244,7 @@ def test_factory_md_is_appended_as_an_additional_context_section() -> None:
     assert "Never apply migrations on a hosted Supabase project" in text[section:]
     assert "The reviewer runs `verify-cleffy`." in text[section:]
     # The standard parts come first; the repo's prose only adds to them.
-    assert text.index("factory-review-rules") < section
+    assert text.index("## Review rules") < section
     assert text.index("orch job done") < section
     # Front matter is policy the dispatcher already applied, not prose.
     assert "base_branch: dev" not in text[section:]

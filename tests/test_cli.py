@@ -407,3 +407,68 @@ def test_check_config_refuses_a_machines_schema_error(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "devices[0].workdir_root must not be under /mnt/" in result.stderr
     assert "devices[0].harnesses.claude must be 'claude-bot'" in result.stderr
+
+
+# --- #108 Unit 1: orch job cancel (#66) -------------------------------------------
+
+
+def _cancel_queue(tmp_path: Path):
+    from lib.queue import JobRequest
+    from tests.test_dispatcher import setup
+
+    queue = setup(tmp_path)[1]
+    job = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="review",
+            recipient="codex",
+            source_comment_id="ready-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="review:k",
+    )
+    return queue, job
+
+
+def _job_state(queue, job_id: str) -> str:
+    with queue.connect() as connection:
+        return str(
+            connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+        )
+
+
+def test_job_cancel_cancels_a_queued_job(tmp_path: Path, capsys) -> None:
+    queue, job = _cancel_queue(tmp_path)
+
+    code = cli.main(["job", "cancel", job.id, "--db", str(queue.path), "--reason", "bad replay"])
+
+    assert code == 0
+    assert capsys.readouterr().out == (
+        f"cancelled {job.id} (owner/repo#42 review -> codex)\n"
+    )
+    assert _job_state(queue, job.id) == "cancelled"
+    with queue.connect() as connection:
+        detail = connection.execute(
+            "SELECT detail FROM job_events WHERE job_id = ? AND event = 'cancelled'",
+            (job.id,),
+        ).fetchone()[0]
+    assert detail == "bad replay"
+
+
+def test_job_cancel_refuses_a_running_job(tmp_path: Path, capsys) -> None:
+    queue, job = _cancel_queue(tmp_path)
+    assert queue.claim("codex") is not None
+
+    code = cli.main(["job", "cancel", job.id, "--db", str(queue.path)])
+
+    assert code == 1
+    assert "job is running; stop its worker first" in capsys.readouterr().err
+    assert _job_state(queue, job.id) == "running"
+
+
+def test_job_cancel_of_an_unknown_job_exits_2(tmp_path: Path, capsys) -> None:
+    queue, _job = _cancel_queue(tmp_path)
+
+    assert cli.main(["job", "cancel", "nope", "--db", str(queue.path)]) == 2
+    assert "unknown job nope" in capsys.readouterr().err

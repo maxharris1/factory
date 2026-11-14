@@ -24,6 +24,7 @@ def machines(tmp_path: Path, devices: list[tuple[str, int, bool]]):
                 f"    tailscale_name: {name}.example.ts.net",
                 "    workdir_root: /home/{bot}/factory-work",
                 f"    ssh_alias: {name}-{{bot}}",
+                "    factory_root: /home/{bot}/factory",
             ]
         lines += [f"    slot_max: {slots}", "    harnesses: {claude: claude-bot, codex: codex-bot}"]
     path = tmp_path / "machines.yml"

@@ -529,7 +529,7 @@ def _dirty_count(database: Path) -> int:
 # but polls only non-terminal ones, so a terminal ticket's dirty row had no
 # reader. It must drain, without reopening the ticket or queueing work.
 @pytest.mark.parametrize("delivery", ["issue-event", "uuid-only-row"])
-@pytest.mark.parametrize("state", ["done", "abandoned", "merged", "handed-off"])
+@pytest.mark.parametrize("state", ["done", "abandoned", "merged"])
 def test_dirty_row_for_a_terminal_tracked_ticket_drains_without_reopening_work(
     tmp_path: Path,
     state: str,
