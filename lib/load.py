@@ -60,7 +60,9 @@ def load_yaml(text: str) -> object:
     """The parsed document; any malformed text raises yaml.YAMLError."""
     try:
         return yaml.load(text, Loader=UniqueKeyLoader)
-    except (ValueError, RecursionError) as exc:
+    except yaml.YAMLError:
+        raise
+    except Exception as exc:
         raise yaml.YAMLError(f"invalid YAML: {exc}") from exc
 
 

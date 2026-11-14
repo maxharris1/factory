@@ -213,7 +213,8 @@ def test_a_box_with_no_factory_root_names_its_own_checkout(tmp_path: Path) -> No
 
 SOURCES = ("skills/skills.lock", "config/pstack-models.yml", "skills/pstack/skills/setup-pstack/SKILL.md")
 CORRUPTIONS = [b"broken: [\n", b"a: 1\na: 2\n", b"key: *missing\n", b"\xff\xfe\n", b"- a list\n", b"",
-               b"? [a, b]\n: value\n", b"a: !!int zz\n", b"[" * 20000]
+               b"? [a, b]\n: value\n", b"a: !!int zz\n", b"[" * 20000,
+               b"a: !!timestamp zz\n", b"a: !!bool zz\n", b"a: !!int +\n"]
 
 
 def _pin_copy(root: Path, bad: str, content: bytes) -> Path:
