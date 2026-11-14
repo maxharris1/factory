@@ -530,7 +530,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
 
 def test_queue_counts_by_recipient_and_action(tmp_path: Path) -> None:
     queue = snapshot_for(tmp_path)["queue"]
-    assert queue["totals"] == {"queued": 2, "running": 2, "done": 3, "failed": 1}
+    assert queue["totals"] == {"queued": 2, "running": 2, "done": 3, "failed": 1, "cancelled": 0}
     rows = {(row["recipient"], row["action"]): row for row in queue["by_recipient_action"]}
     assert rows[("claude", "build")] == {
         "recipient": "claude",
@@ -539,6 +539,7 @@ def test_queue_counts_by_recipient_and_action(tmp_path: Path) -> None:
         "running": 0,
         "done": 1,
         "failed": 1,
+        "cancelled": 0,
     }
     assert rows[("codex", "review")]["running"] == 1
     assert rows[("codex", "review")]["done"] == 1
@@ -687,6 +688,7 @@ devices:
     harnesses: {claude: claude-bot}
     workdir_root: REPLACE_WITH_PC_WORKDIR_ROOT
     ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
 """,
         encoding="utf-8",
     )

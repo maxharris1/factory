@@ -55,6 +55,8 @@ export ORCH_DB="${DB}"
 export PATH="\${HOME}/.local/bin:\${PATH}"
 # Poller autostart (deploy/poller-service.sh install-autostart): with no
 # systemd user session, each bot shell makes sure the poller is up.
+# The state directory can be lost (#66); make it before logging into it.
+mkdir -p "$(dirname "$DB")"
 if [ -f "\${HOME}/.config/factory/poller-autostart" ] && [ -x "${ROOT}/deploy/poller-service.sh" ]; then
     ("${ROOT}/deploy/poller-service.sh" ensure >>"$(dirname "$DB")/poller-service.log" 2>&1 &)
 fi

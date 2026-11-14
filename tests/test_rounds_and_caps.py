@@ -413,7 +413,9 @@ def test_failed_build_with_a_posted_ready_is_done_from_ready(tmp_path: Path) -> 
 
 
 def test_a_ready_whose_review_already_answered_is_done_from_ready(tmp_path: Path) -> None:
-    """#71 with #105: T2 calls the ready stale-ready-verdict, yet it was the fix's handoff."""
+    """#71 with #105 and #108: the ready whose round-2 review the thread already
+    answered is replayed as answered-review, is the fix's handoff, and lets that
+    REVISE act."""
     flow = Flow(tmp_path)
     fix = _failed_fix(flow)
     flow.head = HEADS[2]
@@ -433,10 +435,12 @@ def test_a_ready_whose_review_already_answered_is_done_from_ready(tmp_path: Path
     flow.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
     flow.dispatcher.process(flow.snapshot())
     flow.dispatcher.reconcile_jobs()
-    assert outcome(flow.queue, ready_id) == "stale-ready-verdict"
+    assert outcome(flow.queue, ready_id) == "answered-review"
+    assert outcome(flow.queue, "revise-2/3") == "queued-review-fix"
     assert _jobs(flow.queue, "fix")[0] == ("done", 1, ready_id)
     assert all(attempt == 1 for _state, attempt, _handoff in _jobs(flow.queue, "fix"))
-    assert [event for event, _detail in _events(flow.queue)] == ["done-from-ready"]
+    assert _jobs(flow.queue, "review")[-1][0] == "cancelled"
+    assert [event for event, _detail in _events(flow.queue)] == ["cancelled", "done-from-ready"]
 
 
 def _unvalidated_ready(tmp_path: Path) -> tuple[Flow, Job, TrackedTicket]:

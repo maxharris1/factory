@@ -18,7 +18,16 @@ States == {
   "abandoned"
 }
 
-Terminal == {"refused", "stuck", "blocked", "abandoned", "done", "handed-off"}
+\* handed-off is not terminal (#108): the poll still watches it, for a merge
+\* and for a trusted ready that re-enters review inside the cap.
+Terminal == {"refused", "stuck", "blocked", "abandoned", "done"}
+
+\* Every state a tracked PR can be in when the poll sees it merged (#108).
+\* Intake and questions have no PR yet; merged, post-merge and done are past it.
+MergeFrom == {
+  "planning", "plan-check", "building", "review", "fixing", "capped", "blocked",
+  "ship", "awaiting-ok", "waiting-external", "stuck", "handed-off"
+}
 
 \* States whose job T6 times out. post-merge is not here because T9 is not
 \* built: no post-merge job exists to time out. TODO(T9): when T9 is
@@ -50,7 +59,9 @@ TypeOK ==
   /\ paused \in {"none", "questions", "building", "fixing"}
   /\ cap \in {0, 1, 3}
   /\ configOk \in BOOLEAN
-  /\ flags \in [covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN]
+  /\ flags \in [
+       covered: BOOLEAN, planOk: BOOLEAN, questionsDone: BOOLEAN, byHand: BOOLEAN
+     ]
   /\ counts \in [
        round: 0..4,
        acUnmet: 0..2,
@@ -66,7 +77,10 @@ Init ==
   /\ paused = "none"
   /\ cap = 0
   /\ configOk \in BOOLEAN
-  /\ flags = [covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE]
+  /\ flags = [
+       covered |-> FALSE, planOk |-> FALSE, questionsDone |-> FALSE,
+       byHand |-> FALSE
+     ]
   /\ counts = [
        round |-> 0, acUnmet |-> 0, gate |-> 0,
        planGaps |-> 0, deaths |-> 0, declines |-> 0,
@@ -452,6 +466,30 @@ MaxOkAnotherRound ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0, !.extra = 1]
 
+\* #108. A trusted ready at a new head after handoff re-enters review. The
+\* approved round counts as completed, so the next review is round + 2, and it
+\* must be within the effective cap.
+ReenterAfterHandoff ==
+  /\ "T2" \notin Omit
+  /\ state = "handed-off"
+  /\ counts.round + 1 < cap + counts.extra
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ counts' = [counts EXCEPT !.round = @ + 1, !.deaths = 0, !.gate = 0]
+
+\* #108. The poll sees the PR merged, by the factory or by hand: merged, with
+\* stuck, paused and every counter that marks stuck cleared.
+MergeObserved ==
+  /\ \/ state \in MergeFrom
+     \/ state = "waiting-max" /\ paused # "questions"
+  /\ state' = "merged"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.byHand = ~flags.covered \/ state \notin
+       {"ship", "awaiting-ok", "waiting-external", "handed-off"}]
+  /\ counts' = [counts EXCEPT !.gate = 0, !.deaths = 0, !.declines = 0,
+       !.planGaps = 0]
+
 End ==
   /\ state \in Terminal
   /\ UNCHANGED vars
@@ -469,7 +507,7 @@ Next ==
   \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
-  \/ MaxOkAnotherRound \/ End
+  \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved \/ End
 
 Spec == Init /\ [][Next]_vars
 
@@ -499,14 +537,15 @@ CountersBounded ==
 ContradictoryConfigNeverRuns ==
   ~configOk => state \in {"intake", "refused"}
 
+\* A hand merge (MergeObserved before a covered ship) is Max's, not the factory's.
 ShipPinnedToCoveredHead ==
   state \in {"merged", "handed-off", "waiting-external", "post-merge", "done"}
-    => flags.covered
+    => flags.covered \/ flags.byHand
 
 CapAtReview ==
   /\ state \in {"intake", "refused", "questions", "planning", "plan-check", "building"}
        => cap = 0
-  /\ state \in ReviewAndAfter => cap \in {1, 3}
+  /\ state \in ReviewAndAfter /\ ~flags.byHand => cap \in {1, 3}
 
 Phase1T9Off ==
   ~AllowPostMerge => state # "post-merge"
@@ -558,6 +597,11 @@ T8Decided ==
   /\ state = "waiting-external" => ENABLED T8Ok
   /\ state = "waiting-external" /\ counts.declines < 2 => ENABLED T8Decline
   /\ state = "waiting-external" /\ counts.declines = 2 => ENABLED T8DeclineStuck
+
+HandedOffDecided ==
+  /\ state = "handed-off" => ENABLED MergeObserved
+  /\ state = "handed-off" /\ counts.round + 1 < cap + counts.extra =>
+       ENABLED ReenterAfterHandoff
 
 T9Decided ==
   /\ AllowPostMerge /\ state = "merged" => ENABLED T9PostMerge

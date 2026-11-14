@@ -71,5 +71,9 @@ export const step = (action, from, to) => {
   if (action === "T9Pass") return "post-merge passes";
   if (action === "T9Fail") return "post-merge fails, follow-up filed";
   if (action === "MaxOkAnotherRound") return "Max okays one more round";
+  if (action === "ReenterAfterHandoff") return "trusted ready at a new head, within the effective cap";
+  // A merge seen in any state ends the ticket (#108); the chart draws only the
+  // handed-off one, and section 4.1 says the rest in prose.
+  if (action === "MergeObserved") return from.state === "handed-off" ? "PR merged" : null;
   return action;
 };

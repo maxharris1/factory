@@ -56,6 +56,7 @@ from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
+from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
 from lib.wait import (
     WaitError,
@@ -80,14 +81,16 @@ usage: orch <command> [options]
 
 commands:
   check-config     validate orch.yml, machines.yml and factory.md
-  install-skills   install the pinned pstack skills
+  install-skills   install the pinned pstack and router skills
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
+  backup-db        back up the dispatcher database (orch poll does each cycle)
+  restore-db       restore a missing dispatcher database from its backup
   wait             block until the dispatcher queues a job for a bot
-  job              run, heartbeat or finish a job that wait returned
+  job              run, heartbeat, finish or cancel a job
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
@@ -136,6 +139,18 @@ poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
 init-db [--db PATH] [--orch PATH]
   Create and initialize the database without polling or delivering work.
 
+backup-db [--db PATH] [--backup PATH]
+restore-db [--db PATH] [--backup PATH]
+  `orch poll` backs the database up after every cycle (#66) with SQLite's
+  online backup API, swapped into place atomically. --backup defaults to
+  $ORCH_DB_BACKUP, else ~/.local/share/factory/backup/orch.db; a path in the
+  database's own directory is refused. A failed cycle backup is one
+  poll_errors row and polling goes on. backup-db takes one by hand.
+  restore-db restores a missing database from the backup after an
+  integrity check: exit 0 restored, 3 no backup, 1 when the database
+  already exists or the backup is bad. deploy/poller-service.sh start and
+  ensure run it when the database is missing.
+
 wait <bot> [--db PATH] [--machines PATH]
   <bot> is claude-bot, codex-bot, or cursor-bot. Blocks until the
   dispatcher database has a queued job for that bot and a device in
@@ -176,7 +191,9 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   events.jsonl in $ORCH_JOB_STATE_DIR (else telemetry-<bot>/<job-id>
   beside the database), capped at 20 MB and rotated,
   and a scrubbed summary goes to the job_telemetry table with each
-  heartbeat and at exit. ORCH_TELEMETRY=off runs COMMAND as given.
+  heartbeat and at exit, with the agent's plan, current and last finished
+  task and sub-agents (issue #147). ORCH_TELEMETRY=counters keeps the
+  counters but stores no such text; ORCH_TELEMETRY=off runs COMMAND as given.
   The job must hold the device slot orch wait claimed for this bot. On a
   remote device COMMAND runs there as the bot's user over the device's
   ssh_alias (ssh -l <bot> -- <alias>), under its login shell (bash -lc),
@@ -216,6 +233,11 @@ job run <bot> <job-id> [--db PATH] [--machines PATH] [--interval SECONDS]
   --status-file PATH: when this exits, its exit status is written to PATH
   (mode 600); the autostart waiter uses it to finish a remote run after a
   waiter restart.
+job cancel <job-id> [--db PATH] [--reason TEXT]
+  Cancel a queued job (an operator command, not a bot's): it never runs,
+  T6 never retries it, and its dedupe key stays, so the comment that
+  queued it queues nothing again. Exits 1 for a running or finished job
+  (a running one's worker must be stopped first) and 2 for an unknown one.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
@@ -295,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_poll, argv[1:])
     if argv[0] == "init-db":
         return _call(_init_db, argv[1:])
+    if argv[0] == "backup-db":
+        return _call(_backup_db, argv[1:])
+    if argv[0] == "restore-db":
+        return _call(_restore_db, argv[1:])
     if argv[0] == "wait":
         return _call(_wait, argv[1:])
     if argv[0] == "job":
@@ -549,14 +575,22 @@ def _poll(argv: list[str]) -> int:
                 create=False,
                 machines_path=args.machines,
             )
-            after_poll = _dashboard_pusher(path, args.orch)
+            pusher = _dashboard_pusher(path, args.orch)
+            after_poll = _AfterPoll(
+                CycleBackup(
+                    path,
+                    default_backup_path(),
+                    lambda *error: dispatcher.record_poll_error(*error),
+                ),
+                pusher,
+            )
             loop = PollLoop(dispatcher, source)
             if args.once:
                 loop.run(max_polls=1, after_poll=after_poll)
             else:
                 # dashboard.push.live: watch orch.db for changes between and
                 # during cycles; stopped on the way out, so a stop starts no push.
-                watcher = after_poll if isinstance(after_poll, LivePusher) else None
+                watcher = pusher if isinstance(pusher, LivePusher) else None
                 if watcher is not None:
                     watcher.start()
                 # Heartbeats (#92): the poller's own row and the per-device
@@ -588,6 +622,19 @@ def _poll(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     return 0
+
+
+class _AfterPoll:
+    """The poll loop's after-cycle hook: the #66 backup, then the dashboard push."""
+
+    def __init__(self, backup: Callable[[], None], pusher: PollPusher | None) -> None:
+        self.backup = backup
+        self.pusher = pusher
+
+    def __call__(self) -> None:
+        self.backup()
+        if self.pusher is not None:
+            self.pusher()
 
 
 def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:
@@ -639,6 +686,42 @@ def _init_db(argv: list[str]) -> int:
         print(f"orch init-db: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     print("ok")
+    return 0
+
+
+def _backup_db(argv: list[str]) -> int:
+    parser = _Parser(prog="orch backup-db", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--backup", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        dest = args.backup or default_backup_path()
+        backup(path, dest)
+    except (BackupError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch backup-db: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(f"backed up {path} to {dest}")
+    return 0
+
+
+def _restore_db(argv: list[str]) -> int:
+    """Exit 0 restored, 3 no backup, 1 the database exists or the backup is bad."""
+    parser = _Parser(prog="orch restore-db", add_help=True)
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--backup", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        path = _db_path(args.db)
+        source = args.backup or default_backup_path()
+        taken = restore(source, path)
+    except FileNotFoundError as exc:
+        print(f"orch restore-db: {exc}", file=sys.stderr)
+        return 3
+    except (BackupError, WaitError, OSError, sqlite3.Error) as exc:
+        print(f"orch restore-db: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(f"restored {path} from {source} (backup taken {taken:%Y-%m-%d %H:%M:%S} UTC)")
     return 0
 
 
@@ -858,6 +941,8 @@ def _quiet_stdout() -> None:
 def _job(argv: list[str]) -> int:
     if argv[:1] == ["run"]:
         return _job_run(argv[1:])
+    if argv[:1] == ["cancel"]:
+        return _job_cancel(argv[1:])
     parser = _Parser(prog="orch job", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     heartbeat = commands.add_parser("heartbeat")
@@ -908,6 +993,45 @@ def _job(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{job.state} {job.id}")
+    return 0
+
+
+def _job_cancel(argv: list[str]) -> int:
+    """`orch job cancel`: an operator's cancel of a queued job (#66).
+
+    Not bot-owned, so it does not go through owned_job.
+    """
+    parser = _Parser(prog="orch job cancel", add_help=True)
+    parser.add_argument("job_id")
+    parser.add_argument("--db", type=Path)
+    parser.add_argument("--reason", default="operator")
+    args = parser.parse_args(argv)
+    prog = "orch job cancel"
+    try:
+        queue = open_queue(_db_path(args.db))
+    except WaitError as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        with queue.connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM jobs WHERE id = ?", (args.job_id,)
+            ).fetchone()
+        if row is None:
+            print(f"{prog}: unknown job {args.job_id}", file=sys.stderr)
+            return 2
+        if row["state"] == "running":
+            print(f"{prog}: job is running; stop its worker first", file=sys.stderr)
+            return 1
+        job = retry_locked(lambda: queue.cancel(args.job_id, args.reason))
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    request = job.request
+    print(
+        f"cancelled {job.id} ({request.repo}#{request.ticket_id} "
+        f"{request.action} -> {request.recipient})"
+    )
     return 0
 
 

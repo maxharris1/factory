@@ -596,26 +596,47 @@ APPROVAL_TOKEN_VARIABLES = (
 )
 
 
-def approval_post_env(
+@dataclass(frozen=True)
+class ApproverGo:
+    body: str
+    env: dict[str, str]
+
+
+def approver_go_post(
+    kind: str,
+    max_words: str,
     environ: Mapping[str, str],
     *,
     app_trust: bool,
     gh_config_dir: Path | None,
-) -> dict[str, str]:
-    """The environment for the gh call that posts a capped-ticket go or a
-    hold ok (#122), from orch.yml's approvals (lib.orch_yml.approvals).
-    Token variables are always dropped. With the app switch on, gh reads
-    only Max's approver profile; with none configured this refuses, so
-    those two kinds are never posted as the app bot."""
+    visible: bool = False,
+) -> ApproverGo:
+    """Short-term (#172, until T02f #173): the capped-ticket go Grok posts
+    as maxharris1, quoting Max's exact words, with the gh environment from
+    orch.yml's approvals (lib.orch_yml.approvals). Any other kind, ok above
+    all, is refused: Max posts his own ok. Token variables are always
+    dropped. With the app switch on, gh reads only Max's approver profile;
+    with none configured this refuses."""
+    if kind != "go":
+        raise OrchestrateError(
+            f"never post kind={kind} as Max: only a capped-ticket go, and Max posts his own ok"
+        )
+    words = _text(max_words, "Max's exact words")
+    quoted = "\n".join(f"> {line}".rstrip() for line in words.splitlines())
+    body = _comment(
+        {"kind": "go", "from": FROM, "role": ROLE, "state": "building"},
+        f"**Max's words**\n{quoted}\n",
+        visible=visible,
+    )
     env = {key: value for key, value in environ.items() if key not in APPROVAL_TOKEN_VARIABLES}
     if not app_trust:
-        return env
+        return ApproverGo(body, env)
     if gh_config_dir is None:
         raise OrchestrateError(
             "no approver_gh_config_dir in orch.yml: post it from maxharris1 by hand"
         )
     env["GH_CONFIG_DIR"] = str(gh_config_dir)
-    return env
+    return ApproverGo(body, env)
 
 
 def format_stop_report(report: StopReport) -> str:
