@@ -773,12 +773,28 @@ def _add_sources(value: object, sources: dict[tuple[str, str], tuple[str, str | 
         for item in value:
             _add_sources(item, sources)
     elif isinstance(value, dict):
-        found = sources.get((str(value.get("repo")).casefold(), str(value.get("ticket_id"))))
+        found = _source_for(str(value.get("repo")), str(value.get("ticket_id")), sources)
         if found is not None:
             value["source"] = found[0] if SOURCE.fullmatch(found[0]) else None
             value["pr"] = _clean(found[1], 16) if found[1] is not None else None
         for item in value.values():
             _add_sources(item, sources)
+
+
+def _source_for(
+    repo: str, ticket_id: str, sources: dict[tuple[str, str], tuple[str, str | None]]
+) -> tuple[str, str | None] | None:
+    """A row's source by its shown repo and ticket id, which `_clean` may have cut short."""
+    found = sources.get((repo.casefold(), ticket_id))
+    if found is not None or not (repo.endswith("…") or ticket_id.endswith("…")):
+        return found
+    matches = [
+        value
+        for (stored_repo, stored_ticket), value in sources.items()
+        if _clean(stored_repo, len(repo)).casefold() == repo.casefold()
+        and _clean(stored_ticket, len(ticket_id)) == ticket_id
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _projects(

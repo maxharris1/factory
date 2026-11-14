@@ -93,9 +93,10 @@ def titled_ticket(
     ticket_id: str = "116",
     tickets: str = "github",
     comments: tuple = (),
+    repo: str = "owner/repo",
 ):
     return replace(
-        ticket(*comments, tickets=tickets, ticket_id=ticket_id),
+        ticket(*comments, tickets=tickets, ticket_id=ticket_id, repo=repo),
         pr_number=pr_number,
         source_issue=source,
         pr_title=title,
@@ -296,3 +297,42 @@ def test_the_live_page_script_shows_the_issue_first_too(tmp_path: Path) -> None:
     assert "repo#115 (PR #116)" in queue
     assert "AUT-2284 (PR #123)" in queue
     assert "owner/repo#115 (PR #116)" in tickets
+
+
+@pytest.mark.parametrize("repo", ["owner/" + "r" * 100, "owner/" + "r" * 130])
+def test_the_dashboard_finds_the_source_of_a_repo_too_long_to_show_whole(
+    tmp_path: Path, repo: str
+) -> None:
+    dispatcher, _ = setup(tmp_path, now=[1_800_000_000.0])
+    go = comment("c1", GO.format(state="building"), author="grok-login")
+    tracked = titled_ticket(comments=(go,), repo=repo)
+    dispatcher.poll_once(FakeSource(tracked, github=(tracked,)))
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
+
+    snapshot = collect_snapshot(tmp_path / "d.db", log, now=1_800_000_100.0)
+
+    assert (len(snapshot["queued"]), len(snapshot["tickets"])) == (1, 1)
+    for row in (*snapshot["queued"], *snapshot["tickets"]):
+        assert row["repo"].endswith("…")
+        assert (row["source"], row["pr"]) == ("#115", "116")
+
+
+def test_the_dashboard_finds_the_source_of_a_ticket_id_too_long_to_show_whole() -> None:
+    ticket_id = "T" * 80
+    row = {"repo": "owner/repo", "ticket_id": "T" * 63 + "…"}
+
+    _add_sources(row, {("owner/repo", ticket_id): ("#115", "116")})
+
+    assert (row["source"], row["pr"]) == ("#115", "116")
+
+
+def test_the_dashboard_shows_no_source_when_two_long_repos_look_the_same() -> None:
+    row = {"repo": "owner/" + "r" * 93 + "…", "ticket_id": "116"}
+
+    _add_sources(row, {
+        ("owner/" + "r" * 100 + "a", "116"): ("#115", "116"),
+        ("owner/" + "r" * 100 + "b", "116"): ("#7", "116"),
+    })
+
+    assert "source" not in row
