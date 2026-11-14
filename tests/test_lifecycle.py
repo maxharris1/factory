@@ -103,10 +103,12 @@ class Flow:
             "codex-login",
         )
 
-    def finish(self, recipient: str) -> Job:
+    def finish(self, recipient: str, handoff: str | None = None) -> Job:
         job = self.queue.claim(recipient)
         assert job is not None
-        self.queue.finish(job.id, owner=recipient, handoff_comment_id=f"handoff-{job.id}")
+        self.queue.finish(
+            job.id, owner=recipient, handoff_comment_id=handoff or f"handoff-{job.id}"
+        )
         return job
 
     def state(self) -> sqlite3.Row:
@@ -114,14 +116,17 @@ class Flow:
 
     def hand_off_at(self, rounds: int) -> None:
         """Build, REVISE until the last round, then APPROVE: handed off."""
+        # #18: each job's handoff is the comment that answers it, so the
+        # handoff check on the ticket read verifies it.
         assert self.go() == "queued-build"
-        self.finish("claude")
+        self.finish("claude", f"ready-{HEADS[1][:6]}")
         for number in range(1, rounds + 1):
             assert self.ready(HEADS[number]) == "queued-review"
-            self.finish("codex")
+            verdict = f"revise-{number}/3" if number < rounds else f"approve-{rounds}/3"
+            self.finish("codex", verdict)
             if number < rounds:
                 assert self.revise(f"{number}/3") == "queued-review-fix"
-                self.finish("claude")
+                self.finish("claude", f"ready-{HEADS[number + 1][:6]}")
         assert self.approve(f"{rounds}/3") == "handed-off"
         assert self.state()["workflow_state"] == "handed-off"
 

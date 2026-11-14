@@ -360,7 +360,10 @@ def _events(queue) -> list[tuple[str, str]]:
     with queue.connect() as connection:
         return [
             (str(row["event"]), str(row["detail"]))
-            for row in connection.execute("SELECT event, detail FROM job_events ORDER BY id")
+            for row in connection.execute(
+                "SELECT event, detail FROM job_events "
+                "WHERE event NOT LIKE 'handoff-%' ORDER BY id"
+            )
         ]
 
 

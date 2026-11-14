@@ -1,4 +1,4 @@
-# A pin bump updates version, commit, and files together.
+# A pin bump updates version, commit, files, and factory together.
 version: "0.15.36"
 commit: c742dd61706fbacc1b95f1a20b7b988cf096ce6c
 token: "You run the program, never the code. Decide which agent does each piece of work, then check what each one produces."
@@ -576,3 +576,7 @@ files:
   skills/why/references/sources/sentry.md: 2d4f83048eac1df530b399e2aed75dd7c9c18577b7665420aaeb96d0ceb0b702
   skills/why/references/sources/slack.md: 3bc6309f5c7b26ace3b919dbd7f7b048861dd2020f910fe24f656cc74b3b661c
   skills/why/references/synthesizer-prompt.md: 11c62671aa7b7a6e3d36929ffe2b59bf95e6ca664eee4d93e6ee527dd3390ddb
+factory:
+  factory-builder/SKILL.md: baa919e6508b3dd60efb6fc5564ab8a2fa549981ab0889039606a15f3de2bc5b
+  factory-reviewer/SKILL.md: 2680dc6ad90dd24c6eb3c54a06aefb526ca1b2dbd2dacf1010ca8a66a03080df
+  harness/codex.md: e4a8683bbfa30d3458fe1e4f9150a1e3ae82695011ac201eeb49c5f1f525c9ee

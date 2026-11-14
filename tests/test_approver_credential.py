@@ -20,7 +20,7 @@ from lib import cli
 from lib.dispatcher import Comment, Dispatcher
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.orch_yml import Approvals, approvals, load_orch_yml
-from lib.orchestrate import OrchestrateError, approval_post_env
+from lib.orchestrate import OrchestrateError, approver_go_post
 from lib.waiter import HarnessCommand, Waiter, WaiterError
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, comment, handled_outcome, job_count
 from tests.test_rounds_and_caps import Flow
@@ -567,7 +567,7 @@ def test_waiter_built_with_the_switch_on_spawns_without_the_profile(tmp_path: Pa
     assert "GH_CONFIG_DIR" not in env
 
 
-# --- scope item: Grok posts a capped go or an ok only through Max's profile ---------
+# --- scope item: Grok posts a capped go only through Max's profile (#172: never an ok) ---------
 
 FAKE_TOKENS = {
     "GH_TOKEN": "fake-app-token",
@@ -578,14 +578,16 @@ FAKE_TOKENS = {
 
 
 def post_env(approvals_value: Approvals, environ: dict[str, str]) -> dict[str, str]:
-    return approval_post_env(
+    return approver_go_post(
+        "go",
+        "One more round.",
         environ,
         app_trust=approvals_value.app_trust,
         gh_config_dir=approvals_value.gh_config_dir,
-    )
+    ).env
 
 
-def test_approval_post_env_uses_only_the_approver_profile(tmp_path: Path) -> None:
+def test_approver_go_post_uses_only_the_approver_profile(tmp_path: Path) -> None:
     profile = tmp_path / "grok" / "gh-approver"
     switch_on = approvals_for(tmp_path, enabled=True, profile=str(profile))
     environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": "/home/grok/.config/gh-app", **FAKE_TOKENS}
@@ -595,14 +597,14 @@ def test_approval_post_env_uses_only_the_approver_profile(tmp_path: Path) -> Non
     assert env == {"PATH": "/usr/bin", "GH_CONFIG_DIR": str(profile)}
 
 
-def test_approval_post_env_refuses_with_no_profile_when_the_switch_is_on(tmp_path: Path) -> None:
+def test_approver_go_post_refuses_with_no_profile_when_the_switch_is_on(tmp_path: Path) -> None:
     switch_on = approvals_for(tmp_path, enabled=True)
     with pytest.raises(OrchestrateError, match="by hand"):
         post_env(switch_on, {"PATH": "/usr/bin", **FAKE_TOKENS})
 
 
 @pytest.mark.parametrize("enabled", [None, False])
-def test_approval_post_env_with_the_switch_off_only_drops_tokens(tmp_path: Path, enabled: bool | None) -> None:
+def test_approver_go_post_with_the_switch_off_only_drops_tokens(tmp_path: Path, enabled: bool | None) -> None:
     switch_off = approvals_for(tmp_path, enabled=enabled, profile=str(tmp_path / "gh-approver"))
     environ = {"PATH": "/usr/bin", "GH_CONFIG_DIR": "/home/grok/.config/gh", **FAKE_TOKENS}
 

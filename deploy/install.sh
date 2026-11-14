@@ -16,10 +16,11 @@ done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${HOME}/.local/share/factory/venv"
+LINEAR_SERVICE="${HOME}/.local/share/factory/linear-webhook-service.sh"
 DB="${HOME}/.local/state/factory/orch.db"
 ORCH_CONFIG="${ORCH_CONFIG:-${ROOT}/orch.yml}"
 
-mkdir -p "${HOME}/.local/bin" "${HOME}/.config/factory" "$(dirname "$DB")"
+mkdir -p "${HOME}/.local/bin" "${HOME}/.config/factory" "$(dirname "$DB")" "$(dirname "$LINEAR_SERVICE")"
 if [[ "$ROOT" != "${HOME}/factory" ]]; then
     echo "warning: expected the production checkout at ${HOME}/factory; using ${ROOT}" >&2
 fi
@@ -45,6 +46,9 @@ cat >"$WRAPPER" <<EOF
 exec "${VENV}/bin/python" "${ROOT}/bin/orch" "\$@"
 EOF
 chmod 0755 "$WRAPPER"
+# A copy, not the checkout's file: a git pull must not rewrite a script that
+# a running loop is still reading.
+install -m 0755 "${ROOT}/deploy/linear-webhook-service.sh" "$LINEAR_SERVICE"
 install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 export ORCH_DB="${DB}"
@@ -66,6 +70,11 @@ for factory_waiter_flag in "\${HOME}/.config/factory"/waiter-autostart-*; do
     ("${ROOT}/deploy/waiter-service.sh" "\$factory_waiter_bot" ensure >>"$(dirname "$DB")/waiter-\${factory_waiter_bot}-service.log" 2>&1 &)
 done
 unset factory_waiter_flag factory_waiter_bot
+# Linear webhook autostart (linear-webhook-service.sh install-autostart, #134):
+# each bot shell makes sure the listener and tunnel loops are up.
+if [ -f "\${HOME}/.config/factory/linear-webhook-autostart" ] && [ -x "${LINEAR_SERVICE}" ]; then
+    ("${LINEAR_SERVICE}" ensure >>"$(dirname "$DB")/linear-webhook-service.log" 2>&1 &)
+fi
 EOF
 ORCH_DB="$DB" "$WRAPPER" init-db --orch "$ORCH_CONFIG"
 if [[ "$AUTOSTART" == 1 ]]; then

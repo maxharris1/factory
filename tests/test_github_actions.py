@@ -674,6 +674,8 @@ def test_set_state_refuses_an_unknown_state() -> None:
         ("check-runs-empty.json", "status-success.json", "success"),
         ("check-runs-all-skipped.json", "status-success.json", "success"),
         ("check-runs-in-progress.json", "status-success.json", "pending"),
+        ("check-runs-failure.json", "status-success.json", "failure"),
+        ("check-runs-success.json", "status-pending.json", "pending"),
     ],
     ids=[
         "success-plus-skipped",
@@ -686,6 +688,8 @@ def test_set_state_refuses_an_unknown_state() -> None:
         "status-success-only",
         "skipped-plus-status-success",
         "running-plus-status-success",
+        "red-check-plus-status-success",
+        "success-plus-status-pending",
     ],
 )
 def test_ci_status_reads_check_runs_and_statuses(
@@ -719,6 +723,24 @@ def test_ci_status_is_pending_when_pages_hold_fewer_runs_than_total_count(
     assert actions.ci_status("owner/repo", HEAD).status == "pending"
 
 
+@pytest.mark.parametrize(
+    "pages",
+    [
+        ("check-runs-total-3-page-1.json", "check-runs-total-2-page-2.json"),
+        ("check-runs-total-1-two-runs.json",),
+    ],
+    ids=["page-counts-disagree", "more-runs-than-total"],
+)
+def test_ci_status_is_pending_when_total_count_does_not_match_the_runs(
+    pages: tuple[str, ...],
+) -> None:
+    actions, gh = adapter()
+    gh.route(CHECKS, served(*pages))
+    gh.route(STATUS, served("status-success.json"))
+
+    assert actions.ci_status("owner/repo", HEAD).status == "pending"
+
+
 def test_ci_status_is_success_when_every_counted_run_arrived() -> None:
     actions, gh = adapter()
     third = (FIXTURES / "check-runs-total-3-page-2.json").read_text()
@@ -735,6 +757,47 @@ def test_ci_status_is_success_when_every_counted_run_arrived() -> None:
     gh.route(STATUS, served("status-empty.json"))
 
     assert actions.ci_status("owner/repo", HEAD).status == "success"
+
+
+TRANSCRIPTS = FIXTURES / "gh-transcripts"
+RECORDED_HEAD = "1a6d0c7e74daf528a16153db4787bb856de1db30"
+
+
+def transcript(name: str) -> GhResult:
+    recorded = json.loads((TRANSCRIPTS / name).read_text())
+    return GhResult(recorded["returncode"], recorded["stdout"], recorded["stderr"])
+
+
+def test_ci_status_over_recorded_gh_transcripts() -> None:
+    commit = f"repos/maxharris1/factory/commits/{RECORDED_HEAD}"
+    actions, gh = adapter()
+    gh.route(
+        ("--paginate", f"{commit}/check-runs?per_page=100"),
+        transcript("check-runs-two-pages.json"),
+    )
+    gh.route((f"{commit}/status",), transcript("status-none.json"))
+
+    assert actions.ci_status("maxharris1/factory", RECORDED_HEAD).status == "success"
+
+
+@pytest.mark.parametrize("status", [403, 409, 422])
+def test_recorded_gh_http_errors_map_to_a_safe_adapter_error(status: int) -> None:
+    recorded = transcript(f"http-{status}.json")
+    message = json.loads(recorded.stdout)["message"]
+    actions, gh = adapter()
+    gh.route(CHECKS, recorded)
+    gh.route(PULL, served("pull-42-open.json"))
+    gh.route(MERGE, recorded)
+
+    with pytest.raises(GitHubAdapterError) as checks:
+        actions.ci_status("owner/repo", HEAD)
+    with pytest.raises(GitHubAdapterError) as merge:
+        actions.merge(pr("merge"), squash=True, match_head_commit=HEAD)
+
+    assert checks.value.safe_detail.endswith(f"(HTTP {status})")
+    assert message not in checks.value.safe_detail
+    assert isinstance(merge.value, HeadMismatchError) is (status == 409)
+    assert getattr(merge.value, "retryable", False) is False
 
 
 def test_stable_patch_id_fails_closed_and_handoff_marks_draft_ready() -> None:
@@ -953,6 +1016,9 @@ class CatchingShipper:
 
 
 class UnavailableGrokDelivery:
+    # Fails on purpose: a failed delivery leaves each Grok wake queued, so
+    # FakeBot(queue, "grok").drain() can count the wakes. A delivery that
+    # succeeded would mark them done and the drains would see none.
     def deliver(self, job: Job, *, logical_key: str) -> str:
         del job, logical_key
         raise RuntimeError("Grok delivery unavailable in GitHub adapter tests")

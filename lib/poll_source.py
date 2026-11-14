@@ -1118,9 +1118,7 @@ class LivePollSource:
             return cached
         pull = self._github_pull(project.repo, number, fresh=fresh)
         merged = pull.get("merged") is True
-        head = _object(pull.get("head"), "GitHub pull request head").get("sha")
-        if not isinstance(head, str):
-            raise PollSourceError(f"{project.repo}#{number} has no head")
+        head = _pr_head(pull, project.repo, number)
         if merged and not fresh:
             # #108: every merge the poll sees ends the ticket; the fresh read
             # is a caller's mid-step read and records nothing (#42 N3).
@@ -1268,15 +1266,7 @@ class LivePollSource:
             merged = pull.get("merged") is True
             if merged and tracked:
                 self._linear_merged(project, identifier, allow_merged)
-            pr_head = _object(
-                pull.get("head"),
-                "GitHub pull request head",
-            ).get("sha")
-            if not isinstance(pr_head, str):
-                raise PollSourceError(
-                    f"{project.repo}#{pr_number} has no head"
-                )
-            head = pr_head
+            head = _pr_head(pull, project.repo, pr_number)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
             comments = tuple(
@@ -1799,6 +1789,15 @@ def _brief(comments: Sequence[Comment]) -> str | None:
         if fields["kind"] == "brief":
             return comment.url or comment.body.strip()
     return None
+
+
+def _pr_head(pull: Mapping[str, Any], repo: str, number: str) -> str:
+    head = _object(pull.get("head"), "GitHub pull request head").get("sha")
+    if not isinstance(head, str):
+        raise PollSourceError(f"{repo}#{number} has no head")
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise PollSourceError(f"{repo}#{number} head {head[:40]!r} is not a full SHA")
+    return head
 
 
 def _latest_head(comments: Sequence[Comment]) -> str | None:

@@ -1,6 +1,8 @@
 import ast
 import os
+import sqlite3
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -1562,7 +1564,8 @@ def test_p14_review_shipper_raises_unless_every_gate_holds(
     elif gate == "ticket-policy":
         source.tickets = (replace(fresh, factory=factory("merge")),)
     elif gate == "head-moved":
-        source.tickets = (replace(fresh, current_head=HEAD_B),)
+        green = {HEAD_A: CIResult("success"), HEAD_B: CIResult("success")}
+        source.tickets = (replace(fresh, current_head=HEAD_B, ci=green),)
     elif gate in ("red-ci", "pending-ci"):
         status = "failure" if gate == "red-ci" else "pending"
         source.tickets = (replace(fresh, ci={HEAD_A: CIResult(status)}),)
@@ -1863,6 +1866,7 @@ def test_m1_a_settle_that_keeps_failing_wakes_grok_once_and_comments_continue(
     source.tickets = (ticket(BRIEFED, APPROVED, OK_1, forged),)
     dispatcher.poll_once(source)
     assert outcomes(queue)["ok-forged"] == "after-merge"
+    assert ("ship-failed", "grok") in jobs(queue)
     for _poll in range(3):
         dispatcher.poll_once(source)
 
@@ -2368,3 +2372,184 @@ def test_no_hook_acts_on_a_merged_ticket(tmp_path: Path, late: Comment) -> None:
     assert jobs(queue) == before
     assert shipper.requests == []
     assert workflow_state(queue) == "merged"
+
+
+OLD_TICKET_STATE = """
+CREATE TABLE ticket_state (
+    repo TEXT NOT NULL,
+    ticket_id TEXT NOT NULL,
+    gate_count INTEGER NOT NULL DEFAULT 0,
+    stuck INTEGER NOT NULL DEFAULT 0,
+    stuck_reason TEXT,
+    stuck_source_comment_id TEXT,
+    timeout_seconds INTEGER,
+    generation INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (repo, ticket_id)
+)
+"""
+
+
+class PauseAfterColumnRead:
+    """Hold a connection right after it reads ticket_state's columns."""
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        read: threading.Event,
+        resume: threading.Event,
+    ):
+        self.connection = connection
+        self.read = read
+        self.resume = resume
+
+    def __enter__(self) -> "PauseAfterColumnRead":
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *exc: object) -> object:
+        return self.connection.__exit__(*exc)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.connection, name)
+
+    def execute(self, sql: str, *args: object) -> object:
+        cursor = self.connection.execute(sql, *args)
+        if sql.strip() != "PRAGMA table_info(ticket_state)" or self.read.is_set():
+            return cursor
+        rows = cursor.fetchall()
+        self.read.set()
+        self.resume.wait(1)
+        return FetchedRows(rows)
+
+
+class FetchedRows:
+    def __init__(self, rows: list[sqlite3.Row]):
+        self.rows = rows
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return self.rows
+
+
+def test_initialize_migrations_are_race_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "d.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(OLD_TICKET_STATE)
+    read = threading.Event()
+    resume = threading.Event()
+    plain = Dispatcher._connect
+
+    def connect(self: Dispatcher) -> object:
+        connection = plain(self)
+        if threading.current_thread().name == "first":
+            return PauseAfterColumnRead(connection, read, resume)
+        return connection
+
+    monkeypatch.setattr(Dispatcher, "_connect", connect)
+    errors: list[BaseException] = []
+
+    def first() -> None:
+        try:
+            setup(tmp_path)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=first, name="first")
+    thread.start()
+    assert read.wait(5)
+
+    setup(tmp_path)
+    resume.set()
+    thread.join(10)
+
+    assert errors == []
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")
+        }
+    assert {"stuck_wake_job_id", "workflow_state", "cap_extra"} <= columns
+
+
+def test_t4_replay_after_settle_keeps_merged(tmp_path: Path) -> None:
+    actions = FakeReviewActions()
+    source = FakeSource(ticket(BRIEFED, APPROVED, OK_1))
+    dispatcher, queue, _shipper = wired(tmp_path, actions, source)
+    in_review(queue, HEAD_A)
+    dispatcher.poll_once(source)
+    assert outcomes(queue)["ok-1"] == "shipped"
+    assert workflow_state(queue) == "merged"
+    with queue.connect() as connection:
+        connection.execute(
+            "DELETE FROM handled_comments WHERE comment_id = 'verdict-1'"
+        )
+
+    dispatcher.poll_once(source)
+
+    assert outcomes(queue)["verdict-1"] == "ship-already-completed-after:tracy-site"
+    assert actions.states[-1] == "merged"
+    assert "waiting-external" not in actions.states[actions.states.index("merged"):]
+    assert workflow_state(queue) == "merged"
+
+
+def test_edited_older_verdict_does_not_override_a_newer_approve(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    _dispatcher, queue, shipper, source, fresh = accepted(tmp_path, actions)
+    with queue.connect() as connection:
+        connection.execute(
+            "INSERT INTO handled_comments VALUES ('owner/repo', '42', 'verdict-0', 'waiting')"
+        )
+    edited = say(
+        "verdict-0", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 0.5
+    )
+    source.tickets = (replace(fresh, comments=fresh.comments + (edited,)),)
+
+    _dispatcher.poll_once(source)
+
+    assert outcomes(queue)["ok-1"] == "shipped"
+    assert [request.approve_comment_id for request in shipper.requests] == ["verdict-1"]
+    assert actions.fast_forwards == [("main", HEAD_A)]
+    assert workflow_state(queue) == "merged"
+
+
+def test_approve_on_red_ci_wakes_grok_once(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    in_review(queue, HEAD_A)
+    red = replace(
+        ticket(BRIEFED, APPROVED, ship="handoff"),
+        ci={HEAD_A: CIResult("failure")},
+    )
+
+    dispatcher.process(red)
+    dispatcher.process(red)
+
+    assert outcomes(queue)["verdict-1"] == "approve-ci-red"
+    assert jobs(queue) == [("blocked", "grok")]
+    with queue.connect() as connection:
+        head, detail = connection.execute(
+            "SELECT head, detail FROM jobs WHERE action = 'blocked'"
+        ).fetchone()
+    assert head == HEAD_A
+    assert f"landed on red CI at {HEAD_A}" in detail
+
+
+def test_approve_on_red_ci_while_held_waits_without_a_wake(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    in_review(queue, HEAD_A)
+    with queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = 'awaiting-ok'"
+        )
+
+    dispatcher.process(
+        replace(
+            ticket(BRIEFED, APPROVED, ship="handoff"),
+            ci={HEAD_A: CIResult("failure")},
+        )
+    )
+
+    assert "verdict-1" not in outcomes(queue)
+    assert jobs(queue) == []

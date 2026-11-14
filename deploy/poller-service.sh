@@ -22,6 +22,12 @@
 # Without dashboard.push nothing is pushed and nothing changes here.
 # start, stop, restart and ensure take poller-service.lock (flock(1), where
 # installed), so a stop cannot interleave with an ensure about to launch.
+# Before launching, start and ensure also probe orch.db.lock, the lock
+# `orch poll` holds beside its database: the ORCH_DB run-poller.sh ends up
+# with after sourcing its env files (`run-poller.sh --print-db`), else the
+# caller's ORCH_DB, else ~/.local/state/factory/orch.db. While it is held, a
+# poller runs even if its pid is not visible from here (another PID
+# namespace), so nothing is launched (issue #134).
 #
 # Autostart: install-autostart writes ~/.config/factory/poller-autostart, which
 # makes the profile written by deploy/install.sh run `ensure` in the
@@ -99,6 +105,17 @@ running_pid() {
     printf '%s\n' "$pid"
 }
 
+# Is orch poll's own lock held? Without flock(1) or the lock file, no.
+poll_lock_held() {
+    local db lock status=0
+    command -v flock >/dev/null 2>&1 || return 1
+    db="$("$RUNNER" --print-db 2>/dev/null 9>&-)" || db=""
+    lock="${db:-${ORCH_DB:-${STATE}/orch.db}}.lock"
+    [[ -e "$lock" ]] || return 1
+    flock -n -E 75 "$lock" true 9>&- || status=$?
+    ((status == 75))
+}
+
 # Serialize start/stop/restart/ensure. Without flock(1) (macOS) this is a
 # no-op and ensure's re-check of the stop marker is the only guard.
 service_lock() {
@@ -150,6 +167,10 @@ launch() {
     mkdir -p "$STATE"
     if pid="$(running_pid)"; then
         say "orch poll already running (pid ${pid})"
+        return 0
+    fi
+    if poll_lock_held; then
+        say "orch poll already running (poll lock held)"
         return 0
     fi
     ensure_db || return 1
@@ -208,6 +229,7 @@ status() {
 ensure() {
     [[ -e "$STOPPED" ]] && return 0
     running_pid >/dev/null && return 0
+    poll_lock_held && return 0
     # Re-check right before launching: a stop may have just landed.
     [[ -e "$STOPPED" ]] && return 0
     launch
