@@ -27,6 +27,7 @@ from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placemen
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
+from lib.pr_title import label, read_sources
 from lib.worktrees import pid_alive
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +54,9 @@ class TrackerRow:
     stuck_reason: str | None = None
     # Issue #86: the hold approver while the ticket is awaiting-ok.
     waiting_on: str | None = None
+    # Issue #115: the source issue and the PR, shown issue first.
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,8 @@ class JobRow:
     last_activity_at: float
     # lib/job_state.py's state, set by build_status for a running job.
     job_state: str | None = None
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +113,8 @@ class AttentionRow:
     ticket_id: str
     reason: str
     detail: str | None
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -211,10 +219,11 @@ class SQLiteStatusReader:
                 FROM needs_attention AS flag
                 LEFT JOIN ticket_state AS state
                   ON state.repo = flag.repo AND state.ticket_id = flag.ticket_id
-                WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'handed-off', 'done')
+                WHERE COALESCE(state.workflow_state, '') NOT IN ('merged', 'done')
                 ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
                 """
             ).fetchall()
+            sources = read_sources(connection)
         finally:
             connection.close()
         return tuple(
@@ -223,6 +232,7 @@ class SQLiteStatusReader:
                 ticket_id=str(row["ticket_id"]),
                 reason=str(row["reason"]),
                 detail=str(row["detail"]) if row["detail"] is not None else None,
+                **_source(sources, row),
             )
             for row in rows
         )
@@ -284,6 +294,7 @@ class SQLiteStatusReader:
                 else {}
             )
             self._slots = read_placements(connection) if has_slots else {}
+            sources = read_sources(connection)
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -313,6 +324,7 @@ class SQLiteStatusReader:
                     if row["workflow_state"] == "awaiting-ok"
                     else None
                 ),
+                **_source(sources, row),
             )
             for row in tracker_rows
         )
@@ -326,6 +338,7 @@ class SQLiteStatusReader:
                 state=str(row["state"]),
                 created_at=float(row["created_at"]),
                 last_activity_at=float(row["last_activity_at"]),
+                **_source(sources, row),
             )
             for row in job_rows
         )
@@ -350,6 +363,13 @@ class SQLiteStatusReader:
             if connection is not None:
                 connection.close()
             raise StatusError(f"cannot read database: {exc}") from exc
+
+
+def _source(
+    sources: Mapping[tuple[str, str], tuple[str, str | None]], row: sqlite3.Row
+) -> dict[str, str | None]:
+    found = sources.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
+    return {"source": found[0], "pr_number": found[1]} if found else {}
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:
@@ -567,7 +587,7 @@ def render(status: Status) -> str:
             reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
             state = f"stuck{reason}"
         lines.append(
-            f"  {row.repo}#{row.ticket_id} {state} [{row.tracker}]{action}"
+            f"  {_label(row)} {state} [{row.tracker}]{action}"
         )
     if not status.paused:
         lines.append("  empty")
@@ -575,7 +595,7 @@ def render(status: Status) -> str:
         lines.extend(("", f"Needs attention ({len(status.attention)})"))
         for flag in status.attention:
             detail = f": {flag.detail}" if flag.detail else ""
-            lines.append(f"  {flag.repo}#{flag.ticket_id} {flag.reason}{detail}")
+            lines.append(f"  {_label(flag)} {flag.reason}{detail}")
     if status.feeder is not None:
         feeder = status.feeder
         lines.extend(
@@ -696,9 +716,13 @@ def main(
 
 def _job_line(row: JobRow, observed_at: float, since: float) -> str:
     return (
-        f"  {row.repo}#{row.ticket_id} {row.action} -> {row.recipient} "
+        f"  {_label(row)} {row.action} -> {row.recipient} "
         f"{row.job_state or row.state} {_age(observed_at, since)}"
     )
+
+
+def _label(row: TrackerRow | JobRow | AttentionRow) -> str:
+    return label(row.repo, row.ticket_id, row.source, row.pr_number)
 
 
 def _device_line(row: DeviceRow) -> str:

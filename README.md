@@ -421,6 +421,16 @@ project or ticket and the long-running loop continues after the
 `poll_seconds` interval; `--once` reports a cycle-level failure with a
 nonzero exit.
 
+*State loss (#66).* After every cycle `orch poll` backs the database up to
+`$ORCH_DB_BACKUP`, else `~/.local/share/factory/backup/orch.db` (outside the
+state directory a reboot can lose; a path inside the database's own directory
+is refused). A failed backup is one `poll_errors` row. `deploy/poller-service.sh`
+`start` and `ensure` restore a missing database with `orch restore-db` before
+launching (`RESTORED orch.db from backup`), or, with no backup, create an empty
+one with `orch init-db` and log a `WARNING`. On an empty or stale database the
+dispatcher still queues no job for a step the thread already answered: a later
+trusted `orch:v1` reply records the job as cancelled (`answered-<action>`).
+
 *Poll interval.* `poll_seconds` in `orch.yml` may be 30 or 60 (anything else is refused); the shipped value is 30. It is how long `orch poll` sleeps after a cycle finishes, so a cycle's elapsed time includes the work it does: cycle start to cycle start is that work plus `poll_seconds`. 30 seconds is the poll interval, not a promise that a comment is picked up and acted on within 30 seconds. GitHub is read
 every cycle. Linear keeps its own 60-second cadence and budget: the
 discovery search, dirty-row reads (with `linear_webhook`) and tracked Linear
@@ -635,8 +645,8 @@ or error cutoff, so a missed webhook costs at most one reconcile interval.
 A dirty row is deleted only after its issue was read in that cycle and only
 if no newer event arrived meanwhile; an unread row (budget deferral, error)
 waits for the next cycle. A tracked ticket the dispatcher no longer polls
-(merged, handed off, done or abandoned) is not read with or without a
-webhook, so its row is deleted unread. A read that finds the issue gone
+(merged, done or abandoned; a handed-off one is still polled, issue #108)
+is not read with or without a webhook, so its row is deleted unread. A read that finds the issue gone
 also drops its reused read, so the ticket is never rebuilt from it. If the dirty queue cannot be read, the cycle
 records a `linear-webhook` poll error and runs as a full cycle. With no
 `linear_webhook`, the poller never reads the dirty queue or the job list
@@ -650,8 +660,15 @@ bin/orch job run claude-bot <job-id> --worktree -- claude ...
 bin/orch job heartbeat claude-bot <job-id>
 bin/orch job done claude-bot <job-id> --handoff <comment-id>
 bin/orch job done claude-bot <job-id> --failed
+bin/orch job cancel <job-id> [--reason TEXT]
 bin/orch gc [--older-than HOURS] [--dry-run]
 ```
+
+`orch job cancel` is an operator command (not a bot's): it moves a queued job
+to `cancelled`, so it never runs and T6 never retries it, and keeps its dedupe
+key, so the comment that queued it queues nothing again. A running job is
+refused (stop its worker first). A merge cancels the ticket's queued harness
+jobs the same way (#108).
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
@@ -1157,6 +1174,35 @@ each poll cycle the dispatcher stores what `LivePollSource` parsed in the
 `project_rules` table (`lib/project_rules.py`), and the snapshot reads it
 back. A `factory.md` the poller could not read, or has not read yet, is
 `status: unknown` with the `reason`, never a default.
+
+`status.json`'s `usage` backs the Efficiency page's Subscription headroom
+(issue #151). It has one entry per bot account (each harness's bot user on
+every enabled `machines.yml` device). Each entry gives the 5-hour and 7-day
+window's `used` fraction, `resets_at` and `observed_at`, plus `headroom`
+(the least `1 - used` over fresh windows). Readings come only from the
+CLI's own output, captured by `orch job run` for every job and stored in
+`usage_readings` on the existing telemetry flush:
+
+- **Claude:** at each job's start, `orch job run` sends Claude Code's SDK
+  control request `get_usage` alone to `claude -p --input-format
+  stream-json` (on the job's device, as its bot; no model turn) and keeps
+  `rate_limits.five_hour` and `seven_day` (`lib/usage_probe.py`). A login
+  without the profile scope answers `rate_limits_available: false`, and a
+  window the reply leaves null, so both read `no reading`.
+- **Codex:** `orch job run` adds `--json` to codex-bot's command, a wrapper
+  included (`<wrapper> exec ...`), and keeps the `thread.started` thread id.
+  It then reads only the `rate_limits` of the last `token_count` event in
+  that job's own rollout, `$CODEX_HOME/sessions/.../rollout-*-<thread
+  id>.jsonl` (`lib/codex_rollout.py`): on each flush for a box job, and
+  once over SSH when a remote job ends. Windows are matched by
+  `window_minutes` (300, 10080). A reading is dated by its event's own
+  timestamp, so rereading an old event never makes it fresh. A newer
+  `token_count` whose `rate_limits` is null or missing, or that leaves a
+  window out, reads that window as `no reading`.
+
+A newer `no reading` replaces older numbers. A window that has reset, or a
+reading older than 24 hours, is `stale` and its `used` is null. Cursor shows `not tracked`, and a database without the
+table shows `no telemetry`.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import QUESTIONS_LINES
+from lib.brief.common import GH, QUESTIONS_LINES
 from lib.queue import Job
 
 
@@ -20,8 +20,26 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "Test first.",
         "3. Before `ready`, run the router's \"Before ready\" steps.",
         "4. Push, then post the ready handoff below with the head you pushed.",
+        _title_line(facts),
         *builder_notes(job),
     ]
+
+
+def _title_line(facts: dict) -> str:
+    source = facts["source"]
+    if source is None:
+        title = (
+            "`#<issue>: <issue title>`, with the source issue's number (not the PR's); "
+            "for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`)"
+        )
+    elif source.startswith("#"):
+        title = f"`{source}: <issue title>`"
+    else:
+        title = f"`{source}: <title>`"
+    return (
+        f"The PR's title starts with its source issue: {title}. If you open the PR, title it so; "
+        f"if its title lacks the prefix, fix it with `{GH} pr edit --title`."
+    )
 
 
 def builder_notes(job: Job) -> list[str]:

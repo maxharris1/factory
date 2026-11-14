@@ -9,6 +9,7 @@ from dataclasses import asdict
 from lib.brief.skills import skill_paths
 from lib.factory_md import FactoryContext
 from lib.github_actions import TOKEN_VARIABLES
+from lib.pr_title import SOURCE
 from lib.queue import Job
 
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
@@ -68,6 +69,9 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     verify = detail.get("verify_skill")
     reviewer = detail.get("reviewer_harness")
     url = detail.get("linear_url")
+    source = detail.get("source_issue")
+    if not (isinstance(source, str) and SOURCE.fullmatch(source)):
+        source = job.request.ticket_id if SOURCE.fullmatch(job.request.ticket_id) else None
     # #158: a build queued by a plan handoff carries that comment's link as its instruction.
     plan = detail.get("instruction") if job.request.action == "build" and not detail.get("resume") else None
     return {
@@ -84,6 +88,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "url": url if isinstance(url, str) and _URL.fullmatch(url) else None,
         "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
         "skills": skill_paths(detail.get("repo_skill_paths")),
+        "source": source,
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
     }
 
