@@ -111,8 +111,8 @@ def test_a_session_puts_basetemp_and_process_temp_in_the_root(pytester, fake_shm
     values = run_probe(pytester)
     sessions = [values["TMP_PATH"], values["GETTEMPDIR"], values["TMPDIR"]]
     assert all(value.startswith(str(fake_shm) + os.sep) for value in sessions)
-    session_root = Path(values["TMPDIR"]).parent
-    assert Path(values["TMP_PATH"]).is_relative_to(session_root / "basetemp")
+    assert Path(values["TMP_PATH"]).is_relative_to(Path(values["TMPDIR"]) / "basetemp")
+    assert Path(values["TMP_PATH"]).is_relative_to(values["GETTEMPDIR"])
     assert values["TEMP"] == values["TMP"] == values["TMPDIR"]
     assert list(fake_shm.iterdir()) == []
 
