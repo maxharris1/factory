@@ -1517,7 +1517,7 @@ Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-proje
 
 ## pstack pin
 
-[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
+[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file, plus the sha256 of each file under [`skills/factory`](skills/factory), the factory's router skills, in its `factory:` section. A pin bump, or any edit to `skills/factory`, regenerates that lock in the same PR.
 
 ```sh
 bin/orch install-skills
@@ -1526,9 +1526,9 @@ bin/orch doctor --print-canary
 bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A dangling link into a removed checkout's `skills/pstack/skills/` is replaced. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
+`install-skills` symlinks each pinned skill, and each router skill in `skills/factory` (`factory-builder`, `factory-reviewer`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
-`doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+`doctor` checks every installed skill and router against the lock, then prints a canary that asks the harness to read the installed `factory-builder` skill, name it, and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot and Codex Bot each start their own harness and write the reply; Cursor is not asked. `doctor` fails if either harness did not load that version. It does not start `claude` or `codex`.
 
 ## Usage reserve
 
