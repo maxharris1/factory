@@ -43,6 +43,7 @@ from lib.orch_yml import (
     resolve_job_timeout,
 )
 from lib.pr_title import SOURCE, github_source
+from lib.project_rules import FactoryRead
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 TIMEOUT_SECONDS = 60.0
@@ -1000,6 +1001,23 @@ class LivePollSource:
             )
         self._factory_cache[identity] = factory
         return factory
+
+    def factory_reads(self) -> tuple[FactoryRead, ...]:
+        """Each orch.yml project's factory.md for this cycle (issue #152).
+
+        Through _factory, so it shares the cycle cache and every check the
+        poll applies. A PollSourceError keeps its message as the reason;
+        any other failure keeps only what _safe_reason does. Nothing is
+        recorded as a cycle error: the poll records its own reads.
+        """
+        reads: list[FactoryRead] = []
+        for project in self.config.projects:
+            try:
+                reads.append(FactoryRead(project.repo, self._factory(project), None))
+            except Exception as exc:
+                reason = str(exc) if isinstance(exc, PollSourceError) else _safe_reason(exc)
+                reads.append(FactoryRead(project.repo, None, reason or type(exc).__name__))
+        return tuple(reads)
 
     def factory_context(self, project: Project) -> FactoryContext:
         """factory.md (front block and prose) from the project's factory_ref.

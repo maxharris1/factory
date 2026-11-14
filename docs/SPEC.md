@@ -544,9 +544,20 @@ minutes whose job is not queued yet, are fewer than the free slots on enabled de
 so the queue never floods; a ticket whose feed failed midway resumes first
 under the same bound. It feeds urgent tickets (an `urgent` label or
 Linear priority Urgent) first, then `bug`, then the oldest, and refreshes
-the claim order of tickets already fed each poll. `orch status` and the
-dashboard show the feeder's last poll, even an empty one: eligible, fed and
-waiting for capacity. With no `intake` anywhere the poller runs no feeder.
+the claim order of tickets already fed each poll. A ticket not fed yet is
+gated by its own lines (issue #156): every `Blocked by` ref (and, on Linear,
+every blocks relation) must be done (a PR merged; an issue closed completed or
+with a merged linked PR; a Linear issue completed), and no ticket in flight
+in the same repo may share a `Touches:` path, and none may share a
+`Conflicts with` edge with it (across repos too), the earlier
+ticket in feed order keeping the path. A ticket that waits is
+`waiting-blocked` with its reason, takes no room and is re-checked every
+poll; a blocker cycle, a blocker closed without finishing and a blocker that
+does not exist are flagged needs-attention (`blocker-cycle`,
+`blocker-closed`, `blocker-missing`). `orch status` and the dashboard show
+the feeder's last poll, even an empty one: eligible, fed, waiting for
+capacity and waiting on blockers or files. With no `intake` anywhere the
+poller runs no feeder.
 
 `ready_starts_review` defaults to `false`. When `true`, a trusted `ready` from
 `factory.md`'s builder (`from=<builder>-bot role=builder`, by a

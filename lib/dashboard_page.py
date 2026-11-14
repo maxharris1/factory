@@ -521,8 +521,8 @@ SCRIPT = r"""
 
   // Backlog feeder (#85): appended to Factory status like the webhook block.
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
-    'feeding': 'feeding', 'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued',
-    'closed': 'PR closed, not fed'};
+    'waiting-blocked': 'waiting on a blocker', 'feeding': 'feeding', 'error': 'feed error, retrying',
+    'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
   function renderFeeder(d) {
     var root = byId('kpis');
     var f = d.feeder;
@@ -531,11 +531,13 @@ SCRIPT = r"""
     box.setAttribute('id', 'feeder');
     add(box, el('h2', null, 'Feeder'));
     add(box, el('p', null, 'eligible ' + f.eligible + ' · fed ' + f.fed +
-      ' · waiting for capacity ' + f.waiting_capacity));
+      ' · waiting for capacity ' + f.waiting_capacity +
+      ' · waiting on blockers or files ' + f.waiting_blocked));
     var list = add(box, el('ul'));
     (f.items || []).forEach(function (item) {
       add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
-        (FEEDER_STATE[item.state] || item.state) + (item.pr ? ' → PR #' + item.pr : '')));
+        (item.reason || FEEDER_STATE[item.state] || item.state) +
+        (item.pr ? ' → PR #' + item.pr : '')));
     });
   }
 
@@ -1497,6 +1499,7 @@ def _kpis(snapshot: dict) -> str:
 _FEEDER_STATE = {
     "eligible": "eligible",
     "waiting-capacity": "waiting for capacity",
+    "waiting-blocked": "waiting on a blocker",
     "feeding": "feeding",
     "error": "feed error, retrying",
     "fed": "fed",
@@ -1513,7 +1516,7 @@ def _feeder(snapshot: dict) -> str:
         return ""
     rows = "".join(
         f"<li>{_e(item['repo'])}#{_e(item['issue'])} "
-        f"{_e(_FEEDER_STATE.get(item['state'], item['state']))}"
+        f"{_e(item.get('reason') or _FEEDER_STATE.get(item['state'], item['state']))}"
         + (f" → PR #{_e(item['pr'])}" if item.get("pr") else "")
         + "</li>"
         for item in feeder["items"]
@@ -1521,7 +1524,8 @@ def _feeder(snapshot: dict) -> str:
     return (
         '<div id="feeder"><h2>Feeder</h2>'
         f"<p>eligible {_e(feeder['eligible'])} · fed {_e(feeder['fed'])} · "
-        f"waiting for capacity {_e(feeder['waiting_capacity'])}</p>"
+        f"waiting for capacity {_e(feeder['waiting_capacity'])} · "
+        f"waiting on blockers or files {_e(feeder.get('waiting_blocked', 0))}</p>"
         f"<ul>{rows}</ul></div>"
     )
 
