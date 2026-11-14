@@ -420,3 +420,22 @@ def test_a_retry_that_still_conflicts_stops_with_nothing_left_to_run(tmp_path: P
 
     assert board.outcome(late) == "stuck-update-failed-2"
     assert board.queue.claim("claude") is None
+
+
+def test_a_failed_update_whose_ready_waits_on_ci_is_done_from_that_ready(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    pr.push(sha(2), ci="pending")
+    ready = board.ready(pr, sha(2))
+    board.fail("claude")
+    board.poll()
+    pr.ci[sha(2)] = "success"
+    board.poll()
+
+    [job] = board.jobs("update-from-main")
+    assert (job["state"], job["handoff_comment_id"]) == ("done", ready)
+    assert board.outcome(ready) == f"approval-carried:{sha(1)[:12]}->{sha(2)[:12]}"
+    row = board.state("42")
+    assert (row["approved_head"], row["update_failures"]) == (sha(2), 0)
+    assert len(board.jobs("review")) == 1

@@ -3190,13 +3190,16 @@ class Dispatcher:
         return not members or members[0]["ticket_id"] == ticket.ticket_id
 
     def _watched(self, ticket: TrackedTicket) -> bool:
-        """An approved ticket the merge queue still watches (#130)."""
+        """An approved ticket the merge queue still watches (#130), an
+        update paused on a builder's question included."""
         with self._connect() as connection:
             return connection.execute(
                 """
                 SELECT 1 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
-                  AND workflow_state IN ('merge-queue', 'updating', 'waiting-external')
+                  AND workflow_state IN (
+                    'merge-queue', 'updating', 'waiting-external', 'waiting-max'
+                  )
                   AND approved_head IS NOT NULL
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
@@ -5110,7 +5113,8 @@ class Dispatcher:
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""
-        kind = _ANSWERS[job.request.action][0]
+        action = job.request.action
+        kind = "ready" if action == "update-from-main" else _ANSWERS[action][0]
         event = f"done-from-{kind}"
         now = self.queue.now()
         with self._connect() as connection:
@@ -6290,8 +6294,10 @@ class ReviewShipper:
     finish_line: merge ticket, the approval the merge queue holds now) is
     request.head, CI on request.head is green, and request.head is a full
     SHA that is still the PR head. A finish_line: merge ticket that is not
-    yet its merge queue's turn (_merge_turn) raises RetryableStateError, so
-    T8 reads the ok again next poll. The
+    yet its merge queue's turn (_merge_turn) raises RetryableStateError
+    before CI is checked, so T8 reads the ok again next poll: an ok posted
+    while the PR conflicts waits for the update whatever CI on the old
+    head says. The
     ticket is re-read from source, and in those fresh comments the latest
     trusted reviewer verdict must still be that APPROVE, before the ok.
     A verdict posted between that read and the merge is not seen; that
@@ -6348,13 +6354,13 @@ class ReviewShipper:
             raise ShipError(f"no completed {policy} ship intent for {head}")
         if ticket.current_head != head:
             raise ShipError(f"PR head is {ticket.current_head}, not {head}")
-        result = ticket.ci.get(head)
-        if result is None or result.status != "success":
-            raise ShipError(f"CI on {head} is not green")
         if ticket.closed:
             raise RetryableStateError(f"PR closed before {head} shipped")
         if not dispatcher._merge_turn(ticket):
             raise RetryableStateError(f"{head} waits its turn in the merge queue")
+        result = ticket.ci.get(head)
+        if result is None or result.status != "success":
+            raise ShipError(f"CI on {head} is not green")
         status, fresh = dispatcher._prepare_external_ship(request)
         if status == "pending":
             if ship_mode(ticket.factory.ship) == "fast-forward":

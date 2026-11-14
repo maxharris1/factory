@@ -212,3 +212,22 @@ def test_a_shippers_fresh_closed_read_abandons_before_a_later_go(
     assert_abandoned(board)
     assert board.queue.claim("claude") is None
     assert board.queue.claim("codex") is None
+
+
+QUESTIONS = "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\nWhich side?"
+
+
+def test_closing_an_update_paused_on_a_question_ends_the_watch(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    job = board.claim("claude")
+    board.post(pr, "questions-1", QUESTIONS, "claude-login")
+    board.queue.finish(job.id, owner="claude", handoff_comment_id="questions-1")
+    board.poll()
+    assert board.state("42")["workflow_state"] == "waiting-max"
+    pr.closed = True
+    board.poll()
+
+    assert_abandoned(board)
+    assert board.actions.states[-1] == "abandoned"

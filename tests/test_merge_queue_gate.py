@@ -211,16 +211,18 @@ def test_an_ok_waits_its_turn_behind_an_older_approval(tmp_path: Path) -> None:
     assert board.actions.fast_forwards == [("main", sha(2))]
 
 
+@pytest.mark.parametrize("early_ci", ["success", "pending", "failure"])
 @pytest.mark.parametrize(
     ("mergeable", "state"), [(False, "dirty"), (True, "behind"), (None, "unknown")]
 )
 def test_an_ok_while_the_pr_cannot_merge_waits_for_the_update(
-    tmp_path: Path, mergeable: bool | None, state: str
+    tmp_path: Path, mergeable: bool | None, state: str, early_ci: str
 ) -> None:
     board = after_board(tmp_path)
     pr = board.open("42", sha(1))
     board.build_and_approve(pr)
     pr.mergeable, pr.mergeable_state = mergeable, state
+    pr.ci[sha(1)] = early_ci
 
     early = post_ok(board, pr, "ok-before-update")
     assert board.outcome(early) is None
