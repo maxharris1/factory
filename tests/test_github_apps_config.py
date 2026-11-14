@@ -215,6 +215,26 @@ def test_switch_on_ties_each_app_login_to_its_own_bot(
     assert config is not None, findings
 
 
+@pytest.mark.parametrize("bot", list(LOGINS))
+@pytest.mark.parametrize("wrong_spelling", ["first", "last"])
+def test_switch_on_ties_every_spelling_of_an_app_login_to_its_own_bot(
+    tmp_path: Path, bot: str, wrong_spelling: str
+) -> None:
+    login = LOGINS[bot]
+    shout = login.upper().replace("[BOT]", "[bot]")
+    other = "codex-bot" if bot == "grok-bot" else "grok-bot"
+    wrong, right = f"[{bot}, {other}]", f"[{bot}]"
+    first, last = (wrong, right) if wrong_spelling == "first" else (right, wrong)
+    trust = {login: first, shout: last}
+    assert any(
+        error.startswith(f"trusted_logins {name} must be [{bot}] alone")
+        for error in errors(tmp_path, orch_text(trust=trust))
+        for name in (login, shout)
+    )
+    config, findings = load(tmp_path, orch_text(enabled=False, trust=trust))
+    assert config is not None, findings
+
+
 def test_switch_on_refuses_an_app_login_missing_from_trusted_logins(tmp_path: Path) -> None:
     text = orch_text().replace(f"  {CODEX}: [codex-bot]\n", "")
     assert "github_app.apps.codex-bot.bot_login must be a trusted_logins key" in errors(tmp_path, text)

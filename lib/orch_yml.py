@@ -970,23 +970,27 @@ def _app_switch(
     project owner, and someone must be able to approve."""
     if "grok-bot" not in github_app.apps:
         findings.append(Finding("error", "github_app.enabled requires github_app.apps.grok-bot"))
-    trusted = {login.casefold(): bots for login, bots in trusted_logins.items()}
     owners = sorted(
         {project.repo.split("/", 1)[0].casefold() for project in projects or ()}
     )
     for bot, app in github_app.apps.items():
         where = f"github_app.apps.{bot}"
-        bots = trusted.get(app.bot_login.casefold())
-        if bots is None:
+        spellings = {
+            login: bots
+            for login, bots in trusted_logins.items()
+            if login.casefold() == app.bot_login.casefold()
+        }
+        if not spellings:
             findings.append(Finding("error", f"{where}.bot_login must be a trusted_logins key"))
-        elif bots != frozenset({bot}):
-            findings.append(
-                Finding(
-                    "error",
-                    f"trusted_logins {app.bot_login} must be [{bot}] alone "
-                    f"while github_app.enabled is true",
+        for login, bots in spellings.items():
+            if bots != frozenset({bot}):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"trusted_logins {login} must be [{bot}] alone "
+                        f"while github_app.enabled is true",
+                    )
                 )
-            )
         installed = {account.casefold() for account in app.installations}
         for owner in owners:
             if owner not in installed:
