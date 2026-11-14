@@ -12,9 +12,8 @@ brief per job kind:
   base branch in by a merge commit, nothing else).
 
 Each brief is rendered from the job row alone: repo, PR or ticket, head sha,
-round and cap, risk, the review-rules contract (docs/SPEC.md section 8, the
-`factory-review-rules` contract) and the orch:v1 handoff header the job must
-end with (section 5). The target repo's factory.md prose is appended as an
+round and cap, risk, the review rules (docs/SPEC.md section 8) and the
+orch:v1 handoff header the job must end with (section 5). The target repo's factory.md prose is appended as an
 additional-context section (lib/factory_md.py parse_factory_context), so
 project-specific behavior stays in each repo's factory.md.
 
