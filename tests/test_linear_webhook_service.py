@@ -437,6 +437,43 @@ def test_listener_serves_the_orch_config_named_by_orch_config(
     _wait_for(lambda: _accepts(_port_of(home)), timeout=20, what="serve on the port")
 
 
+def _has_open(pid: int, path: Path) -> bool:
+    target = str(path.resolve())
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            if os.readlink(f"/proc/{pid}/fd/{fd}") == target:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def test_has_open_skips_a_descriptor_closed_while_listing(tmp_path: Path, monkeypatch) -> None:
+    held = tmp_path / "held"
+    held.touch()
+    doomed = os.open(tmp_path / "doomed", os.O_CREAT | os.O_RDONLY)
+    real_listdir = os.listdir
+    real_readlink = os.readlink
+
+    def listdir(path):
+        names = real_listdir(path)
+        names.remove(str(doomed))
+        return [str(doomed), *names]
+
+    def readlink(path, *args, **kwargs):
+        if str(path).endswith(f"/fd/{doomed}"):
+            try:
+                os.close(doomed)
+            except OSError:
+                pass
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "readlink", readlink)
+    with held.open("rb"):
+        assert _has_open(os.getpid(), held)
+
+
 def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> None:
     lock = _state(home) / "linear-webhook-listener.lock"
     lock.parent.mkdir(parents=True)
@@ -444,10 +481,7 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
     reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
     try:
         _wait_for(
-            lambda: any(
-                os.path.realpath(f"/proc/{reader.pid}/fd/{fd}") == str(lock.resolve())
-                for fd in os.listdir(f"/proc/{reader.pid}/fd")
-            ),
+            lambda: _has_open(reader.pid, lock),
             what="the reader to open the lock file",
         )
         result = _service(home, "stop")

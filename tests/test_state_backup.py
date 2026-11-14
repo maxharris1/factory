@@ -3,6 +3,7 @@ and restored when it is missing."""
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 from pathlib import Path
 
@@ -92,9 +93,11 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
     _dispatcher, queue = _seeded(tmp_path)
     dest = tmp_path / "share" / "orch.db"
     backup(queue.path, dest)
+    gc.collect()
     before = queue.path.read_bytes()
 
     code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
+    gc.collect()
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
