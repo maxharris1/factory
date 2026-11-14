@@ -232,3 +232,37 @@ def test_builder_no_longer_skips_deslop() -> None:
     text = BUILDER.read_text(encoding="utf-8")
     assert "skills/cursor-team-kit/deslop/SKILL.md" in text
     assert "until T07" not in text
+
+
+def test_every_cloud_copy_of_a_vendored_skill_carries_its_upstream_license(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    assert install_skills(ROOT, project, "cloud") == []
+    sources = {
+        **{path.name: PSTACK / "LICENSE" for path in (PSTACK / "skills").iterdir() if path.is_dir()},
+        **{path.name: KIT / "LICENSE" for path in KIT.iterdir() if path.is_dir()},
+    }
+    for rel in SKILL_DIRS:
+        for name, license_file in sources.items():
+            copied = project / rel / name / "LICENSE"
+            assert copied.read_bytes() == license_file.read_bytes(), copied
+            assert f"{sha256(license_file)} LICENSE" in (project / rel / name / ".orch-owned").read_text("utf-8")
+    replies = tmp_path / "replies"
+    write_replies(replies)
+    assert doctor(ROOT, project, "cloud", replies, print_canary=False)[::2] == (0, [])
+    dropped = project / ".agents" / "skills" / "deslop" / "LICENSE"
+    dropped.unlink()
+    code, _prompt, errors = doctor(ROOT, project, "cloud", replies, print_canary=False)
+    assert code == 1
+    assert errors == ["codex: did not load the pinned version (missing skills/deslop/LICENSE)"]
+
+
+def test_a_cloud_copy_from_before_the_license_is_upgraded_in_place(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    assert install_skills(ROOT, project, "cloud") == []
+    skill = project / ".claude" / "skills" / "deslop"
+    (skill / "LICENSE").unlink()
+    marker = skill / ".orch-owned"
+    lines = marker.read_text("utf-8").splitlines()
+    marker.write_text("\n".join(line for line in lines if not line.endswith(" LICENSE")) + "\n", "utf-8")
+    assert install_skills(ROOT, project, "cloud") == []
+    assert (skill / "LICENSE").read_bytes() == (KIT / "LICENSE").read_bytes()

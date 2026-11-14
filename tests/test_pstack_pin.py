@@ -164,6 +164,9 @@ def test_install_vendors_each_skill_into_the_cloud_project_paths(tmp_path: Path)
     pinned = {rel: digest for rel, digest in pin.hashes().items() if rel.startswith("skills/")}
     pinned |= {f"skills/{rel}": digest for rel, digest in pin.factory_hashes().items() if rel.split("/")[0] in ROUTERS}
     pinned |= {f"skills/{rel}": digest for rel, digest in pin.kit_hashes().items() if rel.split("/")[0] in KIT_SKILLS}
+    pstack_license = pin.hashes()["LICENSE"]
+    pinned |= {f"skills/{name}/LICENSE": pstack_license for name in names if name not in ROUTERS + KIT_SKILLS}
+    pinned |= {f"skills/{name}/LICENSE": pin.kit_hashes()["LICENSE"] for name in KIT_SKILLS}
     for rel in (".claude/skills", ".agents/skills", ".cursor/skills"):
         installed = sorted(path.name for path in (project / rel).iterdir())
         assert installed == names

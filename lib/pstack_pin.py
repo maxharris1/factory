@@ -67,6 +67,7 @@ _FACTORY_SKILLS = ("skills", "factory")
 _KIT_SKILLS = ("skills", "cursor-team-kit")
 _LOCK_KEYS = frozenset({"version", "commit", "token", "files", "factory", "kit"})
 _MARKER = ".orch-owned"
+_NOTICE = "LICENSE"
 _STAGING_PREFIX = ".orch-staging-"
 _LEGACY_BACKUP_PREFIX = ".orch-backup-"
 _INSTALLER = "orch-install-skills"
@@ -236,10 +237,11 @@ def install_skills(root: Path, anchor: Path, mode: Mode, *, rules: str | None = 
     try:
         skills = _skills(root)
         pin = load_pin(root)
-        pinned = _installed_hashes(pin, skills)
+        notices = _notices(root, pin, skills)
+        pinned = _installed_hashes(pin, skills, notices)
     except (OSError, ValueError, UnicodeError) as exc:
         return [str(exc)]
-    planned: list[tuple[Path, Path, str]] = []
+    planned: list[tuple[Path, Path, Path | None]] = []
     dir_errors: dict[Path, str] = {}
     recovered: set[Path] = set()
     for name, src in skills:
@@ -256,7 +258,7 @@ def install_skills(root: Path, anchor: Path, mode: Mode, *, rules: str | None = 
             if refusal:
                 errors.append(refusal)
             else:
-                planned.append((src, dest, name))
+                planned.append((src, dest, notices.get(name, (None, ""))[0]))
     for message in dir_errors.values():
         if message:
             errors.append(message)
@@ -268,9 +270,9 @@ def install_skills(root: Path, anchor: Path, mode: Mode, *, rules: str | None = 
         errors.extend(_rules_error(anchor, rules_dest, rules, "replace"))
     if errors:
         return errors
-    for src, dest, _name in planned:
+    for src, dest, notice in planned:
         try:
-            _place_owned(src, dest, mode, pin.commit, pinned)
+            _place_owned(src, dest, notice, mode, pin.commit, pinned)
         except OSError as exc:
             return [f"install interrupted at {dest}: {exc}"]
     try:
@@ -439,7 +441,8 @@ def doctor(
 
 def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
     skills = _skills(root)
-    pin = _installed_hashes(load_pin(root), skills)
+    loaded = load_pin(root)
+    pin = _installed_hashes(loaded, skills, _notices(root, loaded, skills))
     errors: list[str] = []
     for name, src in skills:
         prefix = f"skills/{name}/"
@@ -573,13 +576,30 @@ def _skill_folders(base: Path, label: str) -> tuple[tuple[str, Path], ...]:
     return tuple(found)
 
 
-def _installed_hashes(pin: Pin, skills: tuple[tuple[str, Path], ...]) -> dict[str, str]:
+def _installed_hashes(
+    pin: Pin, skills: tuple[tuple[str, Path], ...], notices: Mapping[str, tuple[Path, str]]
+) -> dict[str, str]:
     names = {name for name, _path in skills}
     hashes = {rel: digest for rel, digest in pin.files if rel.startswith("skills/")}
     for rel, digest in (*pin.factory, *pin.kit):
         if rel.split("/", 1)[0] in names:
             hashes[f"skills/{rel}"] = digest
+    for name, (_notice, digest) in notices.items():
+        hashes.setdefault(f"skills/{name}/{_NOTICE}", digest)
     return hashes
+
+
+def _notices(root: Path, pin: Pin, skills: tuple[tuple[str, Path], ...]) -> dict[str, tuple[Path, str]]:
+    sources = (
+        (root / SKILL_ROOT, pstack_root(root), pin.hashes()),
+        (kit_root(root), kit_root(root), pin.kit_hashes()),
+    )
+    notices: dict[str, tuple[Path, str]] = {}
+    for name, src in skills:
+        for parent, base, hashes in sources:
+            if src.parent == parent and _NOTICE in hashes:
+                notices[name] = (base / _NOTICE, hashes[_NOTICE])
+    return notices
 
 
 def _skill_dir(root: Path, name: str) -> Path:
@@ -602,7 +622,9 @@ def _harness_for(dest: Path, anchor: Path, mode: Mode) -> str:
     _exhaustive(mode)
 
 
-def _place_owned(src: Path, dest: Path, mode: Mode, commit: str, pinned: Mapping[str, str]) -> None:
+def _place_owned(
+    src: Path, dest: Path, notice: Path | None, mode: Mode, commit: str, pinned: Mapping[str, str]
+) -> None:
     skills_dir = dest.parent
     if skills_dir.is_symlink():
         raise OSError(f"refusing to follow symlinked skills dir {skills_dir}")
@@ -616,6 +638,8 @@ def _place_owned(src: Path, dest: Path, mode: Mode, commit: str, pinned: Mapping
             staged.symlink_to(src.resolve(), target_is_directory=True)
         elif mode == "cloud":
             _copy_tree(src, staged)
+            if notice is not None and not (staged / _NOTICE).exists():
+                (staged / _NOTICE).write_bytes(notice.read_bytes())
             _write_marker(staged, commit)
         else:
             _exhaustive(mode)
