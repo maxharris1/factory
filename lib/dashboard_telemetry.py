@@ -17,6 +17,22 @@ Snapshot shape:
   calls by type, files touched, tests, tokens, cost, elapsed, last activity,
   exit reason, the last STEPS_SHOWN steps, each a fixed label) or null when
   it has none;
+* each summary also carries the live run (#147 writes it, #148 reads it).
+  null means no source: a table from before #147, ORCH_TELEMETRY=counters,
+  or nothing captured yet. An empty list means the source is there and empty.
+    plan:          null | [{text: str<=TASK_TEXT_LIMIT,
+                            status: "pending" | "in_progress" | "done"}]
+                   (at most PLAN_ITEMS)
+    current_task:  null | str<=TASK_TEXT_LIMIT
+    last_finished: null | str<=TASK_TEXT_LIMIT
+    subagents:     null | [{kind: str<=LABEL_LIMIT, description: str<=TASK_TEXT_LIMIT,
+                            status: "running" | "finished" | "failed",
+                            started_age_seconds: int | null,
+                            finished_age_seconds: int | null (null while running)}]
+                   (at most SUBAGENTS)
+  Times are ages in seconds, like every other time in the snapshot. An
+  unknown plan status reads as "pending", an unknown sub-agent status as
+  "running"; text is one line, capped with "…";
 * the top-level `telemetry` holds the rollup over the last WINDOW_DAYS:
   totals, then tokens and cost per harness and per repo, and the summaries
   of the RECENT_JOBS most recently finished jobs (so a job modal opened on
@@ -36,7 +52,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 
-from lib.telemetry import TABLE
+from lib.telemetry import LABEL_LIMIT, LIVE_RUN_COLUMNS, PLAN_ITEMS, SUBAGENTS, TABLE, TASK_TEXT_LIMIT
 
 WINDOW_DAYS = 7
 RECENT_JOBS = 12
@@ -47,6 +63,8 @@ TEXT_LIMIT = 160
 HARNESSES = ("claude", "codex", "cursor")
 STEP_KINDS = ("tool", "command", "error")
 STEP_STATUSES = ("running", "ok", "error")
+PLAN_STATUSES = ("pending", "in_progress", "done")
+SUBAGENT_STATUSES = ("running", "finished", "failed")
 
 _COLUMNS = (
     "job_id", "harness", "repo", "started_at", "updated_at", "last_event_at",
@@ -116,6 +134,63 @@ def _harness(value: object) -> str:
     return str(value) if str(value) in HARNESSES else "other"
 
 
+def _json_list(value: object) -> list | None:
+    try:
+        data = json.loads(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _line(value: object) -> str | None:
+    return (_text(value, TASK_TEXT_LIMIT) or None) if isinstance(value, str) else None
+
+
+def _plan(value: object) -> list[dict] | None:
+    items = _json_list(value)
+    if items is None:
+        return None
+    plan = []
+    for item in items:
+        text = _line(item.get("text")) if isinstance(item, dict) else None
+        if text is None:
+            continue
+        status = item.get("status")
+        plan.append({"text": text, "status": status if status in PLAN_STATUSES else "pending"})
+    return plan[:PLAN_ITEMS]
+
+
+def _subagents(value: object, now: float) -> list[dict] | None:
+    items = _json_list(value)
+    if items is None:
+        return None
+    agents = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status") if item.get("status") in SUBAGENT_STATUSES else "running"
+        kind = item.get("kind")
+        agents.append(
+            {
+                "kind": (_text(kind, LABEL_LIMIT) if isinstance(kind, str) else "") or "agent",
+                "description": _line(item.get("description")) or "",
+                "status": status,
+                "started_age_seconds": _age(now, item.get("started_at")),
+                "finished_age_seconds": None if status == "running" else _age(now, item.get("finished_at")),
+            }
+        )
+    return agents[:SUBAGENTS]
+
+
+def _live(row: sqlite3.Row | dict, now: float) -> dict:
+    return {
+        "plan": _plan(row["plan"]),
+        "current_task": _line(row["current_task"]),
+        "last_finished": _line(row["last_finished"]),
+        "subagents": _subagents(row["subagents"], now),
+    }
+
+
 def summary(row: sqlite3.Row | dict, now: float) -> dict:
     """One job's telemetry as the dashboard shows it."""
     tools = _json(row["tool_calls"], dict)
@@ -162,6 +237,7 @@ def summary(row: sqlite3.Row | dict, now: float) -> dict:
         "exit_code": row["exit_code"] if finished and isinstance(row["exit_code"], int) else None,
         "exit_reason": _shaped(row["exit_reason"], _REASON, "finished") if finished and row["exit_reason"] else None,
         "steps": steps,
+        **_live(row, now),
     }
 
 
@@ -206,8 +282,10 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
     if present is None:
         return {"rows": {}, "rollup": _empty_rollup("none")}
     try:
+        present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
+        live = [name if name in present else f"NULL AS {name}" for name in LIVE_RUN_COLUMNS]
         rows = connection.execute(
-            f"SELECT {', '.join(_COLUMNS)} FROM {TABLE} WHERE updated_at >= ? "
+            f"SELECT {', '.join([*_COLUMNS, *live])} FROM {TABLE} WHERE updated_at >= ? "
             "ORDER BY updated_at DESC LIMIT ?",
             (now - WINDOW_DAYS * 86400, ROW_LIMIT),
         ).fetchall()
