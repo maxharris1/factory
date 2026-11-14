@@ -1158,6 +1158,19 @@ each poll cycle the dispatcher stores what `LivePollSource` parsed in the
 back. A `factory.md` the poller could not read, or has not read yet, is
 `status: unknown` with the `reason`, never a default.
 
+`status.json`'s `usage` backs the Efficiency page's Subscription headroom
+(issue #151). It has one entry per bot account (each harness's bot user on
+every enabled `machines.yml` device). Each entry gives the 5-hour and 7-day
+window's `used` fraction, `resets_at`, `status` and `observed_at`, plus
+`headroom` (the least `1 - used` over fresh windows). The only source is
+the CLI's own output: Claude Code's `rate_limit_event` in the stream-json
+events `orch job run` already reads. `lib/usage_readings.py` keeps only
+those numbers and enums and stores them in `usage_readings` on the existing
+telemetry flush. A window that has reset, or a reading older than 24 hours,
+is `stale` and its `used` is null. Codex shows `no reading` until a source
+is picked, and Cursor shows `not tracked`. A database without the table
+shows `no telemetry`.
+
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)

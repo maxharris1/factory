@@ -1152,6 +1152,7 @@ def _job_run_command(argv: list[str]) -> int:
         log=log,
         environ=environment,
         worker_env=placed.remote,
+        device=placed.device.name,
     )
     if session is not None:
         sessions.append(session)

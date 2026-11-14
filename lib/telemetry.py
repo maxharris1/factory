@@ -40,6 +40,10 @@ stdout on a pipe and hands the pipe to a `Session` here:
   rewritten with each heartbeat and `job_telemetry.updated_at` moves with
   `jobs.last_activity_at` (`last_seen` reads it, for the stale and health
   checks of #91 and #92).
+* Claude Code's `rate_limit_event` lines give subscription usage readings
+  (lib/usage_readings.py, #151): the 5-hour and 7-day used fraction, reset
+  time and status word only. They are written to `usage_readings` in the
+  same transaction as the telemetry row, per harness, bot and device.
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels). Defense in depth, they are
@@ -96,6 +100,7 @@ from typing import IO, Any
 from lib.codex_sandbox import exec_index
 from lib.job_token import PROOF_ENV
 from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
+from lib.usage_readings import Reading, parse_claude, store
 
 TABLE = "job_telemetry"
 STATE_DIR_ENV = "ORCH_JOB_STATE_DIR"
@@ -616,6 +621,7 @@ class Summary:
         self._seen_items: set[str] = set()
         self._messages: dict[str, tuple[int, int, int]] = {}
         self._totals = False
+        self.usage: dict[str, Reading] = {}
 
     # -- shared --
 
@@ -627,6 +633,9 @@ class Summary:
             self._claude(kind, event, now)
         elif kind in _CODEX_EVENTS:
             self._codex(kind, event, now)
+        elif kind == "rate_limit_event" and self.harness == "claude":
+            for reading in parse_claude(event, now):
+                self.usage[reading.window] = reading
 
     def _tool(self, name: str) -> str:
         """Count a call of the harness's tool `name`; its label for the step."""
@@ -912,8 +921,10 @@ class Session:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         worker_env: bool = False,
+        device: str = "box",
     ):
         self.connect = connect
+        self.device = device
         self.job_id = job_id
         self.bot = bot
         self.repo = repo
@@ -1053,6 +1064,8 @@ class Session:
     def _write(self, code: int | None, *, finished: bool) -> None:
         try:
             data = self.row(code, finished=finished)
+            with self._lock:
+                readings = list(self.summary.usage.values())
             marks = ", ".join("?" for _ in COLUMNS)
             with closing(self.connect()) as connection:
                 with connection:
@@ -1060,6 +1073,14 @@ class Session:
                     connection.execute(
                         f"INSERT OR REPLACE INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({marks})",
                         tuple(data[name] for name in COLUMNS),
+                    )
+                    store(
+                        connection,
+                        harness=self.harness,
+                        bot=self.bot,
+                        device=self.device,
+                        job_id=self.job_id,
+                        readings=readings,
                     )
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
@@ -1101,6 +1122,7 @@ def start_session(
     stdout: IO[bytes] | None = None,
     max_log_bytes: int = MAX_LOG_BYTES,
     worker_env: bool = False,
+    device: str = "box",
 ) -> Session | None:
     """A session for one `orch job run`, or None when ORCH_TELEMETRY is off.
 
@@ -1131,4 +1153,5 @@ def start_session(
         log=log,
         stdout=stdout if stdout is not None else getattr(sys.stdout, "buffer", None),
         worker_env=worker_env,
+        device=device,
     )

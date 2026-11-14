@@ -18,7 +18,8 @@ family from the builder this call selected. On a later round,
 builder, and the reviewer is outside its family. Family resolution is
 the check-config rule. A preferred harness check-config would refuse
 (unknown, or no family) raises instead of routing around it. This
-module does not read a usage account.
+module does not read a usage account; lib/usage_readings.py's
+`TelemetryUsage` reads the CLI's own usage readings from orch.db.
 """
 
 from __future__ import annotations
