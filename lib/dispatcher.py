@@ -621,7 +621,7 @@ class Dispatcher:
         try:
             self._title_pull(ticket)
         except Exception as exc:
-            self._record_poll_error(ticket, type(exc).__name__)
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         comments = sorted(ticket.comments, key=_comment_order)
         try:
             self._redrive_handoffs(ticket)
