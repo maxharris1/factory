@@ -652,9 +652,17 @@ _TASK_EVENTS = frozenset({"task_started", "task_progress", "task_notification"})
 _TASK_CREATED = re.compile(r"\bTask #([\w-]{1,40}) created successfully")
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "done"}
 _SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed"}
+_PATH_HEAD = r"(?:(?:[\w.-]+@)?[\w.-]+:(?!//))?(?:~[\w.-]*|[A-Za-z]:)?[/\\]+[^\s/\\]"
 _ABSOLUTE_PATH = re.compile(
-    r"(?<![\w.:/~\\-])(?:~[\w.-]*|[A-Za-z]:)?[/\\]+[^\s/\\]+(?:[/\\][^\s/\\]*)*"
+    rf"(?P<quote>[\"'`]){_PATH_HEAD}(?:(?!(?P=quote)).)*(?P<close>(?P=quote)?)"
+    rf"|(?<![\w.:/~\\@-]){_PATH_HEAD}(?:\\ |\S)*"
 )
+
+
+def _cut_paths(text: str) -> str:
+    return _ABSOLUTE_PATH.sub(
+        lambda found: f"{found['quote']}[path]{found['close']}" if found["quote"] else "[path]", text
+    )
 
 
 def _str(value: object) -> str | None:
@@ -846,7 +854,7 @@ class LiveRun:
             if not value:
                 return ""
             if len(value) <= SCRUB_LIMIT:
-                value = _ABSOLUTE_PATH.sub("[path]", value)
+                value = _cut_paths(value)
             return scrub(value, limit)
 
         current = next((item for item in self.plan if item["status"] == "in_progress"), None)

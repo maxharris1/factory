@@ -1306,23 +1306,54 @@ ABSOLUTE_PATHS = [
 ]
 
 
-@pytest.mark.parametrize("path", ABSOLUTE_PATHS)
-def test_every_absolute_path_form_is_cut_from_both_harnesses(path: str) -> None:
-    text = f"Inspect {path}"
-    claude = _live(_feed(
-        Summary("claude", Scrubber({})),
-        _use("t1", "TodoWrite", {"todos": [{"content": text, "status": "in_progress", "activeForm": text}]}),
-        _use("a1", "Agent", {"description": text, "subagent_type": "general-purpose"}),
-    ))
-    codex = _live(_feed(Summary("codex", Scrubber({})), {"type": "item.started", "item": {
-        "id": "t", "type": "todo_list", "items": [{"text": text, "completed": False}]}}))
+PATH_CUTS = [
+    *((f"Inspect {path}", "Inspect [path]") for path in ABSOLUTE_PATHS),
+    ("Inspect build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect bot@build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect file:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    (r"Inspect build-host:C:\Users\bot\private\deployment.txt", "Inspect [path]"),
+    ('Read "/Users/John Doe/private/deployment.txt"', 'Read "[path]"'),
+    ("Read '/Users/John Doe/private/deployment.txt' first", "Read '[path]' first"),
+    ("Read `~/My Files/private/deployment.txt` first", "Read `[path]` first"),
+    (r'Read "C:\Users\John Doe\private\deployment.txt"', 'Read "[path]"'),
+    ('Read "build-host:/srv/John Doe/private/deployment.txt"', 'Read "[path]"'),
+    ('Read "/Users/John Doe/private/deployment.txt', 'Read "[path]'),
+    (r"Read /Users/John\ Doe/private/deployment.txt", "Read [path]"),
+]
+
+
+def _persisted_live(tmp_path: Path, harness: str, text: str) -> dict:
+    if harness == "claude":
+        events = [
+            _use("t1", "TodoWrite", {"todos": [{"content": text, "status": "in_progress", "activeForm": text}]}),
+            _use("a1", "Agent", {"description": text, "subagent_type": "general-purpose"}),
+        ]
+    else:
+        events = [{"type": "item.started", "item": {
+            "id": "t", "type": "todo_list", "items": [{"text": text, "completed": False}]}}]
+    db = tmp_path / f"{harness}.db"
+    session = Session(
+        connect=lambda: sqlite3.connect(db), job_id=harness, bot=f"{harness}-bot", repo="acme/widgets",
+        harness=harness, argv=[], raw_log=None, scrub=Scrubber({}), log=lambda _: None, stdout=io.BytesIO(),
+    )
+    session.consume(io.BytesIO("".join(json.dumps(event) + "\n" for event in events).encode()))
+    session.finish(0)
+    row = _row(db, harness)
+    return {**row, "plan": json.loads(row["plan"]), "subagents": json.loads(row["subagents"])}
+
+
+@pytest.mark.parametrize(("text", "cut"), PATH_CUTS)
+def test_every_absolute_path_form_is_cut_whole_before_it_is_stored(tmp_path: Path, text: str, cut: str) -> None:
+    claude = _persisted_live(tmp_path, "claude", text)
+    codex = _persisted_live(tmp_path, "codex", text)
     for live in (claude, codex):
-        assert [item["text"] for item in live["plan"]] == ["Inspect [path]"]
-        assert live["current_task"] == "Inspect [path]"
-    assert claude["subagents"][0]["description"] == "Inspect [path]"
+        assert [item["text"] for item in live["plan"]] == [cut]
+        assert live["current_task"] == cut
+        assert "private" not in json.dumps(live)
+    assert claude["subagents"][0]["description"] == cut
 
 
-@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x"])
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b"])
 def test_relative_slashes_are_not_paths(text: str) -> None:
     live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
     assert "[path]" not in live["plan"][0]["text"]
