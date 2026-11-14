@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard import _add_sources, collect_snapshot, render_pages
+from lib.dashboard import _ticket_ref, collect_snapshot, render_pages
 from lib.dashboard_page import _ticket
 from lib.github_actions import GhResult, GitHubAdapterError, LinearReviewActions
 from lib.pr_title import SOURCES_TABLE, github_source, label, prefixed
@@ -270,18 +270,14 @@ def test_the_dashboard_shows_the_issue_first_and_the_pr_second(tmp_path: Path) -
 
 @pytest.mark.parametrize("source", ["ABCDEFGHIJ-1234567890", "#1234567890"])
 def test_the_dashboard_keeps_every_accepted_source_whole(source: str) -> None:
-    row = {"repo": "owner/repo", "ticket_id": "1234567891"}
-
-    _add_sources(row, {("owner/repo", "1234567891"): (source, "1234567891")})
+    row = _ticket_ref({("owner/repo", "1234567891"): (source, "1234567891")}, "owner/repo", "1234567891")
 
     assert (row["source"], row["pr"]) == (source, "1234567891")
     assert _ticket(row, full=True) == f"owner/repo#{source.removeprefix('#')} (PR #1234567891)"
 
 
 def test_the_dashboard_drops_a_stored_source_that_is_not_an_issue_or_key() -> None:
-    row = {"repo": "owner/repo", "ticket_id": "116"}
-
-    _add_sources(row, {("owner/repo", "116"): ("<script>", "116")})
+    row = _ticket_ref({("owner/repo", "116"): ("<script>", "116")}, "owner/repo", "116")
 
     assert (row["source"], row["pr"]) == (None, "116")
     assert _ticket(row, full=True) == "owner/repo#116"
@@ -320,19 +316,34 @@ def test_the_dashboard_finds_the_source_of_a_repo_too_long_to_show_whole(
 
 def test_the_dashboard_finds_the_source_of_a_ticket_id_too_long_to_show_whole() -> None:
     ticket_id = "T" * 80
-    row = {"repo": "owner/repo", "ticket_id": "T" * 63 + "…"}
 
-    _add_sources(row, {("owner/repo", ticket_id): ("#115", "116")})
+    row = _ticket_ref({("owner/repo", ticket_id): ("#115", "116")}, "owner/repo", ticket_id)
 
+    assert row["ticket_id"].endswith("…")
     assert (row["source"], row["pr"]) == ("#115", "116")
 
 
-def test_the_dashboard_shows_no_source_when_two_long_repos_look_the_same() -> None:
-    row = {"repo": "owner/" + "r" * 93 + "…", "ticket_id": "116"}
+def test_each_long_repo_keeps_its_own_source_when_the_shown_names_match(tmp_path: Path) -> None:
+    dispatcher, _ = setup(tmp_path, now=[1_800_000_000.0])
+    go = comment("c1", GO.format(state="building"), author="grok-login")
+    repos = ["owner/" + "r" * 94 + suffix for suffix in "ab"]
+    tracked = tuple(
+        titled_ticket(comments=(go,), repo=repo, source=source)
+        for repo, source in zip(repos, ("#115", "#114"))
+    )
+    dispatcher.poll_once(FakeSource(*tracked, github=tracked))
+    log = tmp_path / "poller.log"
+    log.write_text("", encoding="utf-8")
 
-    _add_sources(row, {
-        ("owner/" + "r" * 100 + "a", "116"): ("#115", "116"),
-        ("owner/" + "r" * 100 + "b", "116"): ("#7", "116"),
-    })
+    snapshot = collect_snapshot(tmp_path / "d.db", log, now=1_800_000_100.0)
 
-    assert "source" not in row
+    for section in ("queued", "tickets"):
+        rows = snapshot[section]
+        assert len({row["repo"] for row in rows}) == 1
+        assert sorted((row["source"], row["pr"]) for row in rows) == [
+            ("#114", "116"), ("#115", "116")
+        ]
+    page = render_pages(snapshot)["index.html"]
+    assert "#115 (PR #116)" in page
+    assert "#114 (PR #116)" in page
+    assert "r" * 93 + "…#116" not in page
