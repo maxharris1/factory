@@ -1065,6 +1065,9 @@ not visible from this shell, so they launch nothing (`start` says
 0 at once when another copy holds it. With `poller-autostart` on and no
 `crontab` (issue #248), `ensure` starts it unless it already runs, and logs
 `crontab not found` once per state directory; it can also be started by hand.
+A loop that `ensure` started exits at its next pass once `remove-autostart`
+has removed `poller-autostart`, and that pass launches nothing; a loop started
+by hand keeps running.
 
 Every `ensure`, held stopped or not, also runs `waiter-service.sh <bot>
 ensure` for each `~/.config/factory/waiter-autostart-<bot>` (logging to

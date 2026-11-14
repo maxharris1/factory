@@ -816,6 +816,66 @@ def test_ensure_without_crontab_starts_the_ensure_loop_that_keeps_waiters_alive(
         _stop_loop(home)
 
 
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_remove_autostart_ends_the_ensure_loop_that_ensure_started(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    config = home / ".config/factory"
+    (config / "poller-autostart").touch()
+    (config / "waiter-autostart-claude-bot").touch()
+    loop_pid = home / ".local/state/factory/poller-ensure-loop.pid"
+    try:
+        started = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.1")
+        assert started.returncode == 0, started.stderr
+        deadline = time.monotonic() + 15
+        while not loop_pid.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        loop = int(loop_pid.read_text())
+        original = int(_pidfile(home).read_text())
+
+        removed = _service(home, "remove-autostart", service=service)
+        assert removed.returncode == 0, removed.stderr
+        _kill_poller(home)
+        deadline = time.monotonic() + 10
+        while alive(loop):
+            assert time.monotonic() < deadline, "ensure loop outlived poller-autostart"
+            time.sleep(0.05)
+        waiter_calls = calls.read_text()
+        time.sleep(0.5)
+
+        assert not _pidfile(home).exists() or int(_pidfile(home).read_text()) == original
+        assert _service(home, "status", service=service).returncode == 3
+        assert calls.read_text() == waiter_calls
+    finally:
+        _stop_loop(home)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_a_hand_started_ensure_loop_runs_without_poller_autostart(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    (home / ".config/factory/waiter-autostart-claude-bot").touch()
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "ORCH_POLL_ENSURE_SEC": "0.1",
+           "ORCH_CRONTAB": str(home / "no-such-crontab")}
+    loop = subprocess.Popen([str(service.parent / "poller-ensure-loop.sh")], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 15
+        while not (calls.exists() and calls.read_text().count("claude-bot ensure") >= 3):
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        assert loop.poll() is None
+        assert _pidfile(home).exists()
+    finally:
+        loop.terminate()
+        loop.wait(timeout=10)
+
+
 def test_ensure_with_crontab_starts_no_ensure_loop(home: Path, tmp_path: Path) -> None:
     calls = tmp_path / "waiter-calls"
     service = _deploy_copy(tmp_path, calls)

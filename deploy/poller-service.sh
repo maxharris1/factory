@@ -37,6 +37,8 @@
 # With poller-autostart on and no `crontab` (issue #248), `ensure` logs that
 # once per state directory and starts deploy/poller-ensure-loop.sh unless it
 # already runs, so `ensure` still runs every ORCH_POLL_ENSURE_SEC seconds.
+# That loop runs with ORCH_POLL_AUTOSTART_LOOP=1: once poller-autostart is
+# gone, its `ensure` launches nothing and exits 76, and the loop exits.
 #
 # Waiters (issue #248): every `ensure`, held stopped or not, also runs
 # `waiter-service.sh <bot> ensure` for each ~/.config/factory/waiter-autostart-<bot>,
@@ -82,6 +84,8 @@ NO_CRONTAB_LOGGED="${STATE}/crontab-absent.logged"
 COPY_IN_STATUS="${ORCH_COPY_IN_STATUS:-/tmp/sand-copy-in-status.json}"
 COPY_IN_WAIT="${ORCH_COPY_IN_WAIT:-600}"
 COPY_IN_POLL="${ORCH_COPY_IN_POLL_SEC:-5}"
+AUTOSTART_LOOP="${ORCH_POLL_AUTOSTART_LOOP:-}"
+unset ORCH_POLL_AUTOSTART_LOOP
 # cron and fresh shells have a minimal PATH; the poller needs orch and gh.
 # The caller's PATH keeps precedence; the standard directories only follow it.
 export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
@@ -325,12 +329,16 @@ ensure_watchdog() {
         flock -n -E 75 "$ENSURE_LOOP_LOCK" true 9>&- || status=$?
         ((status == 75)) && return 0
     fi
-    nohup "$ENSURE_LOOP" >>"${STATE}/poller-ensure-loop.log" 2>&1 </dev/null 9>&- &
+    ORCH_POLL_AUTOSTART_LOOP=1 nohup "$ENSURE_LOOP" >>"${STATE}/poller-ensure-loop.log" 2>&1 </dev/null 9>&- &
 }
 
 ensure() {
     local status=0
     mkdir -p "$STATE"
+    if [[ -n "$AUTOSTART_LOOP" && ! -e "$AUTOSTART" ]]; then
+        say "poller autostart is off; the ensure loop it started stops here"
+        return 76
+    fi
     ensure_poller || status=$?
     ensure_waiters
     ensure_watchdog
