@@ -5,7 +5,7 @@ description: Route a factory review job through pstack. Names the exact pstack f
 
 # Factory reviewer
 
-Read `<pstack>/skills/poteto-mode/SKILL.md` in full, then the steps below, at the absolute paths the brief gives. `<pstack>` is the folder that holds pstack's `skills/` and `docs/`. Until the brief names it, it is this repo's `skills/pstack`. Then read your harness adapter. Codex reads `skills/factory/harness/codex.md`. Claude reads `<pstack>/docs/harness/claude-code.md`.
+Read `<pstack>/skills/poteto-mode/SKILL.md` in full, then the steps below, at the absolute paths the brief gives. `<pstack>` is the folder that holds pstack's `skills/` and `docs/`. It is the deployed factory checkout's `skills/pstack`, never the job's worktree. Then read your harness adapter. Codex reads `skills/factory/harness/codex.md`. Claude reads `<pstack>/docs/harness/claude-code.md`.
 
 This skill routes to pstack and never replaces it. Where it differs from pstack, the table at the bottom names the pstack line and the reason. The brief wins over this skill where the two differ.
 
@@ -49,3 +49,4 @@ Use `verdict=BLOCKED` only when you could not review at all, such as a missing h
 | `<pstack>/skills/interrogate/SKILL.md`, "Ask the user when the intent is unclear." | Read the criteria first. If the intent is still unclear, return BLOCKED with what you need. | No live user. Max, "Blocked means couldn't review, stop and tell me". |
 | `<pstack>/skills/interrogate/SKILL.md`, "Otherwise it is the branch diff from its merge base with the base branch, through the working tree." | From round 2, review the delta and confirm earlier blockers | Rounds converge. T15 will spell this out. |
 | `<pstack>/skills/poteto-mode/SKILL.md`, "You own every subagent's work." | You alone write the verdict | Kept as written. Helpers never post. |
+| `<pstack>/skills/poteto-mode/SKILL.md`, "The Principles section below grounds every trigger." | Apply three triggers: restate the intent, prove it with a run, unslop the verdict | A reviewer writes no code, so the build triggers do not apply. These three keep the verdict tied to the criteria and to a run. |
