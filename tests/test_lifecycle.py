@@ -1143,3 +1143,75 @@ def test_a_restored_unanswered_claim_is_queued_again_by_the_next_pass(
 
     rerun = pool.claim("claude")
     assert rerun is not None and rerun[0].id == build.id
+
+
+def _restored_dead(tmp_path: Path, action: str):
+    """A cycle backup holds a plan or build whose worker had started (#108
+    round 6); the job then finished, the state directory was lost and
+    restored, and its runner and worker are gone, so T6 takes it."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.post("go-1", GO.format(state="planning" if action == "plan" else "building"), "grok-login")
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[0].request.action == action
+    job = claimed[0]
+    pool.attach_runner(job.id, owner="claude", pid=11, start=None, alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=22, start=None)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.queue.finish(job.id, owner="claude", handoff_comment_id="answer-1")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.now[0] += 400
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config)
+    flow.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(), alive=lambda *_: False
+    )
+    return flow, pool
+
+
+def _answer(flow: Flow, action: str) -> None:
+    flow.head = HEADS[1]
+    body = PLAN.format(round=1, ac="met") if action == "plan" else READY.format(head=flow.head)
+    flow.add("answer-1", body, "claude-login")
+
+
+def _claims(pool: DevicePool) -> list[tuple[str, int]]:
+    claimed = []
+    while (value := pool.claim("claude")) is not None:
+        claimed.append((value[0].request.action, value[0].request.attempt))
+    return claimed
+
+
+@pytest.mark.parametrize("read", ("full", "deferred"))
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_dead_job_answered_after_the_backup_is_never_retried(
+    tmp_path: Path, action: str, read: str
+) -> None:
+    flow, pool = _restored_dead(tmp_path, action)
+    _answer(flow, action)
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()) if read == "full" else FakeSource())
+
+    assert (action, 2) not in _claims(pool)
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert (action, 2) not in _claims(pool)
+    assert (action, "queued") not in _harness_jobs(flow.queue)
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_dead_unanswered_job_is_retried_after_a_pass(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_dead(tmp_path, action)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert _claims(pool) == []
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert _claims(pool) == [(action, 2)]

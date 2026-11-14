@@ -173,6 +173,12 @@ class SQLiteJobQueue:
                 ).rowcount
                 if handled != 1:
                     raise QueueError("retry requires one unhandled failed job")
+                if _restored_claim(connection, failed_job_id):
+                    _mark_restored_claim(connection, job.id, now=self.now())
+                if retire_requeued(connection, job.id, "t6-retry", now=self.now()):
+                    job = _job(
+                        connection.execute("SELECT * FROM jobs WHERE id = ?", (job.id,)).fetchone()
+                    )
             connection.commit()
             return job, inserted
 
@@ -697,9 +703,9 @@ def retire_requeued(
     Returns the cancel's job_events detail, or None when it stays queued.
 
     Every write that returns a job to queued (a released claim, an unstarted
-    requeue, a step whose answer was rejected) calls this before it commits.
-    A merged or done ticket's job is cancelled `finished:<reason>`, so a
-    finished ticket never regains claimable work. A step restore() copied
+    requeue, a step whose answer was rejected, a T6 retry) calls this before
+    it commits. A merged or done ticket's job is cancelled
+    `finished:<reason>`, so a finished ticket never regains claimable work. A step restore() copied
     running (RESTORED_CLAIM) and not held since is cancelled RESTORED, as
     restore() holds a queued step: the backup may predate its answer, and
     the dispatcher's next pass queues it again only if nothing answered it.
@@ -721,21 +727,9 @@ def retire_requeued(
     ).fetchone()
     if finished is not None:
         detail = f"finished:{reason}"
-    elif _has_table(connection, "job_events") and connection.execute(
-        f"""
-        SELECT 1 FROM jobs WHERE {harness}
-          AND EXISTS (
-            SELECT 1 FROM job_events AS mark
-            WHERE mark.job_id = jobs.id AND mark.event = ?
-              AND NOT EXISTS (
-                SELECT 1 FROM job_events AS hold
-                WHERE hold.job_id = jobs.id AND hold.event = 'cancelled'
-                  AND hold.detail = ? AND hold.id > mark.id
-              )
-          )
-        """,
-        (job_id, RESTORED_CLAIM, RESTORED),
-    ).fetchone() is not None:
+    elif connection.execute(
+        f"SELECT 1 FROM jobs WHERE {harness}", (job_id,)
+    ).fetchone() is not None and _restored_claim(connection, job_id):
         detail = RESTORED
     else:
         return None
@@ -756,6 +750,40 @@ def retire_requeued(
             (detail, now, job_id),
         )
     return detail
+
+
+def _restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
+    """True when restore() copied job_id running (RESTORED_CLAIM) and no
+    RESTORED hold has cancelled it since."""
+    if not _has_table(connection, "job_events"):
+        return False
+    return connection.execute(
+        """
+        SELECT 1 FROM job_events AS mark
+        WHERE mark.job_id = ? AND mark.event = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM job_events AS hold
+            WHERE hold.job_id = mark.job_id AND hold.event = 'cancelled'
+              AND hold.detail = ? AND hold.id > mark.id
+          )
+        """,
+        (job_id, RESTORED_CLAIM, RESTORED),
+    ).fetchone() is not None
+
+
+def _mark_restored_claim(connection: sqlite3.Connection, job_id: str, *, now: float) -> None:
+    """A T6 retry of restored work inherits its RESTORED_CLAIM: the backup
+    may predate the failed job's answer, so the retry is held like it."""
+    connection.execute(
+        """
+        INSERT INTO job_events (
+            job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+        )
+        SELECT id, lower(repo), ticket_id, action, recipient, ?, ?, ?
+        FROM jobs WHERE id = ?
+        """,
+        (RESTORED_CLAIM, RESTORED, now, job_id),
+    )
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:
