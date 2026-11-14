@@ -111,8 +111,7 @@ def test_a_session_puts_basetemp_and_process_temp_in_the_root(pytester, fake_shm
     values = run_probe(pytester)
     sessions = [values["TMP_PATH"], values["GETTEMPDIR"], values["TMPDIR"]]
     assert all(value.startswith(str(fake_shm) + os.sep) for value in sessions)
-    session_root = Path(values["TMPDIR"]).parent
-    assert Path(values["TMP_PATH"]).is_relative_to(session_root / "basetemp")
+    assert Path(values["TMP_PATH"]).is_relative_to(Path(values["GETTEMPDIR"]) / "basetemp")
     assert values["TEMP"] == values["TMP"] == values["TMPDIR"]
     assert list(fake_shm.iterdir()) == []
 
@@ -198,6 +197,7 @@ def test_a_real_run_uses_dev_shm(tmp_path):
     values = run_real_pytest(tmp_path)
     for key in ("TMP_PATH", "GETTEMPDIR", "TMPDIR"):
         assert values[key].startswith("/dev/shm/pytest-factory-"), values
+    assert Path(values["TMP_PATH"]).is_relative_to(values["GETTEMPDIR"]), values
     assert not Path(values["TMPDIR"]).parent.exists()
 
 

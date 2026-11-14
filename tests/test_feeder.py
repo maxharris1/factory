@@ -117,6 +117,7 @@ def machines(tmp_path: Path, *, box: int = 3, pc: int = 0, mac: int = 0):
                 "    harnesses: {claude: claude-bot, codex: codex-bot}",
                 "    workdir_root: /home/{bot}/factory-work",
                 f"    ssh_alias: {name}-{{bot}}",
+                "    factory_root: /home/{bot}/factory",
             ]
     path = tmp_path / "machines.yml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

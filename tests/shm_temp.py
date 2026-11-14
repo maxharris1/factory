@@ -96,7 +96,7 @@ def pytest_configure(config: pytest.Config) -> None:
         os.environ[name] = str(process_tmp)
     tempfile.tempdir = None
     if not config.option.basetemp and not os.environ.get("PYTEST_DEBUG_TEMPROOT"):
-        config.option.basetemp = str(root / "basetemp")
+        config.option.basetemp = str(process_tmp / "basetemp")
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

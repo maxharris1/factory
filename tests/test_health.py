@@ -50,6 +50,7 @@ devices:
       codex: codex-bot
     workdir_root: /home/{bot}/factory-work
     ssh_alias: pc-wsl-{bot}
+    factory_root: /home/{bot}/factory
   - name: mac
     enabled: false
     tailscale_name: mac.example.ts.net
@@ -58,6 +59,7 @@ devices:
       claude: claude-bot
     workdir_root: /Users/{bot}/factory-work
     ssh_alias: mac-{bot}
+    factory_root: /Users/{bot}/factory
 """
 
 
@@ -1002,6 +1004,7 @@ MANY_DEVICES = MACHINES + "".join(
       codex: codex-bot
     workdir_root: /home/{{bot}}/factory-work
     ssh_alias: {name}-{{bot}}
+    factory_root: /home/{{bot}}/factory
 """
     for name in ("hang1", "hang2", "hang3")
 )

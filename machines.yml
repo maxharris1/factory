@@ -5,7 +5,9 @@
 # the harness's bot user), ssh_alias (required on remote devices: the
 # Host alias in the box user's own SSH client config, containing {bot}, so
 # each bot logs in through its own alias; never a key path, user@ or
-# option), and enabled (default true).
+# option), factory_root (required on remote devices: the deployed factory
+# checkout with skills/ and bin/orch, not workdir_root; same path rules), and
+# enabled (default true).
 # A disabled device or one with a REPLACE_WITH_ value is never scheduled.
 # Slots are counted per device name: list each host (tailscale_name) once.
 # F2-02 starts a remote job over `ssh -l <bot user> <ssh_alias>`; nothing
@@ -23,6 +25,8 @@ devices:
       claude: claude-bot
       codex: codex-bot
       cursor: cursor-bot
+    # The deployed checkout the box's units run from (%h/factory).
+    factory_root: /home/box/factory
   # The WSL Ubuntu node on the PC, not the Windows host.
   # Stays disabled until Max enables it (F2-02 remote start is built; Max
   # turns the device on). F2-02 reaches it through the box's SSH aliases
@@ -40,6 +44,8 @@ devices:
     # the Windows C: drive; /mnt/ is refused.
     workdir_root: /home/{bot}/factory-work
     ssh_alias: pc-wsl-{bot}
+    # Each bot's own deployed factory checkout, beside its workdir_root.
+    factory_root: /home/{bot}/factory
   # Its bot users do not exist yet and SSH is off. Stays disabled until Max
   # provisions them and enables it.
   - name: mac
@@ -49,3 +55,4 @@ devices:
     harnesses: {}
     workdir_root: REPLACE_WITH_MAC_WORKDIR_ROOT
     ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS
+    factory_root: /Users/{bot}/factory

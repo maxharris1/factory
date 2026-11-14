@@ -372,7 +372,8 @@ def test_the_autostart_waiter_claims_remote_slots_too(tmp_path: Path) -> None:
         "    harnesses: {claude: claude-bot}\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot}\n"
-        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n",
+        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n"
+        "    factory_root: /home/{bot}/factory\n",
         encoding="utf-8",
     )
     db, queue = make_queue(tmp_path)
@@ -942,7 +943,8 @@ def test_autostart_runs_with_only_remote_devices(tmp_path: Path) -> None:
         "devices:\n"
         "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot}\n"
-        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n",
+        "    workdir_root: /home/{bot}/factory-work\n    ssh_alias: pc-{bot}\n"
+        "    factory_root: /home/{bot}/factory\n",
         encoding="utf-8",
     )
     env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
