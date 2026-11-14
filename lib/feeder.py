@@ -52,6 +52,9 @@ open, or one selected earlier in this poll. A ticket that waits is
 poll. Blocker and holder statuses come from one batched, cached read per
 poll, and none when no ticket has a gate line. A blocker cycle, a blocker
 closed without finishing and one that does not exist raise needs-attention.
+A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
+its `Conflicts with` edges while it waits for a go, and takes its paths back
+on the poll after the round resumes (#270).
 
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
 the feeder has a ticket id for, so an urgent or bug label added after the
@@ -127,6 +130,7 @@ _COLUMNS = (
     ("touches", "TEXT"),
     ("conflicts", "TEXT"),
     ("released", "INTEGER NOT NULL DEFAULT 0"),
+    ("capped_release", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -253,6 +257,18 @@ class _Candidate:
         return rank, self.issue.created_at, _key_order(self.issue.key)
 
 
+@dataclass(frozen=True)
+class _Holder:
+    """A fed ticket's feeder row: its gate lines, PR, whether its PR ended
+    (`released`), its dispatcher ticket and whether it last held as capped."""
+
+    lines: GateLines
+    pull: Ref | None
+    released: bool
+    ticket: tuple[str, str] | None
+    capped_release: bool
+
+
 class _Held(Exception):
     def __init__(self, wait: Wait):
         super().__init__(wait.reason)
@@ -317,6 +333,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             touches TEXT,
             conflicts TEXT,
             released INTEGER NOT NULL DEFAULT 0,
+            capped_release INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, issue)
         )
         """
@@ -547,12 +564,12 @@ class Feeder:
             if c.lines.blocked_by
         }
         conflicts = {ref for c in unstarted for ref in c.lines.conflicts_with}
-        pull_of = {ref: pull for ref, (_, pull, _) in rows.items() if pull is not None}
+        pull_of = {ref: row.pull for ref, row in rows.items() if row.pull is not None}
         known = set(rows) | set(pull_of.values()) | {c.ref for c in candidates}
         holders = {
-            ref: (lines, pull)
-            for ref, (lines, pull, released) in rows.items()
-            if not released and (lines or ref in conflicts or pull in conflicts)
+            ref: row
+            for ref, row in rows.items()
+            if not row.released and (row.lines or ref in conflicts or row.pull in conflicts)
         }
         blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
         via = {ref: pull_of[ref] for ref in blockers if ref in pull_of}
@@ -564,7 +581,7 @@ class Feeder:
         external = {ref for ref in conflicts if ref not in known}
         needed = {ref for ref in blockers if ref.tracker == "github"}
         needed |= set(via.values()) | external
-        needed |= {pull for _, pull in holders.values() if pull is not None}
+        needed |= {row.pull for row in holders.values() if row.pull is not None}
         statuses: dict[Ref, RefStatus] = {}
         ok = True
         if needed:
@@ -579,10 +596,19 @@ class Feeder:
                 statuses[blocker] = statuses[pull]
         holds = Holds()
         released: list[Ref] = []
-        for ref, (lines, pull) in sorted(holders.items()):
+        capped = self._capped({row.ticket for row in holders.values() if row.ticket})
+        flips: list[tuple[Ref, bool]] = []
+        for ref, row in sorted(holders.items()):
+            pull = row.pull
             if pull is not None and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
                 released.append(ref)
                 continue
+            lines = row.lines
+            is_capped = row.ticket in capped
+            if is_capped:
+                lines = GateLines(conflicts_with=lines.conflicts_with)
+            if is_capped != row.capped_release:
+                flips.append((ref, is_capped))
             holds.take(ref, () if pull is None else (pull,), lines)
         for ref in sorted(external):
             status = statuses.get(ref)
@@ -591,30 +617,73 @@ class Feeder:
             elif status.is_pull and status.progress is Progress.OPEN:
                 holds.take(ref, (), GateLines())
         self._release(released)
+        self._flip_capped(flips)
         return blocker_waits(gated, statuses), holds, ok
 
-    def _feeder_rows(self) -> dict[Ref, tuple[GateLines, Ref | None, bool]]:
-        """Tickets fed or feeding: their lines, PR ref and whether they were
-        released (their PR merged or closed)."""
+    def _feeder_rows(self) -> dict[Ref, _Holder]:
+        """Tickets fed or feeding."""
         with self.queue.connect() as connection:
             connection.row_factory = sqlite3.Row
             rows = connection.execute(
                 f"""
-                SELECT repo, issue, tracker, pr_number, touches, conflicts, released
+                SELECT repo, issue, tracker, pr_number, ticket_id, touches, conflicts,
+                       released, capped_release
                 FROM {FEEDER_TABLE}
                 WHERE state IN ({",".join("?" * len(HOLDING))})
                 """,
                 HOLDING,
             ).fetchall()
-        found: dict[Ref, tuple[GateLines, Ref | None, bool]] = {}
+        found: dict[Ref, _Holder] = {}
         for row in rows:
             ref = Ref(row["tracker"], row["repo"], row["issue"])
             pull = github_ref(row["repo"], row["pr_number"]) if row["pr_number"] else None
             touches = frozenset(json.loads(row["touches"] or "[]"))
             conflicts = frozenset(Ref(*item) for item in json.loads(row["conflicts"] or "[]"))
             lines = GateLines(touches=touches, conflicts_with=conflicts)
-            found[ref] = (lines, pull, bool(row["released"]))
+            found[ref] = _Holder(
+                lines=lines,
+                pull=pull,
+                released=bool(row["released"]),
+                ticket=(row["repo"], row["ticket_id"]) if row["ticket_id"] else None,
+                capped_release=bool(row["capped_release"]),
+            )
         return found
+
+    def _capped(self, tickets: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        """The (repo, ticket_id) of tickets whose round is capped and not
+        stuck; read-only, and empty on a database without that state."""
+        if not tickets:
+            return set()
+        with self.queue.connect() as connection:
+            if not _has_table(connection, "ticket_state"):
+                return set()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(ticket_state)")}
+            if not {"repo", "ticket_id", "workflow_state"} <= columns:
+                return set()
+            stuck = " AND stuck = 0" if "stuck" in columns else ""
+            found = {
+                (str(repo), str(ticket_id))
+                for repo, ticket_id in connection.execute(
+                    f"SELECT repo, ticket_id FROM ticket_state WHERE workflow_state = 'capped'{stuck}"
+                )
+            }
+        return found & tickets
+
+    def _flip_capped(self, flips: Sequence[tuple[Ref, bool]]) -> None:
+        """Record and log a holder releasing its paths (capped) or taking them back."""
+        if not flips:
+            return
+        with self.queue.connect() as connection:
+            connection.executemany(
+                f"UPDATE {FEEDER_TABLE} SET capped_release = ? WHERE repo = ? AND issue = ?",
+                [(int(capped), ref.repo, ref.key) for ref, capped in flips],
+            )
+        for ref, capped in flips:
+            name = f"{ref.repo}#{ref.key}"
+            self.log(
+                f"feeder: released locks of {name} (capped)" if capped
+                else f"feeder: re-held locks of {name}"
+            )
 
     def _release(self, refs: Sequence[Ref]) -> None:
         """A holder whose PR merged or closed stops holding, for good."""

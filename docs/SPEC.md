@@ -612,7 +612,15 @@ every blocks relation) must be done (a PR merged; an issue closed completed or
 with a merged linked PR; a Linear issue completed), and no ticket in flight
 in the same repo may share a `Touches:` path, and none may share a
 `Conflicts with` edge with it (across repos too), the earlier
-ticket in feed order keeping the path. A ticket that waits is
+ticket in feed order keeping the path. A ticket in flight whose round is `capped`
+(`ticket_state.workflow_state`, read-only; not one marked stuck) holds only
+its `Conflicts with` edges while it waits for a go, so a ticket waiting on
+one of its paths is fed on the next poll (issue #270). When a go resumes the
+round, it holds its paths again from the next poll; a ticket fed on a shared
+path meanwhile keeps running, and the PR that merges second takes the
+existing base update. The poller log says `feeder: released locks of
+<repo>#<n> (capped)` and `feeder: re-held locks of <repo>#<n>`, once each
+per change. A ticket that waits is
 `waiting-blocked` with its reason, takes no room and is re-checked every
 poll; a blocker cycle, a blocker closed without finishing and a blocker that
 does not exist are flagged needs-attention (`blocker-cycle`,
