@@ -1,0 +1,255 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-13T20:30:00Z"
+  },
+  "title": "Factory dashboard — pixel animation states",
+  "launch": {
+    "view": "canvas",
+    "page": "mockups"
+  },
+  "pages": [
+    {
+      "id": "mockups",
+      "name": "Page mock-ups"
+    },
+    {
+      "id": "statemap",
+      "name": "State map explorations"
+    },
+    {
+      "id": "motion",
+      "name": "Motion studies"
+    },
+    {
+      "id": "parts",
+      "name": "Components"
+    }
+  ],
+  "boards": {
+    "Lanes.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 1300,
+      "title": "Lanes",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Tickets.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 1400,
+      "title": "Tickets",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Job.dc.html": {
+      "x": 3040,
+      "y": 0,
+      "w": 1440,
+      "h": 1720,
+      "title": "Ticket detail · journey",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Activity.dc.html": {
+      "x": 4560,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "Activity",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Efficiency.dc.html": {
+      "x": 6080,
+      "y": 0,
+      "w": 1440,
+      "h": 1060,
+      "title": "Efficiency",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "System.dc.html": {
+      "x": 7600,
+      "y": 0,
+      "w": 1440,
+      "h": 2100,
+      "title": "System",
+      "page": "mockups",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Main.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1520,
+      "h": 672,
+      "title": "Slot card states (PR A)",
+      "page": "motion"
+    },
+    "Playground.dc.html": {
+      "x": 1600,
+      "y": 0,
+      "w": 920,
+      "h": 560,
+      "title": "Playground",
+      "is_interactive": true,
+      "page": "motion"
+    },
+    "HeaderBand.dc.html": {
+      "x": 0,
+      "y": 792,
+      "w": 1280,
+      "h": 470,
+      "title": "Header band (PR C)",
+      "page": "motion"
+    },
+    "Bits.dc.html": {
+      "x": 1360,
+      "y": 792,
+      "w": 1160,
+      "h": 680,
+      "title": "Bar, KPIs, devices, queue, feed (PR B)",
+      "is_interactive": true,
+      "page": "motion"
+    },
+    "SlotCard.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 344,
+      "h": 132,
+      "title": "Component · slot card (study)",
+      "page": "parts"
+    },
+    "PixelStrip.dc.html": {
+      "x": 424,
+      "y": 0,
+      "w": 640,
+      "h": 40,
+      "title": "Component · pixel strip",
+      "page": "parts"
+    },
+    "SlotTile.dc.html": {
+      "x": 1144,
+      "y": 0,
+      "w": 200,
+      "h": 124,
+      "title": "Component · slot tile",
+      "page": "parts"
+    },
+    "TopBar.dc.html": {
+      "x": 0,
+      "y": 252,
+      "w": 1440,
+      "h": 116,
+      "title": "Component · top bar, band, attention strip",
+      "page": "parts"
+    },
+    "StatusLine.dc.html": {
+      "x": 0,
+      "y": 488,
+      "w": 1440,
+      "h": 40,
+      "title": "Component · status line",
+      "page": "parts"
+    },
+    "FlowMap.dc.html": {
+      "x": 0,
+      "y": 986,
+      "w": 1000,
+      "h": 352,
+      "title": "C · State map, coloured and numbered (the machine)",
+      "page": "statemap"
+    },
+    "PhaseRail.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1000,
+      "h": 290,
+      "title": "A · Phase rail (the glance)",
+      "page": "statemap"
+    },
+    "JourneyClimb.dc.html": {
+      "x": 0,
+      "y": 410,
+      "w": 1000,
+      "h": 456,
+      "title": "B · Journey climb (the story), v2",
+      "page": "statemap",
+      "is_interactive": true
+    },
+    "RunTape.dc.html": {
+      "x": 0,
+      "y": 1458,
+      "w": 1000,
+      "h": 366,
+      "title": "D · Live run (what the agent is working on)",
+      "page": "statemap"
+    }
+  },
+  "order": [
+    "Lanes.dc.html",
+    "Tickets.dc.html",
+    "Job.dc.html",
+    "Activity.dc.html",
+    "Efficiency.dc.html",
+    "System.dc.html",
+    "Main.dc.html",
+    "Playground.dc.html",
+    "HeaderBand.dc.html",
+    "Bits.dc.html",
+    "SlotCard.dc.html",
+    "PixelStrip.dc.html",
+    "SlotTile.dc.html",
+    "TopBar.dc.html",
+    "StatusLine.dc.html",
+    "FlowMap.dc.html",
+    "PhaseRail.dc.html",
+    "JourneyClimb.dc.html",
+    "RunTape.dc.html"
+  ],
+  "notes": {
+    "title": {
+      "x": 0,
+      "y": -300,
+      "text": "Factory dashboard — pixel animation states",
+      "kind": "title1",
+      "maxW": 2520,
+      "page": "motion"
+    },
+    "mockups-title": {
+      "x": 0,
+      "y": -300,
+      "text": "Factory Mission Control — proposed pages",
+      "kind": "title1",
+      "maxW": 9040,
+      "page": "mockups"
+    },
+    "parts-title": {
+      "x": 0,
+      "y": -300,
+      "text": "Shared components",
+      "kind": "title1",
+      "maxW": 1440,
+      "page": "parts"
+    },
+    "statemap-title": {
+      "x": 0,
+      "y": -300,
+      "text": "Where is this ticket in its journey?",
+      "kind": "title1",
+      "maxW": 1000,
+      "page": "statemap"
+    }
+  },
+  "designSystems": []
+}

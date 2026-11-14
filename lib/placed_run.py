@@ -71,13 +71,16 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import IO, BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
+from lib.job_run import OUTPUT_GRACE_SECONDS
 from lib.job_state import (
     REQUEUED_EARLY_EXIT,
     RUN_DIED,
@@ -229,6 +232,9 @@ class PlacedRun:
         env: Mapping[str, str],
         brief: bytes,
         control: Control,
+        *,
+        report_env: bool = False,
+        output: Callable[[IO[bytes]], None] | None = None,
     ) -> int:
         """Launch the command detached on the device and follow it (#128).
 
@@ -237,6 +243,10 @@ class PlacedRun:
         is live there) for a refused launch, which ran nothing; 255 when the
         worker is gone without a status or the device went quiet for the
         grace window; for a stop, the status the device recorded.
+
+        With report_env, the start first prints the WORKER_ENV_MARK line
+        (#93). `output` (lib/telemetry.py) then takes the relayed output in
+        place of stdout, as job_run.run's `output` does for a local command.
         """
         assert self.target is not None
         # Factory, Nov 13: the waiter config is shared by every device, so a
@@ -250,6 +260,7 @@ class PlacedRun:
             guarded_dirs=device.guarded_dirs,
             insert_at=device.insert_at,
             cd=device.cd,
+            report_env=report_env,
         )
         launch = launch_script(
             self.target,
@@ -258,14 +269,31 @@ class PlacedRun:
             not_after=int(time.time()) + LAUNCH_TTL_SECONDS,
         )
         assert isinstance(self.transport, ByteTransport)
+        sink: BinaryIO = sys.stdout.buffer
+        reader: threading.Thread | None = None
+        if output is not None:
+            read_end, write_end = os.pipe()
+            sink = os.fdopen(write_end, "wb")
+            reader = threading.Thread(
+                target=output, args=(os.fdopen(read_end, "rb"),), name="orch-output", daemon=True
+            )
+            reader.start()
         follower = Follower(
             self.transport,
             self.target,
-            sys.stdout.buffer,
+            sink,
             log=self.log,
             grace=self.grace,
         )
-        end = follower.run(launch, brief, control)
+        try:
+            end = follower.run(launch, brief, control)
+        finally:
+            if reader is not None:
+                try:
+                    sink.close()  # the reader sees EOF once it has the rest
+                except OSError:
+                    pass
+                reader.join(OUTPUT_GRACE_SECONDS)
         self.follow_end = end
         if end.kind in (LOST, WORKER_GONE):
             self.log(f"job {self.placement.job_id} on {self.device.name}: {end.detail}")

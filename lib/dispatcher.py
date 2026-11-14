@@ -7,11 +7,13 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib import project_rules
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -30,7 +32,7 @@ from lib.job_state import (
     requeue_unstarted,
     unstarted_too_long,
 )
-from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS, Approvals
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -46,6 +48,7 @@ GROK_WAKE_REASONS = (
     "stale",
     "done",
     "awaiting-ok",
+    "go-not-from-approver",
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
@@ -270,6 +273,77 @@ _SECRET_ASSIGNMENT = re.compile(
     r"|api[_-]?key|[A-Za-z_]*(?:_TOKEN|_SECRET|_KEY|_AUTH))\b\s*[:=]?\s*\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+_PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
+_CREDENTIAL_WORD = re.compile(
+    r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
+    r"|cookie|signature|bearer|basic)"
+)
+POLL_ERROR_FRAMES = 10
+POLL_ERROR_DETAIL_LIMIT = 4000
+_POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
+_POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_URL.sub("<url>", text)
+    text = _SECRET_HOST_PATH.sub("<host>", text)
+    text = _SECRET_TOKEN.sub("<secret>", text)
+    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+
+
+def _without_body(exc: BaseException) -> str:
+    name, separator, message = "".join(
+        traceback.format_exception_only(type(exc), exc)
+    ).partition(": ")
+    safe = getattr(exc, "safe_detail", None)
+    if isinstance(safe, str) and safe:
+        separator, message = ": ", safe
+    message = message.rstrip()
+    plain = _PLAIN_MESSAGE.match(message).group(0)
+    credential = _CREDENTIAL_WORD.search(plain)
+    if credential is not None:
+        plain = plain[: credential.start()] + "<credential omitted>"
+    elif plain != message:
+        plain += "<body omitted>"
+    return name.rstrip() + separator + plain + "\n"
+
+
+def poll_error_detail(exc: BaseException) -> str:
+    """The exception chain's messages and newest frames, redacted and capped.
+
+    A ShipError's safe_detail stands in for its message when set. Each
+    message is cut at its first character outside letters, digits, spaces
+    and _.,:;()'/=+-, so no structured or escaped body reaches the
+    redactors, and at its first credential-like word, so no redactor can
+    consume a key and leave its value. Stored in poll_errors.detail
+    beside the bare class name; the tail is kept when the cap cuts, so the
+    raising frame and message survive.
+    """
+    from lib.dashboard import redact
+
+    blocks: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        seen.add(id(current))
+        frames = "".join(traceback.format_tb(current.__traceback__, limit=-POLL_ERROR_FRAMES))
+        if frames:
+            blocks.append(f"Traceback (most recent call last):\n{frames}{_without_body(current)}")
+        else:
+            blocks.append(_without_body(current))
+        if current.__cause__ is not None:
+            link, current = _POLL_ERROR_CAUSE, current.__cause__
+        elif not current.__suppress_context__:
+            link, current = _POLL_ERROR_CONTEXT, current.__context__
+        else:
+            current = None
+        if current is None or id(current) in seen:
+            break
+        blocks.append(link)
+    text = _redact(redact("".join(reversed(blocks)).rstrip()))
+    if len(text) > POLL_ERROR_DETAIL_LIMIT:
+        text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
+    return text
 
 
 def safe_ship_error(exc: BaseException) -> str:
@@ -283,11 +357,7 @@ def safe_ship_error(exc: BaseException) -> str:
     detail = getattr(exc, "safe_detail", None)
     if not isinstance(detail, str):
         detail = str(exc)
-    detail = _SECRET_BODY.sub(" <body omitted>", detail)
-    detail = _SECRET_URL.sub("<url>", detail)
-    detail = _SECRET_HOST_PATH.sub("<host>", detail)
-    detail = _SECRET_TOKEN.sub("<secret>", detail)
-    detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
+    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
     detail = "".join(char if char.isprintable() else " " for char in detail)
     detail = " ".join(detail.split())
     text = f"{name}: {detail}" if detail else name
@@ -367,6 +437,7 @@ class Dispatcher:
         job_states: JobStateConfig | None = None,
         log: Callable[[str], None] | None = None,
         feeder: Feeder | None = None,
+        approvals: Approvals | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -388,6 +459,7 @@ class Dispatcher:
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
         self.feeder = feeder
+        self.approvals = approvals if approvals is not None else Approvals()
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
@@ -408,7 +480,7 @@ class Dispatcher:
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
-            self.record_poll_error("github", "-", type(exc).__name__)
+            self.record_poll_exception("github", "-", exc)
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -422,22 +494,35 @@ class Dispatcher:
                 ),
             )
         except Exception as exc:
-            self.record_poll_error("linear", "-", type(exc).__name__)
+            self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
         try:
             tracked = source.tracked_tickets(self._tracked_refs())
         except Exception as exc:
-            self.record_poll_error("tracked", "-", type(exc).__name__)
+            self.record_poll_exception("tracked", "-", exc)
             tracked = ()
         for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
-                self._record_poll_error(ticket, type(exc).__name__)
+                self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         self.reconcile_jobs()
+        self._record_factory_reads(source)
         if end is not None:
             end()
+
+    def _record_factory_reads(self, source: PollSource) -> None:
+        """Store each project's factory.md as this cycle read it (#152)."""
+        reads = getattr(source, "factory_reads", None)
+        if reads is None:
+            return
+        try:
+            cycle = reads()
+            with self._connect() as connection:
+                project_rules.record_reads(connection, cycle, self.queue.now())
+        except Exception as exc:
+            self.record_poll_error("factory", "-", type(exc).__name__)
 
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -452,7 +537,7 @@ class Dispatcher:
         try:
             report = self.feeder.feed_once()
         except Exception as exc:
-            self.record_poll_error("feeder", "-", type(exc).__name__)
+            self.record_poll_exception("feeder", "-", exc)
             return
         fresh_reader = getattr(source, "fresh_ticket", None)
         if fresh_reader is None:
@@ -461,21 +546,44 @@ class Dispatcher:
             try:
                 ticket = fresh_reader(ref)
             except Exception as exc:
-                self.record_poll_error(ref.repo, ref.ticket_id, type(exc).__name__)
+                self.record_poll_exception(ref.repo, ref.ticket_id, exc)
                 continue
             if ticket is not None:
                 self._discover((ticket,), tracker=ref.tracker)
 
-    def record_poll_error(self, repo: str, ticket_id: str, error: str) -> None:
+    def record_poll_error(
+        self,
+        repo: str,
+        ticket_id: str,
+        error: str,
+        detail: str | None = None,
+    ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO poll_errors (
-                    repo, ticket_id, error, recorded_at
-                ) VALUES (?, ?, ?, ?)
+                    repo, ticket_id, error, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, error, self.queue.now()),
+                (repo.lower(), ticket_id, error, detail, self.queue.now()),
             )
+
+    def record_poll_exception(
+        self,
+        repo: str,
+        ticket_id: str,
+        exc: BaseException,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Record the class in poll_errors.error and the traceback in detail.
+
+        The same traceback goes to stderr, the poller's log.
+        """
+        error = f"{prefix}{type(exc).__name__}"
+        detail = poll_error_detail(exc)
+        print(f"orch poll: {repo} {ticket_id} {error}\n{detail}", file=sys.stderr, flush=True)
+        self.record_poll_error(repo, ticket_id, error, detail)
 
     def record_poll_deferral(self, detail: str) -> None:
         with self._connect() as connection:
@@ -1069,12 +1177,13 @@ class Dispatcher:
         """T7: one Grok wake per stop, across restarts.
 
         refused wakes once per ticket. blocked and capped wake once per
-        ticket and head. unparsed and ship-failed wake once per comment.
+        ticket and head. unparsed, ship-failed and go-not-from-approver wake
+        once per comment.
         stuck goes through the ticket's stuck flag, which wakes once.
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
-        if reason in ("unparsed", "ship-failed", "rejected", "stale"):
+        if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
             once_key = source_comment_id
         elif reason in ("blocked", "capped", "done", "awaiting-ok"):
             once_key = head or "-"
@@ -1125,9 +1234,10 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted(
+        trusted = self._trusted(
             ticket, comment, fields, "grok-bot", role="orchestrator"
-        ):
+        )
+        if not trusted and not self._approver_go(comment, fields):
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
@@ -1135,6 +1245,8 @@ class Dispatcher:
             resumed = self._resume_after_cap(ticket, comment)
             if resumed is not None:
                 return resumed
+        if not trusted:
+            return True, "rejected-go-author"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -1197,7 +1309,9 @@ class Dispatcher:
 
         One transaction raises cap_extra by 1, moves the ticket to fixing
         and queues the fix, keyed on the go comment so every go Max relays
-        queues exactly one fix. None when the ticket is not capped.
+        queues exactly one fix. None when the ticket is not capped. With the
+        GitHub App switch on, only an approver's go counts; any other wakes
+        Grok once with go-not-from-approver and changes nothing (#122).
         """
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
@@ -1224,6 +1338,12 @@ class Dispatcher:
             if row is None or row["workflow_state"] != "capped":
                 connection.commit()
                 return None
+            if not self._may_approve_go(comment.author):
+                connection.commit()
+                self._wake_comment_problem(
+                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
+                )
+                return True, "go-not-from-approver"
             cap_extra = int(row["cap_extra"]) + 1
             self.queue.enqueue_in_transaction(
                 connection,
@@ -2024,7 +2144,7 @@ class Dispatcher:
             changed_files=ticket.changed_files,
             label_events=ticket.label_events,
             comments=ticket.comments,
-            approver_trusted=self._trusted_login(hold.approver),
+            approver_allowed=self._may_approve(hold.approver),
             covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
         )
 
@@ -2039,10 +2159,34 @@ class Dispatcher:
         assert hold is not None
         if (
             comment.author.casefold() == hold.approver.casefold()
-            and self._trusted_login(hold.approver)
+            and self._may_approve(hold.approver)
         ):
             return "hold-ok"
         return "rejected-hold-ok-author"
+
+    def _may_approve(self, login: str) -> bool:
+        """A Max-only approval (#122): a trusted_logins key while the
+        GitHub App switch is off, else a login in approver_logins."""
+        if self.approvals.app_trust:
+            return self.approvals.may_approve(login)
+        return self._trusted_login(login)
+
+    def _approver_go(self, comment: Comment, fields: Mapping[str, str]) -> bool:
+        """With the switch on, an approver's go may lift a cap even when the
+        approver is not trusted for grok-bot; it starts nothing else (#122)."""
+        return (
+            self.approvals.app_trust
+            and fields.get("from") == "grok-bot"
+            and fields.get("role") == "orchestrator"
+            and self.approvals.may_approve(comment.author)
+        )
+
+    def _may_approve_go(self, author: str) -> bool:
+        """A Linear author keeps today's rule: the app changes GitHub
+        identity only."""
+        if author.startswith("linear:") or not self.approvals.app_trust:
+            return True
+        return self.approvals.may_approve(author)
 
     def _trusted_login(self, login: str) -> bool:
         wanted = login.casefold()
@@ -3890,9 +4034,6 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _record_poll_error(self, ticket: TrackedTicket, error: str) -> None:
-        self.record_poll_error(ticket.repo, ticket.ticket_id, error)
-
     def _record_job_error(self, job: Job, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -3952,7 +4093,11 @@ class Dispatcher:
                 """
             ).fetchall()
         for row in rows:
-            self._ensure_stuck_wake(str(row["repo"]), str(row["ticket_id"]))
+            repo, ticket_id = str(row["repo"]), str(row["ticket_id"])
+            try:
+                self._ensure_stuck_wake(repo, ticket_id)
+            except Exception as exc:
+                self.record_poll_exception(repo, ticket_id, exc, prefix="stuck-wake:")
 
     def _ensure_stuck_wake(self, repo: str, ticket_id: str) -> None:
         with self._connect() as connection:
@@ -4008,8 +4153,10 @@ class Dispatcher:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"]),
-                timeout_seconds=int(state["timeout_seconds"]),
+                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                timeout_seconds=int(
+                    state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
+                ),
                 generation=generation,
                 detail=reason,
             ),
@@ -4213,6 +4360,7 @@ class Dispatcher:
                 )
                 """
             )
+            project_rules.ensure_table(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_holds (
@@ -4300,10 +4448,16 @@ class Dispatcher:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
-                    recorded_at REAL NOT NULL
+                    recorded_at REAL NOT NULL,
+                    detail TEXT
                 )
                 """
             )
+            if "detail" not in {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(poll_errors)").fetchall()
+            }:
+                connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_deferrals (

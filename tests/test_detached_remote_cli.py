@@ -164,7 +164,10 @@ def test_a_remote_job_survives_a_forced_ssh_kill_and_completes(tmp_path: Path) -
     [rundir] = run_dirs(tmp_path, "claude-bot", job_id)
     device_log = (rundir / "log").read_bytes()
     assert device_log.endswith(b"ORCH-HANDOFF: 123456\n")
-    assert run_log.count(device_log) == 1 and run_log.count(b"line 0 ") == 1
+    # #93: telemetry keeps the start's worker-environment report out of run.log.
+    report, relayed = device_log.split(b"\n", 1)
+    assert report.startswith(b"ORCH-WORKER-ENV ") and b"ORCH-WORKER-ENV" not in run_log
+    assert run_log.count(relayed) == 1 and run_log.count(b"line 0 ") == 1
     assert b"reattached" in run_log  # the runner's own stderr line, in run.log too
     assert "run-died" not in [event for event, _ in events(db, job_id)]
     assert slots(db) == {}
@@ -188,7 +191,9 @@ def test_dropped_polls_mid_run_relay_the_device_log_exactly(tmp_path: Path) -> N
     assert proc.returncode == 0, err
     assert "lost the link to pc" in err and "reattached" in err
     [rundir] = run_dirs(tmp_path, "codex-bot", job_id)
-    assert out.encode() == (rundir / "log").read_bytes()
+    # #93: telemetry keeps the start's worker-environment report out of the relay.
+    report, relayed = (rundir / "log").read_bytes().split(b"\n", 1)
+    assert report.startswith(b"ORCH-WORKER-ENV ") and out.encode() == relayed
     assert len(count.read_text().split()) == 1
     assert "run-died" not in [event for event, _ in events(db, job_id)]
     assert poller.pool.placement(job_id) is None

@@ -427,6 +427,14 @@ backoff (writes are never retried); a ref that still times out records a retryab
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated
 row per cycle to `poll_deferrals`, not `poll_errors`.
+A poll step's exception, and one that escapes a whole cycle, keeps its class in
+`poll_errors.error` and stores its message and newest ten frames, redacted and
+capped at 4,000 characters, in `poll_errors.detail`; each message in the chain
+is cut at its first character outside letters, digits, spaces and `_.,:;()'/=+-`,
+so no response body, escaped or not, is kept.
+The same text goes to the poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
+`ticket_state` row records a `stuck-wake:<class>` error and the rest of the
+cycle still runs.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
@@ -623,7 +631,7 @@ and records itself on the slot, so the job reads `running` within seconds of
 the claim, with no model turn and no message to any bot. The harness posts its
 `orch:v1` handoff and runs `orch job done` as the brief says.
 
-- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+- **Brief.** [`lib/brief/`](lib/brief/) renders one standard brief per
   job kind from the job row: implement (`build`, `plan`), fix, review, and
   merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
   repo, PR or ticket, head, round and cap, risk, the section 8 review rules
@@ -1066,6 +1074,15 @@ written to a temp file in the same directory and fsynced, then renamed into
 place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
+
+`status.json`'s `projects` lists each `orch.yml` project in order with its
+tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
+round caps (`rounds.low`, `rounds.high`), as the poller last read its
+`factory.md` (issue #152). The dashboard has no copy of any `factory.md`:
+each poll cycle the dispatcher stores what `LivePollSource` parsed in the
+`project_rules` table (`lib/project_rules.py`), and the snapshot reads it
+back. A `factory.md` the poller could not read, or has not read yet, is
+`status: unknown` with the `reason`, never a default.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
