@@ -14,7 +14,8 @@ def task_lines(facts: dict) -> list[str]:
         "and say which checks did not run."
     )
     return [
-        f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer.",
+        f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
+        "Follow the router in Skills above.",
         "1. Read the whole diff and the CI result on that head.",
         verify_line,
         "3. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "

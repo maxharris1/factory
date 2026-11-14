@@ -9,6 +9,7 @@ from dataclasses import asdict
 from lib.brief.skills import skill_paths
 from lib.factory_md import FactoryContext
 from lib.github_actions import TOKEN_VARIABLES
+from lib.pr_title import SOURCE
 from lib.queue import Job
 
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
@@ -68,6 +69,9 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     verify = detail.get("verify_skill")
     reviewer = detail.get("reviewer_harness")
     url = detail.get("linear_url")
+    source = detail.get("source_issue")
+    if not (isinstance(source, str) and SOURCE.fullmatch(source)):
+        source = job.request.ticket_id if SOURCE.fullmatch(job.request.ticket_id) else None
     # #158: a build queued by a plan handoff carries that comment's link as its instruction.
     plan = detail.get("instruction") if job.request.action == "build" and not detail.get("resume") else None
     return {
@@ -84,6 +88,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "url": url if isinstance(url, str) and _URL.fullmatch(url) else None,
         "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
         "skills": skill_paths(detail.get("repo_skill_paths")),
+        "source": source,
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
     }
 
@@ -163,20 +168,45 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
     return "\n".join(lines)
 
 
-def handoff_section(bot: str, role: str, facts: dict, header: str, example: str) -> str:
+def handoff_section(
+    bot: str, role: str, facts: dict, header: str, example: str, *, skills_read: bool
+) -> str:
     target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
-    repo = facts["repo"] or "<owner>/<repo>"
-    pr = facts["pr"] or "<pr-number>"
+    read = (
+        "The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. "
+        if skills_read
+        else ""
+    )
     return (
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
         "with each `<...>` replaced by one of its choices:\n\n"
         f"{header}\n\n"
-        f"Then plain prose for people and agents: {example} "
+        f"Then plain prose for people and agents: {example} {read}"
         "If a product question blocks the work, post a questions handoff instead "
         f"(`<!-- orch:v1 kind=questions from={bot} role={role} -->`, "
         "then the question); it is this job's handoff.\n\n"
+        + _post_command(facts)
+    )
+
+
+def questions_handoff_section(bot: str, role: str, facts: dict) -> str:
+    target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
+    return (
+        "## Handoff comment\n"
+        f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
+        "not an inline comment). It is a questions handoff, and its first line is this orch:v1 header:\n\n"
+        f"<!-- orch:v1 kind=questions from={bot} role={role} -->\n\n"
+        "Then plain prose: what is missing and what you need. This job posts no other handoff.\n\n"
+        + _post_command(facts)
+    )
+
+
+def _post_command(facts: dict) -> str:
+    repo = facts["repo"] or "<owner>/<repo>"
+    pr = facts["pr"] or "<pr-number>"
+    return (
         "Write the comment to `handoff.md` (never commit that file) and post it with this command, "
         "which prints the new comment's id:\n\n"
         f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`"

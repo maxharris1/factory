@@ -1,0 +1,5 @@
+- **Decision:** On a `ship: handoff` repo with `finish_line: merge`, the APPROVE marks the PR ready and enters `merge-queue` with no `done` wake, and the poller's merge queue squash-merges the PR and sends the `done` wake (outcome merged) at the merge; `ship: merge` with `finish_line: merge` still merges at APPROVE unless its PR is `dirty` or an older approval in the same repo is still queued, in which case it enters `merge-queue` too.
+- **When:** 2026-11-13 4:50 PM ET, by Factory decided (technical)
+- **Source:** [PR #131](https://github.com/maxharris1/factory/pull/131), commit 9c49af6 (the #130 build), refining plan decision 1
+
+The plan sent the `done` wake at entry and had every `ship: merge` APPROVE wait for the queue. The build moved the wake to the merge, so Grok Bot is told once, when there is something done, and nobody is invited to merge by hand. It kept `ship: merge`'s merge at APPROVE when nothing is in its way, so a repo with an empty queue ships as fast as before. A merge by hand is still harmless: Merged is absorbing.

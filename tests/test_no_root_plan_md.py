@@ -11,6 +11,7 @@ import pytest
 
 from lib.brief import PLAN_HANDOFF_LIMIT, render_brief
 from lib.queue import Job, JobRequest
+from tests.test_brief import FACTORY_ROOT
 
 ROOT = Path(__file__).resolve().parents[1]
 GITHUB_COMMENT_LIMIT = 65_536
@@ -70,19 +71,19 @@ def test_the_check_fails_on_a_fixture_with_a_root_plan_md(tmp_path: Path) -> Non
 @pytest.mark.parametrize("instruction", [None, "round=2/2; previous plan https://x/1"])
 def test_a_plan_brief_never_mentions_plan_md(instruction: str | None) -> None:
     extra = {"instruction": instruction} if instruction else {}
-    text = render_brief(job("plan", **extra), bot="claude-bot", context=None)
+    text = render_brief(job("plan", **extra), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "plan.md" not in text
     assert "plan handoff" in text
 
 
 def test_the_plan_handoff_cap_is_stated_with_margin_under_githubs_limit() -> None:
     assert 53_361 < PLAN_HANDOFF_LIMIT <= GITHUB_COMMENT_LIMIT - 4_096
-    text = render_brief(job("plan"), bot="claude-bot", context=None)
+    text = render_brief(job("plan"), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert f"{PLAN_HANDOFF_LIMIT:,} characters" in text
 
 
 def test_a_build_brief_reads_the_plan_from_the_linked_plan_handoff() -> None:
-    text = render_brief(job("build", instruction=PLAN_LINK), bot="claude-bot", context=None)
+    text = render_brief(job("build", instruction=PLAN_LINK), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert f"the plan handoff comment at {PLAN_LINK}" in text
     assert "plan.md" not in text
 
@@ -96,7 +97,7 @@ def test_a_build_brief_reads_the_plan_from_the_linked_plan_handoff() -> None:
     ],
 )
 def test_a_build_brief_without_a_plan_link_says_there_is_none(extra: dict) -> None:
-    text = render_brief(job("build", **extra), bot="claude-bot", context=None)
+    text = render_brief(job("build", **extra), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "No plan handoff comment is linked" in text
     assert not re.search(r"plan handoff comment at ", text)
     assert "plan.md" not in text

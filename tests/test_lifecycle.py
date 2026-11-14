@@ -932,8 +932,27 @@ def _start_failed(poller: Poller, job_id: str) -> None:
     )
 
 
+def _released_by_its_bot(poller: Poller, job_id: str) -> None:
+    poller.queue.release(job_id, owner="codex")
+
+
+def _runner_died_unstarted(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    poller.now[0] += 20
+    poller.queue.heartbeat(job_id, owner="codex")
+    poller.at(90)
+
+
 @pytest.mark.parametrize(
-    "recover", [_released_claim, _released_unstarted, _early_exit, _start_failed]
+    "recover",
+    [
+        _released_claim,
+        _released_unstarted,
+        _early_exit,
+        _start_failed,
+        _released_by_its_bot,
+        _runner_died_unstarted,
+    ],
 )
 def test_recovering_a_job_after_the_merge_retires_it(tmp_path: Path, recover) -> None:
     """The merge leaves a claimed job alone. Every path that would put it
@@ -950,6 +969,14 @@ def test_recovering_a_job_after_the_merge_retires_it(tmp_path: Path, recover) ->
     assert poller.pool.placement(job_id) is None
     assert poller.pool.claim("codex") is None
     assert poller.events()[-1] == (job_id, "cancelled")
+
+
+def test_a_job_released_on_an_open_ticket_is_still_requeued(tmp_path: Path) -> None:
+    poller = Poller(tmp_path, box=False)
+    job_id = poller.review()
+    poller.claim()
+    poller.at(301)
+    assert poller.row(job_id)["state"] == "queued"
 
 
 def test_an_answer_rejected_after_the_merge_requeues_nothing(tmp_path: Path) -> None:

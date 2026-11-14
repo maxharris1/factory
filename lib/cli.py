@@ -60,6 +60,7 @@ from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
+from lib.update_check import UpdateClass, classify as classify_update
 from lib.wait import (
     WaitError,
     open_queue,
@@ -96,7 +97,8 @@ commands:
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
-  health           component heartbeats: report, beat or forget (issue #92)
+  health           component heartbeats: report or forget (issue #92)
+  heal             restart down or stale-code components (issue #107)
   status           read-only snapshot of the queue, devices and paused tickets
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
@@ -288,11 +290,23 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   last-seen in ET, pid and device, and each queued harness job with no
   live waiter on an eligible device ("no waiter for <harness>"). A
   component machines.yml or orch.yml expects that has never beaten is
-  down. Reads orch.health.db beside the database. Exits 3 when a
-  component is down or a queued job has no waiter, 1 when orch.health.db
-  cannot be read, else 0.
+  down. A poller, waiter or listener whose heartbeat names another commit
+  than the checkout shows "stale code". Reads orch.health.db beside the
+  database. Exits 3 when a component is down or a queued job has no
+  waiter, 1 when orch.health.db cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
+
+heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
+     [--machines PATH] [--orch PATH] [--device NAME] [--dry-run]
+  Read `orch health --json` and restart, through its own deploy/ service
+  script, each component on this device that this account owns
+  (~/.config/factory autostart flags) and that is down, or runs stale code
+  and is idle. Never overrides a *.stopped hold; at most 3 restarts per
+  component in 30 minutes. Logs to self-heal.log in the state directory
+  and escalates to the Factory webhook when a component cannot be fixed or
+  flaps. Never calls an LLM and never signals a job. deploy/self-heal.sh
+  runs it every 2 minutes.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
@@ -339,6 +353,10 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_linear_webhook, argv[1:])
     if argv[0] == "health":
         return health.main(argv[1:])
+    if argv[0] == "heal":
+        from lib import heal
+
+        return heal.main(argv[1:])
     if argv[0] == "status":
         return _call(status_main, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
@@ -394,6 +412,12 @@ def _check_config(argv: list[str]) -> int:
         if orch_config is not None and factory is not None:
             findings = findings + hold_approver_findings(orch_config, factory.hold)
         failed = _report(path, findings) or failed
+    from lib.config_overlay import describe
+
+    for path in (orch_path, machines_path):
+        line = describe(path) if path is not None else None
+        if line is not None:
+            print(line)
     if failed:
         return 1
     print("ok")
@@ -590,10 +614,11 @@ def _poll(argv: list[str]) -> int:
                 ),
                 pusher,
             )
-            loop = PollLoop(dispatcher, source)
             if args.once:
-                loop.run(max_polls=1, after_poll=after_poll)
+                PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
             else:
+                stopper = StopAtBoundary()
+                loop = PollLoop(dispatcher, source, sleep=stopper.sleep)
                 # dashboard.push.live: watch orch.db for changes between and
                 # during cycles; stopped on the way out, so a stop starts no push.
                 watcher = pusher if isinstance(pusher, LivePusher) else None
@@ -602,6 +627,7 @@ def _poll(argv: list[str]) -> int:
                 # Heartbeats (#92): the poller's own row and the per-device
                 # SSH reachability probe, each in its own daemon thread.
                 beats = health.poller_beats(path, args.machines).start()
+                signal.signal(signal.SIGTERM, stopper.on_term)
                 try:
                     loop.run(
                         on_error=lambda exc: dispatcher.record_poll_exception(
@@ -798,6 +824,7 @@ def _runtime(
         job_states=config.job_states,
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
+        update_classifier=_classify_update,
         approvals=approvals(config),
     )
     source.error_sink = dispatcher.record_poll_error
@@ -809,6 +836,14 @@ def _runtime(
         source.unpolled_tickets = dispatcher.unpolled_linear_tickets
     t8.shipper = ReviewShipper(dispatcher, source)
     return dispatcher, source
+
+
+def _classify_update(repo: str, base: str, approved: str, head: str) -> UpdateClass:
+    """#130: the trivial-update check, on the waiter's bare clone of repo."""
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
+    )
+    return classify_update(clone, approved, head, f"refs/remotes/origin/{base}")
 
 
 def _feeder(
@@ -932,6 +967,30 @@ def _runtime_config(path: Path | None) -> OrchConfig:
 
 def _exit_on_term(_signum: int, _frame: FrameType | None) -> None:
     raise SystemExit(143)
+
+
+class StopAtBoundary:
+    """`orch poll`'s SIGTERM (#107): during a cycle it waits for the cycle to
+    end, so no handoff or ship is cut in half; during the sleep between
+    cycles, or a second SIGTERM, exits at once. Either way the exit is 143."""
+
+    def __init__(self, sleep: Callable[[float], None] = time.sleep):
+        self._sleep = sleep
+        self.cycling = True
+        self.requested = False
+
+    def on_term(self, _signum: int, _frame: FrameType | None) -> None:
+        if self.cycling and not self.requested:
+            self.requested = True
+            return
+        raise SystemExit(143)
+
+    def sleep(self, seconds: float) -> None:
+        self.cycling = False
+        if self.requested:
+            raise SystemExit(143)
+        self._sleep(seconds)
+        self.cycling = True
 
 
 def _quiet_stdout() -> None:
@@ -1570,7 +1629,7 @@ def _linear_webhook(argv: list[str]) -> int:
             ),
             db_path=path,
             path=webhook.path,
-            log=lambda line: print(line, flush=True),
+            log=linear_webhook.utc_log,
         )
         server = linear_webhook.make_server(app, *bind)
     except (
@@ -1584,7 +1643,7 @@ def _linear_webhook(argv: list[str]) -> int:
         return 1
     host, port = server.server_address[:2]
     shown = f"[{host}]" if ":" in str(host) else str(host)
-    print(f"linear-webhook: listening on {shown}:{port}{webhook.path}", flush=True)
+    linear_webhook.utc_log(f"linear-webhook: listening on {shown}:{port}{webhook.path}")
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         # Heartbeat (#92), and the tunnel probe when public_url is set.

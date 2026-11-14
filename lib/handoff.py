@@ -58,6 +58,8 @@ STATES = (
     "ship",
     "merged",
     "handed-off",
+    "merge-queue",
+    "updating",
     "waiting-external",
     "awaiting-ok",
     "post-merge",

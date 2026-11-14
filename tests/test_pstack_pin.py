@@ -714,9 +714,10 @@ def test_cli_local_install_refuses_a_worktree_checkout(
 ) -> None:
     root = tiny_tree(tmp_path)
     bump_pin(root, "a" * 40, "0.15.36")
+    temp = tmp_path
     if why == "worktree":
         (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
-    temp = tmp_path / "not-temp" if why == "worktree" else tmp_path
+        temp = tmp_path / "not-temp"
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
     monkeypatch.setattr(cli, "ROOT", root)
     monkeypatch.setattr(cli, "rules_text", lambda _root: "# pstack model configuration.\n")

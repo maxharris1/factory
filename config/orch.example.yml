@@ -25,6 +25,12 @@ dashboard:
     remote_dir: factory-dashboard
     method: scp
     # live: true
+# Optional: harnesses whose jobs the factory refuses; health then expects
+# no waiter for them.
+# refused_harnesses:
+#   - cursor
+# Host-specific values belong in a gitignored orch.local.yml beside this
+# file, merged in at load (config/orch.local.example.yml).
 # Optional job states (README "Job states"), whole minutes, defaults shown:
 # a running job with no heartbeat for stale_minutes is stale; one claimed
 # and never started for release_claimed_minutes is requeued (no round charged).

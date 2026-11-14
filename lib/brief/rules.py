@@ -17,7 +17,7 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
             "- If you cannot finish, make the very last line exactly this (T6 retries the job once):\n\n"
             "ORCH-HANDOFF: failed\n\n"
             "- The waiter on the box reads that line when you exit and runs `orch job done` there.\n"
-            "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another harness."
+            "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job or message another bot."
         )
     return (
         "## Finish the job\n"
@@ -25,7 +25,7 @@ def finish_section(job: Job, bot: str, remote_device: str | None = None) -> str:
         f"- If you cannot finish: `orch job done {bot} {job.id} --failed` (T6 retries the job once).\n"
         "- `orch job done` checks the secret that `orch job run` put in `$ORCH_JOB_PROOF`, so run it "
         "from this environment. Never print, post, write down or commit that value.\n"
-        "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another harness."
+        "- `orch job run` heartbeats for you; never start a heartbeat loop. Never start another factory job or message another bot."
     )
 
 
@@ -55,7 +55,6 @@ def rules() -> str:
         "## Rules\n"
         f"- Run GitHub as `{GH}`.\n"
         "- Never read credentials, runner tokens, `.env`, `auth.json`, `.runner` or `FACTORY_WEBHOOK_*` values.\n"
-        "- No force-push and no rebase of a pushed branch. Bring a base branch in by a merge commit only.\n"
         "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
         "- Post only this job's handoff, or a `questions` handoff. Never post `go`, `ok`, `answers`, "
         "`brief`, or (outside a review job) a `verdict`. Never merge, close, approve or label a PR.\n"

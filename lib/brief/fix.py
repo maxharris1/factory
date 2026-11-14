@@ -10,11 +10,11 @@ def task_lines(job: Job, facts: dict) -> list[str]:
     head = facts["head"] or "the PR head"
     return [
         "Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). "
-        "Run as poteto-mode.",
+        "Follow the router in Skills above.",
         f"1. Check out the PR branch at {head}.",
         "2. Test first: a test that fails on the current head and covers the whole class of the "
         "finding. Then fix the class.",
-        "3. Run the tests. Self-check: principle-prove-it-works, no-comments.",
+        "3. Run the tests, then the router's \"Before ready\" steps.",
         "4. Push, then post the ready handoff below with the head you pushed.",
         *builder_notes(job),
     ]

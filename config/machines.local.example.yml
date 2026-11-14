@@ -1,0 +1,11 @@
+# Host-local overlay for machines.yml (README "Local config overlay").
+# Copy to machines.local.yml beside machines.yml; that name is gitignored.
+# Devices merge by name: only the fields listed here change, and a device
+# machines.yml lacks is appended. `orch check-config` names the keys it
+# sets, never their values. ORCH_NO_LOCAL_OVERLAY=1 ignores it.
+devices:
+  - name: box
+    slot_max: 2
+  - name: pc
+    enabled: true
+    slot_max: 2
