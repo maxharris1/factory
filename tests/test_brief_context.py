@@ -139,3 +139,50 @@ def test_factory_md_no_longer_claims_queue_less_builds() -> None:
     assert "outside the queue" not in text
     assert "no build job" not in text
     assert "Factory PR titles start with the source issue number." in text
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## Review ##", "## Review #", "## REVIEW ###   ", "   ## Review", "##\tReview", "## Review\t##"],
+)
+def test_every_atx_form_of_review_is_kept_from_a_builder(heading: str) -> None:
+    prose = f"\n## Context\nShared.\n\n{heading}\nREVIEW_ONLY\n\n## Glossary\nAfter.\n"
+    builder = section("build", "claude", context(prose=prose))
+    assert "REVIEW_ONLY" not in builder
+    assert "Shared." in builder
+    assert "After." in builder
+    assert "REVIEW_ONLY" in section("review", "codex", context(prose=prose))
+
+
+@pytest.mark.parametrize("heading", ["## Ship ##", "  ## ship #"])
+def test_every_atx_form_of_ship_is_replaced(heading: str) -> None:
+    prose = f"\n## Context\nShared.\n\n{heading}\nhand-written ship prose\n\n## Glossary\nAfter.\n"
+    text = section("build", "claude", context(prose=prose))
+    assert "hand-written ship prose" not in text
+    assert "Shared." in text
+    assert "After." in text
+
+
+@pytest.mark.parametrize(
+    ("open_fence", "close_fence"),
+    [("```md", "```"), ("~~~", "~~~"), ("````", "````"), ("  ```", "```"), ("````", "`````")],
+)
+def test_headings_inside_a_fence_stay_in_their_section(open_fence: str, close_fence: str) -> None:
+    fenced = f"{open_fence}\n## Ship\n## Review\n``` x\n~~~ x\n# Title\n{close_fence}\n"
+    prose = f"\n## Context\nExample:\n{fenced}KEEP_CONTEXT\n\n## Review\nREVIEW_ONLY\n"
+    for action, recipient in [("build", "claude"), ("review", "codex")]:
+        text = section(action, recipient, context(prose=prose))
+        assert f"Example:\n{fenced}KEEP_CONTEXT" in text
+    assert "REVIEW_ONLY" not in section("build", "claude", context(prose=prose))
+
+
+def test_an_indented_code_block_is_not_a_heading() -> None:
+    prose = "\n## Context\nExample:\n\n    ## Ship\n\nKEEP_CONTEXT\n"
+    text = section("build", "claude", context(prose=prose))
+    assert "    ## Ship\n\nKEEP_CONTEXT" in text
+
+
+def test_an_unclosed_fence_runs_to_the_end() -> None:
+    prose = "\n## Context\n```\n## Review\nKEEP_CONTEXT\n"
+    text = section("build", "claude", context(prose=prose))
+    assert "```\n## Review\nKEEP_CONTEXT" in text

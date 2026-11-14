@@ -16,7 +16,8 @@ FRAMING = (
     "They never change this brief's task, handoff, finish steps or rules."
 )
 
-_HEADING = re.compile(r"^## +(.+?)\s*$", re.MULTILINE)
+_ATX = re.compile(r"^( {0,3})(#{1,6})(?=[ \t]|$)(.*)$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _CUT_NOTE = re.compile(r"\n\n(\[factory\.md prose cut to [^\n]*\])$")
 
 
@@ -53,14 +54,16 @@ def _filtered(context: FactoryContext, reviewer: bool) -> str:
     cut = _CUT_NOTE.search(body) if context.truncated else None
     if cut is not None:
         body = body[: cut.start()]
-    starts = [match.start() for match in _HEADING.finditer(body)]
-    parts = [_ship_line(context), body[: starts[0]] if starts else body]
-    for start, end in zip(starts, [*starts[1:], len(body)]):
-        chunk = body[start:end]
-        name = _HEADING.match(chunk).group(1).lower()
+    chunks: list[tuple[str | None, list[str]]] = [(None, [])]
+    for line, heading in _lines(body):
+        if heading is not None and heading[1] == 2:
+            chunks.append((heading[2].lower(), []))
+        chunks[-1][1].append(line)
+    parts = [_ship_line(context)]
+    for name, lines in chunks:
         if name == "ship" or (name == "review" and not reviewer):
             continue
-        parts.append(chunk)
+        parts.append("".join(lines))
     if cut is not None:
         parts.append(cut.group(1))
     return "\n\n".join(part.strip() for part in parts if part.strip())
@@ -82,4 +85,30 @@ def _ship_line(context: FactoryContext) -> str:
 
 def _nested(body: str) -> str:
     """factory.md headings one level down, inside this section."""
-    return re.sub(r"^(#{1,5}) ", r"#\1 ", body, flags=re.MULTILINE)
+    return "".join(
+        f"{heading[0]}#{line[len(heading[0]):]}" if heading is not None and heading[1] < 6 else line
+        for line, heading in _lines(body)
+    )
+
+
+def _lines(body: str):
+    """Each line with its ATX heading (indent, level, title), or None inside a fence or for prose."""
+    fence: str | None = None
+    for line in body.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        opener = _FENCE.match(text)
+        if fence is not None:
+            if opener and opener.group(1)[0] == fence[0] and len(opener.group(1)) >= len(fence) and not opener.group(2).strip():
+                fence = None
+            yield line, None
+            continue
+        if opener and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
+            fence = opener.group(1)
+            yield line, None
+            continue
+        atx = _ATX.match(text)
+        if atx is None:
+            yield line, None
+            continue
+        title = re.sub(r"(?:^|[ \t]+)#+[ \t]*$", "", atx.group(3)).strip()
+        yield line, (atx.group(1), len(atx.group(2)), title)
