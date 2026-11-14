@@ -19,7 +19,9 @@ When the source has an "Acceptance criteria" heading outside any code block,
 the text is the first such section, up to the next heading of the same or a
 higher level outside any code block. Code blocks follow CommonMark: they do
 not nest, and a fence closes only on the opening character, at least as long,
-with no info string. A code example inside the section stays in the text, and
+with no info string. A fence or list marker indented four or more spaces past
+its list item's content is indented code, and a fence opened in a list item
+ends with the item. A code example inside the section stays in the text, and
 a heading or list item inside a code example is ignored. Its list items are
 the criteria. Without one, the text is the whole source and only its checkbox
 items outside code blocks are criteria. Criteria are numbered `ac-1`, `ac-2`,
@@ -49,6 +51,7 @@ _TICKET_HEADING = re.compile(r"^ticket$", re.IGNORECASE)
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _CHECKBOX = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$")
 _ITEM = re.compile(r"^\s*(?:[-*+]\s+(?:\[[ xX]\]\s+)?|[0-9]+[.)]\s+)(.+?)\s*$")
+_MARKER = re.compile(r"^([-*+]|[0-9]{1,9}[.)])( *)(?=\S|$)")
 _NOTE_ROOM = 80
 
 
@@ -139,8 +142,7 @@ def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | 
 
 def _quoted_ticket(body: str) -> str:
     lines = body.splitlines()
-    blocks = _code_blocks(lines)
-    code = _in_code(lines, blocks)
+    code, blocks = _scan(lines)
     for index, line in enumerate(lines):
         heading = _HEADING.match(line)
         if heading is not None and not code[index] and _TICKET_HEADING.match(heading.group(2)) and index + 1 in blocks:
@@ -149,7 +151,7 @@ def _quoted_ticket(body: str) -> str:
 
 
 def _section(lines: list[str]) -> list[str] | None:
-    code = _in_code(lines, _code_blocks(lines))
+    code, _ = _scan(lines)
     headings = [(index, _HEADING.match(line)) for index, line in enumerate(lines)]
     starts = [index for index, heading in headings if heading and not code[index] and _AC_HEADING.match(heading.group(2))]
     if not starts:
@@ -163,34 +165,69 @@ def _section(lines: list[str]) -> list[str] | None:
     return lines[start:]
 
 
-def _code_blocks(lines: list[str]) -> dict[int, int]:
-    """Opening fence line to closing fence line. Blocks do not nest; an unclosed one runs to the end."""
+def _scan(lines: list[str]) -> tuple[list[bool], dict[int, int]]:
+    """Which lines start no list item or heading, and each fenced block's opening line to its end.
+
+    Those lines are code and lazy paragraph lines. A fence or list marker
+    counts only when indented at most three spaces past the content column of
+    the list item it sits in; deeper, it is indented code or paragraph text.
+    A fence opened inside a list item ends with that item. A block's end is
+    its closing fence line, else the first line past it; an unclosed block
+    runs to the end.
+    """
+    inert = [False] * len(lines)
     blocks: dict[int, int] = {}
-    opener: tuple[int, str] | None = None
-    for index, line in enumerate(lines):
-        fence = _FENCE.match(line)
-        if fence is None:
+    columns: list[int] = []
+    fence: tuple[int, str, int] | None = None
+    blank_before = True
+    for index, raw in enumerate(lines):
+        line = raw.expandtabs(4)
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        blank = not stripped
+        if fence is not None:
+            start, marker, column = fence
+            if blank or indent >= column:
+                inert[index] = True
+                close = _FENCE.match(stripped)
+                if (
+                    close is not None
+                    and indent - column <= 3
+                    and close.group(1)[0] == marker[0]
+                    and len(close.group(1)) >= len(marker)
+                    and not close.group(2).strip()
+                ):
+                    blocks[start] = index
+                    fence = None
+                continue
+            blocks[start] = index
+            fence = None
+        if blank:
+            blank_before = True
             continue
-        marker, info = fence.group(1), fence.group(2)
-        if opener is None:
-            if not (marker[0] == "`" and "`" in info):
-                opener = (index, marker)
-        elif marker[0] == opener[1][0] and len(marker) >= len(opener[1]) and not info.strip():
-            blocks[opener[0]] = index
-            opener = None
-    if opener is not None:
-        blocks[opener[0]] = len(lines)
-    return blocks
-
-
-def _in_code(lines: list[str], blocks: Mapping[int, int]) -> list[bool]:
-    code = [False] * len(lines)
-    for first, last in blocks.items():
-        code[first : last + 1] = [True] * (min(last, len(lines) - 1) - first + 1)
-    return code
+        opener = _FENCE.match(stripped)
+        item = _MARKER.match(stripped)
+        outer = [column for column in columns if column <= indent]
+        if blank_before or (
+            (opener or item or _HEADING.match(stripped)) and indent - (outer[-1] if outer else 0) <= 3
+        ):
+            columns = outer
+        blank_before = False
+        base = columns[-1] if columns else 0
+        if indent < base or indent - base > 3:
+            inert[index] = True
+        elif opener is not None and not (opener.group(1)[0] == "`" and "`" in opener.group(2)):
+            inert[index] = True
+            fence = (index, opener.group(1), base)
+        elif item is not None:
+            gap = len(item.group(2))
+            columns.append(indent + len(item.group(1)) + (gap if 1 <= gap <= 4 else 1))
+    if fence is not None:
+        blocks[fence[0]] = len(lines)
+    return inert, blocks
 
 
 def _items(text: str, pattern: re.Pattern[str]) -> list[str]:
     lines = text.splitlines()
-    code = _in_code(lines, _code_blocks(lines))
-    return [match.group(1) for line, literal in zip(lines, code) if not literal and (match := pattern.match(line))]
+    inert, _ = _scan(lines)
+    return [match.group(1) for line, skip in zip(lines, inert) if not skip and (match := pattern.match(line))]

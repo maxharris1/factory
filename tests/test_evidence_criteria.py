@@ -306,3 +306,28 @@ def test_cut_count_ignores_items_inside_a_code_example():
     bundle = _bundle(issue_body=body, limit=200)
     assert [c.text for c in bundle.criteria] == ["Keep."]
     assert "and 1 criteria" in bundle.cut
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ("## Acceptance criteria\n\nExample fence delimiter:\n\n    ```\n\n- [ ] Real criterion.\n", ["Real criterion."]),
+        ("Intro\n\n    ~~~\n\n- [ ] Real box.\n", ["Real box."]),
+        ("## Acceptance criteria\n- [ ] A:\n\n      ```\n- [ ] B.\n", ["A:", "B."]),
+        ("## Acceptance criteria\n- [ ] Sample:\n\n      - [ ] Indented example.\n- [ ] B.\n", ["Sample:", "B."]),
+        ("## Acceptance criteria\n- [ ] A:\n  ```\n  - [ ] Example.\n- [ ] B.\n", ["A:", "B."]),
+        ("## Acceptance criteria\n- [ ] A:\n  ```\n     ```\n  - [ ] Example.\n  ```\n- [ ] B.\n", ["A:", "Example.", "B."]),
+        ("## Acceptance criteria\n- [ ] A\n  - [ ] A.1\n- [ ] B.\n", ["A", "A.1", "B."]),
+    ],
+)
+def test_indentation_decides_what_is_a_code_example(body, expected):
+    bundle = _bundle(issue_body=body)
+    assert [c.text for c in bundle.criteria] == expected
+    assert bundle.cut is None
+
+
+def test_heading_after_a_list_item_code_example_ends_the_section():
+    body = "## Acceptance criteria\n- [ ] A:\n  ```\n  x\n## Notes\n- Not a criterion.\n"
+    bundle = _bundle(issue_body=body)
+    assert [c.text for c in bundle.criteria] == ["A:"]
+    assert "Not a criterion" not in bundle.text
