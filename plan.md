@@ -147,52 +147,52 @@ Each unit is one commit that ends green under `env -u ORCH_DB pytest`. Test firs
 
 ### Unit 1. Parse gate lines (AC 1, 2, 4, 8)
 
-- [ ] New `lib/feeder_gates.py` with `Ref`, `GateLines` and `parse_gate_lines` per the parsing rules.
-- [ ] `test_parse_blocked_by_forms`: `Blocked by #4`, `Blocked by: #4`, `**Blocked by:** #4 and #5`, `Blocked by #4, PR #9, open PR #10`, `Blocked by other/repo#3`, issue and pull URLs, mixed case, a list marker.
-- [ ] `test_parse_real_chain_lines`: the lines of #138, #141, #145, #150 and #151 as they read on 2026-11-13, pasted as fixtures. #150 gives `{#145, #113}`, and its trailing prose names no path.
-- [ ] `test_parse_ignores_prose_backticks_and_fences`: `Open PRs #111 and #116 ...` on the next line, this ticket's own backticked examples, and a fenced block are not gate lines.
-- [ ] `test_parse_touches_and_conflicts` and `test_paths_collide_on_equal_or_folder`.
+- [x] New `lib/feeder_gates.py` with `Ref`, `GateLines` and `parse_gate_lines` per the parsing rules.
+- [x] `test_parse_blocked_by_forms`: `Blocked by #4`, `Blocked by: #4`, `**Blocked by:** #4 and #5`, `Blocked by #4, PR #9, open PR #10`, `Blocked by other/repo#3`, issue and pull URLs, mixed case, a list marker.
+- [x] `test_parse_real_chain_lines`: the lines of #138, #141, #145, #150 and #151 as they read on 2026-11-13, pasted as fixtures. #150 gives `{#145, #113}`, and its trailing prose names no path.
+- [x] `test_parse_ignores_prose_backticks_and_fences`: `Open PRs #111 and #116 ...` on the next line, this ticket's own backticked examples, and a fenced block are not gate lines.
+- [x] `test_parse_touches_and_conflicts` and `test_paths_collide_on_equal_or_folder`.
 
 ### Unit 2. Resolve statuses, cheaply (AC 1, 2, 6, 9)
 
-- [ ] `lib/github_actions.py`: a keyword-only `cache_ttl` on `_call` and `_json` that overrides `self.cache_ttl` for one call. No other caller changes.
-- [ ] `lib/intake_live.py`: `GitHubIntakeClient.ref_statuses`, one aliased GraphQL read per repo in chunks of 50, with `cache_ttl="60s"`. `LINEAR_INTAKE_QUERY` gains `inverseRelations`, and `linear_intake` fills `IntakeIssue.blocked_by`.
-- [ ] `lib/feeder_gates.py`: `Progress`, `RefStatus`, and `linear_status(state_type)`.
-- [ ] Tests: `test_ref_statuses_reads_issue_and_pr_kinds` (merged PR, closed unmerged PR, open PR, issue closed completed, closed not planned, closed duplicate, null reason, linked PR merged, null node), `test_ref_statuses_is_one_cached_graphql_read_per_repo`, `test_linear_intake_reads_blocks_relations` (only `blocks` relations, inverse direction), `test_linear_relations_add_no_linear_request`.
+- [x] `lib/github_actions.py`: a keyword-only `cache_ttl` on `_call` and `_json` that overrides `self.cache_ttl` for one call. No other caller changes.
+- [x] `lib/intake_live.py`: `GitHubIntakeClient.ref_statuses`, one aliased GraphQL read per repo in chunks of 50, with `cache_ttl="60s"`. `LINEAR_INTAKE_QUERY` gains `inverseRelations`, and `linear_intake` fills `IntakeIssue.blocked_by`.
+- [x] `lib/feeder_gates.py`: `Progress`, `RefStatus`, and `linear_status(state_type)`.
+- [x] Tests: `test_ref_statuses_reads_issue_and_pr_kinds` (merged PR, closed unmerged PR, open PR, issue closed completed, closed not planned, closed duplicate, null reason, linked PR merged, null node), `test_ref_statuses_is_one_cached_graphql_read_per_repo`, `test_linear_intake_reads_blocks_relations` (only `blocks` relations, inverse direction), `test_linear_relations_add_no_linear_request`.
 
 ### Unit 3. The blocked-by gate in the feed loop (AC 1, 2, 3, 6, 7, 9, 10)
 
-- [ ] `lib/feeder_gates.py`: `Wait` and `blocker_waits`, with Tarjan SCC for cycles. A cycle reason lists the loop in ticket order.
-- [ ] New `lib/attention.py`: `ensure_table` (the DDL moved out of `lib/dispatcher.py`, which now calls it) and `sync`.
-- [ ] `lib/feeder.py`: the new state, columns and migration. `feed_once` per "One poll, in order". `_set_state` writes `waiting_reason` and clears it on any other state. `_Candidate.order()` compares numeric keys as numbers.
-- [ ] `FakeGitHub` gains `statuses` and `ref_statuses`, counting calls.
-- [ ] Tests: `test_pr_blocker_done_only_when_merged`, `test_issue_blocker_done_when_closed_completed`, `test_issue_blocker_done_when_a_linked_pr_merged`, `test_issue_blocker_done_when_its_feeder_pr_merged`, `test_a_blocked_ticket_is_not_fed_until_every_blocker_is_done`, `test_dependent_is_fed_on_the_poll_after_its_blocker_merges`, `test_a_blocked_ticket_takes_no_room`, `test_cycle_detection_two_and_three_long_and_self`, `test_a_cycle_flags_every_participant_and_feeds_none`, `test_a_blocker_closed_unmerged_flags_needs_attention`, `test_a_blocker_closed_not_planned_flags_needs_attention`, `test_attention_clears_when_the_cause_is_gone`, `test_an_unreadable_status_fails_closed_without_a_flag`, `test_linear_relation_blocker_waits_until_completed`, `test_linear_description_blocked_by_line_resolves_on_the_project_repo`, `test_feeder_reads_statuses_once_per_poll_for_a_long_chain`, `test_no_gate_lines_means_no_status_read`, `test_a_waiting_blocked_ticket_that_loses_its_label_is_forgotten`, `test_existing_database_gains_the_new_columns`.
+- [x] `lib/feeder_gates.py`: `Wait` and `blocker_waits`, with Tarjan SCC for cycles. A cycle reason lists the loop in ticket order.
+- [x] New `lib/attention.py`: `ensure_table` (the DDL moved out of `lib/dispatcher.py`, which now calls it) and `sync`.
+- [x] `lib/feeder.py`: the new state, columns and migration. `feed_once` per "One poll, in order". `_set_state` writes `waiting_reason` and clears it on any other state. `_Candidate.order()` compares numeric keys as numbers.
+- [x] `FakeGitHub` gains `statuses` and `ref_statuses`, counting calls.
+- [x] Tests: `test_pr_blocker_done_only_when_merged`, `test_issue_blocker_done_when_closed_completed`, `test_issue_blocker_done_when_a_linked_pr_merged`, `test_issue_blocker_done_when_its_feeder_pr_merged`, `test_a_blocked_ticket_is_not_fed_until_every_blocker_is_done`, `test_dependent_is_fed_on_the_poll_after_its_blocker_merges`, `test_a_blocked_ticket_takes_no_room`, `test_cycle_detection_two_and_three_long_and_self`, `test_a_cycle_flags_every_participant_and_feeds_none`, `test_a_blocker_closed_unmerged_flags_needs_attention`, `test_a_blocker_closed_not_planned_flags_needs_attention`, `test_attention_clears_when_the_cause_is_gone`, `test_an_unreadable_status_fails_closed_without_a_flag`, `test_linear_relation_blocker_waits_until_completed`, `test_linear_description_blocked_by_line_resolves_on_the_project_repo`, `test_feeder_reads_statuses_once_per_poll_for_a_long_chain`, `test_no_gate_lines_means_no_status_read`, `test_a_waiting_blocked_ticket_that_loses_its_label_is_forgotten`, `test_existing_database_gains_the_new_columns`.
 
 ### Unit 4. The file-conflict gate (AC 4, 7)
 
-- [ ] `lib/feeder_gates.py`: `Holds`. A holder is known by its issue ref and its PR ref, so `Conflicts with #151` and `Conflicts with #<its PR>` both match. The edge counts from either side. A `Conflicts with` ref that is not a feeder ticket but resolves to an open PR also holds.
-- [ ] `lib/feeder.py`: holders from fed rows, sticky `released`, `Holds.take` before `_feed`.
-- [ ] Tests: `test_collision_keeps_urgent_then_bug_then_oldest_then_lower_number`, `test_a_fed_ticket_with_an_open_pr_holds_its_paths`, `test_a_holder_releases_when_its_pr_merges_or_closes`, `test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number`, `test_two_tickets_sharing_a_path_are_not_selected_in_one_poll`, `test_a_conflicting_ticket_takes_no_room`.
+- [x] `lib/feeder_gates.py`: `Holds`. A holder is known by its issue ref and its PR ref, so `Conflicts with #151` and `Conflicts with #<its PR>` both match. The edge counts from either side. A `Conflicts with` ref that is not a feeder ticket but resolves to an open PR also holds.
+- [x] `lib/feeder.py`: holders from fed rows, sticky `released`, `Holds.take` before `_feed`.
+- [x] Tests: `test_collision_keeps_urgent_then_bug_then_oldest_then_lower_number`, `test_a_fed_ticket_with_an_open_pr_holds_its_paths`, `test_a_holder_releases_when_its_pr_merges_or_closes`, `test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number`, `test_two_tickets_sharing_a_path_are_not_selected_in_one_poll`, `test_a_conflicting_ticket_takes_no_room`.
 
 ### Unit 5. Visibility (AC 5, 6)
 
-- [ ] `lib/feeder.py`: `feeder_items` returns `waiting_reason`; `feeder_counts` returns `waiting_blocked`.
-- [ ] `lib/status.py`: `FeederState` gains `waiting_blocked`, and `items` becomes a tuple of a small frozen `FeederItem(repo, issue, state, pr, reason)`. `render` prints the count and the reason.
-- [ ] `lib/dashboard.py`: snapshot count and item `reason`, `ATTENTION_REASONS` extended. `lib/dashboard_page.py`: `FEEDER_STATE`, `renderFeeder` and `_feeder` show the reason.
-- [ ] Tests: `test_orch_status_shows_waiting_reasons`, `test_dashboard_snapshot_shows_waiting_reasons`, `test_dashboard_page_renders_the_feeder_reason`, `test_status_and_dashboard_list_the_blocker_flags`. The existing `test_feeder_counts_eligible_fed_and_waiting` and `test_status_and_dashboard_show_an_empty_latest_poll` assert exact dicts, so they gain `waiting_blocked: 0`. That is the only edit to an existing test.
+- [x] `lib/feeder.py`: `feeder_items` returns `waiting_reason`; `feeder_counts` returns `waiting_blocked`.
+- [x] `lib/status.py`: `FeederState` gains `waiting_blocked`, and `items` becomes a tuple of a small frozen `FeederItem(repo, issue, state, pr, reason)`. `render` prints the count and the reason.
+- [x] `lib/dashboard.py`: snapshot count and item `reason`, `ATTENTION_REASONS` extended. `lib/dashboard_page.py`: `FEEDER_STATE`, `renderFeeder` and `_feeder` show the reason.
+- [x] Tests: `test_orch_status_shows_waiting_reasons`, `test_dashboard_snapshot_shows_waiting_reasons`, `test_dashboard_page_renders_the_feeder_reason`, `test_status_and_dashboard_list_the_blocker_flags`. The existing `test_feeder_counts_eligible_fed_and_waiting` and `test_status_and_dashboard_show_an_empty_latest_poll` assert exact dicts, so they gain `waiting_blocked: 0`. That is the only edit to an existing test.
 
 ### Unit 6. Docs
 
-- [ ] New `docs/decisions/156-feeder-gates.md` in the README's template, one entry per call in Appendix A.
-- [ ] `docs/SPEC.md` section 7, the `intake` paragraph: three sentences on the gate lines, `waiting-blocked` and the three attention reasons. The frozen decision log is not touched.
+- [x] New `docs/decisions/156-feeder-gates.md` in the README's template, one entry per call in Appendix A.
+- [x] `docs/SPEC.md` section 7, the `intake` paragraph: three sentences on the gate lines, `waiting-blocked` and the three attention reasons. The frozen decision log is not touched.
 
 ## Verify
 
-- [ ] Unit. `env -u ORCH_DB pytest` passes at the PR head, in the foreground.
-- [ ] Revert. For each row of the map, revert its unit's production change on a scratch branch and record that its tests fail. Results go in the `ready` comment.
-- [ ] Real bodies. A throwaway script runs `parse_gate_lines` on the live bodies of #138 to #152 (read with `env -u GH_TOKEN gh`) and prints each ticket's blockers, touches and conflicts. The output goes in the `ready` comment, so Max can compare it with the intended chain in the ticket.
-- [ ] Budget. A fake-runner run over a 15-ticket chain logs the `gh` argv per poll. It shows one `graphql` read per repo with `--cache 60s` and no per-ticket reads.
-- [ ] Config. `python bin/orch check-config` passes on all four CI invocations in `.github/workflows/ci.yml`.
+- [x] Unit. `env -u ORCH_DB pytest` passes at the PR head, in the foreground.
+- [x] Revert. For each row of the map, revert its unit's production change on a scratch branch and record that its tests fail. Results go in the `ready` comment.
+- [x] Real bodies. A throwaway script runs `parse_gate_lines` on the live bodies of #138 to #152 (read with `env -u GH_TOKEN gh`) and prints each ticket's blockers, touches and conflicts. The output goes in the `ready` comment, so Max can compare it with the intended chain in the ticket.
+- [x] Budget. A fake-runner run over a 15-ticket chain logs the `gh` argv per poll. It shows one `graphql` read per repo with `--cache 60s` and no per-ticket reads.
+- [x] Config. `python bin/orch check-config` passes on all four CI invocations in `.github/workflows/ci.yml`.
 - [ ] CI. `.github/workflows/ci.yml` is green at the head (pytest, `check-config`, `statechart`). The feeder is not in the TLA+ model, so the model needs no edit.
 - [ ] Review gate. Codex Bot's round-1 review of the `ready` head.
 
