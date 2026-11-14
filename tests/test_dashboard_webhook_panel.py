@@ -27,12 +27,13 @@ def test_status_json_carries_webhook_health_and_the_panel_sits_in_factory_status
     write_snapshot(out, snapshot)
     status = json.loads((out / "status.json").read_text(encoding="utf-8"))
     assert status["poller"]["linear_webhook"]["dirty"] == 3
-    assert status["poller"]["linear_webhook"]["warning"].startswith("no Linear webhook")
+    assert status["poller"]["linear_webhook"]["warning"] is None
+    assert status["poller"]["linear_webhook"]["note"].startswith("quiet: no Linear webhook")
 
     kpis = _section(_no_script((out / "index.html").read_text(encoding="utf-8")), "kpis")
     assert '<div id="linear-webhook"><h2>Linear webhook</h2>' in kpis
     assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in kpis
-    assert '<p class="bad">warning: no Linear webhook for over 1h' in kpis
+    assert '<p class="muted">note: quiet: no Linear webhook for 1h' in kpis
     for name in ("activity.html", "efficiency.html", "job.html"):
         assert "Linear webhook" not in render_pages(snapshot)[name], name
 
@@ -53,7 +54,8 @@ def test_script_redraws_webhook_health_from_status_json(tmp_path: Path) -> None:
     )
     out = _run_page(tmp_path / "silent", silent, "main", BAR + ["hud", "kpis", "lanes", "queue"])
     assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in out["text"]["kpis"]
-    assert "p.bad \"warning: no Linear webhook for over 1h" in out["dump"]["kpis"]
+    assert "p.muted \"note: quiet: no Linear webhook for 1h" in out["dump"]["kpis"]
+    assert "warning" not in out["text"]["kpis"]
 
     waiting = _hooked(
         tmp_path / "waiting", last_received=None, started=NOW - 600, dirty=0, active_linear=1

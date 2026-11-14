@@ -517,6 +517,7 @@ SCRIPT = r"""
     add(box, el('h2', null, 'Linear' + ' webhook'));
     add(box, el('p', null, 'last received ' + received + ' · dirty queue ' + w.dirty));
     if (w.warning !== null && w.warning !== undefined) add(box, el('p', 'bad', 'warning: ' + w.warning));
+    if (w.note !== null && w.note !== undefined) add(box, el('p', 'muted', 'note: ' + w.note));
   }
 
   // Backlog feeder (#85): appended to Factory status like the webhook block.
@@ -1158,7 +1159,8 @@ __TELEMETRY__
       add(tr, el('td', null, c.last_seen_et || 'never'));
       ticking(add(tr, el('td', 'num')), c.last_seen_age_seconds, '', '');
       add(tr, el('td', 'num', c.pid === null || c.pid === undefined ? '—' : c.pid));
-      add(tr, el('td', null, c.version));
+      var ver = add(tr, el('td', null, c.version));
+      if (c.stale_code) add(ver, el('span', 'warn', ' stale code'));
       add(tr, el('td', null, c.started_at_et || '—'));
       mark('components', c.anchor + ':' + c.state, tr);
     });
@@ -1550,6 +1552,8 @@ def _linear_webhook(snapshot: dict) -> str:
         if webhook["warning"] is not None
         else ""
     )
+    if webhook.get("note") is not None:
+        warning += f'<p class="muted">note: {_e(webhook["note"])}</p>'
     return (
         '<div id="linear-webhook"><h2>Linear webhook</h2>'
         f"<p>last received {_e(received)} · dirty queue {_e(webhook['dirty'])}</p>"
@@ -1946,7 +1950,8 @@ def _components(snapshot: dict) -> str:
             + _td(row["last_seen_et"] or "never")
             + _td(duration(row["last_seen_age_seconds"]), "num")
             + _td(row["pid"], "num")
-            + _td(row["version"])
+            + (f'<td>{_e(row["version"])}{_span("warn", " stale code")}</td>'
+               if row.get("stale_code") else _td(row["version"]))
             + _td(row["started_at_et"])
             + "</tr>"
         )

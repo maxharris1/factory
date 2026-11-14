@@ -543,8 +543,8 @@ linear_webhook:
 
 `orch linear-webhook serve` is a small stdlib HTTP server. It opens the
 existing dispatcher database (never creates it; run `init-db` first),
-creates its own `linear_dirty`, `linear_webhook_health` and
-`linear_project_issues` tables, and for
+creates its own `linear_dirty`, `linear_webhook_health`,
+`linear_project_issues` and `linear_webhook_seen` tables, and for
 each request:
 
 - serves POST on `path` only (404 elsewhere, 405 for other methods);
@@ -562,9 +562,10 @@ each request:
   from now (401);
 - for an Issue in a configured `linear_project_id` (or just moved out of
   one), or a Comment on a tracked issue, or a Comment carrying an `orch:v1`
-  marker on an issue a signed Issue event last placed in a configured
-  project, upserts one `linear_dirty(issue_id, identifier, event,
-  received_at)` row and returns 200. Comment payloads do not name the
+  marker on an issue a signed Issue event last placed in a project that is
+  still configured (the project is stored with it, issue #69), upserts one
+  `linear_dirty(issue_id, identifier, event, received_at)` row and returns
+  200. Comment payloads do not name the
   issue's project and a marker alone proves nothing, so the listener keeps
   `linear_project_issues` from Issue events; a handoff on an issue it has
   not seen is found by the reconcile search. The poller still checks the
@@ -572,8 +573,25 @@ each request:
   and is ignored. A database error returns 500 so Linear retries.
 
 It never runs handoff logic and never calls Linear. Log lines are
-`linear-webhook: accepted Issue.update AUT-123`-style: outcome, event type
-and identifier, never bodies (PHI), headers or signatures.
+`2026-11-13T14:02:00Z linear-webhook: accepted Issue.update AUT-123`-style:
+a UTC timestamp, outcome, event type and identifier, never bodies (PHI),
+headers or signatures.
+
+Webhook health (issues #79 and #107): every delivery whose signature
+verifies counts as received, whatever happens to it next (stale timestamp,
+malformed, ignored, an Attachment event), so it proves the path works. Each
+signed, fresh delivery that names an issue also records when that issue was
+last delivered (`linear_webhook_seen`). When the poller reads an issue in a
+configured project directly, it compares the issue's newest comment with
+that record: a comment made at least a minute after the listener started,
+at least two minutes old, with no delivery for its issue since a minute
+before it, is a missed delivery (`linear_webhook_missed`). `orch status`
+and the dashboard warn only on a miss found in the last 24 hours
+(`Linear webhook missed 1 delivery in 24h (newest AUT-123, found 12m
+ago)`). Over an hour with no delivery while Linear tickets are active and
+nothing missed is a soft note (`quiet: no Linear webhook for 2h (nothing
+missed by the last reconcile)`): Linear may simply have had nothing to
+send.
 
 The signing secret is read once, at startup, from `secret_file`. A file
 readable by group or others, empty, or unreadable is refused with an error
@@ -618,7 +636,10 @@ Commands: `start` (clears a stop), `stop` (holds them stopped), `restart`,
 unless held stopped; silent when all run), `install-autostart` and
 `remove-autostart` (write or remove `~/.config/factory/linear-webhook-autostart`,
 which makes the installed `profile.sh` run `ensure` in the background in each
-bot shell). `stop` ends every loop for this state directory, from any copy
+bot shell; where `crontab` exists, `install-autostart` also adds an `@reboot`
+line and a 5-minute `ensure` watchdog tagged `# factory-linear-webhook`,
+replaced and never duplicated, and changes nothing if the crontab cannot be
+read). `stop` ends every loop for this state directory, from any copy
 of the script (argv `.../linear-webhook-service.sh _listener-loop` or
 `_tunnel-loop` whose `--state`, `ORCH_STATE_DIR` or `HOME` points here) and
 every process holding a loop lock (its `/proc/PID/fdinfo` shows the lock; a
@@ -626,6 +647,10 @@ process that only has the lock file open is left alone), each with its
 children. If a lock is
 still held afterwards, by a loop in a PID namespace this shell cannot see,
 `stop` says so and exits 1: run it from a host shell.
+A `restart` whose `stop` fails drops the `linear-webhook.stopped` hold that
+`stop` just wrote, so `ensure` and self-heal (issue #107, which restarts a
+down or stale-code listener or tunnel with `restart`) still see a service to
+recover; a hold that was already there stays.
 
 Deploy: re-run `deploy/install.sh`, then run
 `~/.local/share/factory/linear-webhook-service.sh restart` once from a host
@@ -931,7 +956,21 @@ venv, installs `requirements.txt` (including PyYAML), writes an `orch` wrapper
 under `$HOME/.local/bin`, initializes one shared database, and writes
 `$HOME/.config/factory/profile.sh`. Without `--autostart` it does not install
 or start the service; with `--autostart` it also runs `deploy/poller-service.sh
-install-autostart`, which turns on autostart but does not start the poller.
+install-autostart`, which turns on autostart but does not start the poller,
+and `deploy/linear-webhook-service.sh install-autostart` when `orch.yml` or
+`orch.local.yml` has `linear_webhook`. It always installs self-heal (see
+"Self-heal"). The generated `profile.sh` runs once per shell (a second
+source is a no-op) and creates the state directory before any hook writes
+a log there.
+
+It also retires the launchers that lived outside the repository (issue
+#107): for `~/.local/share/factory/run-poller.sh` and, unless it is already
+the installed copy of `deploy/linear-webhook-service.sh` (issue #134),
+`~/.local/share/factory/linear-webhook-service.sh`, before installing that
+copy, it runs the old listener script's `stop`, sends SIGTERM to each process whose argv runs
+exactly that file (and to its direct children), removes the crontab lines
+that name it and deletes it, printing each step. If the crontab cannot be
+read it changes nothing and exits 1.
 Stop `orch-poll` (or `deploy/poller-service.sh stop`) before re-running
 `deploy/install.sh`; both install paths replace the venv.
 Keep the checkout at
@@ -955,13 +994,19 @@ Every bot shell sources [`deploy/profile.sh`](deploy/profile.sh).
 database exists, opens, and has the runtime tables, and that the factory
 wrapper is the `orch` found on `PATH`.
 
-[`deploy/run-poller.sh`](deploy/run-poller.sh) is the long-running poller
-launcher: it sources `~/.config/factory/webhook.env` and
+[`deploy/run-poller.sh`](deploy/run-poller.sh) is the one poller launcher
+(issue #107): it sources `~/.config/factory/webhook.env` and
 `~/.config/factory/orch-poll.env` with `set -a`, sets `PYTHONUNBUFFERED=1`,
-and runs `orch poll`; redirect its output to `poller.log`. `orch poll` also
-line-buffers its own stdout and stderr, so the log stays current.
-[`deploy/orch-poll.service`](deploy/orch-poll.service) is the systemd user
-unit alternative; it reads the same two files and sets `PYTHONUNBUFFERED=1`.
+and runs `orch poll`; redirect its output to `poller.log`. If either file
+cannot be read it exits 78 with `run-poller: missing
+~/.config/factory/<file>` and starts nothing, so no poller runs without its
+environment. `orch poll` also line-buffers its own stdout and stderr, so
+the log stays current. `poller-service.sh` and
+[`deploy/orch-poll.service`](deploy/orch-poll.service), the systemd user
+unit alternative, both start the poller only through it. On SIGTERM a
+poller in the middle of a cycle finishes the cycle first, so no handoff or
+ship is cut in half; between cycles, or on a second SIGTERM, it exits at
+once. Either way it exits 143. The unit allows 300 seconds for that.
 Max creates both files mode `0600`. `orch-poll.env` names `ORCH_DB` and the
 Linear variable named by `orch.yml`. `webhook.env` holds `FACTORY_WEBHOOK_URL`
 and either `FACTORY_WEBHOOK_AUTH` or `FACTORY_WEBHOOK_KEY`;
@@ -1055,9 +1100,13 @@ under `Grok wakes`.
 Once a Linear webhook listener or a webhook-mode poller has run on the
 database (the poller records `linear_webhook_polling`), a `Linear webhook`
 section shows the last delivery (or `never` and the listener's age, or
-`never (listener has not started)`) and the
-dirty-queue depth, plus a warning after more than an hour with no delivery
-while any tracked Linear ticket is not merged, handed off, done or abandoned.
+`never (listener has not started)`) and the dirty-queue depth, plus a
+`warning:` when the poller found a missed delivery in the last 24 hours, or
+else a `note:` after more than an hour with no delivery while any tracked
+Linear ticket is not merged, handed off, done or abandoned (see "Linear
+webhook"). A running job's age counts from its claim (its device slot's
+`placed_at`, else when it was queued), followed by its last heartbeat:
+`aut0-code/aut0#12 build -> claude running 42m (beat 12s ago)`.
 The last section is `Health` (next section), and a queued job that no live
 waiter can take ends with `[no waiter for <harness>]`.
 
@@ -1084,7 +1133,7 @@ poll` also records whether each dashboard push it started succeeded
 failing, last pushed … ago"), down once no push has succeeded for 8 push
 intervals. It is listed once a push has finished. The
 listener checks its tunnel (`tunnel`) every 15 seconds by a GET of
-`linear_webhook.public_url`, its Funnel URL: only the listener's own 405
+`linear_webhook.public_url`, its Funnel URL, when that is set: only the listener's own 405
 for its path counts as seen, so a Funnel that is off, a gateway error or a
 dead listener is a failed check. From the box that GET reaches the listener
 through Tailscale's proxy for the Funnel.
@@ -1097,8 +1146,8 @@ linear_webhook:
 A row is `(component, device, bot, pid, started_at, last_seen, version,
 interval_seconds, stopped_at, checked_at)`, one per process (the pid is in
 the key, so one `orch wait` exiting never removes another's row), where
-version is the checkout's commit (12 hex digits, read from `.git`) or
-`unknown`. Each value must be an allowlisted name, a device `machines.yml`
+version is the commit the process loaded when it started (12 hex digits,
+read from `.git` at import) or `unknown`. Each value must be an allowlisted name, a device `machines.yml`
 lists, a number or that SHA, so nothing else can be written. A beat also
 removes the rows other processes left for the same component and bot once
 they are down. Rows live in `orch.health.db` beside `orch.db` (created with
@@ -1121,8 +1170,10 @@ of its processes' rows; a device probe or tunnel check shows its newest
 check, whichever process made it. Once any heartbeat exists, every expected component
 with no row is shown down (`never seen`, or `never reached` for a probe):
 the poller; each bot's waiter on some device `machines.yml` makes eligible
-for its harness, and each probed device; the Linear listener and its tunnel
-when `orch.yml` has `linear_webhook`; and the dashboard writer when
+for its harness, unless `orch.yml` lists that harness in
+`refused_harnesses` (`[cursor]` here, issue #107), and each probed device;
+the Linear listener when `orch.yml` has `linear_webhook`, and its tunnel
+when that sets `public_url`; and the dashboard writer when
 `dashboard.push.transport` is `ssh`. A row nothing expects (a retired bot or
 device) is listed as `not configured` and needs no attention. A queued
 harness job is flagged **no waiter for <harness>** when no up or stale
@@ -1139,6 +1190,86 @@ ages on to stale and down, so a publisher that died is one needs-attention
 item. A one-off snapshot (`orch dashboard snapshot`) vouches for nothing:
 its components turn unknown on their own thresholds, and the old snapshot is
 one needs-attention item.
+
+**Stale code** (issue #107): a poller, waiter or Linear listener whose
+heartbeat names a commit other than the checkout's current one is still
+running old code. `orch health`, `orch status` and the dashboard's Health
+tab mark it `stale code (running <commit>, checkout <commit>)`, and the
+header counts it (`Health (9 components, 0 down, 1 stale code)`). It is not
+down and needs no attention: self-heal restarts it. `orch health --json`
+adds `code_version`, and `stale_code` and `started_at` for each component.
+
+## Self-heal
+
+```sh
+deploy/self-heal.sh once      # one pass, what the timer runs
+cat ~/.local/state/factory/self-heal.log
+```
+
+Self-heal (issue #107) restarts factory components that are down or run
+stale code, with no LLM and no tokens. Every 2 minutes `deploy/self-heal.sh
+once` pipes `orch health --json` into `orch heal --health-json -`
+(`lib/heal.py`). For each component on this device, it acts only when this
+account owns the component's service, which is marked by an autostart flag
+in `~/.config/factory`: `poller-autostart`, `waiter-autostart-<bot>` or
+`linear-webhook-autostart`. A waiter runs as its own bot user, so each
+account heals only its own services. It restarts through the component's own
+service script and never sends a signal itself:
+
+- a down or stale-code poller: `deploy/poller-service.sh restart`, which
+  starts it through `run-poller.sh`. The stop waits up to 300 seconds for
+  the poller's cycle to finish.
+- a waiter: `deploy/waiter-service.sh <bot> restart`. This stops only that
+  bot's supervisor and its `orch wait --autostart`. Each job's `orch job
+  run` has its own session and keeps running.
+- the Linear listener or its tunnel: `deploy/linear-webhook-service.sh
+  restart`. For stale code it waits until no delivery is in flight.
+
+The rules for each component:
+
+- A component held by its `*.stopped` marker is skipped. Self-heal never
+  overrides an operator's stop. A `restart` whose stop times out removes
+  the marker its own stop wrote, so the next pass retries and, after 3
+  failures, escalates.
+- A component restarted less than a minute ago is left to come up.
+- A component gets at most 3 restarts in 30 minutes. After that it is
+  skipped until the oldest restart leaves the window.
+- Self-heal escalates once per component per 30 minutes: when that backoff
+  trips, when the restart command fails 3 times, or when the component
+  flaps (3 process changes in the window that self-heal did not cause).
+  Escalating means POSTing a short JSON summary (`"action": "self-heal",
+  "kind": "escalation"`, with the components, their states and reasons) to
+  the Factory webhook named by `orch.yml` `grok.webhook_url_env`, with the
+  same auth as Grok delivery.
+
+The URL and auth values come only from the environment: `self-heal.sh`
+reads `webhook.env` when this user can read it, and nothing logs a value.
+A bot user without `webhook.env` logs `escalation skipped:
+missing-env:FACTORY_WEBHOOK_URL`, and the box user's run escalates for the
+box. The service scripts run without the webhook and Linear key variables.
+
+Each restart and escalation is one timestamped line in
+`~/.local/state/factory/self-heal.log`, with the exit code and duration, for
+example `2026-11-13T14:02:00Z self-heal: restart waiter codex-bot @ box
+(down: no heartbeat for 3m) exit=0 2.1s`. A skip or a deferral is logged
+only when its decision changes. A service script's own output goes to that
+service's `*-service.log`. State is kept in `self-heal.state.json`, written
+atomically; a corrupt file is logged and started fresh. `orch heal
+--dry-run` logs what it would do and runs nothing.
+
+`deploy/install.sh` runs `deploy/self-heal.sh install-autostart`. Where a
+systemd user session exists (`systemctl --user show-environment` works), it
+installs and enables
+[`factory-self-heal.timer`](deploy/factory-self-heal.timer) and its oneshot
+[service](deploy/factory-self-heal.service), which has `KillMode=process`
+so the services it restarts outlive the run. Otherwise it writes
+`~/.config/factory/self-heal-autostart`, so `profile.sh` starts the loop
+(`self-heal.sh ensure`, every `ORCH_HEAL_SECONDS`, default 120), and adds an
+`@reboot` line and a 5-minute `ensure` watchdog tagged `# factory-self-heal`.
+`self-heal.sh` also has `start`, `stop` (held by `self-heal.stopped`),
+`restart`, `status`, `ensure` (silent while running) and
+`remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
+pass exit at once.
 
 ## Dashboard
 
@@ -1536,6 +1667,50 @@ on that node), `DASHBOARD_DIR` and `DASHBOARD_PORT` in
 the unit to `~/.config/systemd/user/`, then runs `systemctl --user
 daemon-reload` and `enable --now`. WSL needs systemd enabled. Nothing in
 this repository installs, enables or starts it, or pushes anything.
+
+## Local config overlay
+
+Host-specific values live in gitignored `orch.local.yml` and
+`machines.local.yml` beside `orch.yml` and `machines.yml` (issue #107), so
+the checkout stays clean and `git pull` never conflicts. They sit beside
+the base files rather than in a home directory because the poller and each
+bot's waiter run as different users and must read the same config. An
+overlay is deep-merged into the parsed base file before validation:
+
+- mappings merge key by key;
+- `projects` merge by `repo`, and `devices` by `name`. A matching entry's
+  fields override the base entry's, and any other entry is appended;
+- every other list, and every scalar, replaces the base value.
+
+A malformed overlay is an error that names the overlay file.
+`ORCH_NO_LOCAL_OVERLAY=1` turns overlays off; the test suite sets it.
+`orch check-config` names the overlay in use and the keys it sets, never
+their values, for example `overlay orch.local.yml sets:
+linear_webhook.public_url, projects[aut0-code/aut0].linear_project_id`. A
+placeholder the overlay fills is no longer reported.
+[`config/orch.local.example.yml`](config/orch.local.example.yml) and
+[`config/machines.local.example.yml`](config/machines.local.example.yml)
+show the keys the box sets: the Linear project id, `trusted_linear_users`,
+`linear_webhook` `path` and `public_url`, a project's `ready_starts_review`,
+and a device's `slot_max` and `enabled`.
+
+Migration on the box (Factory, once, after merge):
+
+1. Move the uncommitted edits in `orch.yml`, `machines.yml` and
+   `deploy/install.sh` into `orch.local.yml` and `machines.local.yml`. The
+   `install.sh` edits are already in the repository: the profile guard,
+   the `mkdir` and the listener autostart.
+2. Run `orch check-config --allow-placeholders` and compare the keys it
+   reports with the old diff.
+3. Run `git checkout -- orch.yml machines.yml deploy/install.sh`, then
+   `git pull`.
+4. Compare the live `~/.local/share/factory/linear-webhook-service.sh`,
+   including its reverse-tunnel command, with
+   `deploy/linear-webhook-service.sh`. Its tunnel host and port are
+   `LINEAR_WEBHOOK_TUNNEL_HOST` and `LINEAR_WEBHOOK_PORT` (see "Listener
+   service without systemd").
+5. Re-run `deploy/install.sh --autostart`. It retires the legacy launchers
+   and installs self-heal.
 
 ## Check config
 
