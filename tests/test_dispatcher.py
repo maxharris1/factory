@@ -83,11 +83,18 @@ class FakeReviewActions:
         self.states: list[str] = []
         self.state_failures: set[tuple[str, str]] = set()
         self.events: list[str] = []
+        self.titles: list[tuple[str, str]] = []
+        self.title_error: Exception | None = None
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         self.states.append(state)
         if (ticket.repo, state) in self.state_failures:
             raise RuntimeError("state write failed")
+
+    def set_title(self, ticket: TrackedTicket, title: str) -> None:
+        if self.title_error is not None:
+            raise self.title_error
+        self.titles.append((ticket.pr_number or ticket.ticket_id, title))
 
     def stable_patch_id(self, ticket: TrackedTicket, head: str) -> str:
         del ticket
@@ -508,6 +515,7 @@ def test_t1_job_detail_contains_tracker_pr_and_review_context(
         "reviewer_harness": "codex",
         "risk": "high",
         "round": "1/3",
+        "source_issue": None,
         "verify_skill": "none",
     }
 

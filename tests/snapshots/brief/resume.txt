@@ -28,6 +28,7 @@ Build the ticket. Run as poteto-mode, with the playbook that fits it (feature; b
 2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
 3. Before `ready`, self-check: principle-prove-it-works, no-comments.
 4. Push, then post the ready handoff below with the head you pushed.
+The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
@@ -145,6 +146,7 @@ Build the ticket. Run as poteto-mode, with the playbook that fits it (feature; b
 2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
 3. Before `ready`, self-check: principle-prove-it-works, no-comments.
 4. Push, then post the ready handoff below with the head you pushed.
+The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
