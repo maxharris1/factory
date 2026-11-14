@@ -1,319 +1,243 @@
-# Plan for #122, a separate approval credential for Max-only actions
+# Plan for #156, feeder blocked-by and file-conflict gates
 
-Every bot posts to GitHub as `maxharris1`, which is Max's login. The factory tells comments apart only by the `from=` label inside each one. So any bot can post the two comments that only Max should give: a `go` that grants an extra round on a capped ticket, and a `kind=ok` that clears a ship hold. Max chose a GitHub App for the bots. Once Max installs the app and Factory turns the switch on, bot comments come from the app's bot login, and the factory counts those two approvals only from a login in a new `approver_logins` list (`maxharris1`). Until then the factory behaves exactly as it does today.
+Max wants to label a whole chain of tickets `factory:ready` at once and walk away. Today the feeder takes every labelled ticket as soon as there is room, so a chain like #138 to #152 has to be released one ticket at a time by a bot or by Max. After this PR the feeder reads `Blocked by`, `Touches:` and `Conflicts with` lines (and Linear blocked-by relations). Each poll it feeds a ticket only once every blocker is done and nothing in flight shares a path or a conflicts-with edge with it. A ticket that waits shows why in `orch status` and on the dashboard. A cycle or a blocker that was closed without finishing raises needs-attention instead of waiting quietly.
 
-This plan is for PR #126 (branch `factory/issue-122`). It changes code and config only. It does not create or install the app, and it never reads, writes or prints a key, token or anything under `~/.config/factory/`. Tests use fake app ids, fake installation ids and fake logins.
+The smallest change that meets it is one pure module that parses the lines and decides the gates, one batched and cached status read per poll, a new `waiting-blocked` feeder state with a reason column, and three new needs-attention reasons. Tickets with none of these lines go through the feeder exactly as today and cost no extra API call.
+
+This plan is for PR #157 (branch `factory/issue-156`). Risk is high. Codex Bot reviews it, up to three rounds. Grok Bot merges on `ship: handoff`.
 
 ## How to read this
 
-One box is one unit of work. Every box names the evidence that checks it. Check a box only when its evidence exists, a test run, a log line or a SHA.
-
-The build job runs under `pstack/skills/poteto-mode/playbooks/feature.md`. There is one PR. Codex Bot reviews it (risk high, up to three rounds). Grok Bot merges it on `ship: handoff`. The multi-phase skeleton's ten cloud lanes do not apply to a single backend PR with no UI. Its verification rule does, adapted in **Verify** below.
-
-Tests alone are not sufficient verification. The PR is verified only when its unit, revert and CI boxes are all checked.
+One box is one unit of work. Every box names the evidence that checks it. Check a box only when its evidence exists: a test run, a log line or a SHA. Tests alone are not sufficient verification. The PR is verified only when its unit, revert and CI boxes are all checked.
 
 ## The data shape
 
-One immutable value answers one question: may this login give a Max-only approval? It is built once from `orch.yml` and passed to the three places that need it: the dispatcher, the waiter and Grok's post helper. `trusted_logins` keeps its current meaning, which bots a login may speak for. Approval is a separate question with its own list.
+Everything the gates need is a fact about a ticket's body and about the status of the tickets it names. The pure module owns both shapes and every decision. `lib/feeder.py` only collects inputs, asks the module and writes rows.
 
 ```python
-# lib/orch_yml.py
+# lib/feeder_gates.py (new). Pure: no I/O, no SQLite, no clock.
+
+@dataclass(frozen=True, order=True)
+class Ref:
+    """A ticket or PR a gate line names, or a candidate itself.
+    GitHub: repo is owner/repo lowercased, key the number as text.
+    Linear: repo is the project's repo lowercased, key the identifier (ENG-12)."""
+    tracker: Literal["github", "linear"]
+    repo: str
+    key: str
+
+    def label(self, home: str) -> str: ...   # "#138", "owner/other#5", "ENG-12"
 
 @dataclass(frozen=True)
-class GitHubApp:
-    """The bots' GitHub App (#122). Numbers and a path only. orch never opens
-    private_key_file. enabled is the switch: false keeps today's single-login trust."""
-    app_id: int
-    installations: Mapping[str, int]      # account login -> installation id
-    private_key_file: Path                # absolute; never opened, read or printed
-    bot_login: str | None = None          # e.g. factory-bots[bot], known after the first app post
-    enabled: bool = False
+class GateLines:
+    blocked_by: frozenset[Ref] = frozenset()
+    touches: frozenset[str] = frozenset()       # normalized paths; "dir/" means the folder
+    conflicts_with: frozenset[Ref] = frozenset()
+
+def parse_gate_lines(body: str, repo: str) -> GateLines: ...
+
+class Progress(Enum):
+    DONE = "done"            # PR merged; issue closed-completed or a linked PR merged; Linear completed
+    OPEN = "open"
+    UNFINISHED = "unfinished"  # PR closed unmerged; issue closed not planned or duplicate; Linear canceled
+    MISSING = "missing"      # no such issue or PR, or not readable
 
 @dataclass(frozen=True)
-class Approvals:
-    """Who may give a capped-ticket go or a hold ok."""
-    app_trust: bool                       # github_app present and enabled
-    logins: frozenset[str]                # casefolded; approver_logins when app_trust,
-                                          # else the trusted_logins keys (today's hold rule)
-    gh_config_dir: Path | None            # Max's approver gh profile; a path only
+class RefStatus:
+    progress: Progress
+    is_pull: bool
+    detail: str = ""         # "closed without merge", "closed as not planned"
 
-    def may_approve(self, login: str) -> bool: ...
-    @classmethod
-    def off(cls, trusted_github_logins: Iterable[str]) -> "Approvals": ...
+@dataclass(frozen=True)
+class Wait:
+    reason: str                    # "waiting on #138", "waiting on file lib/dashboard.py held by #151"
+    attention: str | None = None   # "blocker-cycle" | "blocker-closed" | "blocker-missing" | None
 
-OrchConfig.github_app: GitHubApp | None = None
-OrchConfig.approver_logins: frozenset[str] | None = None   # None when unset
-OrchConfig.approver_gh_config_dir: Path | None = None
+def blocker_waits(
+    gated: Mapping[Ref, GateLines],      # candidates not started yet
+    statuses: Mapping[Ref, RefStatus],   # every blocker named by them
+    unreadable: frozenset[Ref],          # blockers whose read failed this poll
+) -> dict[Ref, Wait]:
+    """Cycles first (Tarjan SCC over edges to blockers that are not DONE and are
+    themselves gated candidates; a self-reference is a cycle). Then UNFINISHED or
+    MISSING blockers, then OPEN or unreadable ones. Absent key: no blocker wait."""
 
-def approvals(config: OrchConfig) -> Approvals: ...
-def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]: ...
+@dataclass
+class Holds:
+    """Paths and conflicts-with edges held by tickets in flight. Starts from the
+    feeder's fed rows whose PR is still open, then grows as this poll selects."""
+    def collision(self, ref: Ref, lines: GateLines) -> Wait | None: ...
+    def take(self, holder: Ref, aliases: frozenset[Ref], lines: GateLines) -> None: ...
 ```
 
-```yaml
-# orch.yml, after Max installs the app (fake numbers)
-approver_logins:
-  - maxharris1
-approver_gh_config_dir: /home/grok/.config/factory/gh-approver   # absolute, outside every harness HOME
-github_app:
-  app_id: 123456
-  installations:
-    maxharris1: 1111111
-    aut0-code: 2222222
-  private_key_file: /home/box/.config/factory/github-app-bots.pem
-  bot_login: factory-bots[bot]
-  enabled: false        # Factory flips this in the rollout ticket, not here
-trusted_logins:
-  factory-bots[bot]: [grok-bot, claude-bot, codex-bot, cursor-bot]
-  maxharris1: [grok-bot]
+The client grows one read. Linear needs no new request.
+
+```python
+# lib/feeder.py
+class GitHubIntake(Protocol):
+    ...
+    def ref_statuses(self, refs: Collection[Ref]) -> Mapping[Ref, RefStatus]: ...
+
+@dataclass(frozen=True)
+class IntakeIssue:
+    ...
+    blocked_by: tuple[tuple[str, str], ...] = ()   # Linear relations: (identifier, state type)
 ```
 
-The switch has two states. Each Max-only check reads `approvals.app_trust` and nothing else.
+```python
+# lib/attention.py (new). The needs_attention table, shared by the dispatcher and the feeder.
+def ensure_table(connection) -> None: ...                 # the DDL moved from dispatcher.py
+def sync(connection, owner_reasons: frozenset[str], scope: frozenset[str],
+         flags: Mapping[tuple[str, str, str], str], now: float) -> None: ...
+```
 
-| Check | Switch off (today, the default) | Switch on |
-| --- | --- | --- |
-| `go` on a capped ticket | Author trusted for `grok-bot` (`_trusted`), as today | Header `from=grok-bot role=orchestrator`, and author in `approver_logins`. Anyone else gets `go-not-from-approver` and one wake |
-| `go` on any other ticket | Author trusted for `grok-bot` | Same, unchanged |
-| Hold `ok` and the approver's label removal | Author is `hold.approver`, and `hold.approver` is a `trusted_logins` key | Author is `hold.approver`, and `hold.approver` is in `approver_logins` |
-| Harness environment | Unchanged | Never carries `GH_CONFIG_DIR` naming the approver profile. The waiter refuses to start when the profile sits inside the run's `HOME` |
-| Grok posting a capped `go` or an `ok` | `env -u GH_TOKEN gh`, as today | Only through the approver profile. With no profile configured, it refuses, and Max posts by hand |
+Feeder bookkeeping. `STATES` gains `waiting-blocked`. `feeder_items` gains `waiting_reason TEXT`, `touches TEXT` (JSON list), `conflicts TEXT` (JSON list of ref labels) and `released INTEGER NOT NULL DEFAULT 0`, added to existing databases by `PRAGMA table_info` plus `ALTER TABLE` (the `lib/device_pool.py` pattern). `feeder_counts` gains `waiting_blocked`.
 
-Linear authors (`linear:<id>`) are not GitHub logins, so the switch does not apply to them. A Linear ticket keeps today's rule in both states. Appendix A says why.
+### The parsing rules
+
+- A gate line is one whole line, outside fenced code, that starts with an optional list marker and optional `**`, then `Blocked by`, `Touches` or `Conflicts with` (any case), then an optional colon and closing `**` in either order. This matches the real bodies, for example `**Blocked by:** #137, PR #111, PR #116.` on #138 and `**Conflicts with:** #152` on #151. A line that starts with a backtick (this ticket's own examples) is not a gate line.
+- On a `Blocked by` or `Conflicts with` line the refs are `owner/repo#N`, `#N` (the ticket's own repo, `PR #N` and `open PR #N` included) and `https://github.com/owner/repo/issues/N` or `/pull/N`. Words between refs are ignored. Only the same line counts. Prose on the next line is never read, as the ticket asks.
+- On a `Touches:` line, paths split on commas and spaces. Backticks, a leading `./` and trailing punctuation are stripped. Two paths collide when equal, or when one ends in `/` and the other is inside it.
+- On a Linear ticket, `#N` resolves against the project's GitHub repo, and the relations come from Linear (below). A Linear identifier written in body text is not parsed. Linear's own relation is the way to say it.
+
+### How a blocker is resolved
+
+- GitHub. One GraphQL read per blocker repo per poll, with aliases (chunks of 50), each `issueOrPullRequest(number: N)`. A `PullRequest` is DONE only when `merged`. Closed unmerged is UNFINISHED. An `Issue` is DONE when closed with `stateReason` COMPLETED (or null, GitHub's old default), or when any `closedByPullRequestsReferences(includeClosedPrs: true)` PR is merged, or when the feeder's own row for that issue has a PR the same read shows merged. Closed as NOT_PLANNED or DUPLICATE is UNFINISHED. A null node is MISSING. GitHub's `__typename` decides PR or issue; the `PR` word on the line is only a hint.
+- The read goes through `GitHubIntakeClient._json` with a per-call `--cache 60s` (a `cache_ttl` keyword added to `GitHubReviewActions._call` and `_json`). The client's other reads stay uncached, so `find_pull` can never return a stale "no PR" and open a second one.
+- Linear. `LINEAR_INTAKE_QUERY` adds `inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } }`. A relation of type `blocks` names a blocker. Its state type `completed` is DONE, `canceled` is UNFINISHED, anything else OPEN. That rides the existing intake request on `_linear_request`, so it uses the poll's Linear budget and backoff and adds no request.
+- The feeder calls `ref_statuses` at most once per poll, with the deduplicated union of what the gates need. With no gate line on any candidate and no holder row, it makes no call at all.
+- A failed read fails closed. Every candidate that needed it waits with `waiting on #N (status unreadable)`, the poll counts one error, and no attention flag is raised for a transient failure.
+
+### One poll, in order
+
+1. `_candidates`, `_record_seen` (also stores `touches` and `conflicts`), `_mark_done`, `_room`, as today.
+2. Parse lines for every candidate. Only candidates not yet started (state `eligible`, `waiting-capacity` or `waiting-blocked`) are gated. A resumed feed (`feeding`, `error`) already passed its gates and is in flight.
+3. Build the holder set from feeder rows in `feeding`, `error`, `fed` or `done` with `released = 0` and at least one declared path or conflicts-with ref. Their PR refs go into the same status read. A PR shown merged or closed sets `released = 1` and stops holding. Released is sticky, so a fed ticket is read at most until its PR ends.
+4. `ref_statuses` once. `blocker_waits` once.
+5. The feed loop keeps today's order: resumed first, then urgent, bug, oldest, then the ticket key compared as a number when both are numbers (the ticket's "lower number" tie-break; the old string compare put `10` before `9`). For a gated candidate, a blocker wait or a `Holds.collision` sets `waiting-blocked` with its reason and `continue`s **before** room is read. So a waiting ticket never takes a harness slot. Otherwise the capacity branch runs unchanged. A candidate selected to feed is added to `Holds` before `_feed`, so a later ticket in the same poll collides with it. Because the loop is in priority order, the earlier ticket always wins a collision.
+6. `attention.sync` replaces the feeder's own flags (`blocker-cycle`, `blocker-closed`, `blocker-missing`) for the projects whose intake was read this poll. A flag clears by itself once the cause is gone, the ticket is fed, or it loses its signal. A project whose intake read failed keeps its flags, so they do not flap.
+
+`_record_seen` already forgets an unfed ticket that lost its signal. `waiting-blocked` joins `eligible` and `waiting-capacity` in that delete.
+
+### What people see
+
+- `orch status`: `Feeder — eligible 9, fed 2, waiting for capacity 1, waiting on blockers or files 6`, then one line per item, for example `owner/app#7 waiting on #6` and `owner/app#9 waiting on file lib/dashboard.py held by #8`. Cycles and closed blockers also appear under `Needs attention`, for example `owner/app#4 blocker-cycle: #4 -> #5 -> #4`.
+- Dashboard snapshot: `feeder` gains `waiting_blocked` and each item gains `reason` (cleaned, at most 200 characters). `ATTENTION_REASONS` gains the three reasons. The page's `renderFeeder` script and the server-rendered `_feeder` in `lib/dashboard_page.py` show the reason after the state.
 
 ## Criterion-to-work map
 
 | # | Acceptance criterion | Work that meets it | Tests that fail on revert |
 | --- | --- | --- | --- |
-| 1 | `orch.yml` and `config/orch.example.yml` accept a GitHub App id and installation id, plus a config path for the private key. No real key is committed, read or printed. | Unit 1 | `test_github_app_config_parses_with_fake_ids`, `test_github_app_config_rejects_bad_fields`, `test_check_config_never_opens_the_private_key_file`, `test_example_configs_carry_the_github_app_block` |
-| 2 | Until the app is installed and the switch is on, a capped-ticket `go` and a `kind=ok` from `maxharris1` still work as they do today. | Units 2 and 3, the switch-off branch of each | `test_switch_off_capped_go_from_the_single_login_still_resumes`, `test_switch_off_hold_ok_from_the_single_login_still_clears`. Both are parametrized over no `github_app` block and `enabled: false` |
-| 3a | Switch on, a capped-ticket `go` from the app bot login is refused with wake reason `go-not-from-approver`. | Unit 2 | `test_switch_on_capped_go_from_the_app_bot_is_refused` (one wake, no fix, `cap_extra` unchanged, state stays `capped`) |
-| 3b | Switch on, a capped-ticket `go` from `maxharris1` raises `cap_extra` by 1. | Unit 2 | `test_switch_on_capped_go_from_the_approver_raises_cap_extra` |
-| 3c | Switch on, a `kind=ok` from a non-approver, the app bot login included, leaves the hold in place. | Unit 3 | `test_switch_on_hold_ok_from_the_app_bot_keeps_the_hold`, `test_switch_on_hold_ok_from_a_non_approver_keeps_the_hold` |
-| 3d | Switch on, a `kind=ok` from `maxharris1` in `approver_logins` clears the hold, with today's head-pin rules. | Unit 3 | `test_switch_on_hold_ok_from_the_approver_clears_at_the_head`, `test_switch_on_hold_ok_at_an_old_head_does_not_clear` |
-| 4 | `check-config` fails when `hold.approver` is not in `approver_logins`. | Unit 4 | `test_check_config_fails_when_the_hold_approver_is_not_an_approver`, `test_check_config_passes_when_the_hold_approver_is_an_approver` |
-| 5 | No harness user's environment or home holds Max's approver profile once the switch is on. A test inspects the waiter's environment builder with fake values only. | Unit 5 | `test_waiter_env_drops_the_approver_gh_config_dir`, `test_waiter_refuses_when_the_approver_profile_is_in_the_run_home`, `test_waiter_env_unchanged_with_the_switch_off` |
-| 6 | Trust-map and decision notes are in `docs/decisions/122-approver-credential.md`. | Unit 7 | Reviewer reads the file. `test_example_configs_carry_the_github_app_block` keeps the example in step with the note |
-
-Scope item outside the AC list: "`lib/orchestrate.py` may still post `go`/`ok` under Max's login when Max has authorized it, and must not post those two kinds as the app bot." Unit 6 covers it with `test_approval_post_env_uses_only_the_approver_profile` and `test_approval_post_env_refuses_with_no_profile_when_the_switch_is_on`.
+| 1 | A `factory:ready` (or Linear intake-state) ticket whose body has `Blocked by #N` / `Blocked by owner/repo#N` / a PR URL is not fed until every blocker is merged (PR) or closed-completed / linked-PR-merged (issue). | Units 1, 2, 3 | `test_parse_blocked_by_forms`, `test_parse_real_chain_lines`, `test_pr_blocker_done_only_when_merged`, `test_issue_blocker_done_when_closed_completed`, `test_issue_blocker_done_when_a_linked_pr_merged`, `test_issue_blocker_done_when_its_feeder_pr_merged`, `test_ref_statuses_reads_issue_and_pr_kinds`, `test_a_blocked_ticket_is_not_fed_until_every_blocker_is_done` |
+| 2 | Linear-sourced tickets honor Linear blocked-by relations when the intake API returns them, and the same body lines on the description. | Units 1, 2, 3 | `test_linear_intake_reads_blocks_relations`, `test_linear_relation_blocker_waits_until_completed`, `test_linear_description_blocked_by_line_resolves_on_the_project_repo` |
+| 3 | Re-evaluation is every feeder poll: after a blocker merges, the dependent is fed on the next `feed_once()` with no relabel and no bot handoff. | Unit 3 | `test_dependent_is_fed_on_the_poll_after_its_blocker_merges` (integration, fake client, same style as `test_waiting_items_are_fed_once_a_slot_frees`) |
+| 4 | Optional `Touches:` and `Conflicts with #N` lines prevent two in-flight tickets from sharing a path or a conflicts-with edge. On collision, urgent then bug then oldest then lower number wins; the other waits with a reason. | Units 1, 4 | `test_parse_touches_and_conflicts`, `test_paths_collide_on_equal_or_folder`, `test_collision_keeps_urgent_then_bug_then_oldest_then_lower_number`, `test_a_fed_ticket_with_an_open_pr_holds_its_paths`, `test_a_holder_releases_when_its_pr_merges_or_closes`, `test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number`, `test_two_tickets_sharing_a_path_are_not_selected_in_one_poll` |
+| 5 | Waiting reasons (`waiting on #N`, `waiting on file X held by #M`) appear in orch status and the dashboard feeder snapshot. | Unit 5 | `test_orch_status_shows_waiting_reasons`, `test_dashboard_snapshot_shows_waiting_reasons`, `test_dashboard_page_renders_the_feeder_reason` |
+| 6 | Cycles and blockers closed-not-merged are raised as needs-Max attention, not left waiting with no alert. | Units 2, 3, 5 | `test_cycle_detection_two_and_three_long_and_self`, `test_a_cycle_flags_every_participant_and_feeds_none`, `test_a_blocker_closed_unmerged_flags_needs_attention`, `test_a_blocker_closed_not_planned_flags_needs_attention`, `test_attention_clears_when_the_cause_is_gone`, `test_status_and_dashboard_list_the_blocker_flags` |
+| 7 | Waiting on a blocker or a file conflict does not consume a harness slot. | Unit 3, 4 | `test_a_blocked_ticket_takes_no_room` (box of 1 slot: a blocked older ticket and an unblocked newer one; the newer is fed), `test_a_conflicting_ticket_takes_no_room` |
+| 8 | Unit tests cover parsing, gate decisions, collision tie-breaking, and cycle detection; an integration test feeds the dependent on the cycle after its blocker merges. | Units 1 to 4 | Everything in rows 1, 3, 4 and 6 |
+| 9 | Blocker status reads reuse the existing GitHub `gh api` cache seam and the Linear poll budget; no uncached N+1 per poll. | Units 2, 3 | `test_ref_statuses_is_one_cached_graphql_read_per_repo` (fake runner asserts one `graphql` call per repo, `--cache 60s` on it, and none on `find_pull`), `test_feeder_reads_statuses_once_per_poll_for_a_long_chain` (15-ticket chain, one `ref_statuses` call per poll), `test_linear_relations_add_no_linear_request` |
+| 10 | Existing intake trust, capacity (`waiting-capacity`), feed-once idempotency, and urgent/bug/oldest ordering are unchanged for tickets with no blocker or conflict lines. | Unit 3 (gates are a no-op without lines) | Every existing test in `tests/test_feeder.py` passes untouched, plus `test_no_gate_lines_means_no_status_read` |
 
 Every criterion is mapped.
 
 ## Work units
 
-Each unit is one commit that ends green under `env -u ORCH_DB pytest`. Test first in every unit. Every new test goes in `tests/test_approver_credential.py`. Nothing is appended to `tests/test_dispatcher.py` or `tests/test_brief.py`.
+Each unit is one commit that ends green under `env -u ORCH_DB pytest`. Test first in every unit. New tests go in `tests/test_feeder_gates.py`, which imports the fakes from `tests/test_feeder.py`. Live-client tests go in `tests/test_intake_live.py`. Status and dashboard tests go next to the existing feeder ones.
 
-### Unit 1. Parse the app, approver logins and approver profile (AC 1)
+### Unit 1. Parse gate lines (AC 1, 2, 4, 8)
 
-**Files.**
+- [ ] New `lib/feeder_gates.py` with `Ref`, `GateLines` and `parse_gate_lines` per the parsing rules.
+- [ ] `test_parse_blocked_by_forms`: `Blocked by #4`, `Blocked by: #4`, `**Blocked by:** #4 and #5`, `Blocked by #4, PR #9, open PR #10`, `Blocked by other/repo#3`, issue and pull URLs, mixed case, a list marker.
+- [ ] `test_parse_real_chain_lines`: the lines of #138, #141, #145, #150 and #151 as they read on 2026-11-13, pasted as fixtures. #150 gives `{#145, #113}`, and its trailing prose names no path.
+- [ ] `test_parse_ignores_prose_backticks_and_fences`: `Open PRs #111 and #116 ...` on the next line, this ticket's own backticked examples, and a fenced block are not gate lines.
+- [ ] `test_parse_touches_and_conflicts` and `test_paths_collide_on_equal_or_folder`.
 
-- [ ] Edit `lib/orch_yml.py`.
-- [ ] Edit `config/orch.example.yml` and `orch.yml`.
-- [ ] New `tests/test_approver_credential.py`.
+### Unit 2. Resolve statuses, cheaply (AC 1, 2, 6, 9)
 
-**Build.**
+- [ ] `lib/github_actions.py`: a keyword-only `cache_ttl` on `_call` and `_json` that overrides `self.cache_ttl` for one call. No other caller changes.
+- [ ] `lib/intake_live.py`: `GitHubIntakeClient.ref_statuses`, one aliased GraphQL read per repo in chunks of 50, with `cache_ttl="60s"`. `LINEAR_INTAKE_QUERY` gains `inverseRelations`, and `linear_intake` fills `IntakeIssue.blocked_by`.
+- [ ] `lib/feeder_gates.py`: `Progress`, `RefStatus`, and `linear_status(state_type)`.
+- [ ] Tests: `test_ref_statuses_reads_issue_and_pr_kinds` (merged PR, closed unmerged PR, open PR, issue closed completed, closed not planned, closed duplicate, null reason, linked PR merged, null node), `test_ref_statuses_is_one_cached_graphql_read_per_repo`, `test_linear_intake_reads_blocks_relations` (only `blocks` relations, inverse direction), `test_linear_relations_add_no_linear_request`.
 
-- [ ] Add `github_app`, `approver_logins` and `approver_gh_config_dir` to `_TOP_KEYS`. Add `GitHubApp`, `Approvals`, `approvals(config)` and the three new `OrchConfig` fields from the data shape.
-- [ ] `_github_app(data, findings)` checks the section is a mapping with no unknown keys. `app_id` is a positive int. `installations` is a non-empty mapping from a GitHub login to a positive int. `private_key_file` is an absolute path string. `bot_login` is `<name>[bot]`. `enabled` is a bool and defaults to false. `private_key_file` is stored as a `Path` and never opened, stat-ed or echoed in a finding.
-- [ ] `_approver_logins` checks a non-empty list of GitHub logins (`_LOGIN`). A `[bot]` login is refused, because an app can never approve.
-- [ ] `approver_gh_config_dir` must be an absolute path. No `~`, because `~` would expand to whichever user reads it.
-- [ ] With `enabled: true`, `bot_login` and `approver_logins` are both required, `bot_login` must not be in `approver_logins`, and `bot_login` must be a `trusted_logins` key, so the bots keep working after the flip. Each broken rule is its own error.
-- [ ] `config/orch.example.yml` gets a commented `approver_logins` and `github_app` block with fake numbers and `enabled: false`, in the style of its `dashboard` and `job_states` blocks. `orch.yml` gets a live `approver_logins: [maxharris1]` and the same commented `github_app` block. Max fills in the real numbers later. No path in either file points at a real key.
+### Unit 3. The blocked-by gate in the feed loop (AC 1, 2, 3, 6, 7, 9, 10)
 
-**You see.**
+- [ ] `lib/feeder_gates.py`: `Wait` and `blocker_waits`, with Tarjan SCC for cycles. A cycle reason lists the loop in ticket order.
+- [ ] New `lib/attention.py`: `ensure_table` (the DDL moved out of `lib/dispatcher.py`, which now calls it) and `sync`.
+- [ ] `lib/feeder.py`: the new state, columns and migration. `feed_once` per "One poll, in order". `_set_state` writes `waiting_reason` and clears it on any other state. `_Candidate.order()` compares numeric keys as numbers.
+- [ ] `FakeGitHub` gains `statuses` and `ref_statuses`, counting calls.
+- [ ] Tests: `test_pr_blocker_done_only_when_merged`, `test_issue_blocker_done_when_closed_completed`, `test_issue_blocker_done_when_a_linked_pr_merged`, `test_issue_blocker_done_when_its_feeder_pr_merged`, `test_a_blocked_ticket_is_not_fed_until_every_blocker_is_done`, `test_dependent_is_fed_on_the_poll_after_its_blocker_merges`, `test_a_blocked_ticket_takes_no_room`, `test_cycle_detection_two_and_three_long_and_self`, `test_a_cycle_flags_every_participant_and_feeds_none`, `test_a_blocker_closed_unmerged_flags_needs_attention`, `test_a_blocker_closed_not_planned_flags_needs_attention`, `test_attention_clears_when_the_cause_is_gone`, `test_an_unreadable_status_fails_closed_without_a_flag`, `test_linear_relation_blocker_waits_until_completed`, `test_linear_description_blocked_by_line_resolves_on_the_project_repo`, `test_feeder_reads_statuses_once_per_poll_for_a_long_chain`, `test_no_gate_lines_means_no_status_read`, `test_a_waiting_blocked_ticket_that_loses_its_label_is_forgotten`, `test_existing_database_gains_the_new_columns`.
 
-- [ ] `orch check-config --orch config/orch.example.yml` prints `ok`. A copy of the example with the block uncommented also prints `ok`, and `approvals(config)` returns `app_trust=False`.
+### Unit 4. The file-conflict gate (AC 4, 7)
 
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k "github_app or example or private_key"`.
+- [ ] `lib/feeder_gates.py`: `Holds`. A holder is known by its issue ref and its PR ref, so `Conflicts with #151` and `Conflicts with #<its PR>` both match. The edge counts from either side. A `Conflicts with` ref that is not a feeder ticket but resolves to an open PR also holds.
+- [ ] `lib/feeder.py`: holders from fed rows, sticky `released`, `Holds.take` before `_feed`.
+- [ ] Tests: `test_collision_keeps_urgent_then_bug_then_oldest_then_lower_number`, `test_a_fed_ticket_with_an_open_pr_holds_its_paths`, `test_a_holder_releases_when_its_pr_merges_or_closes`, `test_conflicts_with_is_symmetric_and_matches_issue_or_pr_number`, `test_two_tickets_sharing_a_path_are_not_selected_in_one_poll`, `test_a_conflicting_ticket_takes_no_room`.
 
-- [ ] `test_github_app_config_parses_with_fake_ids`.
-- [ ] `test_github_app_config_rejects_bad_fields` covers each error above, including `enabled: true` without `bot_login`, an app login inside `approver_logins`, and a relative key path.
-- [ ] `test_check_config_never_opens_the_private_key_file` points `private_key_file` at a `tmp_path` file holding a fake sentinel. It runs `_check_config` in-process with `builtins.open`, `io.open` and `os.open` wrapped to record paths. It asserts the key path was never opened and the sentinel is in neither stdout nor stderr.
-- [ ] `test_example_configs_carry_the_github_app_block` uncomments the example block and parses it.
+### Unit 5. Visibility (AC 5, 6)
 
-### Unit 2. Only an approver's `go` lifts a cap once the switch is on (AC 2, 3a, 3b)
+- [ ] `lib/feeder.py`: `feeder_items` returns `waiting_reason`; `feeder_counts` returns `waiting_blocked`.
+- [ ] `lib/status.py`: `FeederState` gains `waiting_blocked`, and `items` becomes a tuple of a small frozen `FeederItem(repo, issue, state, pr, reason)`. `render` prints the count and the reason.
+- [ ] `lib/dashboard.py`: snapshot count and item `reason`, `ATTENTION_REASONS` extended. `lib/dashboard_page.py`: `FEEDER_STATE`, `renderFeeder` and `_feeder` show the reason.
+- [ ] Tests: `test_orch_status_shows_waiting_reasons`, `test_dashboard_snapshot_shows_waiting_reasons`, `test_dashboard_page_renders_the_feeder_reason`, `test_status_and_dashboard_list_the_blocker_flags`. The existing `test_feeder_counts_eligible_fed_and_waiting` and `test_status_and_dashboard_show_an_empty_latest_poll` assert exact dicts, so they gain `waiting_blocked: 0`. That is the only edit to an existing test.
 
-**Files.**
+### Unit 6. Docs
 
-- [ ] Edit `lib/dispatcher.py`: `_t1`'s author check, `_resume_after_cap`, a `Dispatcher(approvals=...)` keyword, and the new reason in `GROK_WAKE_REASONS`.
-- [ ] Edit `lib/queue.py`, one `ACTIONS` entry.
-- [ ] Edit `lib/cli.py` `_runtime`, which passes `approvals(config)`.
-- [ ] Edit `tests/test_approver_credential.py`.
-
-**Build.**
-
-- [ ] `Dispatcher.__init__` takes `approvals: Approvals | None = None`. `None` means `Approvals.off(<github trusted_logins keys>)`, so every existing caller and test keeps today's behavior.
-- [ ] `_t1` keeps its header check (`from=grok-bot role=orchestrator`). The author check becomes "trusted for `grok-bot`, or the switch is on and the author may approve". It returns `rejected-go-author` otherwise, as today. After `_resume_after_cap` returns `None` (the ticket is not capped), a go whose author is not trusted for `grok-bot` is still `rejected-go-author`. An approver who is not a trusted login cannot start ordinary work. Nothing else in `_t1` changes.
-- [ ] In `_resume_after_cap`, after it reads `workflow_state = 'capped'` and before it writes anything, it checks the switch. With the switch on and an author who may not approve, it commits nothing, wakes Grok with reason `go-not-from-approver` through `_wake_comment_problem` (once per comment), and returns `(True, "go-not-from-approver")`. With the switch off, it takes today's path. A Linear author always takes today's path.
-- [ ] Add `go-not-from-approver` to `GROK_WAKE_REASONS` and `lib/queue.py` `ACTIONS`. `wake_grok_once` keys it on the comment, as it does `rejected`.
-
-**You see.**
-
-- [ ] With the switch on, a capped ticket and an app-bot go leave `ticket_state` at `capped` with `cap_extra=0`. `jobs` has one `grok` row, action `go-not-from-approver`. The same go from `maxharris1` gives `cap_extra=1`, `workflow_state='fixing'` and one fix job.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k "capped_go"`.
-
-- [ ] `test_switch_off_capped_go_from_the_single_login_still_resumes`, parametrized over no `github_app` block and `enabled: false`.
-- [ ] `test_switch_on_capped_go_from_the_app_bot_is_refused`.
-- [ ] `test_switch_on_capped_go_from_the_approver_raises_cap_extra`.
-- [ ] `test_switch_on_go_from_an_approver_on_an_uncapped_ticket_needs_grok_trust` checks that an approver with no `trusted_logins` entry gets `rejected-go-author` on a ticket that is not capped.
-- [ ] The existing capped-go tests in `tests/test_dispatcher.py` pass unchanged.
-
-### Unit 3. Only an approver's `ok` clears a hold once the switch is on (AC 2, 3c, 3d)
-
-**Files.**
-
-- [ ] Edit `lib/hold.py`. Rename `decide(approver_trusted=)` to `approver_allowed=`, which has one caller, and update the module docstring.
-- [ ] Edit `lib/dispatcher.py`, `_hold_decision` and `_hold_ok_outcome` only.
-- [ ] Edit `tests/test_approver_credential.py`.
-
-**Build.**
-
-- [ ] Add `Dispatcher._may_approve(login)`. With the switch off it is today's `_trusted_login(login)`. With it on it is `approvals.may_approve(login)`. `_hold_decision` passes `approver_allowed=self._may_approve(hold.approver)`. `_hold_ok_outcome` uses the same predicate. The author must still equal `hold.approver`, and the `ok` must still name a 40-character head that covers the current head. `hold.py`'s head-pin logic does not change.
-- [ ] An app-bot login can never be an approver, because Unit 1 refuses it in `approver_logins`. A repo whose `factory.md` names the app as `hold.approver` therefore fails closed at runtime, and the hold stays.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py tests/test_ship_hold.py -k "hold"`. Reuse `tests/test_ship_hold.py`'s `setup`, `approve` and `ok` helpers by import.
-
-- [ ] `test_switch_off_hold_ok_from_the_single_login_still_clears`, parametrized as in Unit 2.
-- [ ] `test_switch_on_hold_ok_from_the_app_bot_keeps_the_hold`. The outcome is `rejected-hold-ok-author` and the ticket stays `awaiting-ok`.
-- [ ] `test_switch_on_hold_ok_from_a_non_approver_keeps_the_hold`.
-- [ ] `test_switch_on_hold_ok_from_the_approver_clears_at_the_head`. The PR merges with `--match-head-commit`.
-- [ ] `test_switch_on_hold_ok_at_an_old_head_does_not_clear`.
-- [ ] `tests/test_ship_hold.py` passes unchanged.
-
-### Unit 4. `check-config` ties `hold.approver` to the approvers (AC 4)
-
-**Files.**
-
-- [ ] Edit `lib/orch_yml.py` (`hold_approver_findings`).
-- [ ] Edit `lib/cli.py` `_check_config`, a cross-file pass after both files load.
-- [ ] Edit `tests/test_approver_credential.py`, with a `tmp_path` `factory.md` fixture that has a `hold:`.
-
-**Build.**
-
-- [ ] `hold_approver_findings(config, hold)` returns an error `hold.approver <login> is not in approver_logins` when `approver_logins` is set and does not hold the approver. When `approver_logins` is unset, the error names `trusted_logins`, today's runtime rule. A `factory.md` with no `hold` gives no finding.
-- [ ] `_check_config` runs it for every `factory.md` it loads and reports under that file's path. The example `factory.md` files have no `hold:`, so the CI steps do not change.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k check_config`.
-
-- [ ] `test_check_config_fails_when_the_hold_approver_is_not_an_approver` covers `approver: max` (the `factory_md` default) and `approver: factory-bots` against `approver_logins: [maxharris1]`. The exit status is 1.
-- [ ] `test_check_config_passes_when_the_hold_approver_is_an_approver`.
-
-### Unit 5. Harness runs never carry the approver profile (AC 5)
-
-**Files.**
-
-- [ ] Edit `lib/harness_env.py` (`harness_environ`).
-- [ ] Edit `lib/waiter.py`: a `Waiter(approvals=...)` keyword and `_spawn`'s env line.
-- [ ] Edit `lib/cli.py` `_wait_autostart`, which passes `approvals(config)` when `orch.yml` loaded.
-- [ ] Edit `tests/test_approver_credential.py`.
-
-**Build.**
-
-- [ ] `harness_environ(environ, approvals) -> dict[str, str]` is pure and compares paths only. It never opens or lists a directory. With the switch off, or with no `gh_config_dir`, it returns `environ` unchanged. With the switch on:
-  - it drops `GH_CONFIG_DIR` when that path equals the approver profile or lies inside it;
-  - it raises `ApproverProfileExposed` when the profile lies inside the run's `HOME`, because `gh` finds `$HOME/.config/gh` with no `GH_CONFIG_DIR` set, and anything under `HOME` belongs to the harness user.
-- [ ] `Waiter.__init__` calls it once and turns `ApproverProfileExposed` into a `WaiterError`. `orch wait --autostart` then exits 2 with that message and starts no harness. `_spawn` builds its env from `harness_environ(self.environ, self.approvals)`. With `approvals=None`, today's env passes through.
-- [ ] Remote runs pass only named variables through `lib/remote.py` (`remote.start_script`), never the box's `GH_CONFIG_DIR`, so they need no change. The decision note says so.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py -k waiter_env`. Every path is under `tmp_path`, and every login and id is fake.
-
-- [ ] `test_waiter_env_drops_the_approver_gh_config_dir` drives `Waiter._spawn` with a fake `spawn` and asserts the captured `env` has no `GH_CONFIG_DIR`, while other variables pass through.
-- [ ] `test_waiter_refuses_when_the_approver_profile_is_in_the_run_home` uses `HOME=<tmp>/claude-bot` and the profile at `<tmp>/claude-bot/.config/gh`. `Waiter(...)` raises `WaiterError`.
-- [ ] `test_waiter_env_unchanged_with_the_switch_off`.
-- [ ] `tests/test_waiter.py` passes unchanged.
-
-### Unit 6. Grok posts the two approvals only through Max's profile (scope item)
-
-**Files.**
-
-- [ ] Edit `lib/orchestrate.py`, a new `approval_post_env` next to `go_comment`.
-- [ ] Edit `grok/orchestrate-project/SKILL.md`, one sentence on posting a capped `go` or a hold `ok`, and one line on the `go-not-from-approver` wake.
-- [ ] Edit `tests/test_approver_credential.py`.
-
-**Build.**
-
-- [ ] `approval_post_env(approvals, environ) -> dict[str, str]` returns the environment for the `gh` call that posts a capped-ticket `go` or a hold `ok`. It always drops `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN`. With the switch off, that is the whole change, the same as today's `env -u GH_TOKEN gh`. With the switch on, it sets `GH_CONFIG_DIR` to `approvals.gh_config_dir`. When no profile is configured, it raises `OrchestrateError("post it from maxharris1 by hand")`. It never falls back to the bot's own `gh`, so those two kinds are never posted as the app.
-- [ ] The skill tells Grok to post those two kinds with this environment, still only with Max's own words for that ticket. It also says a `go-not-from-approver` wake means a capped go came from a login that cannot approve, and to tell Max once.
-
-**Verify, unit.** Run `env -u ORCH_DB pytest tests/test_approver_credential.py tests/test_orchestrate.py -k "approval_post or orchestrate"`.
-
-- [ ] `test_approval_post_env_uses_only_the_approver_profile` gives a fake env with `GH_TOKEN=fake-app-token`. The result has no token variable and `GH_CONFIG_DIR=<fake profile>`.
-- [ ] `test_approval_post_env_refuses_with_no_profile_when_the_switch_is_on`.
-- [ ] `test_approval_post_env_with_the_switch_off_only_drops_tokens`.
-
-### Unit 7. Decision note and SPEC rows (AC 6)
-
-**Files.**
-
-- [ ] New `docs/decisions/122-approver-credential.md`.
-- [ ] Edit `docs/SPEC.md`: the section 6 `hold.approver` row, a section 7 `orch.yml` field list entry, and the section 4.2 T1 row for the capped `go`. There is no decision-log row, per the ticket.
-
-**Build.**
-
-- [ ] The note carries Max's decision and its time (Nov 13, 2026, 2:26 to 2:52 PM ET), the trust map table from **The data shape**, the two switch states, and what Factory flips on rollout. Rollout means setting `enabled: true`, adding `trusted_logins[factory-bots[bot]]`, trimming `maxharris1` to `[grok-bot]`, and moving the bots' `gh` onto the app.
-- [ ] It also records what this ticket cannot check. The factory cannot tell which account a `gh` profile holds without reading its token, so moving the harness users' own `gh` login off `maxharris1` is Max's setup step. The code checks paths only.
-- [ ] It records the Linear gap (Appendix A) and the `hold.approver` default `max` (Appendix C).
-
-**Verify, unit.**
-
-- [ ] The note exists and names every row of the trust map. Codex reads it in review.
+- [ ] New `docs/decisions/156-feeder-gates.md` in the README's template, one entry per call in Appendix A.
+- [ ] `docs/SPEC.md` section 7, the `intake` paragraph: three sentences on the gate lines, `waiting-blocked` and the three attention reasons. The frozen decision log is not touched.
 
 ## Verify
 
-Tests alone are not sufficient verification. The PR is verified only when its unit, revert and CI boxes are all checked.
-
-- [ ] Unit. `env -u ORCH_DB pytest` passes at the PR head, run in the foreground.
-- [ ] Revert. For each test in the map, revert its unit's production change on a scratch branch and record that the test fails. Note the result per criterion in the `ready` comment.
+- [ ] Unit. `env -u ORCH_DB pytest` passes at the PR head, in the foreground.
+- [ ] Revert. For each row of the map, revert its unit's production change on a scratch branch and record that its tests fail. Results go in the `ready` comment.
+- [ ] Real bodies. A throwaway script runs `parse_gate_lines` on the live bodies of #138 to #152 (read with `env -u GH_TOKEN gh`) and prints each ticket's blockers, touches and conflicts. The output goes in the `ready` comment, so Max can compare it with the intended chain in the ticket.
+- [ ] Budget. A fake-runner run over a 15-ticket chain logs the `gh` argv per poll. It shows one `graphql` read per repo with `--cache 60s` and no per-ticket reads.
 - [ ] Config. `python bin/orch check-config` passes on all four CI invocations in `.github/workflows/ci.yml`.
-- [ ] Secrets. `git grep -nE "BEGIN (RSA )?PRIVATE KEY|ghs_|ghp_|github_pat_"` at the head finds nothing. `git diff origin/main --stat` lists no `.pem` and nothing under `~/.config/factory`.
-- [ ] CI. `.github/workflows/ci.yml` is green at the head, covering pytest, the `check-config` steps and `statechart`. No workflow state changes, so the model needs no edit.
-- [ ] Perf. None. The change adds one set lookup per `go` on a capped ticket and per hold check.
+- [ ] CI. `.github/workflows/ci.yml` is green at the head (pytest, `check-config`, `statechart`). The feeder is not in the TLA+ model, so the model needs no edit.
 - [ ] Review gate. Codex Bot's round-1 review of the `ready` head.
 
 ## Close
 
 - [ ] Every box above is checked with its evidence.
-- [ ] PR title `#122: Separate approval credential: GitHub App for the bots`.
-- [ ] Post the `ready` handoff with the pushed head, the per-criterion test list and the revert results.
+- [ ] PR title `#156: Feeder blocked-by and file-conflict gates`.
+- [ ] Post the `ready` handoff naming the pushed head, with the per-criterion test list, the revert results and the real-bodies output.
 
 ## Appendix A. Calls made without asking Max
 
 No product question blocks this. Each call below is a default, with what Max could ask for instead.
 
-- **Linear tickets keep today's rule.** The ticket is about GitHub logins. A Linear comment's author is a Linear user id, and the app does not change who posts on Linear. So the capped `go` and the hold `ok` on a Linear ticket (Aut0) stay trusted-for-`grok-bot` and trusted-login, as today. The F-02 gap stays open on Linear until bots get their own Linear identity. Max could instead ask for an `approver_linear_users` list now. That needs a second Linear identity for the bots, which does not exist yet.
-- **Approvers live in `orch.yml`, not `factory.md`.** `factory.md` sits in the repo the bots push to, so a bot could edit its own approver list. `orch.yml` lives on the box.
-- **Installations are a mapping from account to id**, because Max installs the app twice (`maxharris1` and `aut0-code`).
-- **A wake reason of its own.** The AC names `go-not-from-approver` as the wake reason, so it is a new reason rather than `rejected` with a detail. That costs one entry each in `GROK_WAKE_REASONS` and `ACTIONS`.
-- **The waiter refuses rather than strips** when the profile sits under `HOME`. A file cannot be stripped from an environment, and failing closed matches the hold's own rule.
+- **One `waiting-blocked` state for blockers and file conflicts.** The reason text tells them apart. Max could ask for a separate `waiting-conflict` count.
+- **Three attention reasons.** `blocker-cycle`, `blocker-closed` (closed without finishing) and `blocker-missing` (no such issue or PR, or not readable as one). The ticket names the first two. A typo like `Blocked by #9999` would otherwise wait forever with no alert.
+- **A failed status read fails closed and raises no flag.** The ticket waits one poll. A flag on every GitHub blip would train Max to ignore the list.
+- **Only the `Blocked by` line itself.** Prose after it is never read, as the ticket asks. So #138 and #145 now wait on their PRs only because their bodies were since edited to name them on the line.
+- **A Linear identifier in body text is not parsed.** Linear's own blocks relation covers Linear-to-Linear. `#N` on a Linear description means the project's GitHub repo. Max could ask for `Blocked by ENG-12` text, which costs one extra Linear read per poll when used.
+- **A closed-unmerged holder releases its paths, and reopening it does not re-take them.** `released` is sticky, so a long-fed ticket is not read forever.
+- **Folder paths.** `Touches: lib/` collides with `lib/feeder.py`. Plain paths must be equal.
+- **An issue closed with no reason counts as completed.** That is GitHub's old default for a plain close.
+- **Only tickets not yet started are gated.** A feed that is already `feeding` or `error` resumes even if its body later gains a blocker line. It is already in flight and holds its PR.
 
 ## Appendix B. Designs compared (architect scaffold)
 
-- **A, chosen.** One `Approvals` value from `orch.yml`, passed to the dispatcher, the waiter and Grok's post helper. Identity (`trusted_logins`) and capability (`approver_logins`) stay separate lists. The switch is one field. Each of the four checks asks one predicate.
-- **B, rejected.** Add a pseudo-bot `approver` to `trusted_logins` (`maxharris1: [grok-bot, approver]`) and check `_trusted(..., "approver")`. That mixes who a login speaks for with what it may approve. A copied `trusted_logins` line could grant approval by accident. It also has no place for the switch or the profile path.
-- **C, rejected.** Per-repo approvers in `factory.md`. The bots can edit it (see Appendix A).
+- **A, chosen.** A pure `lib/feeder_gates.py` that takes parsed lines and resolved statuses and returns per-ticket waits, plus a `Holds` value that grows during the existing feed loop. The feeder makes one batched read per poll. Every rule is unit-testable with no database, and the loop keeps one ordering, so "earlier ticket wins" is true by construction.
+- **B, rejected.** Gate inside `_candidates`, dropping blocked tickets before the loop. It is simpler, but a dropped ticket has no row, so no reason reaches `orch status`, and `_record_seen` would forget it every poll. It also cannot see tickets selected earlier in the same poll for the conflict gate.
+- **C, rejected.** Persist a blocker graph table and resolve statuses from webhook events. It would save reads, but this repo has no GitHub webhook, and a second source of truth for issue state goes stale. The batched cached read is one call per repo per poll.
 
-The arena runners were not run for this plan. The design space is narrow and fixed by the ticket. Codex should press on A's switch-on `_t1` gate in review.
+The arena runners were not run for this plan. The ticket fixes the hook points and the design space is narrow. Codex should press on the holder release rule and on the GraphQL linked-PR check in review.
 
 ## Appendix C. Risks and lane notes
 
-- **Files beyond the ticket's list.** Each is the smallest hunk that meets an AC:
-  - `lib/cli.py`: wiring in `_runtime` and `_wait_autostart`, and the cross-file pass in `_check_config` (AC 4).
-  - `lib/waiter.py` and `lib/harness_env.py`: the env builder the AC names (AC 5).
-  - `lib/queue.py` and `GROK_WAKE_REASONS`: the AC's wake reason (AC 3a).
-  - `lib/dispatcher.py`: the `_t1` author check (the ticket allows it), `_hold_decision`, `_hold_ok_outcome` and the constructor keyword (AC 3c, 3d).
-  - `orch.yml`: the ticket asks for it.
-  - `grok/orchestrate-project/SKILL.md`: one sentence.
-  - `docs/SPEC.md`: three table rows, no decision log.
-- **#111 is open** and touches `lib/orch_yml.py`, `lib/dispatcher.py`, `lib/cli.py`, `orch.yml` and `config/orch.example.yml`. If it lands first, bring `main` in by a merge commit before `ready`.
-- **`hold.approver` defaults to `max`** in `lib/factory_md.py`. That is not a login in `trusted_logins`, so a hold with the default never clears today. This PR leaves the default alone, since that file is outside the lane. `check-config` now reports it. Changing the default to `maxharris1` is a one-line follow-up for Factory to file.
-- **`orch job run` started by hand**, outside a waiter, inherits that shell's environment (`lib/cli.py` copies `os.environ`). The guard covers every run the factory starts. A person running a job by hand owns their own shell.
-- **A waiter whose `orch.yml` fails to load** runs with `approvals=None` (switch off). The poller fails on the same file, so no job is queued from it.
-- **Switch on with the app not yet trusted.** Unit 1 refuses `enabled: true` unless `bot_login` is a `trusted_logins` key, so the flip cannot lock the bots out.
+- **Files beyond the ticket's list.** `lib/github_actions.py` (the per-call `cache_ttl`), `lib/attention.py` and a 12-line DDL move in `lib/dispatcher.py`, `lib/dashboard_page.py` (the reason on the page), `docs/SPEC.md` and `docs/decisions/`.
+- **Open PRs on the same files.** #116 changes two lines of `lib/feeder.py`. #111, #113, #114, #129, #131 and #135 touch `lib/dispatcher.py`, `lib/status.py`, `lib/dashboard.py`, `lib/queue.py` or `lib/github_actions.py`. If any lands first, bring `main` in by a merge commit before `ready`. The `dispatcher.py` hunk is kept to the DDL block to keep that merge small.
+- **GraphQL cost.** GitHub prices a GraphQL request by the connection nodes it asks for, divided by 100, with a minimum of 1 (GitHub's rate-limit docs; not measured here). A 50-ref chunk with `closedByPullRequestsReferences(first: 10)` makes about 51 connection requests, so about 1 point, against 5,000 an hour. The Verify budget box records the real `rateLimit { cost }` once on the live repo.
+- **Linear complexity.** `inverseRelations(first: 10)` raises the intake query's real complexity. The poller charges every non-search request a flat `LINEAR_ISSUE_COMPLEXITY`, so its budget does not see the increase. Ten relations per issue keeps it small. Max could ask for a measured complexity charge in a follow-up.
+- **`gh --cache` and the poll interval.** At a 30-second poll, a blocker merge is seen at most 60 seconds plus one poll late. That meets "the next `feed_once()`" in the integration test, which uses the fake client.
 
 ## Appendix D. Reading list
 
-- `lib/dispatcher.py`: `_t1`, `_resume_after_cap`, `_hold_decision`, `_hold_ok_outcome`, `_trusted_login`, `_wake_comment_problem`, `wake_grok_once`, `GROK_WAKE_REASONS`.
-- `lib/hold.py` `decide` and `_approver_ok`. `lib/factory_md.py` `_hold`.
-- `lib/orch_yml.py` `_validate`, `_trusted_logins` and `_linear_webhook` (the `secret_file` is never read, and that is the pattern to copy).
-- `lib/waiter.py` `Waiter.__init__` and `_spawn`. `lib/harness_env.py`. `lib/cli.py` `_check_config`, `_runtime` and `_wait_autostart`.
-- `lib/orchestrate.py` `go_comment`. `grok/orchestrate-project/SKILL.md` on the `awaiting-ok` wake.
-- `docs/SPEC.md` sections 4.2 (T1, T4H), 6 (`hold`) and 7.
+- `lib/feeder.py`: `feed_once`, `_candidates`, `_room`, `_record_seen`, `_set_state`, `feeder_counts`, `feeder_items`, `_Candidate.order`.
+- `lib/intake_live.py`: `GitHubIntakeClient`, `LINEAR_INTAKE_QUERY`, `LinearIntakeClient.linear_intake`.
+- `lib/github_actions.py`: `GitHubReviewActions._call`, `_json`, `_is_read`.
+- `lib/poll_source.py`: `_linear_request`, `_linear_request_available`, `_gh_call`.
+- `lib/dispatcher.py`: `flag_attention`, `clear_attention`, the `needs_attention` DDL.
+- `lib/status.py`: `FeederState`, `SQLiteStatusReader.feeder` and `attention`, `render`. `lib/dashboard.py`: `collect_snapshot`, `_attention`, `ATTENTION_REASONS`. `lib/dashboard_page.py`: `renderFeeder`, `_feeder`.
+- `tests/test_feeder.py`: `FakeGitHub`, `make_feeder`, `issue`, and the five fixtures the ticket names.
