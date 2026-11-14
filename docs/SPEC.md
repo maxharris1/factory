@@ -425,15 +425,18 @@ projects:
 # Optional (issue #107): harnesses whose jobs are refused; health expects
 # no waiter for them.
 # refused_harnesses: [cursor]
-# Approval credential (issue #122, docs/decisions/122-approver-credential.md).
+# Approval credential (issue #122, docs/decisions/122-approver-credential.md)
+# and one GitHub App per bot (issue #170, docs/decisions/170-four-github-apps.md).
 # approver_logins: [maxharris1]     # capped-ticket go and hold ok, once enabled
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver  # absolute, outside every harness HOME
 # github_app:
-#   app_id: 123456
-#   installations: {maxharris1: 1111111}
-#   private_key_file: /home/box/.config/factory/github-app-bots.pem  # never opened by orch
-#   bot_login: factory-bots[bot]    # must be a trusted_logins key when enabled
-#   enabled: false                  # the switch; false keeps the single-login trust
+#   enabled: false                  # the switch; false keeps today's trusted_logins trust
+#   apps:                           # keyed by bot: grok-bot (required when enabled), claude-bot, codex-bot, cursor-bot
+#     grok-bot:
+#       bot_login: factory-grok[bot]  # when enabled: a trusted_logins key for [grok-bot] alone
+#       app_id: 111111
+#       installations: {maxharris1: 1000001}  # when enabled: every project owner
+#       private_key_file: /home/box/.config/factory/apps/factory.pem  # never opened by orch
 ```
 
 Phase 1 polls from the box, using the existing `gh` login and the Linear key

@@ -77,7 +77,10 @@ _TOP_KEYS = {
     "approver_gh_config_dir",
     "github_app",
 }
-_GITHUB_APP_KEYS = {"app_id", "installations", "private_key_file", "bot_login", "enabled"}
+_GITHUB_APP_KEYS = {"enabled", "apps"}
+_APP_KEYS = {"bot_login", "app_id", "installations", "private_key_file"}
+_MOVED_APP_KEYS = ("bot_login", "app_id", "installations", "private_key_file")
+APP_BOTS = ("grok-bot", "claude-bot", "codex-bot", "cursor-bot")
 _USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
 _BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
 _JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
@@ -163,28 +166,45 @@ class LinearWebhookConfig:
 
 @dataclass(frozen=True)
 class GitHubApp:
-    """The bots' GitHub App (#122). private_key_file is a path orch never
-    opens. enabled is the switch: false keeps today's single-login trust."""
+    """One bot's GitHub App (#170). private_key_file is a path orch never
+    opens."""
 
+    bot: str
+    bot_login: str
     app_id: int
     installations: Mapping[str, int]
     private_key_file: Path
-    bot_login: str | None = None
+
+
+@dataclass(frozen=True)
+class GitHubApps:
+    """The four bots' Apps, keyed by the bot each speaks for (#170). enabled
+    is the switch: false keeps today's trusted_logins trust."""
+
+    apps: Mapping[str, GitHubApp]
     enabled: bool = False
 
 
 @dataclass(frozen=True)
 class Approvals:
-    """Who may give a capped-ticket go or a hold ok (#122). With app_trust
-    off, the dispatcher keeps today's trusted_logins rule. gh_config_dir is
-    Max's approver gh profile, a path only."""
+    """Who may give a capped-ticket go or a hold ok (#122), and which login
+    is which bot's App (#170). With app_trust off, the dispatcher keeps
+    today's trusted_logins rule. gh_config_dir is Max's approver gh profile,
+    a path only."""
 
     app_trust: bool = False
     logins: frozenset[str] = frozenset()
     gh_config_dir: Path | None = None
+    app_logins: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def may_approve(self, login: str) -> bool:
         return login.casefold() in self.logins
+
+    def app_bot(self, login: str) -> str | None:
+        """The bot whose App posts as login, when the switch is on."""
+        if not self.app_trust:
+            return None
+        return self.app_logins.get(login.casefold())
 
 
 @dataclass(frozen=True)
@@ -206,7 +226,7 @@ class OrchConfig:
     # Harnesses whose jobs the factory refuses (issue #107): health expects
     # no waiter for them.
     refused_harnesses: tuple[str, ...] = ()
-    github_app: GitHubApp | None = None
+    github_app: GitHubApps | None = None
     approver_logins: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
 
@@ -218,14 +238,16 @@ def approvals(config: OrchConfig) -> Approvals:
 
 
 def _approvals(
-    app: GitHubApp | None,
+    github_app: GitHubApps | None,
     approver_logins: frozenset[str] | None,
     gh_config_dir: Path | None,
 ) -> Approvals:
+    apps = github_app.apps.values() if github_app is not None else ()
     return Approvals(
-        app_trust=app is not None and app.enabled,
+        app_trust=github_app is not None and github_app.enabled,
         logins=frozenset(login.casefold() for login in approver_logins or ()),
         gh_config_dir=gh_config_dir,
+        app_logins=MappingProxyType({app.bot_login.casefold(): app.bot for app in apps}),
     )
 
 
@@ -345,7 +367,7 @@ def _validate(
     )
     github_app = _github_app(data, findings)
     if github_app is not None and github_app.enabled:
-        _app_switch(github_app, approver_logins, trusted_logins, findings)
+        _app_switch(github_app, approver_logins, trusted_logins, projects, findings)
     if (
         "linear_webhook" in data
         and projects is not None
@@ -833,7 +855,7 @@ def _absolute_path(
     return None
 
 
-def _github_app(data: dict, findings: list[Finding]) -> GitHubApp | None:
+def _github_app(data: dict, findings: list[Finding]) -> GitHubApps | None:
     if "github_app" not in data:
         return None
     value = data["github_app"]
@@ -841,65 +863,136 @@ def _github_app(data: dict, findings: list[Finding]) -> GitHubApp | None:
         findings.append(Finding("error", "github_app must be a mapping"))
         return None
     start = len(findings)
-    _unknown_keys(value, _GITHUB_APP_KEYS, "github_app", findings)
+    for key in _MOVED_APP_KEYS:
+        if key in value:
+            findings.append(
+                Finding("error", f"github_app.{key} moved to github_app.apps.<bot>.{key} (#170)")
+            )
+    _unknown_keys(
+        {key: item for key, item in value.items() if key not in _MOVED_APP_KEYS},
+        _GITHUB_APP_KEYS,
+        "github_app",
+        findings,
+    )
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        findings.append(Finding("error", "github_app.enabled must be true or false"))
+    entries = value.get("apps")
+    if not isinstance(entries, dict) or not entries:
+        findings.append(
+            Finding("error", f"github_app.apps must map bots ({', '.join(APP_BOTS)}) to their Apps")
+        )
+        return None
+    apps: dict[str, GitHubApp] = {}
+    for bot in sorted(entries, key=lambda item: str(item)):
+        if bot not in APP_BOTS:
+            findings.append(Finding("error", f"unknown field 'github_app.apps.{bot}'"))
+            continue
+        app = _one_app(bot, entries[bot], findings)
+        if app is not None:
+            apps[bot] = app
+    for field_name in ("bot_login", "app_id"):
+        seen: dict[object, str] = {}
+        for bot, app in apps.items():
+            key = getattr(app, field_name)
+            key = key.casefold() if isinstance(key, str) else key
+            if key in seen:
+                findings.append(
+                    Finding(
+                        "error",
+                        f"github_app.apps.{seen[key]} and github_app.apps.{bot} "
+                        f"share {field_name}; each bot needs its own App",
+                    )
+                )
+            seen.setdefault(key, bot)
+    if len(findings) > start:
+        return None
+    return GitHubApps(apps=MappingProxyType(apps), enabled=enabled)
+
+
+def _one_app(bot: str, value: object, findings: list[Finding]) -> GitHubApp | None:
+    where = f"github_app.apps.{bot}"
+    if not isinstance(value, dict):
+        findings.append(Finding("error", f"{where} must be a mapping"))
+        return None
+    start = len(findings)
+    _unknown_keys(value, _APP_KEYS, where, findings)
+    bot_login = value.get("bot_login")
+    if bot_login is None:
+        findings.append(Finding("error", f"{where}.bot_login is required"))
+    elif not isinstance(bot_login, str) or _BOT_LOGIN.fullmatch(bot_login) is None:
+        findings.append(Finding("error", f"{where}.bot_login must be an app login, <name>[bot]"))
     app_id = value.get("app_id")
     if not is_strict_int(app_id) or app_id < 1:
-        findings.append(Finding("error", "github_app.app_id must be a positive integer"))
+        findings.append(Finding("error", f"{where}.app_id must be a positive integer"))
     installations = value.get("installations")
-    if (
-        not isinstance(installations, dict)
-        or not installations
-        or not all(
-            isinstance(account, str)
-            and _USER_LOGIN.fullmatch(account)
-            and is_strict_int(number)
-            and number >= 1
-            for account, number in installations.items()
-        )
+    if installations is None or installations == {}:
+        findings.append(Finding("error", f"{where}.installations is required"))
+    elif not isinstance(installations, dict) or not all(
+        isinstance(account, str)
+        and _USER_LOGIN.fullmatch(account)
+        and is_strict_int(number)
+        and number >= 1
+        for account, number in installations.items()
     ):
         findings.append(
             Finding(
                 "error",
-                "github_app.installations must map an account login to a positive installation id",
+                f"{where}.installations must map an account login to a positive installation id",
             )
         )
     if "private_key_file" not in value:
-        findings.append(Finding("error", "github_app.private_key_file must be an absolute path"))
+        findings.append(Finding("error", f"{where}.private_key_file must be an absolute path"))
     private_key_file = _absolute_path(
-        value, "private_key_file", "github_app.private_key_file", findings
+        value, "private_key_file", f"{where}.private_key_file", findings
     )
-    bot_login = value.get("bot_login")
-    if bot_login is not None and (
-        not isinstance(bot_login, str) or _BOT_LOGIN.fullmatch(bot_login) is None
-    ):
-        findings.append(Finding("error", "github_app.bot_login must be an app login, <name>[bot]"))
-    enabled = value.get("enabled", False)
-    if not isinstance(enabled, bool):
-        findings.append(Finding("error", "github_app.enabled must be true or false"))
     if len(findings) > start:
         return None
     assert private_key_file is not None
     return GitHubApp(
+        bot=bot,
+        bot_login=bot_login,
         app_id=int(app_id),
         installations=MappingProxyType(dict(installations)),
         private_key_file=private_key_file,
-        bot_login=bot_login,
-        enabled=enabled,
     )
 
 
 def _app_switch(
-    app: GitHubApp,
+    github_app: GitHubApps,
     approver_logins: frozenset[str] | None,
     trusted_logins: Mapping[str, frozenset[str]],
+    projects: tuple[Project, ...] | None,
     findings: list[Finding],
 ) -> None:
-    """With the switch on, the bots must still be trusted as the app, and
-    someone must be able to approve."""
-    if app.bot_login is None:
-        findings.append(Finding("error", "github_app.enabled requires github_app.bot_login"))
-    elif app.bot_login.casefold() not in {login.casefold() for login in trusted_logins}:
-        findings.append(Finding("error", "github_app.bot_login must be a trusted_logins key"))
+    """With the switch on, Factory must have its App, each App's login must
+    speak for its own bot alone, each App must be installed for every
+    project owner, and someone must be able to approve."""
+    if "grok-bot" not in github_app.apps:
+        findings.append(Finding("error", "github_app.enabled requires github_app.apps.grok-bot"))
+    trusted = {login.casefold(): bots for login, bots in trusted_logins.items()}
+    owners = sorted(
+        {project.repo.split("/", 1)[0].casefold() for project in projects or ()}
+    )
+    for bot, app in github_app.apps.items():
+        where = f"github_app.apps.{bot}"
+        bots = trusted.get(app.bot_login.casefold())
+        if bots is None:
+            findings.append(Finding("error", f"{where}.bot_login must be a trusted_logins key"))
+        elif bots != frozenset({bot}):
+            findings.append(
+                Finding(
+                    "error",
+                    f"trusted_logins {app.bot_login} must be [{bot}] alone "
+                    f"while github_app.enabled is true",
+                )
+            )
+        installed = {account.casefold() for account in app.installations}
+        for owner in owners:
+            if owner not in installed:
+                findings.append(
+                    Finding("error", f"{where}.installations has no installation for {owner}")
+                )
     if approver_logins is None:
         findings.append(Finding("error", "github_app.enabled requires approver_logins"))
 
