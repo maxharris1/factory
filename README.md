@@ -47,6 +47,12 @@ still ship `enabled: false` until Max turns them on.
   label on a label-only hold. Grok Bot is woken once per held head. The OK
   carries to a moved head only on an equal patch-id, and `stable_patch_id` is
   not built (below), so today a moved head needs a new OK.
+- A repo may list shared docs in `factory.md` `shared_paths` (issue #261),
+  paths or globs such as `docs/SPEC.md` or `docs/decisions/` (a trailing `/`
+  is a directory). A `Touches:` path that matches never makes the feeder hold
+  a ticket (a `Conflicts with` edge still does), and an update from base that
+  keeps both sides of a conflict hunk in such a file, unchanged and one after
+  the other, still carries the approval. Code paths are never affected.
   Hooks never see `kind=go`, `kind=plan` or `kind=ready`.
 
 ## GitHub adapter

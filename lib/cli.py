@@ -838,12 +838,16 @@ def _runtime(
     return dispatcher, source
 
 
-def _classify_update(repo: str, base: str, approved: str, head: str) -> UpdateClass:
+def _classify_update(
+    repo: str, base: str, approved: str, head: str, shared_paths: tuple[str, ...] = ()
+) -> UpdateClass:
     """#130: the trivial-update check, on the waiter's bare clone of repo."""
     clone = worktrees.fetched_clone(
         worktrees.work_root(None), repo, (approved, head), worktrees.url_template(None)
     )
-    return classify_update(clone, approved, head, f"refs/remotes/origin/{base}")
+    return classify_update(
+        clone, approved, head, f"refs/remotes/origin/{base}", shared_paths
+    )
 
 
 def _feeder(
