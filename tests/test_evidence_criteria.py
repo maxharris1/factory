@@ -274,3 +274,35 @@ def test_longer_closing_fence_closes_the_example():
 def test_template_with_stray_fence_marker_is_not_the_section():
     body = "Template:\n```md\n~~~\n## Acceptance criteria\n- [ ] Example.\n```\n\n## Acceptance criteria\n- [ ] Real.\n"
     assert _bundle(issue_body=body).criteria == (Criterion("ac-1", "Real."),)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Acceptance criteria\n- [ ] Render this Markdown literally:\n```md\n- [ ] Example, not a requirement.\n1. Numbered example.\n* bullet example\n```\n- [ ] Pass the test.\n",
+        "Intro\n- [ ] Render this Markdown literally:\n~~~md\n- [ ] Example, not a requirement.\n~~~\n- [ ] Pass the test.\n",
+        "## Acceptance criteria\n- [ ] Render this Markdown literally:\n  ```md\n  - [ ] Example, not a requirement.\n  ```\n- [ ] Pass the test.\n",
+    ],
+)
+def test_list_items_inside_a_code_example_are_not_criteria(body):
+    bundle = _bundle(issue_body=body)
+    assert [(c.id, c.text) for c in bundle.criteria] == [
+        ("ac-1", "Render this Markdown literally:"),
+        ("ac-2", "Pass the test."),
+    ]
+    assert "Example, not a requirement." in bundle.text
+
+
+def test_list_items_inside_a_brief_ticket_code_example_are_not_criteria():
+    ticket = "## Acceptance criteria\n- [ ] Show:\n```\n- [ ] Example.\n```\n- [ ] Inside.\n"
+    brief_body = f"### Ticket\n````\n{ticket}````\n"
+    bundle = _bundle(comments=(_brief("factory-app[bot]", brief_body),))
+    assert [c.text for c in bundle.criteria] == ["Show:", "Inside."]
+
+
+def test_cut_count_ignores_items_inside_a_code_example():
+    example = "```md\n" + "\n".join(f"- [ ] Example {n}." for n in range(50)) + "\n```\n"
+    body = "## Acceptance criteria\n- [ ] Keep.\n" + "x" * 300 + "\n" + example + "- [ ] Dropped.\n"
+    bundle = _bundle(issue_body=body, limit=200)
+    assert [c.text for c in bundle.criteria] == ["Keep."]
+    assert "and 1 criteria" in bundle.cut

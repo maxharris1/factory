@@ -20,10 +20,10 @@ the text is the first such section, up to the next heading of the same or a
 higher level outside any code block. Code blocks follow CommonMark: they do
 not nest, and a fence closes only on the opening character, at least as long,
 with no info string. A code example inside the section stays in the text, and
-a heading inside a code example is ignored. Its list items are the criteria.
-Without one, the text is the whole source and only its checkbox items are
-criteria. Criteria are numbered `ac-1`, `ac-2`, ... in order, so the same
-text always gets the same ids.
+a heading or list item inside a code example is ignored. Its list items are
+the criteria. Without one, the text is the whole source and only its checkbox
+items outside code blocks are criteria. Criteria are numbered `ac-1`, `ac-2`,
+... in order, so the same text always gets the same ids.
 
 The text is capped at TEXT_LIMIT characters, the cap lib/brief.py holds.
 A longer text is cut from the end, at a line break when there is one, and
@@ -191,4 +191,6 @@ def _in_code(lines: list[str], blocks: Mapping[int, int]) -> list[bool]:
 
 
 def _items(text: str, pattern: re.Pattern[str]) -> list[str]:
-    return [match.group(1) for line in text.splitlines() if (match := pattern.match(line))]
+    lines = text.splitlines()
+    code = _in_code(lines, _code_blocks(lines))
+    return [match.group(1) for line, literal in zip(lines, code) if not literal and (match := pattern.match(line))]
