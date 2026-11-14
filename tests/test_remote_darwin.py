@@ -293,6 +293,7 @@ def test_darwin_tagged_worker_is_running_until_its_group_is_sent_sigterm(
         assert remote.stop_worker(transport, t) is True
         assert wait_gone(seen["pid"])
         proc.wait(timeout=20)
+        assert wait_group_gone(seen["pgid"])  # the keeper leaves once it is alone
         assert remote.check_worker(transport, t) == remote.GONE
         assert record_of(t).exists()  # the record is never removed
     finally:
@@ -301,17 +302,19 @@ def test_darwin_tagged_worker_is_running_until_its_group_is_sent_sigterm(
             proc.kill()
 
 
-def test_darwin_child_left_in_the_group_after_the_leader_exits_is_unknown_until_it_ends(
+def test_darwin_child_left_in_the_group_after_the_leader_exits_is_running_until_stopped(
     tmp_path: Path, mac_ssh
 ) -> None:
-    """Nothing ties a leaderless group to the start (F1.2): the slot is kept,
-    nothing is signalled, and the check says gone once the group is empty."""
+    """Codex PR #129 r3: the start's keeper stays in the group, so a group whose
+    leader has exited is still provably the start's: the check says running,
+    the stop ends the child, and the check says gone once the group is empty."""
     ssh, mac = mac_ssh
     t = target(tmp_path)
     child_pid = tmp_path / "child.pid"
     transport = remote.SshTransport()
     proc = start(t, leave_child_command(child_pid, stubborn=False))
     child: int | None = None
+    leader: int | None = None
     try:
         proc.wait(timeout=30)
         assert proc.returncode == 0, proc.stderr.read()
@@ -319,15 +322,93 @@ def test_darwin_child_left_in_the_group_after_the_leader_exits_is_unknown_until_
         leader = int(record_of(t).read_text(encoding="utf-8").split()[0])
         assert os.getpgid(child) == leader and gone(leader)  # leaderless group
 
-        assert remote.check_worker(transport, t) == remote.UNKNOWN
-        assert remote.stop_worker(transport, t) is True  # answered, signalled nothing
-        time.sleep(0.2)
-        assert not gone(child)
-        kill_quietly(child)
+        assert remote.check_worker(transport, t) == remote.RUNNING
+        assert remote.stop_worker(transport, t) is True
         assert wait_gone(child)
+        assert wait_group_gone(leader)
         assert remote.check_worker(transport, t) == remote.GONE
     finally:
         kill_quietly(child)
+        kill_quietly(leader, group=True)
+
+
+def test_r3_darwin_keeper_is_not_a_child_the_harness_waits_for(
+    tmp_path: Path, mac_ssh
+) -> None:
+    """A harness that reaps children until it has none still ends."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    reaps_all = (
+        "import os\n"
+        "try:\n"
+        "    while True:\n"
+        "        os.wait()\n"
+        "except ChildProcessError:\n"
+        "    pass\n"
+    )
+    proc = start(t, [sys.executable, "-c", reaps_all])
+    leader = None
+    try:
+        proc.wait(timeout=30)
+        assert proc.returncode == 0, proc.stderr.read()
+        leader = int(record_of(t).read_text(encoding="utf-8").split()[0])
+        assert wait_group_gone(leader)
+        assert remote.check_worker(remote.SshTransport(), t) == remote.GONE
+    finally:
+        kill_quietly(leader, group=True)
+        if proc.poll() is None:
+            proc.kill()
+
+
+# A leader whose SIGTERM handler forks a child that ignores SIGTERM, then exits.
+FORKS_WHEN_STOPPED = (
+    "import os, signal, sys, time\n"
+    "def stop(signum, frame):\n"
+    "    if os.fork() == 0:\n"
+    "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "        open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid()))\n"
+    "        os.rename(sys.argv[1] + '.tmp', sys.argv[1])\n"
+    "        time.sleep(600)\n"
+    "        os._exit(0)\n"
+    "    os._exit(143)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "open(sys.argv[2] + '.tmp', 'w').write(str(os.getpid()))\n"
+    "os.rename(sys.argv[2] + '.tmp', sys.argv[2])\n"
+    "time.sleep(600)\n"
+)
+
+
+def test_r3_darwin_child_forked_by_the_leaders_sigterm_handler_is_found_and_killed(
+    tmp_path: Path, mac_ssh
+) -> None:
+    """Codex PR #129 r3: the child is born after the stop's snapshot and the
+    leader exits at once, so no stop ever sees them together."""
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    child_file, leader_file = tmp_path / "child.pid", tmp_path / "leader.pid"
+    transport = remote.SshTransport()
+    proc = start(t, [sys.executable, "-c", FORKS_WHEN_STOPPED, str(child_file), str(leader_file)])
+    leader = child = None
+    try:
+        leader = int(wait_file(leader_file, proc))
+        assert remote.stop_worker(transport, t) is True
+        child = int(wait_file(child_file))
+        assert wait_gone(leader)
+        assert os.getpgid(child) == leader
+
+        assert remote.check_worker(transport, t) == remote.RUNNING
+        assert remote.stop_worker(transport, t) is True
+        time.sleep(0.2)
+        assert not gone(child)  # SIGTERM again: ignored
+        assert remote.stop_worker(transport, t, kill=True) is True
+        assert wait_gone(child)
+        assert wait_group_gone(leader)
+        assert remote.check_worker(transport, t) == remote.GONE
+    finally:
+        kill_quietly(child)
+        kill_quietly(leader, group=True)
+        if proc.poll() is None:
+            proc.kill()
 
 
 @pytest.mark.parametrize(
@@ -530,9 +611,10 @@ def test_darwin_remote_job_runs_and_releases_its_slot_once_the_worker_is_gone(
     assert state(queue, job_id) == "running"  # it ran: no unstarted requeue
 
 
-def test_darwin_remote_child_left_in_the_group_keeps_the_slot_until_it_ends(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_darwin_remote_child_left_in_the_group_is_stopped_before_the_slot_is_released(
+    tmp_path: Path,
 ) -> None:
+    """Codex PR #129 r3: as on Linux, the keeper ties the leaderless group to the start."""
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     mac = Mac(tmp_path)
     child_pid = tmp_path / "child.pid"
@@ -547,19 +629,9 @@ def test_darwin_remote_child_left_in_the_group_keeps_the_slot_until_it_ends(
         _, err = proc.communicate(timeout=60)
         child = int(wait_file(child_pid))
         assert proc.returncode == 0, err
-        assert "not confirmed gone (unknown)" in err, err
-        assert "stopping it" not in err, err
-        assert not gone(child)  # never signalled
-        assert pool.placement(job_id) is not None
-
-        # Once the leftover child ends, the poller confirms the group empty.
-        kill_quietly(child)
+        assert "stopping it" in err, err  # the leftover child was found running
         assert wait_gone(child)
-        use_fake_ssh(monkeypatch, ssh)
-        monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
-        queue.finish(job_id, owner="codex", handoff_comment_id="c1")
-        monitor = DeviceMonitor(pool, config_of(machines), remote.SshTransport())
-        assert monitor.reconcile(time.time(), lambda *_: None).released == (job_id,)
+        assert pool.placement(job_id) is None, err
     finally:
         kill_quietly(child)
 

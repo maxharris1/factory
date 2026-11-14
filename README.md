@@ -228,12 +228,17 @@ refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
 id (a UUID) and the start leads its own process group, then creates the record with
 noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
-UTC). A check that finds no record cannot tell whether the start is still on
-its way, so it creates the record itself as a fence (`fenced`) and cannot tell
-this time; the fenced start then refuses, and later checks read the fence as
-gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The poll that follows a detached start (issue #128) never writes the
-fence: with no record it cannot tell, and the start it follows records itself.
+UTC). Just before, it starts a keeper in its own group and writes the keeper's
+pid and start time as the first snapshot (below). The keeper ignores SIGTERM,
+SIGINT and SIGHUP and exits once no other process is in the group, so the group
+is never empty while any process of the start lives, and its number is never
+reused meanwhile (Codex PR #129 round 3). A check that finds no record cannot
+tell whether the start is still on its way, so it creates the record itself as
+a fence (`fenced`) and cannot tell this time; the fenced start then refuses,
+and later checks read the fence as gone. A start that never ran (unreachable,
+refused) so frees its slot one check later. The poll that follows a detached
+start (issue #128) never writes the fence: with no record it cannot tell, and
+the start it follows records itself.
 The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
 every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
@@ -254,10 +259,12 @@ verified alive, the stop first writes a snapshot of the group
 again after it). A snapshot member still in the group with the same start time
 proves the group was never empty since, so its number was never reused: a
 cancelled run whose harness dies on SIGTERM but leaves a child that ignores it
-is still killed (Codex PR #129 round 2). A process that leaves the job's group
-(`setsid`), or stays in it after its leader exits with no stop before, is never
-signalled on macOS; the latter keeps the slot until it ends. Every script runs
-under POSIX `sh` whatever the login shell (the Mac bots use zsh).
+is still killed (Codex PR #129 round 2). With the keeper, so is a child born
+after the snapshot, even one the harness forks while it shuts down, and a child
+left in the group after a normal exit is stopped before the slot is released,
+as on Linux (round 3). A process that leaves the job's group (`setsid`) is
+never signalled on macOS. Every script runs under POSIX `sh` whatever the login
+shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker

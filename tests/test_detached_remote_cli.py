@@ -302,6 +302,50 @@ def test_a_cancel_stops_the_whole_unit_when_only_a_child_ignores_sigterm(
             proc.wait()
 
 
+@pytest.mark.parametrize("darwin", [False, True], ids=["linux", "darwin"])
+def test_a_cancel_stops_a_child_the_harness_forks_while_it_shuts_down(
+    tmp_path: Path, darwin: bool
+) -> None:
+    """Codex PR #129 r3: the harness's SIGTERM handler forks a child that
+    ignores SIGTERM, then exits. The child was born after any stop looked at
+    the group; the cancel still kills it, then frees the slot."""
+    poller, db, job_id, ssh = setup(tmp_path)
+    env = mac_env(ssh, Mac(tmp_path)) if darwin else {}
+    child_file, parent_file = tmp_path / "child.pid", tmp_path / "parent.pid"
+    command = (
+        "import os, signal, time\n"
+        "def stop(signum, frame):\n"
+        "    if os.fork() == 0:\n"
+        "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"        open({str(child_file)!r}, 'w').write(str(os.getpid()))\n"
+        "        time.sleep(600)\n"
+        "        os._exit(0)\n"
+        "    os._exit(143)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        f"open({str(parent_file)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(600)\n"
+    )
+    proc = run(poller, job_id, ssh, "--", sys.executable, "-c", command, env=env)
+    parent = child = None
+    try:
+        parent = int(wait_file(parent_file, proc))
+        proc.send_signal(signal.SIGTERM)
+        child = int(wait_file(child_file, proc))
+        assert os.getpgid(child) == parent
+        _, err = proc.communicate(timeout=KILL_AFTER_SECONDS + 60)
+        assert wait_gone(child), err
+        assert gone(parent)
+        assert poller.pool.placement(job_id) is None, err
+    finally:
+        if child is None and child_file.exists():
+            child = int(child_file.read_text())
+        kill_quietly(child)
+        kill_quietly(parent)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 class StopsOnlyOnKill:
     """The device: the worker runs on until a SIGKILL stop; records each stop sent."""
 

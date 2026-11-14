@@ -72,7 +72,11 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   create the record with noclobber (O_EXCL) holding
   `<process group> <boot session> <tag> <leader start time>` (the leader's
   `ps -o lstart=` in the C locale and UTC), refusing if it already exists,
-  and exec as above;
+  and exec as above. Before the record it starts the keeper in its group
+  and writes the keeper's pid and start time as the first snapshot (below):
+  the keeper ignores SIGTERM and stays until it is alone in the group, so
+  the group is never empty, nor its number reused, while any process of
+  the start lives (Codex PR #129 r3);
 * check: with no record the start may still be on its way, so the check
   creates the record itself as the fence `fenced` (O_EXCL as well: the start
   or the check creates it, never both) and exits 3; the fenced start can
@@ -81,7 +85,7 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   recorded group, read from a `ps -A -o pgid=,pid=,uid=` that exited 0; 1
   while the group holds only this user's processes and is led by the
   recorded leader (same start time), or (Codex PR #129 r2) its leader has
-  exited but it still holds a process from the stop's snapshot with that
+  exited but it still holds a process from the snapshot with that
   process's recorded start time; 3 for a malformed record or one naming
   another tag, a group holding another user's process, a group whose leader
   has exited and holds no snapshot process (nothing ties the processes left
@@ -95,10 +99,11 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   the snapshot `.orch-worker-<tag>.members.pid` (`<pid> <start time>` per
   member of the group, from one listing, kept only when the leader is
   verified again after it), so a cancel that kills the leader but not a
-  child still finds and kills the child. A process that left the job's
-  group (setsid), or that stays in it after the leader exits with no stop
-  before, is never signalled here: macOS gives no way to find it by its
-  tag. Such a group keeps the slot until it is empty;
+  child still finds and kills the child. The keeper, in the snapshot from
+  the start on, ties the group to the start after its leader exits, so a
+  child born later (one the harness forks as it shuts down included) is
+  signalled as well. A process that left the job's group (setsid) is never
+  signalled here: macOS gives no way to find it by its tag;
 * poll (#128): the check without the fence. The wrapper writes `pid` before
   its start writes the record, so no record is only unsure: a poll never
   fences the start it follows.
@@ -248,6 +253,25 @@ _DARWIN_MEMBER = (
     '[ "$*" = "$a" ] && { v=1; break; }; '
     'done < "$m"; fi'
 )
+# Codex PR #129 r3: the keeper, which the start leaves in its own group ($1)
+# so that the group is never empty while any process of the start lives: its
+# number cannot be reused, and the keeper (a member of the snapshot) proves it
+# to a check after the leader has exited. It ignores SIGTERM, SIGINT and
+# SIGHUP (SIGKILL ends it with the group) and exits once a listing it is on
+# shows no other member of the group but its own children. The listing goes
+# to the file $2, so ps is the keeper's own child, never a grandchild. The
+# start forks it from a subshell that exits at once, so it is not the
+# harness's child: a harness that waits for all its children never waits
+# on it.
+_DARWIN_KEEPER = (
+    'trap "" TERM INT HUP; '
+    "while sleep 1; do "
+    'ps -A -o pgid= -o pid= -o ppid= > "$2" 2>/dev/null || continue; '
+    '[ "$(awk -v p="$1" -v k="$$" '
+    "'$2 == k { s = 1 } $1 == p && $2 != k && $3 != k { n = 1 } END { print s + 0, n + 0 }' "
+    '"$2")" = "1 0" ] && break; '
+    'done; rm -f -- "$2"'
+)
 # What a check or stop writes as the record of a start that has written none:
 # the start's own record write (noclobber, so O_EXCL) then fails, and it
 # refuses (125) without running anything.
@@ -290,12 +314,13 @@ def _darwin_worker(
     boot session is not a UUID.
     running: the recorded group holds only this user's processes and is
     either led by the recorded leader or (#129 r2) still holds a member of
-    the stop's snapshot `$d/.orch-worker-$t.members.pid` with its recorded
-    start time. With snapshot (a stop), a group led by its leader is
-    snapshotted before running. blind: the device cannot tell (no boot
-    session id, a user id that is not a number, ps failed or listed nothing, a
-    listing line that is not three numbers, awk read less than the whole
-    listing, failed, or printed anything but three fields of 0 or 1).
+    the snapshot `$d/.orch-worker-$t.members.pid` (the start's keeper, then
+    each stop's listing) with its recorded start time. With snapshot (a
+    stop), a group led by its leader is snapshotted before running. blind:
+    the device cannot tell (no boot session id, a user id that is not a
+    number, ps failed or listed nothing, a listing line that is not three
+    numbers, awk read less than the whole listing, failed, or printed
+    anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
     no_record = (
@@ -451,8 +476,13 @@ def start_script(
         f'[ "$1" = "$$" ] || exit {START_REFUSED}; '
         f'p=$$; {_LSTART}; s="$*"; [ -n "$s" ] || exit {START_REFUSED}; '
         f'mkdir -p -- "$d" && cd -- "$d" || exit {START_REFUSED}; '
-        f'(set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
-        f"|| exit {START_REFUSED}; "
+        f"k=$(sh -c {shlex.quote(_DARWIN_KEEPER)} orch-keeper $$ "
+        f"{shlex.quote(f'.orch-worker-{tag}.keeper.pid')} "
+        "< /dev/null > /dev/null 2>&1 & echo $!); "
+        f'p=$k; {_LSTART}; [ -n "$k" ] && [ -n "$*" ] '
+        f"&& echo \"$k $*\" > {shlex.quote(f'.orch-worker-{tag}.members.pid')} "
+        f'&& (set -C; echo "$$ $c {tag} $s" > {darwin_file}) 2>/dev/null '
+        f'|| {{ kill -KILL "$k"; exit {START_REFUSED}; }}; '
         f"{login}"
     )
     inner = (
