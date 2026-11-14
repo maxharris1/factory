@@ -209,3 +209,71 @@ def test_a_box_job_names_the_box_factory_root(tmp_path: Path) -> None:
 def test_a_box_with_no_factory_root_names_its_own_checkout(tmp_path: Path) -> None:
     named = _named(_started_brief(tmp_path, box_slots=5))
     assert named and all(path.startswith(f"{ROOT}/skills/") for path in named)
+
+
+SOURCES = ("skills/skills.lock", "config/pstack-models.yml", "skills/pstack/skills/setup-pstack/SKILL.md")
+CORRUPTIONS = [b"broken: [\n", b"a: 1\na: 2\n", b"key: *missing\n", b"\xff\xfe\n", b"- a list\n", b""]
+
+
+def _pin_copy(root: Path, bad: str, content: bytes) -> Path:
+    for source in SOURCES:
+        target = root / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / source, target)
+    (root / bad).write_bytes(content)
+    return root
+
+
+@pytest.mark.parametrize("bad", SOURCES)
+@pytest.mark.parametrize("content", CORRUPTIONS)
+def test_any_malformed_pin_input_fails_closed(tmp_path: Path, bad: str, content: bytes) -> None:
+    pin = _pin_copy(tmp_path, bad, content)
+    named = "skills.lock" if bad == SOURCES[0] else "helper model map"
+    for action, recipient, extra in ROUTER_JOBS:
+        _assert_questions_only(_brief(action, recipient, extra, pin_root=pin), named)
+
+
+@pytest.mark.parametrize("bad", SOURCES)
+def test_a_malformed_pin_input_still_starts_the_job_with_a_questions_brief(tmp_path: Path, bad: str) -> None:
+    from functools import partial
+    from unittest.mock import patch
+
+    pin = _pin_copy(tmp_path / "pin", bad, CORRUPTIONS[0])
+    run = tmp_path / "run"
+    run.mkdir()
+    with patch("lib.waiter.render_brief", partial(render_brief, pin_root=pin)):
+        text = _started_brief(run, box_slots=1)
+    _assert_questions_only(text, "skills.lock" if bad == SOURCES[0] else "helper model map")
+
+
+ROOT_CANDIDATES = [
+    "/srv/factory checkout",
+    "/srv/factory+checkout",
+    "/srv/fäctory",
+    "/srv/o'brien/factory",
+    "/srv/a$b/factory",
+    "/srv/a,b@c~d/factory",
+    "/srv/a`b/factory",
+    "/srv/a\tb/factory",
+    "/srv/factory/",
+    "/srv//factory",
+    "/srv/./factory",
+    "/mnt/c/factory",
+    "/",
+    "srv/factory",
+    "/srv/{bot}/factory",
+    "/srv/{user}/factory",
+]
+
+
+@pytest.mark.parametrize("root", ROOT_CANDIDATES)
+def test_the_brief_accepts_exactly_the_factory_roots_the_machines_schema_accepts(root: str) -> None:
+    from lib.brief.skills import resolve
+    from lib.machines_yml import workdir_problem
+
+    schema_ok = workdir_problem(root) is None and "{bot}" not in root
+    router = resolve("builder", "claude-bot", root)
+    assert isinstance(router, str) != schema_ok, router
+    if schema_ok:
+        named = _named(_brief("build", "claude", {}, factory_root=root))
+        assert named and all(path.startswith(root + "/skills/") for path in named)

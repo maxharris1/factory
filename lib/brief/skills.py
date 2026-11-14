@@ -13,11 +13,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.pstack_models import ModelMapError, brief_lines
+import yaml
+
+from lib.machines_yml import BOT_TOKEN, workdir_problem
+from lib.pstack_models import brief_lines
 from lib.pstack_pin import FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
 
 _SKILL_PATH = re.compile(r"^\.claude/skills/[a-z0-9-]+/SKILL\.md$")
-_ROOT = re.compile(r"^/[A-Za-z0-9._/-]*$")
+_UNREADABLE = (OSError, ValueError, yaml.YAMLError)
 
 
 @dataclass(frozen=True)
@@ -92,32 +95,32 @@ def resolve(role: str, bot: str, factory_root: str | None, pin_root: Path = ROOT
     problem = _root_problem(factory_root)
     if problem is not None:
         return problem
-    root = factory_root.rstrip("/")
     adapter = ADAPTERS.get(bot)
     if adapter is None:
         return f"{bot} has no pstack harness adapter"
     try:
         pin = load_pin(pin_root)
-    except (OSError, ValueError) as exc:
+    except _UNREADABLE as exc:
         return f"skills/skills.lock cannot be read ({exc})"
     pinned = {"files": pin.hashes(), "factory": pin.factory_hashes()}
     files = (*(BUILDER_FILES if role == "builder" else REVIEWER_FILES), adapter)
-    missing = [item.under(root) for item in files if item.rel not in pinned[item.section]]
+    missing = [item.under(factory_root) for item in files if item.rel not in pinned[item.section]]
     if missing:
         return "not in skills/skills.lock: " + ", ".join(f"`{path}`" for path in missing)
     try:
         models = brief_lines(bot.removesuffix("-bot"), pin_root)
-    except (OSError, ModelMapError) as exc:
+    except _UNREADABLE as exc:
         return f"the helper model map cannot be read ({exc})"
-    agents = tuple(item.under(root) for item in AGENT_FILES) if role == "builder" else ()
-    return Router(role, bot, tuple(item.under(root) for item in files), agents, models)
+    agents = tuple(item.under(factory_root) for item in AGENT_FILES) if role == "builder" else ()
+    return Router(role, bot, tuple(item.under(factory_root) for item in files), agents, models)
 
 
 def _root_problem(factory_root: str) -> str | None:
     if "REPLACE_WITH_" in factory_root:
         return f"factory_root `{factory_root}` is a placeholder"
-    if _ROOT.fullmatch(factory_root) is None or ".." in factory_root.split("/"):
-        return f"factory_root `{factory_root}` is not a plain absolute path"
+    problem = "names an unresolved {bot}" if BOT_TOKEN in factory_root else workdir_problem(factory_root)
+    if problem is not None:
+        return f"factory_root `{factory_root}` {problem}"
     return None
 
 
