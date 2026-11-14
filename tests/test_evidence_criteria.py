@@ -181,3 +181,33 @@ def test_default_limit_is_the_existing_cap():
     from lib.brief import TEXT_LIMIT as BRIEF_LIMIT
 
     assert TEXT_LIMIT == BRIEF_LIMIT == 20_000
+
+
+def test_code_example_inside_the_section_keeps_later_criteria():
+    body = '## Acceptance criteria\n- [ ] Emit JSON:\n  ```json\n  {"ok": true}\n  ```\n- [ ] Exit nonzero on validation failure.'
+    bundle = _bundle(issue_body=body)
+    assert [c.text for c in bundle.criteria] == ["Emit JSON:", "Exit nonzero on validation failure."]
+    assert '{"ok": true}' in bundle.text
+    assert bundle.cut is None
+
+
+def test_heading_inside_a_code_example_does_not_end_the_section():
+    body = "## Acceptance criteria\n- [ ] Run:\n```sh\n# set up\nmake\n```\n- [ ] Second.\n## Notes\n- not a criterion\n"
+    bundle = _bundle(issue_body=body)
+    assert [c.text for c in bundle.criteria] == ["Run:", "Second."]
+    assert "not a criterion" not in bundle.text
+
+
+def test_code_example_inside_a_brief_ticket_fence():
+    ticket = "# T\n\n## Acceptance criteria\n\n- [ ] Show:\n```\nexample\n```\n- [ ] Inside.\n"
+    brief_body = f"### Ticket\n````\n{ticket}````\n\n- [ ] Outside.\n"
+    bundle = _bundle(comments=(_brief("factory-app[bot]", brief_body),))
+    assert [c.text for c in bundle.criteria] == ["Show:", "Inside."]
+    assert "example" in bundle.text
+    assert "Outside" not in bundle.text
+
+
+def test_acceptance_heading_inside_a_code_example_is_not_the_section():
+    body = "Template:\n```md\n## Acceptance criteria\n- [ ] Example.\n```\n\n## Acceptance criteria\n- [ ] Real.\n"
+    bundle = _bundle(issue_body=body)
+    assert bundle.criteria == (Criterion("ac-1", "Real."),)

@@ -12,8 +12,11 @@ passes them in. The criteria text comes from the first source that has any:
    are built from a packet with no brief.
 
 When the source has an "Acceptance criteria" heading, the text is that
-section (up to the next heading of the same or a higher level, or a closing
-code fence); its list items are the criteria. Without one, the text is the
+section, up to the next heading of the same or a higher level outside any
+code block, or the fence that closes the code block the heading sits in (a
+brief quotes the ticket in one). A code example inside the section stays in
+the text. When several such headings exist, the one inside the fewest code
+blocks wins. Its list items are the criteria. Without one, the text is the
 whole source and only its checkbox items are criteria. Criteria are numbered
 `ac-1`, `ac-2`, ... in order, so the same text always gets the same ids.
 
@@ -37,7 +40,7 @@ SOURCES = ("brief", "issue", "pr", "none")
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _AC_HEADING = re.compile(r"^acceptance criteria\b", re.IGNORECASE)
-_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _CHECKBOX = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$")
 _ITEM = re.compile(r"^\s*(?:[-*+]\s+(?:\[[ xX]\]\s+)?|[0-9]+[.)]\s+)(.+?)\s*$")
 _NOTE_ROOM = 80
@@ -129,19 +132,44 @@ def _criteria(body: str, limit: int) -> tuple[str, tuple[Criterion, ...], str | 
 
 
 def _section(lines: list[str]) -> list[str] | None:
-    for start, line in enumerate(lines):
-        heading = _HEADING.match(line)
-        if heading is None or not _AC_HEADING.match(heading.group(2)):
+    depths = _fence_depths(lines)
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if (heading := _HEADING.match(line)) is not None and _AC_HEADING.match(heading.group(2))
+    ]
+    if not starts:
+        return None
+    start = min(starts, key=lambda index: depths[index])
+    depth = depths[start]
+    level = len(_HEADING.match(lines[start]).group(1))
+    for index in range(start + 1, len(lines)):
+        if depths[index] < depth:
+            return lines[start:index]
+        other = _HEADING.match(lines[index])
+        if depths[index] == depth and other is not None and len(other.group(1)) <= level:
+            return lines[start:index]
+    return lines[start:]
+
+
+def _fence_depths(lines: list[str]) -> list[int]:
+    """How many code fences are open at each line, a fence line counted outside its block."""
+    open_fences: list[str] = []
+    depths = []
+    for line in lines:
+        fence = _FENCE.match(line)
+        if fence is not None:
+            marker, info = fence.group(1), fence.group(2).strip()
+            top = open_fences[-1] if open_fences else ""
+            if top and not info and marker[0] == top[0] and len(marker) >= len(top):
+                open_fences.pop()
+                depths.append(len(open_fences))
+                continue
+            open_fences.append(marker)
+            depths.append(len(open_fences) - 1)
             continue
-        level = len(heading.group(1))
-        end = len(lines)
-        for index in range(start + 1, len(lines)):
-            other = _HEADING.match(lines[index])
-            if (other is not None and len(other.group(1)) <= level) or _FENCE.match(lines[index]):
-                end = index
-                break
-        return lines[start:end]
-    return None
+        depths.append(len(open_fences))
+    return depths
 
 
 def _items(text: str, pattern: re.Pattern[str]) -> list[str]:
