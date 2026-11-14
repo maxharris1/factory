@@ -698,6 +698,9 @@ class Dispatcher:
             ticket = self._polled.get(key, ticket)
             if self._is_handled(ticket, comment.id):
                 continue
+            if self._review_context(ticket)[0] == "abandoned":
+                self._mark_handled(ticket, comment.id, "after-close")
+                continue
             fields: dict[str, str] | None
             try:
                 fields = parse_comment(comment.body).as_dict()

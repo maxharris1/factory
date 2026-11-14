@@ -139,3 +139,55 @@ def test_a_job_failing_after_the_close_is_not_retried(tmp_path: Path, start) -> 
 
     assert_abandoned(board)
     assert board.queue.claim(held.request.recipient) is None
+
+
+def a_second_ready(board: Board, pr: PR) -> str:
+    return board.ready(pr, pr.head, "second-ready")
+
+
+def a_go(board: Board, pr: PR) -> str:
+    board.go(pr, "late-go")
+    return "late-go"
+
+
+def a_revise(board: Board, pr: PR) -> str:
+    board.revise(pr, "2/3")
+    return "revise-42-2/3"
+
+
+def an_approve(board: Board, pr: PR) -> str:
+    return board.approve(pr, "2/3", "late-approve")
+
+
+def an_update_ready(board: Board, pr: PR) -> tuple[str, str]:
+    board.build_and_approve(pr, mergeable=False)
+    board.finish("claude")
+    pr.push(sha(2))
+    return board.ready(pr, pr.head, "first-ready"), sha(2)
+
+
+def a_queued_builder_ready(board: Board, pr: PR) -> tuple[str, str]:
+    board.build_and_approve(pr, mergeable=None)
+    pr.push(sha(2))
+    return board.ready(pr, pr.head, "first-ready"), sha(1)
+
+
+@pytest.mark.parametrize("first", [an_update_ready, a_queued_builder_ready])
+@pytest.mark.parametrize("later", [a_second_ready, a_go, a_revise, an_approve])
+def test_no_later_comment_in_the_pass_acts_after_a_fresh_read_abandons(
+    tmp_path: Path, first, later
+) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    abandoning, cached_head = first(board, pr)
+    follower = later(board, pr)
+    stale_open_on_the_first_read(board, cached_head)
+    pr.closed = True
+    board.poll()
+    board.poll()
+
+    assert board.outcome(abandoning) == "ready-on-closed-pr"
+    assert board.outcome(follower) == "after-close"
+    assert_abandoned(board)
+    assert board.queue.claim("codex") is None
+    assert board.queue.claim("claude") is None
