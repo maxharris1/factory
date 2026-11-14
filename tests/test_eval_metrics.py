@@ -14,9 +14,12 @@ import pytest
 from lib import cli, remote, telemetry
 from lib.device_pool import DevicePool
 from lib.eval_report import EvalError, Metrics, build_metrics, render_metrics
+from lib.factory_md import HoldConfig
 from lib.queue import JobRequest
 from lib.state_backup import backup
+from lib.update_check import UpdateClass
 from tests.test_dispatcher import setup
+from tests.merge_queue_support import Board, sha
 from tests.test_lifecycle import HEADS, Flow
 from tests.test_remote_start import config_of, machines_file
 
@@ -297,6 +300,57 @@ def test_a_first_round_revise_stays_one_after_a_later_approve(tmp_path: Path) ->
     flow = Flow(tmp_path / "flow")
     flow.hand_off_at(2)
     assert _rates(_backed_up(flow, tmp_path)) == (1.0, 0.0)
+
+
+def test_first_verdict_survives_update_rereview(tmp_path: Path) -> None:
+    board = Board(tmp_path / "state")
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    assert _rates(board.queue.path) == (0.0, 1.0)
+    board.verdict = UpdateClass(False, "manual conflict resolution")
+    board.finish("claude")
+    pr.push(sha(2))
+    ready_id = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(ready_id) == "queued-review"
+    assert board.state("42")["workflow_state"] == "review"
+    copy = tmp_path / "backup" / "orch.db"
+    backup(board.queue.path, copy)
+    assert _rates(copy) == (0.0, 1.0)
+
+
+def test_held_approval_is_not_dropped_from_denominator(tmp_path: Path) -> None:
+    board = Board(tmp_path / "state", ship="merge", hold=HoldConfig())
+    first = board.open("42", sha(1))
+    first.labels = ("factory:hold",)
+    board.build_and_approve(first)
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    second = board.open("43", sha(2))
+    board.go(second, "go-43")
+    board.poll()
+    board.finish("claude")
+    board.ready(second, second.head)
+    board.poll()
+    board.finish("codex")
+    board.revise(second, "1/3")
+    board.poll()
+    copy = tmp_path / "backup" / "orch.db"
+    backup(board.queue.path, copy)
+    assert _rates(copy) == (0.5, 0.5)
+
+
+def test_a_held_approve_after_a_first_round_revise_stays_a_revise(tmp_path: Path) -> None:
+    _dispatcher, queue = setup(tmp_path / "state")
+    with sqlite3.connect(queue.path) as connection:
+        _verdict(connection, "8", "R1", "R")
+        connection.execute(
+            "INSERT INTO ship_holds VALUES ('owner/repo', '8', 'h', 'codex-bot', '[]', 'A2', 0)"
+        )
+        connection.execute(
+            "INSERT INTO ship_holds VALUES ('owner/repo', '9', 'h', 'codex-bot', '[]', 'A1', 0)"
+        )
+        connection.execute("UPDATE handled_comments SET repo = 'Owner/Repo'")
+    assert _rates(queue.path) == (0.5, 0.5)
 
 
 def _requeued(tmp_path: Path, fail) -> Path:
