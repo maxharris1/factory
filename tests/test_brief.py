@@ -189,7 +189,7 @@ def test_ready_header_has_no_round_when_the_job_has_none() -> None:
 def test_builder_briefs_say_run_tests_in_the_foreground(action: str, extra: dict) -> None:
     first = render_brief(job(action, **extra), bot="claude-bot", context=None)
     assert "in the foreground" in first
-    assert "never in the background" in first
+    assert "in the background, or in chunks" in first
     assert "git log @{u}.." not in first
     first_job = job(action, **extra)
     retry = replace(first_job, request=replace(first_job.request, attempt=2))

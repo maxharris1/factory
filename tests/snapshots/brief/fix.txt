@@ -26,9 +26,10 @@ You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this
 Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). Run as poteto-mode.
 1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. Test first: a test that fails on the current head and covers the whole class of the finding. Then fix the class.
-3. Run the tests. Self-check: principle-prove-it-works, no-comments.
+3. Run only the new test and the tests for the files you touched, plus a short smoke set. Self-check: principle-prove-it-works, no-comments.
 4. Push, then post the ready handoff below with the head you pushed.
-Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
@@ -142,9 +143,10 @@ You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this
 Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). Run as poteto-mode.
 1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
 2. Test first: a test that fails on the current head and covers the whole class of the finding. Then fix the class.
-3. Run the tests. Self-check: principle-prove-it-works, no-comments.
+3. Run only the new test and the tests for the files you touched, plus a short smoke set. Self-check: principle-prove-it-works, no-comments.
 4. Push, then post the ready handoff below with the head you pushed.
-Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 

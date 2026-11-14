@@ -14,7 +14,8 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         f"1. Check out the PR branch at {head}.",
         "2. Test first: a test that fails on the current head and covers the whole class of the "
         "finding. Then fix the class.",
-        "3. Run the tests. Self-check: principle-prove-it-works, no-comments.",
+        "3. Run only the new test and the tests for the files you touched, plus a short smoke set. "
+        "Self-check: principle-prove-it-works, no-comments.",
         "4. Push, then post the ready handoff below with the head you pushed.",
         *builder_notes(job),
     ]
