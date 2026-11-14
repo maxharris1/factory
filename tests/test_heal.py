@@ -367,4 +367,4 @@ def test_orch_heal_is_listed_in_the_cli_help(capsys) -> None:
     cli_main(["--help"])
     text = capsys.readouterr().out
     assert "  heal             restart down or stale-code components" in text
-    assert "  health           component heartbeats: report or forget (issue #92)" in text
+    assert "  health           component heartbeats: report, beat or forget (issue #92)" in text

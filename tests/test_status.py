@@ -1,3 +1,4 @@
+import io
 import sqlite3
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from types import MappingProxyType
 
 import pytest
 
+from lib.cli import main as cli_main
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.status import (
     JobRow,
@@ -16,6 +18,7 @@ from lib.status import (
     device_rows,
     render,
 )
+from lib.status import main as status_main
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -160,12 +163,14 @@ devices:
     harnesses: {cursor: cursor-bot}
     workdir_root: /home/work
     ssh_alias: pc-{bot}
+    factory_root: /home/{bot}/factory
   - name: mac
     tailscale_name: REPLACE_WITH_MAC_TAILSCALE_NAME
     slot_max: REPLACE_WITH_MAC_SLOT_MAX
     harnesses: REPLACE_WITH_MAC_HARNESSES
     workdir_root: /Users/work
     ssh_alias: REPLACE_WITH_MAC_SSH_ALIAS
+    factory_root: /Users/{bot}/factory
 """.lstrip(),
         encoding="utf-8",
     )
@@ -344,15 +349,63 @@ def test_status_command_refuses_an_invalid_machines_file(tmp_path: Path) -> None
     assert "devices must list at least one device" in result.stderr
 
 
-def test_status_command_changes_no_database_bytes_or_mtimes(tmp_path: Path) -> None:
-    path = tmp_path / "queue.sqlite3"
+AUDIT_HOOK = """
+import os
+import sys
+
+_log = open(os.environ["STATUS_AUDIT_LOG"], "a", buffering=1)
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+
+
+def _hook(event, args):
+    if event == "open":
+        path, mode, flags = args
+        if isinstance(mode, str) and any(c in mode for c in "wax+"):
+            _log.write(f"write {path}\\n")
+        elif mode is None and flags & _WRITE_FLAGS:
+            _log.write(f"write {path}\\n")
+    elif event in ("os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.replace"):
+        _log.write(f"{event} {args[0]}\\n")
+    elif event == "sqlite3.connect":
+        _log.write(f"connect {args[0]}\\n")
+
+
+sys.addaudithook(_hook)
+"""
+
+
+@pytest.mark.parametrize("journal", ["delete", "wal"])
+def test_status_command_writes_nothing_anywhere(tmp_path: Path, journal: str) -> None:
+    state = tmp_path / "state"
+    path = state / "db" / "queue.sqlite3"
+    path.parent.mkdir(parents=True)
     create_database(path)
-    before = directory_snapshot(tmp_path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(f"PRAGMA journal_mode = {journal}").fetchone() == (journal,)
+    connection.close()
+    home = state / "home"
+    temp = state / "tmp"
+    home.mkdir()
+    temp.mkdir()
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "sitecustomize.py").write_text(AUDIT_HOOK, encoding="utf-8")
+    log = tmp_path / "audit.log"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(temp),
+        "PYTHONPATH": str(site),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "STATUS_AUDIT_LOG": str(log),
+    }
+    before = directory_snapshot(state)
 
     result = subprocess.run(
         [sys.executable, str(ROOT / "bin" / "orch"), "status", "--db", str(path)],
         text=True,
         capture_output=True,
+        env=env,
         check=False,
     )
 
@@ -360,7 +413,12 @@ def test_status_command_changes_no_database_bytes_or_mtimes(tmp_path: Path) -> N
     assert "Queue (1)" in result.stdout
     assert "  box [claude,codex,cursor] 1/3 slots\n" in result.stdout
     assert "Paused (1)" in result.stdout
-    assert directory_snapshot(tmp_path) == before
+    assert directory_snapshot(state) == before
+    events = log.read_text(encoding="utf-8").splitlines()
+    connects = [line for line in events if line.startswith("connect ")]
+    assert connects
+    assert all("mode=ro" in line for line in connects), connects
+    assert [line for line in events if not line.startswith("connect ")] == []
 
 
 def test_status_reads_uncheckpointed_wal_without_changing_files(
@@ -381,6 +439,8 @@ def test_status_reads_uncheckpointed_wal_without_changing_files(
         )
         writer.commit()
         assert Path(f"{path}-wal").exists()
+        # A first reader of a WAL database writes its read mark into -shm;
+        # prime it so the snapshot below sees only what status itself does.
         prime = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         prime.execute("SELECT COUNT(*) FROM jobs").fetchone()
         prime.close()
@@ -433,48 +493,39 @@ def test_dispatcher_stuck_flag_is_rendered_as_paused(tmp_path: Path) -> None:
     assert "owner/repo#42 stuck (ci-red-3) [github]" in output
 
 
-def test_read_only_proof_detects_a_mutant_tracker_write(tmp_path: Path) -> None:
+@pytest.mark.parametrize("journal", ["delete", "wal"])
+def test_status_connections_cannot_write(tmp_path: Path, journal: str) -> None:
     path = tmp_path / "queue.sqlite3"
     create_database(path)
-    tracker = FakeStatusSource(
-        tracker=(TrackerRow("owner/repo", "42", "github", "waiting-max"),)
-    )
-    jobs = SQLiteStatusReader(path)
-
-    assert_read_only(
-        tmp_path,
-        tracker,
-        lambda: render(build_status(tracker, jobs, clock=lambda: 100)),
-    )
-
-    with pytest.raises(AssertionError):
-        assert_read_only(
-            tmp_path,
-            tracker,
-            lambda: (
-                build_status(tracker, jobs, clock=lambda: 100),
-                tracker.set_state("42", "building"),
-            ),
-        )
-
-
-def assert_read_only(
-    directory: Path,
-    tracker: FakeStatusSource,
-    action: Callable[[], object],
-) -> None:
-    before_files = directory_snapshot(directory)
-    before_writes = tuple(tracker.write_calls)
-    action()
-    assert directory_snapshot(directory) == before_files
-    assert tuple(tracker.write_calls) == before_writes
+    writer = sqlite3.connect(path)
+    try:
+        assert writer.execute(f"PRAGMA journal_mode = {journal}").fetchone() == (journal,)
+        if journal == "wal":
+            writer.execute("PRAGMA wal_autocheckpoint = 0")
+            writer.execute("UPDATE jobs SET last_activity_at = 31 WHERE id = 'running'")
+            writer.commit()
+            assert Path(f"{path}-wal").exists()
+        connection = SQLiteStatusReader(path)._connect()
+        try:
+            assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError):
+                connection.execute("UPDATE jobs SET state = 'done'")
+            connection.execute("PRAGMA query_only = OFF")
+            with pytest.raises(sqlite3.OperationalError):
+                connection.execute("UPDATE jobs SET state = 'done'")
+        finally:
+            connection.close()
+    finally:
+        writer.close()
 
 
-def directory_snapshot(directory: Path) -> dict[str, tuple[bytes, int]]:
+def directory_snapshot(directory: Path) -> dict[str, tuple[bytes | None, int]]:
     return {
-        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
-        for path in sorted(directory.iterdir())
-        if path.is_file()
+        str(path.relative_to(directory)): (
+            None if path.is_dir() else path.read_bytes(),
+            path.stat().st_mtime_ns,
+        )
+        for path in sorted(directory.rglob("*"))
     }
 
 
@@ -541,3 +592,85 @@ def test_a_running_job_ages_from_its_claim_and_shows_its_last_beat() -> None:
     assert "    o/repo#12 build -> claude running 42m (beat 12s ago)\n" in output
     assert "    o/repo#13 build -> claude running 16m (beat 1s ago) no-placement\n" in output
     assert "running 0s" not in output
+
+
+def test_status_on_a_queue_only_db_shows_the_empty_state(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    sqlite3.connect(path).execute("CREATE TABLE unrelated (x)").connection.close()
+    stdout = io.StringIO()
+
+    code = status_main(
+        ["--db", str(path), "--machines", str(ROOT / "machines.yml")],
+        stdout=stdout,
+        clock=lambda: 0,
+    )
+
+    assert code == 0
+    assert "Queue (0)\n  empty\n" in stdout.getvalue()
+    assert "Paused (0)\n  empty\n" in stdout.getvalue()
+
+
+def test_status_sorts_ticket_ids_naturally() -> None:
+    source = FakeStatusSource(
+        tracker=tuple(
+            TrackerRow("o/repo", ticket_id, "github", "stuck", stuck=True)
+            for ticket_id in ("10", "ENG-2", "9", "abc")
+        ),
+        jobs=tuple(
+            job(f"j{ticket_id}", repo="o/repo", ticket_id=ticket_id, state="running",
+                created_at=0, last_activity_at=0)
+            for ticket_id in ("10", "9")
+        ),
+    )
+
+    status = build_status(source, source, clock=lambda: 0)
+
+    assert [row.ticket_id for row in status.paused] == ["9", "10", "abc", "ENG-2"]
+    assert [row.ticket_id for row in status.device_jobs["box"]] == ["9", "10"]
+
+
+def test_status_closes_every_connection_and_reads_rows_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    opened: list[TrackedConnection] = []
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, factory=TrackedConnection, **kwargs)
+        connection.set_trace_callback(statements.append)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+    code = status_main(["--db", str(path)], stdout=io.StringIO(), clock=lambda: 100)
+
+    assert code == 0
+    assert opened
+    assert all(connection.closed for connection in opened)
+    assert sum("FROM tracked_tickets" in sql for sql in statements) == 1
+
+
+class TrackedConnection(sqlite3.Connection):
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
+
+
+def test_help_lists_status(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli_main(["--help"]) == 0
+    assert "\n  status " in capsys.readouterr().out
+
+
+def test_cli_routes_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+
+    assert cli_main(["status", "--db", str(path)]) == 0
+    assert "Queue (1)" in capsys.readouterr().out
+    assert "status_main" not in (ROOT / "bin" / "orch").read_text(encoding="utf-8")

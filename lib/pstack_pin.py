@@ -1,12 +1,14 @@
 """Pinned pstack source (docs/SPEC.md F1-02, docs/PLAN.md section 9).
 
-skills/pstack is the vendored tree. skills/skills.lock records the pin
-commit, the version, and the sha256 of each file. bump_pin writes those
-three together. install-skills symlinks that tree into the local harness
-directories, or copies it into the project for a cloud run. doctor prints
-a canary that asks for poteto-mode and a token from the pinned skill. The
+skills/pstack is the vendored tree and skills/factory holds the factory's
+router skills. skills/skills.lock records the pin commit, the version, the
+sha256 of each pstack file, and the sha256 of each skills/factory file.
+bump_pin writes them together. install-skills symlinks the pstack skills and
+the routers into the local harness directories, or copies them into the
+project for a cloud run. doctor prints a canary that asks Claude and Codex
+to load factory-builder and quote a token from the pinned poteto-mode. The
 owning bot starts the harness and writes the reply. This module does not
-start claude, codex, or cursor-agent.
+start claude or codex.
 """
 
 from __future__ import annotations
@@ -21,10 +23,10 @@ from pathlib import Path
 from typing import Literal, Mapping, NoReturn
 
 from lib.load import load_yaml
-from lib.schema import HARNESSES
 
 ROOT = Path(__file__).resolve().parent.parent
 PSTACK_DIR = Path("skills") / "pstack"
+FACTORY_DIR = Path("skills") / "factory"
 LOCK_PATH = Path("skills") / "skills.lock"
 SKILL_ROOT = PSTACK_DIR / "skills"
 POTETO_SKILL = SKILL_ROOT / "poteto-mode" / "SKILL.md"
@@ -44,17 +46,20 @@ DIR_HARNESS = {
     ".agents/skills": "codex",
     ".cursor/skills": "cursor",
 }
+CANARY_HARNESSES = ("claude", "codex")
 OWNERS = {
     "claude": "claude-bot",
     "codex": "codex-bot",
-    "cursor": "cursor-bot",
 }
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_LOCK_KEYS = frozenset({"version", "commit", "token", "files"})
-_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
+_PSTACK_SKILLS = ("skills", "pstack", "skills")
+_FACTORY_SKILLS = ("skills", "factory")
+_LOCK_KEYS = frozenset({"version", "commit", "token", "files", "factory"})
 _MARKER = ".orch-owned"
+_STAGING_PREFIX = ".orch-staging-"
+_LEGACY_BACKUP_PREFIX = ".orch-backup-"
 _INSTALLER = "orch-install-skills"
 Mode = Literal["local", "cloud"]
 
@@ -65,9 +70,13 @@ class Pin:
     commit: str
     token: str
     files: tuple[tuple[str, str], ...]
+    factory: tuple[tuple[str, str], ...]
 
     def hashes(self) -> dict[str, str]:
         return dict(self.files)
+
+    def factory_hashes(self) -> dict[str, str]:
+        return dict(self.factory)
 
 
 def lock_file(root: Path) -> Path:
@@ -76,6 +85,10 @@ def lock_file(root: Path) -> Path:
 
 def pstack_root(root: Path) -> Path:
     return root / PSTACK_DIR
+
+
+def factory_root(root: Path) -> Path:
+    return root / FACTORY_DIR
 
 
 def load_pin(root: Path) -> Pin:
@@ -94,24 +107,32 @@ def load_pin(root: Path) -> Pin:
     version = data["version"]
     commit = data["commit"]
     token = data["token"]
-    files = data["files"]
     if not isinstance(version, str) or not version:
         raise ValueError("skills.lock version is not a string")
     if not isinstance(commit, str) or _COMMIT.fullmatch(commit) is None:
         raise ValueError("skills.lock commit is not a git sha")
     if not isinstance(token, str) or not token or "\n" in token or token != token.strip():
         raise ValueError("skills.lock token is not one line")
-    if not isinstance(files, dict) or not files:
-        raise ValueError("skills.lock files is empty")
+    return Pin(
+        version=version,
+        commit=commit,
+        token=token,
+        files=_lock_rows(data["files"], "files"),
+        factory=_lock_rows(data["factory"], "factory"),
+    )
+
+
+def _lock_rows(section: object, key: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(section, dict) or not section:
+        raise ValueError(f"skills.lock {key} is empty")
     rows: list[tuple[str, str]] = []
-    for rel, digest in files.items():
+    for rel, digest in section.items():
         if not isinstance(rel, str) or not _safe_rel(rel):
             raise ValueError(f"skills.lock path is not a relative file: {rel!r}")
         if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
             raise ValueError(f"skills.lock hash is not sha256: {rel}")
         rows.append((rel, digest))
-    rows.sort()
-    return Pin(version=version, commit=commit, token=token, files=tuple(rows))
+    return tuple(sorted(rows))
 
 
 def verify_pin(root: Path) -> list[str]:
@@ -122,25 +143,30 @@ def verify_pin(root: Path) -> list[str]:
     errors: list[str] = []
     found, scan_errors = _scan_tree(root)
     errors.extend(scan_errors)
+    factory, factory_errors = _scan_factory(root)
+    errors.extend(factory_errors)
     try:
         if pin.token != _canary_token(root):
             errors.append("skills.lock: token does not match the pinned poteto-mode skill")
     except (OSError, ValueError, UnicodeError) as exc:
         errors.append(str(exc))
-    pinned = pin.hashes()
-    for rel in sorted(set(pinned) - set(found)):
-        errors.append(f"skills.lock: missing {rel}")
-    for rel in sorted(set(found) - set(pinned)):
-        errors.append(f"skills.lock: extra {rel}")
-    for rel in sorted(set(pinned) & set(found)):
-        if pinned[rel] != found[rel]:
-            errors.append(f"skills.lock: {rel} hash does not match the pin")
+    errors.extend(_compare(pin.hashes(), found, ""))
+    errors.extend(_compare(pin.factory_hashes(), factory, "factory/"))
     versions = _manifest_versions(root)
     if isinstance(versions, str):
         errors.append(versions)
     elif any(version != pin.version for version in versions):
         shown = ", ".join(versions)
         errors.append(f"skills.lock: version {pin.version} does not match plugin.json ({shown})")
+    return errors
+
+
+def _compare(pinned: Mapping[str, str], found: Mapping[str, str], label: str) -> list[str]:
+    errors = [f"skills.lock: missing {label}{rel}" for rel in sorted(set(pinned) - set(found))]
+    errors.extend(f"skills.lock: extra {label}{rel}" for rel in sorted(set(found) - set(pinned)))
+    for rel in sorted(set(pinned) & set(found)):
+        if pinned[rel] != found[rel]:
+            errors.append(f"skills.lock: {label}{rel} hash does not match the pin")
     return errors
 
 
@@ -157,13 +183,16 @@ def bump_pin(root: Path, commit: str, version: str) -> Pin:
         shown = ", ".join(versions)
         raise ValueError(f"plugin.json version is {shown}, not {version}")
     found, scan_errors = _scan_tree(root)
-    if scan_errors:
-        raise ValueError(scan_errors[0])
+    factory, factory_errors = _scan_factory(root)
+    if scan_errors or factory_errors:
+        raise ValueError((scan_errors + factory_errors)[0])
     token = _canary_token(root)
     files = tuple(sorted(found.items()))
     if not files:
         raise ValueError("pstack tree is empty")
-    pin = Pin(version=version, commit=commit, token=token, files=files)
+    if not factory:
+        raise ValueError("skills/factory is empty")
+    pin = Pin(version=version, commit=commit, token=token, files=files, factory=tuple(sorted(factory.items())))
     _write_lock(root, pin)
     return pin
 
@@ -174,11 +203,13 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
         return errors
     try:
         skills = _skills(root)
-        commit = load_pin(root).commit
+        pin = load_pin(root)
+        pinned = _installed_hashes(pin, skills)
     except (OSError, ValueError, UnicodeError) as exc:
         return [str(exc)]
     planned: list[tuple[Path, Path, str]] = []
     dir_errors: dict[Path, str] = {}
+    recovered: set[Path] = set()
     for name, src in skills:
         for dest in _destinations(anchor, name, mode):
             skills_dir = dest.parent
@@ -186,7 +217,10 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
                 dir_errors[skills_dir] = _symlink_skills_dir_error(anchor, skills_dir) or ""
             if dir_errors[skills_dir]:
                 continue
-            refusal = _unowned_error(dest, name)
+            if skills_dir not in recovered:
+                recovered.add(skills_dir)
+                _recover_leftovers(skills_dir, pinned)
+            refusal = _unowned_error(dest, name, pinned)
             if refusal:
                 errors.append(refusal)
             else:
@@ -198,24 +232,37 @@ def install_skills(root: Path, anchor: Path, mode: Mode) -> list[str]:
         return errors
     for src, dest, _name in planned:
         try:
-            _place_owned(src, dest, mode, commit)
+            _place_owned(src, dest, mode, pin.commit, pinned)
         except OSError as exc:
             return [f"install interrupted at {dest}: {exc}"]
     return []
 
 
+def unstable_checkout(root: Path) -> str | None:
+    if (root / ".git").is_file():
+        return f"{root} is a linked git worktree; install from a stable checkout"
+    temp = Path(tempfile.gettempdir()).resolve()
+    if root.resolve().is_relative_to(temp):
+        return f"{root} is under the temp dir; install from a stable checkout"
+    return None
+
+
 def canary_prompt() -> str:
     return (
-        "Name the skill you loaded: poteto-mode.\n"
+        "Read the factory-builder skill from your harness's skills folder: "
+        ".claude/skills/factory-builder/SKILL.md in Claude Code, "
+        ".agents/skills/factory-builder/SKILL.md in Codex.\n"
+        "Name the skill you loaded: factory-builder.\n"
+        "It routes to poteto-mode, installed beside it. "
         "Quote the whole first bold passage of the pinned poteto-mode playbook "
-        "playbooks/orchestrate.md, exactly as written, on one line.\n"
+        "playbooks/orchestrate.md, exactly as written but without the ** markers, "
+        "on one line.\n"
         "The owning bot starts this harness.\n"
         "Claude Bot writes started-by: claude-bot.\n"
         "Codex Bot writes started-by: codex-bot.\n"
-        "Cursor Bot writes started-by: cursor-bot.\n"
         "Reply with these three lines:\n"
         "started-by: <bot>\n"
-        "skill: poteto-mode\n"
+        "skill: factory-builder\n"
         "token: <that passage>\n"
     )
 
@@ -248,7 +295,7 @@ def doctor(
     if responses is None:
         errors = [
             f"{harness}: did not load the pinned version (no canary response)"
-            for harness in HARNESSES
+            for harness in CANARY_HARNESSES
         ]
         return 1, prompt, errors
     errors = _score_responses(responses, token)
@@ -258,18 +305,20 @@ def doctor(
 
 
 def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
-    pin = load_pin(root).hashes()
+    skills = _skills(root)
+    pin = _installed_hashes(load_pin(root), skills)
     errors: list[str] = []
-    for name, src in _skills(root):
+    for name, src in skills:
         prefix = f"skills/{name}/"
         expected = {rel: digest for rel, digest in pin.items() if rel.startswith(prefix)}
         for dest in _destinations(anchor, name, mode):
             harness = _harness_for(dest, anchor, mode)
-            errors.extend(_check_dest(src, dest, expected, prefix, harness, mode))
+            errors.extend(_check_dest(anchor, src, dest, expected, prefix, harness, mode))
     return errors
 
 
 def _check_dest(
+    anchor: Path,
     src: Path,
     dest: Path,
     expected: Mapping[str, str],
@@ -278,7 +327,7 @@ def _check_dest(
     mode: Mode,
 ) -> list[str]:
     if mode == "cloud":
-        if dest.is_symlink() or _skills_parent_is_symlink(dest):
+        if _symlinked_component(anchor, dest):
             return [f"{harness}: did not load the pinned version ({dest} must be a real copy)"]
     elif mode == "local" and dest.is_symlink():
         try:
@@ -321,9 +370,8 @@ def _check_dest(
 
 
 def _score_responses(responses: Path, token: str) -> list[str]:
-    owners = _owners()
     errors: list[str] = []
-    for harness in HARNESSES:
+    for harness in CANARY_HARNESSES:
         path = responses / harness
         if not path.is_file():
             errors.append(f"{harness}: did not load the pinned version (no canary response)")
@@ -334,23 +382,21 @@ def _score_responses(responses: Path, token: str) -> list[str]:
             errors.append(f"{harness}: did not load the pinned version (reply is not utf-8)")
             continue
         lines = [line.strip() for line in text.splitlines()]
-        owner = owners[harness]
-        if f"started-by: {owner}" not in lines:
-            errors.append(f"{harness}: did not load the pinned version (not started by {owner})")
-            continue
-        if "skill: poteto-mode" not in lines:
-            errors.append(f"{harness}: did not load the pinned version (did not name poteto-mode)")
-            continue
-        if f"token: {token}" not in lines:
-            errors.append(f"{harness}: did not load the pinned version (token does not match the pin)")
+        owner = OWNERS[harness]
+        checks = (
+            ("started-by", owner, f"not started by {owner}"),
+            ("skill", "factory-builder", "did not name factory-builder"),
+            ("token", token, "token does not match the pin"),
+        )
+        for key, expected, wrong in checks:
+            found = [line for line in lines if line.startswith(f"{key}:")]
+            if len(found) > 1:
+                errors.append(f"{harness}: did not load the pinned version (more than one {key}: line)")
+                break
+            if found != [f"{key}: {expected}"]:
+                errors.append(f"{harness}: did not load the pinned version ({wrong})")
+                break
     return errors
-
-
-def _owners() -> dict[str, str]:
-    missing = [name for name in HARNESSES if name not in OWNERS]
-    if missing:
-        raise ValueError("no owning bot for " + ", ".join(missing))
-    return {name: OWNERS[name] for name in HARNESSES}
 
 
 def _skills(root: Path) -> tuple[tuple[str, Path], ...]:
@@ -365,7 +411,36 @@ def _skills(root: Path) -> tuple[tuple[str, Path], ...]:
             found.append((path.name, path))
     if not found:
         raise ValueError("pinned pstack has no skills")
+    pstack = {name for name, _path in found}
+    routers = _routers(root)
+    for name, _path in routers:
+        if name in pstack:
+            raise ValueError(f"skills/factory/{name} has the same name as a pstack skill")
+    return tuple(found) + routers
+
+
+def _routers(root: Path) -> tuple[tuple[str, Path], ...]:
+    base = factory_root(root)
+    if base.is_symlink() or not base.is_dir():
+        raise ValueError("skills/factory is missing")
+    found: list[tuple[str, Path]] = []
+    for path in sorted(base.iterdir(), key=lambda item: item.name):
+        if path.is_symlink():
+            raise ValueError(f"skills/factory: symlink is not allowed: {path.name}")
+        if path.is_dir() and (path / "SKILL.md").is_file():
+            found.append((path.name, path))
+    if not found:
+        raise ValueError("skills/factory has no router skills")
     return tuple(found)
+
+
+def _installed_hashes(pin: Pin, skills: tuple[tuple[str, Path], ...]) -> dict[str, str]:
+    names = {name for name, _path in skills}
+    hashes = {rel: digest for rel, digest in pin.files if rel.startswith("skills/")}
+    for rel, digest in pin.factory:
+        if rel.split("/", 1)[0] in names:
+            hashes[f"skills/{rel}"] = digest
+    return hashes
 
 
 def _skill_dir(root: Path, name: str) -> Path:
@@ -388,14 +463,14 @@ def _harness_for(dest: Path, anchor: Path, mode: Mode) -> str:
     _exhaustive(mode)
 
 
-def _place_owned(src: Path, dest: Path, mode: Mode, commit: str) -> None:
+def _place_owned(src: Path, dest: Path, mode: Mode, commit: str, pinned: Mapping[str, str]) -> None:
     skills_dir = dest.parent
     if skills_dir.is_symlink():
         raise OSError(f"refusing to follow symlinked skills dir {skills_dir}")
     skills_dir.mkdir(parents=True, exist_ok=True)
     if skills_dir.is_symlink() or not skills_dir.is_dir():
         raise OSError(f"refusing to follow symlinked skills dir {skills_dir}")
-    stage_root = Path(tempfile.mkdtemp(prefix=".orch-staging-", dir=skills_dir))
+    stage_root = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=skills_dir))
     staged = stage_root / dest.name
     try:
         if mode == "local":
@@ -405,31 +480,70 @@ def _place_owned(src: Path, dest: Path, mode: Mode, commit: str) -> None:
             _write_marker(staged, commit)
         else:
             _exhaustive(mode)
-        _swap_in(staged, dest)
+        _swap_in(staged, dest, stage_root / "backup" / dest.name, pinned)
     finally:
         _discard(stage_root)
 
 
-def _swap_in(staged: Path, dest: Path) -> None:
+def _swap_in(staged: Path, dest: Path, backup: Path, pinned: Mapping[str, str]) -> None:
     if dest.exists() or dest.is_symlink():
-        if not _installer_owns(dest, dest.name):
+        if not _installer_owns(dest, dest.name, pinned):
             raise OSError(f"refusing to replace unowned path {dest}")
     if not dest.exists() and not dest.is_symlink():
         os.rename(staged, dest)
         return
-    if dest.is_symlink() or dest.is_file():
+    if _is_non_dir(staged) and _is_non_dir(dest):
         os.replace(staged, dest)
         return
-    backup_name = tempfile.mkdtemp(prefix=f".orch-backup-{dest.name}-", dir=dest.parent)
-    os.rmdir(backup_name)
-    backup = Path(backup_name)
+    backup.parent.mkdir()
     os.rename(dest, backup)
     try:
         os.rename(staged, dest)
-    except OSError:
+    except BaseException:
         os.rename(backup, dest)
         raise
-    _discard(backup)
+
+
+def _is_non_dir(path: Path) -> bool:
+    return path.is_symlink() or not path.is_dir()
+
+
+def _recover_leftovers(skills_dir: Path, pinned: Mapping[str, str]) -> None:
+    if skills_dir.is_symlink() or not skills_dir.is_dir():
+        return
+    for entry in sorted(skills_dir.iterdir()):
+        if entry.name.startswith(_STAGING_PREFIX) and not entry.is_symlink() and entry.is_dir():
+            backups = entry / "backup"
+            if not backups.is_symlink() and backups.is_dir():
+                for backup in sorted(backups.iterdir()):
+                    _restore_backup(backup, skills_dir / backup.name, pinned)
+            if _owned_leftover(entry, pinned):
+                _discard(entry)
+        elif entry.name.startswith(_LEGACY_BACKUP_PREFIX):
+            name = entry.name.removeprefix(_LEGACY_BACKUP_PREFIX).rsplit("-", 1)[0]
+            dest = skills_dir / name
+            if name and _installer_owns(entry, name, pinned):
+                if dest.exists() or dest.is_symlink():
+                    _discard(entry)
+                else:
+                    os.rename(entry, dest)
+
+
+def _restore_backup(backup: Path, dest: Path, pinned: Mapping[str, str]) -> None:
+    if dest.exists() or dest.is_symlink():
+        return
+    if _installer_owns(backup, backup.name, pinned):
+        os.rename(backup, dest)
+
+
+def _owned_leftover(stage_root: Path, pinned: Mapping[str, str]) -> bool:
+    for entry in stage_root.iterdir():
+        if entry.name == "backup" and not entry.is_symlink() and entry.is_dir():
+            if not all(_installer_owns(item, item.name, pinned) for item in entry.iterdir()):
+                return False
+        elif not _installer_owns(entry, entry.name, pinned):
+            return False
+    return True
 
 
 def _copy_tree(src: Path, dest: Path) -> None:
@@ -461,22 +575,29 @@ def _discard(path: Path) -> None:
 
 
 def _scan_tree(root: Path) -> tuple[dict[str, str], list[str]]:
-    base = pstack_root(root)
+    return _scan(pstack_root(root), "skills/pstack")
+
+
+def _scan_factory(root: Path) -> tuple[dict[str, str], list[str]]:
+    return _scan(factory_root(root), "skills/factory")
+
+
+def _scan(base: Path, label: str) -> tuple[dict[str, str], list[str]]:
     errors: list[str] = []
     if base.is_symlink():
-        return {}, ["skills/pstack: symlink is not allowed"]
+        return {}, [f"{label}: symlink is not allowed"]
     if not base.is_dir():
-        return {}, ["skills/pstack is missing"]
+        return {}, [f"{label} is missing"]
     hashes: dict[str, str] = {}
     for path in base.rglob("*"):
         rel = path.relative_to(base).as_posix()
         if path.is_symlink():
-            errors.append(f"skills/pstack: symlink is not allowed: {rel}")
+            errors.append(f"{label}: symlink is not allowed: {rel}")
             continue
         if path.is_dir():
             continue
         if not path.is_file():
-            errors.append(f"skills/pstack: not a regular file: {rel}")
+            errors.append(f"{label}: not a regular file: {rel}")
             continue
         hashes[rel] = _sha256(path)
     return hashes, errors
@@ -486,11 +607,15 @@ def _canary_token(root: Path) -> str:
     path = root / SKILL_ROOT / "poteto-mode" / "playbooks" / "orchestrate.md"
     if path.is_symlink() or not path.is_file():
         raise ValueError("pinned poteto-mode playbook is missing")
-    match = _BOLD.search(path.read_text(encoding="utf-8"))
-    if match is None:
+    text = path.read_text(encoding="utf-8")
+    start = text.find("**")
+    if start < 0:
         raise ValueError("pinned poteto-mode has no version token")
-    token = match.group(1).strip()
-    if not token or "\n" in token:
+    end = text.find("**", start + 2)
+    if end < 0 or "\n" in text[start + 2 : end]:
+        raise ValueError("pinned poteto-mode first bold passage is not on one line")
+    token = text[start + 2 : end].strip()
+    if not token:
         raise ValueError("pinned poteto-mode has no version token")
     return token
 
@@ -519,60 +644,100 @@ def _symlink_skills_dir_error(anchor: Path, skills_dir: Path) -> str | None:
     return None
 
 
-def _skills_parent_is_symlink(dest: Path) -> bool:
-    return dest.parent.is_symlink()
+def _symlinked_component(anchor: Path, dest: Path) -> bool:
+    current = anchor
+    for part in dest.relative_to(anchor).parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
 
 
-def _unowned_error(dest: Path, name: str) -> str | None:
+def _unowned_error(dest: Path, name: str, pinned: Mapping[str, str]) -> str | None:
     if not dest.exists() and not dest.is_symlink():
         return None
-    if _installer_owns(dest, name):
+    if _installer_owns(dest, name, pinned):
         return None
     return f"refusing to replace unowned path {dest}"
 
 
-def _installer_owns(dest: Path, name: str) -> bool:
+def _installer_owns(dest: Path, name: str, pinned: Mapping[str, str]) -> bool:
     if dest.is_symlink():
-        return _symlink_into_pstack(dest, name)
+        return _symlink_into_source(dest, name)
     if dest.is_dir():
-        return _has_orch_marker(dest)
+        return _marker_matches_contents(dest, name, pinned)
     return False
 
 
-def _symlink_into_pstack(dest: Path, name: str) -> bool:
+def _symlink_into_source(dest: Path, name: str) -> bool:
     try:
         resolved = dest.resolve(strict=True)
     except OSError:
+        target = Path(os.readlink(dest))
+        return target.name == name and _source_parent(target.parts)
+    return resolved.name == name and resolved.is_dir() and _source_parent(resolved.parts)
+
+
+def _source_parent(parts: tuple[str, ...]) -> bool:
+    return parts[-4:-1] == _PSTACK_SKILLS or parts[-3:-1] == _FACTORY_SKILLS
+
+
+def _marker_matches_contents(dest: Path, name: str, pinned: Mapping[str, str]) -> bool:
+    listed = _marker_files(dest / _MARKER)
+    if listed is None:
         return False
-    parts = resolved.parts
-    return (
-        resolved.name == name
-        and resolved.is_dir()
-        and len(parts) >= 4
-        and parts[-4:-1] == ("skills", "pstack", "skills")
-    )
+    if not listed:
+        prefix = f"skills/{name}/"
+        listed = {rel.removeprefix(prefix): digest for rel, digest in pinned.items() if rel.startswith(prefix)}
+    return bool(listed) and _content_hashes(dest) == listed
 
 
-def _has_orch_marker(dest: Path) -> bool:
-    path = dest / _MARKER
+def _marker_files(path: Path) -> dict[str, str] | None:
     if path.is_symlink() or not path.is_file():
-        return False
+        return None
     try:
         lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     except (OSError, UnicodeError):
-        return False
+        return None
     if len(lines) < 2 or lines[0] != f"installer: {_INSTALLER}":
-        return False
+        return None
     if not lines[1].startswith("commit: "):
-        return False
-    return _COMMIT.fullmatch(lines[1].removeprefix("commit: ")) is not None
+        return None
+    if _COMMIT.fullmatch(lines[1].removeprefix("commit: ")) is None:
+        return None
+    files: dict[str, str] = {}
+    for line in lines[2:]:
+        if not line.startswith("file: "):
+            return None
+        digest, _, rel = line.removeprefix("file: ").partition(" ")
+        if _SHA256.fullmatch(digest) is None or not _safe_rel(rel):
+            return None
+        files[rel] = digest
+    return files
+
+
+def _content_hashes(dest: Path) -> dict[str, str] | None:
+    hashes: dict[str, str] = {}
+    for path in dest.rglob("*"):
+        rel = path.relative_to(dest).as_posix()
+        if path.is_symlink():
+            return None
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            return None
+        if rel != _MARKER:
+            hashes[rel] = _sha256(path)
+    return hashes
 
 
 def _write_marker(dest: Path, commit: str) -> None:
-    (dest / _MARKER).write_text(
-        f"installer: {_INSTALLER}\ncommit: {commit}\n",
-        encoding="utf-8",
-    )
+    hashes = _content_hashes(dest)
+    if not hashes:
+        raise OSError(f"staged copy has no regular files: {dest}")
+    lines = [f"installer: {_INSTALLER}", f"commit: {commit}"]
+    lines.extend(f"file: {digest} {rel}" for rel, digest in sorted(hashes.items()))
+    (dest / _MARKER).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _manifest_versions(root: Path) -> tuple[str, ...] | str:
@@ -594,13 +759,16 @@ def _manifest_versions(root: Path) -> tuple[str, ...] | str:
 
 def _write_lock(root: Path, pin: Pin) -> None:
     lines = [
-        "# A pin bump updates version, commit, and files together.",
+        "# A pin bump updates version, commit, files, and factory together.",
         f"version: {json.dumps(pin.version)}",
         f"commit: {pin.commit}",
         f"token: {json.dumps(pin.token)}",
         "files:",
     ]
     for rel, digest in pin.files:
+        lines.append(f"  {rel}: {digest}")
+    lines.append("factory:")
+    for rel, digest in pin.factory:
         lines.append(f"  {rel}: {digest}")
     lines.append("")
     path = lock_file(root)

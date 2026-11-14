@@ -28,7 +28,8 @@ case " $* " in
     fi ;;
   *" checkout "*)
     mkdir -p "$2/pstack/skills/statechart/scripts"
-    printf '#!/bin/sh\\nexit 0\\n' > "$2/pstack/skills/statechart/scripts/statechart" ;;
+    printf '#!/bin/sh\\nexit 0\\n' > "$2/pstack/skills/statechart/scripts/statechart"
+    chmod +x "$2/pstack/skills/statechart/scripts/statechart" ;;
 esac
 exit 0
 """
@@ -84,7 +85,7 @@ def count(log: Path, name: str) -> int:
 @pytest.mark.parametrize("fails", [1, 3])
 def test_downloads_retry_through_rate_limits(tmp_path: Path, fails: int) -> None:
     proc, log = run_check(tmp_path, fails, fails)
-    assert "1/6 phase 1 model" in proc.stdout, proc.stderr
+    assert "1/7 phase 1 model" in proc.stdout, proc.stderr
     assert count(log, "fetches") == fails + 1
     assert count(log, "curls") == fails + 1
     sleeps = (log / "sleeps").read_text().split()
@@ -97,7 +98,7 @@ def test_downloads_give_up_after_every_try_fails(tmp_path: Path, curl_fails: int
                                                  git_fails: int) -> None:
     proc, log = run_check(tmp_path, curl_fails, git_fails)
     assert proc.returncode != 0
-    assert "1/6 phase 1 model" not in proc.stdout
+    assert "1/7 phase 1 model" not in proc.stdout
     tries = count(log, "curls") if curl_fails else count(log, "fetches")
     assert 1 < tries < 100
 

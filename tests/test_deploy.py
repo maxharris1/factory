@@ -1,5 +1,7 @@
 import os
+import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -615,7 +617,7 @@ def test_install_falls_back_to_the_profile_loop_and_cron_without_systemd(tmp_pat
     assert (tmp_path / ".config/factory/self-heal-autostart").is_file()
     profile = (tmp_path / ".config/factory/profile.sh").read_text(encoding="utf-8")
     assert f'"{ROOT}/deploy/self-heal.sh" ensure' in profile
-    assert f'"{ROOT}/deploy/linear-webhook-service.sh" ensure' in profile
+    assert f'"{tmp_path}/.local/share/factory/linear-webhook-service.sh" ensure' in profile
 
 
 def test_the_profile_is_guarded_and_makes_its_state_dir(tmp_path: Path) -> None:
@@ -704,12 +706,19 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         assert not (tmp_path / "poller-continued").exists()
         assert all(_ends(child) for child in children)
         assert bystander.poll() is None
-        assert not poller.exists() and not listener.exists()
+        assert not poller.exists()
+        # Merged with #134: the listener path now holds the service script's
+        # installed copy, which a later install leaves in place.
+        assert listener.read_bytes() == (ROOT / "deploy/linear-webhook-service.sh").read_bytes()
         assert (tmp_path / "legacy-stopped").is_file()
         table = (tmp_path / "crontab.txt").read_text(encoding="utf-8")
         assert "0 3 * * * /usr/bin/true # keep" in table
         assert str(legacy) not in table
         assert f"stopped legacy {poller}" in result.stdout
+        again = _install(environment)
+        assert again.returncode == 0, again.stderr
+        assert f"removed legacy launcher {listener}" not in again.stdout
+        assert listener.exists()
     finally:
         for proc in (*pollers, bystander):
             if proc.poll() is None:
@@ -732,3 +741,49 @@ def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(
     assert result.returncode == 1
     assert "cannot read the crontab" in result.stderr
     assert legacy.exists()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
+    tmp_path: Path,
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    installed = tmp_path / ".local/share/factory/linear-webhook-service.sh"
+    assert installed.read_bytes() == (ROOT / "deploy/linear-webhook-service.sh").read_bytes()
+    assert installed.stat().st_mode & 0o777 == 0o755
+    wrapper = tmp_path / ".local/bin/orch"
+    wrapper.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {
+        **_profile_env(tmp_path),
+        "LINEAR_WEBHOOK_PORT": str(port),
+        "LINEAR_WEBHOOK_TUNNEL_HOST": "",
+    }
+    source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
+    lock = tmp_path / ".local/state/factory/linear-webhook-listener.lock"
+
+    off = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                         capture_output=True, timeout=30, check=False)
+    assert off.returncode == 0 and off.stdout == "ok", off.stderr
+    time.sleep(0.5)
+    assert not lock.exists()
+
+    (tmp_path / ".config/factory/linear-webhook-autostart").touch()
+    on = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                        capture_output=True, timeout=30, check=False)
+    assert on.returncode == 0 and on.stdout == "ok", on.stderr
+    try:
+        deadline = time.monotonic() + 15
+        while not (tmp_path / ".local/state/factory/linear-webhook-listener.pid").exists():
+            assert time.monotonic() < deadline, "the profile hook never started the listener loop"
+            time.sleep(0.1)
+        status = subprocess.run([str(installed), "status"], env=env, text=True,
+                                capture_output=True, timeout=30, check=False)
+        assert status.returncode == 0, status.stdout + status.stderr
+    finally:
+        stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
+                                 capture_output=True, timeout=60, check=False)
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr

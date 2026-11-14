@@ -1,39 +1,131 @@
-"""deploy/linear-webhook-service.sh supervises the listener and its tunnel (#107).
-
-Nothing here installs or starts anything outside a temporary HOME: `orch`
-and `ssh` are fakes that record their argv and run until SIGTERM.
-"""
+"""deploy/linear-webhook-service.sh: one listener loop and one tunnel loop per
+state directory, however many times `ensure` runs (issue #134)."""
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
+import shutil
 import signal
+import socket
 import subprocess
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from lib.queue import SQLiteJobQueue
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "deploy" / "linear-webhook-service.sh"
-STATE = Path(".local/state/factory")
 
-FAKE = """#!/usr/bin/env python3
-import os, signal, sys, time
-from pathlib import Path
+pytestmark = pytest.mark.skipif(
+    shutil.which("flock") is None or not Path("/proc/self/cmdline").exists(),
+    reason="needs flock(1) and /proc",
+)
 
-name = Path(sys.argv[0]).name
-with (Path(os.environ["HOME"]) / f"starts-{name}").open("a") as handle:
-    handle.write(f"{os.getpid()}\\t{os.environ.get('ORCH_DB', '')}\\t{' '.join(sys.argv[1:])}\\n")
-if os.environ.get("FAKE_FAIL") == name:
-    raise SystemExit(2)
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-while True:
-    time.sleep(0.2)
+FAKE_ORCH = """#!/usr/bin/env python3
+import os, sys, time
+with open(os.path.join(os.environ["HOME"], "orch-calls.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+assert sys.argv[1:3] == ["linear-webhook", "serve"], sys.argv
+time.sleep(300)
 """
+
+FAKE_SSH = """#!/usr/bin/env python3
+import os, sys, time
+with open(os.path.join(os.environ["HOME"], "ssh-calls.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+if os.environ.get("FAKE_SSH_FORWARD_FAIL"):
+    print("Error: remote port forwarding failed for listen port 8787", file=sys.stderr)
+    raise SystemExit(255)
+time.sleep(300)
+"""
+
+MODES = ("_listener-loop", "_tunnel-loop")
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _environ(pid: int) -> dict[str, str]:
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    return dict(
+        item.split("=", 1) for item in raw.decode(errors="replace").split("\0") if "=" in item
+    )
+
+
+def _argv(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return raw.decode(errors="replace").split("\0")[:-1]
+
+
+def _processes_of(home: Path) -> list[int]:
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            if _environ(int(entry.name)).get("HOME") == str(home) and alive(int(entry.name)):
+                found.append(int(entry.name))
+    return found
+
+
+def _loops(home: Path, mode: str) -> list[int]:
+    return [
+        pid
+        for pid in _processes_of(home)
+        if any(
+            arg.endswith("linear-webhook-service.sh") and argv[i + 1 : i + 2] == [mode]
+            for argv in [_argv(pid)]
+            for i, arg in enumerate(argv)
+        )
+    ]
+
+
+def _calls(home: Path, name: str) -> list[str]:
+    path = home / f"{name}-calls.log"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def _state(home: Path) -> Path:
+    return home / ".local" / "state" / "factory"
+
+
+def _wait_for(predicate, timeout: float = 10.0, what: str = "condition") -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.05)
+
+
+@contextmanager
+def _held(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def _lock_free(path: Path) -> bool:
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return True
 
 
 @pytest.fixture
@@ -41,34 +133,42 @@ def home(tmp_path: Path):
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
     bin_dir.mkdir(parents=True)
-    for name in ("orch", "ssh"):
-        fake = bin_dir / name
-        fake.write_text(FAKE, encoding="utf-8")
-        fake.chmod(0o755)
-    (home / ".config" / "factory").mkdir(parents=True)
+    for name, source in (("orch", FAKE_ORCH), ("ssh", FAKE_SSH)):
+        (bin_dir / name).write_text(source, encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
     yield home
     _service(home, "stop")
-    for name in ("orch", "ssh"):
-        for pid in _starts(home, name):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+    for pid in _processes_of(home):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
-def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
-    env = {
+def _env(home: Path, **extra: str) -> dict[str, str]:
+    return {
         "HOME": str(home),
-        "PATH": f"{home / '.local' / 'bin'}:/usr/bin:/bin",
-        "ORCH_LINEAR_RESTART_SEC": "0.2",
-        "ORCH_LINEAR_START_WAIT": "10",
-        "ORCH_LINEAR_STOP_WAIT": "10",
-        "ORCH_CRONTAB": str(cron) if cron is not None else str(home / "no-such-crontab"),
+        "PATH": "/usr/bin:/bin",
+        "LINEAR_WEBHOOK_PORT": str(extra.pop("port", "") or _port_of(home)),
+        "LINEAR_WEBHOOK_TUNNEL_HOST": "test-host",
+        "LINEAR_WEBHOOK_START_WAIT": "10",
+        "LINEAR_WEBHOOK_STOP_WAIT": "10",
+        "ORCH_CRONTAB": str(home / "no-such-crontab"),
         **extra,
     }
+
+
+def _port_of(home: Path) -> int:
+    path = home / "port"
+    if not path.exists():
+        path.write_text(str(_free_port()))
+    return int(path.read_text())
+
+
+def _service(home: Path, *args: str, **extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(SERVICE), *args],
-        env=env,
+        env=_env(home, **extra),
         text=True,
         capture_output=True,
         timeout=60,
@@ -76,225 +176,245 @@ def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
     )
 
 
-def _records(home: Path, name: str) -> list[list[str]]:
-    path = home / f"starts-{name}"
-    if not path.exists():
-        return []
-    return [line.split("\t") for line in path.read_text().splitlines() if line.strip()]
+def test_concurrent_ensure_starts_exactly_one_listener_and_one_tunnel(home: Path) -> None:
+    runs = [
+        subprocess.Popen(
+            ["bash", str(SERVICE), "ensure"],
+            env=_env(home),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(8)
+    ]
+    for run in runs:
+        out, err = run.communicate(timeout=60)
+        assert run.returncode == 0, out + err
 
+    _wait_for(lambda: _calls(home, "orch") and _calls(home, "ssh"), what="serve and ssh")
+    time.sleep(1.0)
+    assert len(_loops(home, "_listener-loop")) == 1
+    assert len(_loops(home, "_tunnel-loop")) == 1
+    port = _port_of(home)
+    assert _calls(home, "orch") == [f"linear-webhook serve --bind 127.0.0.1:{port}"]
+    assert len(_calls(home, "ssh")) == 1
+    assert f"-R 127.0.0.1:{port}:127.0.0.1:{port} test-host" in _calls(home, "ssh")[0]
+    assert "ExitOnForwardFailure=yes" in _calls(home, "ssh")[0]
 
-def _starts(home: Path, name: str = "orch") -> list[int]:
-    return [int(record[0]) for record in _records(home, name)]
-
-
-def _wait_for(predicate, seconds: float = 15.0):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(0.05)
-    raise AssertionError("timed out")
-
-
-def _supervisor(home: Path) -> int:
-    return int((home / STATE / "linear-webhook.pid").read_text().strip())
-
-
-def _tunnel_env(home: Path, text: str) -> None:
-    (home / ".config/factory/linear-webhook.env").write_text(text, encoding="utf-8")
-
-
-def test_start_runs_the_listener_and_status_reports_it(home: Path) -> None:
-    started = _service(home, "start")
-    assert started.returncode == 0, started.stderr
-    record = _wait_for(lambda: _records(home, "orch"))[0]
-    assert record[2] == "linear-webhook serve"
-    assert record[1] == str(home / STATE / "orch.db")
-    assert alive(int(record[0])) and alive(_supervisor(home))
     status = _service(home, "status")
-    assert status.returncode == 0
-    assert status.stdout.startswith("running (pid ")
-    again = _service(home, "start")
-    assert again.returncode == 0
-    assert "already running" in again.stdout
-    time.sleep(0.4)
-    assert len(_starts(home)) == 1
+    assert status.returncode == 0, status.stdout + status.stderr
+    assert "listener: running" in status.stdout
+    assert "tunnel: running" in status.stdout
 
-
-def test_a_killed_listener_is_restarted_by_its_supervisor(home: Path) -> None:
-    assert _service(home, "start").returncode == 0
-    first = _wait_for(lambda: _starts(home))[0]
-    supervisor = _supervisor(home)
-    os.kill(first, signal.SIGKILL)
-    second = _wait_for(lambda: len(_starts(home)) >= 2 and _starts(home)[1])
-    assert second != first and alive(second)
-    assert _supervisor(home) == supervisor
-    assert "restarting in" in (home / STATE / "linear-webhook.log").read_text()
-
-
-def test_stop_ends_everything_and_holds_it_until_start(home: Path) -> None:
-    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\nLINEAR_TUNNEL_REMOTE_PORT=9443\n")
-    assert _service(home, "start").returncode == 0
-    listener = _wait_for(lambda: _starts(home))[0]
-    tunnel = _wait_for(lambda: _starts(home, "ssh"))[0]
-    supervisor = _supervisor(home)
     stopped = _service(home, "stop")
-    assert stopped.returncode == 0, stopped.stderr
-    _wait_for(lambda: not any(alive(pid) for pid in (listener, tunnel, supervisor)))
-    time.sleep(0.6)
-    assert len(_starts(home)) == 1 and len(_starts(home, "ssh")) == 1
-    status = _service(home, "status")
-    assert status.returncode == 3
-    assert "stopped" in status.stdout
-    held = _service(home, "ensure")
-    assert (held.returncode, held.stdout, held.stderr) == (0, "", "")
-    time.sleep(0.4)
-    assert len(_starts(home)) == 1
-    assert _service(home, "start").returncode == 0
-    _wait_for(lambda: len(_starts(home)) == 2)
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert _processes_of(home) == []
+    assert _service(home, "status").returncode == 3
 
 
-def test_restart_replaces_the_supervisor_and_its_listener(home: Path) -> None:
-    assert _service(home, "start").returncode == 0
-    first = _wait_for(lambda: _starts(home))[0]
-    supervisor = _supervisor(home)
-    restarted = _service(home, "restart")
-    assert restarted.returncode == 0, restarted.stderr
-    _wait_for(lambda: len(_starts(home)) == 2)
-    assert not alive(first) and not alive(supervisor)
-    assert _supervisor(home) != supervisor
-    assert not (home / STATE / "linear-webhook.stopped").exists()
-
-
-def test_ensure_is_silent_when_running_and_starts_it_when_not(home: Path) -> None:
-    first = _service(home, "ensure")
-    assert first.returncode == 0, first.stderr
-    assert "started" in first.stdout
-    _wait_for(lambda: _starts(home))
-    for _ in range(3):
-        quiet = _service(home, "ensure")
-        assert (quiet.returncode, quiet.stdout, quiet.stderr) == (0, "", "")
-    assert len(_starts(home)) == 1
-    supervisor = _supervisor(home)
-    os.kill(supervisor, signal.SIGKILL)
-    _wait_for(lambda: not alive(supervisor))
-    assert _service(home, "ensure").returncode == 0
-    _wait_for(lambda: _supervisor(home) != supervisor and alive(_supervisor(home)))
-
-
-def _lose_the_supervisor(home: Path) -> tuple[int, int]:
-    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\nLINEAR_TUNNEL_REMOTE_PORT=9443\n")
-    before = len(_starts(home))
-    assert _service(home, "start").returncode == 0
-    listener = _wait_for(lambda: _starts(home)[before:])[0]
-    tunnel = _wait_for(lambda: _starts(home, "ssh"))[0]
-    supervisor = _supervisor(home)
-    os.kill(supervisor, signal.SIGKILL)
-    _wait_for(lambda: not alive(supervisor))
-    return listener, tunnel
-
-
-@pytest.fixture
-def bystander(home: Path):
-    """A listener this service did not start, in a process group of its own."""
-    proc = subprocess.Popen([str(home / ".local/bin/orch"), "linear-webhook", "serve"],
-                            env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-                            start_new_session=True)
-    _wait_for(lambda: proc.pid in _starts(home))
-    yield proc.pid
-    proc.kill()
-    proc.wait()
-
-
-@pytest.mark.parametrize("command", ["ensure", "start", "restart"])
-def test_a_lost_supervisors_children_are_replaced_not_doubled(
-    home: Path, bystander: int, command: str
+@pytest.mark.parametrize("mode,lock", [
+    ("_listener-loop", "linear-webhook-listener.lock"),
+    ("_tunnel-loop", "linear-webhook-tunnel.lock"),
+])
+def test_a_second_loop_exits_0_without_spawning_while_the_lock_is_held(
+    home: Path, mode: str, lock: str
 ) -> None:
-    listener, tunnel = _lose_the_supervisor(home)
-
-    replaced = _service(home, command)
-
-    assert replaced.returncode == 0, replaced.stderr
-    assert not alive(listener) and not alive(tunnel)
-    _wait_for(lambda: len(_starts(home, "ssh")) == 2)
-    live = [pid for pid in _starts(home) if alive(pid)]
-    assert sorted(live) == sorted([bystander, _starts(home)[-1]])
-    assert alive(bystander)
-
-
-def test_stop_ends_a_lost_supervisors_children(home: Path, bystander: int) -> None:
-    listener, tunnel = _lose_the_supervisor(home)
-
-    stopped = _service(home, "stop")
-
-    assert stopped.returncode == 0, stopped.stderr
-    assert not alive(listener) and not alive(tunnel)
-    time.sleep(0.6)
-    assert [pid for pid in _starts(home) if alive(pid)] == [bystander]
-    assert _starts(home, "ssh") == [tunnel]
+    state = _state(home)
+    pidfile = state / lock.replace(".lock", ".pid")
+    with _held(state / lock):
+        pidfile.write_text("4242\n")
+        result = subprocess.run(
+            ["bash", str(SERVICE), mode],
+            env=_env(home),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "already running (lock held)" in result.stdout
+    assert _calls(home, "orch") == []
+    assert _calls(home, "ssh") == []
+    assert pidfile.read_text() == "4242\n"
 
 
-def test_no_tunnel_without_both_settings(home: Path) -> None:
-    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\n")
-    assert _service(home, "start").returncode == 0
-    _wait_for(lambda: _starts(home))
-    time.sleep(0.5)
-    assert _starts(home, "ssh") == []
+def test_listener_never_starts_serve_while_the_port_has_a_listener(home: Path) -> None:
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        result = _service(
+            home, "ensure", port=str(port), LINEAR_WEBHOOK_TUNNEL_HOST="",
+            LINEAR_WEBHOOK_RETRY_SEC="0.2", LINEAR_WEBHOOK_RETRY_MAX_SEC="0.4",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        log = _state(home) / "linear-webhook-listener.log"
+        _wait_for(lambda: log.exists() and "already has a listener" in log.read_text(),
+                  what="the busy-port line")
+        time.sleep(1.5)
+        assert _calls(home, "orch") == []
+        assert log.read_text().count("already has a listener") == 1
+        assert _loops(home, "_tunnel-loop") == []
+    _wait_for(lambda: _calls(home, "orch"), what="serve once the port is free")
+    assert _calls(home, "orch") == [f"linear-webhook serve --bind 127.0.0.1:{port}"]
 
 
-def test_the_tunnel_runs_with_the_exact_ssh_argv(home: Path) -> None:
-    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS=relay\nLINEAR_TUNNEL_REMOTE_PORT=9443\n")
-    assert _service(home, "start").returncode == 0
-    record = _wait_for(lambda: _records(home, "ssh"))[0]
-    assert record[2] == (
-        "-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 "
-        "-R 9443:127.0.0.1:8787 relay"
-    )
-    tunnel = int(record[0])
-    os.kill(tunnel, signal.SIGKILL)
-    _wait_for(lambda: len(_starts(home, "ssh")) >= 2)
-    assert len(_starts(home)) == 1
+def test_refused_forward_backs_off_doubling_to_the_cap(home: Path, tmp_path: Path) -> None:
+    out = tmp_path / "tunnel.out"
+    with out.open("w") as sink:
+        loop = subprocess.Popen(
+            ["bash", str(SERVICE), "_tunnel-loop"],
+            env=_env(
+                home, FAKE_SSH_FORWARD_FAIL="1",
+                LINEAR_WEBHOOK_RETRY_SEC="0.25", LINEAR_WEBHOOK_RETRY_MAX_SEC="1",
+            ),
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _wait_for(lambda: out.read_text().count("forward refused") >= 4, timeout=15,
+                      what="four refused forwards")
+        finally:
+            loop.terminate()
+            loop.wait(timeout=10)
+    delays = re.findall(r"forward refused: port \d+ already forwarded on test-host; retry in (\S+)s",
+                        out.read_text())
+    assert delays[:4] == ["0.25", "0.5", "1", "1"]
+    assert loop.returncode in (0, 143)
 
 
-def test_the_tunnel_bind_can_be_set(home: Path) -> None:
-    _tunnel_env(
-        home,
-        "LINEAR_TUNNEL_SSH_ALIAS=relay\nLINEAR_TUNNEL_REMOTE_PORT=9443\n"
-        "LINEAR_TUNNEL_BIND=127.0.0.1:9000\n",
-    )
-    assert _service(home, "start").returncode == 0
-    record = _wait_for(lambda: _records(home, "ssh"))[0]
-    assert record[2].endswith("-R 9443:127.0.0.1:9000 relay")
-
-
-def test_a_malformed_tunnel_setting_is_refused_without_echoing_it(home: Path) -> None:
-    _tunnel_env(home, "LINEAR_TUNNEL_SSH_ALIAS='relay;id'\nLINEAR_TUNNEL_REMOTE_PORT=9443\n")
-    assert _service(home, "start").returncode == 0
-    _wait_for(lambda: _starts(home))
-    log = _wait_for(lambda: "tunnel not started" in (home / STATE / "linear-webhook.log").read_text()
-                    and (home / STATE / "linear-webhook.log").read_text())
-    assert "relay;id" not in log
-    assert _starts(home, "ssh") == []
-
-
-def test_every_line_the_script_writes_is_utc_timestamped(home: Path) -> None:
-    started = _service(home, "start", FAKE_FAIL="orch")
-    assert started.returncode == 0, started.stderr
-    _wait_for(lambda: len(_starts(home)) >= 3, 20)
-    assert _service(home, "stop").returncode == 0
-    stamp = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ linear-webhook-service: ")
-    log = (home / STATE / "linear-webhook.log").read_text().splitlines()
-    assert any("exited 2; restarting" in line for line in log)
-    assert log and all(stamp.match(line) for line in log), log
-    assert stamp.match(started.stdout)
-
-
-def test_install_autostart_adds_tagged_cron_lines_and_remove_drops_them(
+def test_stop_ends_every_loop_including_old_copies_and_their_children(
     home: Path, tmp_path: Path
 ) -> None:
-    table = tmp_path / "crontab.txt"
-    table.write_text("0 1 * * * keep-me\n", encoding="utf-8")
+    old = tmp_path / "old" / "linear-webhook-service.sh"
+    old.parent.mkdir()
+    old.write_text("#!/usr/bin/env bash\nsleep 300 &\nwait\n")
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
+    olds = [
+        subprocess.Popen(["bash", str(old), mode], env=env, start_new_session=True)
+        for mode in ("_listener-loop", "_listener-loop", "_tunnel-loop")
+    ]
+    foreign = subprocess.Popen(
+        ["bash", str(old), "_listener-loop"],
+        env={"HOME": str(other_home), "PATH": "/usr/bin:/bin"},
+        start_new_session=True,
+    )
+    try:
+        assert _service(home, "ensure").returncode == 0
+        _wait_for(lambda: _calls(home, "orch") and _calls(home, "ssh"), what="serve and ssh")
+        _wait_for(lambda: len(_loops(home, "_listener-loop")) == 3, what="the loops")
+        children = [pid for pid in _processes_of(home) if _argv(pid)[:1] == ["sleep"]]
+        assert len(children) == 3
+
+        stopped = _service(home, "stop")
+        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+        for proc in olds:
+            proc.wait(timeout=5)
+        assert all(not alive(pid) for pid in children)
+        assert _processes_of(home) == []
+        state = _state(home)
+        assert _lock_free(state / "linear-webhook-listener.lock")
+        assert _lock_free(state / "linear-webhook-tunnel.lock")
+        assert foreign.poll() is None, "stop must leave another state dir's loops alone"
+
+        held = _service(home, "ensure")
+        assert held.returncode == 0 and held.stdout == ""
+        time.sleep(0.5)
+        assert _processes_of(home) == []
+    finally:
+        foreign.kill()
+        foreign.wait()
+
+
+def test_stop_fails_while_a_lock_is_held_by_a_process_it_cannot_see(
+    home: Path, tmp_path: Path
+) -> None:
+    # A loop in another PID namespace: it holds the lock, but this shell's
+    # /proc (here an empty one) does not list it.
+    lock = _state(home) / "linear-webhook-listener.lock"
+    lock.parent.mkdir(parents=True)
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "60"])
+    try:
+        _wait_for(lambda: not _lock_free(lock), what="the holder")
+        empty = tmp_path / "proc"
+        empty.mkdir()
+        result = _service(home, "stop", ORCH_PROC_DIR=str(empty))
+        assert holder.poll() is None
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1
+    assert f"{lock} is still held" in result.stderr
+
+
+def test_start_clears_a_stop_and_ensure_restarts_a_killed_loop(home: Path) -> None:
+    assert _service(home, "stop").returncode == 0
+    assert (_state(home) / "linear-webhook.stopped").exists()
+    started = _service(home, "start")
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert "started _listener-loop" in started.stdout
+    assert not (_state(home) / "linear-webhook.stopped").exists()
+    again = _service(home, "start")
+    assert "_listener-loop already running" in again.stdout
+
+    (listener,) = _loops(home, "_listener-loop")
+    os.kill(listener, signal.SIGKILL)
+    _wait_for(lambda: not alive(listener), what="the killed loop")
+    assert _lock_free(_state(home) / "linear-webhook-listener.lock")
+    assert _service(home, "ensure").returncode == 0
+    assert len(_loops(home, "_listener-loop")) == 1
+    assert len(_loops(home, "_tunnel-loop")) == 1
+
+
+def test_autostart_flag(home: Path) -> None:
+    flag = home / ".config" / "factory" / "linear-webhook-autostart"
+    assert _service(home, "install-autostart").returncode == 0
+    assert flag.is_file()
+    assert _service(home, "remove-autostart").returncode == 0
+    assert not flag.exists()
+
+
+def _invisible_listener_lock(home: Path) -> subprocess.Popen:
+    lock = _state(home) / "linear-webhook-listener.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "60"])
+    _wait_for(lambda: not _lock_free(lock), what="the holder")
+    return holder
+
+
+def test_a_restart_whose_stop_fails_leaves_no_hold(home: Path, tmp_path: Path) -> None:
+    # #107 review: self-heal and ensure read a leftover hold as an operator's
+    # stop and would never retry or escalate.
+    holder = _invisible_listener_lock(home)
+    empty = tmp_path / "proc"
+    empty.mkdir()
+    try:
+        result = _service(home, "restart", ORCH_PROC_DIR=str(empty))
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1
+    assert "is still held" in result.stderr
+    assert not (_state(home) / "linear-webhook.stopped").exists()
+
+
+def test_a_failed_restart_keeps_an_operators_hold(home: Path, tmp_path: Path) -> None:
+    assert _service(home, "stop").returncode == 0
+    holder = _invisible_listener_lock(home)
+    empty = tmp_path / "proc"
+    empty.mkdir()
+    try:
+        result = _service(home, "restart", ORCH_PROC_DIR=str(empty))
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 1
+    assert (_state(home) / "linear-webhook.stopped").exists()
+
+
+def _fake_crontab(tmp_path: Path, table: Path) -> Path:
     crontab = tmp_path / "crontab"
     crontab.write_text(
         "#!/usr/bin/env python3\n"
@@ -307,8 +427,17 @@ def test_install_autostart_adds_tagged_cron_lines_and_remove_drops_them(
         encoding="utf-8",
     )
     crontab.chmod(0o755)
+    return crontab
+
+
+def test_install_autostart_adds_tagged_cron_lines_and_remove_drops_them(
+    home: Path, tmp_path: Path
+) -> None:
+    table = tmp_path / "crontab.txt"
+    table.write_text("0 1 * * * keep-me\n", encoding="utf-8")
+    crontab = str(_fake_crontab(tmp_path, table))
     for _ in range(2):
-        result = _service(home, "install-autostart", cron=crontab)
+        result = _service(home, "install-autostart", ORCH_CRONTAB=crontab)
         assert result.returncode == 0, result.stderr
     lines = table.read_text().splitlines()
     tagged = [line for line in lines if line.endswith("# factory-linear-webhook")]
@@ -319,9 +448,8 @@ def test_install_autostart_adds_tagged_cron_lines_and_remove_drops_them(
     assert "0 1 * * * keep-me" in lines
     assert (home / ".config/factory/linear-webhook-autostart").exists()
 
-    assert _service(home, "remove-autostart", cron=crontab).returncode == 0
-    lines = table.read_text().splitlines()
-    assert lines == ["0 1 * * * keep-me"]
+    assert _service(home, "remove-autostart", ORCH_CRONTAB=crontab).returncode == 0
+    assert table.read_text().splitlines() == ["0 1 * * * keep-me"]
     assert not (home / ".config/factory/linear-webhook-autostart").exists()
 
 
@@ -330,13 +458,92 @@ def test_an_unreadable_crontab_changes_nothing(home: Path, tmp_path: Path) -> No
     crontab.write_text("#!/bin/sh\necho 'crontab: permission denied' >&2\nexit 1\n",
                        encoding="utf-8")
     crontab.chmod(0o755)
-    result = _service(home, "install-autostart", cron=crontab)
+    result = _service(home, "install-autostart", ORCH_CRONTAB=str(crontab))
     assert result.returncode == 1
     assert "cannot read the crontab" in result.stderr
     assert not (home / ".config/factory/linear-webhook-autostart").exists()
 
 
-def test_an_unknown_command_is_a_usage_error(home: Path) -> None:
-    result = _service(home, "serve")
+@pytest.mark.parametrize("extra", [
+    {"LINEAR_WEBHOOK_TUNNEL_HOST": "-oProxyCommand=evil"},
+    {"port": "87a"},
+    {"LINEAR_WEBHOOK_RETRY_SEC": "soon"},
+])
+def test_ensure_refuses_bad_settings(home: Path, extra: dict[str, str]) -> None:
+    result = _service(home, "ensure", **extra)
+    assert result.returncode == 2
+    assert _processes_of(home) == []
+
+
+def test_unknown_command(home: Path) -> None:
+    result = _service(home, "bogus")
     assert result.returncode == 2
     assert "usage:" in result.stderr
+
+
+def _real_orch(home: Path) -> None:
+    wrapper = home / ".local" / "bin" / "orch"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {ROOT / 'bin' / 'orch'} \"$@\"\n")
+    wrapper.chmod(0o755)
+
+
+def _accepts(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+    except OSError:
+        return False
+    return True
+
+
+def test_listener_serves_the_orch_config_named_by_orch_config(
+    home: Path, tmp_path: Path
+) -> None:
+    _real_orch(home)
+    secret = tmp_path / "linear-webhook.secret"
+    secret.write_text("s" * 40, encoding="utf-8")
+    secret.chmod(0o600)
+    config = tmp_path / "custom-orch.yml"
+    config.write_text(
+        "poll_seconds: 60\n"
+        "linear:\n  api_key_env: LINEAR_KEY\n"
+        "projects:\n"
+        "  - repo: acme/widgets\n"
+        "    factory_ref: main\n"
+        "    linear_project_id: project-1\n"
+        "linear_webhook:\n"
+        "  bind: 127.0.0.1:8787\n"
+        f"  secret_file: {secret}\n",
+        encoding="utf-8",
+    )
+    database = tmp_path / "orch.db"
+    SQLiteJobQueue(database, clock=time.time)
+
+    result = _service(
+        home, "ensure", LINEAR_WEBHOOK_TUNNEL_HOST="",
+        ORCH_CONFIG=str(config), ORCH_DB=str(database),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    _wait_for(lambda: _accepts(_port_of(home)), timeout=20, what="serve on the port")
+
+
+def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> None:
+    lock = _state(home) / "linear-webhook-listener.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    reader = subprocess.Popen(["tail", "-f", str(lock)], stdout=subprocess.DEVNULL)
+    try:
+        _wait_for(
+            lambda: any(
+                os.path.realpath(f"/proc/{reader.pid}/fd/{fd}") == str(lock.resolve())
+                for fd in os.listdir(f"/proc/{reader.pid}/fd")
+            ),
+            what="the reader to open the lock file",
+        )
+        result = _service(home, "stop")
+        time.sleep(0.3)
+        assert reader.poll() is None, "stop killed a process that holds no lock"
+    finally:
+        reader.kill()
+        reader.wait()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no linear webhook loop is running" in result.stdout

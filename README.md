@@ -70,7 +70,7 @@ with no local clone and no cache. A GitHub `ticket_id` is the PR number.
 | `fast_forward` | `PATCH git/refs/heads/<branch>` with `sha=<head>`, `force=false` | Never `force=true`. GitHub's 422 "not a fast forward" raises `NotFastForwardError`. No merge or squash fallback |
 | `merge` | `GET pulls/<n>` (and for a draft the GraphQL `markPullRequestReadyForReview`), then `PUT pulls/<n>/merge` with `merge_method=squash`, `sha=<head>` | Marks a draft ready first (issue #83: GitHub refuses to merge a draft with 405). The API form of `--squash --match-head-commit`. A 409 head mismatch raises `HeadMismatchError`. A 405, a 5xx, a timeout or a mark-ready that did not land raises with `retryable=True`, so the dispatcher re-drives the ship once; anything else, or a failed re-drive, flags the ticket needs-attention |
 | `list_comments` | `GET issues/<n>/comments`, `--paginate` | Ids must be positive integers (coerced to int); `created_at` must be ISO-8601 |
-| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or fewer runs received than `total_count` is `pending` |
+| `ci_status` | `GET commits/<sha>/check-runs`, `--paginate`, and `GET commits/<sha>/status` | Only the latest attempt of each check (same app, same workflow run, same name, latest start) counts, so a rerun at the same head replaces the attempt it reran (issue #84). The workflow run is the run id in an Actions check's `details_url`, else its check suite; two workflows that share a job name are two checks, and a check run with neither supersedes nothing (#87). Any failure is `failure`. `success` needs at least one check run that concluded `success`, or a `success` commit status, with nothing pending. All neutral or skipped, anything running, nothing reported, or runs received that do not match `total_count` on every page is `pending`. A short read is `pending` even with a failure in view, since a rerun on an unread page may supersede it |
 | `set_state` | `issues/<n>/labels` | Adds `orch:state/<state>`, then removes other `orch:state/` labels. Linear and Aut0 get none |
 | `await_approver` | `POST issues/<n>/comments` | Tells the approver which SHA is previewed |
 | `stable_patch_id` | none | Not built; a moved head queues a re-review |
@@ -83,8 +83,11 @@ fails closed: `ship-failed` and one Grok wake. `ship_intents.error` records
 the class and a safe detail, such as `GitHubAdapterError: gh api POST graphql
 exited 1 (HTTP 403) graphql errors: FORBIDDEN`. It never holds gh's output, a
 URL, a token or a body; the merge 409 and fast-forward 422 errors carry only
-the inner safe detail. A `handoff` that failed before any write was confirmed
-is re-driven once on a later poll, and only while its APPROVE is still the
+the inner safe detail. A target repo's branch protection or ruleset can
+reject the `fast_forward` ref update; that rejection is a
+`GitHubAdapterError` too, so the ship fails closed as `ship-failed`, and the
+factory never bypasses the protection. A `handoff` that failed before any
+write was confirmed is re-driven once on a later poll, and only while its APPROVE is still the
 latest trusted reviewer verdict on the ticket (a newer REVISE or APPROVE spends
 it with no write), the PR is still at the intent's head with green CI, and the
 ticket has not already been handed off, merged or finished, nor completed a
@@ -103,6 +106,14 @@ calls `heartbeat`, then calls `finish` with the handoff comment ID. Finishing
 without a handoff ID invokes T6. `claim` is intentionally non-blocking so
 `orch wait` can add blocking behavior without changing the queue contract. One
 clock is injected when the queue opens; all timestamps use that clock.
+
+`release`, `heartbeat` and `finish` take `owner=`, the recipient that claimed
+the job. Each refuses an owner that is not a recipient, a job that belongs to
+another recipient, and a job that is not running; a refused call changes
+nothing. A repeated `finish` with the same outcome and handoff ID returns the
+recorded job unchanged; one with a different outcome or handoff ID is refused
+and the first stays. `claim` takes a job in the issue #85 order: urgent, then a
+resumed paused step, then bug, then the oldest.
 
 Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, `stuck`,
 or the Grok wakes `blocked`, `capped`, `refused`, `unparsed` and `ship-failed`),
@@ -582,21 +593,58 @@ to the Aut0 team) with the Funnel URL, and saves its signing secret to
 owns the Funnel that exposes only the listener path. This repository
 changes no network configuration.
 
-[`deploy/linear-webhook-service.sh`](deploy/linear-webhook-service.sh)
-(issue #107) runs the listener under a restart supervisor on a host with no
-systemd user session, with the same commands as `poller-service.sh`:
-`start`, `stop` (held by `linear-webhook.stopped`), `restart`, `status`,
-`ensure` and `install-autostart`/`remove-autostart` (flag
-`~/.config/factory/linear-webhook-autostart`, cron tag
-`# factory-linear-webhook`). `ensure` prints nothing while it runs. When
-`~/.config/factory/linear-webhook.env` sets `LINEAR_TUNNEL_SSH_ALIAS` and
-`LINEAR_TUNNEL_REMOTE_PORT` (and optionally `LINEAR_TUNNEL_BIND`, default
-`127.0.0.1:8787`), it also supervises the reverse tunnel `ssh -N -o
-ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R <port>:<bind>
-<alias>`. Everything it writes to `linear-webhook.log` carries a UTC
-timestamp. The supervisor leads its own process group; if it alone is
-killed, the next `stop`, `start`, `restart` or `ensure` first ends the
-listener and tunnel it left behind.
+### Listener service without systemd
+
+[`deploy/linear-webhook-service.sh`](deploy/linear-webhook-service.sh) keeps
+two loops up on the box (issue #134). `deploy/install.sh` copies it to
+`~/.local/share/factory/linear-webhook-service.sh`; run that copy, not the
+checkout's file, so a `git pull` never rewrites a script a running loop reads.
+
+- `_listener-loop` runs `orch linear-webhook serve --bind 127.0.0.1:PORT`,
+  adding `--orch "$ORCH_CONFIG"` when `ORCH_CONFIG` is set. It
+  starts `serve` only while nothing listens on `127.0.0.1:PORT`, and logs one
+  line per streak while the port is taken.
+- `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
+  127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
+  `forward refused: port PORT already forwarded on HOST; retry in Ns`.
+- After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
+  (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
+  longer run resets the wait.
+- `LINEAR_WEBHOOK_PORT` defaults to 8787 and `LINEAR_WEBHOOK_TUNNEL_HOST` to
+  `pc-wsl-cursor-bot`; an empty host runs no tunnel.
+
+Each loop is a singleton per state directory: it holds an exclusive `flock`
+on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its
+whole life and exits 0 at once if the lock is held. Locks belong to the open
+file, not a pid, so they hold across PID namespaces (sandboxed bot shells
+share the state directory but not pids). `ensure`, `start` and `status`
+decide from the locks; the pidfiles are for people only. `flock(1)` is
+required.
+
+Commands: `start` (clears a stop), `stop` (holds them stopped), `restart`,
+`status` (exit 3 unless every loop runs), `ensure` (start what is missing
+unless held stopped; silent when all run), `install-autostart` and
+`remove-autostart` (write or remove `~/.config/factory/linear-webhook-autostart`,
+which makes the installed `profile.sh` run `ensure` in the background in each
+bot shell; where `crontab` exists, `install-autostart` also adds an `@reboot`
+line and a 5-minute `ensure` watchdog tagged `# factory-linear-webhook`,
+replaced and never duplicated, and changes nothing if the crontab cannot be
+read). `stop` ends every loop for this state directory, from any copy
+of the script (argv `.../linear-webhook-service.sh _listener-loop` or
+`_tunnel-loop` whose `--state`, `ORCH_STATE_DIR` or `HOME` points here) and
+every process holding a loop lock (its `/proc/PID/fdinfo` shows the lock; a
+process that only has the lock file open is left alone), each with its
+children. If a lock is
+still held afterwards, by a loop in a PID namespace this shell cannot see,
+`stop` says so and exits 1: run it from a host shell.
+A `restart` whose `stop` fails drops the `linear-webhook.stopped` hold that
+`stop` just wrote, so `ensure` and self-heal (issue #107, which restarts a
+down or stale-code listener or tunnel with `restart`) still see a service to
+recover; a hold that was already there stays.
+
+Deploy: re-run `deploy/install.sh`, then run
+`~/.local/share/factory/linear-webhook-service.sh restart` once from a host
+shell, so the new `stop` clears loops started by the old copy.
 
 With the webhook configured, `orch poll` reads the dirty rows and the
 tickets with queued or running jobs each Linear cycle (every cycle at
@@ -632,14 +680,18 @@ bin/orch gc [--older-than HOURS] [--dry-run]
 
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
-`codex`, `cursor`). It checks for a job once a second, claims the oldest
-through the device pool (`--machines`, default the checkout's `machines.yml`,
+`codex`, `cursor`). It checks for a job once a second, claims the next one
+in the queue's claim order (urgent, resumed, bug, then oldest) through the
+device pool (`--machines`, default the checkout's `machines.yml`,
 placeholders accepted and never scheduled), and prints one JSON line with the
 job's `device` and `remote` and, on a remote device, its `workdir`. With no free
 slot on an eligible device the job stays queued and the waiter keeps waiting. While the poller holds a write, a claim that sees
 `database is locked` (after a 5-second SQLite busy timeout) keeps waiting with
 backoff capped at 5 seconds; `job heartbeat` and `job done` retry the same way
 up to 8 attempts. Other database errors still fail at once.
+SIGINT and SIGTERM are held from each claim until its line is printed, so a
+signal may wait up to the 5-second busy timeout, or until stdout drains,
+before it takes effect; SIGKILL always works.
 If that line cannot be printed, the job is finished as
 failed so T6 retries it at once, and its slot is released (no bot got it). Plain `orch wait` never starts a harness:
 the bot that ran the shell call starts its own, through `orch job run`, or its autostart waiter does (below). `orch` never chooses a harness on its own. `job heartbeat` and `job done` refuse a job that
@@ -810,7 +862,9 @@ and at a third of the timeout, so a live job never shows as stale; see "Job
 states"). The heartbeat stops when
 the command exits, when a heartbeat finds the job no longer running (for
 example after the command's own `orch job done`), or when `orch job run` dies;
-locked or failed writes are logged and retried at the next beat. SIGTERM and
+locked or failed writes are logged and retried at the next beat. A heartbeat
+error never aborts the command: it runs on, and if the job then times out, T6
+retries it once (see "Job states"). SIGTERM and
 SIGHUP are forwarded to the command, a Ctrl-C (SIGINT to the process group)
 reaches the command directly, and the exit status is the command's; a signal
 that arrives before the command starts means it never runs.
@@ -893,9 +947,10 @@ source is a no-op) and creates the state directory before any hook writes
 a log there.
 
 It also retires the launchers that lived outside the repository (issue
-#107): for `~/.local/share/factory/run-poller.sh` and
-`~/.local/share/factory/linear-webhook-service.sh` it runs the old
-listener script's `stop`, sends SIGTERM to each process whose argv runs
+#107): for `~/.local/share/factory/run-poller.sh` and, unless it is already
+the installed copy of `deploy/linear-webhook-service.sh` (issue #134),
+`~/.local/share/factory/linear-webhook-service.sh`, before installing that
+copy, it runs the old listener script's `stop`, sends SIGTERM to each process whose argv runs
 exactly that file (and to its direct children), removes the crontab lines
 that name it and deletes it, printing each step. If the crontab cannot be
 read it changes nothing and exits 1.
@@ -980,6 +1035,17 @@ precedence over the standard directories the script appends. `deploy/install.sh`
 changes neither. Run `poller-service.sh stop` before re-running
 `deploy/install.sh`, then `start`. `ensure` output goes to
 `poller-service.log`.
+
+`start` and `ensure` also probe `orch.db.lock` with `flock` before
+launching, beside the `ORCH_DB` that `run-poller.sh` ends up with after
+sourcing its env files (`run-poller.sh --print-db`), else the caller's
+`ORCH_DB`: while it is held, a poller runs even if its pid is
+not visible from this shell, so they launch nothing (`start` says
+`orch poll already running (poll lock held)`).
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
+hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+(default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
+0 at once when another copy holds it.
 
 ## Status
 
@@ -1594,8 +1660,9 @@ Migration on the box (Factory, once, after merge):
    `git pull`.
 4. Compare the live `~/.local/share/factory/linear-webhook-service.sh`,
    including its reverse-tunnel command, with
-   `deploy/linear-webhook-service.sh`. Put the alias and port in
-   `~/.config/factory/linear-webhook.env`.
+   `deploy/linear-webhook-service.sh`. Its tunnel host and port are
+   `LINEAR_WEBHOOK_TUNNEL_HOST` and `LINEAR_WEBHOOK_PORT` (see "Listener
+   service without systemd").
 5. Re-run `deploy/install.sh --autostart`. It retires the legacy launchers
    and installs self-heal.
 
@@ -1621,11 +1688,11 @@ always named on stderr and does not fail the check.
 
 ## orchestrate-project
 
-Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` calls `lib.usage.route_job(config, marked_urgent=urgent)` and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
+Grok Bot's skill is [`grok/orchestrate-project/SKILL.md`](grok/orchestrate-project/SKILL.md). Comment text, the questions gate, and routing go through [`lib/orchestrate.py`](lib/orchestrate.py). `choose_route` refuses a factory.md pair that fails `assert_cross_family`, then calls `lib.usage.route_job(config, marked_urgent=urgent)` once and builds a `FitChoice` from the route's builder and reviewer. See [`lib/usage.py`](lib/usage.py).
 
 ## pstack pin
 
-[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file. A pin bump changes the vendored tree and regenerates that lock in the same PR.
+[`skills/pstack`](skills/pstack) is pstack 0.15.36 from `cursor/plugins` commit `c742dd61706fbacc1b95f1a20b7b988cf096ce6c`. [`skills/skills.lock`](skills/skills.lock) records that commit and the sha256 of each file, plus the sha256 of each file under [`skills/factory`](skills/factory), the factory's router skills, in its `factory:` section. A pin bump, or any edit to `skills/factory`, regenerates that lock in the same PR.
 
 ```sh
 bin/orch install-skills
@@ -1634,9 +1701,9 @@ bin/orch doctor --print-canary
 bin/orch doctor --home "$HOME" --responses DIR
 ```
 
-`install-skills` symlinks each pinned skill into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`.
+`install-skills` symlinks each pinned skill, and each router skill in `skills/factory` (`factory-builder`, `factory-reviewer`), into `~/.claude/skills/<name>/`, `~/.agents/skills/<name>/`, and `~/.cursor/skills/<name>/`. `--cloud` copies those skills into the project's `.claude/skills/`, `.agents/skills/`, and `.cursor/skills/`. Each copy gets an `.orch-owned` marker with the sha256 of every file it holds. A later install replaces only a copy whose files still match its marker, so an edited copy is refused and kept. A local install refuses a checkout that is a linked git worktree or sits under the temp dir, since its links would dangle once that checkout is gone; `--allow-unstable-checkout` overrides that. A link into another or removed checkout's `skills/pstack/skills/` or `skills/factory/` is re-linked to this checkout, and a missing skill is added. In `--cloud` mode, `doctor` rejects a symlink anywhere on the path from the project down to a skill.
 
-`doctor` prints a canary that asks the harness to name poteto-mode and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written. Claude Bot, Codex Bot, and Cursor Bot each start their own harness and write the reply. `doctor` fails if any harness did not load that version. It does not start `claude`, `codex`, or `cursor-agent`.
+`doctor` checks every installed skill and router against the lock, then prints a canary that asks the harness to read the installed `factory-builder` skill, name it, and quote the whole first bold passage of the pinned poteto-mode orchestrate playbook exactly as written, without the `**` markers, on one line. Claude Bot and Codex Bot each start their own harness and write the reply; Cursor is not asked. `doctor` fails if either harness did not load that version. It does not start `claude` or `codex`.
 
 ## Usage reserve
 
@@ -1650,14 +1717,14 @@ The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to t
 bin/orch eval-report --input tests/fixtures/eval/week
 ```
 
-The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
 
 ## Model family
 
 `orch check-config` refuses a reviewer unless it is a different model family from the builder. The check fails closed.
 
 - A `claude` harness is Anthropic. A `codex` harness is OpenAI. The harness decides the family. A hint that names the other family is refused.
-- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI.
+- A `cursor` harness takes its family only from the model hint. `claude*`, `sonnet*`, `opus*`, and `haiku*` are Anthropic. `gpt*`, `codex*`, and `o<digit>` (`o3`, `o4-mini`) are OpenAI. The family word must end the name or be followed by `-`, `.`, `_`, `:` or a digit, so `haikus`, `claudette` and `magnum-opus` resolve to no family. `opus-mt*`, `gpt-j*` and `gpt-neo*` are other model lines and resolve to no family.
 - If either side's family cannot be resolved, the check refuses. A cursor side needs one of those hints.
 - If both families resolve and they are the same, the check refuses.
 

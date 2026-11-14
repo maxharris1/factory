@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a54"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the repo layout","completed":false},{"text":"Write tests for @@API_KEY@@ rotation","completed":false},{"text":"Run pytest","completed":false}]}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"bash -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"bash -lc ls","aggregated_output":"README.md\n","exit_code":0,"status":"completed"}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the repo layout","completed":true},{"text":"Write tests for @@API_KEY@@ rotation","completed":false},{"text":"Run pytest","completed":false}]}}
+{"type":"item.started","item":{"id":"item_3","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-a","receiver_thread_ids":["thread-b"],"prompt":"PROMPT-SENTINEL write the tests","agents_states":{"thread-b":{"status":"running","message":null}},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-a","receiver_thread_ids":["thread-b"],"prompt":"PROMPT-SENTINEL write the tests","agents_states":{"thread-b":{"status":"completed","message":"RESULT-SENTINEL done"}},"status":"completed"}}
+{"type":"item.updated","item":{"id":"item_1","type":"todo_list","items":[{"text":"Inspect the repo layout","completed":true},{"text":"Write tests for @@API_KEY@@ rotation","completed":true},{"text":"Run pytest","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"ASSISTANT-SENTINEL Done."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":900,"output_tokens":50}}

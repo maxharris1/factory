@@ -18,6 +18,7 @@ done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${HOME}/.local/share/factory/venv"
+LINEAR_SERVICE="${HOME}/.local/share/factory/linear-webhook-service.sh"
 DB="${HOME}/.local/state/factory/orch.db"
 STATE="$(dirname "$DB")"
 ORCH_CONFIG="${ORCH_CONFIG:-${ROOT}/orch.yml}"
@@ -76,6 +77,11 @@ retire_legacy() {
     fi
     for path in "${LEGACY[@]}"; do
         [[ -e "$path" ]] || continue
+        # Since #134 the listener path holds the committed service script's
+        # installed copy; only a launcher that is not that copy is legacy.
+        if [[ "$path" == */linear-webhook-service.sh ]] && grep -q -- '_listener-loop' "$path" 2>/dev/null; then
+            continue
+        fi
         if [[ "$path" == */linear-webhook-service.sh && -x "$path" ]]; then
             timeout 90 "$path" stop >/dev/null 2>&1 || true
         fi
@@ -104,7 +110,7 @@ retire_legacy() {
     fi
 }
 
-mkdir -p "${HOME}/.local/bin" "${HOME}/.config/factory" "$STATE"
+mkdir -p "${HOME}/.local/bin" "${HOME}/.config/factory" "$STATE" "$(dirname "$LINEAR_SERVICE")"
 if [[ "$ROOT" != "${HOME}/factory" ]]; then
     echo "warning: expected the production checkout at ${HOME}/factory; using ${ROOT}" >&2
 fi
@@ -130,8 +136,13 @@ cat >"$WRAPPER" <<EOF
 exec "${VENV}/bin/python" "${ROOT}/bin/orch" "\$@"
 EOF
 chmod 0755 "$WRAPPER"
-install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
+# Retire legacy launchers first: the listener's legacy path is where the
+# service script's copy goes.
 retire_legacy
+# A copy, not the checkout's file: a git pull must not rewrite a script that
+# a running loop is still reading.
+install -m 0755 "${ROOT}/deploy/linear-webhook-service.sh" "$LINEAR_SERVICE"
+install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 # Sourced once per shell: a second source (.profile and .bashrc) is a no-op.
 if [ -z "\${FACTORY_PROFILE_LOADED:-}" ]; then
@@ -154,10 +165,10 @@ for factory_waiter_flag in "\${HOME}/.config/factory"/waiter-autostart-*; do
     ("${ROOT}/deploy/waiter-service.sh" "\$factory_waiter_bot" ensure >>"${STATE}/waiter-\${factory_waiter_bot}-service.log" 2>&1 &)
 done
 unset factory_waiter_flag factory_waiter_bot
-# Linear webhook listener autostart (deploy/linear-webhook-service.sh
-# install-autostart, #107); ensure prints nothing while it runs.
-if [ -f "\${HOME}/.config/factory/linear-webhook-autostart" ] && [ -x "${ROOT}/deploy/linear-webhook-service.sh" ]; then
-    ("${ROOT}/deploy/linear-webhook-service.sh" ensure >>"${STATE}/linear-webhook-service.log" 2>&1 &)
+# Linear webhook autostart (linear-webhook-service.sh install-autostart, #134):
+# each bot shell makes sure the listener and tunnel loops are up.
+if [ -f "\${HOME}/.config/factory/linear-webhook-autostart" ] && [ -x "${LINEAR_SERVICE}" ]; then
+    ("${LINEAR_SERVICE}" ensure >>"${STATE}/linear-webhook-service.log" 2>&1 &)
 fi
 # Self-heal loop (deploy/self-heal.sh install-autostart, #107), where no
 # systemd user timer runs it.
@@ -170,7 +181,7 @@ ORCH_DB="$DB" "$WRAPPER" init-db --orch "$ORCH_CONFIG"
 if [[ "$AUTOSTART" == 1 ]]; then
     "${ROOT}/deploy/poller-service.sh" install-autostart
     if grep -qE '^linear_webhook:' "$ORCH_CONFIG" "${ORCH_CONFIG%.yml}.local.yml" 2>/dev/null; then
-        "${ROOT}/deploy/linear-webhook-service.sh" install-autostart
+        "${LINEAR_SERVICE}" install-autostart
     fi
 fi
 "${ROOT}/deploy/self-heal.sh" install-autostart

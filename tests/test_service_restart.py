@@ -43,8 +43,10 @@ while True:
 SERVICES = {
     "poller": ([str(DEPLOY / "poller-service.sh")], "poller.stopped"),
     "waiter": ([str(DEPLOY / "waiter-service.sh"), "codex-bot"], "waiter-codex-bot.stopped"),
-    "linear-webhook": ([str(DEPLOY / "linear-webhook-service.sh")], "linear-webhook.stopped"),
 }
+# linear-webhook-service.sh (#134) SIGKILLs a loop that outlives its stop
+# wait, so its stop fails only on a lock it cannot see: its restart hold is
+# tested in tests/test_linear_webhook_service.py.
 
 
 @pytest.fixture
@@ -73,7 +75,6 @@ def _env(home: Path) -> dict[str, str]:
         "ORCH_CRONTAB": str(home / "no-such-crontab"),
         "ORCH_POLL_STOP_WAIT": "1",
         "ORCH_WAITER_STOP_WAIT": "1",
-        "ORCH_LINEAR_STOP_WAIT": "1",
     }
 
 

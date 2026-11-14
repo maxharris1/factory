@@ -21,7 +21,9 @@ connection is `mode=rw`, and a file without the jobs table is refused,
 so nothing is created or written into an unrelated database.
 
 SIGINT and SIGTERM are blocked from each claim until its output is
-flushed. A job is failed for T6 only when its delivery did not complete.
+flushed, so a signal may wait up to the busy timeout (BUSY_TIMEOUT_SECONDS)
+or until stdout drains; SIGKILL always works. A job is failed for T6 only
+when its delivery did not complete.
 """
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ def open_queue(path: Path) -> ExistingJobQueue:
     try:
         return ExistingJobQueue(path, clock=time.time)
     except STORAGE_ERRORS as exc:
-        raise WaitError(f"cannot open dispatcher database {path}: {_one_line(exc)}") from exc
+        raise WaitError(f"cannot open dispatcher database {str(path)!r}: {_one_line(exc)}") from exc
 
 
 def wait_for_job(
@@ -128,15 +130,22 @@ def wait_for_job(
     *,
     sleep: Callable[[float], None] = time.sleep,
     pool: DevicePool | None = None,
+    keep_ignored: bool = False,
 ) -> Job:
     """Claim the next job for recipient, print it, and return it.
 
     With a pool, the claim holds a device slot (F2-02). A locked database
     means the poller is writing; keep waiting with backoff.
+
+    A SIGINT or SIGTERM raised during the claim and delivery is dropped,
+    and the caller's mask and handlers are restored on leaving. With
+    keep_ignored both signals stay ignored (the CLI exits 0 once a job is
+    delivered).
     """
+    handlers = {signum: signal.getsignal(signum) for signum in GUARDED_SIGNALS}
     locked = 0
     while True:
-        signal.pthread_sigmask(signal.SIG_BLOCK, GUARDED_SIGNALS)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, GUARDED_SIGNALS)
         leaving = True
         try:
             try:
@@ -155,7 +164,11 @@ def wait_for_job(
             if leaving:
                 for signum in GUARDED_SIGNALS:
                     signal.signal(signum, signal.SIG_IGN)
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, GUARDED_SIGNALS)
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            if leaving and not keep_ignored:
+                for signum, handler in handlers.items():
+                    if handler is not None:
+                        signal.signal(signum, handler)
         sleep(lock_backoff(locked) if locked else POLL_SECONDS)
 
 
