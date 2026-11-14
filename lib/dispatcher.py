@@ -289,11 +289,14 @@ _POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following
 _POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
 
 
-def _redact(text: str) -> str:
+def _redact_spans(text: str) -> str:
     text = _SECRET_URL.sub("<url>", text)
     text = _SECRET_HOST_PATH.sub("<host>", text)
-    text = _SECRET_TOKEN.sub("<secret>", text)
-    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+    return _SECRET_TOKEN.sub("<secret>", text)
+
+
+def _redact(text: str) -> str:
+    return _SECRET_ASSIGNMENT.sub("<secret>", _redact_spans(text))
 
 
 def _without_body(exc: BaseException) -> str:
@@ -380,11 +383,14 @@ def scrub_detail(detail: str) -> str:
     """`detail` with no URL, host path, token, credential value, body or
     non-printable character.
 
-    After redaction the text is cut as poll_error_detail cuts a message:
-    at its first character outside the plain set, so no encoded or escaped
-    body survives, and at its first credential-like word."""
+    URLs, host paths and token shapes are replaced; then the text is cut
+    as poll_error_detail cuts a message: at its first character outside
+    the plain set, so no encoded or escaped body survives, and at its
+    first credential-like word. Credential assignments are not redacted
+    before the cut, which would drop the key and keep a quoted value's
+    later words."""
     detail = "".join(char if char.isprintable() else " " for char in detail)
-    detail = _redact(detail)
+    detail = _redact_spans(detail)
     for placeholder, mark in _REDACTED_MARKS.items():
         detail = detail.replace(placeholder, mark)
     detail = _plain_prefix(detail, _PLAIN_REDACTED)

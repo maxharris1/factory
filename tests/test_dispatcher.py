@@ -2621,6 +2621,12 @@ CREDENTIAL_BODIES = (
     f"token: password = {CANARY}",
     f"session cookie: auth key {CANARY}",
     f"bad credentials for user bot pass {CANARY}",
+    f"password='first {CANARY}'",
+    f'password="first {CANARY}"',
+    f"api_key = 'first second {CANARY}'",
+    f'GITHUB_TOKEN: "first {CANARY}"',
+    f"Authorization: 'Bearer first {CANARY}'",
+    f"secret first {CANARY}",
 )
 
 
@@ -5409,7 +5415,7 @@ def test_a_poll_error_message_is_scrubbed_and_capped(tmp_path: Path) -> None:
     text = poll_error_text(RuntimeError(
         f"call https://api.example.com/x?token=abc failed with {secret} "
         "FACTORY_WEBHOOK_AUTH=Bearer-value body {\"key\": \"value\"}"))
-    assert text.startswith("RuntimeError: call <url> failed with <secret> <secret>")
+    assert text.startswith("RuntimeError: call <url> failed with <secret> <credential omitted>")
     for leaked in ("https://", "api.example.com", secret, "Bearer-value", '"value"'):
         assert leaked not in text
     assert len(poll_error_text(RuntimeError("x" * 2000))) == POLL_ERROR_LIMIT
