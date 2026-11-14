@@ -3,6 +3,7 @@
 Fixtures stand in for harness usage. Nothing here reads an account.
 """
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -300,6 +301,8 @@ def test_usage_report_rejects_a_bad_fraction() -> None:
         UsageReport("claude", 1.1, True)
     with pytest.raises(ValueError):
         UsageReport("claude", True, True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        UsageReport("claude", float("nan"), True)
 
 
 def test_reserve_check_rejects_an_unknown_harness() -> None:
@@ -316,3 +319,61 @@ def test_usage_module_does_not_touch_credentials() -> None:
     text = (ROOT / "lib" / "usage.py").read_text(encoding="utf-8")
     for token in (".env", "auth.json", ".runner", "GH_TOKEN", "credentials"):
         assert token not in text
+
+
+@pytest.mark.parametrize(
+    ("role", "overrides"),
+    [
+        ("builder", {"builder_harness": "grok"}),
+        ("reviewer", {"reviewer_harness": "grok"}),
+        ("builder", {"builder_harness": "cursor"}),
+        ("reviewer", {"reviewer_harness": "cursor"}),
+        ("reviewer", {"reviewer_harness": "cursor", "reviewer_model": "gemini-3"}),
+    ],
+)
+def test_route_refuses_a_preference_check_config_refuses(
+    role: str, overrides: dict[str, object]
+) -> None:
+    bad = config(**overrides)
+    with pytest.raises(ValueError):
+        fit_table(bad, role)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        route_job(bad)
+
+
+def test_lib_modules_import_no_private_factory_md_names() -> None:
+    for relative in ("lib/usage.py", "lib/orchestrate.py"):
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        imported = [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "lib.factory_md"
+            for alias in node.names
+        ]
+        assert imported
+        assert [name for name in imported if name.startswith("_")] == [], relative
+
+
+def test_later_round_reviewer_excludes_the_family_that_built() -> None:
+    route = route_job(config(), built_by=("cursor", "gpt-5"))
+    assert route.ok
+    assert route.builder is not None and route.reviewer is not None
+    assert (route.builder.harness, route.builder.model, route.builder.family) == (
+        "cursor",
+        "gpt-5",
+        "openai",
+    )
+    assert route.reviewer.harness == "claude"
+    assert route.reviewer.family == "anthropic"
+    same = route_job(config(), built_by=("claude", "claude-opus"))
+    assert same.reviewer is not None and same.reviewer.harness == "codex"
+    blocked = route_job(
+        config(),
+        usage=usage(UsageReport("claude", 0.0, True)),
+        built_by=("cursor", "gpt-5"),
+    )
+    assert blocked.ok is False
+    assert blocked.reason == "reserve"
+    for built_by in (("grok", None), ("cursor", None), ("cursor", "gemini-3")):
+        with pytest.raises(ValueError):
+            route_job(config(), built_by=built_by)

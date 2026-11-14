@@ -53,9 +53,10 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import LivePollSource, PollSourceError
-from lib.pstack_pin import Mode, doctor, install_skills
+from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
+from lib.status import main as status_main
 from lib.wait import (
     WaitError,
     open_queue,
@@ -91,6 +92,7 @@ commands:
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
   health           component heartbeats: report, beat or forget (issue #92)
+  status           read-only snapshot of the queue, devices and paused tickets
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -100,7 +102,7 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   A disabled or placeholder device is named on stderr and never scheduled.
   An unknown model name warns on stderr and still exits 0.
 
-install-skills [--home PATH] [--project PATH] [--cloud]
+install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checkout]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
   and ~/.cursor/skills. --cloud copies them into the project at
   .claude/skills, .agents/skills, and .cursor/skills.
@@ -265,6 +267,13 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   cannot be read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
+
+status [--db PATH] [--machines PATH] [--orch PATH]
+  Print the queue, each device's slots and running jobs, Grok wakes,
+  paused and stuck tickets, the feeder, the webhook and component health,
+  read-only. A database without the dispatcher tables shows the empty
+  state. --db defaults to ORCH_DB. Exits 1 when the database or a given
+  config file cannot be read, else 0.
 """
 
 
@@ -300,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_linear_webhook, argv[1:])
     if argv[0] == "health":
         return health.main(argv[1:])
+    if argv[0] == "status":
+        return _call(status_main, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -451,7 +462,7 @@ def _wait(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, _exit_on_term)
     try:
         with beats:
-            wait_for_job(queue, recipient, sys.stdout, pool=pool)
+            wait_for_job(queue, recipient, sys.stdout, pool=pool, keep_ignored=True)
     except WaitError as exc:
         _quiet_stdout()
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -1485,12 +1496,17 @@ def _install_skills(argv: list[str]) -> int:
     parser.add_argument("--home", type=Path)
     parser.add_argument("--project", type=Path)
     parser.add_argument("--cloud", action="store_true")
+    parser.add_argument("--allow-unstable-checkout", action="store_true")
     args = parser.parse_args(argv)
     try:
         anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
+    unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
+    if unstable:
+        print(f"orch install-skills: {unstable}", file=sys.stderr)
+        return 1
     errors = install_skills(ROOT, anchor, mode)
     if errors:
         for message in errors:
