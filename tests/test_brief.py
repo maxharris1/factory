@@ -487,7 +487,8 @@ def test_the_build_brief_titles_the_pr_with_its_source_issue(
     base = job(raw_detail=detail(**extra))
     built = replace(base, request=replace(base.request, ticket_id=ticket_id))
 
-    task = render_brief(built, bot="claude-bot", context=None).split("## What to do")[1]
+    task = render_brief(built, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
+    task = task.split("## What to do")[1]
     task = task.split("## Handoff comment")[0]
 
     assert f"The PR's title starts with its source issue: {wanted}" in task
@@ -496,5 +497,6 @@ def test_the_build_brief_titles_the_pr_with_its_source_issue(
 
 def test_only_the_build_brief_asks_for_the_title() -> None:
     for action, recipient in (("plan", "claude"), ("fix", "claude"), ("review", "codex")):
-        brief = render_brief(job(action, recipient), bot=f"{recipient}-bot", context=None)
+        brief = render_brief(job(action, recipient), bot=f"{recipient}-bot", factory_root=FACTORY_ROOT, context=None)
+        assert "Do not start the work" not in brief
         assert "title starts with its source issue" not in brief
