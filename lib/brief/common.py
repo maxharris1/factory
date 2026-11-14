@@ -8,8 +8,14 @@ from dataclasses import asdict
 
 from lib.brief.skills import skill_paths
 from lib.factory_md import FactoryContext
+from lib.github_actions import TOKEN_VARIABLES
 from lib.queue import Job
 
+GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
+QUESTIONS_LINES = [
+    "If something left open needs a decision, post a `questions` handoff.",
+    "If the ticket lists a dependency that has not merged, post `questions` before any work.",
+]
 BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cursor Bot"}
 # SPEC section 8: one round for low risk, up to three for high.
 DEFAULT_CAPS = {"low": 1, "high": 3}
@@ -139,7 +145,6 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         f"- reviewer harness: {facts['reviewer']}" if facts["reviewer"] else "- reviewer harness: see factory.md",
         f"- verify skill: {facts['verify']}" if facts["verify"] else "- verify skill: see factory.md",
         f"- attempt: {request.attempt}",
-        f"- timeout: {request.timeout_seconds // 60} minutes without a heartbeat",
     ]
     if facts["skills"]:
         lines.append("- repo skills: " + ", ".join(f"`{item}`" for item in facts["skills"]))
@@ -152,26 +157,29 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         lines.append(
             f"- working directory: this job's own directory on device {remote_device} "
             f"(`$ORCH_JOB_WORKDIR`), empty at the start: clone {request.repo} there with "
-            "`env -u GH_TOKEN gh repo clone` and check out the branch the task names. "
+            f"`{GH} repo clone` and check out the branch the task names. "
             "This brief is on your stdin only."
         )
     return "\n".join(lines)
 
 
 def handoff_section(bot: str, role: str, facts: dict, header: str, example: str) -> str:
-    target = (
-        f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
-    )
+    target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
+    repo = facts["repo"] or "<owner>/<repo>"
+    pr = facts["pr"] or "<pr-number>"
     return (
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
-        "not an inline comment), with `env -u GH_TOKEN gh`. Its first line is this orch:v1 header, "
+        "not an inline comment). Its first line is this orch:v1 header, "
         "with each `<...>` replaced by one of its choices:\n\n"
         f"{header}\n\n"
         f"Then plain prose for people and agents: {example} "
         "If a product question blocks the work, post a questions handoff instead "
         f"(`<!-- orch:v1 kind=questions from={bot} role={role} -->`, "
-        "then the question); it is this job's handoff."
+        "then the question); it is this job's handoff.\n\n"
+        "Write the comment to `handoff.md` (never commit that file) and post it with this command, "
+        "which prints the new comment's id:\n\n"
+        f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`"
     )
 
 
