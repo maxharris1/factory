@@ -347,7 +347,7 @@ def _device(
     elif is_placeholder(raw_workdir):
         placeholder("workdir_root")
     else:
-        problem = _workdir_problem(raw_workdir)
+        problem = workdir_problem(raw_workdir)
         if problem is None:
             workdir_root = str(raw_workdir)
         else:
@@ -368,7 +368,7 @@ def _device(
     elif is_placeholder(raw_factory):
         placeholder("factory_root")
     else:
-        problem = _workdir_problem(raw_factory)
+        problem = workdir_problem(raw_factory)
         if problem is None:
             factory_root = str(raw_factory)
         else:
@@ -513,11 +513,13 @@ def _is_tailscale_name(value: object) -> bool:
     return not all(label.isdigit() for label in labels)
 
 
-def _workdir_problem(value: object) -> str | None:
+def workdir_problem(value: object) -> str | None:
     if not isinstance(value, str) or not value.startswith("/"):
         return "must be an absolute POSIX path"
     if any(unicodedata.category(char) == "Cc" for char in value):
         return "must not contain NUL or another control character"
+    if "`" in value:
+        return "must not contain a backtick"
     for part in value.split("/"):
         if BOT_TOKEN in part and part != BOT_TOKEN:
             return f"'{BOT_TOKEN}' must be a whole path component"

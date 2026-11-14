@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.procs import alive
+from tests.procs import alive, open_files
 
 pytestmark = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
 
@@ -59,3 +59,23 @@ def test_a_process_reaped_right_after_the_signal_probe_is_not_alive(
 
     monkeypatch.setattr(os, "kill", kill_then_reap)
     assert not alive(child.pid)
+
+
+def test_open_files_skips_an_fd_that_closes_mid_scan(tmp_path: Path, monkeypatch) -> None:
+    held = tmp_path / "held"
+    closing = tmp_path / "closing"
+    held.touch()
+    closing.touch()
+    real_readlink = os.readlink
+    with open(held), open(closing) as gone:
+        vanished = f"/fd/{gone.fileno()}"
+
+        def readlink(path, *args, **kwargs):
+            if str(path).endswith(vanished):
+                raise FileNotFoundError(path)
+            return real_readlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "readlink", readlink)
+        found = open_files(os.getpid())
+    assert str(held.resolve()) in found
+    assert str(closing.resolve()) not in found

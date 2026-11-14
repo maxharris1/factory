@@ -28,7 +28,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter, handoff_marker
 from lib.worktrees import pid_alive
-from tests.test_brief import detail
+from tests.test_brief import FACTORY_ROOT, detail
 from tests.test_remote_start import Ssh
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, slots, state
 
@@ -36,14 +36,16 @@ ROOT = Path(__file__).resolve().parents[1]
 ORCH = ROOT / "bin" / "orch"
 
 
-def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = True) -> Path:
+def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = True,
+                    pc: bool = True) -> Path:
     path = tmp_path / "machines.yml"
     path.write_text(
         "devices:\n"
         f"  - name: box\n    local: true\n    enabled: {str(box_enabled).lower()}\n"
         f"    slot_max: {box_slots}\n"
         "    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot}\n"
-        "  - name: pc\n    tailscale_name: pc.example.ts.net\n    slot_max: 3\n"
+        "  - name: pc\n    tailscale_name: pc.example.ts.net\n"
+        f"    enabled: {str(pc).lower()}\n    slot_max: 3\n"
         "    harnesses: {claude: claude-bot, codex: codex-bot, cursor: cursor-bot}\n"
         f"    workdir_root: {tmp_path}/remote/{{bot}}/work\n    ssh_alias: fakepc-{{bot}}\n"
         "    factory_root: /srv/factory\n",
@@ -81,12 +83,10 @@ def test_autostart_places_on_a_remote_device_and_runs_without_worktree(tmp_path:
     spawn = FakeSpawn()
     waiter, queue, db = make_waiter(tmp_path, machines, spawn)
     first = enqueue(queue, "a")
-    second = enqueue(queue, "b")
 
-    # Least loaded: the pc (3 free) before the box (1 free).
+    # An empty pool ties at 0%: the tie goes off-box, to the pc (issue #223).
     assert waiter.step() == first
-    assert waiter.step() == second
-    assert slots(db) == {first: "pc", second: "pc"}
+    assert slots(db) == {first: "pc"}
     for argv, _ in spawn.calls:
         assert argv[:6] == ["python3", "/factory/bin/orch", "job", "run", "claude-bot", argv[5]]
         assert "--worktree" not in argv
@@ -98,7 +98,7 @@ def test_autostart_places_on_a_remote_device_and_runs_without_worktree(tmp_path:
 
 
 def test_a_box_placement_still_gets_a_worktree(tmp_path: Path) -> None:
-    machines = remote_machines(tmp_path, box_slots=5)
+    machines = remote_machines(tmp_path, box_slots=5, pc=False)
     spawn = FakeSpawn()
     waiter, queue, db = make_waiter(tmp_path, machines, spawn)
     job_id = enqueue(queue, "a")
@@ -169,7 +169,7 @@ def test_a_job_already_finished_is_left_alone(tmp_path: Path) -> None:
 
 
 def test_box_jobs_still_finish_themselves(tmp_path: Path) -> None:
-    machines = remote_machines(tmp_path, box_slots=5)
+    machines = remote_machines(tmp_path, box_slots=5, pc=False)
     spawn = FakeSpawn()
     waiter, queue, db = make_waiter(tmp_path, machines, spawn)
     job_id = enqueue(queue, "a")
@@ -196,11 +196,11 @@ def test_handoff_marker_accepts_only_comment_ids() -> None:
 
 def test_the_remote_brief_names_the_workdir_and_the_marker() -> None:
     queue_job = _job("build")
-    text = render_brief(queue_job, bot="claude-bot", context=None, remote_device="pc")
+    text = render_brief(queue_job, bot="claude-bot", factory_root=FACTORY_ROOT, context=None, remote_device="pc")
     assert "pc" in text and "$ORCH_JOB_WORKDIR" in text
     assert "ORCH-HANDOFF: <comment-id>" in text
     assert "ORCH-HANDOFF: failed" in text
-    local = render_brief(queue_job, bot="claude-bot", context=None)
+    local = render_brief(queue_job, bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
     assert "ORCH-HANDOFF" not in local
     assert "orch job done claude-bot" in local
 

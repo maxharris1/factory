@@ -56,6 +56,37 @@ model-findings.txt lines:
 The model checks the spec, not runs, so nothing writes this file yet. A
 missing file is reported as none supplied.
 
+Metrics (issue #209, SF-10) come from an orch.db snapshot, not from this
+directory: build_metrics opens a backup (lib.state_backup) read-only, so
+it writes nothing to it or beside it, and render_metrics prints each
+metric beside O4's baseline snapshot. A metric whose source is not in a
+snapshot prints as unrecorded:
+
+- rounds per PR: a PR is reviewed once it has a REVISE round
+  (ticket_state.review_round) or an approval; its rounds are its REVISE
+  rounds plus the approving one
+- first-round REVISE and first-pass APPROVE rates: each PR's first acted-on
+  verdict, in handled_comments order: a REVISE recorded in review_events,
+  or an APPROVE recorded as a ship intent or ship hold. They read verdict
+  history only, so a re-entry after handoff or an update-from-main
+  re-review does not change them. A held APPROVE stays unhandled until its
+  hold clears, so it counts as that PR's latest verdict until then
+- PRs capped: capped now, or a capped review_events outcome
+- PRs dirty after approval: tickets with an update-from-main job
+- duplicate handoffs: duplicate-verdict handled comments
+- BLOCKED stops: tickets in blocked
+- tickets succeeded: merged or done; Aut0 counts at handed-off (Ready for
+  Review)
+- Skills read and helpers per job: #100's job_telemetry tool counts
+  (Skill; Agent and Task) over Claude jobs. D25 sets no helper cap, so the
+  max is printed too
+- preflight failures: requeued-unstarted job events whose reason is one
+  lib.remote.preflight raises (PREFLIGHT_FAILURE). An unreachable device
+  counts: preflight is a job's first ssh call
+- slot-hours lost: telemetry elapsed time of failed and cancelled jobs
+- hand-written gos, ac=unmet with APPROVE, submitted-invalid, repeat-block
+  and unsatisfiable stops: nothing records these yet
+
 This module does not correct, reflect, run blinded evals, or maintain.
 
 TODO(#50): count bot-to-bot messages against scripted handoffs for the
@@ -65,7 +96,9 @@ there is no input line to count.
 
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -76,6 +109,7 @@ from lib.factory_md import FactoryConfig, load_factory_md
 from lib.handoff import STATES, HandoffError, parse_comment
 from lib.load import Finding
 from lib.orch_yml import load_orch_yml
+from lib.schema import AUT0_REPO
 
 EventKind = Literal["enter", "comment", "wake", "end"]
 RiskName = Literal["low", "high"]
@@ -213,6 +247,11 @@ class Report:
     stuck: tuple[tuple[str, str], ...]
     model: tuple[ModelBreak, ...] | None
     mismatches: tuple[Mismatch, ...]
+
+
+@dataclass(frozen=True)
+class Metrics:
+    values: tuple[tuple[str, int | float | None], ...]
 
 
 @dataclass(frozen=True)
@@ -837,3 +876,272 @@ def _parse_time(value: str, where: str) -> datetime:
 
 def _format_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+APPROVED_STATES = (
+    "awaiting-ok",
+    "ship",
+    "merge-queue",
+    "updating",
+    "handed-off",
+    "merged",
+    "done",
+)
+PREFLIGHT_FAILURE = re.compile(
+    r"\S+ is unreachable over ssh \(|missing under bash -lc on "
+    r"|bash not found on |preflight on \S+ exited "
+)
+REVISE_OUTCOMES = ("queued-review-fix", "answered-fix", "capped-review")
+UNRECORDED_METRICS = (
+    "hand-written-gos",
+    "ac-unmet-approve",
+    "submitted-invalid",
+    "repeat-block-stops",
+    "unsatisfiable-stops",
+)
+HELPER_TOOLS = ("Agent", "Task")
+
+
+def build_metrics(db: Path) -> Metrics:
+    """Read an orch.db snapshot read-only; None marks a metric it does not record."""
+    if not db.is_file():
+        raise EvalError(f"database not found: {db}")
+    try:
+        connection = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise EvalError(f"{db}: {exc}") from exc
+    try:
+        return Metrics(values=_metric_values(connection))
+    except sqlite3.DatabaseError as exc:
+        raise EvalError(f"{db} is not a readable SQLite database: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def render_metrics(current: Metrics, baseline: Metrics) -> str:
+    base = dict(baseline.values)
+    lines = ["eval metrics", "metric current baseline"]
+    for name, value in current.values:
+        lines.append(f"{name} {_metric_text(value)} {_metric_text(base.get(name))}")
+    return "\n".join(lines) + "\n"
+
+
+def _metric_text(value: int | float | None) -> str:
+    if value is None:
+        return "unrecorded"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def _metric_values(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, int | float | None], ...]:
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    values: list[tuple[str, int | float | None]] = list(_review_metrics(connection, tables))
+    values.append(("prs-capped", _capped(connection, tables)))
+    values.append(
+        (
+            "prs-dirty-after-approval",
+            _scalar(
+                connection,
+                tables,
+                ("jobs",),
+                "SELECT COUNT(*) FROM (SELECT DISTINCT lower(repo), ticket_id FROM jobs "
+                "WHERE action = 'update-from-main')",
+            ),
+        )
+    )
+    values.append(
+        (
+            "duplicate-handoffs",
+            _scalar(
+                connection,
+                tables,
+                ("handled_comments",),
+                "SELECT COUNT(*) FROM handled_comments WHERE outcome = 'duplicate-verdict'",
+            ),
+        )
+    )
+    values.append(
+        (
+            "blocked-stops",
+            _scalar(
+                connection,
+                tables,
+                ("ticket_state",),
+                "SELECT COUNT(*) FROM ticket_state WHERE workflow_state = 'blocked'",
+            ),
+        )
+    )
+    values.append(
+        (
+            "tickets-succeeded",
+            _scalar(
+                connection,
+                tables,
+                ("ticket_state",),
+                "SELECT COUNT(*) FROM ticket_state WHERE workflow_state IN ('merged', 'done') "
+                "OR (lower(repo) = ? AND workflow_state = 'handed-off')",
+                (AUT0_REPO,),
+            ),
+        )
+    )
+    values.extend(_tool_metrics(connection, tables))
+    values.append(("preflight-failures", _preflight_failures(connection, tables)))
+    lost = _scalar(
+        connection,
+        tables,
+        ("jobs", "job_telemetry"),
+        "SELECT COALESCE(SUM(t.elapsed_seconds), 0) FROM job_telemetry t "
+        "JOIN jobs j ON j.id = t.job_id WHERE j.state IN ('failed', 'cancelled')",
+    )
+    values.append(("slot-hours-lost", None if lost is None else lost / 3600))
+    values.extend((name, None) for name in UNRECORDED_METRICS)
+    return tuple(values)
+
+
+def _scalar(
+    connection: sqlite3.Connection,
+    tables: set[str],
+    needs: tuple[str, ...],
+    query: str,
+    params: tuple[object, ...] = (),
+) -> int | float | None:
+    if not set(needs) <= tables:
+        return None
+    return connection.execute(query, params).fetchone()[0]
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def _review_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, int | float | None]]:
+    rates = _first_verdict_rates(connection, tables)
+    if "ticket_state" not in tables:
+        return [("prs-reviewed", None), ("rounds-per-pr", None), *rates]
+    has_approval = "approve_comment_id" in _columns(connection, "ticket_state")
+    approval = "approve_comment_id IS NOT NULL OR " if has_approval else ""
+    marks = ", ".join("?" for _ in APPROVED_STATES)
+    rows = connection.execute(
+        f"SELECT review_round, ({approval}workflow_state IN ({marks})) FROM ticket_state",
+        APPROVED_STATES,
+    ).fetchall()
+    reviewed = [(int(rounds or 0), bool(approved)) for rounds, approved in rows]
+    reviewed = [(rounds, approved) for rounds, approved in reviewed if rounds or approved]
+    count = len(reviewed)
+    if count == 0:
+        return [("prs-reviewed", 0), ("rounds-per-pr", None), *rates]
+    total = sum(rounds + int(approved) for rounds, approved in reviewed)
+    return [
+        ("prs-reviewed", count),
+        ("rounds-per-pr", total / count),
+        *rates,
+    ]
+
+
+def _first_verdict_rates(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, float | None]]:
+    names = ("first-round-revise-rate", "first-pass-approve-rate")
+    if not {"handled_comments", "review_events", "ship_intents"} <= tables:
+        return [(name, None) for name in names]
+    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE', 0 FROM ship_intents"]
+    if "ship_holds" in tables:
+        approvals.append(
+            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE', 1 FROM ship_holds"
+        )
+    marks = ", ".join("?" for _ in REVISE_OUTCOMES)
+    first: dict[tuple[str, str], str] = {}
+    for repo, ticket_id, verdict in connection.execute(
+        f"""
+        SELECT v.repo, v.ticket_id, v.verdict FROM (
+            SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict, 0 AS held
+            FROM review_events WHERE outcome IN ({marks})
+            UNION ALL {" UNION ALL ".join(approvals)}
+        ) v
+        LEFT JOIN handled_comments h
+          ON lower(h.repo) = lower(v.repo) AND h.ticket_id = v.ticket_id
+         AND h.comment_id = v.comment_id
+        WHERE h.rowid IS NOT NULL OR v.held
+        ORDER BY h.rowid IS NULL, h.rowid
+        """,
+        REVISE_OUTCOMES,
+    ):
+        first.setdefault((str(repo).lower(), str(ticket_id)), str(verdict))
+    if not first:
+        return [(name, None) for name in names]
+    verdicts = list(first.values())
+    return [
+        ("first-round-revise-rate", verdicts.count("REVISE") / len(verdicts)),
+        ("first-pass-approve-rate", verdicts.count("APPROVE") / len(verdicts)),
+    ]
+
+
+def _preflight_failures(connection: sqlite3.Connection, tables: set[str]) -> int | None:
+    if "job_events" not in tables:
+        return None
+    return sum(
+        1
+        for (detail,) in connection.execute(
+            "SELECT detail FROM job_events WHERE event = 'requeued-unstarted'"
+        )
+        if PREFLIGHT_FAILURE.match(str(detail or ""))
+    )
+
+
+def _capped(connection: sqlite3.Connection, tables: set[str]) -> int | None:
+    parts: list[str] = []
+    if "ticket_state" in tables:
+        parts.append(
+            "SELECT lower(repo), ticket_id FROM ticket_state WHERE workflow_state = 'capped'"
+        )
+    if "review_events" in tables:
+        parts.append(
+            "SELECT lower(repo), ticket_id FROM review_events "
+            "WHERE outcome IN ('capped-review', 'capped-patch-review')"
+        )
+    if not parts:
+        return None
+    return connection.execute(f"SELECT COUNT(*) FROM ({' UNION '.join(parts)})").fetchone()[0]
+
+
+def _tool_metrics(
+    connection: sqlite3.Connection,
+    tables: set[str],
+) -> list[tuple[str, int | float | None]]:
+    names = ("skills-read-per-job", "helpers-per-job", "helpers-per-job-max")
+    if "job_telemetry" not in tables:
+        return [(name, None) for name in names]
+    skills: list[int] = []
+    helpers: list[int] = []
+    for (raw,) in connection.execute(
+        "SELECT tool_calls FROM job_telemetry WHERE harness = 'claude'"
+    ):
+        try:
+            counts = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(counts, dict):
+            continue
+        skills.append(_count(counts.get("Skill")))
+        helpers.append(sum(_count(counts.get(tool)) for tool in HELPER_TOOLS))
+    if not skills:
+        return [(name, None) for name in names]
+    return [
+        ("skills-read-per-job", sum(skills) / len(skills)),
+        ("helpers-per-job", sum(helpers) / len(helpers)),
+        ("helpers-per-job-max", max(helpers)),
+    ]
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0

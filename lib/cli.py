@@ -33,7 +33,7 @@ from lib import (
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
-from lib.eval_report import EvalError, build_report, render
+from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
 from lib.harness_env import harness_env
@@ -54,7 +54,8 @@ from lib.orch_yml import (
     parse_bind,
 )
 from lib.poll_source import LivePollSource, PollSourceError
-from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
+from lib.pstack_models import rules_text
+from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
@@ -109,9 +110,13 @@ check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
   An unknown model name warns on stderr and still exits 0.
 
 install-skills [--home PATH] [--project PATH] [--cloud] [--allow-unstable-checkout]
+               [--remove-claude-extras]
   Symlink each pinned skill into ~/.claude/skills, ~/.agents/skills,
   and ~/.cursor/skills. --cloud copies them into the project at
-  .claude/skills, .agents/skills, and .cursor/skills.
+  .claude/skills, .agents/skills, and .cursor/skills. A local install also
+  links pstack's agents/ and docs/ into ~/.claude and writes
+  ~/.claude/rules/pstack-models.md. --remove-claude-extras removes those
+  three and leaves the skills.
 
 doctor [--home PATH] [--project PATH] [--cloud]
        [--responses DIR] [--print-canary]
@@ -121,8 +126,11 @@ doctor [--home PATH] [--project PATH] [--cloud]
   --print-canary prints the prompt and does not read replies.
 
 eval-report --input PATH [--since TIME] [--until TIME]
+eval-report --db PATH --baseline PATH
   Print the weekly eval report for one directory of fixtures or
   collected logs. It does not contact GitHub or Linear.
+  --db prints the #209 metrics of a backed-up orch.db, opened read-only,
+  beside those of the --baseline snapshot (O4's).
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -448,10 +456,27 @@ class _Parser(argparse.ArgumentParser):
 
 def _eval_report(argv: list[str]) -> int:
     parser = _Parser(prog="orch eval-report", add_help=True)
-    parser.add_argument("--input", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", type=Path)
+    source.add_argument("--db", type=Path)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--since")
     parser.add_argument("--until")
     args = parser.parse_args(argv)
+    if args.db is not None:
+        if args.baseline is None:
+            parser.error("--db needs --baseline")
+        if args.since is not None or args.until is not None:
+            parser.error("--since and --until read --input only")
+        try:
+            current, baseline = build_metrics(args.db), build_metrics(args.baseline)
+        except EvalError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(render_metrics(current, baseline), end="")
+        return 0
+    if args.baseline is not None:
+        parser.error("--baseline needs --db")
     try:
         built = build_report(args.input, since=args.since, until=args.until)
     except EvalError as exc:
@@ -1732,17 +1757,24 @@ def _install_skills(argv: list[str]) -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--cloud", action="store_true")
     parser.add_argument("--allow-unstable-checkout", action="store_true")
+    parser.add_argument("--remove-claude-extras", action="store_true")
     args = parser.parse_args(argv)
     try:
         anchor, mode = _anchor("install-skills", args.home, args.project, args.cloud)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 2
-    unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
-    if unstable:
-        print(f"orch install-skills: {unstable}", file=sys.stderr)
-        return 1
-    errors = install_skills(ROOT, anchor, mode)
+    if args.remove_claude_extras:
+        if mode != "local":
+            print("orch install-skills: --remove-claude-extras is for a local install", file=sys.stderr)
+            return 2
+        errors = remove_claude_extras(anchor, rules_text(ROOT))
+    else:
+        unstable = unstable_checkout(ROOT) if mode == "local" and not args.allow_unstable_checkout else None
+        if unstable:
+            print(f"orch install-skills: {unstable}", file=sys.stderr)
+            return 1
+        errors = install_skills(ROOT, anchor, mode, rules=rules_text(ROOT) if mode == "local" else None)
     if errors:
         for message in errors:
             print(message, file=sys.stderr)

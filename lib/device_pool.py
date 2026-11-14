@@ -4,8 +4,9 @@ A slot is one row in `device_slots`, in the dispatcher database next to
 `jobs`. `claim` moves the first queued job for a harness, in the queue's
 claim order (lib/queue.py claim_order: urgent, a resumed paused step, bug,
 then oldest), to running and holds a slot for it on the least-loaded
-device (most free slots; a tie goes to the earlier device in machines.yml)
-that is schedulable and lists that harness (issue #85). Both writes happen
+device (lowest utilization, slots held over slot_max; a tie goes to a remote
+before the local box, remotes in machines.yml order; issue #223) that is
+schedulable and lists that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
@@ -45,6 +46,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
+from fractions import Fraction
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import (
@@ -114,21 +116,23 @@ def choose_device(
     harness: str,
     used: Mapping[str, int],
 ) -> Device | None:
-    """The least-loaded schedulable device listing harness, or None.
+    """The schedulable device listing harness with the lowest utilization, or None.
 
-    Least loaded is the most free slots (slot_max minus held); a tie goes
-    to the device listed first in machines.yml (issue #85).
+    Utilization is slots held over slot_max, compared exactly. A tie goes to
+    a remote device before the local box, remotes in machines.yml order
+    (issue #223). A full device is never chosen.
     """
-    best: Device | None = None
-    best_free = 0
-    for device in config.devices:
+    candidates = []
+    for index, device in enumerate(config.devices):
         if not device.eligible(harness):
             continue
         assert device.slot_max is not None
-        free = device.slot_max - used.get(device.name, 0)
-        if free > best_free:
-            best, best_free = device, free
-    return best
+        held = used.get(device.name, 0)
+        if held < device.slot_max:
+            candidates.append(((Fraction(held, device.slot_max), device.local, index), device))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda candidate: candidate[0])[1]
 
 
 def free_slots(config: MachinesConfig, harness: str, used: Mapping[str, int]) -> int:

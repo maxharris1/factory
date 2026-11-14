@@ -10,7 +10,7 @@ PLAN_HANDOFF_LIMIT = 60_000
 
 def task_lines(facts: dict) -> list[str]:
     return [
-        "This is a plan job. Run as poteto-mode.",
+        "This is a plan job. Follow the router in Skills above.",
         "1. Read the ticket and its brief (Job data). Start with an architect scaffold.",
         "2. Map every acceptance criterion to the work that meets it. The plan lives in the "
         "plan handoff comment, never in a file in the repo.",
