@@ -33,6 +33,8 @@ SPEC_STATE = {
     "Ship": "ship",
     "Merged": "merged",
     "HandedOff": "handed-off",
+    "MergeQueue": "merge-queue",
+    "Updating": "updating",
     "WaitingExternal": "waiting-external",
     "AwaitingOk": "awaiting-ok",
     "PostMerge": "post-merge",
@@ -274,7 +276,7 @@ def test_t2_self_loops_are_charted() -> None:
     ("source", "bad", "message"),
     [
         ("spec", "  Fixing -->Review: CI green", "unparsed section 4.1 edge"),
-        ("chart", "  s12 --> s8", "unparsed chart.mmd edge"),
+        ("chart", "  s15 --> s9", "unparsed chart.mmd edge"),
         ("chart", "  s3 --> s9: ready again", "draws .* twice"),
     ],
     ids=["spec-unparsed", "chart-unlabelled", "chart-duplicate"],

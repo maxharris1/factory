@@ -148,3 +148,9 @@ def test_a_restored_backup_is_a_working_dispatcher_database(tmp_path: Path) -> N
     assert restored_dispatcher._tracked_refs() == ()
     restored_dispatcher.process(ticket())
     assert [job.request.action for job in restored.outstanding()] == ["build"]
+
+
+def test_backup_refuses_a_path_nested_in_the_databases_directory(tmp_path: Path) -> None:
+    _dispatcher, queue = _seeded(tmp_path)
+    with pytest.raises(BackupError, match="own directory"):
+        backup(queue.path, queue.path.parent / "backup" / "orch.db")

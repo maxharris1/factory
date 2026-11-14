@@ -160,6 +160,22 @@ def prepare(
     return checkout
 
 
+def fetched_clone(root: Path, repo: str, heads: tuple[str, ...], template: str) -> Path:
+    """The repo's bare clone, fetched, holding every commit in heads (#130).
+
+    The poller's read of the clone the waiter keeps for job worktrees, under
+    the same lock. It never makes a worktree or moves a local ref.
+    """
+    clone = _clone_path(root, repo)
+    url = template.format(repo=repo)
+    check_remote_url(url)
+    with _clone_lock(clone):
+        _ensure_clone(clone, url)
+        for head in heads:
+            _target(clone, head)
+    return clone
+
+
 def _adopt_kept(
     root: Path,
     adopt: str,

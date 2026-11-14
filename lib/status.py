@@ -32,6 +32,7 @@ from lib.worktrees import pid_alive
 
 ROOT = Path(__file__).resolve().parent.parent
 
+MERGE_QUEUE_STATES = ("merge-queue", "updating")
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
@@ -54,6 +55,8 @@ class TrackerRow:
     stuck_reason: str | None = None
     # Issue #86: the hold approver while the ticket is awaiting-ok.
     waiting_on: str | None = None
+    # #130: when the covering APPROVE landed, for a merge-queue position.
+    approved_at: float | None = None
     # Issue #115: the source issue and the PR, shown issue first.
     source: str | None = None
     pr_number: str | None = None
@@ -136,6 +139,8 @@ class Status:
     unplaced: frozenset[str] = frozenset()
     # Component heartbeats (#92), when build_status was given a reader.
     health: component_health.HealthReport | None = None
+    # #130: approved tickets watched until merge, oldest approval first.
+    merge_queue: tuple[TrackerRow, ...] = ()
 
 
 class TrackerReader(Protocol):
@@ -253,13 +258,20 @@ class SQLiteStatusReader:
         try:
             connection.execute("BEGIN")
             approvers = _hold_approvers(connection)
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(ticket_state)")
+            }
+            approved_at = (
+                "state.approved_at" if "approved_at" in columns else "NULL"
+            )
             tracker_rows = (
                 connection.execute(
-                    """
+                    f"""
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                            COALESCE(state.workflow_state, 'intake') AS workflow_state,
                            state.paused_action, COALESCE(state.stuck, 0) AS stuck,
-                           state.stuck_reason
+                           state.stuck_reason, {approved_at} AS approved_at
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
@@ -323,6 +335,9 @@ class SQLiteStatusReader:
                     approvers.get((str(row["repo"]), str(row["ticket_id"])))
                     if row["workflow_state"] == "awaiting-ok"
                     else None
+                ),
+                approved_at=(
+                    float(row["approved_at"]) if row["approved_at"] is not None else None
                 ),
                 **_source(sources, row),
             )
@@ -528,6 +543,24 @@ def build_status(
         devices=tuple(device_rows_out),
         device_jobs=device_jobs,
         unplaced=frozenset(unplaced),
+        merge_queue=tuple(
+            sorted(
+                (
+                    row
+                    for row in tracker_rows
+                    if not row.stuck
+                    and (
+                        row.state in MERGE_QUEUE_STATES
+                        or (row.state == "waiting-external" and row.approved_at is not None)
+                    )
+                ),
+                key=lambda row: (
+                    row.repo.casefold(),
+                    row.approved_at if row.approved_at is not None else float("inf"),
+                    row.ticket_id,
+                ),
+            )
+        ),
         paused=tuple(
             sorted(
                 (
@@ -591,6 +624,19 @@ def render(status: Status) -> str:
         )
     if not status.paused:
         lines.append("  empty")
+    if status.merge_queue:
+        lines.extend(("", f"Merge queue ({len(status.merge_queue)})"))
+        sizes: dict[str, int] = {}
+        for row in status.merge_queue:
+            sizes[row.repo.casefold()] = sizes.get(row.repo.casefold(), 0) + 1
+        positions: dict[str, int] = {}
+        for row in status.merge_queue:
+            key = row.repo.casefold()
+            positions[key] = positions.get(key, 0) + 1
+            lines.append(
+                f"  {row.repo}#{row.ticket_id} {row.state} "
+                f"{positions[key]} of {sizes[key]} [{row.tracker}]"
+            )
     if status.attention:
         lines.extend(("", f"Needs attention ({len(status.attention)})"))
         for flag in status.attention:

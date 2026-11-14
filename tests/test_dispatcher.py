@@ -275,7 +275,12 @@ def factory(
     rounds_low: int = 1,
     rounds_high: int = 3,
     ship: str = "merge",
+    finish_line: str = "ready-for-review",
 ) -> FactoryConfig:
+    """finish_line defaults to ready-for-review: these tests drive T4 through
+    process() alone, which never runs the merge queue step (#130), so a
+    ship: merge APPROVE merges at once. finish_line: merge, where every merge
+    waits for that step, is covered on tests/merge_queue_support.py's Board."""
     return FactoryConfig(
         base_branch="main",
         tickets=tickets,
@@ -286,6 +291,7 @@ def factory(
         verify="none",
         ship=ship,
         skills=(),
+        finish_line=finish_line,
     )
 
 
@@ -6423,8 +6429,8 @@ def test_71_a_ready_older_than_its_heads_verdict_queues_no_review(tmp_path: Path
     now = [200.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
     poll(_ready_71("ready-1", HEAD_71, 100), _revise_71(120))
-    # #108: the empty DB records the answered review cancelled, never claimable.
     assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+    assert _outcomes(queue)["ready-1"] == "answered-review"
     assert queue.claim("codex") is None
 
 
