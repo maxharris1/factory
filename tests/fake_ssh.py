@@ -28,10 +28,31 @@ when the call starts (create or remove one mid-test to toggle it):
 * `<alias>.drop-after`: the client exits 255 after that long, as a dropped
   link does. The script keeps running; its output no longer reaches the
   client, and a write to the closed channel ends it with SIGPIPE.
+
+Connection reuse (#222). `-o ControlMaster=...`, `-o ControlPath=...` and
+`-o ControlPersist=...` stay in `options`; `-N`, `-f` and `-O <op>` are
+understood. Control calls are logged to $FAKE_SSH_CONTROL_LOG (default
+`$FAKE_SSH_LOG.control`), never to $FAKE_SSH_LOG, as one JSON line each with
+`op` (`master`, `check`, `stop`, `exit`), `alias`, `user`, `path`, `code`:
+
+* a master start (`ControlMaster=yes` with `-N`) exits 255 as a login would
+  (unknown alias, wrong user, `<alias>.offline`); otherwise it binds a real
+  unix socket at ControlPath, writes `<path>.fake-master` (the master is
+  alive while that marker is there) and exits 0, as `-f` does;
+* `-O check` exits 0 while both the socket and its marker exist, else 255
+  with `Control socket connect(<path>): Connection refused`;
+* `-O stop` / `-O exit` remove the marker and the socket;
+* a data call with a ControlPath (not `none`) logs `"via": "master"` when
+  that master is alive, else `"via": "login"`: ssh's own fallback to a
+  plain login over a missing or stale socket. `<alias>.mux-refuse` makes a
+  live master refuse the session: ssh warns and falls back to a login.
+  `<alias>.offline` fails the call (255) through a live master too: the
+  link under it is down.
 """
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -52,15 +73,94 @@ def _relay(source, sink) -> None:
         sink.flush()
 
 
+def _option(options: list[str], name: str) -> str | None:
+    for option in options:
+        key, _, value = option.partition("=")
+        if key == name:
+            return value
+    return None
+
+
+def _live(path: str) -> bool:
+    return os.path.exists(path) and os.path.exists(path + ".fake-master")
+
+
+def _refused(hosts: str, alias: str | None, user: str | None) -> str | None:
+    """Why a login to alias as user fails, or None when it succeeds."""
+    if alias is None:
+        return "no alias"
+    known = os.path.join(hosts, alias)
+    if not hosts or not os.path.isfile(known):
+        return f"unknown alias {alias}"
+    with open(known, encoding="utf-8") as handle:
+        if handle.read().strip() != user:
+            return f"{alias} refuses user {user}"
+    if os.path.exists(known + ".offline"):
+        return f"{alias} is offline"
+    return None
+
+
+def _control(op: str, options: list[str], user: str | None, alias: str | None) -> int:
+    path = _option(options, "ControlPath") or ""
+    hosts = os.environ.get("FAKE_SSH_HOSTS", "")
+    code = 0
+    if op == "master":
+        reason = _refused(hosts, alias, user)
+        if reason:
+            print(f"fake ssh: {reason}", file=sys.stderr)
+            code = 255
+        else:
+            if os.path.lexists(path):
+                print(f"fake ssh: ControlSocket {path} already exists", file=sys.stderr)
+                code = 255
+            else:
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                server.bind(path)
+                server.close()
+                with open(path + ".fake-master", "w", encoding="utf-8") as marker:
+                    marker.write(f"{alias} {user}\n")
+    elif op == "check":
+        if not _live(path):
+            print(f"Control socket connect({path}): Connection refused", file=sys.stderr)
+            code = 255
+    elif op in ("stop", "exit"):
+        if _live(path):
+            os.unlink(path + ".fake-master")
+            os.unlink(path)
+        else:
+            print(f"Control socket connect({path}): Connection refused", file=sys.stderr)
+            code = 255
+    else:
+        print(f"fake ssh: unknown -O {op}", file=sys.stderr)
+        code = 255
+    log = os.environ.get("FAKE_SSH_CONTROL_LOG") or os.environ["FAKE_SSH_LOG"] + ".control"
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"op": op, "alias": alias, "user": user, "path": path, "code": code}) + "\n"
+        )
+    return code
+
+
 def main(argv: list[str]) -> int:
     options: list[str] = []
     user = None
+    op = None
+    background = no_command = False
     index = 0
     while index < len(argv):
         part = argv[index]
         if part == "-o":
             options.append(argv[index + 1])
             index += 2
+        elif part == "-O":
+            op = argv[index + 1]
+            index += 2
+        elif part == "-N":
+            no_command = True
+            index += 1
+        elif part == "-f":
+            background = True
+            index += 1
         elif part == "-l":
             user = argv[index + 1]
             index += 2
@@ -72,28 +172,39 @@ def main(argv: list[str]) -> int:
             return 255
     rest = argv[index:]
     alias = rest[0] if rest else None
+    if op is not None:
+        return _control(op, options, user, alias)
+    if no_command and _option(options, "ControlMaster") == "yes":
+        return _control("master", options, user, alias) if background else 255
+    hosts = os.environ.get("FAKE_SSH_HOSTS", "")
+    path = _option(options, "ControlPath")
+    via = "login"
+    if path and path != "none" and _live(path):
+        via = "master"
+        if alias and os.path.exists(os.path.join(hosts, alias + ".mux-refuse")):
+            print(
+                "mux_client_request_session: session request failed: "
+                "Session open refused by peer",
+                file=sys.stderr,
+            )
+            via = "login"
     script = " ".join(rest[1:]) if len(rest) > 1 else None
     with open(os.environ["FAKE_SSH_LOG"], "a", encoding="utf-8") as log:
         log.write(
             json.dumps(
                 {"options": options, "user": user, "alias": alias, "script": script,
-                 "words": len(rest) - 1, "pid": os.getpid()}
+                 "words": len(rest) - 1, "pid": os.getpid(), "via": via}
             )
             + "\n"
         )
-    hosts = os.environ.get("FAKE_SSH_HOSTS", "")
     if alias is None or script is None:
         return 255
+    reason = _refused(hosts, alias, user)
+    if reason:
+        if "offline" not in reason:
+            print(f"fake ssh: {reason}", file=sys.stderr)
+        return 255
     known = os.path.join(hosts, alias)
-    if not hosts or not os.path.isfile(known):
-        print(f"fake ssh: unknown alias {alias}", file=sys.stderr)
-        return 255
-    with open(known, encoding="utf-8") as handle:
-        if handle.read().strip() != user:
-            print(f"fake ssh: {alias} refuses user {user}", file=sys.stderr)
-            return 255
-    if os.path.exists(known + ".offline"):
-        return 255
     home = os.environ.get("FAKE_SSH_HOME")
     if not home:
         # Never the real user's HOME: a login shell on the "device" would

@@ -8,7 +8,9 @@ put tests/fake_ssh.py in front of it instead.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -54,3 +56,13 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
         os.environ.pop("ORCH_DB_BACKUP", None)
     else:
         os.environ["ORCH_DB_BACKUP"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _ssh_control_dir(monkeypatch: pytest.MonkeyPatch):
+    """#222: each test gets its own short ControlMaster socket directory, so
+    no fake master outlives its test and a socket path stays bindable."""
+    directory = tempfile.mkdtemp(prefix="orch-ssh-", dir="/tmp")
+    monkeypatch.setenv("ORCH_SSH_CONTROL_DIR", directory)
+    yield directory
+    shutil.rmtree(directory, ignore_errors=True)
