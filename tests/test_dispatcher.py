@@ -2615,6 +2615,10 @@ CREDENTIAL_BODIES = (
     + CANARY
     + "&quot;&#125;&#125;",
     r"\x7b'credentials': \x7b'password': '" + CANARY + r"'\x7d\x7d",
+    f"credentials: password = {CANARY}",
+    f"token: password = {CANARY}",
+    f"session cookie: auth key {CANARY}",
+    f"bad credentials for user bot pass {CANARY}",
 )
 
 
