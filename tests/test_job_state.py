@@ -171,6 +171,7 @@ class Poller:
         now: float = CLAIMED_AT,
         box: bool = True,
         box_slots: int = 1,
+        pc: bool = True,
         check: int = 0,
         job_states: JobStateConfig | None = None,
     ):
@@ -178,7 +179,7 @@ class Poller:
         self.now = [now]
         self.path = tmp_path / "orch.db"
         self.queue = SQLiteJobQueue(self.path, clock=lambda: self.now[0])
-        self.machines = machines_file(tmp_path, box_enabled=box, box_slots=box_slots)
+        self.machines = machines_file(tmp_path, box_enabled=box, box_slots=box_slots, pc=pc)
         self.config = config_of(self.machines)
         self.pool = DevicePool(self.queue, self.config)
         self.live: set[int] = set()

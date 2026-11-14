@@ -178,11 +178,11 @@ def test_a_harness_without_the_agent_name_starts_a_general_helper(recipient: str
     assert f"`{FACTORY_ROOT}/skills/pstack/agents/poteto-agent.md`" in text
 
 
-def _started_brief(tmp_path: Path, box_slots: int, box_root: str | None = None) -> str:
-    from tests.test_waiter import FakeSpawn, enqueue
+def _started_brief(tmp_path: Path, device: str, box_root: str | None = None) -> str:
+    from tests.test_waiter import FakeSpawn, enqueue, slots
     from tests.test_waiter_remote import make_waiter, remote_machines
 
-    machines = remote_machines(tmp_path, box_slots=box_slots)
+    machines = remote_machines(tmp_path, box_enabled=device == "box", pc=device == "pc")
     if box_root is not None:
         text = machines.read_text(encoding="utf-8")
         machines.write_text(text.replace("    local: true\n", f"    local: true\n    factory_root: {box_root}\n"),
@@ -191,23 +191,24 @@ def _started_brief(tmp_path: Path, box_slots: int, box_root: str | None = None) 
     waiter, queue, _ = make_waiter(tmp_path, machines, spawn)
     job_id = enqueue(queue, "a")
     assert waiter.step() == job_id
+    assert slots(tmp_path / "orch.db") == {job_id: device}
     return spawn.stdin[0].decode("utf-8")
 
 
 def test_a_remote_job_names_the_devices_factory_root_never_its_workdir(tmp_path: Path) -> None:
-    text = _started_brief(tmp_path, box_slots=1)
+    text = _started_brief(tmp_path, "pc")
     named = _named(text)
     assert named and all(path.startswith("/srv/factory/skills/") for path in named)
     assert not any(str(tmp_path) in path for path in named)
 
 
 def test_a_box_job_names_the_box_factory_root(tmp_path: Path) -> None:
-    named = _named(_started_brief(tmp_path, box_slots=5, box_root="/opt/orch/factory"))
+    named = _named(_started_brief(tmp_path, "box", box_root="/opt/orch/factory"))
     assert named and all(path.startswith("/opt/orch/factory/skills/") for path in named)
 
 
 def test_a_box_with_no_factory_root_names_its_own_checkout(tmp_path: Path) -> None:
-    named = _named(_started_brief(tmp_path, box_slots=5))
+    named = _named(_started_brief(tmp_path, "box"))
     assert named and all(path.startswith(f"{ROOT}/skills/") for path in named)
 
 
@@ -247,7 +248,7 @@ def test_a_malformed_pin_input_still_starts_the_job_with_a_questions_brief(
     run = tmp_path / "run"
     run.mkdir()
     with patch("lib.waiter.render_brief", partial(render_brief, pin_root=pin)):
-        text = _started_brief(run, box_slots=1)
+        text = _started_brief(run, "pc")
     _assert_questions_only(text, "skills.lock" if bad == SOURCES[0] else "helper model map")
 
 

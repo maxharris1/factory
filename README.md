@@ -165,8 +165,8 @@ assumes a device is reachable: the poller checks it (below).
 moves the first queued job for that harness, in claim order (a ticket marked
 urgent, then a job resuming a paused step, then a ticket marked bug, then the
 oldest; issue #85), to running and holds a slot on the least-loaded device
-(the most free slots; a tie goes to the earlier device in `machines.yml`)
-that is enabled, has no placeholder and lists the harness. Slots are generic: any
+(the lowest utilization, slots held over `slot_max`; a tie goes to a remote
+device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
