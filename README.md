@@ -1047,6 +1047,15 @@ place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
 
+`status.json`'s `projects` lists each `orch.yml` project in order with its
+tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
+round caps (`rounds.low`, `rounds.high`), as the poller last read its
+`factory.md` (issue #152). The dashboard has no copy of any `factory.md`:
+each poll cycle the dispatcher stores what `LivePollSource` parsed in the
+`project_rules` table (`lib/project_rules.py`), and the snapshot reads it
+back. A `factory.md` the poller could not read, or has not read yet, is
+`status: unknown` with the `reason`, never a default.
+
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
 (`LIVE`, `STALE SNAPSHOT` after 3 minutes, `LINK LOST` when fetches fail)
