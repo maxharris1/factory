@@ -14,7 +14,13 @@ same process that runs the command:
   timed out, e.g. by the command's own `orch job done`), and retries
   transient storage errors at the next interval;
 * it stops when the command exits, and dies with this process, so no loop
-  can outlive the job.
+  can outlive the job;
+* with a `Budget` (#199: the job's timeout_seconds, printed in the brief),
+  a command still running when the wall clock runs out is stopped: SIGTERM,
+  then SIGKILL after KILL_GRACE_SECONDS, and run returns only once the
+  child is reaped, so its death is confirmed before the job can fail and
+  T6 can retry it. A remote run's Control is stopped instead, and
+  lib/placed_run.py confirms its worker gone on the device.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
@@ -28,6 +34,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
@@ -41,6 +48,9 @@ FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 # rest of its stdout (a process the command left behind may hold the pipe).
 OUTPUT_GRACE_SECONDS = 5.0
 TRANSIENT_ERRORS = (sqlite3.Error, OSError)
+# #199: how long a command past its budget has between SIGTERM and SIGKILL.
+KILL_GRACE_SECONDS = 30.0
+WALL_CLOCK = "wall-clock"
 
 Beat = Callable[[], object]
 Log = Callable[[str], None]
@@ -91,6 +101,37 @@ def heartbeat_interval(timeout_seconds: float, override: float | None) -> float:
     return min(override, limit)
 
 
+class Budget:
+    """A job's wall-clock budget (#199), from when `orch job run` started it."""
+
+    def __init__(
+        self,
+        seconds: float,
+        *,
+        grace: float = KILL_GRACE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("the wall-clock budget must be a number of seconds above 0")
+        self.seconds = seconds
+        self.grace = grace
+        self.clock = clock
+        self.started = clock()
+        self.expired = False
+        self.signum: int | None = None
+
+    def remaining(self) -> float:
+        return max(0.0, self.started + self.seconds - self.clock())
+
+    def elapsed(self) -> float:
+        return max(0.0, self.clock() - self.started)
+
+    def describe(self) -> str:
+        if self.seconds % 60:
+            return f"{self.seconds:g}-second wall-clock budget"
+        return f"{self.seconds / 60:g}-minute wall-clock budget"
+
+
 class Heartbeat:
     def __init__(
         self, beat: Beat, interval: float, log: Log, on_end: Callable[[], None] | None = None
@@ -136,6 +177,7 @@ def run(
     started: Callable[[int], None] | None = None,
     output: Callable[[IO[bytes]], None] | None = None,
     execed: Callable[[], None] | None = None,
+    budget: Budget | None = None,
 ) -> int:
     """Beat once, run argv with a heartbeat, and return its exit status.
 
@@ -165,6 +207,10 @@ def run(
     given, stdout is a pipe and `output(pipe)` runs on a daemon thread until
     the pipe closes. After the command exits run waits up to
     OUTPUT_GRACE_SECONDS for it, then returns either way.
+
+    `budget` (#199): a command still running when it runs out gets SIGTERM,
+    then SIGKILL after budget.grace seconds; run returns once it is reaped,
+    with budget.expired set and budget.signum the last signal sent.
     """
     beat()
     heartbeat = Heartbeat(beat, interval, log)
@@ -257,7 +303,7 @@ def run(
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
-        code = child.wait()
+        code = _wait(child, budget, argv[0], log)
     finally:
         if reader is not None:
             reader.join(OUTPUT_GRACE_SECONDS)
@@ -267,6 +313,30 @@ def run(
         if prepared and teardown is not None:
             teardown()
     return code if code >= 0 else 128 - code
+
+
+def _wait(
+    child: subprocess.Popen[bytes], budget: Budget | None, name: str, log: Log
+) -> int:
+    """child.wait(), stopping the child once the budget runs out; returns once it is reaped."""
+    if budget is None:
+        return child.wait()
+    try:
+        return child.wait(timeout=budget.remaining())
+    except subprocess.TimeoutExpired:
+        pass
+    budget.expired = True
+    log(f"{name} ran past its {budget.describe()}; stopping pid {child.pid} (SIGTERM)")
+    budget.signum = signal.SIGTERM
+    child.send_signal(signal.SIGTERM)
+    try:
+        return child.wait(timeout=budget.grace)
+    except subprocess.TimeoutExpired:
+        pass
+    log(f"{name} (pid {child.pid}) ignored SIGTERM for {budget.grace:g}s; killing it (SIGKILL)")
+    budget.signum = signal.SIGKILL
+    child.kill()
+    return child.wait()
 
 
 class Control:
@@ -295,6 +365,7 @@ def follow(
     log: Log,
     setup: Callable[[], object] | None = None,
     teardown: Callable[[], None] | None = None,
+    budget: Budget | None = None,
 ) -> int:
     """Beat once, then run body (a remote run's follower) under a heartbeat (#128).
 
@@ -304,7 +375,10 @@ def follow(
     QueueError (the job was finished, failed or timed out), set the body's
     Control, which stops the remote worker. A signal during setup means the
     body never runs (exit 128 + the signal). `teardown` runs after the
-    heartbeat stops, whenever setup succeeded.
+    heartbeat stops, whenever setup succeeded. A `budget` that runs out
+    while the body runs stops the Control the same way (SIGTERM), with
+    budget.expired set; the worker's death is confirmed on the device by
+    lib/placed_run.py before its slot is freed or its job retried (#199).
     """
     beat()
     control = Control()
@@ -312,6 +386,7 @@ def follow(
         beat, interval, log, on_end=lambda: control.stop(signal.SIGTERM, "the job ended")
     )
     previous: dict[int, object] = {}
+    timer: threading.Timer | None = None
 
     def on_signal(signum: int, _frame: FrameType | None) -> None:
         control.stop(signum, f"got signal {signum}")
@@ -328,13 +403,28 @@ def follow(
         if control.signum is not None:
             log(f"not starting: {control.reason}")
             return 128 + control.signum
+        if budget is not None:
+            timer = threading.Timer(budget.remaining(), _out_of_budget, (budget, control, log))
+            timer.daemon = True
+            timer.start()
         return body(control)
     finally:
+        if timer is not None:
+            timer.cancel()
         heartbeat.stop()
         for signum, handler in previous.items():
             signal.signal(signum, handler)  # type: ignore[arg-type]
         if prepared and teardown is not None:
             teardown()
+
+
+def _out_of_budget(budget: Budget, control: Control, log: Log) -> None:
+    if control.signum is not None:
+        return  # already stopping for another reason
+    budget.expired = True
+    budget.signum = signal.SIGTERM
+    log(f"the run passed its {budget.describe()}; stopping its remote worker")
+    control.stop(signal.SIGTERM, f"past its {budget.describe()}")
 
 
 def _one_line(exc: BaseException) -> str:

@@ -395,6 +395,17 @@ class PlacedRun:
             return False
         return harness_launched(self.transport, self.target) is False
 
+    def live_worker(self) -> int | None:
+        """A box worker of this job that still runs (its pid), or None."""
+        workers = list(self._worker)
+        if self.placement.worker_pid is not None:
+            # a worker an earlier, dead runner of this job left behind
+            workers.append((self.placement.worker_pid, self.placement.worker_start))
+        for pid, start in workers:
+            if self.alive(pid, start):
+                return pid
+        return None
+
     def finish(
         self, code: int | None = None, settle: Callable[[], None] | None = None
     ) -> bool:
@@ -411,14 +422,10 @@ class PlacedRun:
         if self.requeued:
             return True  # the requeue freed the slot; nothing was started
         if self.target is None:
-            workers = list(self._worker)
-            if self.placement.worker_pid is not None:
-                # a worker an earlier, dead runner of this job left behind
-                workers.append((self.placement.worker_pid, self.placement.worker_start))
-            for pid, start in workers:
-                if self.alive(pid, start):
-                    self.log(f"worker pid {pid} still runs; slot held")
-                    return _held(settle)
+            pid = self.live_worker()
+            if pid is not None:
+                self.log(f"worker pid {pid} still runs; slot held")
+                return _held(settle)
             return self._release(code, settle)
         status = check_worker(self.transport, self.target)
         cancelled = self.follow_end is not None and self.follow_end.kind == STOPPED
