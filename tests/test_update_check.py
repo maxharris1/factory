@@ -227,3 +227,39 @@ def test_git_failure_is_not_trivial(repo: Repo, monkeypatch: pytest.MonkeyPatch)
 def test_unknown_commit_is_not_trivial(repo: Repo) -> None:
     result = run(repo, "0" * 40, "1" * 40)
     assert not result.trivial
+
+
+def _marker_fixture(size: int) -> str:
+    return (
+        "<" * size + " fixture\nKEEP_FIRST\n" + "|" * size + " base\nKEEP_BASE\n"
+        + "=" * size + "\nKEEP_SECOND\n" + ">" * size + " fixture\n"
+    )
+
+
+@pytest.mark.parametrize("size", [7, 61, 80])
+def test_marker_lines_already_in_the_file_never_hide_an_edit(repo: Repo, size: int) -> None:
+    repo.write("app.py", _marker_fixture(size) + BASE)
+    repo.base = repo.commit("marker fixture")
+    approved, _ = repo.branches(
+        [("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")]
+    )
+    head = repo.merge_main(
+        lambda r: r.write("app.py", "KEEP_FIRST\n" + BASE.replace("line 5\n", "line 5 pr\n"))
+    )
+    result = run(repo, approved, head)
+    assert not result.trivial
+    assert "not resolved to exactly one side" in result.reason
+
+
+@pytest.mark.parametrize("size", [7, 61, 80])
+def test_marker_lines_already_in_the_file_still_allow_a_one_side_resolution(
+    repo: Repo, size: int
+) -> None:
+    repo.write("app.py", _marker_fixture(size) + BASE)
+    repo.base = repo.commit("marker fixture")
+    approved, _ = repo.branches(
+        [("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")]
+    )
+    head = repo.merge_main(lambda r: r.git("checkout", "--ours", "app.py"))
+    result = run(repo, approved, head)
+    assert result.trivial, result.reason

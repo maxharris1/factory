@@ -1135,10 +1135,7 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
-            merged=merged and fresh,
-            mergeable=pull.get("mergeable") if isinstance(pull.get("mergeable"), bool) else None,
-            mergeable_state=_optional_string(pull.get("mergeable_state")),
-            closed=pull.get("state") == "closed" and not merged,
+            **_pull_facts(pull, fresh=fresh),
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -1245,8 +1242,10 @@ class LivePollSource:
             issue,
             fresh=fresh,
         )
+        pull_facts: dict[str, Any] = {}
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
+            pull_facts = _pull_facts(pull, fresh=fresh)
             if pull.get("merged") is True and tracked:
                 # #108: a hand merge of a tracked Linear ticket's PR ends it too.
                 if self.terminal_sink is not None:
@@ -1301,6 +1300,7 @@ class LivePollSource:
             linear_ready_for_review=project.linear_ready_for_review,
             linear_state_phase=_linear_state_phase(issue),
             ready_starts_review=project.ready_starts_review,
+            **pull_facts,
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
@@ -1658,6 +1658,19 @@ def _linear_project(
 def _linear_closed(issue: Mapping[str, Any]) -> bool:
     state = issue.get("state")
     return isinstance(state, dict) and state.get("type") in ("completed", "canceled")
+
+
+def _pull_facts(pull: Mapping[str, Any], *, fresh: bool) -> dict[str, Any]:
+    """The linked PR's merge facts a ticket carries, whatever its tracker
+    (#130: the merge queue reads them)."""
+    merged = pull.get("merged") is True
+    mergeable = pull.get("mergeable")
+    return {
+        "merged": merged and fresh,
+        "mergeable": mergeable if isinstance(mergeable, bool) else None,
+        "mergeable_state": _optional_string(pull.get("mergeable_state")),
+        "closed": pull.get("state") == "closed" and not merged,
+    }
 
 
 def _optional_string(value: object) -> str | None:

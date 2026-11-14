@@ -106,13 +106,14 @@ def test_queues_in_two_repos_each_merge_in_the_same_cycle(tmp_path: Path) -> Non
     assert sorted(board.actions.merges) == [(True, sha(1)), (True, sha(2))]
 
 
-def test_ship_merge_merges_at_approve_when_nothing_is_queued(tmp_path: Path) -> None:
+def test_ship_merge_merges_through_the_queue_in_the_approve_poll(tmp_path: Path) -> None:
     board = Board(tmp_path, ship="merge", finish_line=None)
     assert board.factory.finish_line == "merge"
     pr = board.open("42", sha(1))
     approve = board.build_and_approve(pr)
-    assert board.outcome(approve) == "merged"
+    assert board.outcome(approve) == "merge-queue"
     assert board.actions.merges == [(True, sha(1))]
+    assert board.state("42")["workflow_state"] == "merged"
 
 
 def test_ship_merge_waits_behind_an_older_approval(tmp_path: Path) -> None:

@@ -262,7 +262,12 @@ def factory(
     rounds_low: int = 1,
     rounds_high: int = 3,
     ship: str = "merge",
+    finish_line: str = "ready-for-review",
 ) -> FactoryConfig:
+    """finish_line defaults to ready-for-review: these tests drive T4 through
+    process() alone, which never runs the merge queue step (#130), so a
+    ship: merge APPROVE merges at once. finish_line: merge, where every merge
+    waits for that step, is covered on tests/merge_queue_support.py's Board."""
     return FactoryConfig(
         base_branch="main",
         tickets=tickets,
@@ -273,6 +278,7 @@ def factory(
         verify="none",
         ship=ship,
         skills=(),
+        finish_line=finish_line,
     )
 
 

@@ -186,6 +186,8 @@ class FakeBot:
 
 
 def factory(ship: str = "after:tracy-site", base_branch: str = "main") -> FactoryConfig:
+    """finish_line: ready-for-review, so a ship: merge APPROVE merges at T4
+    (#130: finish_line: merge is tests/merge_queue_support.py's Board)."""
     return FactoryConfig(
         base_branch=base_branch,
         tickets="github",
@@ -196,6 +198,7 @@ def factory(ship: str = "after:tracy-site", base_branch: str = "main") -> Factor
         verify="none",
         ship=ship,
         skills=(),
+        finish_line="ready-for-review",
     )
 
 

@@ -19,6 +19,7 @@ import pytest
 from lib.dispatcher import CIResult, Comment, TrackedTicket
 from lib.queue import Job, JobRequest
 from lib.state_backup import backup, restore
+from tests.test_job_state import Poller
 from tests.test_dispatcher import (
     GO,
     PLAN,
@@ -797,3 +798,48 @@ def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
 
     assert state_row(queue)["stuck"] == 0
     assert wakes(queue, "stuck") == 0
+
+
+def _release_claimed(poller) -> None:
+    poller.at(301)
+
+
+def _release_by_its_bot(poller) -> None:
+    poller.queue.release(poller.job_id, owner="codex")
+
+
+def _start_failed(poller) -> None:
+    poller.pool.attach_runner(poller.job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    poller.pool.requeue_unstarted(poller.job_id, owner="codex", runner=11, reason="preflight")
+
+
+def _runner_died_unstarted(poller) -> None:
+    poller.pool.attach_runner(poller.job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    poller.now[0] += 20
+    poller.queue.heartbeat(poller.job_id, owner="codex")
+    poller.at(90)
+
+
+@pytest.mark.parametrize(
+    "release", [_release_claimed, _release_by_its_bot, _start_failed, _runner_died_unstarted]
+)
+def test_a_job_released_after_the_merge_is_cancelled_not_requeued(tmp_path: Path, release) -> None:
+    """A claimed job the merge left alone never runs: whichever path puts it
+    back in the queue cancels it instead, so no waiter can claim it."""
+    poller = Poller(tmp_path, box=False)
+    poller.job_id = poller.review()
+    poller.claim()
+    poller.dispatcher.record_terminal("maxharris1/factory", "72", "merged")
+
+    release(poller)
+
+    assert poller.row(poller.job_id)["state"] == "cancelled"
+    assert poller.pool.claim("codex") is None
+
+
+def test_a_job_released_on_an_open_ticket_is_still_requeued(tmp_path: Path) -> None:
+    poller = Poller(tmp_path, box=False)
+    job_id = poller.review()
+    poller.claim()
+    poller.at(301)
+    assert poller.row(job_id)["state"] == "queued"

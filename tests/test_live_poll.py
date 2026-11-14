@@ -2741,3 +2741,49 @@ def test_github_discovery_does_not_read_a_tracked_pr(tmp_path: Path) -> None:
         )
 
     assert sum(reads) == 1
+
+
+# --- #130: the merge queue reads the linked PR's facts on every tracker -------
+
+
+@pytest.mark.parametrize("tracker, ticket_id", [("github", "12"), ("linear", "AUT-42")])
+@pytest.mark.parametrize(
+    "facts, expected",
+    [
+        (dict(mergeable=True, mergeable_state="clean", state="open"), (True, "clean", False)),
+        (dict(mergeable=False, mergeable_state="dirty", state="open"), (False, "dirty", False)),
+        (dict(mergeable=None, mergeable_state="unknown", state="closed"), (None, "unknown", True)),
+    ],
+)
+def test_a_ticket_carries_its_pr_merge_facts(tracker, ticket_id, facts, expected) -> None:
+    text = FACTORY.format(tickets=tracker, ship="handoff")
+    gh = FakeGh(text.replace("skills: []", "finish_line: merge\nskills: []"))
+
+    def runner(argv, timeout):
+        if any(part == "repos/acme/widgets/pulls/12" for part in argv):
+            return GhResult(0, json.dumps({"head": {"sha": gh.head}, "merged": False, **facts}), "")
+        return gh(argv, timeout)
+
+    source = LivePollSource(
+        config(linear=tracker == "linear"),
+        environ={"LINEAR_KEY": "test-placeholder"},
+        gh_runner=runner,
+        linear_transport=linear_transport_for(linear_issue()),
+    )
+    ticket = source.fresh_ticket(TicketRef("acme/widgets", ticket_id, tracker))
+
+    assert ticket is not None
+    assert (ticket.mergeable, ticket.mergeable_state, ticket.closed) == expected
+    assert ticket.merged is False
+
+
+def test_a_fresh_linear_read_of_a_merged_pr_says_merged() -> None:
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    source = LivePollSource(
+        config(linear=True),
+        environ={"LINEAR_KEY": "test-placeholder"},
+        gh_runner=_merged_runner(gh),
+        linear_transport=linear_transport_for(linear_issue()),
+    )
+    ticket = source.fresh_ticket(TicketRef("acme/widgets", "AUT-42", "linear"))
+    assert ticket is not None and ticket.merged is True and ticket.closed is False

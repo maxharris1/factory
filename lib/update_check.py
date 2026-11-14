@@ -14,12 +14,14 @@ never reads or writes a worktree and never changes a ref.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 MARKER_SIZE = 61
+_MARKER_RUN = re.compile(rb"^([<|=>])\1*", re.MULTILINE)
 TIMEOUT_SECONDS = 120.0
 _REGULAR_MODES = ("100644", "100755")
 
@@ -115,22 +117,32 @@ def _conflict_segments(ours: bytes, base: bytes, theirs: bytes) -> list[tuple[by
             target = Path(scratch) / name
             target.write_bytes(data)
             names.append(str(target))
-        environment = _environment()
+        size = _marker_size(ours, base, theirs)
         result = subprocess.run(
-            ["git", "merge-file", "-p", f"--marker-size={MARKER_SIZE}", *names],
+            ["git", "merge-file", "-p", f"--marker-size={size}", *names],
             cwd=scratch,
-            env=environment,
+            env=_environment(),
             capture_output=True,
             timeout=TIMEOUT_SECONDS,
             check=False,
         )
     if not 0 <= result.returncode < 128:
         raise _NotTrivial("git merge-file failed")
-    return _parse_markers(result.stdout)
+    return _parse_markers(result.stdout, size)
 
 
-def _parse_markers(text: bytes) -> list[tuple[bytes, ...]]:
-    start, base, middle, end = (bytes([char]) * MARKER_SIZE for char in b"<|=>")
+def _marker_size(*texts: bytes) -> int:
+    """Longer than any run of marker characters that starts a line in the
+    inputs, so text already in a file never reads as a conflict marker."""
+    longest = max(
+        (len(run.group(0)) for text in texts for run in _MARKER_RUN.finditer(text)),
+        default=0,
+    )
+    return max(MARKER_SIZE, longest + 1)
+
+
+def _parse_markers(text: bytes, size: int) -> list[tuple[bytes, ...]]:
+    start, base, middle, end = (bytes([char]) * size for char in b"<|=>")
     segments: list[tuple[bytes, ...]] = []
     plain: list[bytes] = []
     ours: list[bytes] = []

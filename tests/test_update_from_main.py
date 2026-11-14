@@ -12,6 +12,7 @@ from lib.brief import brief_kind
 from lib.queue import _job
 from lib.update_check import UpdateClass
 from tests.merge_queue_support import Board, sha
+from tests.test_dispatcher import READY
 
 
 def conflicted(tmp_path: Path, **options) -> tuple[Board, object, str]:
@@ -241,3 +242,71 @@ def test_replay_an_approved_pr_conflicts_is_updated_and_merges_with_no_human(
     assert board.actions.merges == [(True, sha(12))]
     assert board.state("111")["workflow_state"] == "merged"
     assert len([c for c in pr.comments if c.author == "grok-login"]) == humans
+
+
+def finish_with(board: Board, pr, body: str | None) -> None:
+    """The update job finishes done; body, when given, is its handoff comment."""
+    job = board.claim("claude")
+    handoff = f"handoff-{job.id}"
+    if body is not None:
+        board.post(pr, handoff, body, "claude-login")
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=handoff)
+
+
+def test_a_done_update_with_no_ready_counts_once_the_grace_runs_out(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    finish_with(board, pr, None)
+    board.poll()
+    assert board.state("42")["update_failures"] == 0
+    assert board.state("42")["workflow_state"] == "updating"
+
+    board.now[0] += 600
+    board.poll()
+    row = board.state("42")
+    assert (row["update_failures"], row["workflow_state"]) == (1, "merge-queue")
+    board.poll()
+    assert len(board.jobs("update-from-main")) == 2
+
+    finish_with(board, pr, None)
+    board.now[0] += 600
+    board.poll()
+    row = board.state("42")
+    assert (row["stuck"], row["stuck_reason"]) == (1, "update-failed-2")
+    for _ in range(3):
+        board.poll()
+    assert len(board.jobs("update-from-main")) == 2
+
+
+def test_a_done_update_whose_handoff_is_not_a_ready_counts_at_once(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    finish_with(board, pr, "Merged main; nothing else to report.")
+    board.poll()
+    assert board.state("42")["update_failures"] == 1
+
+
+def test_a_done_update_that_asks_a_question_pauses_and_does_not_count(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    finish_with(
+        board, pr, "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\nWhich side?"
+    )
+    board.now[0] += 3600
+    board.poll()
+    row = board.state("42")
+    assert (row["update_failures"], row["workflow_state"]) == (0, "waiting-max")
+
+
+def test_a_done_update_whose_ready_was_stale_counts(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    finish_with(board, pr, READY.format(head=sha(9)))
+    board.poll()
+    assert board.state("42")["update_failures"] == 1
+
+
+def test_a_done_update_whose_ready_waits_for_ci_does_not_count(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    pr.push(sha(2), ci="pending")
+    finish_with(board, pr, READY.format(head=sha(2)))
+    board.now[0] += 3600
+    board.poll()
+    row = board.state("42")
+    assert (row["update_failures"], row["workflow_state"]) == (0, "updating")

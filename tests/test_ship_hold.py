@@ -77,6 +77,9 @@ def hold_factory(
         ship=ship,
         skills=(),
         hold=HoldConfig(label=label, approver=approver, paths=paths),
+        # process() alone never runs the merge queue step (#130); a held
+        # finish_line: merge ticket is tests/test_merge_queue.py's.
+        finish_line="ready-for-review",
     )
 
 
@@ -243,6 +246,7 @@ def test_a_repo_with_no_hold_configured_merges_without_reading_holds(
         verify="none",
         ship="merge",
         skills=(),
+        finish_line="ready-for-review",
     )
 
     dispatcher.process(

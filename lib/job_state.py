@@ -57,7 +57,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib.device_pool import Placement
-from lib.queue import SLOTS_TABLE
+from lib.queue import SLOTS_TABLE, cancel_if_finished
 
 CLAIMED = "claimed"
 RUNNING = "running"
@@ -412,4 +412,5 @@ def requeue_unstarted(
         )
     connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
     record_job_event(connection, job_id, outcome, detail, now)
+    cancel_if_finished(connection, job_id, now)
     return outcome, detail

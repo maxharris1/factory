@@ -32,7 +32,15 @@ from lib.job_state import (
     unstarted_too_long,
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
-from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
+from lib.queue import (
+    SLOTS_TABLE,
+    Job,
+    JobRequest,
+    QueueError,
+    SQLiteJobQueue,
+    _job,
+    cancel_if_finished,
+)
 from lib.update_check import UpdateClass
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -46,6 +54,7 @@ STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 # polled every cycle, until its PR merges or closes.
 WATCHED_STATES = ("merge-queue", "updating")
 UPDATE_FAILURES_TO_STOP = 2
+UPDATE_READY_GRACE_SECONDS = 600.0
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
@@ -439,6 +448,8 @@ class Dispatcher:
         self._poll_seconds = POLL_SECONDS
         # Stopped tickets whose turn came and that no read has reached yet.
         self._stopped_due: set[tuple[str, str]] = set()
+        # Repos (lowercased) that merged a PR this poll: one merge each (#130).
+        self._merged_repos: set[str] = set()
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -449,6 +460,7 @@ class Dispatcher:
         if begin is not None:
             begin()
         self._polled = {}
+        self._merged_repos = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._poll_seconds = getattr(
             getattr(source, "config", None), "poll_seconds", POLL_SECONDS
@@ -981,6 +993,7 @@ class Dispatcher:
                 "minutes ago and never started it; requeued, no round charged"
             )
             self._record_job_event(connection, job, "released-claimed", detail, now)
+            cancel_if_finished(connection, job.id, now)
             connection.commit()
         self._log_job_event(job, "released-claimed", detail)
 
@@ -1907,6 +1920,15 @@ class Dispatcher:
                 f"approval carried: {ticket.repo}#{ticket.ticket_id} "
                 f"{str(approved)[:12]} -> {head[:12]} ({verdict.reason})"
             )
+        if fresh.factory.ship.startswith("after:"):
+            try:
+                self._review_actions(fresh).await_approver(
+                    fresh, head, fresh.factory.ship.removeprefix("after:")
+                )
+            except Exception as exc:
+                self.record_poll_error(
+                    ticket.repo, ticket.ticket_id, f"carried-preview:{type(exc).__name__}"
+                )
         return True, f"approval-carried:{str(approved)[:12]}->{head[:12]}"
 
     def _classify_update(
@@ -2274,7 +2296,7 @@ class Dispatcher:
                 self._write_state_label(ticket, "merged")
                 self._wake_done(ticket, comment, "merged")
                 return True, "merge-confirmed"
-            if watch and self._waits_in_merge_queue(ticket):
+            if watch:
                 return self._enter_merge_queue(ticket, comment, current_head)
             self._ship_head(ticket, current_head)
             self._complete_ship_intent(ticket, comment.id, "merged")
@@ -2335,7 +2357,8 @@ class Dispatcher:
         """
         heads: dict[str, sqlite3.Row] = {}
         for row in self._merge_queue_members():
-            heads.setdefault(str(row["repo"]), row)
+            if str(row["repo"]) not in self._merged_repos:
+                heads.setdefault(str(row["repo"]), row)
         for row in heads.values():
             try:
                 self._advance_merge_queue(row)
@@ -2359,8 +2382,22 @@ class Dispatcher:
         if ticket.closed:
             self._abandon_closed(ticket)
             return
-        if row["workflow_state"] == "updating" or ticket.factory.finish_line != "merge":
-            # An update job is out: its ready (T2) or failure (T6) moves on.
+        if row["workflow_state"] == "updating":
+            # An update job is out: its ready (T2) or failure (T6) moves on,
+            # and so does a done job whose ready never came.
+            why = self._update_unanswered(ticket)
+            if why is not None:
+                self._update_failed(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    source_comment_id=self._queue_comment(ticket, row).id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    project_bot=ticket.grok_bot,
+                    back_to=_queue_state(ticket.factory.ship),
+                    why=why,
+                )
+            return
+        if ticket.factory.finish_line != "merge":
             return
         if ticket.mergeable_state in ("dirty", "behind"):
             self._queue_update(ticket, row)
@@ -2382,6 +2419,39 @@ class Dispatcher:
         if ship == "merge" and self._held(ticket, head):
             return
         self._merge_queue_head(ticket, row, head)
+
+    def _update_unanswered(self, ticket: TrackedTicket) -> str | None:
+        """Why the latest update-from-main job counts as failed though it
+        finished done (#130 Unit 6): its handoff is not a ready, its ready
+        was handled and left the ticket updating, or no handoff showed on
+        the thread within UPDATE_READY_GRACE_SECONDS. None while the job is
+        out, failed (T6 counts it) or its ready is still to be read."""
+        with self._connect() as connection:
+            job = connection.execute(
+                """
+                SELECT id, state, handoff_comment_id, finished_at FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        if job is None or job["state"] != "done":
+            return None
+        handoff = next(
+            (item for item in ticket.comments if item.id == job["handoff_comment_id"]),
+            None,
+        )
+        if handoff is not None:
+            try:
+                kind = parse_comment(handoff.body).as_dict()["kind"]
+            except HandoffError:
+                kind = None
+            if kind == "ready" and not self._is_handled(ticket, handoff.id):
+                return None
+        elif self.queue.now() - float(job["finished_at"] or 0) < UPDATE_READY_GRACE_SECONDS:
+            return None
+        return f"job {job['id']} finished with no ready that settles the update"
 
     def _merge_queue_head(
         self,
@@ -2585,15 +2655,16 @@ class Dispatcher:
             connection.commit()
         return "stuck-update-failed-2"
 
-    def _waits_in_merge_queue(self, ticket: TrackedTicket) -> bool:
-        """A ship: merge APPROVE merges at once unless its PR conflicts or
-        an older approval in the same repo is still queued (#130)."""
-        if ticket.mergeable_state == "dirty":
+    def _merge_turn(self, ticket: TrackedTicket) -> bool:
+        """Whether a finish_line: merge ticket may merge now (#130): it heads
+        its repo's merge queue and nothing in that repo merged this poll.
+        Every merge of a watched ticket passes this one gate."""
+        if ticket.factory.finish_line != "merge":
             return True
-        return any(
-            member[1] != ticket.ticket_id
-            for member in self._merge_queue_members(ticket.repo)
-        )
+        if ticket.repo.lower() in self._merged_repos:
+            return False
+        members = self._merge_queue_members(ticket.repo)
+        return not members or members[0]["ticket_id"] == ticket.ticket_id
 
     def _merge_queue_members(self, repo: str | None = None) -> list[sqlite3.Row]:
         """Approved tickets still watched, oldest approval first (#130).
@@ -2802,6 +2873,7 @@ class Dispatcher:
             )
         else:
             raise ShipError(f"unknown ship mode {mode!r}")
+        self._merged_repos.add(ticket.repo.lower())
 
     def _t5_questions(
         self,
@@ -3645,6 +3717,12 @@ class Dispatcher:
                 continue
             if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
                 continue
+            if policy == "merge" and ticket.factory.finish_line == "merge":
+                # #130: a watched ticket merges only through the queue.
+                self._complete_redrive(
+                    ticket, comment_id, "merge-queue", approval=(head, comment)
+                )
+                continue
             try:
                 if policy == "handoff":
                     try:
@@ -3851,24 +3929,38 @@ class Dispatcher:
         )
 
     def _has_completed_ship_intent(
-        self,
-        repo: str,
-        ticket_id: str,
-        comment_id: str,
-        head: str,
-        policy: str,
+        self, repo: str, ticket_id: str, comment_id: str, policy: str
     ) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM ship_intents
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
-                  AND head = ? AND policy = ?
-                  AND status = 'completed'
+                  AND policy = ? AND status = 'completed'
                 """,
-                (repo.lower(), ticket_id, comment_id, head, policy),
+                (repo.lower(), ticket_id, comment_id, policy),
             ).fetchone()
         return row is not None
+
+    def _previewed_head(self, ticket: TrackedTicket, approve_id: str) -> str | None:
+        """The head an ok of an after:<approver> APPROVE may ship.
+
+        Its completed ship intent's head; on a finish_line: merge ticket, the
+        approval the merge queue holds for that APPROVE now (#130): moved to
+        the new head by a carried update, cleared by a go or a re-review.
+        """
+        intent = self._ship_intent(ticket, approve_id)
+        if intent is None:
+            return None
+        head, policy, status = intent
+        if policy != ticket.factory.ship or status != "completed":
+            return None
+        if ticket.factory.finish_line != "merge":
+            return head
+        row = self._queue_row(ticket)
+        if row["approve_comment_id"] != approve_id or row["approved_head"] is None:
+            return None
+        return str(row["approved_head"])
 
     def _latest_review_verdict(
         self,
@@ -5345,8 +5437,12 @@ class ReviewShipper:
     """F1-05's ship for T8's after:<approver> ok (the hook_t8 Shipper).
 
     ship raises unless F1-05 completed an after:<approver> ship intent for
-    request.approve_comment_id on request.head, CI on request.head is
-    green, and request.head is a full SHA that is still the PR head. The
+    request.approve_comment_id whose previewed head (_previewed_head: on a
+    finish_line: merge ticket, the approval the merge queue holds now) is
+    request.head, CI on request.head is green, and request.head is a full
+    SHA that is still the PR head. A finish_line: merge ticket that is not
+    yet its merge queue's turn (_merge_turn) raises RetryableStateError, so
+    T8 reads the ok again next poll. The
     ticket is re-read from source, and in those fresh comments the latest
     trusted reviewer verdict must still be that APPROVE, before the ok.
     A verdict posted between that read and the merge is not seen; that
@@ -5374,11 +5470,7 @@ class ReviewShipper:
         if not _is_full_sha(head):
             raise ShipError(f"ship head {head!r} is not a 40-character SHA")
         if not dispatcher._has_completed_ship_intent(
-            request.repo,
-            request.ticket_id,
-            request.approve_comment_id,
-            head,
-            policy,
+            request.repo, request.ticket_id, request.approve_comment_id, policy
         ):
             raise ShipError(f"no completed {policy} ship intent for {head}")
         ticket = self._ticket(request)
@@ -5402,11 +5494,15 @@ class ReviewShipper:
             )
         if ticket.factory.ship != policy:
             raise ShipError(f"ticket ship policy is {ticket.factory.ship}")
+        if dispatcher._previewed_head(ticket, request.approve_comment_id) != head:
+            raise ShipError(f"no completed {policy} ship intent for {head}")
         if ticket.current_head != head:
             raise ShipError(f"PR head is {ticket.current_head}, not {head}")
         result = ticket.ci.get(head)
         if result is None or result.status != "success":
             raise ShipError(f"CI on {head} is not green")
+        if not dispatcher._merge_turn(ticket):
+            raise RetryableStateError(f"{head} waits its turn in the merge queue")
         status, fresh = dispatcher._prepare_external_ship(request)
         if status == "pending":
             if ship_mode(ticket.factory.ship) == "fast-forward":

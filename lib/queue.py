@@ -287,6 +287,8 @@ class SQLiteJobQueue:
                     f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?",
                     (job_id,),
                 )
+            if changed == 1:
+                cancel_if_finished(connection, job_id, self.now())
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
@@ -407,38 +409,7 @@ class SQLiteJobQueue:
     def _cancel(
         self, connection: sqlite3.Connection, job_id: str, reason: str
     ) -> Job:
-        now = self.now()
-        changed = connection.execute(
-            """
-            UPDATE jobs
-            SET state = 'cancelled', finished_at = ?, last_activity_at = ?
-            WHERE id = ? AND state = 'queued'
-            """,
-            (now, now, job_id),
-        ).rowcount
-        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if row is None:
-            raise QueueError(f"unknown job {job_id!r}")
-        if changed != 1:
-            raise QueueError(f"job {job_id} is {row['state']}; only a queued job can be cancelled")
-        if _has_table(connection, "job_events"):
-            connection.execute(
-                """
-                INSERT INTO job_events (
-                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
-                ) VALUES (?, ?, ?, ?, ?, 'cancelled', ?, ?)
-                """,
-                (
-                    job_id,
-                    str(row["repo"]).lower(),
-                    row["ticket_id"],
-                    row["action"],
-                    row["recipient"],
-                    reason,
-                    now,
-                ),
-            )
-        return _job(row)
+        return cancel_queued(connection, job_id, reason, self.now())
 
     def outstanding(self) -> tuple[Job, ...]:
         with self._connect() as connection:
@@ -652,6 +623,64 @@ def _no_remote_start(connection: sqlite3.Connection) -> str:
         f" AND NOT EXISTS (SELECT 1 FROM {SLOTS_TABLE} AS slot"
         " WHERE slot.job_id = jobs.id AND slot.remote_started = 1)"
     )
+
+
+def cancel_queued(
+    connection: sqlite3.Connection, job_id: str, reason: str, now: float
+) -> Job:
+    """queued -> cancelled, in the caller's transaction (SQLiteJobQueue.cancel)."""
+    changed = connection.execute(
+        """
+        UPDATE jobs
+        SET state = 'cancelled', finished_at = ?, last_activity_at = ?
+        WHERE id = ? AND state = 'queued'
+        """,
+        (now, now, job_id),
+    ).rowcount
+    row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        raise QueueError(f"unknown job {job_id!r}")
+    if changed != 1:
+        raise QueueError(f"job {job_id} is {row['state']}; only a queued job can be cancelled")
+    if _has_table(connection, "job_events"):
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            ) VALUES (?, ?, ?, ?, ?, 'cancelled', ?, ?)
+            """,
+            (
+                job_id,
+                str(row["repo"]).lower(),
+                row["ticket_id"],
+                row["action"],
+                row["recipient"],
+                reason,
+                now,
+            ),
+        )
+    return _job(row)
+
+
+def cancel_if_finished(connection: sqlite3.Connection, job_id: str, now: float) -> bool:
+    """A harness job just put back in queued whose ticket has merged or is
+    done is cancelled instead (#130): whichever path released it, nothing
+    new runs for a finished ticket. Grok wakes are left alone."""
+    if not _has_table(connection, "ticket_state"):
+        return False
+    finished = connection.execute(
+        """
+        SELECT 1 FROM jobs JOIN ticket_state AS ticket
+          ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
+        WHERE jobs.id = ? AND jobs.state = 'queued' AND jobs.recipient != 'grok'
+          AND ticket.workflow_state IN ('merged', 'done')
+        """,
+        (job_id,),
+    ).fetchone()
+    if finished is None:
+        return False
+    cancel_queued(connection, job_id, "ticket-finished", now)
+    return True
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

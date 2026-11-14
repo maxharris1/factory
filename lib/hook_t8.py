@@ -4,7 +4,9 @@ A preview is waiting when the reviewer's latest verdict on the whole
 ticket is an APPROVE that came before the approver's comment, and F1-05
 (T4) completed an after:<approver> ship intent for it. The previewed SHA
 is that intent's head: the full current head T4 passed to
-await_approver, after a short-prefix or patch-id match. The APPROVE's
+await_approver, after a short-prefix or patch-id match. On a
+finish_line: merge ticket it is the approval the merge queue holds for
+that APPROVE now (Dispatcher._previewed_head, #130). The APPROVE's
 own head= is never the preview. A later verdict of any kind, even in the
 same poll, means the earlier ok or decline is refused. An ok or decline
 that arrives before T4 has completed that intent (CI still pending, say)
@@ -340,15 +342,8 @@ def _waiting_preview(
         return None
     if fields.get("verdict") != "APPROVE":
         return None
-    intent = dispatcher._ship_intent(ticket, verdict.id)
-    if intent is None:
-        return None
-    head, policy, status = intent
-    if (
-        policy != ticket.factory.ship
-        or status != "completed"
-        or _FULL_SHA.fullmatch(head) is None
-    ):
+    head = dispatcher._previewed_head(ticket, verdict.id)
+    if head is None or _FULL_SHA.fullmatch(head) is None:
         return None
     return verdict.id, head
 

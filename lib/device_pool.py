@@ -47,7 +47,15 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
-from lib.queue import SLOTS_TABLE, Job, QueueError, SQLiteJobQueue, _job, claim_order
+from lib.queue import (
+    SLOTS_TABLE,
+    Job,
+    QueueError,
+    SQLiteJobQueue,
+    _job,
+    cancel_if_finished,
+    claim_order,
+)
 from lib.remote import new_tag
 from lib.schema import HARNESSES
 
@@ -352,6 +360,7 @@ class DevicePool:
                         now,
                     ),
                 )
+            cancel_if_finished(connection, job_id, now)
             connection.commit()
         return True
 

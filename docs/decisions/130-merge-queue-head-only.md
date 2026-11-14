@@ -3,3 +3,5 @@
 - **Source:** [#130 plan on PR #131](https://github.com/maxharris1/factory/pull/131), "Decisions this plan makes", 4
 
 Two approved PRs updated at once keep re-conflicting each other; one at a time does not. The cost is head-of-line blocking: a head waiting on CI or an approver's `ok` holds its repo's queue. A head that goes stuck (`update-failed-2`, `merge-failed`) leaves the queue, so the next one moves up. A carried approval keeps its `approved_at`, so an update does not lose the ticket its place.
+
+Review round 1 (2026-11-13): the limit holds for every merge path, not only the queue step. `ship: merge` with `finish_line: merge` enters `merge-queue` at APPROVE and TQ merges it, a merge re-drive completes into the queue, and an `after:` approver's `ok` ships only when its ticket heads the queue and nothing in that repo merged this poll (`Dispatcher._merge_turn`). An `after:` ok's preview is the approval the queue holds now, so a carried update moves it and a go or re-review clears it.
