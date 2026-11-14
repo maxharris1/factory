@@ -4,12 +4,15 @@ import io
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from lib import status
 from lib.dashboard import collect_snapshot, render_html
-from lib.linear_webhook import ensure_tables
+from lib.linear_webhook import LinearDirtyQueue, ensure_tables, missed_delivery, read_health
 from tests.test_dashboard import NOW, seeded
 
 ROOT = Path(__file__).resolve().parents[1]
+QUIET = "quiet: no Linear webhook for 1h (nothing missed by the last reconcile)"
 
 
 def _with_webhook(
@@ -81,30 +84,28 @@ def test_status_shows_last_webhook_and_dirty_queue_depth(tmp_path: Path) -> None
     assert "warning" not in text
 
 
-def test_status_warns_after_an_hour_of_silence_while_linear_tickets_are_active(
+def test_status_notes_an_hour_of_quiet_while_linear_tickets_are_active(
     tmp_path: Path,
 ) -> None:
+    """#79: a quiet hour with nothing missed is a soft note, not a warning."""
     db, _log = seeded(tmp_path)
     _with_webhook(db, last_received=NOW - 3601, started=NOW - 7200, dirty=0, active_linear=2)
 
     text = _status(db, NOW)
 
     assert "  last received 1h ago (Issue.update), dirty queue 0\n" in text
-    # seeded() already tracks one active Linear ticket (AUT-7, stuck).
-    assert (
-        "  warning: no Linear webhook for over 1h while 3 Linear ticket(s) are active\n"
-        in text
-    )
+    assert f"  note: {QUIET}\n" in text
+    assert "warning" not in text
 
 
-def test_status_warns_when_a_listener_never_received_anything(tmp_path: Path) -> None:
+def test_status_notes_when_a_listener_never_received_anything(tmp_path: Path) -> None:
     db, _log = seeded(tmp_path)
     _with_webhook(db, last_received=None, started=NOW - 4000, dirty=0, active_linear=1)
 
     text = _status(db, NOW)
 
     assert "  last received never (listener started 1h ago), dirty queue 0\n" in text
-    assert "  warning: no Linear webhook for over 1h" in text
+    assert f"  note: {QUIET}\n" in text
 
 
 def test_no_warning_without_active_linear_tickets(tmp_path: Path) -> None:
@@ -145,11 +146,12 @@ def test_dashboard_shows_webhook_health_only_when_a_listener_ran(
         "last_event": "Issue.update",
         "listener_age_seconds": 9000,
         "dirty": 3,
-        "warning": "no Linear webhook for over 1h while 2 Linear ticket(s) are active",
+        "warning": None,
+        "note": QUIET,
     }
     page = render_html(snapshot)
     assert "<h2>Linear webhook</h2>" in page
-    assert "no Linear webhook for over 1h" in page
+    assert f'<p class="muted">note: {QUIET}</p>' in page
 
 
 def _poll_once(db: Path, *, at: float, webhook: bool) -> None:
@@ -173,12 +175,11 @@ def _poll_once(db: Path, *, at: float, webhook: bool) -> None:
 
 
 NEVER_STARTED = "  last received never (listener has not started), dirty queue 0\n"
-SILENT = "no Linear webhook for over 1h while 1 Linear ticket(s) are active"
 
 
 # F1.6: webhook polling is configured but `orch linear-webhook serve` never
 # ran on this database. seeded() tracks one active Linear ticket (AUT-7).
-def test_status_and_dashboard_warn_when_webhook_polling_has_no_listener(
+def test_status_and_dashboard_note_when_webhook_polling_has_no_listener(
     tmp_path: Path,
 ) -> None:
     db, log = seeded(tmp_path)
@@ -189,16 +190,17 @@ def test_status_and_dashboard_warn_when_webhook_polling_has_no_listener(
     page = render_html(snapshot)
 
     assert "Linear webhook\n" + NEVER_STARTED in text
-    assert f"  warning: {SILENT}\n" in text
+    assert f"  note: {QUIET}\n" in text
     assert snapshot["poller"]["linear_webhook"] == {
         "last_received_age_seconds": None,
         "last_event": None,
         "listener_age_seconds": None,
         "dirty": 0,
-        "warning": SILENT,
+        "warning": None,
+        "note": QUIET,
     }
     assert "last received never (listener has not started)" in page
-    assert f"warning: {SILENT}" in page
+    assert f"note: {QUIET}" in page
 
 
 def test_webhook_polling_without_a_listener_is_shown_but_not_warned_within_the_hour(
@@ -226,3 +228,67 @@ def test_poller_with_no_webhook_configured_leaves_status_and_dashboard_unchanged
     assert _status(db, NOW) == before
     assert "Linear webhook" not in before
     assert "linear_webhook" not in collect_snapshot(db, log, now=NOW)["poller"]
+
+
+# --- #79: warn only on a real missed delivery ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "comment_at, seen_at, started_at, missed",
+    [
+        (NOW - 600, None, NOW - 3600, True),
+        (NOW - 600, NOW - 900, NOW - 3600, True),
+        (NOW - 600, NOW - 660, NOW - 3600, False),
+        (NOW - 600, NOW - 590, NOW - 3600, False),
+        (NOW - 60, None, NOW - 3600, False),
+        (NOW - 600, None, NOW - 630, False),
+        (NOW - 600, None, None, False),
+        (None, None, NOW - 3600, False),
+    ],
+    ids=["never-seen", "seen-before", "seen-within-slack", "seen-after", "too-recent",
+         "before-listener-start", "no-listener", "no-comment"],
+)
+def test_missed_delivery(comment_at, seen_at, started_at, missed) -> None:
+    assert missed_delivery(comment_at, seen_at, started_at, NOW) is missed
+
+
+def test_a_missed_delivery_is_a_warning_and_replaces_the_quiet_note(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    _with_webhook(db, last_received=NOW - 4000, started=NOW - 9000, dirty=0, active_linear=1)
+    LinearDirtyQueue(db).record_missed("id-AUT-5", "AUT-5", NOW - 900, NOW - 720)
+
+    text = _status(db, NOW)
+    snapshot = collect_snapshot(db, log, now=NOW)
+
+    warning = "Linear webhook missed 1 delivery in 24h (newest AUT-5, found 12m ago)"
+    assert f"  warning: {warning}\n" in text
+    assert "note:" not in text
+    assert snapshot["poller"]["linear_webhook"]["warning"] == warning
+    assert snapshot["poller"]["linear_webhook"]["note"] is None
+    assert f'<p class="bad">warning: {warning}</p>' in render_html(snapshot)
+
+
+def test_a_miss_older_than_a_day_no_longer_warns(tmp_path: Path) -> None:
+    db, _log = seeded(tmp_path)
+    _with_webhook(db, last_received=NOW - 4000, started=NOW - 9000, dirty=0, active_linear=1)
+    LinearDirtyQueue(db).record_missed("id-AUT-5", "AUT-5", NOW - 90_000, NOW - 86_401)
+
+    text = _status(db, NOW)
+
+    assert "warning" not in text
+    assert f"  note: {QUIET}\n" in text
+
+
+def test_the_same_miss_found_again_keeps_its_first_found_time(tmp_path: Path) -> None:
+    db, _log = seeded(tmp_path)
+    _with_webhook(db, last_received=NOW - 60, started=NOW - 9000, dirty=0, active_linear=0)
+    queue = LinearDirtyQueue(db)
+    queue.record_missed("id-AUT-5", "AUT-5", NOW - 900, NOW - 720)
+    queue.record_missed("id-AUT-5", "AUT-5", NOW - 900, NOW - 60)
+    queue.record_missed("id-AUT-6", None, NOW - 900, NOW - 30)
+    with sqlite3.connect(db) as connection:
+        health = read_health(connection)
+    assert health is not None
+    assert health.missed == ((None, NOW - 30), ("AUT-5", NOW - 720))
+    assert health.warning(NOW) == (
+        "Linear webhook missed 2 deliveries in 24h (newest an issue, found 30s ago)")

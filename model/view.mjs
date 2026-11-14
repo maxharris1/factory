@@ -23,6 +23,8 @@ export const group = (v) => {
     name === "awaiting-ok" ||
     name === "merged" ||
     name === "handed-off" ||
+    name === "merge-queue" ||
+    name === "updating" ||
     name === "post-merge" ||
     name === "done"
   ) {
@@ -73,7 +75,20 @@ export const step = (action, from, to) => {
   if (action === "MaxOkAnotherRound") return "Max okays one more round";
   if (action === "ReenterAfterHandoff") return "trusted ready at a new head, within the effective cap";
   // A merge seen in any state ends the ticket (#108); the chart draws only the
-  // handed-off one, and section 4.1 says the rest in prose.
+  // handed-off one, and section 4.1 says the rest in prose. From merge-queue
+  // the QueueMerge arrow's label names it.
   if (action === "MergeObserved") return from.state === "handed-off" ? "PR merged" : null;
+  if (action === "T4ShipQueue") return "APPROVE, finish_line merge";
+  if (action === "QueueMerge") {
+    return "poller squash-merges the queue head (clean, CI green, approval covers the head), or the merge is observed";
+  }
+  if (action === "QueueConflict") return "PR conflicts with base, update-from-main queued";
+  if (action === "QueueClosed") return "PR closed unmerged";
+  if (action === "QueueGoPlan") return "trusted kind=go, queue plan";
+  if (action === "QueueGoBuild") return "trusted kind=go, queue build";
+  if (action === "UpdateTrivial") return "trivial update, approval carried";
+  if (action === "UpdateNonTrivial") return "non-trivial update, cross-family re-review";
+  if (action === "UpdateRetry") return "update fails, one more update";
+  if (action === "UpdateStuck") return "two failed updates (update-failed-2)";
   return action;
 };

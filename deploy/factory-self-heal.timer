@@ -1,0 +1,10 @@
+[Unit]
+Description=Run factory self-heal every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Unit=factory-self-heal.service
+
+[Install]
+WantedBy=timers.target

@@ -507,3 +507,33 @@ def test_linear_webhook_requires_a_linear_project(tmp_path: Path) -> None:
     assert "linear_webhook requires a project with linear_project_id" in [
         finding.message for finding in findings
     ]
+
+
+def test_refused_harnesses_defaults_empty_and_the_shipped_file_refuses_cursor(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text("poll_seconds: 30\nprojects:\n  - repo: a/b\n", encoding="utf-8")
+    config, findings = load_orch_yml(path)
+    assert findings == [] and config is not None
+    assert config.refused_harnesses == ()
+    shipped, _ = load_orch_yml(ROOT / "orch.yml", allow_placeholders=True)
+    assert shipped is not None
+    assert shipped.refused_harnesses == ("cursor",)
+
+
+@pytest.mark.parametrize("value, message", [
+    ("[gemini]", "refused_harnesses has unknown harness 'gemini'"),
+    ("[cursor, cursor]", "refused_harnesses lists a harness twice"),
+    ("cursor", "refused_harnesses must be a list of harness names"),
+    ("[1]", "refused_harnesses must be a list of harness names"),
+])
+def test_refused_harnesses_is_validated(tmp_path: Path, value: str, message: str) -> None:
+    path = tmp_path / "orch.yml"
+    path.write_text(
+        f"poll_seconds: 30\nrefused_harnesses: {value}\nprojects:\n  - repo: a/b\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(path)
+    assert config is None
+    assert any(f.severity == "error" and f.message.startswith(message) for f in findings)

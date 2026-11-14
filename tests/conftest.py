@@ -37,6 +37,19 @@ def _no_real_ssh(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _no_local_overlay():
+    """No host's orch.local.yml or machines.local.yml leaks into a test (#107).
+    Overlay tests clear ORCH_NO_LOCAL_OVERLAY with monkeypatch.delenv."""
+    previous = os.environ.get("ORCH_NO_LOCAL_OVERLAY")
+    os.environ["ORCH_NO_LOCAL_OVERLAY"] = "1"
+    yield
+    if previous is None:
+        os.environ.pop("ORCH_NO_LOCAL_OVERLAY", None)
+    else:
+        os.environ["ORCH_NO_LOCAL_OVERLAY"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
     """#66: `orch poll` backs up after every cycle; never to the real
     ~/.local/share/factory/backup. Tests that need a path set their own."""

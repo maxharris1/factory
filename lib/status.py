@@ -27,10 +27,12 @@ from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placemen
 from lib.linear_webhook import WebhookHealth, read_health
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import load_orch_yml
+from lib.pr_title import label, read_sources
 from lib.worktrees import pid_alive
 
 ROOT = Path(__file__).resolve().parent.parent
 
+MERGE_QUEUE_STATES = ("merge-queue", "updating")
 PAUSED_STATES = frozenset(
     {"waiting-max", "waiting-external", "awaiting-ok", "stuck", "blocked", "capped"}
 )
@@ -53,6 +55,11 @@ class TrackerRow:
     stuck_reason: str | None = None
     # Issue #86: the hold approver while the ticket is awaiting-ok.
     waiting_on: str | None = None
+    # #130: when the covering APPROVE landed, for a merge-queue position.
+    approved_at: float | None = None
+    # Issue #115: the source issue and the PR, shown issue first.
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,8 @@ class JobRow:
     last_activity_at: float
     # lib/job_state.py's state, set by build_status for a running job.
     job_state: str | None = None
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,8 @@ class AttentionRow:
     ticket_id: str
     reason: str
     detail: str | None
+    source: str | None = None
+    pr_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,10 @@ class Status:
     unplaced: frozenset[str] = frozenset()
     # Component heartbeats (#92), when build_status was given a reader.
     health: component_health.HealthReport | None = None
+    # When each running job was claimed: its slot's placed_at, else created_at.
+    started: Mapping[str, float] = field(default_factory=dict)
+    # #130: approved tickets watched until merge, oldest approval first.
+    merge_queue: tuple[TrackerRow, ...] = ()
 
 
 class TrackerReader(Protocol):
@@ -215,6 +230,7 @@ class SQLiteStatusReader:
                 ORDER BY flag.raised_at, flag.repo, flag.ticket_id, flag.reason
                 """
             ).fetchall()
+            sources = read_sources(connection)
         finally:
             connection.close()
         return tuple(
@@ -223,6 +239,7 @@ class SQLiteStatusReader:
                 ticket_id=str(row["ticket_id"]),
                 reason=str(row["reason"]),
                 detail=str(row["detail"]) if row["detail"] is not None else None,
+                **_source(sources, row),
             )
             for row in rows
         )
@@ -243,13 +260,20 @@ class SQLiteStatusReader:
         try:
             connection.execute("BEGIN")
             approvers = _hold_approvers(connection)
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(ticket_state)")
+            }
+            approved_at = (
+                "state.approved_at" if "approved_at" in columns else "NULL"
+            )
             tracker_rows = (
                 connection.execute(
-                    """
+                    f"""
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                            COALESCE(state.workflow_state, 'intake') AS workflow_state,
                            state.paused_action, COALESCE(state.stuck, 0) AS stuck,
-                           state.stuck_reason
+                           state.stuck_reason, {approved_at} AS approved_at
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
@@ -284,6 +308,7 @@ class SQLiteStatusReader:
                 else {}
             )
             self._slots = read_placements(connection) if has_slots else {}
+            sources = read_sources(connection)
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -313,6 +338,10 @@ class SQLiteStatusReader:
                     if row["workflow_state"] == "awaiting-ok"
                     else None
                 ),
+                approved_at=(
+                    float(row["approved_at"]) if row["approved_at"] is not None else None
+                ),
+                **_source(sources, row),
             )
             for row in tracker_rows
         )
@@ -326,6 +355,7 @@ class SQLiteStatusReader:
                 state=str(row["state"]),
                 created_at=float(row["created_at"]),
                 last_activity_at=float(row["last_activity_at"]),
+                **_source(sources, row),
             )
             for row in job_rows
         )
@@ -350,6 +380,13 @@ class SQLiteStatusReader:
             if connection is not None:
                 connection.close()
             raise StatusError(f"cannot read database: {exc}") from exc
+
+
+def _source(
+    sources: Mapping[tuple[str, str], tuple[str, str | None]], row: sqlite3.Row
+) -> dict[str, str | None]:
+    found = sources.get((str(row["repo"]).casefold(), str(row["ticket_id"])))
+    return {"source": found[0], "pr_number": found[1]} if found else {}
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:
@@ -507,7 +544,29 @@ def build_status(
         ),
         devices=tuple(device_rows_out),
         device_jobs=device_jobs,
+        started={
+            row.id: held[row.id].placed_at if row.id in held else row.created_at
+            for row in running
+        },
         unplaced=frozenset(unplaced),
+        merge_queue=tuple(
+            sorted(
+                (
+                    row
+                    for row in tracker_rows
+                    if not row.stuck
+                    and (
+                        row.state in MERGE_QUEUE_STATES
+                        or (row.state == "waiting-external" and row.approved_at is not None)
+                    )
+                ),
+                key=lambda row: (
+                    row.repo.casefold(),
+                    row.approved_at if row.approved_at is not None else float("inf"),
+                    row.ticket_id,
+                ),
+            )
+        ),
         paused=tuple(
             sorted(
                 (
@@ -543,7 +602,7 @@ def render(status: Status) -> str:
         lines.append(_device_line(device))
         lines.extend(
             "  "
-            + _job_line(row, status.observed_at, row.last_activity_at)
+            + _running_line(status, row)
             + (" no-placement" if row.id in status.unplaced else "")
             for row in status.device_jobs.get(device.device, ())
         )
@@ -552,10 +611,7 @@ def render(status: Status) -> str:
 
     if status.wakes:
         lines.extend(("", f"Grok wakes ({len(status.wakes)})"))
-        lines.extend(
-            _job_line(row, status.observed_at, row.last_activity_at)
-            for row in status.wakes
-        )
+        lines.extend(_running_line(status, row) for row in status.wakes)
 
     lines.extend(("", f"Paused ({len(status.paused)})"))
     for row in status.paused:
@@ -567,15 +623,28 @@ def render(status: Status) -> str:
             reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
             state = f"stuck{reason}"
         lines.append(
-            f"  {row.repo}#{row.ticket_id} {state} [{row.tracker}]{action}"
+            f"  {_label(row)} {state} [{row.tracker}]{action}"
         )
     if not status.paused:
         lines.append("  empty")
+    if status.merge_queue:
+        lines.extend(("", f"Merge queue ({len(status.merge_queue)})"))
+        sizes: dict[str, int] = {}
+        for row in status.merge_queue:
+            sizes[row.repo.casefold()] = sizes.get(row.repo.casefold(), 0) + 1
+        positions: dict[str, int] = {}
+        for row in status.merge_queue:
+            key = row.repo.casefold()
+            positions[key] = positions.get(key, 0) + 1
+            lines.append(
+                f"  {row.repo}#{row.ticket_id} {row.state} "
+                f"{positions[key]} of {sizes[key]} [{row.tracker}]"
+            )
     if status.attention:
         lines.extend(("", f"Needs attention ({len(status.attention)})"))
         for flag in status.attention:
             detail = f": {flag.detail}" if flag.detail else ""
-            lines.append(f"  {flag.repo}#{flag.ticket_id} {flag.reason}{detail}")
+            lines.append(f"  {_label(flag)} {flag.reason}{detail}")
     if status.feeder is not None:
         feeder = status.feeder
         lines.extend(
@@ -598,9 +667,12 @@ def render(status: Status) -> str:
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
-        warning = status.webhook.silence_warning(status.observed_at)
+        warning = status.webhook.warning(status.observed_at)
         if warning is not None:
             lines.append(f"  warning: {warning}")
+        note = status.webhook.quiet_note(status.observed_at)
+        if note is not None:
+            lines.append(f"  note: {note}")
     if status.health is not None:
         lines.append("")
         lines.extend(component_health.render_lines(status.health, status.observed_at))
@@ -696,9 +768,19 @@ def main(
 
 def _job_line(row: JobRow, observed_at: float, since: float) -> str:
     return (
-        f"  {row.repo}#{row.ticket_id} {row.action} -> {row.recipient} "
+        f"  {_label(row)} {row.action} -> {row.recipient} "
         f"{row.job_state or row.state} {_age(observed_at, since)}"
     )
+
+
+def _running_line(status: Status, row: JobRow) -> str:
+    since = status.started.get(row.id, row.created_at)
+    beat = _age(status.observed_at, row.last_activity_at)
+    return f"{_job_line(row, status.observed_at, since)} (beat {beat} ago)"
+
+
+def _label(row: TrackerRow | JobRow | AttentionRow) -> str:
+    return label(row.repo, row.ticket_id, row.source, row.pr_number)
 
 
 def _device_line(row: DeviceRow) -> str:

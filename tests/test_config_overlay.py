@@ -1,0 +1,181 @@
+"""Host-local orch.local.yml and machines.local.yml overlays (issue #107)."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from lib.config_overlay import merge, overlay_keys, overlay_path
+from lib.machines_yml import load_machines_yml
+from lib.orch_yml import load_orch_yml
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def overlay_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY", raising=False)
+
+
+@pytest.fixture
+def shipped(tmp_path: Path) -> tuple[Path, Path]:
+    orch = tmp_path / "orch.yml"
+    machines = tmp_path / "machines.yml"
+    shutil.copy(ROOT / "orch.yml", orch)
+    shutil.copy(ROOT / "machines.yml", machines)
+    return orch, machines
+
+
+def test_overlay_path_sits_beside_the_base_file() -> None:
+    assert overlay_path(Path("/x/orch.yml")) == Path("/x/orch.local.yml")
+    assert overlay_path(Path("/x/machines.yml")) == Path("/x/machines.local.yml")
+
+
+def test_projects_merge_by_repo_and_new_ones_append() -> None:
+    base = {"projects": [{"repo": "a/b", "factory_ref": "main", "intake": {"label": "x"}},
+                         {"repo": "c/d"}]}
+    merged = merge(base, {"projects": [
+        {"repo": "a/b", "ready_starts_review": True, "intake": {"trusted": ["m"]}},
+        {"repo": "e/f"},
+    ]})
+    assert merged["projects"] == [
+        {"repo": "a/b", "factory_ref": "main", "ready_starts_review": True,
+         "intake": {"label": "x", "trusted": ["m"]}},
+        {"repo": "c/d"},
+        {"repo": "e/f"},
+    ]
+    assert base["projects"][0] == {"repo": "a/b", "factory_ref": "main", "intake": {"label": "x"}}
+
+
+def test_devices_merge_by_name() -> None:
+    base = {"devices": [{"name": "box", "slot_max": 3}, {"name": "pc", "enabled": False}]}
+    merged = merge(base, {"devices": [{"name": "pc", "enabled": True, "slot_max": 2}]})
+    assert merged["devices"] == [{"name": "box", "slot_max": 3},
+                                 {"name": "pc", "enabled": True, "slot_max": 2}]
+
+
+def test_scalars_override_mappings_merge_and_other_lists_replace() -> None:
+    base = {"poll_seconds": 30, "grok": {"a": 1, "b": 2},
+            "trusted_logins": {"max": ["grok-bot", "claude-bot"]}}
+    merged = merge(base, {"poll_seconds": 60, "grok": {"b": 3},
+                          "trusted_logins": {"max": ["grok-bot"]}})
+    assert merged == {"poll_seconds": 60, "grok": {"a": 1, "b": 3},
+                      "trusted_logins": {"max": ["grok-bot"]}}
+
+
+def test_overlay_keys_name_fields_never_values() -> None:
+    keys = overlay_keys({
+        "linear_webhook": {"public_url": "https://secret.example.ts.net/hook"},
+        "projects": [{"repo": "a/b", "linear_project_id": "proj-123"}, {"repo": "c/d"}],
+        "trusted_linear_users": {"user-1": ["grok-bot"]},
+    })
+    assert keys == [
+        "linear_webhook.public_url",
+        "projects[a/b].linear_project_id",
+        "projects[c/d]",
+        "trusted_linear_users",
+    ]
+
+
+def test_overlay_fills_a_placeholder(overlay_on: None, shipped: tuple[Path, Path]) -> None:
+    orch, _ = shipped
+    config, findings = load_orch_yml(orch, allow_placeholders=True)
+    assert any("placeholder" in f.message for f in findings)
+    overlay_path(orch).write_text(
+        "projects:\n  - repo: aut0-code/aut0\n    linear_project_id: real-project\n",
+        encoding="utf-8",
+    )
+    config, findings = load_orch_yml(orch)
+    assert findings == []
+    assert config is not None
+    project = next(p for p in config.projects if p.repo == "aut0-code/aut0")
+    assert project.linear_project_id == "real-project"
+    assert project.job_timeout == 150
+
+
+def test_machines_overlay_enables_a_device(overlay_on: None, shipped: tuple[Path, Path]) -> None:
+    _, machines = shipped
+    overlay_path(machines).write_text(
+        "devices:\n  - name: pc\n    enabled: true\n    slot_max: 1\n", encoding="utf-8")
+    config, findings = load_machines_yml(machines, allow_placeholders=True)
+    assert config is not None, findings
+    pc = config.device("pc")
+    assert pc is not None and pc.enabled and pc.slot_max == 1
+    assert config.device("box").slot_max == 3
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("projects: [\n", "orch.local.yml: invalid YAML"),
+    ("- a\n- b\n", "orch.local.yml: an overlay must be a mapping"),
+    ("projects:\n  - factory_ref: main\n", "orch.local.yml: projects[0] must be a mapping with a repo"),
+    ("projects: {repo: a/b}\n", "orch.local.yml: projects must be a list"),
+])
+def test_a_bad_overlay_is_an_error_naming_the_file(
+    overlay_on: None, shipped: tuple[Path, Path], text: str, expected: str
+) -> None:
+    orch, _ = shipped
+    overlay_path(orch).write_text(text, encoding="utf-8")
+    config, findings = load_orch_yml(orch, allow_placeholders=True)
+    assert config is None
+    assert [f.severity for f in findings] == ["error"]
+    assert findings[0].message.startswith(expected)
+
+
+def test_the_env_switch_and_the_argument_turn_it_off(
+    monkeypatch: pytest.MonkeyPatch, shipped: tuple[Path, Path]
+) -> None:
+    orch, _ = shipped
+    overlay_path(orch).write_text("poll_seconds: 60\n", encoding="utf-8")
+    config, _ = load_orch_yml(orch, allow_placeholders=True)
+    assert config is not None and config.poll_seconds == 30
+    monkeypatch.delenv("ORCH_NO_LOCAL_OVERLAY")
+    config, _ = load_orch_yml(orch, allow_placeholders=True)
+    assert config is not None and config.poll_seconds == 60
+    config, _ = load_orch_yml(orch, allow_placeholders=True, overlay=False)
+    assert config is not None and config.poll_seconds == 30
+
+
+@pytest.mark.parametrize("base, example, load", [
+    ("orch.yml", "orch.local.example.yml", load_orch_yml),
+    ("machines.yml", "machines.local.example.yml", load_machines_yml),
+])
+def test_the_shipped_examples_load_as_overlays(
+    overlay_on: None, tmp_path: Path, base: str, example: str, load
+) -> None:
+    target = tmp_path / base
+    shutil.copy(ROOT / base, target)
+    shutil.copy(ROOT / "config" / example, overlay_path(target))
+    config, findings = load(target, allow_placeholders=True)
+    assert config is not None
+    assert not [f for f in findings if f.severity == "error"]
+
+
+def test_check_config_lists_overlay_key_names_and_no_values(
+    overlay_on: None, shipped: tuple[Path, Path]
+) -> None:
+    orch, machines = shipped
+    overlay_path(orch).write_text(
+        "projects:\n  - repo: aut0-code/aut0\n    linear_project_id: secret-project-id\n"
+        "trusted_linear_users:\n  secret-user-id:\n    - grok-bot\n",
+        encoding="utf-8",
+    )
+    overlay_path(machines).write_text(
+        "devices:\n  - name: box\n    slot_max: 2\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "orch"), "check-config",
+         "--orch", str(orch), "--machines", str(machines), "--allow-placeholders"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "overlay orch.local.yml sets: projects[aut0-code/aut0].linear_project_id, "
+        "trusted_linear_users",
+        "overlay machines.local.yml sets: devices[box].slot_max",
+        "ok",
+    ]
+    assert "secret-project-id" not in result.stdout + result.stderr
+    assert "secret-user-id" not in result.stdout + result.stderr

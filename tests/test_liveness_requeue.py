@@ -291,9 +291,8 @@ def test_an_unstarted_job_on_an_abandoned_ticket_is_closed_not_requeued(
 
     poller.at(90)
 
-    assert poller.jobs() == [(job_id, "failed", 1)]
-    assert poller.row(job_id)["failure_handled"] == 1
-    assert poller.events() == [(job_id, RELEASED_UNSTARTED), (job_id, "abandoned")]
+    assert poller.jobs() == [(job_id, "cancelled", 1)]
+    assert poller.events() == [(job_id, "cancelled")]
     assert poller.pool.claim("codex") is None
 
 

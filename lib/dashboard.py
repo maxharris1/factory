@@ -80,6 +80,7 @@ from lib.job_state import (
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
+from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
 from lib.queue import ACTIONS, RECIPIENTS, STATES
 from lib.schema import TICKETS
@@ -767,6 +768,26 @@ def collect_snapshot(
     return _scrub(snapshot)  # type: ignore[return-value]
 
 
+def _ticket_ref(
+    sources: dict[tuple[str, str], tuple[str, str | None]],
+    repo: object,
+    ticket_id: object,
+    repo_limit: int = 100,
+) -> dict:
+    """Issue #115: a row's shown repo and ticket id, with its source issue and PR
+    found by the stored identifiers before `_clean` can cut them short."""
+    ref = {"repo": _clean(repo, repo_limit), "ticket_id": _clean(ticket_id, 64)}
+    found = sources.get((str(repo).casefold(), str(ticket_id)))
+    if found is not None:
+        ref["source"] = found[0] if SOURCE.fullmatch(found[0]) else None
+        ref["pr"] = _clean(found[1], 16) if found[1] is not None else None
+    return ref
+
+
+def _same_ref(row: dict) -> dict:
+    return {key: row[key] for key in ("repo", "ticket_id", "source", "pr") if key in row}
+
+
 def _projects(
     orch: OrchConfig | None, rules: dict[str, sqlite3.Row], now: float
 ) -> list[dict]:
@@ -820,8 +841,7 @@ def _attention(
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")
-        items.append({"kind": "stuck", "repo": row["repo"], "ticket_id": row["ticket_id"],
-                      "detail": detail})
+        items.append({"kind": "stuck", **_same_ref(row), "detail": detail})
     for row in overdue:
         job_state = row.get("job_state")
         if job_state == DEAD:
@@ -832,15 +852,13 @@ def _attention(
             kind, what = "stale", row["state"]
         items.append({
             "kind": kind,
-            "repo": row["repo"],
-            "ticket_id": row["ticket_id"],
+            **_same_ref(row),
             "detail": f"{row['recipient']} {row['action']} {what}, "
                       f"no heartbeat for {_duration(row['age_seconds'])}",
         })
     for row in flags:
         detail = row["reason"] + (f": {row['detail']}" if row["detail"] else "")
-        items.append({"kind": "needs-attention", "repo": row["repo"],
-                      "ticket_id": row["ticket_id"], "detail": detail})
+        items.append({"kind": "needs-attention", **_same_ref(row), "detail": detail})
     listed = {(row["repo"], row["ticket_id"]) for row in stuck}
     listed |= {(row["repo"], row["ticket_id"]) for row in flags}
     for row in paused:
@@ -849,8 +867,7 @@ def _attention(
         detail = row["state"] + (f" ({row['paused_action']})" if row["paused_action"] else "")
         if row.get("waiting_on"):
             detail += f" (waiting on {row['waiting_on']})"
-        items.append({"kind": "paused", "repo": row["repo"], "ticket_id": row["ticket_id"],
-                      "detail": detail})
+        items.append({"kind": "paused", **_same_ref(row), "detail": detail})
     for component in health.down if health is not None else ():
         reason = f" ({component.reason})" if component.reason else ""
         items.append({"kind": "down", "repo": "", "ticket_id": "",
@@ -943,6 +960,7 @@ def _read_db(
 ) -> dict:
     tables = _tables(connection)
     jobs = "jobs" in tables
+    sources = read_sources(connection)
 
     totals = {state: 0 for state in STATES}
     groups: dict[tuple[str, str], dict] = {}
@@ -1001,8 +1019,7 @@ def _read_db(
         ):
             base = {
                 "job": _clean(str(row["id"])[:8], 8),
-                "repo": _clean(row["repo"], 100),
-                "ticket_id": _clean(row["ticket_id"], 64),
+                **_ticket_ref(sources, row["repo"], row["ticket_id"]),
                 "action": _enum(row["action"], ACTIONS),
                 "recipient": _enum(row["recipient"], RECIPIENTS),
             }
@@ -1095,8 +1112,7 @@ def _read_db(
               ON state.repo = tracked.repo AND state.ticket_id = tracked.ticket_id
             """
         ):
-            repo = _clean(row["repo"], 100)
-            ticket_id = _clean(row["ticket_id"], 64)
+            ref = _ticket_ref(sources, row["repo"], row["ticket_id"])
             state = _enum(row["workflow_state"], WORKFLOW_STATES)
             paused_action = (
                 _enum(row["paused_action"], ACTIONS)
@@ -1118,8 +1134,7 @@ def _read_db(
             )
             tickets.append(
                 {
-                    "repo": repo,
-                    "ticket_id": ticket_id,
+                    **ref,
                     "tracker": _enum(row["tracker"], TRACKERS),
                     "state": state,
                     "round": int(row["review_round"]),
@@ -1132,8 +1147,7 @@ def _read_db(
             if stuck:
                 stuck_tickets.append(
                     {
-                        "repo": repo,
-                        "ticket_id": ticket_id,
+                        **ref,
                         "state": state,
                         "reason": (
                             _clean(row["stuck_reason"], 200)
@@ -1145,8 +1159,7 @@ def _read_db(
             if stuck or str(row["workflow_state"]) in PAUSED_STATES:
                 paused.append(
                     {
-                        "repo": repo,
-                        "ticket_id": ticket_id,
+                        **ref,
                         "state": state,
                         "paused_action": paused_action,
                         **waiting,
@@ -1177,8 +1190,7 @@ def _read_db(
         newest_error_at = row["newest"]
         errors["recent"] = [
             {
-                "repo": _clean(item["repo"], 100),
-                "ticket_id": _clean(item["ticket_id"], 64),
+                **_ticket_ref(sources, item["repo"], item["ticket_id"]),
                 "error": _clean(item["error"]),
                 "age_seconds": _age(now, item["recorded_at"]),
             }
@@ -1245,8 +1257,7 @@ def _read_db(
         ):
             attention_flags.append(
                 {
-                    "repo": _clean(row["repo"], 120),
-                    "ticket_id": _clean(row["ticket_id"], 64),
+                    **_ticket_ref(sources, row["repo"], row["ticket_id"], 120),
                     "reason": _enum(row["reason"], ATTENTION_REASONS),
                     "detail": _clean(row["detail"]) if row["detail"] is not None else "",
                 }
@@ -1262,7 +1273,8 @@ def _read_db(
             ),
             "listener_age_seconds": _age(now, health.started_at),
             "dirty": health.dirty,
-            "warning": health.silence_warning(now),
+            "warning": health.warning(now),
+            "note": health.quiet_note(now),
         }
 
     recent_handoffs: list[dict] = []
@@ -1283,8 +1295,7 @@ def _read_db(
             recent_handoffs.append(
                 {
                     "job": _clean(str(row["id"])[:8], 8),
-                    "repo": _clean(row["repo"], 100),
-                    "ticket_id": _clean(row["ticket_id"], 64),
+                    **_ticket_ref(sources, row["repo"], row["ticket_id"]),
                     "action": _enum(row["action"], ACTIONS),
                     "recipient": recipient,
                     "state": state,
@@ -1306,8 +1317,7 @@ def _read_db(
                 outcome = "other"
             verdicts.append(
                 {
-                    "repo": _clean(row["repo"], 100),
-                    "ticket_id": _clean(row["ticket_id"], 64),
+                    **_ticket_ref(sources, row["repo"], row["ticket_id"]),
                     "outcome": _clean(outcome, 48),
                     "kind": _verdict_kind(outcome),
                 }

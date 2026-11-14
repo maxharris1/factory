@@ -73,6 +73,7 @@ from lib.dispatcher import (
 )
 from lib.handoff import STATES
 from lib.hold import LabelEvent
+from lib.pr_title import TITLE_LIMIT
 from lib.schema import AUT0_REPO
 
 TOKEN_VARIABLES = (
@@ -380,6 +381,18 @@ class GitHubReviewActions:
             "ok on this exact SHA, or a decline."
         )
         self._call("-X", "POST", f"{issue}/comments", "-f", f"body={body}")
+
+    def set_title(self, ticket: TrackedTicket, title: str) -> None:
+        """The REST write `gh pr edit --title` makes (issue #115)."""
+        if not title or len(title) > TITLE_LIMIT:
+            raise GitHubAdapterError(f"a PR title is 1 to {TITLE_LIMIT} characters")
+        self._call(
+            "-X",
+            "PATCH",
+            f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}",
+            "-f",
+            f"title={title}",
+        )
 
     def list_comments(self, repo: str, number: str) -> tuple[Comment, ...]:
         """Every issue comment, all pages, ordered by (created_at, int id)."""

@@ -20,5 +20,16 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "5. Push, post the ready handoff below with the head you pushed, and finish the job.",
         "Do not poll, watch or wait on GitHub Actions or any other CI from inside this job: "
         "the factory's own review and CI gate check CI after `ready`.",
+        *_approved_note(job),
         *builder_notes(job),
+    ]
+
+
+def _approved_note(job: Job) -> list[str]:
+    if job.request.action != "update-from-main":
+        return []
+    return [
+        "The PR is approved. Resolve each conflict hunk by taking exactly one side when you "
+        "can, and change nothing else: the poller then carries the approval to your merge "
+        "commit. Any other edit sends the PR back to review."
     ]

@@ -11,6 +11,7 @@ review:
     high: 3
   verify: verify-cleffy
 ship: merge
+# finish_line: merge  # optional; omitted, it follows ship
 skills:
   - verify-cleffy
 ---

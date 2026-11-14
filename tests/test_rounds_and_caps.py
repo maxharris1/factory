@@ -638,3 +638,31 @@ def test_claude_print_mode_gets_the_bg_wait_ceiling_on_a_remote_device(
 )
 def test_orch_job_run_reads_the_job_a_retry_repeats(detail: str | None, expected: str | None) -> None:
     assert cli._retry_of(detail) == expected
+
+
+def test_a_builds_ready_listed_with_a_verdict_is_reviewed(tmp_path: Path) -> None:
+    """A verdict T3 could not act on while building does not make the
+    build's ready stale (Codex PR #112 r5 F1): it is the verdict of the
+    review that ready starts (#108 answered-review), and T3 acts on it."""
+    flow = Flow(tmp_path)
+    assert flow.go("go-1") == "queued-build"
+    build = flow.queue.claim("claude")
+    assert build is not None
+    flow.head = HEADS[1]
+    ready_id = f"ready-{HEADS[1][:6]}"
+    flow.comments.append(
+        comment(ready_id, READY.format(head=HEADS[1]), author="claude-login", created_at=flow.now[0] + 10)
+    )
+    flow.comments.append(
+        comment(
+            "revise-1/3",
+            VERDICT.format(round="1/3", head=HEADS[1], verdict="REVISE", risk="high"),
+            author="codex-login",
+            created_at=flow.now[0] + 20,
+        )
+    )
+    flow.now[0] += 30
+    flow.queue.finish(build.id, owner="claude", handoff_comment_id=ready_id)
+    flow.dispatcher.process(flow.snapshot())
+    assert outcome(flow.queue, ready_id) == "answered-review"
+    assert outcome(flow.queue, "revise-1/3") == "queued-review-fix"

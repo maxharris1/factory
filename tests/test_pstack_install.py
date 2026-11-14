@@ -27,13 +27,15 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def expected_files(name: str) -> dict[str, str]:
+def expected_files(name: str, mode: str = "local") -> dict[str, str]:
     pin = load_pin(ROOT)
     if name in ROUTERS:
-        prefix, hashes = f"{name}/", pin.factory_hashes()
-    else:
-        prefix, hashes = f"skills/{name}/", pin.hashes()
-    return {rel.removeprefix(prefix): digest for rel, digest in hashes.items() if rel.startswith(prefix)}
+        return {rel.removeprefix(f"{name}/"): digest for rel, digest in pin.factory if rel.startswith(f"{name}/")}
+    prefix = f"skills/{name}/"
+    files = {rel.removeprefix(prefix): digest for rel, digest in pin.files if rel.startswith(prefix)}
+    if mode == "cloud":
+        files["LICENSE"] = pin.hashes()["LICENSE"]
+    return files
 
 
 def installed_files(skill: Path) -> dict[str, str]:
@@ -74,7 +76,7 @@ def test_clean_home_gets_both_routers_and_poteto_mode_matching_the_lock(tmp_path
         for name in (*ROUTERS, "poteto-mode"):
             skill = home / rel / name
             assert (skill / "SKILL.md").is_file(), f"{skill} is missing"
-            assert installed_files(skill) == expected_files(name), f"{skill} differs from the lock"
+            assert installed_files(skill) == expected_files(name, mode), f"{skill} differs from the lock"
     for name in ROUTERS:
         link = home / ".claude" / "skills" / name
         if mode == "local":
@@ -139,7 +141,7 @@ def test_lock_without_a_factory_section_is_refused(tmp_path: Path) -> None:
     bump_pin(root, "a" * 40, "0.15.36")
     lock = root / "skills" / "skills.lock"
     text = lock.read_text(encoding="utf-8")
-    lock.write_text(text[: text.index("factory:")], encoding="utf-8")
+    lock.write_text(text[: text.index("factory:")] + text[text.index("kit:") :], encoding="utf-8")
     assert verify_pin(root) == ["skills.lock is missing factory"]
 
 
