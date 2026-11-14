@@ -271,3 +271,31 @@ def test_marker_lines_already_in_the_file_still_allow_a_one_side_resolution(
     head = repo.merge_main(lambda r: r.git("checkout", "--ours", "app.py"))
     result = run(repo, approved, head)
     assert result.trivial, result.reason
+
+
+@pytest.mark.parametrize("name", [":(literal)other.py", ":(glob)*.py", "*.py", ":!app.py"])
+def test_a_conflicted_filename_is_looked_up_literally(tmp_path: Path, name: str) -> None:
+    repo = Repo(tmp_path / "r")
+    repo.write(name, BASE)
+    repo.write("other.py", BASE.replace("line 5\n", "line 5 pr\n"))
+    repo.write("app.py", BASE.replace("line 5\n", "line 5 pr\n"))
+    repo.base = repo.commit("base holding a pathspec-like filename")
+    approved, _main = repo.branches(
+        [(name, "line 5\n", "line 5 pr\n")],
+        [(name, "line 5\n", "line 5 main\n")],
+    )
+    head = repo.merge_main(lambda r: r.write(name, "UNREVIEWED REPLACEMENT\n"))
+
+    assert not run(repo, approved, head).trivial
+
+
+@pytest.mark.parametrize("variable", ["GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+def test_a_pathspec_setting_in_the_environment_changes_nothing(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    approved, _ = repo.branches([("app.py", "line 5\n", "line 5 pr\n")], [("app.py", "line 5\n", "line 5 main\n")])
+    head = repo.merge_main(lambda r: r.git("checkout", "--ours", "app.py"))
+    monkeypatch.setenv(variable, "1")
+
+    result = run(repo, approved, head)
+    assert result.trivial, result.reason

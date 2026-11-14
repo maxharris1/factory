@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lib.brief import brief_kind
 from lib.queue import _job
 from lib.update_check import UpdateClass
@@ -310,3 +312,42 @@ def test_a_done_update_whose_ready_waits_for_ci_does_not_count(tmp_path: Path) -
     board.poll()
     row = board.state("42")
     assert (row["update_failures"], row["workflow_state"]) == (0, "updating")
+
+
+@pytest.mark.parametrize("exit_before_poll", [False, True])
+def test_one_failed_update_counts_once_and_its_retry_still_runs(
+    tmp_path: Path, exit_before_poll: bool
+) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    first = board.claim("claude")
+    board.ready(pr, sha(1), "old-ready")
+    if exit_before_poll:
+        board.queue.finish(first.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+    if not exit_before_poll:
+        board.queue.finish(first.id, owner="claude", handoff_comment_id=None)
+        board.poll()
+    board.poll()
+
+    jobs = board.jobs("update-from-main")
+    row = board.state("42")
+    assert [job["state"] for job in jobs] == ["failed", "queued"]
+    assert row["update_failures"] == 1
+    assert row["stuck"] == 0
+    retry = board.queue.claim("claude")
+    assert retry is not None and retry.request.action == "update-from-main"
+
+
+def test_the_stop_cancels_an_update_still_queued(tmp_path: Path) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.fail("claude")
+    board.poll()
+    board.poll()
+    assert board.jobs("update-from-main")[-1]["state"] == "queued"
+    pr.push(sha(2), state="dirty")
+    late = board.ready(pr, sha(2))
+    board.poll()
+
+    assert board.outcome(late) == "stuck-update-failed-2"
+    assert board.jobs("update-from-main")[-1]["state"] == "cancelled"
+    assert board.queue.claim("claude") is None

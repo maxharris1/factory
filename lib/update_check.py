@@ -228,11 +228,17 @@ def _run(clone: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
 
 def _environment() -> dict[str, str]:
     """No user or system git config: a conflict style or merge driver set
-    there must not change what the check sees."""
-    environment = dict(os.environ)
+    there must not change what the check sees. Every path is literal, so a
+    filename such as `:(literal)x` or `*.py` names only itself."""
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+    }
     environment.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_TERMINAL_PROMPT="0",
+        GIT_LITERAL_PATHSPECS="1",
     )
     return environment

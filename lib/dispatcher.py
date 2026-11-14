@@ -1890,6 +1890,7 @@ class Dispatcher:
             "timeout_seconds": ticket.job_timeout_minutes * 60,
             "project_bot": ticket.grok_bot,
             "back_to": back_to,
+            "job_id": self._update_job_before(ticket, comment),
         }
         if row["update_from_head"] is not None and _matching_head(
             reported_head, str(row["update_from_head"])
@@ -2407,8 +2408,9 @@ class Dispatcher:
         if row["workflow_state"] == "updating":
             # An update job is out: its ready (T2) or failure (T6) moves on,
             # and so does a done job whose ready never came.
-            why = self._update_unanswered(ticket)
-            if why is not None:
+            unanswered = self._update_unanswered(ticket)
+            if unanswered is not None:
+                job_id, why = unanswered
                 self._update_failed(
                     repo=ticket.repo,
                     ticket_id=ticket.ticket_id,
@@ -2416,6 +2418,7 @@ class Dispatcher:
                     timeout_seconds=ticket.job_timeout_minutes * 60,
                     project_bot=ticket.grok_bot,
                     back_to=_queue_state(ticket.factory.ship),
+                    job_id=job_id,
                     why=why,
                 )
             return
@@ -2442,7 +2445,23 @@ class Dispatcher:
             return
         self._merge_queue_head(ticket, row, head)
 
-    def _update_unanswered(self, ticket: TrackedTicket) -> str | None:
+    def _update_job_before(self, ticket: TrackedTicket, comment: Comment) -> str | None:
+        """The update-from-main job a ready answers: the latest queued no
+        later than the ready was posted."""
+        with self._connect() as connection:
+            job = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
+                  AND created_at <= ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.created_at),
+            ).fetchone()
+        return None if job is None else str(job["id"])
+
+    def _update_unanswered(self, ticket: TrackedTicket) -> tuple[str, str] | None:
         """Why the latest update-from-main job counts as failed though it
         finished done (#130 Unit 6): its handoff is not a ready, its ready
         was handled and left the ticket updating, or no handoff showed on
@@ -2473,7 +2492,7 @@ class Dispatcher:
                 return None
         elif self.queue.now() - float(job["finished_at"] or 0) < UPDATE_READY_GRACE_SECONDS:
             return None
-        return f"job {job['id']} finished with no ready that settles the update"
+        return str(job["id"]), f"job {job['id']} finished with no ready that settles the update"
 
     def _merge_queue_head(
         self,
@@ -2614,17 +2633,21 @@ class Dispatcher:
         timeout_seconds: int,
         project_bot: str | None,
         back_to: str,
+        job_id: str | None,
         why: str,
     ) -> str:
-        """Count one failed update. The second stops the ticket and asks
-        Max (update-failed-2); the first puts it back in the queue, whose
-        next pass queues one more update job."""
+        """Count one failed update job, once however many signals report it
+        (its old-head ready, its failed exit). The second stops the ticket,
+        cancels any queued update and asks Max (update-failed-2); the first
+        puts it back in the queue, whose next pass queues one more update
+        job."""
         key = (repo.lower(), ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT update_failures, update_from_head FROM ticket_state
+                SELECT update_failures, update_from_head, update_failed_job
+                FROM ticket_state
                 WHERE repo = ? AND ticket_id = ? AND workflow_state = 'updating'
                 """,
                 key,
@@ -2632,24 +2655,39 @@ class Dispatcher:
             if row is None:
                 connection.commit()
                 return "update-not-pending"
+            if job_id is not None and row["update_failed_job"] == job_id:
+                connection.commit()
+                return "update-failure-counted"
             failures = int(row["update_failures"]) + 1
             if failures < UPDATE_FAILURES_TO_STOP:
                 connection.execute(
                     """
                     UPDATE ticket_state
-                    SET update_failures = ?, workflow_state = ?
+                    SET update_failures = ?, update_failed_job = ?, workflow_state = ?
                     WHERE repo = ? AND ticket_id = ?
                     """,
-                    (failures, back_to, *key),
+                    (failures, job_id, back_to, *key),
                 )
                 connection.commit()
                 if self.log is not None:
                     self.log(f"update failed once: {repo}#{ticket_id}: {why}")
                 return "update-failed-1"
             connection.execute(
-                "UPDATE ticket_state SET update_failures = ? WHERE repo = ? AND ticket_id = ?",
-                (failures, *key),
+                """
+                UPDATE ticket_state SET update_failures = ?, update_failed_job = ?
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (failures, job_id, *key),
             )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND action = 'update-from-main'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(str(job["id"]), "update-failed-2", connection=connection)
             self._set_stuck_in_transaction(
                 connection,
                 repo=repo,
@@ -4277,6 +4315,7 @@ class Dispatcher:
                 timeout_seconds=job.request.timeout_seconds,
                 project_bot=_detail_project_bot(job.request.detail),
                 back_to=_queue_state(polled.factory.ship if polled else "handoff"),
+                job_id=job.id,
                 why=f"job {job.id} failed",
             )
             self.queue.mark_failure_handled(job.id)
@@ -5293,6 +5332,7 @@ class Dispatcher:
                     approve_comment_id TEXT,
                     update_failures INTEGER NOT NULL DEFAULT 0,
                     update_from_head TEXT,
+                    update_failed_job TEXT,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
@@ -5323,6 +5363,7 @@ class Dispatcher:
                 "approve_comment_id": "TEXT",
                 "update_failures": "INTEGER NOT NULL DEFAULT 0",
                 "update_from_head": "TEXT",
+                "update_failed_job": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in columns:
