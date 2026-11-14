@@ -805,6 +805,24 @@ def test_restore_waits_for_the_copy_in_and_keeps_the_db_it_brings_back(
     assert _pidfile(home).exists()
 
 
+@pytest.mark.parametrize("attempt", range(5))
+def test_restore_never_waits_less_than_the_copy_in_bound(
+    home: Path, tmp_path: Path, attempt: int
+) -> None:
+    database = _lost_db(home)
+    status = _copy_in(tmp_path, "copying")
+
+    started = time.monotonic()
+    result = _service(
+        home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(home / "calls.txt"),
+        ORCH_COPY_IN_STATUS=str(status), ORCH_COPY_IN_WAIT="1", ORCH_COPY_IN_POLL_SEC="0.05",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started >= 1
+    assert database.parent.is_dir()
+
+
 def test_restore_waits_a_bounded_time_for_a_stuck_copy_in(home: Path, tmp_path: Path) -> None:
     database = _lost_db(home)
     calls = home / "calls.txt"

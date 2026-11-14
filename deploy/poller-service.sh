@@ -173,7 +173,7 @@ wait_for_copy_in() {
     [[ "$phase" == done ]] && return 0
     loud "box copy-in is still running (phase ${phase:-unknown}); waiting up to ${COPY_IN_WAIT}s before restoring orch.db"
     deadline=$((SECONDS + COPY_IN_WAIT))
-    while ((SECONDS < deadline)); do
+    while ((SECONDS <= deadline)); do
         sleep "$COPY_IN_POLL"
         [[ -e "$db" ]] && return 0
         [[ -e "$COPY_IN_STATUS" ]] || return 0
