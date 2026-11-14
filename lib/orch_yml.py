@@ -25,6 +25,7 @@ import yaml
 
 from lib.config_overlay import apply_overlay
 from lib.dashboard_config import DashboardConfig, parse_dashboard
+from lib.factory_md import HoldConfig
 from lib.job_state import (
     DEFAULT_RELEASE_CLAIMED_MINUTES,
     DEFAULT_STALE_MINUTES,
@@ -72,7 +73,13 @@ _TOP_KEYS = {
     "linear_webhook",
     "job_states",
     "refused_harnesses",
+    "approver_logins",
+    "approver_gh_config_dir",
+    "github_app",
 }
+_GITHUB_APP_KEYS = {"app_id", "installations", "private_key_file", "bot_login", "enabled"}
+_USER_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+_BOT_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*\[bot\]$")
 _JOB_STATES_KEYS = {"stale_minutes", "release_claimed_minutes"}
 _LINEAR_WEBHOOK_KEYS = {"bind", "path", "secret_file", "reconcile_seconds", "public_url"}
 _PROJECT_KEYS = {
@@ -155,6 +162,32 @@ class LinearWebhookConfig:
 
 
 @dataclass(frozen=True)
+class GitHubApp:
+    """The bots' GitHub App (#122). private_key_file is a path orch never
+    opens. enabled is the switch: false keeps today's single-login trust."""
+
+    app_id: int
+    installations: Mapping[str, int]
+    private_key_file: Path
+    bot_login: str | None = None
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class Approvals:
+    """Who may give a capped-ticket go or a hold ok (#122). With app_trust
+    off, the dispatcher keeps today's trusted_logins rule. gh_config_dir is
+    Max's approver gh profile, a path only."""
+
+    app_trust: bool = False
+    logins: frozenset[str] = frozenset()
+    gh_config_dir: Path | None = None
+
+    def may_approve(self, login: str) -> bool:
+        return login.casefold() in self.logins
+
+
+@dataclass(frozen=True)
 class OrchConfig:
     poll_seconds: int
     projects: tuple[Project, ...]
@@ -173,6 +206,66 @@ class OrchConfig:
     # Harnesses whose jobs the factory refuses (issue #107): health expects
     # no waiter for them.
     refused_harnesses: tuple[str, ...] = ()
+    github_app: GitHubApp | None = None
+    approver_logins: frozenset[str] | None = None
+    approver_gh_config_dir: Path | None = None
+
+
+def approvals(config: OrchConfig) -> Approvals:
+    return _approvals(
+        config.github_app, config.approver_logins, config.approver_gh_config_dir
+    )
+
+
+def _approvals(
+    app: GitHubApp | None,
+    approver_logins: frozenset[str] | None,
+    gh_config_dir: Path | None,
+) -> Approvals:
+    return Approvals(
+        app_trust=app is not None and app.enabled,
+        logins=frozenset(login.casefold() for login in approver_logins or ()),
+        gh_config_dir=gh_config_dir,
+    )
+
+
+def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
+    """The approval settings alone (#122), for a waiter whose orch.yml has
+    an error elsewhere: that error must not turn the approver-profile guard
+    off. None when the file or these settings do not load."""
+    data, findings = _read(path)
+    if data is None:
+        return None, findings
+    approver_logins = _approver_logins(data, findings)
+    gh_config_dir = _absolute_path(
+        data, "approver_gh_config_dir", "approver_gh_config_dir", findings
+    )
+    app = _github_app(data, findings)
+    if findings:
+        return None, findings
+    return _approvals(app, approver_logins, gh_config_dir), findings
+
+
+def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]:
+    """A hold whose approver can never clear it (#122): not in
+    approver_logins, or, with the switch off, not a trusted_logins key."""
+    if hold is None:
+        return []
+    approver = hold.approver.casefold()
+    findings: list[Finding] = []
+    if config.approver_logins is not None and approver not in {
+        login.casefold() for login in config.approver_logins
+    }:
+        findings.append(
+            Finding("error", f"hold.approver {hold.approver} is not in approver_logins")
+        )
+    if not approvals(config).app_trust and approver not in {
+        login.casefold() for login in config.trusted_logins
+    }:
+        findings.append(
+            Finding("error", f"hold.approver {hold.approver} is not a trusted_logins key")
+        )
+    return findings
 
 
 def resolve_job_timeout(config: OrchConfig, repo: str) -> int:
@@ -197,6 +290,13 @@ def load_orch_yml(
     allow_placeholders: bool = False,
     overlay: bool = True,
 ) -> tuple[OrchConfig | None, list[Finding]]:
+    data, findings = _read(path, overlay=overlay)
+    if data is None:
+        return None, findings
+    return _validate(data, allow_placeholders=allow_placeholders)
+
+
+def _read(path: Path, *, overlay: bool = True) -> tuple[dict | None, list[Finding]]:
     if not path.is_file():
         return None, [Finding("error", "file not found")]
     text = path.read_text(encoding="utf-8")
@@ -211,7 +311,7 @@ def load_orch_yml(
         data, findings = apply_overlay(path, data)
         if data is None:
             return None, findings
-    return _validate(data, allow_placeholders=allow_placeholders)
+    return data, []
 
 
 def _validate(
@@ -239,6 +339,13 @@ def _validate(
     linear_webhook = _linear_webhook(data, findings)
     job_states = _job_states(data, findings)
     refused_harnesses = _refused_harnesses(data, findings)
+    approver_logins = _approver_logins(data, findings)
+    approver_gh_config_dir = _absolute_path(
+        data, "approver_gh_config_dir", "approver_gh_config_dir", findings
+    )
+    github_app = _github_app(data, findings)
+    if github_app is not None and github_app.enabled:
+        _app_switch(github_app, approver_logins, trusted_logins, findings)
     if (
         "linear_webhook" in data
         and projects is not None
@@ -277,6 +384,9 @@ def _validate(
             linear_webhook=linear_webhook,
             job_states=job_states or JobStateConfig(),
             refused_harnesses=refused_harnesses,
+            github_app=github_app,
+            approver_logins=approver_logins,
+            approver_gh_config_dir=approver_gh_config_dir,
         ),
         findings,
     )
@@ -686,6 +796,112 @@ def _job_states(data: dict, findings: list[Finding]) -> JobStateConfig | None:
         stale_seconds=minutes["stale_minutes"] * 60.0,
         release_claimed_seconds=minutes["release_claimed_minutes"] * 60.0,
     )
+
+
+def _approver_logins(data: dict, findings: list[Finding]) -> frozenset[str] | None:
+    """GitHub user logins whose capped-ticket go or hold ok counts once the
+    app switch is on. An app's [bot] login can never approve."""
+    if "approver_logins" not in data:
+        return None
+    value = data["approver_logins"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and _USER_LOGIN.fullmatch(item) for item in value)
+    ):
+        findings.append(
+            Finding("error", "approver_logins must list GitHub user logins (no [bot] logins)")
+        )
+        return None
+    return frozenset(value)
+
+
+def _absolute_path(
+    data: Mapping[str, object],
+    key: str,
+    where: str,
+    findings: list[Finding],
+) -> Path | None:
+    """An absolute path, never opened. No ~: it would expand to whichever
+    user reads the file."""
+    if key not in data:
+        return None
+    value = data[key]
+    if isinstance(value, str) and Path(value).is_absolute():
+        return Path(value)
+    findings.append(Finding("error", f"{where} must be an absolute path"))
+    return None
+
+
+def _github_app(data: dict, findings: list[Finding]) -> GitHubApp | None:
+    if "github_app" not in data:
+        return None
+    value = data["github_app"]
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "github_app must be a mapping"))
+        return None
+    start = len(findings)
+    _unknown_keys(value, _GITHUB_APP_KEYS, "github_app", findings)
+    app_id = value.get("app_id")
+    if not is_strict_int(app_id) or app_id < 1:
+        findings.append(Finding("error", "github_app.app_id must be a positive integer"))
+    installations = value.get("installations")
+    if (
+        not isinstance(installations, dict)
+        or not installations
+        or not all(
+            isinstance(account, str)
+            and _USER_LOGIN.fullmatch(account)
+            and is_strict_int(number)
+            and number >= 1
+            for account, number in installations.items()
+        )
+    ):
+        findings.append(
+            Finding(
+                "error",
+                "github_app.installations must map an account login to a positive installation id",
+            )
+        )
+    if "private_key_file" not in value:
+        findings.append(Finding("error", "github_app.private_key_file must be an absolute path"))
+    private_key_file = _absolute_path(
+        value, "private_key_file", "github_app.private_key_file", findings
+    )
+    bot_login = value.get("bot_login")
+    if bot_login is not None and (
+        not isinstance(bot_login, str) or _BOT_LOGIN.fullmatch(bot_login) is None
+    ):
+        findings.append(Finding("error", "github_app.bot_login must be an app login, <name>[bot]"))
+    enabled = value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        findings.append(Finding("error", "github_app.enabled must be true or false"))
+    if len(findings) > start:
+        return None
+    assert private_key_file is not None
+    return GitHubApp(
+        app_id=int(app_id),
+        installations=MappingProxyType(dict(installations)),
+        private_key_file=private_key_file,
+        bot_login=bot_login,
+        enabled=enabled,
+    )
+
+
+def _app_switch(
+    app: GitHubApp,
+    approver_logins: frozenset[str] | None,
+    trusted_logins: Mapping[str, frozenset[str]],
+    findings: list[Finding],
+) -> None:
+    """With the switch on, the bots must still be trusted as the app, and
+    someone must be able to approve."""
+    if app.bot_login is None:
+        findings.append(Finding("error", "github_app.enabled requires github_app.bot_login"))
+    elif app.bot_login.casefold() not in {login.casefold() for login in trusted_logins}:
+        findings.append(Finding("error", "github_app.bot_login must be a trusted_logins key"))
+    if approver_logins is None:
+        findings.append(Finding("error", "github_app.enabled requires approver_logins"))
 
 
 def _grok(data: dict, findings: list[Finding]) -> GrokConfig | None:

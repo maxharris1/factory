@@ -37,3 +37,18 @@ dashboard:
 # job_states:
 #   stale_minutes: 2
 #   release_claimed_minutes: 5
+# Optional approval credential (#122, docs/decisions/122-approver-credential.md).
+# The bots post as a GitHub App; a capped-ticket go and a hold ok then count
+# only from approver_logins. enabled: false (the default) keeps today's
+# single-login trust. orch never opens private_key_file. The numbers below
+# are fake.
+# approver_logins:
+#   - maxharris1
+# approver_gh_config_dir: /home/grok/.config/factory/gh-approver
+# github_app:
+#   app_id: 123456
+#   installations:
+#     maxharris1: 1111111
+#   private_key_file: /home/box/.config/factory/github-app-bots.pem
+#   bot_login: factory-bots[bot]
+#   enabled: false

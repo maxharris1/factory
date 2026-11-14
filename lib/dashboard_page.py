@@ -12,7 +12,9 @@ needs-attention badge):
   the current step and what can come next; the full chart is behind a
   collapsed toggle; job.html#job-<id> shows one job;
 - activity.html: needs attention, recent handoffs and verdicts, tickets, log;
-- efficiency.html: poll and Linear budget, handoff savings;
+- efficiency.html: poll and Linear budget, handoff savings, tokens and cost
+  per harness, repo and job (#93, lib/dashboard_telemetry.py). Each job's
+  article (job page and modal) ends with its telemetry feed;
 - health.html (Health, #92): each component heartbeat (poller, waiters,
   Linear listener, tunnel, dashboard writer, device probes) as up, stale or
   down with last-seen in ET, pid and device, and each harness whose queued
@@ -47,6 +49,7 @@ import re
 from pathlib import Path
 
 from lib.dashboard_flow import path_geometry, render_path_svg, render_svg
+from lib.dashboard_telemetry import TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel
 
 POLL_MS = 1500
 
@@ -512,8 +515,8 @@ SCRIPT = r"""
 
   // Backlog feeder (#85): appended to Factory status like the webhook block.
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
-    'feeding': 'feeding', 'error': 'feed error, retrying', 'fed': 'fed', 'done': 'fed, job queued',
-    'closed': 'PR closed, not fed'};
+    'waiting-blocked': 'waiting on a blocker', 'feeding': 'feeding', 'error': 'feed error, retrying',
+    'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
   function renderFeeder(d) {
     var root = byId('kpis');
     var f = d.feeder;
@@ -522,11 +525,13 @@ SCRIPT = r"""
     box.setAttribute('id', 'feeder');
     add(box, el('h2', null, 'Feeder'));
     add(box, el('p', null, 'eligible ' + f.eligible + ' · fed ' + f.fed +
-      ' · waiting for capacity ' + f.waiting_capacity));
+      ' · waiting for capacity ' + f.waiting_capacity +
+      ' · waiting on blockers or files ' + f.waiting_blocked));
     var list = add(box, el('ul'));
     (f.items || []).forEach(function (item) {
       add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
-        (FEEDER_STATE[item.state] || item.state) + (item.pr ? ' → PR #' + item.pr : '')));
+        (item.reason || FEEDER_STATE[item.state] || item.state) +
+        (item.pr ? ' → PR #' + item.pr : '')));
     });
   }
 
@@ -995,6 +1000,7 @@ SCRIPT = r"""
       ticking(add(where, el('span')), flow.state_age_seconds, '', ' in ' + flow.state);
     }
     add(art, el('p', 'path', 'path: ' + ((flow.path || []).length ? flow.path.join(' → ') : '—')));
+    add(art, telemetryBlock(r.telemetry));
     // The full chart drawn on the server (#flow-template) is the source of
     // the SVG namespace too, so the page names no URL.
     var tpl = byId('flow-template');
@@ -1073,6 +1079,8 @@ SCRIPT = r"""
       var gone = add(box, el('section', 'panel jobpage'));
       add(add(gone, el('h2')), el('span', null, anchor(modal.job)));
       add(gone, el('p', 'empty', 'That job is no longer running or queued.'));
+      var ended = finishedTelemetry(latest, modal.job);
+      if (ended) add(gone, telemetryBlock(ended));
     }
     var more = add(box, el('p', 'more'));
     add(more, link(null, 'job.html#' + anchor(modal.job))).textContent = 'open on the job page';
@@ -1112,6 +1120,8 @@ SCRIPT = r"""
     trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
     trails = [];
   }
+
+__TELEMETRY__
 
   // --- health page (#92) -------------------------------------------------------
 
@@ -1180,7 +1190,7 @@ SCRIPT = r"""
     main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
     job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
-    efficiency: [renderHealth, renderSavings],
+    efficiency: [renderHealth, renderSavings, renderTokens],
     health: [renderComponents, renderNoWaiter]
   };
   var RENDERERS = [renderBadge].concat(PAGES[PAGE] || []);
@@ -1308,7 +1318,8 @@ def font_faces() -> str:
 
 def page_script() -> str:
     return (
-        SCRIPT.replace("__POLL_MS__", str(POLL_MS))
+        SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
+        .replace("__POLL_MS__", str(POLL_MS))
         .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
         .replace("__FONTS__", font_faces())
     )
@@ -1479,6 +1490,7 @@ def _kpis(snapshot: dict) -> str:
 _FEEDER_STATE = {
     "eligible": "eligible",
     "waiting-capacity": "waiting for capacity",
+    "waiting-blocked": "waiting on a blocker",
     "feeding": "feeding",
     "error": "feed error, retrying",
     "fed": "fed",
@@ -1495,7 +1507,7 @@ def _feeder(snapshot: dict) -> str:
         return ""
     rows = "".join(
         f"<li>{_e(item['repo'])}#{_e(item['issue'])} "
-        f"{_e(_FEEDER_STATE.get(item['state'], item['state']))}"
+        f"{_e(item.get('reason') or _FEEDER_STATE.get(item['state'], item['state']))}"
         + (f" → PR #{_e(item['pr'])}" if item.get("pr") else "")
         + "</li>"
         for item in feeder["items"]
@@ -1503,7 +1515,8 @@ def _feeder(snapshot: dict) -> str:
     return (
         '<div id="feeder"><h2>Feeder</h2>'
         f"<p>eligible {_e(feeder['eligible'])} · fed {_e(feeder['fed'])} · "
-        f"waiting for capacity {_e(feeder['waiting_capacity'])}</p>"
+        f"waiting for capacity {_e(feeder['waiting_capacity'])} · "
+        f"waiting on blockers or files {_e(feeder.get('waiting_blocked', 0))}</p>"
         f"<ul>{rows}</ul></div>"
     )
 
@@ -2107,6 +2120,7 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         + "</div>"
         + where
         + f'<p class="path">path: {_e(path)}</p>'
+        + job_block(row.get("telemetry"))
         + diagram
         + legend
         + "</article>"
@@ -2134,7 +2148,7 @@ def _flow_template(snapshot: dict) -> str:
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
     "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
-    "efficiency.html": (_health, _savings),
+    "efficiency.html": (_health, _savings, rollup_panel),
     "health.html": (_components, _no_waiter),
     "job.html": (_jobs, _jobview),
 }
@@ -2157,7 +2171,7 @@ def _page(snapshot: dict, name: str) -> str:
             '<meta name="robots" content="noindex">',
             '<meta name="color-scheme" content="dark">',
             f"<title>factory mission control · {label.lower()}</title>",
-            f"<style>{CSS}</style></head>",
+            f"<style>{CSS}{TELEMETRY_CSS}</style></head>",
             f'<body data-page="{page}" '
             f'data-generated="{float(snapshot["generated_at_epoch"]):.3f}" '
             f'data-refresh="{refresh}">',

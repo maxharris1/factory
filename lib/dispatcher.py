@@ -7,11 +7,13 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib import attention, project_rules
 from lib.factory_md import FactoryConfig
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
@@ -30,7 +32,7 @@ from lib.job_state import (
     requeue_unstarted,
     unstarted_too_long,
 )
-from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS
+from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES, POLL_SECONDS, Approvals
 from lib.queue import SLOTS_TABLE, Job, JobRequest, QueueError, SQLiteJobQueue, _job
 
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
@@ -46,6 +48,7 @@ GROK_WAKE_REASONS = (
     "stale",
     "done",
     "awaiting-ok",
+    "go-not-from-approver",
 )
 CORE_KINDS = ("go", "plan", "ready")
 SETTLE_FAILURES_TO_WAKE = 3
@@ -274,6 +277,77 @@ _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
 )
 _SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
+_PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
+_CREDENTIAL_WORD = re.compile(
+    r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
+    r"|cookie|signature|bearer|basic)"
+)
+POLL_ERROR_FRAMES = 10
+POLL_ERROR_DETAIL_LIMIT = 4000
+_POLL_ERROR_CAUSE = "\nThe above exception was the direct cause of the following exception:\n\n"
+_POLL_ERROR_CONTEXT = "\nDuring handling of the above exception, another exception occurred:\n\n"
+
+
+def _redact(text: str) -> str:
+    text = _SECRET_URL.sub("<url>", text)
+    text = _SECRET_HOST_PATH.sub("<host>", text)
+    text = _SECRET_TOKEN.sub("<secret>", text)
+    return _SECRET_ASSIGNMENT.sub("<secret>", text)
+
+
+def _without_body(exc: BaseException) -> str:
+    name, separator, message = "".join(
+        traceback.format_exception_only(type(exc), exc)
+    ).partition(": ")
+    safe = getattr(exc, "safe_detail", None)
+    if isinstance(safe, str) and safe:
+        separator, message = ": ", safe
+    message = message.rstrip()
+    plain = _PLAIN_MESSAGE.match(message).group(0)
+    credential = _CREDENTIAL_WORD.search(plain)
+    if credential is not None:
+        plain = plain[: credential.start()] + "<credential omitted>"
+    elif plain != message:
+        plain += "<body omitted>"
+    return name.rstrip() + separator + plain + "\n"
+
+
+def poll_error_detail(exc: BaseException) -> str:
+    """The exception chain's messages and newest frames, redacted and capped.
+
+    A ShipError's safe_detail stands in for its message when set. Each
+    message is cut at its first character outside letters, digits, spaces
+    and _.,:;()'/=+-, so no structured or escaped body reaches the
+    redactors, and at its first credential-like word, so no redactor can
+    consume a key and leave its value. Stored in poll_errors.detail
+    beside the bare class name; the tail is kept when the cap cuts, so the
+    raising frame and message survive.
+    """
+    from lib.dashboard import redact
+
+    blocks: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None:
+        seen.add(id(current))
+        frames = "".join(traceback.format_tb(current.__traceback__, limit=-POLL_ERROR_FRAMES))
+        if frames:
+            blocks.append(f"Traceback (most recent call last):\n{frames}{_without_body(current)}")
+        else:
+            blocks.append(_without_body(current))
+        if current.__cause__ is not None:
+            link, current = _POLL_ERROR_CAUSE, current.__cause__
+        elif not current.__suppress_context__:
+            link, current = _POLL_ERROR_CONTEXT, current.__context__
+        else:
+            current = None
+        if current is None or id(current) in seen:
+            break
+        blocks.append(link)
+    text = _redact(redact("".join(reversed(blocks)).rstrip()))
+    if len(text) > POLL_ERROR_DETAIL_LIMIT:
+        text = "..." + text[-(POLL_ERROR_DETAIL_LIMIT - 3):]
+    return text
 
 
 def safe_ship_error(exc: BaseException) -> str:
@@ -301,11 +375,7 @@ def poll_error_text(error: str | BaseException) -> str:
 def scrub_detail(detail: str) -> str:
     """`detail` with no URL, host path, token, credential value, body or
     non-printable character."""
-    detail = _SECRET_BODY.sub(" <body omitted>", detail)
-    detail = _SECRET_URL.sub("<url>", detail)
-    detail = _SECRET_HOST_PATH.sub("<host>", detail)
-    detail = _SECRET_TOKEN.sub("<secret>", detail)
-    detail = _SECRET_ASSIGNMENT.sub("<secret>", detail)
+    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
     detail = "".join(char if char.isprintable() else " " for char in detail)
     return " ".join(detail.split())
 
@@ -389,6 +459,7 @@ class Dispatcher:
         job_states: JobStateConfig | None = None,
         log: Callable[[str], None] | None = None,
         feeder: Feeder | None = None,
+        approvals: Approvals | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
             raise QueueError("dispatcher state and queue must use one database")
@@ -410,9 +481,12 @@ class Dispatcher:
         self.job_states = job_states if job_states is not None else JobStateConfig()
         self.log = log
         self.feeder = feeder
+        self.approvals = approvals if approvals is not None else Approvals()
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
+        # #105: the source's uncached read, for a ready naming a newer head.
+        self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
         self._initialize()
         for hook in self.hooks:
             hook.initialize(self)
@@ -423,11 +497,12 @@ class Dispatcher:
         if begin is not None:
             begin()
         self._polled = {}
+        self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._feed(source)
         try:
             github = source.github_candidates(GITHUB_STATE_LABEL_PREFIX)
         except Exception as exc:
-            self.record_poll_error("github", "-", exc)
+            self.record_poll_exception("github", "-", exc)
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -441,22 +516,35 @@ class Dispatcher:
                 ),
             )
         except Exception as exc:
-            self.record_poll_error("linear", "-", exc)
+            self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
         try:
             tracked = source.tracked_tickets(self._tracked_refs())
         except Exception as exc:
-            self.record_poll_error("tracked", "-", exc)
+            self.record_poll_exception("tracked", "-", exc)
             tracked = ()
         for ticket in tracked:
             try:
                 self.process(ticket)
             except Exception as exc:
-                self._record_poll_error(ticket, exc)
+                self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
         self.reconcile_jobs()
+        self._record_factory_reads(source)
         if end is not None:
             end()
+
+    def _record_factory_reads(self, source: PollSource) -> None:
+        """Store each project's factory.md as this cycle read it (#152)."""
+        reads = getattr(source, "factory_reads", None)
+        if reads is None:
+            return
+        try:
+            cycle = reads()
+            with self._connect() as connection:
+                project_rules.record_reads(connection, cycle, self.queue.now())
+        except Exception as exc:
+            self.record_poll_error("factory", "-", type(exc).__name__)
 
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -471,7 +559,7 @@ class Dispatcher:
         try:
             report = self.feeder.feed_once()
         except Exception as exc:
-            self.record_poll_error("feeder", "-", exc)
+            self.record_poll_exception("feeder", "-", exc)
             return
         fresh_reader = getattr(source, "fresh_ticket", None)
         if fresh_reader is None:
@@ -480,23 +568,52 @@ class Dispatcher:
             try:
                 ticket = fresh_reader(ref)
             except Exception as exc:
-                self.record_poll_error(ref.repo, ref.ticket_id, exc)
+                self.record_poll_exception(ref.repo, ref.ticket_id, exc)
                 continue
             if ticket is not None:
                 self._discover((ticket,), tracker=ref.tracker)
 
     def record_poll_error(
-        self, repo: str, ticket_id: str, error: str | BaseException, *, prefix: str = ""
+        self,
+        repo: str,
+        ticket_id: str,
+        error: str | BaseException,
+        detail: str | None = None,
+        *,
+        prefix: str = "",
     ) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO poll_errors (
-                    repo, ticket_id, error, recorded_at
-                ) VALUES (?, ?, ?, ?)
+                    repo, ticket_id, error, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (repo.lower(), ticket_id, prefix + poll_error_text(error), self.queue.now()),
+                (
+                    repo.lower(),
+                    ticket_id,
+                    prefix + poll_error_text(error),
+                    detail,
+                    self.queue.now(),
+                ),
             )
+
+    def record_poll_exception(
+        self,
+        repo: str,
+        ticket_id: str,
+        exc: BaseException,
+        *,
+        prefix: str = "",
+    ) -> None:
+        """Record the class in poll_errors.error and the traceback in detail.
+
+        The same traceback goes to stderr, the poller's log.
+        """
+        error = f"{prefix}{type(exc).__name__}"
+        detail = poll_error_detail(exc)
+        print(f"orch poll: {repo} {ticket_id} {error}\n{detail}", file=sys.stderr, flush=True)
+        self.record_poll_error(repo, ticket_id, error, detail)
 
     def record_poll_deferral(self, detail: str) -> None:
         with self._connect() as connection:
@@ -541,7 +658,11 @@ class Dispatcher:
         ticket: TrackedTicket,
         comments: list[Comment],
     ) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
         for comment in comments:
+            # A ready may re-read the ticket uncached (T2); later comments
+            # then see the fresh head.
+            ticket = self._polled.get(key, ticket)
             if self._is_handled(ticket, comment.id):
                 continue
             fields: dict[str, str] | None
@@ -1086,12 +1207,13 @@ class Dispatcher:
         """T7: one Grok wake per stop, across restarts.
 
         refused wakes once per ticket. blocked and capped wake once per
-        ticket and head. unparsed and ship-failed wake once per comment.
+        ticket and head. unparsed, ship-failed and go-not-from-approver wake
+        once per comment.
         stuck goes through the ticket's stuck flag, which wakes once.
         """
         if reason not in GROK_WAKE_REASONS:
             raise ValueError(f"unknown wake reason {reason!r}")
-        if reason in ("unparsed", "ship-failed", "rejected", "stale"):
+        if reason in ("unparsed", "ship-failed", "rejected", "stale", "go-not-from-approver"):
             once_key = source_comment_id
         elif reason in ("blocked", "capped", "done", "awaiting-ok"):
             once_key = head or "-"
@@ -1142,17 +1264,19 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        if not self._trusted(
+        trusted = self._trusted(
             ticket, comment, fields, "grok-bot", role="orchestrator"
-        ):
+        )
+        if not trusted and not self._approver_go(comment, fields):
             return True, "rejected-go-author"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
-        workflow_state = self._workflow_state(ticket.repo, ticket.ticket_id)
-        if workflow_state == "capped" and action is not None:
-            action = "fix"
-            state = "fixing"
-        resumed = workflow_state == "capped" and action is not None
+        if action is not None:
+            resumed = self._resume_after_cap(ticket, comment)
+            if resumed is not None:
+                return resumed
+        if not trusted:
+            return True, "rejected-go-author"
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
@@ -1188,7 +1312,15 @@ class Dispatcher:
                 source_comment_id=comment.id,
                 timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
-                detail=self._job_detail(ticket, action=action, resume=resumed),
+                detail=self._job_detail(
+                    ticket,
+                    action=action,
+                    round_number=(
+                        None
+                        if action == "plan"
+                        else self._review_context(ticket)[1] + 1
+                    ),
+                ),
             ),
             dedupe_key=(
                 f"t1:{_scope(ticket.repo, ticket.ticket_id)}:{action}:"
@@ -1198,18 +1330,122 @@ class Dispatcher:
         self._set_workflow_state(ticket, state)
         return True, f"queued-{action}"
 
-    def _workflow_state(self, repo: str, ticket_id: str) -> str | None:
+    def _resume_after_cap(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
+        """A trusted go on a capped ticket: Max's OK for one more round (#105).
+
+        One transaction raises cap_extra by 1, moves the ticket to fixing
+        and queues the fix, keyed on the go comment so every go Max relays
+        queues exactly one fix. None when the ticket is not capped. With the
+        GitHub App switch on, only an approver's go counts; any other wakes
+        Grok once with go-not-from-approver and changes nothing (#122).
+        """
+        scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT outcome FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+            if prior is not None:
+                connection.commit()
+                self._write_state_label(ticket, "fixing")
+                return True, str(prior["outcome"])
             row = connection.execute(
                 """
-                SELECT workflow_state FROM ticket_state
+                SELECT workflow_state, review_round, cap_extra, generation
+                FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
-                (repo.lower(), ticket_id),
+                (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        if row is None or row["workflow_state"] is None:
-            return None
-        return str(row["workflow_state"])
+            if row is None or row["workflow_state"] != "capped":
+                connection.commit()
+                return None
+            if not self._may_approve_go(comment.author):
+                connection.commit()
+                self._wake_comment_problem(
+                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
+                )
+                return True, "go-not-from-approver"
+            cap_extra = int(row["cap_extra"]) + 1
+            self.queue.enqueue_in_transaction(
+                connection,
+                JobRequest(
+                    repo=ticket.repo,
+                    ticket_id=ticket.ticket_id,
+                    action="fix",
+                    recipient=ticket.factory.builder_harness,
+                    source_comment_id=comment.id,
+                    timeout_seconds=ticket.job_timeout_minutes * 60,
+                    generation=int(row["generation"]),
+                    head=ticket.current_head,
+                    detail=self._job_detail(
+                        ticket,
+                        action="fix",
+                        head=ticket.current_head,
+                        round_number=int(row["review_round"]) + 1,
+                        cap=self._config_cap(ticket) + cap_extra,
+                        resume=True,
+                    ),
+                ),
+                dedupe_key=f"t1:{scope}:fix:{comment.id}",
+            )
+            connection.execute(
+                """
+                UPDATE ticket_state
+                SET cap_extra = ?, workflow_state = 'fixing'
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (cap_extra, ticket.repo.lower(), ticket.ticket_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                VALUES (?, ?, ?, 'queued-fix')
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            )
+            connection.commit()
+        self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
+        self._write_state_label(ticket, "fixing")
+        return True, "queued-fix"
+
+    def _over_cap(self, ticket: TrackedTicket, reported_round: int | None) -> bool:
+        """A verdict round above the effective cap: no extra round covers it."""
+        return reported_round is not None and reported_round > self._effective_cap(ticket)
+
+    def _config_cap(self, ticket: TrackedTicket) -> int:
+        return (
+            ticket.factory.rounds_low
+            if ticket.risk == "low"
+            else ticket.factory.rounds_high
+        )
+
+    def _effective_cap(
+        self,
+        ticket: TrackedTicket,
+        connection: sqlite3.Connection | None = None,
+    ) -> int:
+        """The ticket's review round cap: factory.md's for its risk, plus
+        one per extra round Max approved (ticket_state.cap_extra)."""
+        query = """
+            SELECT cap_extra FROM ticket_state
+            WHERE repo = ? AND ticket_id = ?
+        """
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        if connection is None:
+            with self._connect() as own:
+                row = own.execute(query, key).fetchone()
+        else:
+            row = connection.execute(query, key).fetchone()
+        return self._config_cap(ticket) + (int(row["cap_extra"]) if row else 0)
 
     def _t_plan(
         self,
@@ -1232,10 +1468,7 @@ class Dispatcher:
         ac = fields.get("ac")
         if ac not in ("met", "unmet"):
             return True, "rejected-plan-result"
-        round_field = fields.get("round")
-        reported_round = (
-            int(round_field.split("/", 1)[0]) if round_field is not None else None
-        )
+        reported_round = _round_number(fields.get("round"))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -1290,7 +1523,8 @@ class Dispatcher:
             connection.execute("BEGIN IMMEDIATE")
             state = connection.execute(
                 """
-                SELECT workflow_state, plan_gap_count, plan_check_comment_id
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id,
+                    review_round
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -1321,6 +1555,8 @@ class Dispatcher:
                         detail=self._job_detail(
                             ticket,
                             action="build",
+                            round_number=int(state["review_round"]) + 1,
+                            cap=self._effective_cap(ticket, connection),
                             instruction=_comment_link(comment),
                         ),
                     ),
@@ -1435,13 +1671,30 @@ class Dispatcher:
         expected = f"{builder_harness}-bot"
         if not self._trusted(ticket, comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
-        state, _review_round = self._review_context(ticket)
+        state, review_round = self._review_context(ticket)
         if state in ("planning", "plan-check"):
             return True, "rejected-ready-in-planning"
+        if state == "capped":
+            self._flag_ready_after_cap(ticket, comment, fields["head"])
+            return True, "capped-ready"
         reported_head = fields["head"]
         head = _matching_head(reported_head, ticket.current_head)
         if head is None:
-            return True, "stale-ready-head"
+            try:
+                fresh = self._fresh_ticket(ticket)
+            except Exception:
+                return False, "pr-head-unavailable"
+            if fresh is not None:
+                head = _matching_head(reported_head, fresh.current_head)
+            if head is None:
+                return True, "stale-ready-head"
+            assert fresh is not None
+            ticket = fresh
+            self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+        if self._verdict_after(ticket, comment, head):
+            # #71: that review already ran. A ready posted after the verdict
+            # (a fix that changed nothing) is still reviewed, as round N+1.
+            return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
             return False, "ci-pending"
@@ -1449,12 +1702,13 @@ class Dispatcher:
         recorded_status, count = self._record_ci_result(ticket, head, result.status)
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if recorded_status == "success":
-            self._queue_review(
+            if not self._queue_review(
                 ticket,
                 source_comment_id=comment.id,
                 head=head,
                 generation=generation,
-            )
+            ):
+                return True, "capped-ready"
             self._set_workflow_state(ticket, "review")
             return True, "queued-review"
         if count >= 3:
@@ -1485,6 +1739,7 @@ class Dispatcher:
                     ticket,
                     action="fix",
                     head=head,
+                    round_number=review_round + 1,
                     instruction=result.log or f"CI failed on {head}",
                 ),
             ),
@@ -1495,6 +1750,37 @@ class Dispatcher:
         )
         return True, "queued-ci-fix"
 
+    def _verdict_after(self, ticket: TrackedTicket, ready: Comment, head: str) -> bool:
+        """A trusted reviewer verdict for head, posted after the ready, that
+        is the first for its round (#71).
+
+        A verdict whose round already had one at or before the ready (a late
+        duplicate) answered an earlier ready. One with no round, or a round
+        above the cap, answers none: T3 and T4 act on no such verdict.
+        """
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        cap = self._effective_cap(ticket)
+        before: set[int] = set()
+        after: set[int] = set()
+        for item in ticket.comments:
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            round_number = _round_number(fields.get("round"))
+            if (
+                round_number is not None
+                and round_number <= cap
+                and fields.get("kind") == "verdict"
+                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and _matching_head(fields.get("head") or "", head) is not None
+            ):
+                if _comment_order(item) <= _comment_order(ready):
+                    before.add(round_number)
+                else:
+                    after.add(round_number)
+        return bool(after - before)
+
     def _t3(
         self,
         ticket: TrackedTicket,
@@ -1503,18 +1789,12 @@ class Dispatcher:
     ) -> tuple[bool, str]:
         if not self._trusted_reviewer(ticket, comment, fields):
             return True, "rejected-revise-author"
+        reported_round = _round_number(fields.get("round"))
+        if self._over_cap(ticket, reported_round):
+            return True, "rejected-over-cap"
         verdict_head = fields.get("head")
         if _matching_head(verdict_head or "", ticket.current_head) is None:
             return True, "stale-revise"
-        round_field = fields.get("round")
-        reported_round = (
-            int(round_field.split("/", 1)[0]) if round_field is not None else None
-        )
-        cap = (
-            ticket.factory.rounds_low
-            if ticket.risk == "low"
-            else ticket.factory.rounds_high
-        )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -1552,6 +1832,7 @@ class Dispatcher:
             ).fetchone()
             assert state is not None
             round_number = int(state["review_round"]) + 1
+            cap = self._effective_cap(ticket, connection)
             if (
                 state["workflow_state"] not in ("review", "awaiting-ok")
                 or reported_round != round_number
@@ -1578,6 +1859,8 @@ class Dispatcher:
                             ticket,
                             action="fix",
                             head=ticket.current_head,
+                            round_number=round_number + 1,
+                            cap=cap,
                             instruction=_comment_link(comment),
                         ),
                     ),
@@ -1659,10 +1942,9 @@ class Dispatcher:
             )
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
-        round_field = fields.get("round")
-        reported_round = (
-            int(round_field.split("/", 1)[0]) if round_field is not None else None
-        )
+        reported_round = _round_number(fields.get("round"))
+        if self._over_cap(ticket, reported_round):
+            return True, "rejected-over-cap"
         if _holds(ticket) and self._superseded_by_revise(
             ticket, comment, reported_round
         ):
@@ -1892,7 +2174,7 @@ class Dispatcher:
             changed_files=ticket.changed_files,
             label_events=ticket.label_events,
             comments=ticket.comments,
-            approver_trusted=self._trusted_login(hold.approver),
+            approver_allowed=self._may_approve(hold.approver),
             covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
         )
 
@@ -1907,10 +2189,34 @@ class Dispatcher:
         assert hold is not None
         if (
             comment.author.casefold() == hold.approver.casefold()
-            and self._trusted_login(hold.approver)
+            and self._may_approve(hold.approver)
         ):
             return "hold-ok"
         return "rejected-hold-ok-author"
+
+    def _may_approve(self, login: str) -> bool:
+        """A Max-only approval (#122): a trusted_logins key while the
+        GitHub App switch is off, else a login in approver_logins."""
+        if self.approvals.app_trust:
+            return self.approvals.may_approve(login)
+        return self._trusted_login(login)
+
+    def _approver_go(self, comment: Comment, fields: Mapping[str, str]) -> bool:
+        """With the switch on, an approver's go may lift a cap even when the
+        approver is not trusted for grok-bot; it starts nothing else (#122)."""
+        return (
+            self.approvals.app_trust
+            and fields.get("from") == "grok-bot"
+            and fields.get("role") == "orchestrator"
+            and self.approvals.may_approve(comment.author)
+        )
+
+    def _may_approve_go(self, author: str) -> bool:
+        """A Linear author keeps today's rule: the app changes GitHub
+        identity only."""
+        if author.startswith("linear:") or not self.approvals.app_trust:
+            return True
+        return self.approvals.may_approve(author)
 
     def _trusted_login(self, login: str) -> bool:
         wanted = login.casefold()
@@ -2093,7 +2399,7 @@ class Dispatcher:
                         else None
                     ),
                     round_number=(
-                        self._review_context(ticket)[1] + 1 if action == "review" else None
+                        None if action == "plan" else self._review_context(ticket)[1] + 1
                     ),
                     instruction=_comment_link(comment),
                     resume=True,
@@ -2179,9 +2485,19 @@ class Dispatcher:
         head: str,
         generation: int,
         detail: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Queue the next review round; False, with nothing queued, past the cap."""
         _state, completed_rounds = self._review_context(ticket)
         review_round = completed_rounds + 1
+        if review_round > self._effective_cap(ticket):
+            self.flag_attention(
+                ticket.repo,
+                ticket.ticket_id,
+                "ready-after-cap",
+                f"review round {review_round} for head {head[:12]} is past the cap "
+                f"and no extra round was approved (comment {source_comment_id})",
+            )
+            return False
         self._enqueue_or_flag(
             ticket,
             JobRequest(
@@ -2206,6 +2522,30 @@ class Dispatcher:
                 f"{head}:r{review_round}"
             ),
         )
+        return True
+
+    def _flag_ready_after_cap(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+    ) -> None:
+        self.flag_attention(
+            ticket.repo,
+            ticket.ticket_id,
+            "ready-after-cap",
+            f"ready {_comment_link(comment)} for head {head[:12]} came after the "
+            "review cap with no extra round approved; nothing was queued",
+        )
+
+    def _fresh_ticket(self, ticket: TrackedTicket) -> TrackedTicket | None:
+        """The ticket read again, uncached, or None when the source cannot."""
+        if self._fresh_reader is None:
+            return None
+        tracker = self._tracker(ticket.repo, ticket.ticket_id)
+        if tracker is None:
+            return None
+        return self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
 
     def _enqueue_or_flag(
         self,
@@ -2271,13 +2611,14 @@ class Dispatcher:
         comment: Comment,
         current_head: str,
     ) -> tuple[bool, str]:
-        self._queue_review(
+        if not self._queue_review(
             ticket,
             source_comment_id=comment.id,
             head=current_head,
             generation=self._generation(ticket.repo, ticket.ticket_id),
             detail=f"Approval does not cover current head {current_head}",
-        )
+        ):
+            return True, "capped-patch-review"
         self._set_workflow_state(ticket, "review")
         return True, "queued-patch-review"
 
@@ -3005,13 +3346,21 @@ class Dispatcher:
             self._ensure_stuck_wake(job.request.repo, job.request.ticket_id)
             self.queue.mark_failure_handled(job.id)
             return
-        if job.request.action == "review":
-            # #91 (PR #88): the review may have posted its verdict and then
-            # failed. That verdict is its handoff: done, never retried.
-            verdict = self._posted_verdict(job)
-            if verdict is not None:
-                self._done_from_verdict(job, verdict)
-                return
+        # #91 (PR #88), #105: the job may have posted its handoff (a review's
+        # verdict, a build or fix's ready) and then failed. That handoff
+        # stands: done, never retried.
+        handoff = self._posted_handoff(job)
+        if handoff is _HANDOFF_UNREAD:
+            self._record_job_event_once(
+                job,
+                "done-deferred",
+                "a posted builder ready's head is not yet checked against the "
+                "PR head; T6 waits for T2 to route it or call it stale",
+            )
+            return
+        if handoff is not None:
+            self._done_from_handoff(job, handoff)
+            return
         if job.request.attempt == 1:
             if job.request.action == "review" and self._review_retry_waits(job):
                 return
@@ -3026,7 +3375,7 @@ class Dispatcher:
                 generation=generation,
                 attempt=2,
                 head=job.request.head,
-                detail=job.request.detail,
+                detail=_retry_detail(job),
             )
             self.queue.enqueue_retry(
                 job.id,
@@ -3053,21 +3402,38 @@ class Dispatcher:
         )
         self.queue.mark_failure_handled(job.id)
 
-    def _posted_verdict(self, job: Job) -> Comment | None:
-        """A trusted reviewer verdict for this review job's head and round.
+    def _posted_handoff(self, job: Job) -> Comment | object | None:
+        """The handoff a failed review, build or fix job already posted.
 
-        Read from the ticket this poll fetched (None when it fetched none):
-        `from` and `role` as the reviewer, from a login trusted for it, a
-        head matching the job's (as a prefix, like every head compare), the
-        job's round number, posted no earlier than the job was queued, and
-        not already rejected when it was handled (stale, superseded, ...).
-        A job with no round, or no head, takes no verdict: it is retried.
+        Read from the ticket this poll fetched (None when it fetched none),
+        posted no earlier than the job was queued, from a login trusted for
+        its `from` and `role`, and not already rejected when it was handled
+        (stale, superseded, ...). A ready stale only because its review
+        already answered (#71 stale-ready-verdict) still counts.
+
+        A review's is a reviewer verdict for the job's head (as a prefix,
+        like every head compare) and round; a review job with no round or no
+        head takes none. A build or fix job's is a builder ready from the
+        job's recipient at a new head: one other than the job's own, or any
+        head for a job that has none. That ready counts once T2 routed it,
+        or while it waits on CI at the polled PR head. One T2 left unhandled
+        at another head (its fresh PR read failed) may yet be stale:
+        _HANDOFF_UNREAD when no counted handoff comes first.
         """
         ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
-        round_number = _detail_round_number(job.request.detail)
-        if ticket is None or job.request.head is None or round_number is None:
+        if ticket is None:
             return None
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        action = job.request.action
+        if action == "review":
+            round_number = _detail_round_number(job.request.detail)
+            if job.request.head is None or round_number is None:
+                return None
+            kind, bot, role = "verdict", f"{ticket.factory.reviewer_harness}-bot", "reviewer"
+        elif action in ("build", "fix"):
+            round_number = None
+            kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"
+        else:
+            return None
         for item in sorted(ticket.comments, key=_comment_order):
             if item.created_at < job.created_at:
                 continue
@@ -3075,22 +3441,41 @@ class Dispatcher:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
                 continue
-            if fields.get("kind") != "verdict":
+            if fields.get("kind") != kind:
                 continue
-            if not self._trusted(ticket, item, fields, reviewer, role="reviewer"):
+            if not self._trusted(ticket, item, fields, bot, role=role):
                 continue
-            if _matching_head(fields.get("head") or "", job.request.head) is None:
-                continue
-            if _round_number(fields.get("round")) != round_number:
+            head = fields.get("head") or ""
+            if kind == "verdict":
+                if _matching_head(head, job.request.head) is None:
+                    continue
+                if _round_number(fields.get("round")) != round_number:
+                    continue
+            elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
             outcome = self._handled_outcome(ticket, item.id)
-            if outcome is not None and outcome.startswith(_REJECTED_OUTCOMES):
+            if (
+                outcome is not None
+                and outcome != "stale-ready-verdict"
+                and outcome.startswith(_REJECTED_OUTCOMES)
+            ):
                 continue
+            if (
+                kind == "ready"
+                and outcome is None
+                and _matching_head(head, ticket.current_head) is None
+            ):
+                return _HANDOFF_UNREAD
             return item
         return None
 
-    def _done_from_verdict(self, job: Job, verdict: Comment) -> None:
-        """Mark a failed review job done with the verdict it already posted."""
+    def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
+        """Mark a failed job done with the handoff it already posted."""
+        event, kind = (
+            ("done-from-verdict", "verdict")
+            if job.request.action == "review"
+            else ("done-from-ready", "ready")
+        )
         now = self.queue.now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -3099,18 +3484,19 @@ class Dispatcher:
                 UPDATE jobs SET state = 'done', handoff_comment_id = ?, failure_handled = 1
                 WHERE id = ? AND state = 'failed' AND failure_handled = 0
                 """,
-                (verdict.id, job.id),
+                (handoff.id, job.id),
             ).rowcount
             if changed != 1:
                 connection.commit()
                 return
+            where = "for" if kind == "verdict" else "after"
             detail = (
-                f"verdict comment {verdict.id} for head {(job.request.head or '')[:12]} was "
-                "already posted; marked done with it, no T6 retry"
+                f"{kind} comment {handoff.id} {where} head {(job.request.head or 'none')[:12]} "
+                "was already posted; marked done with it, no T6 retry"
             )
-            self._record_job_event(connection, job, "done-from-verdict", detail, now)
+            self._record_job_event(connection, job, event, detail, now)
             connection.commit()
-        self._log_job_event(job, "done-from-verdict", detail)
+        self._log_job_event(job, event, detail)
 
     def _open_fix_for_head(self, job: Job) -> bool:
         """A fix job on the same ticket for this job's head that is still open.
@@ -3146,8 +3532,17 @@ class Dispatcher:
         ticket still has this head (a fix that changed nothing and readied
         the same head needs it: that ready's review dedupes onto this failed
         job), and is dropped for good once the head was replaced.
+        #71: a head this poll read as replaced is dropped at once, fix or not.
         True when the retry is not queued now.
         """
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if (
+            ticket is not None
+            and ticket.current_head is not None
+            and _matching_head(job.request.head or "", ticket.current_head) is None
+        ):
+            self._skip_review_retry(job, ticket.current_head)
+            return True
         if self._open_fix_for_head(job):
             self._record_job_event_once(
                 job,
@@ -3158,7 +3553,6 @@ class Dispatcher:
             return True
         if not self._job_event_recorded(job, "retry-deferred"):
             return False
-        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
         if ticket is None:
             return True  # the head is not known this poll; look again next poll
         if _matching_head(job.request.head or "", ticket.current_head) is not None:
@@ -3204,7 +3598,7 @@ class Dispatcher:
                 return
             detail = (
                 f"head {(job.request.head or '')[:12]} was replaced by "
-                f"{(current_head or 'none')[:12]} while its fix ran; no T6 retry review"
+                f"{(current_head or 'none')[:12]}; no T6 retry review"
             )
             self._record_job_event(connection, job, "retry-skipped", detail, now)
             connection.commit()
@@ -3465,11 +3859,7 @@ class Dispatcher:
         )
 
     def _trusted_bots(self, comment: Comment) -> frozenset[str]:
-        tracker = "linear" if comment.author.startswith("linear:") else "github"
-        return self.trusted_logins.get(tracker, {}).get(
-            comment.author,
-            frozenset(),
-        )
+        return trusted_bots(self.trusted_logins, comment.author)
 
     def _review_actions(self, ticket: TrackedTicket) -> ReviewActions:
         if isinstance(self.review_actions, Mapping):
@@ -3490,12 +3880,10 @@ class Dispatcher:
         round_number: int | None = None,
         instruction: str | None = None,
         resume: bool = False,
+        cap: int | None = None,
     ) -> str:
-        cap = (
-            ticket.factory.rounds_low
-            if ticket.risk == "low"
-            else ticket.factory.rounds_high
-        )
+        if round_number is not None and cap is None:
+            cap = self._effective_cap(ticket)
         context: dict[str, object] = {
             "linear_url": ticket.ticket_url,
             "gitBranchName": ticket.git_branch_name,
@@ -3676,9 +4064,6 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _record_poll_error(self, ticket: TrackedTicket, error: str | BaseException) -> None:
-        self.record_poll_error(ticket.repo, ticket.ticket_id, error)
-
     def _record_job_error(
         self, job: Job, error: str | BaseException, *, prefix: str = ""
     ) -> None:
@@ -3740,7 +4125,11 @@ class Dispatcher:
                 """
             ).fetchall()
         for row in rows:
-            self._ensure_stuck_wake(str(row["repo"]), str(row["ticket_id"]))
+            repo, ticket_id = str(row["repo"]), str(row["ticket_id"])
+            try:
+                self._ensure_stuck_wake(repo, ticket_id)
+            except Exception as exc:
+                self.record_poll_exception(repo, ticket_id, exc, prefix="stuck-wake:")
 
     def _ensure_stuck_wake(self, repo: str, ticket_id: str) -> None:
         with self._connect() as connection:
@@ -3796,8 +4185,10 @@ class Dispatcher:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"]),
-                timeout_seconds=int(state["timeout_seconds"]),
+                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                timeout_seconds=int(
+                    state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
+                ),
                 generation=generation,
                 detail=reason,
             ),
@@ -3946,6 +4337,7 @@ class Dispatcher:
                     stuck_wake_job_id TEXT,
                     timeout_seconds INTEGER,
                     generation INTEGER NOT NULL DEFAULT 1,
+                    cap_extra INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (repo, ticket_id)
                 )
                 """
@@ -3970,6 +4362,7 @@ class Dispatcher:
                 "paused_head": "TEXT",
                 "paused_generation": "INTEGER",
                 "paused_question_id": "TEXT",
+                "cap_extra": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, declaration in migrations.items():
                 if name not in columns:
@@ -3999,6 +4392,7 @@ class Dispatcher:
                 )
                 """
             )
+            project_rules.ensure_table(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ship_holds (
@@ -4086,10 +4480,16 @@ class Dispatcher:
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
                     error TEXT NOT NULL,
-                    recorded_at REAL NOT NULL
+                    recorded_at REAL NOT NULL,
+                    detail TEXT
                 )
                 """
             )
+            if "detail" not in {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(poll_errors)").fetchall()
+            }:
+                connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_deferrals (
@@ -4102,18 +4502,7 @@ class Dispatcher:
             # #83/#84: tickets that need a person (a ship that failed and
             # will not be retried, a job dedupe dropped). Shown by orch
             # status and the dashboard; cleared when the ticket moves on.
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS needs_attention (
-                    repo TEXT NOT NULL,
-                    ticket_id TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    detail TEXT,
-                    raised_at REAL NOT NULL,
-                    PRIMARY KEY (repo, ticket_id, reason)
-                )
-                """
-            )
+            attention.ensure_table(connection)
             # #75: what the poller did to a job because of its state
             # (released-claimed, dead; #94 requeued-unstarted from orch job run), one row each, for the log and audit.
             connection.execute(
@@ -4362,6 +4751,16 @@ def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
 
 
+def trusted_bots(
+    trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
+    author: str,
+) -> frozenset[str]:
+    """The bots a comment author may speak for: GitHub logins from
+    trusted_logins, `linear:<id>` authors from trusted_linear_users."""
+    tracker = "linear" if author.startswith("linear:") else "github"
+    return frozenset(trusted_logins.get(tracker, {}).get(author, frozenset()))
+
+
 def _normalize_trusted_logins(
     value: Mapping[str, object],
 ) -> dict[str, dict[str, frozenset[str]]]:
@@ -4422,6 +4821,9 @@ def _round_number(value: object) -> int | None:
     return int(head) if head.isdigit() else None
 
 
+# _posted_handoff: a ready whose head T2 could not yet check against the PR.
+_HANDOFF_UNREAD = object()
+
 # Handled outcomes that rejected a verdict: such a comment is no job's handoff.
 _REJECTED_OUTCOMES = (
     "rejected-",
@@ -4432,6 +4834,19 @@ _REJECTED_OUTCOMES = (
     "failed-",
     "ticket-stuck",
 )
+
+
+def _retry_detail(job: Job) -> str | None:
+    """The failed job's detail naming it as `retry_of`, so the retry can
+    take over a worktree the first attempt kept (#105)."""
+    try:
+        context = json.loads(job.request.detail) if job.request.detail else {}
+    except ValueError:
+        return job.request.detail
+    if not isinstance(context, dict):
+        return job.request.detail
+    context["retry_of"] = job.id
+    return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
 
 def _detail_round_number(detail: str | None) -> int | None:

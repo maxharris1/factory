@@ -24,6 +24,7 @@ from lib.dispatcher import (
     TicketRef,
     TrackedTicket,
     scrub_detail,
+    trusted_bots,
 )
 from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
 from lib.github_actions import (
@@ -42,6 +43,7 @@ from lib.orch_yml import (
     Project,
     resolve_job_timeout,
 )
+from lib.project_rules import FactoryRead
 
 LINEAR_ENDPOINT = "https://api.linear.app/graphql"
 TIMEOUT_SECONDS = 60.0
@@ -223,6 +225,10 @@ class LivePollSource:
         self.clock = clock
         self.sleep = sleep
         self.gh_call_timeout_seconds = gh_call_timeout_seconds
+        self._trusted = {
+            "github": config.trusted_logins,
+            "linear": config.trusted_linear_users,
+        }
         self._factory_cache: dict[str, FactoryConfig] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
@@ -1045,6 +1051,23 @@ class LivePollSource:
         self._factory_cache[identity] = factory
         return factory
 
+    def factory_reads(self) -> tuple[FactoryRead, ...]:
+        """Each orch.yml project's factory.md for this cycle (issue #152).
+
+        Through _factory, so it shares the cycle cache and every check the
+        poll applies. A PollSourceError keeps its message as the reason;
+        any other failure keeps only what _safe_reason does. Nothing is
+        recorded as a cycle error: the poll records its own reads.
+        """
+        reads: list[FactoryRead] = []
+        for project in self.config.projects:
+            try:
+                reads.append(FactoryRead(project.repo, self._factory(project), None))
+            except Exception as exc:
+                reason = str(exc) if isinstance(exc, PollSourceError) else _safe_reason(exc)
+                reads.append(FactoryRead(project.repo, None, reason or type(exc).__name__))
+        return tuple(reads)
+
     def factory_context(self, project: Project) -> FactoryContext:
         """factory.md (front block and prose) from the project's factory_ref.
 
@@ -1144,7 +1167,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci={head: self.github.ci_status(project.repo, head)},
-            risk=_risk(comments),
+            risk=_risk(comments, self._trusted),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
             git_branch_name=_optional_string(
@@ -1272,7 +1295,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci=ci,
-            risk=_risk(comments),
+            risk=_risk(comments, self._trusted),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
@@ -1754,14 +1777,18 @@ def _newest_comment_at(issue: Mapping[str, Any]) -> float | None:
     return newest
 
 
-def _risk(comments: Sequence[Comment]) -> str:
+def _risk(
+    comments: Sequence[Comment],
+    trusted: Mapping[str, Mapping[str, frozenset[str]]],
+) -> str:
+    """The last risk= a trusted author wrote, else high (#68)."""
     risk = "high"
     for comment in comments:
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             continue
-        if "risk" in fields:
+        if "risk" in fields and fields.get("from") in trusted_bots(trusted, comment.author):
             risk = fields["risk"]
     return risk
 

@@ -6,6 +6,7 @@ dashboard.push is configured. Nothing here runs ssh, scp or rsync: the spawn
 is a fake, and so is the clock.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -315,3 +316,116 @@ def test_poller_service_runs_orch_poll_which_owns_the_dashboard_push() -> None:
     assert 'exec "${HOME}/.local/bin/orch" poll "$@"' in runner
     assert "dashboard push" in service
     assert "dashboard.push" in service
+
+
+# --- #106: a failing push backs off instead of retrying every cycle ----------
+
+
+def test_backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() -> None:
+    from lib.dashboard_push import backoff_seconds
+
+    assert [backoff_seconds(k) for k in range(1, 8)] == [30, 60, 120, 240, 480, 600, 600]
+
+
+def test_backoff_stays_capped_however_long_the_outage() -> None:
+    """Codex PR #112 r1 F2: 2 ** 1024 overflowed a float before min() capped it."""
+    from lib.dashboard_push import backoff_seconds
+
+    assert [backoff_seconds(k) for k in (1024, 1025, 10**6)] == [600, 600, 600]
+
+
+def failing_pusher():
+    outcomes: list[bool] = []
+    spawn = Spawn()
+    push, spawn, clock, lines = pusher(spawn=spawn)
+    push.record = outcomes.append
+    return push, spawn, clock, lines, outcomes
+
+
+def test_a_failed_push_skips_cycles_until_its_backoff_ends() -> None:
+    push, spawn, clock, lines, outcomes = failing_pusher()
+    started: list[float] = []
+    for _ in range(50):  # a 10 s poll cycle; the device stays down
+        before = len(spawn.calls)
+        push()
+        if len(spawn.calls) > before:
+            started.append(clock.now - 1000)
+            spawn.children[-1].returncode = 255
+        clock.now += 10
+    # Each failure pauses pushes from the failed push's start: 30, 60, 120, 240 s.
+    assert started == [0, 30, 90, 210, 450]
+    assert outcomes == [False] * 5
+    assert lines == [
+        f"dashboard push: failed (exit 255), {k} in a row; pushes paused for {pause}s"
+        for k, pause in enumerate((30, 60, 120, 240, 480), start=1)
+    ]
+
+
+def test_a_success_clears_the_backoff() -> None:
+    push, spawn, clock, lines, outcomes = failing_pusher()
+    push()
+    spawn.children[-1].returncode = 1
+    clock.now += 30
+    push()  # settles the failure; the backoff (30 s from the start) is over
+    assert len(spawn.calls) == 2
+    spawn.children[-1].returncode = 0
+    clock.now += 10
+    push()  # the success clears it: no pause, a push every cycle again
+    assert len(spawn.calls) == 3
+    spawn.children[-1].returncode = 0
+    clock.now += 10
+    push()
+    assert len(spawn.calls) == 4
+    assert outcomes == [False, True, True]
+    assert len(lines) == 1
+
+
+def test_orch_polls_pusher_records_each_push_outcome_in_health(tmp_path: Path, monkeypatch) -> None:
+    from lib import health
+
+    seen = _run_poll(
+        tmp_path,
+        monkeypatch,
+        POLL_ORCH
+        + """\
+dashboard:
+  push:
+    transport: ssh
+    host: pc-wsl-cursor-bot
+    method: scp
+    every_minutes: 2
+""",
+    )
+    push = seen["after_poll"]
+    db = tmp_path / "orch.db"
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "devices:\n  - name: box\n    local: true\n    slot_max: 1\n"
+        "    harnesses: {claude: claude-bot}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "ROOT", tmp_path)
+    child = Child()
+    push.spawn = lambda argv, **kwargs: child
+    push()
+    child.returncode = 255
+    push.clock = lambda: 10.0**9
+    push()
+
+    rows = health.read_heartbeats(db)
+    assert [(r.component, r.device, r.pid, r.last_seen, r.interval_seconds) for r in rows] == [
+        ("dashboard-push", "box", os.getpid(), None, 120.0)
+    ]
+
+
+def test_a_week_offline_keeps_pausing_ten_minutes_and_recording_each_failure() -> None:
+    push, spawn, clock, lines, outcomes = failing_pusher()
+    for _ in range(1100):
+        push()
+        spawn.children[-1].returncode = 255
+        clock.now += 600
+    clock.now -= 600 - 30
+    push()  # settles failure 1100; 30 s into its 600 s pause
+    assert len(spawn.calls) == 1100
+    assert outcomes == [False] * 1100
+    assert lines[-1].endswith("1100 in a row; pushes paused for 600s")

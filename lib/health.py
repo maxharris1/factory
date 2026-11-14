@@ -9,6 +9,12 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
 * `linear-listener`: `orch linear-webhook serve`;
 * `dashboard`: the dashboard writer, once per `orch dashboard push`
   snapshot (its interval is the push interval);
+* `dashboard-push` (#106): whether the poller's dashboard pushes reach the
+  dashboard host, written by `orch poll` from each push child's exit
+  status (`push_result`). A failed push leaves it stale ("push failing"),
+  and failures for DOWN_BEATS push intervals make it down. It is listed
+  once a push has finished, and is not in the expected registry: with no
+  push at all, `dashboard` is already down;
 * `device-probe`: one row per enabled remote device in machines.yml, from
   an SSH round trip the poller makes every PROBE_SECONDS (60); only a
   device that answered counts as seen;
@@ -105,8 +111,11 @@ WAITER = "waiter"
 LISTENER = "linear-listener"
 TUNNEL = "tunnel"
 DASHBOARD = "dashboard"
+DASHBOARD_PUSH = "dashboard-push"
 DEVICE_PROBE = "device-probe"
-COMPONENTS = (POLLER, WAITER, LISTENER, TUNNEL, DASHBOARD, DEVICE_PROBE)
+COMPONENTS = (POLLER, WAITER, LISTENER, TUNNEL, DASHBOARD, DASHBOARD_PUSH, DEVICE_PROBE)
+# Checks of a target, not liveness of a process: the newest check decides.
+CHECKS = (DEVICE_PROBE, TUNNEL, DASHBOARD_PUSH)
 
 UP = "up"
 STALE = "stale"
@@ -499,12 +508,16 @@ def beat_once(
     interval: float = BEAT_SECONDS,
     machines: Path | None = None,
     log: Log = _stderr,
+    ok: bool = True,
 ) -> bool:
     """One heartbeat from a short-lived writer (the dashboard push), on the
-    local device. Never raises: a failure is logged and returns False."""
+    local device; with ok=False, a failed check instead. Never raises: a
+    failure is logged and returns False."""
     try:
         config = load_machines(machines)
-        HealthStore(db, devices=known_devices(config)).beat(
+        store = HealthStore(db, devices=known_devices(config))
+        record = store.beat if ok else store.checked
+        record(
             component,
             local_device(config),
             pid=os.getpid(),
@@ -515,6 +528,11 @@ def beat_once(
     except Exception as exc:
         log(f"health: {component} heartbeat failed: {type(exc).__name__}")
         return False
+
+
+def push_result(db: Path, ok: bool, *, interval: float, log: Log = _stderr) -> bool:
+    """`orch poll`'s record of one finished dashboard push (#106)."""
+    return beat_once(db, DASHBOARD_PUSH, interval=interval, log=log, ok=ok)
 
 
 # --- the device probe -------------------------------------------------------------------
@@ -873,12 +891,16 @@ def classify(row: Heartbeat, now: float) -> tuple[str, str]:
         state = STALE
     else:
         return UP, ""
+    if failed and row.component == DASHBOARD_PUSH:
+        return state, f"push failing, last pushed {age_text(age)} ago"
     if failed:
         return state, f"unreachable, last reached {age_text(age)} ago"
     return state, f"no heartbeat for {age_text(age)}"
 
 
 def _never(component: str) -> str:
+    if component == DASHBOARD_PUSH:
+        return "never pushed"
     return "never reached" if component in (DEVICE_PROBE, TUNNEL) else "never seen"
 
 
@@ -1009,14 +1031,15 @@ def _better(a: Component, b: Component) -> bool:
 
 
 def _latest_checks(rows: Sequence[Heartbeat]) -> list[Heartbeat]:
-    """A device probe or tunnel check is a fact about its target, not about
-    the process that made it: across processes (a poller or listener that
-    restarted), the newest check decides, with the newest success as its
-    last seen. Every other component keeps one row per process."""
+    """A device probe, tunnel check or dashboard push is a fact about its
+    target, not about the process that made it: across processes (a poller
+    or listener that restarted), the newest check decides, with the newest
+    success as its last seen. Every other component keeps one row per
+    process."""
     merged: dict[tuple[str, str, str], Heartbeat] = {}
     others = []
     for row in rows:
-        if row.component not in (DEVICE_PROBE, TUNNEL):
+        if row.component not in CHECKS:
             others.append(row)
             continue
         key = (row.component, row.device, row.bot)

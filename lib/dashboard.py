@@ -34,6 +34,10 @@ never beaten), each harness with queued jobs but no live waiter, and an
 orch.health.db that cannot be read is a needs-attention item linked to the
 Health tab, and such a queued job carries `no_waiter`. With no
 orch.health.db nothing is flagged.
+
+Projects (#152): `projects` is each orch.yml project's tracker, ship mode
+and round caps as the poller last read its factory.md (lib/project_rules.py).
+An unreadable or not-yet-read factory.md is `unknown` with the reason.
 """
 
 from __future__ import annotations
@@ -54,9 +58,12 @@ import yaml
 from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_page import PAGES, render_pages
 from lib.dashboard_page import duration as _duration
 from lib.feeder import STATES as FEEDER_STATES
+from lib.feeder_gates import ATTENTION_REASONS as FEEDER_ATTENTION_REASONS
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.handoff import STATES as WORKFLOW_STATES
 from lib.job_state import (
@@ -72,7 +79,9 @@ from lib.job_state import (
 from lib.linear_webhook import read_health
 from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
+from lib.project_rules import read_rows as read_project_rules
 from lib.queue import ACTIONS, RECIPIENTS, STATES
+from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
 
@@ -107,7 +116,7 @@ MACHINES_MAX_BYTES = 256 * 1024
 WAIT_RECIPIENTS = ("claude", "codex", "cursor")
 HARNESSES = ("claude", "codex", "cursor")
 TRACKERS = ("github", "linear")
-ATTENTION_REASONS = ("ship-failed", "dedupe-dropped")
+ATTENTION_REASONS = ("ship-failed", "dedupe-dropped", *FEEDER_ATTENTION_REASONS)
 
 HANDOFF_SAVINGS_DEFINITION = (
     "scripted = jobs for claude, codex or cursor that `orch wait` claimed and "
@@ -500,6 +509,8 @@ def _scrub(value: object) -> object:
         return {key: _scrub(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_scrub(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
 
 
@@ -648,6 +659,8 @@ def collect_snapshot(
             job_states if job_states is not None else JobStateConfig(),
             alive,
         )
+        telemetry = read_telemetry(connection, now)  # issue #93
+        rules = read_project_rules(connection)  # issue #152
         connection.execute("COMMIT")
     except sqlite3.Error as exc:
         raise DashboardError(f"cannot read database: {exc}") from exc
@@ -673,6 +686,7 @@ def collect_snapshot(
         machines_path, db["held"], unplaced=db["box_running"]
     )
     box_running = db["box_running"] + db["running_on"].get(box_name, 0)
+    attach_telemetry([*db["running"], *db["queued"]], telemetry, now)
     report = component_health.load_report(
         db_path,
         now,
@@ -745,8 +759,47 @@ def collect_snapshot(
         # The backlog feeder at its last poll (issue #85); None when none has run.
         "feeder": db["feeder"],
         "statechart": chart,
+        "telemetry": telemetry["rollup"],
+        "projects": _projects(orch, rules, now),
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+def _projects(
+    orch: OrchConfig | None, rules: dict[str, sqlite3.Row], now: float
+) -> list[dict]:
+    """Each orch.yml project's tracker, ship mode and round caps, in orch.yml
+    order, as the poller last read its factory.md (issue #152). A project
+    whose factory.md was unreadable, or not read yet, is `unknown` with the
+    reason and no values."""
+    if orch is None:
+        return []
+    projects: list[dict] = []
+    for project in orch.projects:
+        row = rules.get(project.repo.lower())
+        if row is None or row["reason"] is not None:
+            projects.append({
+                "repo": project.repo,
+                "status": "unknown",
+                "tracker": "unknown",
+                "ship": "unknown",
+                "approver": None,
+                "rounds": None,
+                "reason": _clean(row["reason"]) if row else "not read by the poller yet",
+                "read_age_seconds": _age(now, row["read_at"]) if row else None,
+            })
+            continue
+        ship, _, approver = str(row["ship"]).partition(":")
+        projects.append({
+            "repo": project.repo,
+            "status": "ok",
+            "tracker": _enum(row["tickets"], TICKETS),
+            "ship": _enum(ship, ("merge", "handoff", "after")),
+            "approver": _clean(approver) if approver else None,
+            "rounds": {"low": int(row["rounds_low"]), "high": int(row["rounds_high"])},
+            "read_age_seconds": _age(now, row["read_at"]),
+        })
+    return projects
 
 
 def _attention(
@@ -1164,6 +1217,7 @@ def _read_db(
                     "issue": _clean(item["issue"], 64),
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
+                    "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
                 }
                 for item in items
             ],
@@ -1483,7 +1537,7 @@ def write_snapshot_pages(out_dir: Path, snapshot: dict) -> tuple[Path, ...]:
     pages in PAGES order.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True) + "\n"}
+    texts = {"status.json": json.dumps(snapshot, indent=2, sort_keys=True, allow_nan=False) + "\n"}
     texts.update(render_pages(snapshot))
     targets = [out_dir / name for name in texts]
     temps: list[str] = []

@@ -93,8 +93,9 @@ TUNNEL_URL = "https://box.example.ts.net/linear-webhook"
 
 def orch(*, listener: bool = False, push: bool = False, public_url: str | None = TUNNEL_URL,
          refused: tuple[str, ...] = ()) -> SimpleNamespace:
-    """What lib/health.py reads of an OrchConfig."""
+    """What lib/health.py, and the snapshot's projects (#152), read of an OrchConfig."""
     return SimpleNamespace(
+        projects=(),
         linear_webhook=SimpleNamespace(public_url=public_url) if listener else None,
         dashboard=SimpleNamespace(push=SimpleNamespace(transport="ssh" if push else "none")),
         refused_harnesses=refused,
@@ -1458,3 +1459,53 @@ def test_the_health_tab_marks_stale_code_without_raising_attention(tmp_path: Pat
     rendered = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "components"])
     assert "0123456789ab stale code" in rendered["text"]["components"]
     assert rendered["text"]["attention-count"] == "0"
+# --- #106: dashboard push failures -------------------------------------------------------
+
+
+def push_row(**overrides) -> health.Heartbeat:
+    return row(component="dashboard-push", bot="", interval_seconds=30.0, **overrides)
+
+
+def pushes(report: health.HealthReport) -> list[health.Component]:
+    return [c for c in report.components if c.component == "dashboard-push"]
+
+
+POLLER_UP = row(component="poller", bot="", pid=1)
+
+
+def test_one_failed_push_makes_dashboard_push_stale_with_how_long() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=NOW - 40, checked_at=NOW - 5)), NOW)
+    (item,) = pushes(report)
+    assert (item.state, item.reason) == ("stale", "push failing, last pushed 40s ago")
+    assert report.down == ()
+
+
+def test_pushes_failing_for_eight_intervals_are_down_and_need_attention() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=NOW - 300, checked_at=NOW - 5)), NOW)
+    (item,) = pushes(report)
+    assert (item.state, item.reason) == ("down", "push failing, last pushed 5m ago")
+    assert [c.label for c in report.down] == ["dashboard-push @ box"]
+    assert "  dashboard-push @ box down (push failing, last pushed 5m ago)" in "\n".join(
+        health.render_lines(report, NOW))
+
+
+def test_a_push_that_never_succeeded_is_down() -> None:
+    report = health.build_report((POLLER_UP, push_row(last_seen=None, checked_at=NOW - 5)), NOW)
+    assert [(c.state, c.reason) for c in pushes(report)] == [("down", "never pushed")]
+
+
+def test_a_success_clears_dashboard_push(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 300).beat("dashboard-push", "box", pid=7, interval=30)
+    store(db, NOW - 10).checked("dashboard-push", "box", pid=7, interval=30)
+    assert [c.state for c in pushes(health.load_report(db, NOW))] == ["down"]
+    store(db, NOW - 1).beat("dashboard-push", "box", pid=7, interval=30)
+    assert [(c.state, c.reason) for c in pushes(health.load_report(db, NOW))] == [("up", "")]
+
+
+def test_a_restarted_pollers_failure_outranks_the_old_pollers_success(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 20).beat("dashboard-push", "box", pid=7, interval=30)  # the old poller
+    store(db, NOW - 5).checked("dashboard-push", "box", pid=8, interval=30)  # after a restart
+    (item,) = pushes(health.load_report(db, NOW))
+    assert (item.state, item.reason) == ("stale", "push failing, last pushed 20s ago")

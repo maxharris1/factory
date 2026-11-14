@@ -15,10 +15,16 @@ out holds one slot on one device. `orch job run` then:
 * on the box (the `local: true` device), runs the command as before and
   records its pid as the worker before the command may start
   (lib/job_run.py holds it at a gate until then);
-* on a remote device, runs the command there over the box's SSH alias for
-  this bot (`ssh -l <bot> -- <alias> <start script>`, lib/remote.py) in
-  `<workdir_root>/jobs/<job-id>`, under the bot's login shell (`bash -lc`)
-  and a fresh worker tag recorded on the slot first. A codex command runs
+* on a remote device, launches the command there detached (#128) over the
+  box's SSH alias for this bot (`ssh -l <bot> -- <alias> <launch script>`,
+  lib/remote.py) in `<workdir_root>/jobs/<job-id>`, under the bot's login
+  shell (`bash -lc`) and a fresh worker tag recorded on the slot first, and
+  follows it with short SSH calls (lib/remote_follow.py) through dropped
+  links. The tag names the launch, so a retried launch never starts a
+  second harness. `run-died` is recorded for a remote run only when its
+  device has an exit status for it, confirms the worker gone without one, or
+  answered nothing certain for the follow's grace window (`ended`); a
+  dropped call is never enough. A codex command runs
   by its bare name, found on the device's login PATH, and each of its
   `--add-dir` directories is given only if the device has it (`test -d`,
   lib/codex_sandbox.py `for_device`); box paths never reach the device's
@@ -64,13 +70,17 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import IO, BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
+from lib.job_run import OUTPUT_GRACE_SECONDS
 from lib.job_state import (
     REQUEUED_EARLY_EXIT,
     RUN_DIED,
@@ -82,8 +92,10 @@ from lib.job_state import (
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import QueueError, SQLiteJobQueue
 from lib.remote import (
+    ENV_FILE,
     GONE,
     RUNNING,
+    ByteTransport,
     CheckoutError,
     RemoteError,
     RemoteTarget,
@@ -92,18 +104,31 @@ from lib.remote import (
     check_worker,
     checkout,
     harness_launched,
+    launch_script,
     new_tag,
     plain_branch,
     preflight,
-    ssh_argv,
+    run_file,
     start_script,
     stop_worker,
 )
+from lib.remote_follow import (
+    FOLLOW_GRACE_SECONDS,
+    LAUNCH_TTL_SECONDS,
+    LOST,
+    REFUSED,
+    STOPPED,
+    Control,
+    FollowEnd,
+    Follower,
+)
+from lib.remote_follow import GONE as WORKER_GONE
 from lib.wait import retry_locked
 from lib.worktrees import WorktreeError, check_remote_url, pid_alive, process_start
 
 STOP_CHECKS = 5
 STOP_PAUSE_SECONDS = 2.0
+KILL_CHECK = 2
 
 Log = Callable[[str], None]
 
@@ -128,6 +153,8 @@ class PlacedRun:
     requeued: bool = False
     spawned: bool = False
     exec_seen: bool = False
+    grace: float = FOLLOW_GRACE_SECONDS
+    follow_end: FollowEnd | None = None
     _worker: list[tuple[int, str | None]] = field(default_factory=list)
 
     @property
@@ -201,24 +228,83 @@ class PlacedRun:
         self.requeued = bool(requeued)
         return self.requeued
 
-    def argv(self, command: Sequence[str], env: Mapping[str, str]) -> list[str]:
-        if self.target is None:
-            return list(command)
+    def follow(
+        self,
+        command: Sequence[str],
+        env: Mapping[str, str],
+        brief: bytes,
+        control: Control,
+        *,
+        report_env: bool = False,
+        output: Callable[[IO[bytes]], None] | None = None,
+    ) -> int:
+        """Launch the command detached on the device and follow it (#128).
+
+        Its output is relayed to stdout (the waiter's run.log). Returns
+        the device's exit status for it; 125 (124 when another run of the job
+        is live there) for a refused launch, which ran nothing; 255 when the
+        worker is gone without a status or the device went quiet for the
+        grace window; for a stop, the status the device recorded.
+
+        With report_env, the start writes the WORKER_ENV_MARK line (#93) to
+        its private `env` file, which the follower relays ahead of the log.
+        `output` (lib/telemetry.py) then takes the relayed output in place
+        of stdout, as job_run.run's `output` does for a local command.
+        """
+        assert self.target is not None
         # Factory, Nov 13: the waiter config is shared by every device, so a
         # codex command runs by its bare name (the device's login PATH finds
         # it) and keeps each --add-dir only where the device has it.
         device = for_device(command)
-        return ssh_argv(
+        start = start_script(
             self.target,
-            start_script(
-                self.target,
-                device.argv,
-                env,
-                guarded_dirs=device.guarded_dirs,
-                insert_at=device.insert_at,
-                cd=device.cd,
-            ),
+            device.argv,
+            env,
+            guarded_dirs=device.guarded_dirs,
+            insert_at=device.insert_at,
+            cd=device.cd,
+            report_env=report_env,
+            env_file=run_file(self.target, ENV_FILE) if report_env else None,
         )
+        launch = launch_script(
+            self.target,
+            start,
+            size=len(brief),
+            not_after=int(time.time()) + LAUNCH_TTL_SECONDS,
+        )
+        assert isinstance(self.transport, ByteTransport)
+        sink: BinaryIO = sys.stdout.buffer
+        reader: threading.Thread | None = None
+        if output is not None:
+            read_end, write_end = os.pipe()
+            sink = os.fdopen(write_end, "wb")
+            reader = threading.Thread(
+                target=output, args=(os.fdopen(read_end, "rb"),), name="orch-output", daemon=True
+            )
+            reader.start()
+        follower = Follower(
+            self.transport,
+            self.target,
+            sink,
+            log=self.log,
+            grace=self.grace,
+        )
+        try:
+            end = follower.run(launch, brief, control)
+        finally:
+            if reader is not None:
+                try:
+                    sink.close()  # the reader sees EOF once it has the rest
+                except OSError:
+                    pass
+                reader.join(OUTPUT_GRACE_SECONDS)
+        self.follow_end = end
+        if end.kind in (LOST, WORKER_GONE):
+            self.log(f"job {self.placement.job_id} on {self.device.name}: {end.detail}")
+            return 255
+        if end.kind == REFUSED:
+            self.log(f"job {self.placement.job_id}: {self.device.name} refused the launch: {end.detail}")
+        return end.code if end.code is not None else 255
 
     def before_start(self) -> None:
         """Record a remote start before ssh is spawned (a crash then still checks)."""
@@ -226,7 +312,11 @@ class PlacedRun:
             target = self.target
             retry_locked(
                 lambda: self.pool.attach_worker(
-                    self.placement.job_id, owner=self.owner, remote=True, tag=target.tag
+                    self.placement.job_id,
+                    owner=self.owner,
+                    remote=True,
+                    tag=target.tag,
+                    runner=self.runner,
                 )
             )
             self.spawned = True
@@ -247,6 +337,7 @@ class PlacedRun:
                 owner=self.owner,
                 pid=pid,
                 start=start,
+                runner=self.runner,
             )
         )
 
@@ -259,6 +350,15 @@ class PlacedRun:
         job_id = self.placement.job_id
         event = RUN_EXITED if code == 0 else RUN_DIED
         detail = f"orch job run's command on {self.device.name}: {exit_reason(code)}"
+        end = self.follow_end
+        if end is not None and end.kind == WORKER_GONE:
+            detail = f"worker gone on {self.device.name} without an exit status"
+        elif end is not None and end.kind == LOST:
+            minutes = f"{self.grace / 60:g} minutes"
+            detail = (
+                f"lost contact with {self.device.name} for {minutes}; "
+                "worker not confirmed gone"
+            )
 
         def write() -> None:
             with self.pool.queue.connect() as connection:
@@ -321,11 +421,15 @@ class PlacedRun:
                     return _held(settle)
             return self._release(code, settle)
         status = check_worker(self.transport, self.target)
+        cancelled = self.follow_end is not None and self.follow_end.kind == STOPPED
         checks = 0
         while status == RUNNING and checks < STOP_CHECKS:
             if checks == 0:
                 self.log(f"job {job_id} worker still runs on {self.device.name}; stopping it")
                 stop_worker(self.transport, self.target)
+            elif cancelled and checks == KILL_CHECK:
+                self.log(f"job {job_id} worker ignored SIGTERM on {self.device.name}; killing it")
+                stop_worker(self.transport, self.target, kill=True)
             self.sleep(STOP_PAUSE_SECONDS)
             status = check_worker(self.transport, self.target)
             checks += 1
@@ -501,7 +605,7 @@ def prepare(
             raise PlacementError(f"device {device.name} maps {owner} to {target.user}, not {bot}")
     runner = os.getpid() if pid is None else pid
     try:
-        retry_locked(
+        placement = retry_locked(
             lambda: pool.attach_runner(
                 job_id,
                 owner=owner,
@@ -513,6 +617,9 @@ def prepare(
         )
     except QueueError as exc:
         raise PlacementError(str(exc)) from exc
+    # #70 F2.1: takeover is decided on the row attach_runner read while it
+    # held the slot, never on the read above: a runner that recorded its
+    # worker and died in between left that worker on this row.
     _earlier_worker_gone(placement, device, transport, alive)
     if placement.worker_pid is not None or placement.remote_started:
         try:
