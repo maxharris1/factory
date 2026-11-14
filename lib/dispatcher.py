@@ -63,6 +63,9 @@ STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 WATCHED_STATES = ("merge-queue", "updating")
 UPDATE_FAILURES_TO_STOP = 2
 UPDATE_READY_GRACE_SECONDS = 600.0
+# #255: how long a ready on a conflicting PR waits for any check run on its
+# head before the dispatcher queues a merge-only base update.
+BASE_UPDATE_GRACE_SECONDS = 120.0
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
@@ -105,6 +108,9 @@ class Comment:
 class CIResult:
     status: str
     log: str | None = None
+    # False when the head has no check run and no commit status at all:
+    # GitHub ran nothing there (#255), as opposed to CI still running.
+    reported: bool = True
 
     def __post_init__(self) -> None:
         if self.status not in ("pending", "success", "failure"):
@@ -2307,6 +2313,12 @@ class Dispatcher:
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
+            if (
+                (result is None or not result.reported)
+                and ticket.mergeable_state == "dirty"
+                and state not in WATCHED_STATES
+            ):
+                return False, self._queue_base_update(ticket, comment, head, review_round)
             return False, "ci-pending"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
@@ -2368,6 +2380,48 @@ class Dispatcher:
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _queue_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+    ) -> str:
+        """#255: GitHub runs no pull_request CI on a conflicting PR, so the
+        ready at head would wait on CI forever. Once the grace has passed
+        with nothing reported on head, queue one merge-only job there; the
+        ready it posts gets CI and review as usual. It charges no round."""
+        if self.queue.now() - comment.created_at < BASE_UPDATE_GRACE_SECONDS:
+            return "ci-pending"
+        request = JobRequest(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            action="fix",
+            recipient=ticket.factory.builder_harness,
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            generation=self._generation(ticket.repo, ticket.ticket_id),
+            head=head,
+            detail=self._job_detail(
+                ticket,
+                action="fix",
+                head=head,
+                round_number=review_round + 1,
+                instruction=(
+                    f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
+                    f"ran no CI on {head}: merge {ticket.factory.base_branch} in."
+                ),
+                kind="merge-only",
+            ),
+        )
+        self._enqueue_or_flag(
+            ticket,
+            comment,
+            request,
+            dedupe_key=f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
+        )
+        return "ci-pending-base-update"
 
     def _settle_update(
         self,
@@ -3121,7 +3175,8 @@ class Dispatcher:
         if ticket.factory.finish_line != "merge":
             return
         if ticket.mergeable_state in ("dirty", "behind"):
-            self._queue_update(ticket, row)
+            if not self._base_update_out(ticket):
+                self._queue_update(ticket, row)
             return
         head = ticket.current_head
         ci = ticket.ci.get(head) if head is not None else None
@@ -3278,6 +3333,24 @@ class Dispatcher:
             self._write_state_label(ticket, "abandoned")
         except RetryableStateError:
             self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
+
+    def _base_update_out(self, ticket: TrackedTicket) -> bool:
+        """A #255 base update for the current head is queued or running, so
+        the merge queue must not queue a second update job for that head."""
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM jobs
+                    WHERE dedupe_key = ? AND state IN ('queued', 'running')
+                    """,
+                    (
+                        f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{ticket.current_head}",
+                    ),
+                ).fetchone()
+                is not None
+            )
 
     def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
         """An update-from-main job for the conflicting queue head (#130)."""
@@ -5817,6 +5890,7 @@ class Dispatcher:
         instruction: str | None = None,
         resume: bool = False,
         cap: int | None = None,
+        kind: str | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -5846,6 +5920,8 @@ class Dispatcher:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if kind is not None:
+            context["kind"] = kind
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
