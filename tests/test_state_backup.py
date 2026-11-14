@@ -32,6 +32,14 @@ def _seeded(tmp_path: Path):
     return dispatcher, queue
 
 
+def _snapshot(path: Path) -> tuple[int, list[str]]:
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return path.stat().st_ino, list(connection.iterdump())
+    finally:
+        connection.close()
+
+
 def _dedupe_keys(path: Path) -> list[str]:
     with sqlite3.connect(path) as connection:
         return [row[0] for row in connection.execute("SELECT dedupe_key FROM jobs")]
@@ -90,29 +98,18 @@ def test_restore_db_restores_a_missing_db(tmp_path: Path, capsys) -> None:
     assert _dedupe_keys(lost) == ["t1:build"]
 
 
-def _contents(path: Path) -> list[str]:
-    with closing(sqlite3.connect(path)) as connection:
-        return list(connection.iterdump())
-
-
 def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
-    gc.disable()
-    try:
-        _dispatcher, queue = _seeded(tmp_path)
-        dest = tmp_path / "share" / "orch.db"
-        backup(queue.path, dest)
-        inode = queue.path.stat().st_ino
-        before = _contents(queue.path)
+    _dispatcher, queue = _seeded(tmp_path)
+    dest = tmp_path / "share" / "orch.db"
+    backup(queue.path, dest)
+    before = _snapshot(queue.path)
 
-        code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
-        gc.collect()
-    finally:
-        gc.enable()
+    code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
+    gc.collect()
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
-    assert queue.path.stat().st_ino == inode
-    assert _contents(queue.path) == before
+    assert _snapshot(queue.path) == before
 
 
 def test_restore_db_rejects_a_corrupt_backup(tmp_path: Path, capsys) -> None:
