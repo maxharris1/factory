@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import time
@@ -38,6 +39,7 @@ PSTACK = {
     "skills/arena/SKILL.md": "arena\n",
     "skills/arena/references/rounds.md": "rounds\n",
     "README.md": "not installed\n",
+    "LICENSE": "pstack license\n",
     "docs/harness/claude-code.md": "claude adapter\n",
     "agents/poteto-agent.md": "agent\n",
 }
@@ -45,12 +47,19 @@ FACTORY = {
     "factory-builder/SKILL.md": "builder\n",
     "harness/codex.md": "not a router\n",
 }
-INSTALLED = {
-    "interrogate/SKILL.md",
-    "arena/SKILL.md",
-    "arena/references/rounds.md",
-    "factory-builder/SKILL.md",
+KIT = {
+    "LICENSE": "kit license\n",
+    "deslop/SKILL.md": "deslop\n",
 }
+INSTALLED = {
+    "interrogate/SKILL.md": PSTACK["skills/interrogate/SKILL.md"],
+    "arena/SKILL.md": PSTACK["skills/arena/SKILL.md"],
+    "arena/references/rounds.md": PSTACK["skills/arena/references/rounds.md"],
+    "factory-builder/SKILL.md": FACTORY["factory-builder/SKILL.md"],
+    "deslop/SKILL.md": KIT["deslop/SKILL.md"],
+}
+SECTIONS = (("files", "skills/pstack", PSTACK), ("factory", "skills/factory", FACTORY),
+            ("kit", "skills/cursor-team-kit", KIT))
 
 
 @pytest.fixture
@@ -62,19 +71,13 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _content(rel: str) -> str:
-    if rel.startswith("factory-builder/"):
-        return FACTORY[rel]
-    return PSTACK[f"skills/{rel}"]
-
-
 @pytest.fixture
 def lock_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "factory"
-    lines = ['version: "1.0.0"', f"commit: {'a' * 40}", 'token: "t"', "files:"]
-    lines += [f"  {rel}: {_sha(text)}" for rel, text in sorted(PSTACK.items())]
-    lines.append("factory:")
-    lines += [f"  {rel}: {_sha(text)}" for rel, text in sorted(FACTORY.items())]
+    lines = ['version: "1.0.0"', f"commit: {'a' * 40}", 'token: "t"']
+    for key, _dir, tree in SECTIONS:
+        lines.append(f"{key}:")
+        lines += [f"  {rel}: {_sha(text)}" for rel, text in sorted(tree.items())]
     (root / "skills").mkdir(parents=True)
     (root / "skills" / "skills.lock").write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(skill_preflight, "ROOT", root)
@@ -82,10 +85,8 @@ def lock_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def deploy(checkout: Path, *, skip: str | None = None, change: str | None = None) -> None:
-    """The deployed factory checkout: every pinned file under skills/pstack and skills/factory."""
-    tree = {f"skills/pstack/{rel}": text for rel, text in PSTACK.items()}
-    tree |= {f"skills/factory/{rel}": text for rel, text in FACTORY.items()}
-    for rel, text in tree.items():
+    """The deployed factory checkout: every file each lock section pins."""
+    for rel, text in checkout_tree().items():
         if rel == skip:
             continue
         path = checkout / rel
@@ -93,19 +94,33 @@ def deploy(checkout: Path, *, skip: str | None = None, change: str | None = None
         path.write_text(text + ("edited\n" if rel == change else ""), encoding="utf-8")
 
 
+def checkout_tree() -> dict[str, str]:
+    return {f"{base}/{rel}": text for _key, base, tree in SECTIONS for rel, text in tree.items()}
+
+
 def checkout_files(checkout: Path) -> dict[str, str]:
-    files = {f"{checkout}/skills/pstack/{rel}": _sha(text) for rel, text in PSTACK.items()}
-    files |= {f"{checkout}/skills/factory/{rel}": _sha(text) for rel, text in FACTORY.items()}
-    return files
+    return {f"{checkout}/{rel}": _sha(text) for rel, text in checkout_tree().items()}
 
 
 def install(home: Path, *, skip: str | None = None, change: str | None = None) -> None:
-    for rel in INSTALLED:
+    for rel, text in INSTALLED.items():
         if rel == skip:
             continue
         path = home / ".claude" / "skills" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_content(rel) + ("edited\n" if rel == change else ""), encoding="utf-8")
+        path.write_text(text + ("edited\n" if rel == change else ""), encoding="utf-8")
+
+
+def placed(skills: Path) -> dict[str, str]:
+    """{path under the skills dir: sha256} for every file there, through symlinks, bar install markers."""
+    found: dict[str, str] = {}
+    for dirpath, _dirs, names in os.walk(skills, followlinks=True):
+        for name in names:
+            path = Path(dirpath) / name
+            rel = path.relative_to(skills).as_posix()
+            if name != ".orch-owned":
+                found[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return found
 
 
 def detail_of(db: Path, job_id: str) -> dict:
@@ -168,11 +183,22 @@ class Device:
 def test_the_pinned_set_is_every_installed_skill_file_and_the_whole_checkout(lock_root: Path) -> None:
     pinned = skill_preflight.pinned_files(lock_root)
     assert pinned.commit == "a" * 40
-    assert set(pinned.installed) == INSTALLED
-    assert pinned.installed["arena/SKILL.md"] == _sha("arena\n")
-    assert set(pinned.checkout) == {f"skills/pstack/{rel}" for rel in PSTACK} | {
-        f"skills/factory/{rel}" for rel in FACTORY
-    }
+    assert pinned.installed == {rel: _sha(text) for rel, text in INSTALLED.items()}
+    assert pinned.checkout == {rel: _sha(text) for rel, text in checkout_tree().items()}
+
+
+def test_the_pinned_set_is_exactly_what_a_real_install_places(tmp_path: Path) -> None:
+    root = tmp_path / "factory"
+    shutil.copytree(REPO / "skills", root / "skills")
+    home = tmp_path / "home"
+    assert install_skills(root, home, "local") == []
+
+    pinned = skill_preflight.pinned_files(root)
+
+    for skills in (".claude/skills", ".agents/skills", ".cursor/skills"):
+        assert placed(home / skills) == pinned.installed
+    assert "deslop/SKILL.md" in pinned.installed
+    assert "skills/cursor-team-kit/deslop/SKILL.md" in pinned.checkout
 
 
 def test_the_pinned_set_covers_the_real_lock() -> None:
@@ -213,11 +239,12 @@ def test_a_real_install_with_a_router_dependency_missing_or_changed_fails(
     assert report.error == f"preflight-{defect}: {root.resolve()}/{rel}"
 
 
+@pytest.mark.parametrize("rel", ["arena/SKILL.md", "deslop/SKILL.md"])
 def test_a_remote_missing_a_referenced_skill_starts_no_harness_and_fails_with_the_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, rel: str
 ) -> None:
     device = Device(tmp_path, monkeypatch, remote=True)
-    install(device.home, skip="arena/SKILL.md")
+    install(device.home, skip=rel)
     deploy(device.checkout)
 
     job_id, started = device.run_one()
@@ -225,9 +252,9 @@ def test_a_remote_missing_a_referenced_skill_starts_no_harness_and_fails_with_th
     assert started is None
     assert device.spawn.calls == []
     assert state(device.db, job_id) == "failed"
-    assert any("preflight-missing: ~/.claude/skills/arena/SKILL.md" in line for line in device.log)
+    assert any(f"preflight-missing: ~/.claude/skills/{rel}" in line for line in device.log)
     entry = detail_of(device.db, job_id)["skill_preflight"]
-    assert entry["error"] == "preflight-missing: ~/.claude/skills/arena/SKILL.md"
+    assert entry["error"] == f"preflight-missing: ~/.claude/skills/{rel}"
     assert entry["device"] == "pc"
     assert len(device.ssh.calls()) == 1
 
@@ -268,7 +295,7 @@ def test_with_everything_present_the_job_detail_lists_paths_and_hashes(
         "root": "~/.claude/skills",
         "checkout": str(device.checkout),
         "commit": "a" * 40,
-        "files": {f"~/.claude/skills/{rel}": _sha(_content(rel)) for rel in sorted(INSTALLED)}
+        "files": {f"~/.claude/skills/{rel}": _sha(text) for rel, text in sorted(INSTALLED.items())}
         | checkout_files(device.checkout),
     }
 
@@ -295,7 +322,9 @@ def test_remote_preflight_is_one_ssh_round_trip_before_the_launch(
     [("missing", "skills/pstack/docs/harness/claude-code.md"),
      ("hash", "skills/pstack/docs/harness/claude-code.md"),
      ("missing", "skills/factory/harness/codex.md"),
-     ("hash", "skills/pstack/agents/poteto-agent.md")],
+     ("hash", "skills/pstack/agents/poteto-agent.md"),
+     ("missing", "skills/cursor-team-kit/deslop/SKILL.md"),
+     ("hash", "skills/cursor-team-kit/LICENSE")],
 )
 def test_a_remote_checkout_missing_or_changing_a_router_dependency_fails_in_one_ssh_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, defect: str, rel: str
@@ -403,7 +432,7 @@ def test_a_symlinked_skill_dir_counts(tmp_path: Path, lock_root: Path) -> None:
     install(source)
     skills = tmp_path / "home" / ".claude" / "skills"
     skills.mkdir(parents=True)
-    for name in ("interrogate", "arena", "factory-builder"):
+    for name in ("interrogate", "arena", "factory-builder", "deslop"):
         (skills / name).symlink_to(source / ".claude" / "skills" / name)
     deploy(lock_root)
     expected = skill_preflight.wanted(".claude/skills", str(lock_root), skill_preflight.pinned_files(lock_root))

@@ -7,11 +7,12 @@ records, at both places the harness reads it from:
 * the bot's skills directory (~/.claude/skills for claude-bot,
   ~/.agents/skills for codex-bot, ~/.cursor/skills for cursor-bot) holds
   the set install-skills places: each pstack file under skills/<name>/ and
-  each factory router (a skills/factory/<name>/ holding a SKILL.md);
+  each factory router and kit skill (a skills/factory/<name>/ or
+  skills/cursor-team-kit/<name>/ holding a SKILL.md);
 * the device's deployed factory checkout holds the whole pinned tree,
-  skills/pstack/ and skills/factory/. The routers send the harness there
-  for pstack's docs/ and agents/ and for skills/factory/harness/, which are
-  never installed. On a remote device the checkout is its factory_root
+  skills/pstack/, skills/factory/ and skills/cursor-team-kit/. The routers
+  send the harness there for pstack's docs/ and agents/ and for
+  skills/factory/harness/, which are never installed. On a remote device the checkout is its factory_root
   (machines.yml); on the box it is the checkout the waiter runs from, whose
   lock it reads (deploy/install.sh points the orch wrapper there).
 
@@ -41,7 +42,7 @@ from pathlib import Path
 from lib.device_monitor import remote_target
 from lib.device_pool import Placement
 from lib.machines_yml import Device
-from lib.pstack_pin import DIR_HARNESS, FACTORY_DIR, PSTACK_DIR, ROOT, load_pin
+from lib.pstack_pin import DIR_HARNESS, FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, load_pin
 from lib.queue import Job, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, SshTransport, ssh_argv
 from lib.wait import OWNING_BOTS, retry_locked
@@ -106,21 +107,20 @@ class Pinned:
 def pinned_files(root: Path = ROOT) -> Pinned:
     """The lock commit, {path under the skills dir: sha256} and {path under the checkout: sha256}."""
     pin = load_pin(root)
-    checkout = {f"{PSTACK_DIR.as_posix()}/{rel}": digest for rel, digest in pin.files}
-    checkout |= {f"{FACTORY_DIR.as_posix()}/{rel}": digest for rel, digest in pin.factory}
+    sections = (
+        (PSTACK_DIR, pin.files),
+        (FACTORY_DIR, pin.factory),
+        (KIT_DIR, pin.kit),
+    )
+    checkout = {f"{base.as_posix()}/{rel}": digest for base, rows in sections for rel, digest in rows}
     files = {
         rel.removeprefix("skills/"): digest
         for rel, digest in pin.files
         if rel.startswith("skills/") and rel.count("/") >= 2
     }
-    routers = {
-        rel.split("/", 1)[0]
-        for rel, _ in pin.factory
-        if rel.count("/") == 1 and rel.endswith("/SKILL.md")
-    }
-    for rel, digest in pin.factory:
-        if rel.split("/", 1)[0] in routers:
-            files[rel] = digest
+    for rows in (pin.factory, pin.kit):
+        skills = {rel.split("/", 1)[0] for rel, _ in rows if rel.count("/") == 1 and rel.endswith("/SKILL.md")}
+        files |= {rel: digest for rel, digest in rows if rel.split("/", 1)[0] in skills}
     for rel in checkout:
         if any(ord(c) < 32 for c in rel):
             raise ValueError(f"skills.lock path has a control character: {rel!r}")
