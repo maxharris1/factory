@@ -50,6 +50,8 @@ _BOTS = {"claude-bot": "Claude Bot", "codex-bot": "Codex Bot", "cursor-bot": "Cu
 _DEFAULT_CAPS = {"low": 1, "high": 3}
 # The most of one free-text value (a CI log) a brief carries.
 TEXT_LIMIT = 20_000
+# The most a plan handoff carries: GitHub caps a comment at 65,536 characters.
+PLAN_HANDOFF_LIMIT = 60_000
 
 _HEAD = re.compile(r"^[0-9a-f]{7,40}$")
 _ROUND = re.compile(r"^([1-9][0-9]*)/([1-9][0-9]*)$")
@@ -145,6 +147,8 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
     source = detail.get("source_issue")
     if not (isinstance(source, str) and SOURCE.fullmatch(source)):
         source = job.request.ticket_id if SOURCE.fullmatch(job.request.ticket_id) else None
+    # #158: a build queued by a plan handoff carries that comment's link as its instruction.
+    plan = detail.get("instruction") if job.request.action == "build" and not detail.get("resume") else None
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
@@ -157,6 +161,7 @@ def _facts(job: Job, detail: dict[str, object], context: FactoryContext | None) 
         "verify": verify if isinstance(verify, str) and (verify == "none" or _SKILL.fullmatch(verify)) else None,
         "reviewer": reviewer if isinstance(reviewer, str) and _HARNESS.fullmatch(reviewer) else None,
         "url": url if isinstance(url, str) and _URL.fullmatch(url) else None,
+        "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
         "skills": [
             item for item in skills
             if isinstance(item, str) and re.fullmatch(r"^\.claude/skills/[a-z0-9-]+/SKILL\.md$", item)
@@ -249,15 +254,21 @@ def _task_section(job: Job, kind: str, facts: dict) -> str:
         body = [
             "This is a plan job. Run as poteto-mode.",
             "1. Read the ticket and its brief (Job data). Start with an architect scaffold.",
-            "2. Write `plan.md` and map every acceptance criterion to the work that meets it.",
-            f"3. Push the plan and post the plan handoff below with `round={facts['plan_round']}/2`: "
+            "2. Map every acceptance criterion to the work that meets it. The plan lives in the "
+            "plan handoff comment, never in a file in the repo.",
+            f"3. Post the plan handoff below with `round={facts['plan_round']}/2`: "
             "`ac=met` when every criterion is mapped, `ac=unmet` when one is not.",
         ]
     elif kind == "implement":
+        plan_line = (
+            f"Read the plan handoff comment at {facts['plan']}: it is the plan."
+            if facts["plan"]
+            else "No plan handoff comment is linked: build from the ticket."
+        )
         body = [
             "Build the ticket. Run as poteto-mode, with the playbook that fits it "
             "(feature; bug-fix, repro first; refactor).",
-            "1. Read the ticket and its brief (Job data), and the plan if the detail links one.",
+            f"1. Read the ticket and its brief (Job data). {plan_line}",
             f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
             "Test first.",
             "3. Before `ready`, self-check: prove-it-works, deslop, no-comments.",
@@ -349,7 +360,10 @@ def _handoff_section(job: Job, bot: str, kind: str, facts: dict) -> str:
             f"<!-- orch:v1 kind=plan from={bot} role=builder ac=<met|unmet> "
             f"round={facts['plan_round']}/2 -->"
         )
-        example = "A link to `plan.md` and the criterion-to-work map."
+        example = (
+            "The plan itself: the criterion-to-work map, in at most "
+            f"{PLAN_HANDOFF_LIMIT:,} characters (GitHub caps a comment at 65,536)."
+        )
     else:
         # #105: round and risk come from the job, never from the builder.
         round_key = f" round={facts['round']}" if facts["round"] else ""

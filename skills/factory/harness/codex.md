@@ -34,7 +34,7 @@ pstack skills use Cursor names, and pstack ships no Codex adapter. This file is 
 | A `gpt-*` slug | `model` on `spawn_agent` only when the schema lists that slug as an override. Otherwise omit `model` and say so. |
 | `claude-<family>-<version>-<effort>[-fast]`, a `grok-*` slug, or any other non-OpenAI slug | Omit `model` so the agent runs on the session model, and say so. |
 | `auto` or `inherit-parent` | Omit `model`. |
-| The `pstack-models.mdc` rule, `~/.cursor/rules/pstack-models.mdc` | No Codex file. A factory job takes model lines from its brief. Until the brief carries them (T10), the job runs on the current Codex setting (Astra) and helpers run on Sol, per Max. |
+| The `pstack-models.mdc` rule, `~/.cursor/rules/pstack-models.mdc` | No Codex file. A factory job takes its model lines from the brief. |
 | A role value `<model> <effort>` | `model` and the reasoning effort that `spawn_agent` lists for that model. |
 
 ## setup-pstack
