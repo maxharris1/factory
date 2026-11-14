@@ -652,7 +652,9 @@ _TASK_EVENTS = frozenset({"task_started", "task_progress", "task_notification"})
 _TASK_CREATED = re.compile(r"\bTask #([\w-]{1,40}) created successfully")
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "done"}
 _SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed"}
-_ABSOLUTE_PATH = re.compile(r"(?<![\w.:/~\\-])~?/[^\s/]+(?:/[^\s/]*)*")
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w.:/~\\-])(?:~[\w.-]*|[A-Za-z]:)?[/\\]+[^\s/\\]+(?:[/\\][^\s/\\]*)*"
+)
 
 
 def _str(value: object) -> str | None:

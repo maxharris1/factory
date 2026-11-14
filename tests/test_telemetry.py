@@ -1293,6 +1293,41 @@ def test_live_run_text_is_scrubbed_capped_and_one_line() -> None:
         assert "\n" not in text and len(text) <= telemetry.TASK_TEXT_LIMIT
 
 
+ABSOLUTE_PATHS = [
+    "/home/bot/private/deployment.txt",
+    "//home/bot/private/deployment.txt",
+    "~/private/deployment.txt",
+    "~bot/private/deployment.txt",
+    r"C:\Users\bot\private\deployment.txt",
+    "C:/Users/bot/private/deployment.txt",
+    r"c:\private",
+    r"\\fileserver\bot\private\deployment.txt",
+    r"\Users\bot\private\deployment.txt",
+]
+
+
+@pytest.mark.parametrize("path", ABSOLUTE_PATHS)
+def test_every_absolute_path_form_is_cut_from_both_harnesses(path: str) -> None:
+    text = f"Inspect {path}"
+    claude = _live(_feed(
+        Summary("claude", Scrubber({})),
+        _use("t1", "TodoWrite", {"todos": [{"content": text, "status": "in_progress", "activeForm": text}]}),
+        _use("a1", "Agent", {"description": text, "subagent_type": "general-purpose"}),
+    ))
+    codex = _live(_feed(Summary("codex", Scrubber({})), {"type": "item.started", "item": {
+        "id": "t", "type": "todo_list", "items": [{"text": text, "completed": False}]}}))
+    for live in (claude, codex):
+        assert [item["text"] for item in live["plan"]] == ["Inspect [path]"]
+        assert live["current_task"] == "Inspect [path]"
+    assert claude["subagents"][0]["description"] == "Inspect [path]"
+
+
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x"])
+def test_relative_slashes_are_not_paths(text: str) -> None:
+    live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
+    assert "[path]" not in live["plan"][0]["text"]
+
+
 def test_a_blind_remote_session_hides_task_text(tmp_path: Path) -> None:
     session, db, _, _ = _session(tmp_path, worker_env=True)
     session.consume(io.BytesIO("".join(line + "\n" for line in fixture_lines("claude_subagents_stream.jsonl")).encode()))
