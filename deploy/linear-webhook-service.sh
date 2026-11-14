@@ -33,6 +33,12 @@
 # the state directory but not pids). ensure, start and status decide from
 # the locks; the pidfiles are for people only. flock(1) is required.
 #
+# Each serve or ssh child also holds a lock of its own
+# (linear-webhook-listener-child.lock, linear-webhook-tunnel-child.lock),
+# taken by its loop just before starting it. A child whose loop was killed
+# keeps holding it, so stop (and restart, which self-heal runs) still finds
+# and ends it, and a new loop starts no second child while it lives.
+#
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
 # LINEAR_WEBHOOK_RETRY_SEC (default 5) doubles up to
@@ -43,7 +49,7 @@
 # `.../linear-webhook-service.sh _listener-loop|_tunnel-loop` (any copy of the
 # script) and whose state directory (its --state argument, else its
 # ORCH_STATE_DIR or HOME) is this one, plus every process holding a loop
-# lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
+# or child lock (a `lock:` line in its /proc/PID/fdinfo for the lock file; merely
 # having the file open does not count). It ends each with its children. If a
 # lock is still held afterwards (a loop in a PID namespace this shell cannot
 # see), stop says so and exits 1.
@@ -58,6 +64,7 @@
 #   ORCH_CONFIG                  orch.yml for serve (default: the checkout's)
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
+# linear-webhook-{listener,tunnel}-child.lock,
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
 # (serializes start/stop/ensure) and linear-webhook-service.log (autostart).
 #
@@ -177,6 +184,18 @@ leave_loop() {
     fi
 }
 
+# Run "$@" holding loop $1's child lock (fd 7) and wait for it. Returns 1,
+# starting nothing, while a child orphaned by an earlier loop still holds it.
+run_locked() {
+    exec 7>>"$(lock_file "$1-child")"
+    if ! flock -n 7; then
+        exec 7>&-
+        return 1
+    fi
+    run_child "${@:2}"
+    exec 7>&-
+}
+
 # Run "$@" without the loop lock and wait for it; its exit status is STATUS.
 run_child() {
     "$@" 8>&- &
@@ -218,8 +237,13 @@ listener_loop() {
         busy=""
         started="$SECONDS"
         say "starting orch linear-webhook serve on 127.0.0.1:${PORT}"
-        run_child "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
-            ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}
+        if ! run_locked listener "$ORCH" linear-webhook serve --bind "127.0.0.1:${PORT}" \
+            ${ORCH_CONFIG:+--orch "$ORCH_CONFIG"}; then
+            say "serve from an earlier loop still holds $(lock_file listener-child); not starting serve"
+            pause "$delay"
+            delay="$(doubled "$delay")"
+            continue
+        fi
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
         say "orch linear-webhook serve exited ${STATUS}; retry in ${delay}s"
@@ -239,9 +263,14 @@ tunnel_loop() {
     while ! stopping; do
         started="$SECONDS"
         say "starting ssh -R 127.0.0.1:${PORT}:127.0.0.1:${PORT} ${TUNNEL_HOST}"
-        run_child ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"
+            -R "127.0.0.1:${PORT}:127.0.0.1:${PORT}" "$TUNNEL_HOST" 2>"$errors"; then
+            say "ssh from an earlier loop still holds $(lock_file tunnel-child); not starting ssh"
+            pause "$delay"
+            delay="$(doubled "$delay")"
+            continue
+        fi
         cat "$errors" >&2 2>/dev/null || true
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
@@ -343,7 +372,7 @@ loop_pids() {
 
 lock_holders() {
     local mode file fd
-    for mode in listener tunnel; do
+    for mode in listener tunnel listener-child tunnel-child; do
         file="$(lock_file "$mode")"
         [[ -e "$file" ]] || continue
         file="$(readlink -f "$file")"
@@ -411,7 +440,7 @@ stop() {
         fi
         say "stopped linear webhook loop(s) ${roots[*]}"
     fi
-    for mode in listener tunnel; do
+    for mode in listener tunnel listener-child tunnel-child; do
         if lock_held "$mode"; then
             say "$(lock_file "$mode") is still held by a process this shell cannot see (another PID namespace?); run stop from the host" >&2
             status=1

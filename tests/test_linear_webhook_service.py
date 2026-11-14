@@ -547,3 +547,63 @@ def test_stop_spares_a_process_that_only_has_a_lock_file_open(home: Path) -> Non
         reader.wait()
     assert result.returncode == 0, result.stdout + result.stderr
     assert "no linear webhook loop is running" in result.stdout
+
+
+def _children(home: Path) -> dict[str, int]:
+    found = {}
+    for pid in _processes_of(home):
+        argv = _argv(pid)
+        if argv[-2:] == ["linear-webhook", "serve"] or argv[2:4] == ["linear-webhook", "serve"]:
+            found["serve"] = pid
+        elif any(arg.endswith("/ssh") for arg in argv[:2]):
+            found["ssh"] = pid
+    return found
+
+
+def _port_owner(port: int, home: Path) -> subprocess.Popen:
+    script = (
+        "import socket, time\n"
+        f"s = socket.socket(); s.bind(('127.0.0.1', {port})); s.listen()\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(300)\n"
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert owner.stdout.readline() == "ready\n"
+    return owner
+
+
+@pytest.mark.parametrize("command", ["restart", "stop"])
+def test_restart_and_stop_end_children_orphaned_by_a_killed_loop(
+    home: Path, tmp_path: Path, command: str
+) -> None:
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
+    orphans = _children(home)
+    for mode in MODES:
+        for loop in _loops(home, mode):
+            os.kill(loop, signal.SIGKILL)
+    _wait_for(lambda: not _loops(home, MODES[0]) and not _loops(home, MODES[1]), what="loops dead")
+    assert all(alive(pid) for pid in orphans.values()), "the children outlive their loops"
+
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: len(_loops(home, MODES[0])) == 1, what="a new listener loop")
+
+    unrelated_home = tmp_path / "unrelated"
+    unrelated_home.mkdir()
+    unrelated = _port_owner(_free_port(), unrelated_home)
+    try:
+        result = _service(home, command)
+        assert result.returncode == 0, result.stdout + result.stderr
+        _wait_for(lambda: not any(alive(pid) for pid in orphans.values()), what="orphans gone")
+        assert unrelated.poll() is None, "an unrelated port owner was killed"
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+    if command == "restart":
+        _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="new serve and ssh")
+        assert not set(_children(home).values()) & set(orphans.values())
+    else:
+        assert _processes_of(home) == []

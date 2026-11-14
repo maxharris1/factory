@@ -91,7 +91,7 @@ commands:
   gc               remove stale job worktrees with no changes
   dashboard        write (and optionally push) the read-only status snapshot
   linear-webhook   serve the Linear webhook listener that marks issues dirty
-  health           component heartbeats: report, beat or forget (issue #92)
+  health           component heartbeats: report or forget (issue #92)
   heal             restart down or stale-code components (issue #107)
   status           read-only snapshot of the queue, devices and paused tickets
 

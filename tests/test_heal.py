@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -367,4 +368,22 @@ def test_orch_heal_is_listed_in_the_cli_help(capsys) -> None:
     cli_main(["--help"])
     text = capsys.readouterr().out
     assert "  heal             restart down or stale-code components" in text
-    assert "  health           component heartbeats: report, beat or forget (issue #92)" in text
+    assert "  health           component heartbeats: report or forget (issue #92)" in text
+
+
+def test_health_help_names_only_subcommands_the_parser_accepts(capsys, tmp_path) -> None:
+    from lib.cli import main as cli_main
+
+    cli_main(["--help"])
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if l.startswith("  health ")]
+    verbs = re.findall(r"\b[a-z]+\b", line.split(":", 1)[1].split("(")[0])
+    verbs = [v for v in verbs if v not in {"or", "report"}]
+    assert verbs
+    for verb in verbs:
+        try:
+            cli_main(["health", verb, "--db", str(tmp_path / "orch.db")])
+        except SystemExit:
+            pass
+        err = capsys.readouterr().err
+        assert f"unrecognized arguments: {verb}" not in err, line
+        assert "invalid choice" not in err, line
