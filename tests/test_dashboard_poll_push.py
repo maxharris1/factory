@@ -321,17 +321,17 @@ def test_poller_service_runs_orch_poll_which_owns_the_dashboard_push() -> None:
 # --- #106: a failing push backs off instead of retrying every cycle ----------
 
 
-def test_backoff_doubles_from_thirty_seconds_and_caps_at_ten_minutes() -> None:
+def test_backoff_doubles_from_thirty_seconds_and_caps_at_one_minute() -> None:
     from lib.dashboard_push import backoff_seconds
 
-    assert [backoff_seconds(k) for k in range(1, 8)] == [30, 60, 120, 240, 480, 600, 600]
+    assert [backoff_seconds(k) for k in range(1, 8)] == [30, 60, 60, 60, 60, 60, 60]
 
 
 def test_backoff_stays_capped_however_long_the_outage() -> None:
     """Codex PR #112 r1 F2: 2 ** 1024 overflowed a float before min() capped it."""
     from lib.dashboard_push import backoff_seconds
 
-    assert [backoff_seconds(k) for k in (1024, 1025, 10**6)] == [600, 600, 600]
+    assert [backoff_seconds(k) for k in (1024, 1025, 10**6)] == [60, 60, 60]
 
 
 def failing_pusher():
@@ -352,13 +352,28 @@ def test_a_failed_push_skips_cycles_until_its_backoff_ends() -> None:
             started.append(clock.now - 1000)
             spawn.children[-1].returncode = 255
         clock.now += 10
-    # Each failure pauses pushes from the failed push's start: 30, 60, 120, 240 s.
-    assert started == [0, 30, 90, 210, 450]
-    assert outcomes == [False] * 5
+    # Each failure pauses pushes from the failed push's start: 30 s, then 60 s.
+    assert started == [0, 30, 90, 150, 210, 270, 330, 390, 450]
+    assert outcomes == [False] * 9
     assert lines == [
         f"dashboard push: failed (exit 255), {k} in a row; pushes paused for {pause}s"
-        for k, pause in enumerate((30, 60, 120, 240, 480), start=1)
+        for k, pause in enumerate((30, 60, 60, 60, 60, 60, 60, 60, 60), start=1)
     ]
+
+
+def test_repeated_failures_never_pause_more_than_a_minute() -> None:
+    push, spawn, clock, lines, outcomes = failing_pusher()
+    started: list[float] = []
+    for _ in range(1000):
+        before = len(spawn.calls)
+        push()
+        if len(spawn.calls) > before:
+            started.append(clock.now)
+            spawn.children[-1].returncode = 255
+        clock.now += 1
+    gaps = [b - a for a, b in zip(started, started[1:])]
+    assert len(gaps) > 10
+    assert max(gaps) == 60
 
 
 def test_a_success_clears_the_backoff() -> None:
@@ -418,14 +433,14 @@ dashboard:
     ]
 
 
-def test_a_week_offline_keeps_pausing_ten_minutes_and_recording_each_failure() -> None:
+def test_a_week_offline_keeps_pausing_a_minute_and_recording_each_failure() -> None:
     push, spawn, clock, lines, outcomes = failing_pusher()
     for _ in range(1100):
         push()
         spawn.children[-1].returncode = 255
-        clock.now += 600
-    clock.now -= 600 - 30
-    push()  # settles failure 1100; 30 s into its 600 s pause
+        clock.now += 60
+    clock.now -= 60 - 30
+    push()  # settles failure 1100; 30 s into its 60 s pause
     assert len(spawn.calls) == 1100
     assert outcomes == [False] * 1100
-    assert lines[-1].endswith("1100 in a row; pushes paused for 600s")
+    assert lines[-1].endswith("1100 in a row; pushes paused for 60s")

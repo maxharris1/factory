@@ -67,8 +67,10 @@ snapshot prints as unrecorded:
   rounds plus the approving one
 - first-round REVISE and first-pass APPROVE rates: each PR's first acted-on
   verdict, in handled_comments order: a REVISE recorded in review_events,
-  or an APPROVE recorded as a ship intent or ship hold. A re-entry after
-  handoff does not change it
+  or an APPROVE recorded as a ship intent or ship hold. They read verdict
+  history only, so a re-entry after handoff or an update-from-main
+  re-review does not change them. A held APPROVE stays unhandled until its
+  hold clears, so it counts as that PR's latest verdict until then
 - PRs capped: capped now, or a capped review_events outcome
 - PRs dirty after approval: tickets with an update-from-main job
 - duplicate handoffs: duplicate-verdict handled comments
@@ -1022,9 +1024,9 @@ def _review_metrics(
     connection: sqlite3.Connection,
     tables: set[str],
 ) -> list[tuple[str, int | float | None]]:
-    names = ("prs-reviewed", "rounds-per-pr", "first-round-revise-rate", "first-pass-approve-rate")
+    rates = _first_verdict_rates(connection, tables)
     if "ticket_state" not in tables:
-        return [(name, None) for name in names]
+        return [("prs-reviewed", None), ("rounds-per-pr", None), *rates]
     has_approval = "approve_comment_id" in _columns(connection, "ticket_state")
     approval = "approve_comment_id IS NOT NULL OR " if has_approval else ""
     marks = ", ".join("?" for _ in APPROVED_STATES)
@@ -1036,12 +1038,12 @@ def _review_metrics(
     reviewed = [(rounds, approved) for rounds, approved in reviewed if rounds or approved]
     count = len(reviewed)
     if count == 0:
-        return [("prs-reviewed", 0), *((name, None) for name in names[1:])]
+        return [("prs-reviewed", 0), ("rounds-per-pr", None), *rates]
     total = sum(rounds + int(approved) for rounds, approved in reviewed)
     return [
         ("prs-reviewed", count),
         ("rounds-per-pr", total / count),
-        *_first_verdict_rates(connection, tables),
+        *rates,
     ]
 
 
@@ -1052,23 +1054,25 @@ def _first_verdict_rates(
     names = ("first-round-revise-rate", "first-pass-approve-rate")
     if not {"handled_comments", "review_events", "ship_intents"} <= tables:
         return [(name, None) for name in names]
-    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE' FROM ship_intents"]
+    approvals = ["SELECT repo, ticket_id, comment_id, 'APPROVE', 0 FROM ship_intents"]
     if "ship_holds" in tables:
         approvals.append(
-            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE' FROM ship_holds"
+            "SELECT repo, ticket_id, approve_comment_id, 'APPROVE', 1 FROM ship_holds"
         )
     marks = ", ".join("?" for _ in REVISE_OUTCOMES)
     first: dict[tuple[str, str], str] = {}
     for repo, ticket_id, verdict in connection.execute(
         f"""
         SELECT v.repo, v.ticket_id, v.verdict FROM (
-            SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict FROM review_events
-            WHERE outcome IN ({marks})
+            SELECT repo, ticket_id, comment_id, 'REVISE' AS verdict, 0 AS held
+            FROM review_events WHERE outcome IN ({marks})
             UNION ALL {" UNION ALL ".join(approvals)}
         ) v
-        JOIN handled_comments h
-          ON h.repo = v.repo AND h.ticket_id = v.ticket_id AND h.comment_id = v.comment_id
-        ORDER BY h.rowid
+        LEFT JOIN handled_comments h
+          ON lower(h.repo) = lower(v.repo) AND h.ticket_id = v.ticket_id
+         AND h.comment_id = v.comment_id
+        WHERE h.rowid IS NOT NULL OR v.held
+        ORDER BY h.rowid IS NULL, h.rowid
         """,
         REVISE_OUTCOMES,
     ):

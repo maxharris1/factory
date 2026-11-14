@@ -30,7 +30,8 @@ Merge-only job: bring `origin/dev` into the PR branch, nothing else.
 4. Run only the tests affected by the files you touched while resolving the merge, plus a short smoke run. Do not run the full suite unless those affected tests are the full suite. With no conflicts to resolve, the smoke run is enough.
 5. Push, post the ready handoff below with the head you pushed, and finish the job.
 Do not poll, watch or wait on GitHub Actions or any other CI from inside this job: the factory's own review and CI gate check CI after `ready`.
-Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
@@ -146,7 +147,8 @@ Merge-only job: bring `origin/dev` into the PR branch, nothing else.
 4. Run only the tests affected by the files you touched while resolving the merge, plus a short smoke run. Do not run the full suite unless those affected tests are the full suite. With no conflicts to resolve, the smoke run is enough.
 5. Push, post the ready handoff below with the head you pushed, and finish the job.
 Do not poll, watch or wait on GitHub Actions or any other CI from inside this job: the factory's own review and CI gate check CI after `ready`.
-Run test suites in the foreground, however long they take: never in the background. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
+Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.
 If the ticket lists a dependency that has not merged, post `questions` before any work.
 
