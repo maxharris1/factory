@@ -95,6 +95,7 @@ query FactoryIssue($id: String!) {
       nodes { url }
       pageInfo { hasNextPage }
     }
+    labels(first: 50) { nodes { name } pageInfo { hasNextPage } }
   }
 }
 """.strip()
@@ -111,7 +112,9 @@ LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
-LINEAR_ISSUE_COMPLEXITY = 672  # +12 for the issue state and state order (#47)
+LINEAR_ISSUE_COMPLEXITY = 729  # +12 for the issue state and state order (#47), +57 for its labels (#195)
+ORCHESTRATOR = "grok-bot"
+RISKY_PATH = re.compile(r"migration|realtime")
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
@@ -1338,19 +1341,20 @@ class LivePollSource:
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
         factory = self._factory(project)
+        hold = (
+            self._hold_inputs(project.repo, pr_number, factory)
+            if pr_number is not None
+            else {}
+        )
         ticket = TrackedTicket(
-            **(
-                self._hold_inputs(project.repo, pr_number, factory)
-                if pr_number is not None
-                else {}
-            ),
+            **hold,
             repo=project.repo,
             ticket_id=identifier,
             factory=factory,
             comments=comments,
             current_head=head,
             ci=ci,
-            risk=_risk(comments, self._trusted),
+            risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number, hold),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
@@ -1368,6 +1372,34 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _linear_risk(
+        self,
+        repo: str,
+        identifier: str,
+        issue: Mapping[str, Any],
+        comments: Sequence[Comment],
+        pr_number: str | None,
+        hold: Mapping[str, Any],
+    ) -> str:
+        """#195: the intake risk, raised to high by a `migrations` label or a
+        migration or realtime change in the linked PR. Labels or files that
+        cannot be read count as high."""
+        if _risk(comments, self._trusted) == "high" or _linear_migrations_label(issue):
+            return "high"
+        if pr_number is None:
+            return "low"
+        if "changed_files" in hold:
+            paths = hold["changed_files"]
+        else:
+            try:
+                paths = self.github.pull_files(repo, pr_number)
+            except Exception as exc:
+                self._record(repo, identifier, exc)
+                paths = None
+        if paths is None or any(RISKY_PATH.search(path.lower()) for path in paths):
+            return "high"
+        return "low"
 
     def _linear_merged(
         self, project: Project, identifier: str, allow_merged: bool
@@ -1868,16 +1900,41 @@ def _risk(
     comments: Sequence[Comment],
     trusted: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> str:
-    """The last risk= a trusted author wrote, else high (#68)."""
-    risk = "high"
+    """#195: the risk= of the first unedited brief or go the trusted
+    orchestrator wrote; later headers cannot move it. None: high (#68)."""
     for comment in comments:
+        if comment.edited_at is not None:
+            continue
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             continue
-        if "risk" in fields and fields.get("from") in trusted_bots(trusted, comment.author):
-            risk = fields["risk"]
-    return risk
+        if (
+            "risk" in fields
+            and fields["kind"] in ("brief", "go")
+            and fields.get("role") == "orchestrator"
+            and fields.get("from") == ORCHESTRATOR
+            and ORCHESTRATOR in trusted_bots(trusted, comment.author)
+        ):
+            return fields["risk"]
+    return "high"
+
+
+def _linear_migrations_label(issue: Mapping[str, Any]) -> bool:
+    """True for a `migrations` label, and when the labels cannot be read."""
+    labels = issue.get("labels")
+    if not isinstance(labels, dict):
+        return True
+    page = labels.get("pageInfo")
+    nodes = labels.get("nodes")
+    if not isinstance(page, dict) or page.get("hasNextPage") is not False:
+        return True
+    if not isinstance(nodes, list):
+        return True
+    names = [node.get("name") if isinstance(node, dict) else None for node in nodes]
+    if not all(isinstance(name, str) for name in names):
+        return True
+    return any(name.strip().lower() == "migrations" for name in names)
 
 
 def _brief(comments: Sequence[Comment]) -> str | None:
