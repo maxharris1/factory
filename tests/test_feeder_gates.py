@@ -780,3 +780,31 @@ def test_readers_accept_the_feeder_schema_before_migration(tmp_path: Path) -> No
     state = SQLiteStatusReader(db).feeder()
     assert state is not None and [item.reason for item in state.items] == [None]
     collect_snapshot(db, tmp_path / "none.log", now=10000)
+
+
+@pytest.mark.parametrize("reused", [True, False])
+def test_a_ticket_selected_this_poll_holds_under_its_pr_number(tmp_path: Path, reused) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, box=3)
+    number = 113 if reused else 501
+    if reused:
+        github.pulls[(HOME, 113)] = {"head": "factory/issue-1", "state": "open"}
+        github.statuses = {ref(113): CLOSED_PULL}
+    github.issues[HOME] = [
+        issue(1, created_at=1000),
+        issue(2, created_at=2000, body=f"Conflicts with PR #{number}"),
+    ]
+    report = feeder.feed_once()
+    assert [item.ticket_id for item in report.fed] == [str(number)]
+    assert report.blocked == 1
+    assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on #1 (conflicts with it)")
+
+
+def test_a_resumed_feed_whose_pr_closed_releases_its_hold_this_poll(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, box=3)
+    github.issues[HOME] = [issue(1, body="Touches: lib/a.py")]
+    github.fail["labels"] = 1
+    assert feeder.feed_once().errors == 1
+    github.pulls[(HOME, 501)]["state"] = "closed"
+    github.statuses = {ref(501): CLOSED_PULL}
+    github.issues[HOME].append(issue(2, created_at=2000, body="Touches: lib/a.py"))
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]

@@ -303,6 +303,12 @@ class Holds:
     ) -> None:
         self.held.append((holder, frozenset({holder, *aliases}), lines, note))
 
+    def alias(self, holder: Ref, name: Ref) -> None:
+        self.held = [
+            (ref, names | {name} if ref == holder else names, lines, note)
+            for ref, names, lines, note in self.held
+        ]
+
     def drop(self, holder: Ref) -> None:
         self.held = [item for item in self.held if item[0] != holder]
 

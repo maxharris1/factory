@@ -472,6 +472,7 @@ class Feeder:
                 )
                 continue
             if ref is None:
+                holds.drop(candidate.ref)
                 room[candidate.harness] += 1
                 self.log(
                     f"feeder: {candidate.issue.repo}#{candidate.issue.key} not fed: "
@@ -829,6 +830,7 @@ class Feeder:
             )
         ticket_id = issue.key if issue.tracker == "linear" else str(number)
         self._record(candidate, pr_number=str(number), ticket_id=ticket_id)
+        holds.alias(candidate.ref, github_ref(repo, number))
         with self.queue.connect() as connection:
             set_ticket_priority(
                 connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug, at=now
