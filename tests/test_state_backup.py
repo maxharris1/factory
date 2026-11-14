@@ -11,7 +11,7 @@ import pytest
 from lib import cli
 from lib.queue import JobRequest
 from lib.state_backup import BackupError, backup, default_backup_path, restore
-from tests.test_dispatcher import setup
+from tests.test_dispatcher import setup, ticket
 
 
 def _seeded(tmp_path: Path):
@@ -144,8 +144,10 @@ def test_a_restored_backup_is_a_working_dispatcher_database(tmp_path: Path) -> N
 
     restored_dispatcher, restored = setup(lost.parent)
 
-    assert [job.request.action for job in restored.outstanding()] == ["build"]
+    assert restored.outstanding() == ()
     assert restored_dispatcher._tracked_refs() == ()
+    restored_dispatcher.process(ticket())
+    assert [job.request.action for job in restored.outstanding()] == ["build"]
 
 
 def test_backup_refuses_a_path_nested_in_the_databases_directory(tmp_path: Path) -> None:

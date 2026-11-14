@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from lib.state_backup import RESTORED, RESTORED_CLAIM
+
 ACTIONS = (
     "plan",
     "build",
@@ -175,6 +177,10 @@ class SQLiteJobQueue:
                 ).rowcount
                 if handled != 1:
                     raise QueueError("retry requires one unhandled failed job")
+                if retire_requeued(connection, job.id, "t6-retry", now=self.now()):
+                    job = _job(
+                        connection.execute("SELECT * FROM jobs WHERE id = ?", (job.id,)).fetchone()
+                    )
             connection.commit()
             return job, inserted
 
@@ -293,7 +299,7 @@ class SQLiteJobQueue:
                     (job_id,),
                 )
             if changed == 1:
-                cancel_if_finished(connection, job_id, self.now())
+                retire_requeued(connection, job_id, "released", now=self.now())
             updated = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?",
                 (job_id,),
@@ -415,6 +421,40 @@ class SQLiteJobQueue:
         self, connection: sqlite3.Connection, job_id: str, reason: str
     ) -> Job:
         return cancel_queued(connection, job_id, reason, self.now())
+
+    def requeue(
+        self, job_id: str, reason: str, *, connection: sqlite3.Connection
+    ) -> bool:
+        """cancelled -> queued, with a job_events row naming the reason;
+        False when the job is no longer cancelled.
+
+        Only for the dispatcher's answered-by cancel (#108), when the answer
+        it relied on was then rejected: the step was never done. The write
+        joins the caller's transaction. A finished ticket's job is cancelled
+        again instead (retire_requeued) and this returns False.
+        """
+        now = self.now()
+        changed = connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'queued', finished_at = NULL, last_activity_at = ?
+            WHERE id = ? AND state = 'cancelled'
+            """,
+            (now, job_id),
+        ).rowcount
+        if changed != 1 or retire_requeued(connection, job_id, reason, now=now) is not None:
+            return False
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            )
+            SELECT id, lower(repo), ticket_id, action, recipient, 'requeued', ?, ?
+            FROM jobs WHERE id = ?
+            """,
+            (reason, now, job_id),
+        )
+        return True
 
     def outstanding(self) -> tuple[Job, ...]:
         with self._connect() as connection:
@@ -679,26 +719,80 @@ def cancel_queued(
     return _job(row)
 
 
-def cancel_if_finished(connection: sqlite3.Connection, job_id: str, now: float) -> bool:
-    """A harness job just put back in queued whose ticket has merged, is
-    done or was abandoned is cancelled instead (#130): whichever path
-    released it, nothing new runs for a finished ticket. Grok wakes are
-    left alone."""
+def retire_requeued(
+    connection: sqlite3.Connection, job_id: str, reason: str, *, now: float
+) -> str | None:
+    """Cancel job_id, just put back in the queue in the caller's open
+    transaction, when it is harness work that must not be claimable (#108).
+    Returns the cancel's job_events detail, or None when it stays queued.
+
+    Every write that returns a job to queued (a released claim, an unstarted
+    requeue, a step whose answer was rejected, a T6 retry) calls this before
+    it commits. A merged, done or abandoned ticket's job is cancelled
+    `finished:<reason>`, so a finished ticket never regains claimable work. A step restore() copied
+    running (RESTORED_CLAIM) and not held since is cancelled RESTORED, as
+    restore() holds a queued step: the backup may predate its answer, and
+    the dispatcher's next pass queues it again only if nothing answered it.
+    """
     if not _has_table(connection, "ticket_state"):
-        return False
+        return None
+    harness = "id = ? AND state = 'queued' AND recipient != 'grok'"
     finished = connection.execute(
-        """
-        SELECT 1 FROM jobs JOIN ticket_state AS ticket
-          ON ticket.repo = lower(jobs.repo) AND ticket.ticket_id = jobs.ticket_id
-        WHERE jobs.id = ? AND jobs.state = 'queued' AND jobs.recipient != 'grok'
-          AND ticket.workflow_state IN ('merged', 'done', 'abandoned')
+        f"""
+        SELECT 1 FROM jobs WHERE {harness}
+          AND EXISTS (
+            SELECT 1 FROM ticket_state
+            WHERE ticket_state.repo = lower(jobs.repo)
+              AND ticket_state.ticket_id = jobs.ticket_id
+              AND ticket_state.workflow_state IN ('merged', 'done', 'abandoned')
+          )
         """,
         (job_id,),
     ).fetchone()
-    if finished is None:
+    if finished is not None:
+        detail = f"finished:{reason}"
+    elif connection.execute(
+        f"SELECT 1 FROM jobs WHERE {harness}", (job_id,)
+    ).fetchone() is not None and restored_claim(connection, job_id):
+        detail = RESTORED
+    else:
+        return None
+    connection.execute(
+        "UPDATE jobs SET state = 'cancelled', finished_at = ?, last_activity_at = ? "
+        "WHERE id = ?",
+        (now, now, job_id),
+    )
+    if _has_table(connection, "job_events"):
+        connection.execute(
+            """
+            INSERT INTO job_events (
+                job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+            )
+            SELECT id, lower(repo), ticket_id, action, recipient, 'cancelled', ?, ?
+            FROM jobs WHERE id = ?
+            """,
+            (detail, now, job_id),
+        )
+    return detail
+
+
+def restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
+    """True when restore() marked job_id RESTORED_CLAIM (copied running, or
+    failed with T6 still to come) and no RESTORED hold has cancelled it since."""
+    if not _has_table(connection, "job_events"):
         return False
-    cancel_queued(connection, job_id, "ticket-finished", now)
-    return True
+    return connection.execute(
+        """
+        SELECT 1 FROM job_events AS mark
+        WHERE mark.job_id = ? AND mark.event = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM job_events AS hold
+            WHERE hold.job_id = mark.job_id AND hold.event = 'cancelled'
+              AND hold.detail = ? AND hold.id > mark.id
+          )
+        """,
+        (job_id, RESTORED_CLAIM, RESTORED),
+    ).fetchone() is not None
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

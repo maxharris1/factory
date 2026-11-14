@@ -57,8 +57,8 @@ from lib.pstack_pin import Mode, doctor, install_skills, unstable_checkout
 from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
-from lib.update_check import UpdateClass, classify as classify_update
 from lib.status import main as status_main
+from lib.update_check import UpdateClass, classify as classify_update
 from lib.wait import (
     WaitError,
     open_queue,

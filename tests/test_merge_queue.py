@@ -11,7 +11,7 @@ import pytest
 from lib.device_pool import DevicePool
 from lib.dispatcher import ShipError
 from lib.factory_md import HoldConfig
-from lib.queue import cancel_if_finished
+from lib.queue import retire_requeued
 from tests.merge_queue_support import Board, sha
 from tests.test_remote_start import config_of, machines_file
 
@@ -254,7 +254,7 @@ def test_a_released_job_of_a_finished_ticket_is_cancelled(tmp_path: Path, state:
             "UPDATE ticket_state SET workflow_state = ? WHERE ticket_id = '42'", (state,)
         )
         connection.execute("UPDATE jobs SET state = 'queued' WHERE id = ?", (job.id,))
-        assert cancel_if_finished(connection, job.id, board.now[0])
+        assert retire_requeued(connection, job.id, "released", now=board.now[0])
     assert board.jobs("update-from-main")[0]["state"] == "cancelled"
 
 

@@ -16,23 +16,30 @@ from pathlib import Path
 
 import pytest
 
+from lib.device_monitor import DeviceMonitor
+from lib.device_pool import DevicePool
 from lib.dispatcher import CIResult, Comment, TrackedTicket
+from lib.job_state import REQUEUED_EARLY_EXIT, requeue_unstarted
 from lib.queue import Job, JobRequest
 from lib.state_backup import backup, restore
-from tests.test_job_state import Poller
 from tests.test_dispatcher import (
+    ANSWERS,
     GO,
     PLAN,
+    QUESTIONS,
     READY,
     VERDICT,
     FakeGrokDelivery,
     FakeReviewActions,
+    FakeSource,
     comment,
     factory,
     setup,
     ticket,
     track,
 )
+from tests.test_job_state import Poller
+from tests.test_remote_start import FakeTransport, config_of, machines_file
 
 HEADS = [f"{n:x}" * 40 for n in range(1, 10)]
 APPROVE = (
@@ -96,10 +103,12 @@ class Flow:
             "codex-login",
         )
 
-    def finish(self, recipient: str) -> Job:
+    def finish(self, recipient: str, handoff: str | None = None) -> Job:
         job = self.queue.claim(recipient)
         assert job is not None
-        self.queue.finish(job.id, owner=recipient, handoff_comment_id=f"handoff-{job.id}")
+        self.queue.finish(
+            job.id, owner=recipient, handoff_comment_id=handoff or f"handoff-{job.id}"
+        )
         return job
 
     def state(self) -> sqlite3.Row:
@@ -107,16 +116,31 @@ class Flow:
 
     def hand_off_at(self, rounds: int) -> None:
         """Build, REVISE until the last round, then APPROVE: handed off."""
+        # #18: each job's handoff is the comment that answers it, so the
+        # handoff check on the ticket read verifies it.
         assert self.go() == "queued-build"
-        self.finish("claude")
+        self.finish("claude", f"ready-{HEADS[1][:6]}")
         for number in range(1, rounds + 1):
             assert self.ready(HEADS[number]) == "queued-review"
-            self.finish("codex")
+            verdict = f"revise-{number}/3" if number < rounds else f"approve-{rounds}/3"
+            self.finish("codex", verdict)
             if number < rounds:
                 assert self.revise(f"{number}/3") == "queued-review-fix"
-                self.finish("claude")
+                self.finish("claude", f"ready-{HEADS[number + 1][:6]}")
         assert self.approve(f"{rounds}/3") == "handed-off"
         assert self.state()["workflow_state"] == "handed-off"
+
+
+class _FreshSource(FakeSource):
+    """A poll whose cached read predates a push; the fresh read sees it."""
+
+    def __init__(self, cached: TrackedTicket, *, fresh: TrackedTicket):
+        super().__init__(cached)
+        self.fresh = fresh
+
+    def fresh_ticket(self, ref) -> TrackedTicket:
+        del ref
+        return self.fresh
 
 
 def outcome(queue, comment_id: str) -> str | None:
@@ -326,8 +350,7 @@ def test_handed_off_ticket_moves_to_merged_when_merged_by_hand(tmp_path: Path) -
         flow.dispatcher.poll_once(source)
 
     assert flow.state()["workflow_state"] == "merged"
-    # Flow's handoff ids are not real comments, so #18 flags them.
-    assert attention(flow.queue) == ["unverified-handoff"]
+    assert attention(flow.queue) == []
     reads = [refs for refs in source.refs if TICKET in refs]
     assert len(reads) == 1
     for _ in range(10):
@@ -647,11 +670,14 @@ def test_revise_with_a_later_ready_queues_no_fix(tmp_path: Path) -> None:
         "codex-login",
     )
     flow.add("ready-2", READY.format(head=HEADS[2]), "claude-login")
-    flow.ci = "pending"  # keep the later ready unhandled
+    cached = flow.snapshot()
+    flow.head, flow.ci = HEADS[2], "pending"  # the push the poll's read missed
+    source = _FreshSource(cached, fresh=flow.snapshot())
 
-    flow.dispatcher.process(flow.snapshot())
+    flow.dispatcher.poll_once(source)
 
     assert outcome(flow.queue, "revise-1") == "answered-fix"
+    assert outcome(flow.queue, "ready-2") is None  # waits for CI at HEADS[2]
     assert _harness_jobs(flow.queue)[-1] == ("fix", "cancelled")
     assert (flow.state()["workflow_state"], flow.state()["review_round"]) == ("fixing", 1)
 
@@ -724,6 +750,76 @@ def test_an_answer_of_another_kind_does_not_answer_the_step(
     assert outcome(flow.queue, "go-1") == f"queued-{action}"
     assert outcome(flow.queue, "answer-1").startswith("rejected-")
     assert _harness_jobs(flow.queue) == [(action, "queued")]
+
+
+@pytest.mark.parametrize(
+    ("state", "answer", "action", "rejected"),
+    [
+        ("planning", PLAN.format(round="2", ac="met"), "plan", "stale-plan"),
+        ("building", READY.format(head=HEADS[1]), "build", "stale-ready-head"),
+    ],
+    ids=["plan-of-another-round", "ready-at-another-head"],
+)
+def test_an_answer_rejected_when_handled_leaves_the_step_runnable(
+    tmp_path: Path, state: str, answer: str, action: str, rejected: str
+) -> None:
+    """A fresh database replays a go and a trusted answer of the right kind
+    that its own row then rejects. The step it was taken to answer is
+    queued again, so the ticket is not left with no runnable work."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state=state), "grok-login")
+    flow.add("answer-1", answer, "claude-login")
+
+    for _ in range(2):
+        flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answer-1") == rejected
+    assert _harness_jobs(flow.queue) == [(action, "queued")]
+    job = flow.queue.claim("claude")
+    assert job is not None and job.request.action == action
+
+
+def test_a_rejected_answer_with_a_later_accepted_one_keeps_the_step_cancelled(
+    tmp_path: Path,
+) -> None:
+    """Ready H1 names a head the PR never had; ready H0 is the build's real
+    answer. The build stays cancelled throughout: it is never queued again
+    between the two readies."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("ready-stale", READY.format(head=HEADS[1]), "claude-login")
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "ready-stale") == "stale-ready-head"
+    assert outcome(flow.queue, "ready-1") == "queued-review"
+    assert _harness_jobs(flow.queue) == [("build", "cancelled"), ("review", "queued")]
+    with flow.queue.connect() as connection:
+        events = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT event, detail FROM job_events WHERE action = 'build'"
+            )
+        ]
+    assert events == [("cancelled", "answered-by:ready-stale")]
+
+
+def test_an_answer_missing_from_a_later_read_does_not_requeue_the_step(
+    tmp_path: Path,
+) -> None:
+    """Only an answer handled as rejected requeues: one the next read no
+    longer shows (deleted, say) leaves the answered build cancelled."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+    flow.comments.pop()
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert _harness_jobs(flow.queue) == [("build", "cancelled")]
 
 
 def test_a_restored_job_answered_after_the_backup_is_cancelled(tmp_path: Path) -> None:
@@ -801,41 +897,78 @@ def test_a_finished_ticket_is_never_marked_stuck(tmp_path: Path) -> None:
     assert wakes(queue, "stuck") == 0
 
 
-def _release_claimed(poller) -> None:
-    poller.at(301)
+# --- Round 4: no claimable work after the merge, none for an answered step ---------
 
 
-def _release_by_its_bot(poller) -> None:
-    poller.queue.release(poller.job_id, owner="codex")
+def _released_claim(poller: Poller, job_id: str) -> None:
+    poller.at(5 * 60 + 1)
 
 
-def _start_failed(poller) -> None:
-    poller.pool.attach_runner(poller.job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
-    poller.pool.requeue_unstarted(poller.job_id, owner="codex", runner=11, reason="preflight")
+def _released_unstarted(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: False)
+    poller.at(5 * 60 + 1)
 
 
-def _runner_died_unstarted(poller) -> None:
-    poller.pool.attach_runner(poller.job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+def _early_exit(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    with poller.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        requeue_unstarted(
+            connection,
+            job_id,
+            now=poller.now[0],
+            event=REQUEUED_EARLY_EXIT,
+            reason="its command ended without reaching the harness",
+            slot_guard="harness = ? AND runner_pid IS ?",
+            slot_params=("codex", 11),
+        )
+        connection.commit()
+
+
+def _start_failed(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
+    assert poller.pool.requeue_unstarted(
+        job_id, owner="codex", runner=11, reason="the checkout failed"
+    )
+
+
+def _released_by_its_bot(poller: Poller, job_id: str) -> None:
+    poller.queue.release(job_id, owner="codex")
+
+
+def _runner_died_unstarted(poller: Poller, job_id: str) -> None:
+    poller.pool.attach_runner(job_id, owner="codex", pid=11, start=None, alive=lambda *_: True)
     poller.now[0] += 20
-    poller.queue.heartbeat(poller.job_id, owner="codex")
+    poller.queue.heartbeat(job_id, owner="codex")
     poller.at(90)
 
 
 @pytest.mark.parametrize(
-    "release", [_release_claimed, _release_by_its_bot, _start_failed, _runner_died_unstarted]
+    "recover",
+    [
+        _released_claim,
+        _released_unstarted,
+        _early_exit,
+        _start_failed,
+        _released_by_its_bot,
+        _runner_died_unstarted,
+    ],
 )
-def test_a_job_released_after_the_merge_is_cancelled_not_requeued(tmp_path: Path, release) -> None:
-    """A claimed job the merge left alone never runs: whichever path puts it
-    back in the queue cancels it instead, so no waiter can claim it."""
-    poller = Poller(tmp_path, box=False)
-    poller.job_id = poller.review()
+def test_recovering_a_job_after_the_merge_retires_it(tmp_path: Path, recover) -> None:
+    """The merge leaves a claimed job alone. Every path that would put it
+    back in the queue once its worker is known absent cancels it instead:
+    a finished ticket has no claimable harness work."""
+    poller = Poller(tmp_path)
+    job_id = poller.review()
     poller.claim()
     poller.dispatcher.record_terminal("maxharris1/factory", "72", "merged")
 
-    release(poller)
+    recover(poller, job_id)
 
-    assert poller.row(poller.job_id)["state"] == "cancelled"
+    assert poller.row(job_id)["state"] == "cancelled"
+    assert poller.pool.placement(job_id) is None
     assert poller.pool.claim("codex") is None
+    assert poller.events()[-1] == (job_id, "cancelled")
 
 
 def test_a_job_released_on_an_open_ticket_is_still_requeued(tmp_path: Path) -> None:
@@ -844,3 +977,403 @@ def test_a_job_released_on_an_open_ticket_is_still_requeued(tmp_path: Path) -> N
     poller.claim()
     poller.at(301)
     assert poller.row(job_id)["state"] == "queued"
+
+
+def test_an_answer_rejected_after_the_merge_requeues_nothing(tmp_path: Path) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+    (build,) = jobs(flow.queue, "build")
+    flow.dispatcher.record_terminal(REPO, TICKET, "merged")
+
+    with flow.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        assert not flow.queue.requeue(build["id"], "answer-rejected:ready-1", connection=connection)
+        connection.commit()
+
+    assert _harness_jobs(flow.queue) == [("build", "cancelled")]
+    assert flow.queue.claim("claude") is None
+
+
+class _Waiter:
+    """`orch wait` for every harness, claiming at each label write of a pass."""
+
+    def __init__(self, flow: Flow):
+        self.claimed: list[str] = []
+        write = flow.actions.set_state
+
+        def set_state(ticket: TrackedTicket, state: str) -> None:
+            write(ticket, state)
+            for harness in ("claude", "codex"):
+                job = flow.queue.claim(harness)
+                if job is not None:
+                    self.claimed.append(job.request.action)
+
+        flow.actions.set_state = set_state
+
+
+def _restored(tmp_path: Path) -> Flow:
+    """A cycle backup holds the build queued; the builder then finished it,
+    and the state directory was lost and restored from that backup."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    assert flow.go() == "queued-build"
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.finish("claude")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    return flow
+
+
+def test_a_restored_job_is_unclaimable_until_a_pass_reads_its_thread(
+    tmp_path: Path,
+) -> None:
+    flow = _restored(tmp_path)
+
+    assert flow.queue.claim("claude") is None
+
+
+def test_a_restored_answered_build_is_never_claimable_during_the_pass(
+    tmp_path: Path,
+) -> None:
+    flow = _restored(tmp_path)
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert "build" not in waiter.claimed
+    assert outcome(flow.queue, "ready-1") == "queued-review"
+    assert ("build", "cancelled") in _harness_jobs(flow.queue)
+
+
+def test_a_restored_unanswered_build_is_queued_again_by_the_pass(tmp_path: Path) -> None:
+    flow = _restored(tmp_path)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert _harness_jobs(flow.queue) == [("build", "queued")]
+    rerun = flow.queue.claim("claude")
+    assert rerun is not None and rerun.request.action == "build"
+
+
+def test_a_replayed_plan_gap_is_never_claimable_once_answered(tmp_path: Path) -> None:
+    """A fresh database replays go, a round-1 plan with gaps, the round-2
+    plan and the ready. Plan round 2 and the build are answered in the read,
+    so no label write of the pass exposes either to a waiter."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="planning"), "grok-login")
+    flow.add("plan-1", PLAN.format(round=1, ac="unmet"), "claude-login")
+    flow.add("plan-2", PLAN.format(round=2, ac="met"), "claude-login")
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert [outcome(flow.queue, c) for c in ("plan-1", "plan-2", "ready-1")] == [
+        "queued-plan-gap",
+        "queued-plan-build",
+        "queued-review",
+    ]
+    assert not {"plan", "build"} & set(waiter.claimed)
+    assert [job for job in _harness_jobs(flow.queue) if job[0] != "review"] == [
+        ("plan", "cancelled"),
+        ("plan", "cancelled"),
+        ("build", "cancelled"),
+    ]
+
+
+def test_a_replayed_answers_resume_is_never_claimable_once_answered(
+    tmp_path: Path,
+) -> None:
+    """The builder asked, Grok answered and the builder's ready came after:
+    replaying the answers resumes a build the ready already answered."""
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="building"), "grok-login")
+    flow.add("questions-1", QUESTIONS, "claude-login")
+    flow.add("answers-1", ANSWERS, "grok-login")
+    flow.ci = "pending"
+    flow.add("ready-1", READY.format(head=HEADS[0]), "claude-login")
+    waiter = _Waiter(flow)
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert "build" not in waiter.claimed
+    assert {state for action, state in _harness_jobs(flow.queue)} == {"cancelled"}
+
+
+def _restored_claim(tmp_path: Path, release: str):
+    """A cycle backup holds the build claimed (#108 round 5); the builder
+    then finished it, and the state directory was lost and restored."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.go()
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    claimed = pool.claim("claude")
+    assert claimed is not None
+    build = claimed[0]
+    if release != "claimed":
+        pool.attach_runner(build.id, owner="claude", pid=11, start=None, alive=lambda *_: False)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.now[0] += 400
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config)
+    flow.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(), alive=lambda *_: False
+    )
+    return flow, pool, build
+
+
+def _release(flow: Flow, pool: DevicePool, build: Job, release: str) -> None:
+    if release == "start-failed":
+        assert pool.requeue_unstarted(build.id, owner="claude", runner=11, reason="start failed")
+    else:
+        flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+
+RELEASES = ("claimed", "unstarted", "start-failed")
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_a_restored_claim_answered_after_the_backup_is_never_claimable(
+    tmp_path: Path, release: str
+) -> None:
+    flow, pool, build = _restored_claim(tmp_path, release)
+    flow.head = HEADS[1]
+    flow.add("ready-1", READY.format(head=flow.head), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+
+    _release(flow, pool, build, release)
+
+    assert pool.claim("claude") is None
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert pool.claim("claude") is None
+    assert ("build", "cancelled") in _harness_jobs(flow.queue)
+
+
+@pytest.mark.parametrize("release", RELEASES)
+def test_a_restored_unanswered_claim_is_queued_again_by_the_next_pass(
+    tmp_path: Path, release: str
+) -> None:
+    flow, pool, build = _restored_claim(tmp_path, release)
+
+    _release(flow, pool, build, release)
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    rerun = pool.claim("claude")
+    assert rerun is not None and rerun[0].id == build.id
+
+
+def _restored_dead(tmp_path: Path, action: str):
+    """A cycle backup holds a plan or build whose worker had started (#108
+    round 6); the job then finished, the state directory was lost and
+    restored, and its runner and worker are gone, so T6 takes it."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.post("go-1", GO.format(state="planning" if action == "plan" else "building"), "grok-login")
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[0].request.action == action
+    job = claimed[0]
+    pool.attach_runner(job.id, owner="claude", pid=11, start=None, alive=lambda *_: False)
+    pool.attach_worker(job.id, owner="claude", pid=22, start=None)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.queue.finish(job.id, owner="claude", handoff_comment_id="answer-1")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.now[0] += 400
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config)
+    flow.dispatcher.devices = DeviceMonitor(
+        pool, config, FakeTransport(), alive=lambda *_: False
+    )
+    return flow, pool
+
+
+def _answer(flow: Flow, action: str) -> None:
+    flow.head = HEADS[1]
+    body = PLAN.format(round=1, ac="met") if action == "plan" else READY.format(head=flow.head)
+    flow.add("answer-1", body, "claude-login")
+
+
+def _claims(pool: DevicePool) -> list[tuple[str, int]]:
+    claimed = []
+    while (value := pool.claim("claude")) is not None:
+        claimed.append((value[0].request.action, value[0].request.attempt))
+    return claimed
+
+
+@pytest.mark.parametrize("read", ("full", "deferred"))
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_dead_job_answered_after_the_backup_is_never_retried(
+    tmp_path: Path, action: str, read: str
+) -> None:
+    flow, pool = _restored_dead(tmp_path, action)
+    _answer(flow, action)
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()) if read == "full" else FakeSource())
+
+    assert (action, 2) not in _claims(pool)
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert (action, 2) not in _claims(pool)
+    assert (action, "queued") not in _harness_jobs(flow.queue)
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_dead_unanswered_job_is_retried_after_a_pass(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_dead(tmp_path, action)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert _claims(pool) == []
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert _claims(pool) == [(action, 2)]
+
+
+def _restored_failed(tmp_path: Path, action: str, attempt: int):
+    """A cycle backup holds a plan or build that already failed with T6 still
+    to handle it (#108 round 7): its runner posted the answer and exited
+    without returning the comment ID after the poll's reconcile. The state
+    directory was then lost and restored."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    flow.post("go-1", GO.format(state="planning" if action == "plan" else "building"), "grok-login")
+    config = config_of(machines_file(state))
+    pool = DevicePool(flow.queue, config)
+    job, _ = pool.claim("claude")
+    if attempt == 2:
+        flow.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+        flow.dispatcher.reconcile_jobs()
+        job, _ = pool.claim("claude")
+        assert job.request.attempt == 2
+    flow.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    return flow, DevicePool(flow.queue, config)
+
+
+@pytest.mark.parametrize("attempt", (1, 2))
+@pytest.mark.parametrize("read", ("full", "deferred"))
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_failed_job_answered_before_the_backup_is_settled_by_its_answer(
+    tmp_path: Path, action: str, read: str, attempt: int
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, attempt)
+    _answer(flow, action)
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()) if read == "full" else FakeSource())
+
+    assert (action, 2) not in _claims(pool)
+    assert not flow.state()["stuck"]
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+    assert (action, 2) not in _claims(pool)
+    assert (action, "queued") not in _harness_jobs(flow.queue)
+    assert not flow.state()["stuck"]
+    assert outcome(flow.queue, "answer-1") is not None
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_failed_unanswered_job_is_retried_after_a_read(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, 1)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert _claims(pool) == []
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert _claims(pool) == [(action, 2)]
+
+
+@pytest.mark.parametrize("action", ("plan", "build"))
+def test_a_restored_second_failure_unanswered_goes_stuck_only_after_a_read(
+    tmp_path: Path, action: str
+) -> None:
+    flow, pool = _restored_failed(tmp_path, action, 2)
+
+    flow.dispatcher.poll_once(FakeSource())
+    assert not flow.state()["stuck"]
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert flow.state()["stuck"]
+    assert _claims(pool) == []
+
+
+
+def _thread(flow: Flow, rounds: int) -> list:
+    steps = [flow.go, lambda: flow.finish("claude")]
+    for number in range(1, rounds + 1):
+        steps += [
+            lambda n=number: flow.ready(HEADS[n]),
+            lambda: flow.finish("codex"),
+        ]
+        if number < rounds:
+            steps += [
+                lambda n=number: flow.revise(f"{n}/3"),
+                lambda: flow.finish("claude"),
+            ]
+    steps.append(lambda: flow.approve(f"{rounds}/3"))
+    return steps
+
+
+def _last_head_backups(rounds: int) -> list[tuple[int, int]]:
+    first = 0 if rounds == 1 else 4 * (rounds - 1)
+    return [(rounds, index) for index in range(first, 4 * rounds + 1)]
+
+
+@pytest.mark.parametrize(
+    ("rounds", "saved_after"),
+    [point for rounds in (1, 2, 3) for point in _last_head_backups(rounds)],
+)
+def test_a_restore_before_the_last_round_repeats_no_work(
+    tmp_path: Path, rounds: int, saved_after: int
+) -> None:
+    """A backup taken in the last round, or after the round before it queued
+    its fix, of a thread that later handed off: the restored database holds
+    earlier rounds' review jobs, and the pass still replays the rest as
+    answered, keeps the handoff, and leaves no completed step claimable."""
+    state = tmp_path / "state"
+    flow = Flow(state)
+    saved = tmp_path / "backup" / "orch.db"
+    for index, step in enumerate(_thread(flow, rounds)):
+        step()
+        if index == saved_after:
+            backup(flow.queue.path, saved)
+    assert flow.state()["workflow_state"] == "handed-off"
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    pool = DevicePool(flow.queue, config_of(machines_file(state)))
+
+    flow.dispatcher.poll_once(FakeSource(flow.snapshot()))
+
+    assert flow.state()["workflow_state"] == "handed-off"
+    assert pool.claim("claude") is None
+    assert pool.claim("codex") is None
+    assert [state for _, state in _harness_jobs(flow.queue) if state == "queued"] == []

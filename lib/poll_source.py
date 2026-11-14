@@ -1236,6 +1236,8 @@ class LivePollSource:
         cache_key = ("linear", project.repo.lower(), identifier)
         cached = None if fresh else self._ticket_cache.get(cache_key)
         if cached is not None:
+            if cached.merged and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             return cached
         comments_data = _object(issue.get("comments"), "Linear comments")
         comments_page = _object(
@@ -1258,16 +1260,13 @@ class LivePollSource:
             issue,
             fresh=fresh,
         )
-        pull_facts: dict[str, Any] = {}
+        pull_facts: dict[str, Any] = {"merged": False}
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
-            pull_facts = _pull_facts(pull, fresh=fresh)
-            if pull.get("merged") is True and tracked:
-                # #108: a hand merge of a tracked Linear ticket's PR ends it too.
-                if self.terminal_sink is not None:
-                    self.terminal_sink(project.repo, identifier, "merged", None)
-                if not allow_merged:
-                    raise _TerminalTicket()
+            # #108: a cached discovery read still carries the merge.
+            pull_facts = {**_pull_facts(pull, fresh=fresh), "merged": pull.get("merged") is True}
+            if pull_facts["merged"] and tracked:
+                self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
@@ -1312,6 +1311,16 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _linear_merged(
+        self, project: Project, identifier: str, allow_merged: bool
+    ) -> None:
+        """#108: a tracked Linear ticket whose PR is merged ends, from a new
+        read or from the one discovery cached earlier in the cycle."""
+        if self.terminal_sink is not None:
+            self.terminal_sink(project.repo, identifier, "merged", None)
+        if not allow_merged:
+            raise _TerminalTicket()
 
     def _linked_pr_number(
         self,

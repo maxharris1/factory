@@ -539,7 +539,7 @@ def test_an_ok_at_the_head_merges_with_match_head_commit(tmp_path: Path) -> None
             ).fetchall()
         )
     assert outcomes["approve-1"] == "merged"
-    assert outcomes["ok-1"] == "hold-ok"
+    assert outcomes["ok-1"] == "after-merge"
 
 
 def test_an_ok_posted_before_the_approve_at_the_same_head_also_clears(
@@ -552,6 +552,11 @@ def test_an_ok_posted_before_the_approve_at_the_same_head_also_clears(
     dispatcher.process(snapshot(early_ok, approve(), labels=("factory:hold",)))
 
     assert actions.merges == [(True, HEAD)]
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'ok-0'"
+        ).fetchone()[0]
+    assert outcome == "hold-ok"
 
 
 def test_an_ok_at_a_stale_head_does_not_merge(tmp_path: Path) -> None:
