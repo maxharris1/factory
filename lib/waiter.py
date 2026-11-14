@@ -9,7 +9,7 @@ runs as the owning bot's own user and login, starts the job itself:
   device takes the job: the box, or a remote device such as the PC or the
   Mac. A remote job runs over the bot's own SSH alias through `orch job
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
-* it renders the standard brief for the job (lib/brief.py), with the target
+* it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
   GitHub token variable unset;

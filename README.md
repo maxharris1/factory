@@ -599,7 +599,7 @@ and records itself on the slot, so the job reads `running` within seconds of
 the claim, with no model turn and no message to any bot. The harness posts its
 `orch:v1` handoff and runs `orch job done` as the brief says.
 
-- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+- **Brief.** [`lib/brief/`](lib/brief/) renders one standard brief per
   job kind from the job row: implement (`build`, `plan`), fix, review, and
   merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
   repo, PR or ticket, head, round and cap, risk, the section 8 review rules
