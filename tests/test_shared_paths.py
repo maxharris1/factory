@@ -233,6 +233,59 @@ def test_a_directory_pattern_covers_new_lines_in_a_file_under_it(tmp_path: Path)
     assert run_shared(repo, approved, head, ("docs/decisions/",)).trivial
 
 
+EOF_CASES = [
+    ("ours", "theirs", "ourstheirs", True),
+    ("ours", "theirs", "theirsours", True),
+    ("ours", "theirs", "ours", True),
+    ("ours", "theirs", "theirs", True),
+    ("ours", "theirs", "ours\ntheirs\n", False),
+    ("ours", "theirs", "ours\ntheirs", False),
+    ("ours", "theirs", "theirs\nours\n", False),
+    ("ours", "theirs", "ours\n", False),
+    ("ours", "theirs", "theirs\n", False),
+    ("ours\n", "theirs", "ours\ntheirs", True),
+    ("ours\n", "theirs", "theirsours\n", True),
+    ("ours\n", "theirs", "ours\n", True),
+    ("ours\n", "theirs", "theirs", True),
+    ("ours\n", "theirs", "ours\ntheirs\n", False),
+    ("ours\n", "theirs", "theirs\nours\n", False),
+    ("ours\n", "theirs", "theirs\n", False),
+    ("ours", "theirs\n", "ourstheirs\n", True),
+    ("ours", "theirs\n", "theirs\nours", True),
+    ("ours", "theirs\n", "ours\ntheirs\n", False),
+    ("ours", "theirs\n", "ours\n", False),
+]
+
+
+@pytest.mark.parametrize("before", ["", "line\n"])
+@pytest.mark.parametrize(("ours", "theirs", "resolved", "trivial"), EOF_CASES)
+def test_a_side_without_a_final_newline_is_matched_byte_for_byte(
+    tmp_path: Path, before: str, ours: str, theirs: str, resolved: str, trivial: bool
+) -> None:
+    repo = Repo(tmp_path / "r")
+    (repo.root / "docs").mkdir()
+    repo.write("docs/SPEC.md", before + "base")
+    repo.base = repo.commit("docs without a final newline")
+    approved, _ = repo.branches(
+        [("docs/SPEC.md", "base", ours)], [("docs/SPEC.md", "base", theirs)]
+    )
+    head = repo.merge_main(lambda r: r.write("docs/SPEC.md", before + resolved))
+    result = run_shared(repo, approved, head, SHARED)
+    assert result.trivial is trivial, result.reason
+
+
+@pytest.mark.parametrize(("resolved", "trivial"), [("ours", True), ("ours\n", False)])
+def test_a_one_side_resolution_without_a_final_newline_outside_shared_paths(
+    tmp_path: Path, resolved: str, trivial: bool
+) -> None:
+    repo = Repo(tmp_path / "r")
+    repo.write("app.py", "base")
+    repo.base = repo.commit("no final newline")
+    approved, _ = repo.branches([("app.py", "base", "ours")], [("app.py", "base", "theirs")])
+    head = repo.merge_main(lambda r: r.write("app.py", resolved))
+    assert run(repo, approved, head).trivial is trivial
+
+
 def run_shared(repo: Repo, approved: str, head: str, shared: tuple[str, ...]):
     return classify(repo.gitdir, approved, head, "refs/heads/main", shared)
 

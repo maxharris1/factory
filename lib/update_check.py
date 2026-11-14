@@ -162,7 +162,22 @@ def _conflict_segments(ours: bytes, base: bytes, theirs: bytes) -> list[tuple[by
         )
     if not 0 <= result.returncode < 128:
         raise _NotTrivial("git merge-file failed")
-    return _parse_markers(result.stdout, size)
+    return _restore_final_newlines(_parse_markers(result.stdout, size), ours, theirs)
+
+
+def _restore_final_newlines(
+    segments: list[tuple[bytes, ...]], ours: bytes, theirs: bytes
+) -> list[tuple[bytes, ...]]:
+    """git merge-file ends a hunk side with LF before the next marker even
+    when that side is the end of a file with no final LF; drop that byte so
+    every side is the file's own bytes."""
+    if len(segments) < 2 or segments[-1] != (b"",) or len(segments[-2]) != 2:
+        return segments
+    sides = tuple(
+        side[:-1] if side.endswith(b"\n") and blob and not blob.endswith(b"\n") else side
+        for side, blob in zip(segments[-2], (ours, theirs))
+    )
+    return [*segments[:-2], sides, segments[-1]]
 
 
 def _marker_size(*texts: bytes) -> int:
