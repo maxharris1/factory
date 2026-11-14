@@ -14,6 +14,20 @@ ship: handoff
 finish_line: merge
 skills: []
 shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]
+hold:
+  approver: maxharris1
+  paths:
+    - skills/factory/**
+    - skills/pstack/**
+    - skills/skills.lock
+    - grok/**
+    - orch.yml
+    - lib/hold.py
+    - lib/orch_yml.py
+    - lib/harness_env.py
+    - .github/**
+    - factory.md
+    - .claude/skills/**
 ---
 
 ## Review
