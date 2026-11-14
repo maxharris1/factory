@@ -55,11 +55,12 @@ child_pids() {
 }
 
 # Retire the launchers that lived outside the repo (#107): stop each legacy
-# script's processes (exact argv only, and their direct children), drop the
+# script's processes (exact argv only, then their direct children, so a
+# parent never sees its child die and runs its next step), drop the
 # crontab lines that name it, delete it. Changes nothing when the crontab
 # cannot be read.
 retire_legacy() {
-    local path pid child current="" kept errors status=0
+    local path pid child children current="" kept errors status=0
     local -a pids
     if command -v "$CRONTAB" >/dev/null 2>&1; then
         errors="$(mktemp "${TMPDIR:-/tmp}/install.XXXXXX")"
@@ -80,10 +81,11 @@ retire_legacy() {
         fi
         mapfile -t pids < <(exact_pids "$path")
         for pid in "${pids[@]}"; do
-            for child in $(child_pids "$pid"); do
+            children="$(child_pids "$pid")"
+            kill -TERM "$pid" 2>/dev/null && echo "stopped legacy ${path} (pid ${pid})"
+            for child in $children; do
                 kill -TERM "$child" 2>/dev/null || true
             done
-            kill -TERM "$pid" 2>/dev/null && echo "stopped legacy ${path} (pid ${pid})"
         done
         rm -f "$path"
         echo "removed legacy launcher ${path}"

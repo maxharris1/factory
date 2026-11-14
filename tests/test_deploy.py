@@ -655,13 +655,33 @@ def test_install_autostart_adds_the_listener_only_with_a_linear_webhook(tmp_path
     assert table.count("# factory-linear-webhook") == 2
 
 
+def _child(pid_file: Path) -> int:
+    while not pid_file.is_file() or not pid_file.read_text(encoding="utf-8").endswith("\n"):
+        time.sleep(0.01)
+    return int(pid_file.read_text(encoding="utf-8"))
+
+
+def _ends(pid: int) -> bool:
+    stat = Path(f"/proc/{pid}/stat")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            if stat.read_text(encoding="utf-8").rsplit(") ", 1)[1].startswith("Z"):
+                return True
+        except (FileNotFoundError, ProcessLookupError):
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
     environment = _install_environment(tmp_path, "venv")
     environment["ORCH_CRONTAB"] = str(_fake(tmp_path, "crontab", FAKE_CRONTAB))
     legacy = tmp_path / ".local/share/factory"
     legacy.mkdir(parents=True)
     poller = legacy / "run-poller.sh"
-    poller.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+    poller.write_text('#!/bin/sh\nsleep 60 &\necho $! >"$HOME/child-$$"\nwait\n'
+                      'touch "$HOME/poller-continued"\n', encoding="utf-8")
     poller.chmod(0o755)
     listener = legacy / "linear-webhook-service.sh"
     listener.write_text('#!/bin/sh\n[ "$1" = stop ] && touch "$HOME/legacy-stopped"\n',
@@ -672,13 +692,17 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         f"@reboot {listener} ensure\n"
         "0 3 * * * /usr/bin/true # keep\n",
         encoding="utf-8")
-    running = subprocess.Popen(["/bin/sh", str(poller)])
+    poller_env = {**os.environ, "HOME": str(tmp_path)}
+    pollers = [subprocess.Popen(["/bin/sh", str(poller)], env=poller_env) for _ in range(20)]
+    children = [_child(tmp_path / f"child-{proc.pid}") for proc in pollers]
     bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"])
     try:
         result = _install(environment)
 
         assert result.returncode == 0, result.stderr
-        assert running.wait(timeout=10) == -signal.SIGTERM
+        assert [proc.wait(timeout=10) for proc in pollers] == [-signal.SIGTERM] * 20
+        assert not (tmp_path / "poller-continued").exists()
+        assert all(_ends(child) for child in children)
         assert bystander.poll() is None
         assert not poller.exists() and not listener.exists()
         assert (tmp_path / "legacy-stopped").is_file()
@@ -687,7 +711,7 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         assert str(legacy) not in table
         assert f"stopped legacy {poller}" in result.stdout
     finally:
-        for proc in (running, bystander):
+        for proc in (*pollers, bystander):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
