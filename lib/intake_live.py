@@ -42,6 +42,20 @@ from lib.github_actions import (
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+# Every page of an issue's blocks relations is read (#157 review): a blocker
+# past the first page still holds the ticket. Past the cap the read fails.
+# The intake query reads the first 10 (it pages 50 issues at once); a further
+# page is one request for that issue alone.
+LINEAR_INTAKE_RELATIONS = 10
+LINEAR_RELATIONS_PAGE = 50
+LINEAR_RELATIONS_MAX_PAGES = 20
+_RELATION_FIELDS = (
+    "{ nodes { type issue { identifier state { type } } } pageInfo { hasNextPage endCursor } }"
+)
+LINEAR_RELATIONS_QUERY = (
+    "query($issue: String!, $after: String) { issue(id: $issue) { "
+    f"inverseRelations(first: {LINEAR_RELATIONS_PAGE}, after: $after) {_RELATION_FIELDS} }} }}"
+)
 # Linear's Issue field is branchName; it is read under the alias the poller
 # uses (poll_source.py LINEAR_ISSUE_QUERY), so the node key is gitBranchName.
 LINEAR_INTAKE_QUERY = (
@@ -50,7 +64,7 @@ LINEAR_INTAKE_QUERY = (
     "{ nodes { id identifier title description url gitBranchName: branchName priority createdAt "
     "labels(first: 20) { nodes { name } } "
     "history(first: 25) { nodes { createdAt actor { id } toState { name } } } "
-    "inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } } } "
+    f"inverseRelations(first: {LINEAR_INTAKE_RELATIONS}) {_RELATION_FIELDS} }} "
     "pageInfo { hasNextPage endCursor } } }"
 )
 # One aliased read per blocker repo per poll (#156), cached like the poller's
@@ -311,10 +325,10 @@ class GitHubIntakeClient(GitHubReviewActions):
         return str(comment_id)
 
 
-def _linear_blockers(node: dict[str, Any]) -> tuple[tuple[str, str | None], ...]:
+def _linear_blockers(relations: Sequence[object]) -> tuple[tuple[str, str | None], ...]:
     """(identifier, state type) of each issue whose `blocks` relation names this one."""
     found: list[tuple[str, str | None]] = []
-    for relation in ((node.get("inverseRelations") or {}).get("nodes")) or []:
+    for relation in relations:
         if not isinstance(relation, dict) or relation.get("type") != "blocks":
             continue
         blocker = relation.get("issue") or {}
@@ -426,10 +440,30 @@ class LinearIntakeClient:
                     linear_id=issue_id,
                     branch=_text(node.get("gitBranchName")) or None,
                     priority=priority if isinstance(priority, int) else None,
-                    blocked_by=_linear_blockers(node),
+                    blocked_by=_linear_blockers(self._relations(issue_id, node)),
                 )
             )
         return found
+
+    def _relations(self, issue_id: str, node: dict[str, Any]) -> list[object]:
+        """Every inverse relation of the issue: the intake page, then the rest."""
+        connection = node.get("inverseRelations") or {}
+        found: list[object] = []
+        for _ in range(LINEAR_RELATIONS_MAX_PAGES):
+            if not isinstance(connection, dict):
+                raise GitHubAdapterError("Linear relations is not an object")
+            found.extend(connection.get("nodes") or [])
+            page = connection.get("pageInfo") or {}
+            if not isinstance(page, dict) or page.get("hasNextPage") is not True:
+                return found
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubAdapterError("Linear relations have a next page but no endCursor")
+            data = self._request(LINEAR_RELATIONS_QUERY, {"issue": issue_id, "after": cursor})
+            connection = (data.get("issue") or {}).get("inverseRelations")
+        raise GitHubAdapterError(
+            f"Linear relations have over {LINEAR_RELATIONS_MAX_PAGES} pages; not fed"
+        )
 
     def linear_comments(self, issue_id: str) -> list[Comment]:
         data = self._request(LINEAR_COMMENTS_QUERY, {"issue": issue_id})

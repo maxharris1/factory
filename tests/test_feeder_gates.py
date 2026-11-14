@@ -671,3 +671,112 @@ def test_a_released_blocker_still_counts_through_its_merged_pr(tmp_path: Path) -
     with sqlite3.connect(tmp_path / "orch.db") as connection:
         connection.execute(f"UPDATE {FEEDER_TABLE} SET fed_at = 0 WHERE issue = '1'")
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-2"]
+
+
+# --- #157 review round 1 --------------------------------------------------------
+
+
+def test_an_unreadable_external_conflict_keeps_the_ticket_waiting(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(1, body="Conflicts with PR #113")]
+    github.statuses = {ref(113): OPEN_PULL}
+    assert not feeder.feed_once().fed
+    github.fail["statuses"] = 1
+    report = feeder.feed_once()
+    assert not report.fed
+    assert states(tmp_path)["1"] == ("waiting-blocked", "waiting on #113 (status unreadable)")
+
+
+def test_a_held_conflict_matches_the_candidates_existing_pr(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.pulls[(HOME, 113)] = {"head": "factory/issue-2", "state": "closed"}
+    github.issues[HOME] = [issue(1, body="Conflicts with PR #113")]
+    github.statuses = {ref(113): CLOSED_PULL}
+    assert len(feeder.feed_once().fed) == 1
+    github.pulls[(HOME, 113)]["state"] = "open"
+    github.statuses = {ref(113): OPEN_PULL, ref(501): OPEN_PULL}
+    github.issues[HOME].append(issue(2, created_at=2000))
+    report = feeder.feed_once()
+    assert not report.fed
+    assert report.blocked == 1
+    assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on #1 (conflicts with it)")
+
+
+def test_linear_cycle_across_projects_flags_both(tmp_path: Path) -> None:
+    class CrossProject:
+        def linear_intake(self, project_id: str, state: str) -> list:
+            if project_id == "proj-1":
+                return [replace(linear_issue("AUT-1"), blocked_by=(("AUT-2", "started"),))]
+            return [replace(linear_issue("AUT-2"), repo="acme/other-app",
+                            blocked_by=(("AUT-1", "started"),))]
+
+    orch = LINEAR_ORCH + (
+        "  - repo: acme/other-app\n"
+        "    factory_ref: dev\n"
+        "    linear_project_id: proj-2\n"
+        "    intake:\n"
+        "      linear_state: In Progress\n"
+    )
+    feeder, queue, _, _ = make_feeder(tmp_path, orch=orch, factory_text=LINEAR_FACTORY_MD,
+                                      linear=CrossProject())
+    report = feeder.feed_once()
+    with queue.connect() as connection:
+        flags = sorted(tuple(row) for row in connection.execute(
+            "SELECT repo, ticket_id, reason FROM needs_attention"))
+    assert (len(report.fed), report.blocked) == (0, 2)
+    assert flags == [
+        ("acme/linear-app", "AUT-1", "blocker-cycle"),
+        ("acme/other-app", "AUT-2", "blocker-cycle"),
+    ]
+
+
+def test_linear_blocker_in_flight_in_another_project_counts_through_its_pr(
+    tmp_path: Path,
+) -> None:
+    class CrossProject(FakeLinear):
+        def __init__(self) -> None:
+            super().__init__()
+            self.second: list = []
+
+        def linear_intake(self, project_id: str, state: str) -> list:
+            return self.issues if project_id == "proj-1" else self.second
+
+    orch = LINEAR_ORCH + (
+        "  - repo: acme/other-app\n"
+        "    factory_ref: dev\n"
+        "    linear_project_id: proj-2\n"
+        "    intake:\n"
+        "      linear_state: In Progress\n"
+    )
+    linear = CrossProject()
+    linear.issues = [linear_issue("AUT-1")]
+    now = [10_000.0]
+    feeder, _, github, _ = make_feeder(tmp_path, orch=orch, factory_text=LINEAR_FACTORY_MD,
+                                       linear=linear, now=now)
+    assert len(feeder.feed_once().fed) == 1
+    pull = int(rows(tmp_path / "orch.db")["AUT-1"]["pr_number"])
+    linear.second = [replace(linear_issue("AUT-2"), repo="acme/other-app",
+                             blocked_by=(("AUT-1", "started"),))]
+    github.statuses = {github_ref("acme/linear-app", pull): MERGED}
+    now[0] += 60
+    assert [item.ticket_id for item in feeder.feed_once().fed] == ["AUT-2"]
+
+
+def test_readers_accept_the_feeder_schema_before_migration(tmp_path: Path) -> None:
+    from lib.dashboard import collect_snapshot
+    from lib.status import SQLiteStatusReader
+
+    db = tmp_path / "old.db"
+    with sqlite3.connect(db) as connection:
+        ensure_tables(connection)
+        for column in ("waiting_reason", "touches", "conflicts", "released"):
+            connection.execute(f"ALTER TABLE {FEEDER_TABLE} DROP COLUMN {column}")
+        connection.execute(
+            f"INSERT INTO {FEEDER_TABLE} (repo, issue, tracker, title, harness, state, risk, "
+            "issue_created_at, first_seen_at, seen_at) "
+            "VALUES ('owner/app', '3', 'github', 't', 'claude', 'eligible', 'low', 1, 1, 10000)"
+        )
+        connection.execute("INSERT INTO feeder_poll(id, at) VALUES (1, 10000)")
+    state = SQLiteStatusReader(db).feeder()
+    assert state is not None and [item.reason for item in state.items] == [None]
+    collect_snapshot(db, tmp_path / "none.log", now=10000)

@@ -296,14 +296,21 @@ class Holds:
     a contested path.
     """
 
-    held: list[tuple[Ref, frozenset[Ref], GateLines]] = field(default_factory=list)
+    held: list[tuple[Ref, frozenset[Ref], GateLines, str]] = field(default_factory=list)
 
-    def take(self, holder: Ref, aliases: Iterable[Ref], lines: GateLines) -> None:
-        self.held.append((holder, frozenset({holder, *aliases}), lines))
+    def take(
+        self, holder: Ref, aliases: Iterable[Ref], lines: GateLines, note: str = "conflicts with it"
+    ) -> None:
+        self.held.append((holder, frozenset({holder, *aliases}), lines, note))
 
-    def collision(self, ref: Ref, lines: GateLines) -> Wait | None:
-        for holder, aliases, held in self.held:
-            if ref in aliases:
+    def drop(self, holder: Ref) -> None:
+        self.held = [item for item in self.held if item[0] != holder]
+
+    def collision(self, ref: Ref, lines: GateLines, aliases: Iterable[Ref] = ()) -> Wait | None:
+        """Why ref waits on a holder; aliases are other refs it goes by (its PR)."""
+        own = frozenset({ref, *aliases})
+        for holder, names, held, note in self.held:
+            if names & own:
                 continue
             for path in sorted(lines.touches):
                 for other in sorted(held.touches):
@@ -312,6 +319,6 @@ class Holds:
                         return Wait(
                             f"waiting on file {shared} held by {holder.label(ref.repo)}"
                         )
-            if lines.conflicts_with & aliases or ref in held.conflicts_with:
-                return Wait(f"waiting on {holder.label(ref.repo)} (conflicts with it)")
+            if lines.conflicts_with & names or own & held.conflicts_with:
+                return Wait(f"waiting on {holder.label(ref.repo)} ({note})")
         return None

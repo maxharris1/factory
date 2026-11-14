@@ -392,7 +392,7 @@ def test_linear_intake_reads_blocks_relations() -> None:
         "proj-1", "In Progress"
     )
     assert found[0].blocked_by == (("AUT-7", "started"), ("AUT-5", "completed"))
-    assert "inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } }" in (
+    assert "inverseRelations(first: 10) { nodes { type issue { identifier state { type } } } " in (
         LINEAR_INTAKE_QUERY
     )
 
@@ -405,3 +405,52 @@ def test_linear_relations_add_no_linear_request() -> None:
     source = PagedLinearSource([[node]])
     LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
     assert len(source.documents) == 1
+
+
+class RelationPagesSource(PagedLinearSource):
+    """One issue with 120 blocks relations, served the way Linear pages them:
+    the intake query's `first`, then the relations query's `first` and `after`."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.relations = [
+            {"type": "blocks", "issue": {"identifier": f"AUT-{n}",
+             "state": {"type": "completed" if n < 120 else "started"}}}
+            for n in range(1, 121)
+        ]
+
+    def _page(self, query: str, after: str | None) -> dict:
+        count = int(re.search(r"inverseRelations\(first: (\d+)", query).group(1))
+        start = 0 if after is None else int(after.removeprefix("rel-"))
+        end = start + count
+        more = end < len(self.relations)
+        return {"nodes": self.relations[start:end],
+                "pageInfo": {"hasNextPage": more, "endCursor": f"rel-{end}" if more else None}}
+
+    def _linear_request(self, document: dict) -> dict:
+        self.documents.append(document)
+        query = document["query"]
+        if "issues(" in query:
+            node = linear_node(200)
+            node["inverseRelations"] = self._page(query, None)
+            return {"data": {"issues": {"nodes": [node], "pageInfo": {"hasNextPage": False}}}}
+        assert document["variables"]["issue"] == "uuid-200"
+        return {"data": {"issue": {
+            "inverseRelations": self._page(query, document["variables"]["after"])}}}
+
+
+def test_linear_intake_reads_every_page_of_blocks_relations() -> None:
+    source = RelationPagesSource()
+    found = LinearIntakeClient(source, {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")
+    assert len(found[0].blocked_by) == 120
+    assert found[0].blocked_by[-1] == ("AUT-120", "started")
+    assert len(source.documents) == 4
+
+
+def test_linear_relation_pages_without_a_cursor_fail_the_read() -> None:
+    class NoCursor(RelationPagesSource):
+        def _page(self, query: str, after: str | None) -> dict:
+            return {"nodes": self.relations[:1], "pageInfo": {"hasNextPage": True, "endCursor": None}}
+
+    with pytest.raises(GitHubAdapterError, match="endCursor"):
+        LinearIntakeClient(NoCursor(), {"proj-1": "acme/app"}).linear_intake("proj-1", "In Progress")

@@ -67,7 +67,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from lib import attention
@@ -252,6 +252,12 @@ class _Candidate:
         return rank, self.issue.created_at, _key_order(self.issue.key)
 
 
+class _Held(Exception):
+    def __init__(self, wait: Wait):
+        super().__init__(wait.reason)
+        self.wait = wait
+
+
 def _key_order(key: str) -> tuple[int, int, str]:
     """A ticket number sorts as a number (9 before 10), an identifier as text."""
     return (0, int(key), "") if key.isdigit() else (1, 0, key)
@@ -365,10 +371,12 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     last = last_feeder_poll(connection)
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
+    reason = "waiting_reason" if "waiting_reason" in present else "NULL AS waiting_reason"
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error, waiting_reason
+               pr_number, issue_created_at, error, {reason}
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),
@@ -448,7 +456,13 @@ class Feeder:
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
             holds.take(candidate.ref, (), candidate.lines)
             try:
-                ref = self._feed(candidate, now)
+                ref = self._feed(candidate, now, holds)
+            except _Held as held:
+                holds.drop(candidate.ref)
+                room[candidate.harness] += 1
+                self._set_state(candidate, "waiting-blocked", reason=held.wait.reason)
+                blocked += 1
+                continue
             except Exception as exc:  # one ticket's failure never stops the poll
                 errors += 1
                 self._set_state(candidate, "error", error=safe_ship_error(exc))
@@ -514,10 +528,23 @@ class Feeder:
     ) -> tuple[dict[Ref, Wait], Holds, bool]:
         """Blocker waits, the holds of tickets in flight, and whether the
         status read (when one was needed) succeeded."""
-        unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
-        gated = {c.ref: c.lines for c in unstarted if c.lines.blocked_by}
-        conflicts = {ref for c in unstarted for ref in c.lines.conflicts_with}
         rows = self._feeder_rows()
+        unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
+        linear_refs = {ref.key: ref for ref in rows if ref.tracker == "linear"}
+        linear_refs.update({c.ref.key: c.ref for c in candidates if c.ref.tracker == "linear"})
+
+        def linear_ref(repo: str, key: str) -> Ref:
+            return linear_refs.get(key) or Ref("linear", repo.lower(), key)
+
+        gated = {
+            c.ref: replace(c.lines, blocked_by=frozenset(
+                linear_ref(ref.repo, ref.key) if ref.tracker == "linear" else ref
+                for ref in c.lines.blocked_by
+            ))
+            for c in unstarted
+            if c.lines.blocked_by
+        }
+        conflicts = {ref for c in unstarted for ref in c.lines.conflicts_with}
         pull_of = {ref: pull for ref, (_, pull, _) in rows.items() if pull is not None}
         known = set(rows) | set(pull_of.values()) | {c.ref for c in candidates}
         holders = {
@@ -528,7 +555,7 @@ class Feeder:
         blockers = {ref for lines in gated.values() for ref in lines.blocked_by}
         via = {ref: pull_of[ref] for ref in blockers if ref in pull_of}
         linear = {
-            Ref("linear", c.issue.repo.lower(), key): linear_status(state_type)
+            linear_ref(c.issue.repo, key): linear_status(state_type)
             for c in unstarted
             for key, state_type in c.issue.blocked_by
         }
@@ -557,7 +584,9 @@ class Feeder:
             holds.take(ref, () if pull is None else (pull,), lines)
         for ref in sorted(external):
             status = statuses.get(ref)
-            if status is not None and status.is_pull and status.progress is Progress.OPEN:
+            if status is None:
+                holds.take(ref, (), GateLines(), "status unreadable")
+            elif status.is_pull and status.progress is Progress.OPEN:
                 holds.take(ref, (), GateLines())
         self._release(released)
         return blocker_waits(gated, statuses), holds, ok
@@ -752,27 +781,36 @@ class Feeder:
 
     # -- one ticket ----------------------------------------------------------------
 
-    def _feed(self, candidate: _Candidate, now: float) -> TicketRef | None:
-        """Feed one ticket; None when its recorded PR is no longer open."""
+    def _feed(self, candidate: _Candidate, now: float, holds: Holds) -> TicketRef | None:
+        """Feed one ticket; None when its recorded PR is no longer open.
+
+        Raises _Held, before any write, when the open PR it would reuse is
+        one a ticket in flight conflicts with.
+        """
         issue = candidate.issue
         config = candidate.context.config
         row = self._row(candidate)
-        self._set_state(candidate, "feeding")
-        risk = str(row["risk"])
-        state = go_state_for(issue.body)
         branch = row["branch"] or self._branch_for(issue)
         if not _BRANCH.fullmatch(branch) or ".." in branch:
             raise ValueError(f"branch name {branch!r} is not safe")
-        self._record(candidate, branch=branch)
         repo = candidate.project.repo
+        number: int | None = None
+        if not row["pr_number"]:
+            number = self.github.find_pull(repo, branch)
+            if number is not None:
+                wait = holds.collision(candidate.ref, candidate.lines, (github_ref(repo, number),))
+                if wait is not None:
+                    raise _Held(wait)
+        self._set_state(candidate, "feeding")
+        risk = str(row["risk"])
+        state = go_state_for(issue.body)
+        self._record(candidate, branch=branch)
         if row["pr_number"]:
-            number: int | None = int(row["pr_number"])
+            number = int(row["pr_number"])
             pull = self.github.pull_state(repo, number)
             if pull != "open":
                 self._set_state(candidate, "closed", error=f"PR #{number} is {pull}")
                 return None
-        else:
-            number = self.github.find_pull(repo, branch)
         if number is None:
             if self.github.branch_sha(repo, branch) is None:
                 base = self.github.branch_sha(repo, config.base_branch)
