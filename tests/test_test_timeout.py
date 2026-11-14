@@ -130,3 +130,114 @@ def test_a_hung_test_fails_on_timeout_and_its_children_are_killed(tmp_path: Path
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+REVIEW_CASES = {
+    "teardown": textwrap.dedent(
+        """
+        import subprocess
+        from pathlib import Path
+        import pytest
+
+
+        @pytest.fixture
+        def child():
+            p = subprocess.Popen(["sleep", "600"], start_new_session=True)
+            Path("child.pid").write_text(str(p.pid))
+            yield p
+            p.wait()
+
+
+        def test_hang(child):
+            pass
+        """
+    ),
+    "context": textwrap.dedent(
+        """
+        import subprocess
+        from pathlib import Path
+
+
+        def test_hang():
+            with subprocess.Popen(["sleep", "600"], start_new_session=True) as p:
+                Path("child.pid").write_text(str(p.pid))
+                p.wait()
+        """
+    ),
+    "group": textwrap.dedent(
+        """
+        import subprocess
+        import sys
+        import time
+        from pathlib import Path
+
+        SERVICE = '''
+        import subprocess, time
+        from pathlib import Path
+        while not Path("go").exists():
+            time.sleep(0.01)
+        p = subprocess.Popen(["sleep", "600"])
+        Path("child.pid").write_text(str(p.pid))
+        time.sleep(600)
+        '''
+
+
+        def test_1_service():
+            p = subprocess.Popen([sys.executable, "-c", SERVICE], start_new_session=True)
+            Path("service.pid").write_text(str(p.pid))
+
+
+        def test_2_hang():
+            Path("go").touch()
+            while not Path("child.pid").exists():
+                time.sleep(0.01)
+            time.sleep(600)
+        """
+    ),
+}
+
+REVIEW_EXPECTED = {
+    "teardown": ("1 passed, 1 error", {"child.pid": False}),
+    "context": ("1 failed", {"child.pid": False}),
+    "group": ("1 failed, 1 passed", {"child.pid": False, "service.pid": True}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REVIEW_CASES))
+def test_a_timeout_in_any_phase_kills_only_the_tests_own_children(tmp_path: Path, case: str) -> None:
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntimeout = 1\ntimeout_method = signal\naddopts = -p tests.child_reaper -p no:cacheprovider\n"
+    )
+    (tmp_path / "test_probe.py").write_text(REVIEW_CASES[case])
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(filter(None, [str(ROOT), os.environ.get("PYTHONPATH")])),
+    }
+    summary, expected_alive = REVIEW_EXPECTED[case]
+    probe = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        try:
+            output, _ = probe.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"{case}: pytest still running 15s after a 1s timeout")
+        assert summary in output, output
+        assert "Timeout (>1.0s) from pytest-timeout" in output, output
+        assert {path.name for path in tmp_path.glob("*.pid")} == set(expected_alive)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and any(
+            alive(int((tmp_path / name).read_text())) != want for name, want in expected_alive.items()
+        ):
+            time.sleep(0.05)
+        assert {name: alive(int((tmp_path / name).read_text())) for name in expected_alive} == expected_alive
+    finally:
+        for pidfile in tmp_path.glob("*.pid"):
+            try:
+                os.killpg(os.getpgid(int(pidfile.read_text())), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if probe.poll() is None:
+            probe.kill()
+        probe.communicate(timeout=5)
