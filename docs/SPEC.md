@@ -615,7 +615,9 @@ in the same repo may share a `Touches:` path, and none may share a
 ticket in feed order keeping the path. A ticket in flight whose round is `capped`
 (`ticket_state.workflow_state`, read-only; not one marked stuck) holds only
 its `Conflicts with` edges while it waits for a go, so a ticket waiting on
-one of its paths is fed on the next poll (issue #270). When a go resumes the
+one of its paths is fed on the next poll (issue #270). That holds while the
+feeder retries its own row too (`error` or `feeding`, as after a go whose
+response was lost). When a go resumes the
 round, it holds its paths again from the next poll; a ticket fed on a shared
 path meanwhile keeps running, and the PR that merges second takes the
 existing base update. The poller log says `feeder: released locks of

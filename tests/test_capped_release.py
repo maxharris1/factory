@@ -160,3 +160,19 @@ def test_existing_feeder_table_gains_capped_release(tmp_path: Path) -> None:
         ensure_tables(connection)
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
     assert "capped_release" in columns
+
+
+@pytest.mark.parametrize("stalled", ["error", "feeding"])
+def test_a_capped_holder_left_in_flight_frees_its_paths(tmp_path: Path, stalled) -> None:
+    feeder, github, log, now = fed_holder(tmp_path, body="Touches: lib/x.py\nConflicts with: #3")
+    with sqlite3.connect(tmp_path / "orch.db") as connection:
+        connection.execute(f"UPDATE {FEEDER_TABLE} SET state = ? WHERE issue = '1'", (stalled,))
+    set_state(tmp_path, "501", "capped")
+    github.issues[HOME] += [
+        issue(2, created_at=2.0, body="Touches: lib/x.py"),
+        issue(3, created_at=3.0, body="Touches: docs/a.md"),
+    ]
+    now[0] += 60
+    assert "factory/issue-2" in fed_heads(github, feeder.feed_once())
+    assert states(tmp_path)["3"] == ("waiting-blocked", "waiting on #1 (conflicts with it)")
+    assert log.count("feeder: released locks of owner/app#1 (capped)") == 1

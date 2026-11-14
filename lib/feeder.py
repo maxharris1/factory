@@ -257,6 +257,11 @@ class _Candidate:
         return rank, self.issue.created_at, _key_order(self.issue.key)
 
 
+def _holding(lines: GateLines, capped: bool) -> GateLines:
+    """What a holder holds: a capped one keeps only its Conflicts with edges."""
+    return GateLines(conflicts_with=lines.conflicts_with) if capped else lines
+
+
 @dataclass(frozen=True)
 class _Holder:
     """A fed ticket's feeder row: its gate lines, PR, whether its PR ended
@@ -446,7 +451,7 @@ class Feeder:
         self._record_seen(candidates, now)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
-        waits, holds, gate_read = self._gates(candidates, states)
+        waits, holds, capped, gate_read = self._gates(candidates, states)
         if gate_read:
             self._sync_attention(waits, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
@@ -472,7 +477,7 @@ class Feeder:
                 waiting += 1
                 continue
             room[candidate.harness] = room.get(candidate.harness, 0) - 1
-            holds.take(candidate.ref, (), candidate.lines)
+            holds.take(candidate.ref, (), _holding(candidate.lines, candidate.ref in capped))
             try:
                 ref = self._feed(candidate, now, holds)
             except _Held as held:
@@ -544,9 +549,10 @@ class Feeder:
 
     def _gates(
         self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
-    ) -> tuple[dict[Ref, Wait], Holds, bool]:
-        """Blocker waits, the holds of tickets in flight, and whether the
-        status read (when one was needed) succeeded."""
+    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool]:
+        """Blocker waits, the holds of tickets in flight, the holders that
+        hold as capped, and whether the status read (when one was needed)
+        succeeded."""
         rows = self._feeder_rows()
         unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
         linear_refs = {ref.key: ref for ref in rows if ref.tracker == "linear"}
@@ -598,18 +604,18 @@ class Feeder:
         released: list[Ref] = []
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
         flips: list[tuple[Ref, bool]] = []
+        capped_refs: set[Ref] = set()
         for ref, row in sorted(holders.items()):
             pull = row.pull
             if pull is not None and _progress(statuses, pull) in (Progress.DONE, Progress.UNFINISHED):
                 released.append(ref)
                 continue
-            lines = row.lines
             is_capped = row.ticket in capped
             if is_capped:
-                lines = GateLines(conflicts_with=lines.conflicts_with)
+                capped_refs.add(ref)
             if is_capped != row.capped_release:
                 flips.append((ref, is_capped))
-            holds.take(ref, () if pull is None else (pull,), lines)
+            holds.take(ref, () if pull is None else (pull,), _holding(row.lines, is_capped))
         for ref in sorted(external):
             status = statuses.get(ref)
             if status is None:
@@ -618,7 +624,7 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        return blocker_waits(gated, statuses), holds, ok
+        return blocker_waits(gated, statuses), holds, capped_refs, ok
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
