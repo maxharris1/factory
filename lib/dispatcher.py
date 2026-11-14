@@ -54,6 +54,9 @@ from lib.update_check import UpdateClass
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
 FINISHED_STATES = ("merged", "done")
+ORCHESTRATOR = "grok-bot"
+# #170: the kinds a worker bot's App login may post once the switch is on.
+WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})
 _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
@@ -3970,6 +3973,7 @@ class Dispatcher:
         return (
             sender is not None
             and sender in self._trusted_bots(comment)
+            and self._app_may_post(comment, fields)
         )
 
     def _latest_step(
@@ -5865,10 +5869,21 @@ class Dispatcher:
             fields.get("from") == expected_bot
             and fields.get("role") == role
             and expected_bot in self._trusted_bots(comment)
+            and self._app_may_post(comment, fields)
         )
 
     def _trusted_bots(self, comment: Comment) -> frozenset[str]:
-        return trusted_bots(self.trusted_logins, comment.author)
+        bots = trusted_bots(self.trusted_logins, comment.author)
+        app_bot = self.approvals.app_bot(comment.author)
+        if app_bot is None:
+            return bots
+        return bots & {app_bot}
+
+    def _app_may_post(self, comment: Comment, fields: Mapping[str, str]) -> bool:
+        """#170: with the switch on, a worker bot's App login speaks only
+        its own handoff kinds; answers, go and ok stay Factory's."""
+        app_bot = self.approvals.app_bot(comment.author)
+        return app_bot in (None, ORCHESTRATOR) or fields.get("kind") in WORKER_KINDS
 
     def _review_actions(self, ticket: TrackedTicket) -> ReviewActions:
         if isinstance(self.review_actions, Mapping):
