@@ -336,10 +336,11 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
     fake.write_text(f"#!/bin/sh\necho \"$1 $2\" >> {marker}\n", encoding="utf-8")
     fake.chmod(0o755)
     patched = profile.replace(str(ROOT / "deploy" / "waiter-service.sh"), str(fake))
+    (home / ".config/factory/waiter-autostart-claude-bot").touch()
     (home / ".config/factory/waiter-autostart-codex-bot").touch()
     (home / ".config/factory/waiter-autostart-bogus").touch()
     subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
                    env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, check=True, timeout=30)
-    _wait_for(lambda: marker.exists())
-    assert marker.read_text().split("\n")[0] == "codex-bot ensure"
+    _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
+    assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()

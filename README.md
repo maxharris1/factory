@@ -1059,10 +1059,27 @@ sourcing its env files (`run-poller.sh --print-db`), else the caller's
 `ORCH_DB`: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
-[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
-hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh) runs
+`poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
 (default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
-0 at once when another copy holds it.
+0 at once when another copy holds it. With `poller-autostart` on and no
+`crontab` (issue #248), `ensure` starts it unless it already runs, and logs
+`crontab not found` once per state directory; it can also be started by hand.
+A loop that `ensure` started exits at its next pass once `remove-autostart`
+has removed `poller-autostart`, and that pass launches nothing; a loop started
+by hand keeps running.
+
+Every `ensure`, held stopped or not, also runs `waiter-service.sh <bot>
+ensure` for each `~/.config/factory/waiter-autostart-<bot>` (logging to
+`waiter-<bot>-service.log`), so whatever keeps the poller alive keeps the
+autostarted waiters alive too, even with a `profile.sh` older than #80.
+
+Before restoring a missing `orch.db`, `start` and `ensure` wait for a box
+copy-in still restoring files: while `ORCH_COPY_IN_STATUS` (default
+`/tmp/sand-copy-in-status.json`) exists and its `"phase"` is not `"done"`,
+they check every `ORCH_COPY_IN_POLL_SEC` (default 5) for up to
+`ORCH_COPY_IN_WAIT` seconds (default 600). An `orch.db` the copy-in brings
+back is kept; after the wait runs out the restore goes ahead.
 
 ## Status
 
