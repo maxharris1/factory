@@ -137,7 +137,7 @@ def test_each_kind_has_the_standard_parts(
     # How the job is finished.
     assert f"orch job done {bot} {item.id} --handoff <comment-id>" in text
     assert f"orch job done {bot} {item.id} --failed" in text
-    assert "env -u GH_TOKEN gh" in text
+    assert "env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh" in text
 
 
 def test_review_brief_states_the_round_and_the_verdict_header() -> None:
