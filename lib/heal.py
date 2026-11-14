@@ -39,9 +39,21 @@ Per component (its health label), in order:
    grok.webhook_url_env); the URL and auth values come from the environment
    and are never logged.
 
-Each restart and escalation is one line in self-heal.log; a skip or a
-deferral is logged only when a component's decision changes. State is
-self-heal.state.json beside it, written atomically.
+Drain (#219): a waiter running stale code with jobs in flight (running
+jobs for its harness in orch.db; a count that cannot be read counts as
+busy) is not restarted. Its marker waiter-<bot>.drain, naming the
+checkout's commit, makes the waiter stop claiming (lib/waiter.py); the
+first pass that finds no running job restarts it, and its service start
+removes the marker. A drain longer than DRAIN_ESCALATE_SECONDS escalates
+once per window and kills nothing. Markers of owned waiters no longer
+draining are removed.
+
+Each restart and escalation is one line in self-heal.log; a skip, a
+deferral or a drain is logged only when a component's decision changes.
+State is self-heal.state.json beside it, written atomically.
+
+`orch heal deploy` (lib/self_deploy.py, #219) is the step before: it moves
+the checkout to origin/main, so this pass sees the stale code.
 """
 
 from __future__ import annotations
@@ -79,7 +91,9 @@ LISTENER_SERVICE = "linear-webhook"
 RESTART = "restart"
 SKIP = "skip"
 DEFER = "defer"
+DRAIN = "drain"
 ESCALATE = "escalate"
+DRAIN_ESCALATE_SECONDS = 2 * 60 * 60
 
 Runner = Callable[[Sequence[str], Mapping[str, str], Path], int]
 Poster = Callable[[str, str, bytes, float], WebhookResult]
@@ -94,6 +108,10 @@ class Facts:
     owned: frozenset[str] = frozenset()
     held: frozenset[str] = frozenset()
     listener_busy: bool = False
+    # Running jobs per owned waiter bot; None when the count could not be read.
+    waiter_jobs: Mapping[str, int | None] = field(default_factory=dict)
+    # When each bot's drain marker was written (its mtime).
+    drain_since: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -210,6 +228,20 @@ def decide(
         if item.get("state") != health.DOWN and service == LISTENER_SERVICE and facts.listener_busy:
             actions.append(act(DEFER, "stale code, busy with a delivery"))
             continue
+        if item.get("state") != health.DOWN and service.startswith("waiter:"):
+            bot = service.split(":", 1)[1]
+            jobs = facts.waiter_jobs.get(bot, 0)
+            if jobs is None or jobs > 0:
+                count = "unknown" if jobs is None else str(jobs)
+                actions.append(act(DRAIN, f"stale code, {count} running jobs"))
+                since = facts.drain_since.get(bot)
+                if (escalation is None and since is not None
+                        and now - since >= DRAIN_ESCALATE_SECONDS
+                        and (key.escalated_at is None
+                             or now - key.escalated_at >= WINDOW_SECONDS)):
+                    actions.append(act(ESCALATE, f"draining for {int((now - since) // 60)}m "
+                                                 f"with {count} running jobs"))
+                continue
         if len(attempts) >= MAX_ATTEMPTS:
             actions.append(act(SKIP, f"backoff: {len(attempts)} restarts in "
                                      f"{WINDOW_SECONDS // 60}m ({need})"))
@@ -258,6 +290,25 @@ def save_state(path: Path, states: Mapping[str, KeyState]) -> None:
     )
     temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temp.write_text(body + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def drain_path(state_dir: Path, bot: str) -> Path:
+    """The marker that tells a bot's waiter to stop claiming (lib/waiter.py)."""
+    return state_dir / f"waiter-{bot}.drain"
+
+
+def _mark_drain(state_dir: Path, bot: str, version: str) -> None:
+    """Write the drain marker naming the checkout's commit; an unchanged
+    marker keeps its mtime, which dates the drain."""
+    path = drain_path(state_dir, bot)
+    try:
+        if path.read_text(encoding="utf-8").strip() == version:
+            return
+    except OSError:
+        pass
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_text(version + "\n", encoding="utf-8")
     os.replace(temp, path)
 
 
@@ -363,9 +414,13 @@ def heal(
     actions = decide(report, states, facts, now)
     child_env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
     done: dict[str, int] = {}
+    draining = {a.service.split(":", 1)[1] for a in actions if a.kind == DRAIN}
     for action in actions:
         key = states.setdefault(action.label, KeyState())
-        if action.kind in (SKIP, DEFER):
+        if action.kind == DRAIN and not dry_run:
+            _mark_drain(state_dir, action.service.split(":", 1)[1],
+                        str(report.get("code_version") or "unknown"))
+        if action.kind in (SKIP, DEFER, DRAIN):
             note = f"{action.kind} {action.label} ({action.reason})"
             if key.last != note:
                 log(note)
@@ -392,6 +447,11 @@ def heal(
         key.attempts = _recent(key.attempts, now) + [now]
         if done[action.service] != 0:
             key.failures = _recent(key.failures, now) + [now]
+    if report.get("known") and not dry_run:
+        for service in facts.owned:
+            bot = service.split(":", 1)[1] if service.startswith("waiter:") else None
+            if bot is not None and bot not in draining:
+                drain_path(state_dir, bot).unlink(missing_ok=True)
     acted = {action.label for action in actions}
     for label, key in states.items():
         if label not in acted:
@@ -415,6 +475,8 @@ def heal(
 USAGE = """\
 orch heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
           [--machines PATH] [--orch PATH] [--device NAME] [--dry-run]
+orch heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
+                 [--device NAME] [--dry-run]
 """
 
 
@@ -426,16 +488,43 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
         owned.add(POLLER_SERVICE)
     if (config_dir / "linear-webhook-autostart").is_file():
         owned.add(LISTENER_SERVICE)
+    jobs: dict[str, int | None] = {}
+    drains: dict[str, float] = {}
     for bot in health.OWNING_BOTS:
         if (config_dir / f"waiter-autostart-{bot}").is_file():
             owned.add(f"waiter:{bot}")
+            jobs[bot] = running_jobs(db, health.OWNING_BOTS[bot])
+            try:
+                drains[bot] = drain_path(state_dir, bot).stat().st_mtime
+            except OSError:
+                pass
         if (state_dir / f"waiter-{bot}.stopped").exists():
             held.add(f"waiter:{bot}")
     if (state_dir / "poller.stopped").exists():
         held.add(POLLER_SERVICE)
     if (state_dir / "linear-webhook.stopped").exists():
         held.add(LISTENER_SERVICE)
-    return Facts(device, frozenset(owned), frozenset(held), _listener_busy(db, now))
+    return Facts(device, frozenset(owned), frozenset(held), _listener_busy(db, now),
+                 jobs, drains)
+
+
+def running_jobs(db: Path | None, recipient: str) -> int | None:
+    """Jobs claimed or running for a harness (a claim moves a job to
+    running), or None when the queue cannot be read: never restart on doubt."""
+    if db is None or not db.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            row = connection.execute(
+                "SELECT count(*) FROM jobs WHERE state = 'running' AND recipient = ?",
+                (recipient,),
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row else None
 
 
 def _listener_busy(db: Path | None, now: float) -> bool:
@@ -472,6 +561,10 @@ def _webhook(orch_path: Path | None) -> Webhook:
 
 def main(argv: list[str], *, stdin: TextIO | None = None,
          clock: Callable[[], float] = time.time) -> int:
+    if argv[:1] == ["deploy"]:
+        from lib import self_deploy
+
+        return self_deploy.main(argv[1:], clock=clock)
     parser = argparse.ArgumentParser(prog="orch heal", usage=USAGE)
     parser.add_argument("--health-json", required=True)
     parser.add_argument("--state", type=Path)

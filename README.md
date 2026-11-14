@@ -1271,6 +1271,42 @@ so the services it restarts outlive the run. Otherwise it writes
 `remove-autostart`. Passes never overlap: `self-heal.lock` makes a second
 pass exit at once.
 
+### Self-deploy
+
+Merged code deploys itself (issue #219). Each `self-heal.sh once` first runs
+`orch heal deploy` (`lib/self_deploy.py`), and the poller runs
+`self-heal.sh kick` after a cycle that merged a PR of the factory's own
+repo (a `--no-block` start of the systemd service, or a detached pass).
+Only the account that owns the checkout pulls:
+
+- `git fetch origin main`, then a fast-forward only. Local edits to
+  `machines.yml`, `orch.yml` and `deploy/install.sh` are kept: each is
+  backed up under `~/.local/state/factory/self-deploy/<time>/` with the
+  `git diff HEAD` patch, and one upstream also changed is 3-way merged
+  before anything is touched. `orch.local.yml` and `machines.local.yml`
+  are untracked, so a pull never touches them; moving the box's values
+  there makes every pull conflict-free.
+- The checkout is left as it was, logged, and escalated once per reason
+  when a kept file conflicts, the checkout is not on `main`, has local
+  commits, staged changes, an operation in progress, or edits to any other
+  tracked file. A failure while applying resets to the old HEAD and
+  restores the backups. A fetch failing for 30 minutes escalates; its log
+  line holds only the exit code.
+- When the merge changed `deploy/` or `requirements.txt` it runs
+  `deploy/install.sh --update`, which installs requirements into the
+  existing venv instead of recreating it (`self-deploy-install.log`).
+- The heal pass that follows runs as a new process, so the poller and
+  waiters on the old commit show stale code and are restarted in the same
+  pass: the poller through `poller-service.sh restart`, an idle waiter
+  through `waiter-service.sh <bot> restart`. A waiter with jobs running is
+  drained instead: `waiter-<bot>.drain` makes it claim nothing, and it is
+  restarted once its last job ends. A running `orch job run` is never
+  stopped.
+
+Each deploy, refusal and escalation is a `self-deploy:` line in
+`self-heal.log`; a repeated outcome is logged once. State is
+`self-deploy.state.json`.
+
 ## Dashboard
 
 ```sh

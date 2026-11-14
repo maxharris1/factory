@@ -35,7 +35,8 @@ args = sys.argv[1:]
 assert args[0] == "wait" and args[2:] == ["--autostart"], args
 starts = Path(os.environ["HOME"]) / f"starts-{args[1]}"
 with starts.open("a") as handle:
-    handle.write(f"{os.getpid()} {os.environ.get('ORCH_DB', '')}\\n")
+    handle.write(f"{os.getpid()} {os.environ.get('ORCH_DB', '')} "
+                 f"{os.environ.get('ORCH_WAITER_DRAIN', '')}\\n")
 if os.environ.get("FAKE_WAITER_FAIL"):
     raise SystemExit(2)
 db = Path(os.environ["ORCH_DB"])
@@ -252,6 +253,20 @@ def test_the_default_orch_db_is_the_shared_state_database(home: Path) -> None:
     _wait_for(lambda: _starts(home))
     line = (home / "starts-claude-bot").read_text().splitlines()[0]
     assert line.split()[1] == str(home / ".local/state/factory/orch.db")
+
+
+def test_start_clears_the_drain_marker_and_names_it_to_the_waiter(home: Path) -> None:
+    """#219: self-heal's restart after a drain (stop, then start) clears the
+    marker, and the waiter is told where self-heal writes it."""
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True)
+    marker = state / "waiter-claude-bot.drain"
+    marker.write_text("0123456789ab\n", encoding="utf-8")
+    assert _service(home, "claude-bot", "start").returncode == 0
+    _wait_for(lambda: _starts(home))
+    assert not marker.exists()
+    line = (home / "starts-claude-bot").read_text().splitlines()[0]
+    assert line.split()[2] == str(marker)
 
 
 @pytest.mark.parametrize("bot", ["grok-bot", "claude", "", "../x", "claude-bot;id"])

@@ -30,6 +30,13 @@ import json, os, subprocess, sys
 from pathlib import Path
 
 home = Path(os.environ["HOME"])
+with (home / "orch-order").open("a") as handle:
+    handle.write(" ".join(sys.argv[1:3]) + "\\n")
+if sys.argv[1:3] == ["heal", "deploy"]:
+    with (home / "deploy-calls").open("a") as handle:
+        handle.write(json.dumps({{"argv": sys.argv[1:], "db": os.environ.get("ORCH_DB")}}) + "\\n")
+    print("deploy output")
+    raise SystemExit(int(os.environ.get("FAKE_DEPLOY_EXIT", "0")))
 if sys.argv[1:] == ["health", "--json"]:
     print({json.dumps(json.dumps(REPORT))})
     raise SystemExit(int(os.environ.get("FAKE_HEALTH_EXIT", "3")))

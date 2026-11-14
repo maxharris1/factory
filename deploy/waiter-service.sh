@@ -29,6 +29,11 @@
 # started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
 # keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
 #
+# Drain (#219): self-heal writes waiter-<bot>.drain in the state directory
+# when this bot's waiter runs stale code with jobs in flight; the waiter
+# (told the path by ORCH_WAITER_DRAIN) then claims nothing until self-heal
+# restarts it after its last job. start removes the marker.
+#
 # Environment: ~/.config/factory/waiter.env, if present, is read for the
 # waiter (ORCH_DB and other ORCH_* paths only). ORCH_DB defaults to
 # the shared state database, ~/.local/state/factory/orch.db.
@@ -64,6 +69,7 @@ LOG="${STATE}/waiter-${BOT}.log"
 SERVICE_LOG="${STATE}/waiter-${BOT}-service.log"
 SERVICE_LOCK="${STATE}/waiter-${BOT}-service.lock"
 STOPPED="${STATE}/waiter-${BOT}.stopped"
+DRAIN="${STATE}/waiter-${BOT}.drain"
 DBFILE="${STATE}/waiter-${BOT}.db"
 AUTOSTART="${CONFIG}/waiter-autostart-${BOT}"
 ENV_FILE="${CONFIG}/waiter.env"
@@ -188,6 +194,7 @@ supervise() {
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     [[ "$ORCH_DB" == /* ]] || ORCH_DB="${PWD}/${ORCH_DB}"
     printf '%s\n' "$ORCH_DB" >"$DBFILE"
+    export ORCH_WAITER_DRAIN="$DRAIN"
     export PYTHONUNBUFFERED=1
     while [[ -z "$stopping" && ! -e "$STOPPED" ]]; do
         started="$SECONDS"
@@ -219,7 +226,7 @@ supervise() {
 
 start() {
     mkdir -p "$STATE"
-    rm -f "$STOPPED"
+    rm -f "$STOPPED" "$DRAIN"
     launch
 }
 
