@@ -34,7 +34,7 @@ from markdown_it import MarkdownIt
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
 
-_TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)\b.*)$", re.IGNORECASE)
+_TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?=[*_`]*(?:\W|$)).*)$", re.IGNORECASE)
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
 _MARKDOWN = MarkdownIt("commonmark")

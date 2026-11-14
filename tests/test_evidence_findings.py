@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from lib.dispatcher import Comment
 from lib.evidence.findings import Finding, findings_evidence
 
@@ -236,3 +238,24 @@ def test_a_corrected_repost_for_the_same_round_supersedes_the_first():
     assert [f.id for f in bundle.findings] == ["f-2"]
     assert bundle.reviewed_head == HEAD_2
     assert bundle.verdict_url == repost.url
+
+
+EMPHASIZED_IDS = ("*f-1*", "**f-1**", "***f-1***", "_f-1_", "__f-1__", "___f-1___", "`f-1`", "**_f-1_**", "__f-1:__")
+
+
+@pytest.mark.parametrize("finding_id", EMPHASIZED_IDS)
+def test_an_emphasized_id_raises_its_finding(finding_id):
+    raised = _verdict(f"1. [blocking] {finding_id} breaks.\n", round_="1/3", head=HEAD_1, at=1.0, cid="11")
+    assert [f.id for f in _bundle((raised,), round_=2).findings] == ["f-1"]
+
+
+@pytest.mark.parametrize("finding_id", EMPHASIZED_IDS)
+def test_an_emphasized_id_closes_its_finding(finding_id):
+    closed = _verdict(f"1. [closed] {finding_id} fixed.\n", round_="2/3", head=HEAD_2, at=2.0, cid="22")
+    assert [f.id for f in _bundle((R1, closed)).findings] == ["f-2"]
+
+
+@pytest.mark.parametrize("finding_id", ("f-1x", "_f-1_x", "f-1_2"))
+def test_an_id_running_into_a_word_is_not_a_finding(finding_id):
+    raised = _verdict(f"1. [blocking] {finding_id} breaks.\n", round_="1/3", head=HEAD_1, at=1.0, cid="11")
+    assert _bundle((raised,), round_=2).findings == ()
