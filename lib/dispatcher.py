@@ -1541,9 +1541,12 @@ class Dispatcher:
             assert fresh is not None
             ticket = fresh
             self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
-        if self._verdict_after(ticket, comment, head, review_round):
+        answered = self._verdict_after(ticket, comment, head, review_round)
+        if answered:
             # #71: that review already ran. A ready posted after the verdict
             # (a fix that changed nothing) is still reviewed, as round N+1.
+            if max(answered) > review_round and state in (None, "questions"):
+                self._set_workflow_state(ticket, "review")
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
@@ -1602,9 +1605,9 @@ class Dispatcher:
 
     def _verdict_after(
         self, ticket: TrackedTicket, ready: Comment, head: str, review_round: int
-    ) -> bool:
-        """A trusted reviewer verdict for head, posted after the ready, that
-        is the first for its round (#71).
+    ) -> set[int]:
+        """The rounds of trusted reviewer verdicts for head, posted after the
+        ready, that are the first for their round (#71).
 
         A verdict whose round already had one at or before the ready (a late
         duplicate) answered an earlier ready. One with no round, a round
@@ -1612,13 +1615,17 @@ class Dispatcher:
         none: T3 and T4 act on no such verdict. Nor does one for a completed
         round that T3 did not act on: another verdict closed that round.
         A verdict for the next round answers it only if T3 or T4 could act
-        on it: not BLOCKED, not while the ticket is still building or fixing,
-        not an APPROVE for a head other than the last reviewed one, and not
-        one they already handled without acting.
+        on it once T2 moves the ticket to review: not BLOCKED, not while the
+        ticket is in a state other than none, questions, review or
+        awaiting-ok, not an APPROVE for a head other than the last reviewed
+        one, not one they already handled without acting, and not one behind
+        a question pause from the ready on.
         """
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
         last_round = min(self._effective_cap(ticket), review_round + 1)
-        working = self._review_context(ticket)[0] in ("building", "fixing")
+        actable = self._review_context(ticket)[0] in (
+            None, "questions", "review", "awaiting-ok"
+        )
         review_head = self._latest_review_head(ticket)
         approvable = (
             review_head is not None and _matching_head(head, review_head) is not None
@@ -1659,10 +1666,10 @@ class Dispatcher:
                 and (
                     item.id in round_closers
                     if round_number <= review_round
-                    else not working
+                    else actable
                     and (item.id not in handled or _acted_verdict(handled[item.id]))
                     and (approvable or fields.get("verdict") != "APPROVE")
-                    and not self._question_open_between(ticket, ready, item)
+                    and not self._paused_between(ticket, ready, item)
                 )
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
@@ -1673,19 +1680,21 @@ class Dispatcher:
                     before.add(round_number)
                 else:
                     after.add(round_number)
-        return bool(after - before)
+        return after - before
 
-    def _question_open_between(
+    def _paused_between(
         self, ticket: TrackedTicket, ready: Comment, verdict: Comment
     ) -> bool:
-        """Whether T5 holds the ticket at waiting-max when verdict lands: a
-        question T5 pauses on, posted after ready, with no answers after it.
-        T3 and T4 act on no verdict there (#112 r7)."""
+        """Whether T5 holds the ticket at waiting-max at any point from ready
+        to verdict. With the ready unreviewed, answers resume clarify, not
+        review, so T3 and T4 act on no such verdict (#112 r7, r8)."""
         start, end = _comment_order(ready), _comment_order(verdict)
-        waiting = False
+        waiting = held = False
         for item in sorted(ticket.comments, key=_comment_order):
-            if not start < _comment_order(item) < end:
-                continue
+            order = _comment_order(item)
+            if order >= end:
+                break
+            held = held or (waiting and order >= start)
             try:
                 handoff = parse_comment(item.body)
             except HandoffError:
@@ -1706,7 +1715,7 @@ class Dispatcher:
                 ticket, item, fields, "grok-bot", role="orchestrator"
             ):
                 waiting = False
-        return waiting
+        return held or waiting
 
     def _t3(
         self,

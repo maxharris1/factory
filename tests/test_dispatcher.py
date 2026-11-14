@@ -5463,21 +5463,58 @@ def test_71_a_verdict_behind_an_unanswered_question_does_not_answer_its_ready(
     assert active >= 1
 
 
-def test_71_a_verdict_after_an_answered_question_still_answers_its_ready(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "question_at,answer_at",
+    [(110, 115), (90, 115), (90, 140)],
+    ids=["answered-before-verdict", "open-at-ready", "open-at-ready-answered-after-verdict"],
+)
+def test_71_a_question_pause_between_ready_and_verdict_keeps_the_ready(
+    tmp_path: Path, question_at: float, answer_at: float
 ) -> None:
-    """The question was answered before the verdict landed, so T3 acts on it
-    and the ready stays answered."""
+    """T5 pauses on the question, so with the ready unreviewed its answers
+    resume clarify and T3 rejects the verdict: it answers no ready, and the
+    ticket still reaches a review or fix (Codex PR #112 r8 F1)."""
     now = [200.0]
     _dispatcher, queue, poll = _poll_71(tmp_path, now)
-    poll(
+    comments = (
         _ready_71("ready", HEAD_71, 100),
-        _questions_71("question", 110),
-        _answers_71("answer", 115),
+        _questions_71("question", question_at),
+        _answers_71("answer", answer_at),
         _revise_71(120),
     )
-    assert _outcomes(queue)["ready"] == "stale-ready-verdict"
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    assert _outcomes(queue)["ready"] == "queued-review"
+    state, active = _review_state_71(queue)
+    assert state[0] in ("review", "fixing")
+    assert active >= 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [(), (("question", 80), ("answer", 90))],
+    ids=["bare", "answered-before-ready"],
+)
+def test_71_a_ready_its_verdict_answers_leaves_the_verdict_acted_on(
+    tmp_path: Path, extra: tuple[tuple[str, float], ...]
+) -> None:
+    """With no pause from the ready to its verdict, the ready stays answered
+    and T3 acts on that verdict: a fix, not a stall at review round 0."""
+    now = [200.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    comments = tuple(
+        _questions_71(name, at) if name == "question" else _answers_71(name, at)
+        for name, at in extra
+    ) + (_ready_71("ready", HEAD_71, 100), _revise_71(120))
+    poll(*comments)
+    now[0] = 220
+    poll(*comments)
+    outcomes = _outcomes(queue)
+    assert outcomes["ready"] == "stale-ready-verdict"
+    assert outcomes["revise-1"] == "queued-review-fix"
     assert _reviews_71(queue) == []
+    assert _review_state_71(queue) == (("fixing", 1), 1)
 
 
 def test_71_an_untrusted_question_does_not_stop_a_verdict_answering_its_ready(
