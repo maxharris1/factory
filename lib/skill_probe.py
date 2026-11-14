@@ -341,8 +341,10 @@ def _failed(output: object) -> bool:
 
 
 def _codex_spawned(output: object) -> bool:
-    """A spawn counts only when its output names the started agent."""
-    return isinstance(output, Mapping) and not _failed(output) and bool(output.get("agent_id"))
+    """A spawn counts only when its output names the started agent (agent_id or task_name)."""
+    return isinstance(output, Mapping) and not _failed(output) and bool(
+        output.get("agent_id") or output.get("task_name")
+    )
 
 
 PARSERS: Mapping[str, Callable[[Iterable[Mapping], str], Evidence]] = {
@@ -462,7 +464,10 @@ def claude_transcript(config_dir: Path, run_dir: str) -> Path | None:
 
 
 def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | None:
-    """The rollout whose session_meta cwd is run_dir, written since the run began."""
+    """The run's own rollout: session_meta cwd is run_dir, written since the run began.
+
+    A sub-agent's rollout shares that cwd; its session_meta names a parent_thread_id.
+    """
     sessions = codex_home / "sessions"
     if not sessions.is_dir():
         return None
@@ -475,7 +480,8 @@ def codex_transcript(codex_home: Path, run_dir: str, since: float) -> Path | Non
         with path.open(encoding="utf-8", errors="replace") as handle:
             first = parse_jsonl(handle.readline())
         payload = first[0].get("payload") if first else None
-        if isinstance(payload, Mapping) and payload.get("cwd") in wanted:
+        if (isinstance(payload, Mapping) and payload.get("cwd") in wanted
+                and "parent_thread_id" not in payload):
             if newest is None or path.stat().st_mtime > newest.stat().st_mtime:
                 newest = path
     return newest
@@ -499,7 +505,9 @@ def fetch_script(harness: str, run_dir: str) -> str:
         script = (
             's="${CODEX_HOME:-$HOME/.codex}/sessions"; [ -d "$s" ] || exit 3; '
             'f=$(find -H "$s" -type f -name "rollout-*.jsonl" -newer "$1" | while read -r f; do '
-            'head -n 1 "$f" | grep -qF -e "\\"cwd\\":\\"$1\\"" -e "\\"cwd\\": \\"$1\\"" '
+            'm=$(head -n 1 "$f"); '
+            'printf "%s" "$m" | grep -qF -e "\\"cwd\\":\\"$1\\"" -e "\\"cwd\\": \\"$1\\"" '
+            '&& ! printf "%s" "$m" | grep -qF "\\"parent_thread_id\\"" '
             '&& { printf "%s\\n" "$f"; break; }; done); '
             '[ -n "$f" ] && exec cat -- "$f"; exit 3'
         )

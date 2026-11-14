@@ -123,6 +123,11 @@ def test_claude_live_transcript_from_pc():
     assert found == sp.Evidence("yes", "Read", "yes", "missing", "2.1.322")
 
 
+def test_codex_live_transcript_from_box():
+    found = evidence("codex", "codex_live_run_as.jsonl")
+    assert found == sp.Evidence("yes", "exec", "yes", "n/a", "0.162.1")
+
+
 def test_codex_shell_read_counts_as_read():
     found = evidence("codex", "codex_shell_read.jsonl")
     assert (found.read, found.read_via) == ("yes", "shell")
@@ -160,17 +165,23 @@ FAILED_SPAWN = {"content": "unsupported call: spawn_agent", "success": False}
     json.dumps(FAILED_SPAWN),
     "unsupported call: spawn_agent",
     json.dumps({"agent_id": "019a", "success": False}),
+    json.dumps({"task_name": "/root/probe", "success": False}),
+    json.dumps({"task_name": ""}),
     json.dumps({"status": "error"}),
     "",
     None,
-], ids=["mapping", "serialized", "plain", "serialized-failed-id", "no-id", "empty", "none"])
-def test_codex_spawn_without_an_agent_id_is_not_a_helper(output):
+], ids=["mapping", "serialized", "plain", "serialized-failed-id", "failed-task-name",
+        "empty-task-name", "no-id", "empty", "none"])
+def test_codex_spawn_that_names_no_agent_is_not_a_helper(output):
     assert sp.codex_evidence(codex_spawn(output), CANARY).helper == "no"
 
 
-@pytest.mark.parametrize("output", [{"agent_id": "019a"}, json.dumps({"agent_id": "019a"})],
-                         ids=["mapping", "serialized"])
-def test_codex_spawn_with_an_agent_id_is_a_helper(output):
+@pytest.mark.parametrize("output", [
+    {"agent_id": "019a"},
+    json.dumps({"agent_id": "019a"}),
+    json.dumps({"task_name": "/root/probe"}),
+], ids=["mapping", "serialized", "task-name"])
+def test_codex_spawn_that_names_its_agent_is_a_helper(output):
     assert sp.codex_evidence(codex_spawn(output), CANARY).helper == "yes"
 
 
@@ -368,6 +379,31 @@ def test_transcript_locator_refuses_paths_outside_the_transcript_dirs(tmp_path):
     (day / "rollout-b.jsonl").write_text('{"type":"session_meta","payload":{"cwd":"/r"}}\n')
     assert sp.codex_transcript(codex, "/r", since=0) == day / "rollout-b.jsonl"
     assert sp.codex_transcript(codex, "/r", since=4e9) is None
+
+
+def write_parent_and_newer_subagent_rollout(day: Path, run_dir: str) -> str:
+    parent = json.dumps({"type": "session_meta", "payload": {
+        "id": "p", "cwd": run_dir, "source": "exec", "thread_source": "user"}}) + "\n"
+    child = json.dumps({"type": "session_meta", "payload": {
+        "id": "c", "parent_thread_id": "p", "cwd": run_dir, "thread_source": "subagent",
+        "source": {"subagent": {"thread_spawn": {"parent_thread_id": "p"}}}}}) + "\n"
+    day.mkdir(parents=True)
+    (day / "rollout-parent.jsonl").write_text(parent)
+    (day / "rollout-sub.jsonl").write_text(child)
+    os.utime(day / "rollout-parent.jsonl", (1000, 1000))
+    os.utime(day / "rollout-sub.jsonl", (2000, 2000))
+    os.utime(run_dir, (1, 1))
+    return parent
+
+
+def test_codex_locators_take_the_parent_rollout_not_a_subagents(tmp_path):
+    home = tmp_path / "home"
+    run_dir = str(tmp_path / "jobs" / "skill-probe-0000-codex-run-as")
+    Path(run_dir).mkdir(parents=True)
+    parent = write_parent_and_newer_subagent_rollout(
+        home / ".codex" / "sessions" / "2026" / "11" / "14", run_dir)
+    assert local_fetch("codex", home, run_dir) == parent
+    assert remote_fetch("codex", home, run_dir).stdout == parent
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex"])
