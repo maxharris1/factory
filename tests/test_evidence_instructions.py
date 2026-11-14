@@ -7,6 +7,7 @@ import pytest
 from lib.dispatcher import Comment
 from lib.evidence.findings import Finding, findings_evidence
 from lib.evidence.instructions import CAUSES, instructions_evidence
+from lib.orch_yml import Approvals
 
 TRUSTED = {
     "github": {
@@ -263,6 +264,17 @@ def test_an_approvers_go_counts_only_for_an_extra_round():
     assert _bundle((max_go,), "70").prose is None
     build = _bundle((max_go,), "70", action="build", detail={}, approvers=frozenset({"maxharris1"}))
     assert build.prose is None
+
+
+@pytest.mark.parametrize("configured", ["maxharris1", "MaxHarris1", "MAXHARRIS1"])
+@pytest.mark.parametrize("author", ["maxharris1", "MaxHarris1", "MAXHARRIS1", "someone-else"])
+def test_an_approvers_go_counts_whenever_the_dispatcher_accepts_its_author(configured, author):
+    approvals = Approvals(app_trust=True, logins=frozenset({configured.casefold()}))
+    go = _comment("go", "Fix only f-1.", cid="70", at=1.0, author=author)
+    expected = ("extra-round", "Fix only f-1.", go.url) if approvals.may_approve(author) else (None,) * 3
+    for approvers in (approvals.logins, frozenset({configured})):
+        bundle = _bundle((go,), "70", approvers=approvers)
+        assert (bundle.cause, bundle.prose, bundle.url) == expected
 
 
 def test_the_header_is_not_part_of_the_prose():

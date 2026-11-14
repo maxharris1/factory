@@ -10,9 +10,10 @@ build, `extra-round` for a go that queued a fix (only Max's extra round on a
 capped ticket does), `answers` for an answers that resumed a paused step, and
 None for any other trigger. A go or answers counts only with `from=grok-bot`,
 `role=orchestrator` and an author trusted_logins lets speak for grok-bot; an
-extra-round go also counts from an approvers login, as the dispatcher lets an
-approver lift a cap. The prose is the trigger's body without its header, or
-None when the comment was edited after it was posted.
+extra-round go also counts from an approvers login, matched without regard to
+case, as the dispatcher lets an approver lift a cap. The prose is the trigger's
+body without its header, or None when the comment was edited after it was
+posted.
 
 prior_instruction is the resumed job's `instruction`, which the resume's own
 instruction replaces in its detail. plan_attempt is plan_gap_count + 1 for a
@@ -94,7 +95,8 @@ def _trigger(
     else:
         return None, None, None
     trusted = ORCHESTRATOR in trusted_bots(trusted_logins, comment.author) or (
-        cause == "extra-round" and comment.author in approvers
+        cause == "extra-round"
+        and comment.author.casefold() in {login.casefold() for login in approvers}
     )
     if not trusted or fields.get("from") != ORCHESTRATOR or fields.get("role") != "orchestrator":
         return None, None, None
