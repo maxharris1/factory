@@ -163,20 +163,45 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
     return "\n".join(lines)
 
 
-def handoff_section(bot: str, role: str, facts: dict, header: str, example: str) -> str:
+def handoff_section(
+    bot: str, role: str, facts: dict, header: str, example: str, *, skills_read: bool
+) -> str:
     target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
-    repo = facts["repo"] or "<owner>/<repo>"
-    pr = facts["pr"] or "<pr-number>"
+    read = (
+        "The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. "
+        if skills_read
+        else ""
+    )
     return (
         "## Handoff comment\n"
         f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
         "not an inline comment). Its first line is this orch:v1 header, "
         "with each `<...>` replaced by one of its choices:\n\n"
         f"{header}\n\n"
-        f"Then plain prose for people and agents: {example} "
+        f"Then plain prose for people and agents: {example} {read}"
         "If a product question blocks the work, post a questions handoff instead "
         f"(`<!-- orch:v1 kind=questions from={bot} role={role} -->`, "
         "then the question); it is this job's handoff.\n\n"
+        + _post_command(facts)
+    )
+
+
+def questions_handoff_section(bot: str, role: str, facts: dict) -> str:
+    target = f"PR #{facts['pr']}" if facts["pr"] else "the linked PR"
+    return (
+        "## Handoff comment\n"
+        f"Post exactly one handoff comment on {target} as a PR issue comment (not a review, "
+        "not an inline comment). It is a questions handoff, and its first line is this orch:v1 header:\n\n"
+        f"<!-- orch:v1 kind=questions from={bot} role={role} -->\n\n"
+        "Then plain prose: what is missing and what you need. This job posts no other handoff.\n\n"
+        + _post_command(facts)
+    )
+
+
+def _post_command(facts: dict) -> str:
+    repo = facts["repo"] or "<owner>/<repo>"
+    pr = facts["pr"] or "<pr-number>"
+    return (
         "Write the comment to `handoff.md` (never commit that file) and post it with this command, "
         "which prints the new comment's id:\n\n"
         f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`"

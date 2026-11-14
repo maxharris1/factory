@@ -14,12 +14,11 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         else "No plan handoff comment is linked: build from the ticket."
     )
     return [
-        "Build the ticket. Run as poteto-mode, with the playbook that fits it "
-        "(feature; bug-fix, repro first; refactor).",
+        "Build the ticket. Follow the router in Skills above.",
         f"1. Read the ticket and its brief (Job data). {plan_line}",
         f"2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `{base}`). "
         "Test first.",
-        "3. Before `ready`, self-check: principle-prove-it-works, no-comments.",
+        "3. Before `ready`, run the router's \"Before ready\" steps.",
         "4. Push, then post the ready handoff below with the head you pushed.",
         *builder_notes(job),
     ]
