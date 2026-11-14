@@ -48,7 +48,7 @@ stdout on a pipe and hands the pipe to a `Session` here:
 
 Secrets: the only free text that goes into the table is the harness's tool
 names (as tool call counts and step labels) and the live run's texts (each
-with absolute paths cut to `[path]` and capped at TASK_TEXT_LIMIT). They are
+with an absolute path and the rest of the text after it cut to `[path]`, and capped at TASK_TEXT_LIMIT). They are
 scrubbed first (`Scrubber`): the values of the
 harness's environment variables whose names look secret, and always its
 ORCH_JOB_PROOF and ORCH_WORKER_TAG, are replaced,
@@ -652,17 +652,16 @@ _TASK_EVENTS = frozenset({"task_started", "task_progress", "task_notification"})
 _TASK_CREATED = re.compile(r"\bTask #([\w-]{1,40}) created successfully")
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "done"}
 _SUBAGENT_END = {"completed": "finished", "failed": "failed", "stopped": "failed"}
-_PATH_HEAD = r"(?:(?:[\w.-]+@)?[\w.-]+:(?!//))?(?:~[\w.-]*|[A-Za-z]:)?[/\\]+[^\s/\\]"
 _ABSOLUTE_PATH = re.compile(
-    rf"(?P<quote>[\"'`]){_PATH_HEAD}(?:(?!(?P=quote)).)*(?P<close>(?P=quote)?)"
-    rf"|(?<![\w.:/~\\@-]){_PATH_HEAD}(?:\\ |\S)*"
+    r"(?<!\S)\S*?(?:(?<![\w.~-])~|(?<![\w./\\-])(?:[/\\](?![/\\])|(?<!:)[/\\]{2,}))[^\s/\\].*",
+    re.DOTALL,
 )
 
 
 def _cut_paths(text: str) -> str:
-    return _ABSOLUTE_PATH.sub(
-        lambda found: f"{found['quote']}[path]{found['close']}" if found["quote"] else "[path]", text
-    )
+    """Where a path ends cannot be told from text (quotes, spaces, escapes), so
+    everything from the word an absolute path starts in to the end goes."""
+    return _ABSOLUTE_PATH.sub("[path]", text)
 
 
 def _str(value: object) -> str | None:
@@ -684,7 +683,7 @@ class LiveRun:
     Only these texts are ever read from the stream: a task-list item's text
     and active form, and a sub-agent's description and type. Never a prompt,
     a result, a summary or a TaskCreate description. They stay in memory as
-    given; `row` cuts every path to `[path]` and scrubs each one."""
+    given; `row` cuts every absolute path and what follows it to `[path]` and scrubs each one."""
 
     def __init__(self) -> None:
         self.plan: list[dict] = []

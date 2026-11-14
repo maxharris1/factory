@@ -1282,10 +1282,10 @@ def test_live_run_text_is_scrubbed_capped_and_one_line() -> None:
     live = _live(summary)
     texts = [item["text"] for item in live["plan"]]
     assert texts[0] == "Rotate [redacted-token] and the [redacted-env] key"
-    assert texts[1] == "Call [redacted-url] as [redacted-email] from [path] and [path]"
+    assert texts[1] == "Call [redacted-url] as [redacted-email] from [path]"
     assert len(texts[2]) == telemetry.TASK_TEXT_LIMIT == 120 and texts[2].endswith("…")
     assert texts[3] == telemetry.HIDDEN  # longer than the scrubber reads: hidden whole
-    assert live["current_task"] == "Doing Call [redacted-url] as [redacted-email] from [path] and [path]"
+    assert live["current_task"] == "Doing Call [redacted-url] as [redacted-email] from [path]"
     agent = live["subagents"][0]
     assert agent["description"] == "Check [redacted-token] for leaks"
     assert len(agent["kind"]) == telemetry.LABEL_LIMIT
@@ -1308,17 +1308,28 @@ ABSOLUTE_PATHS = [
 
 PATH_CUTS = [
     *((f"Inspect {path}", "Inspect [path]") for path in ABSOLUTE_PATHS),
+    *((f"Inspect {path} then report", "Inspect [path]") for path in ABSOLUTE_PATHS),
     ("Inspect build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
     ("Inspect bot@build-host:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect bot@[2001:db8::1]:/srv/factory/private/deployment.txt", "Inspect [path]"),
+    ("Inspect [2001:db8::1]:/srv/factory/private/deployment.txt", "Inspect [path]"),
     ("Inspect file:/srv/factory/private/deployment.txt", "Inspect [path]"),
     (r"Inspect build-host:C:\Users\bot\private\deployment.txt", "Inspect [path]"),
-    ('Read "/Users/John Doe/private/deployment.txt"', 'Read "[path]"'),
-    ("Read '/Users/John Doe/private/deployment.txt' first", "Read '[path]' first"),
-    ("Read `~/My Files/private/deployment.txt` first", "Read `[path]` first"),
-    (r'Read "C:\Users\John Doe\private\deployment.txt"', 'Read "[path]"'),
-    ('Read "build-host:/srv/John Doe/private/deployment.txt"', 'Read "[path]"'),
-    ('Read "/Users/John Doe/private/deployment.txt', 'Read "[path]'),
+    ("Inspect path=/srv/factory/private/deployment.txt now", "Inspect [path]"),
+    ("Inspect (/srv/factory/private/deployment.txt)", "Inspect [path]"),
+    (r"Inspect %USERPROFILE%\private\deployment.txt", "Inspect [path]"),
+    ('Read "/Users/John Doe/private/deployment.txt"', "Read [path]"),
+    ("Read '/Users/John Doe/private/deployment.txt' first", "Read [path]"),
+    ("Read `~/My Files/private/deployment.txt` first", "Read [path]"),
+    (r'Read "C:\Users\John Doe\private\deployment.txt"', "Read [path]"),
+    ('Read "build-host:/srv/John Doe/private/deployment.txt"', "Read [path]"),
+    ('Read "/Users/John Doe/private/deployment.txt', "Read [path]"),
+    (r'Read "/Users/John \"The Builder\" Doe/private/deployment.txt"', "Read [path]"),
+    ("Read '/Users/John O'Brien/private/deployment.txt'", "Read [path]"),
+    ("Read \u201c/Users/John Doe/private/deployment.txt\u201d", "Read [path]"),
+    ("Read /Users/John\tDoe/private/deployment.txt", "Read [path]"),
     (r"Read /Users/John\ Doe/private/deployment.txt", "Read [path]"),
+    ("/Users/John Doe/private/deployment.txt", "[path]"),
 ]
 
 
@@ -1353,7 +1364,7 @@ def test_every_absolute_path_form_is_cut_whole_before_it_is_stored(tmp_path: Pat
     assert claude["subagents"][0]["description"] == cut
 
 
-@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b"])
+@pytest.mark.parametrize("text", ["and/or", "TCP/IP", "1/2 done", "a / b", "Read a \\ b", "see https://example.com/x", "see file:///etc/x", "Note: a/b", "it's a/b", "edit lib/telemetry.py", "run ./setup.sh", "24/7 on-call"])
 def test_relative_slashes_are_not_paths(text: str) -> None:
     live = _live(_feed(Summary("claude", Scrubber({})), _use("t1", "TodoWrite", _todos((text, "pending")))))
     assert "[path]" not in live["plan"][0]["text"]
