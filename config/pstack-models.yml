@@ -1,0 +1,38 @@
+# Helper model per pstack role, one value per harness, in that harness
+# adapter's own format (SF-6). Roles are the step-5 lines of the pinned
+# skills/pstack/skills/setup-pstack/SKILL.md. lib/pstack_models.py reads
+# this file. The brief's helper model lines and ~/.claude/rules/pstack-models.md
+# both come from it. `roles` must equal the pinned list, in pin order, so a
+# pin bump that adds, renames or drops a role fails until this file follows.
+roles:
+  - feature, refactoring
+  - bug-fix
+  - perf-issue
+  - hillclimb
+  - judgment and prose
+  - hardest tasks
+  - how explorer
+  - how explainer
+  - why investigators
+  - why synthesizer
+  - reflect tooling
+  - reflect judgment, divergent, synthesizer
+  - arena runners
+  - arena cross-judge pool
+  - swarm workers
+  - architect runners
+  - interrogate reviewers
+harnesses:
+  claude:
+    budget: medium (high)
+    default: opus high
+    panel: [opus high, opus high]
+  codex:
+    budget: medium (high)
+    default: gpt-6.1-sol high
+    panel: [gpt-6.1-sol high, gpt-6.1-sol high]
+  cursor:
+    budget: medium (high)
+    default: inherit-parent
+    panel: [inherit-parent, inherit-parent]
+overrides: {}

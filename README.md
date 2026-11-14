@@ -228,24 +228,43 @@ refuses (exit 125) unless `sysctl -n kern.bootsessionuuid` gives a boot session
 id (a UUID) and the start leads its own process group, then creates the record with
 noclobber (it refuses if the file exists), holding
 `<group> <boot session> <tag> <leader start time>` (`ps -o lstart=`, C locale,
-UTC). A check that finds no record cannot tell whether the start is still on
-its way, so it creates the record itself as a fence (`fenced`) and cannot tell
-this time; the fenced start then refuses, and later checks read the fence as
-gone. A start that never ran (unreachable, refused) so frees its slot one check
-later. The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
+UTC). Just before, it starts a keeper in its own group and writes the keeper's
+pid and start time as the first snapshot (below). The keeper ignores SIGTERM,
+SIGINT and SIGHUP and exits once no other process is in the group, so the group
+is never empty while any process of the start lives, and its number is never
+reused meanwhile (Codex PR #129 round 3). A check that finds no record cannot
+tell whether the start is still on its way, so it creates the record itself as
+a fence (`fenced`) and cannot tell this time; the fenced start then refuses,
+and later checks read the fence as gone. A start that never ran (unreachable,
+refused) so frees its slot one check later. The poll that follows a detached
+start (issue #128) never writes the fence: with no record it cannot tell, and
+the start it follows records itself.
+The check reads the record and `ps -A -o pgid=,pid=,uid=`. Gone needs
 every step to succeed with a well-formed result: ps exits 0, every line it
 lists is three numbers, and awk reads all of them, exits 0 and prints exactly
 three 0/1 answers. Then a record from an earlier boot session or an empty group
 is gone; a group holding only the bot's own processes and led by the recorded
-leader is running; a malformed record, another tag, another user's process in the group,
-a group whose leader has exited (nothing ties the processes left to this start),
+leader is running, and so is one whose leader has exited while it still holds
+a process from the last stop's snapshot (below) with its recorded start time;
+a malformed record, another tag, another user's process in the group,
+a group whose leader has exited with no such process (nothing ties the
+processes left to this start),
 a leader with a different start time (the number was reused), or any failed or
 malformed step (no boot session UUID, a user id that is not a number, ps, awk)
-cannot tell. The stop sends SIGTERM to the recorded group only when the check
-would say running. A process that leaves the job's group (`setsid`), or stays in
-it after its leader exits, is never signalled on macOS; the latter keeps the
-slot until it ends. Every script runs under POSIX `sh` whatever the login shell
-(the Mac bots use zsh).
+cannot tell. The stop sends SIGTERM (SIGKILL when a cancel escalates) to the
+recorded group only when the check would say running. While the leader is
+verified alive, the stop first writes a snapshot of the group
+(`.orch-worker-<tag>.members.pid`: each member's pid and start time, from one
+`ps -A -o pgid=,pid=,lstart=` listing, kept only when the leader is verified
+again after it). A snapshot member still in the group with the same start time
+proves the group was never empty since, so its number was never reused: a
+cancelled run whose harness dies on SIGTERM but leaves a child that ignores it
+is still killed (Codex PR #129 round 2). With the keeper, so is a child born
+after the snapshot, even one the harness forks while it shuts down, and a child
+left in the group after a normal exit is stopped before the slot is released,
+as on Linux (round 3). A process that leaves the job's group (`setsid`) is
+never signalled on macOS. Every script runs under POSIX `sh` whatever the login
+shell (the Mac bots use zsh).
 
 When the command ends, done, failed or killed, the slot is released only once
 the worker is confirmed gone. On the box the command has exited (and no worker
@@ -257,7 +276,12 @@ device one SSH check looks for the tag: any process of the bot user carrying it
 still in the recorded group from this boot means it cannot tell; otherwise the
 worker is gone. A worker still running is sent SIGTERM (every tagged process
 and each group holding one; a stored number alone is never signalled) and
-checked again for up to 10 seconds. An unreachable device, a check that cannot
+checked again for up to 10 seconds. A cancelled run (a signal to `orch job
+run`, or its job ended elsewhere) is not left running: the follow sends
+SIGTERM, then SIGKILL to the same processes from 60 seconds on, and follows
+the worker until it is gone, for up to two minutes; if it is still not
+confirmed gone, the final check sends SIGKILL after its SIGTERM too (issue
+#128). An unreachable device, a check that cannot
 tell, or a worker that will not stop keeps the slot and is logged. A new
 `orch job run` for a job whose runner died is refused (exit 2, nothing started)
 while that runner's worker is not confirmed gone, so its identity is never
@@ -403,6 +427,14 @@ backoff (writes are never retried); a ref that still times out records a retryab
 Linear budget and search page-limit deferrals are expected load shedding, not
 errors: they do not fail the cycle and are written as at most one aggregated
 row per cycle to `poll_deferrals`, not `poll_errors`.
+A poll step's exception, and one that escapes a whole cycle, keeps its class in
+`poll_errors.error` and stores its message and newest ten frames, redacted and
+capped at 4,000 characters, in `poll_errors.detail`; each message in the chain
+is cut at its first character outside letters, digits, spaces and `_.,:;()'/=+-`,
+so no response body, escaped or not, is kept.
+The same text goes to the poller's stderr. Each stuck ticket's wake is tried on its own, so one bad
+`ticket_state` row records a `stuck-wake:<class>` error and the rest of the
+cycle still runs.
 At startup, polling refuses an invalid `orch.yml` (including placeholders), a
 missing GitHub trust map, any configured Linear project with no Linear trust
 map, missing Grok webhook environment-variable names, a missing initialized
@@ -599,7 +631,7 @@ and records itself on the slot, so the job reads `running` within seconds of
 the claim, with no model turn and no message to any bot. The harness posts its
 `orch:v1` handoff and runs `orch job done` as the brief says.
 
-- **Brief.** [`lib/brief.py`](lib/brief.py) renders one standard brief per
+- **Brief.** [`lib/brief/`](lib/brief/) renders one standard brief per
   job kind from the job row: implement (`build`, `plan`), fix, review, and
   merge-only (a `fix` whose detail has `"kind": "merge-only"`). It states the
   repo, PR or ticket, head, round and cap, risk, the section 8 review rules
@@ -955,7 +987,11 @@ interval or `every_minutes`, up to a day). The poller also probes each
 enabled, non-placeholder remote device in `machines.yml` over SSH every 60
 seconds (`device-probe`, through the device's first bot alias, `ssh -o
 BatchMode=yes ... exit 0`), each device in its own thread so one that hangs
-never delays another; only a device that answered counts as seen. The
+never delays another; only a device that answered counts as seen. `orch
+poll` also records whether each dashboard push it started succeeded
+(`dashboard-push`, issue #106): stale after one failed push ("push
+failing, last pushed … ago"), down once no push has succeeded for 8 push
+intervals. It is listed once a push has finished. The
 listener checks its tunnel (`tunnel`) every 15 seconds by a GET of
 `linear_webhook.public_url`, its Funnel URL: only the listener's own 405
 for its path counts as seen, so a Funnel that is off, a gateway error or a
@@ -1038,6 +1074,15 @@ written to a temp file in the same directory and fsynced, then renamed into
 place, `status.json` first; if a later rename fails, every file already
 renamed is put back as it was (or removed if it had no earlier version), so
 the set always comes from one snapshot.
+
+`status.json`'s `projects` lists each `orch.yml` project in order with its
+tracker, ship mode (`merge`, `handoff`, or `after` plus the `approver`) and
+round caps (`rounds.low`, `rounds.high`), as the poller last read its
+`factory.md` (issue #152). The dashboard has no copy of any `factory.md`:
+each poll cycle the dispatcher stores what `LivePollSource` parsed in the
+`project_rules` table (`lib/project_rules.py`), and the snapshot reads it
+back. A `factory.md` the poller could not read, or has not read yet, is
+`status: unknown` with the `reason`, never a default.
 
 **Pages.** Every page shares one bar: links to the pages (Lanes, Jobs,
 Activity, Efficiency, in that order), the link state
@@ -1302,21 +1347,22 @@ sends it); with an older copy of that server the browser blocks the poll
 and the page falls back to reloading.
 
 *How it publishes.* Each file is first uploaded to a dot-prefixed temp name
-in the served directory (`scp -q -B [-F ssh_config] -o BatchMode=yes -o
-ConnectTimeout=10 -- status.json
+in the served directory (`scp -q -B [-F ssh_config] <options> -- status.json
 pc-wsl-cursor-bot:factory-dashboard/.status.json.push-tmp`, then the same
-for each page; with `rsync`, `rsync --quiet --timeout=30 --chmod=F644 -e
-"ssh [-F ssh_config] -o BatchMode=yes -o ConnectTimeout=10" --` to the same
-temp names). Only after every upload succeeds does one `ssh [-F ssh_config]
--o BatchMode=yes -o ConnectTimeout=10 -- pc-wsl-cursor-bot 'cd --
+for each page; with `rsync`, `rsync --quiet --timeout=10 --chmod=F644 -e
+"ssh [-F ssh_config] <options>" --` to the same temp names). Only after
+every upload succeeds does one `ssh [-F ssh_config] <options> --
+pc-wsl-cursor-bot 'cd --
 factory-dashboard && mv -f -- .status.json.push-tmp status.json && mv -f --
 .index.html.push-tmp index.html && ...'` rename them all over the live
 names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
 mismatched for at most the instants between local `rename(2)` calls. The static server
-never serves the temp names. Every command is an argv list (no local shell)
-with a 60-second timeout; the remote shell sees only the validated
+never serves the temp names. `<options>` are `-o BatchMode=yes -o
+ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`, so a
+dead link fails in seconds (issue #106). Every command is an argv list (no
+local shell) with a 20-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
 bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
 path, absolute or relative to the remote login's home, with no leading `-`,
@@ -1324,7 +1370,15 @@ path, absolute or relative to the remote login's home, with no leading `-`,
 ssh_config file, and a name that looks like a key (`id_*`, `*.pem`,
 `*.key`, `*.pub`, `*.ppk`) is refused. SSH uses the login Max provisions;
 the factory never reads, names or passes a key, and never reads the
-ssh_config file itself. `check-config` validates the section. Tests use a
+ssh_config file itself. `check-config` validates the section.
+
+*When a push fails* (issue #106), `orch poll` reads the push child's exit
+status. After the k-th failure in a row it starts no push until
+min(30·2^(k-1), 600) seconds after the failed one started, with one
+`dashboard push: failed (exit N), k in a row; pushes paused for Ss` line;
+a success clears the backoff. A live push's pending change waits and goes
+out when the backoff ends. Each push's outcome is the `dashboard-push`
+Health component (below). Tests use a
 fake transport and a fake spawn; nothing in this repository runs ssh, scp
 or rsync against a real host.
 

@@ -9,7 +9,7 @@ runs as the owning bot's own user and login, starts the job itself:
   device takes the job: the box, or a remote device such as the PC or the
   Mac. A remote job runs over the bot's own SSH alias through `orch job
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
-* it renders the standard brief for the job (lib/brief.py), with the target
+* it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
   GitHub token variable unset;
@@ -21,7 +21,8 @@ runs as the owning bot's own user and login, starts the job itself:
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
-(or `ORCH-HANDOFF: failed`); that output comes back over SSH into run.log,
+(or `ORCH-HANDOFF: failed`); that output is relayed by orch job run's
+follower (lib/remote_follow.py) into run.log,
 and when the run ends the waiter runs `orch job done` on the box: done with
 that comment id only when `orch job run` exited 0 and the marker is the last
 line of this run's output (run.log from the offset where this run began,
