@@ -5445,6 +5445,35 @@ def test_no_credential_value_reaches_a_poll_error_row(tmp_path: Path, message: s
         assert text.startswith("RuntimeError")
 
 
+class FailedDevices:
+    def __init__(self, body: str):
+        self.body = body
+
+    def reconcile(self, now: float, on_offline: object) -> None:
+        raise RuntimeError(f"device check failed: {self.body}")
+
+
+@pytest.mark.parametrize("body", CREDENTIAL_BODIES)
+def test_no_credential_body_reaches_an_exception_message_formatter(
+    tmp_path: Path, body: str
+) -> None:
+    from lib.dispatcher import poll_error_text, safe_ship_error
+    from lib.poll_source import _safe_reason
+
+    dispatcher, queue = setup(tmp_path, [100.0])
+    dispatcher.devices = FailedDevices(body)
+    dispatcher.reconcile_jobs()
+    dispatcher.record_poll_error("o/r", "1", ValueError(body), prefix="job-states:")
+    with queue.connect() as connection:
+        rows = [dict(row) for row in connection.execute("SELECT error, detail FROM poll_errors")]
+    assert len(rows) == 2
+    error = RuntimeError(body)
+    for text in (json.dumps(rows), poll_error_text(error), safe_ship_error(error),
+                 _safe_reason(error)):
+        assert CANARY not in text
+    assert rows[0]["error"].startswith("RuntimeError: device check failed")
+
+
 def test_poll_error_prefixes_are_kept(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path, [0.0])
     dispatcher.record_poll_error("o/r", "1", ValueError("bad row"), prefix="job-states:")

@@ -276,8 +276,9 @@ _SECRET_NAME = (
 _SECRET_ASSIGNMENT = re.compile(
     rf"(?i)(?<!<)(?:\b{_SECRET_NAME}\b\s*[:=]?\s*[\"']?)+\S+"
 )
-_SECRET_BODY = re.compile(r"[{\[<].*", re.DOTALL)
 _PLAIN_MESSAGE = re.compile(r"[A-Za-z0-9_ .,:;()'/=+-]*")
+_REDACTED_MARKS = {"<url>": "\ue000", "<host>": "\ue001", "<secret>": "\ue002"}
+_PLAIN_REDACTED = re.compile(r"[A-Za-z0-9_ .,:;()'/=+\ue000-\ue002-]*")
 _CREDENTIAL_WORD = re.compile(
     r"(?i)[A-Za-z0-9_-]*(?:token|secret|pass|pwd|key|auth|credential|session"
     r"|cookie|signature|bearer|basic)"
@@ -302,14 +303,17 @@ def _without_body(exc: BaseException) -> str:
     safe = getattr(exc, "safe_detail", None)
     if isinstance(safe, str) and safe:
         separator, message = ": ", safe
-    message = message.rstrip()
-    plain = _PLAIN_MESSAGE.match(message).group(0)
+    return name.rstrip() + separator + _plain_prefix(message.rstrip(), _PLAIN_MESSAGE) + "\n"
+
+
+def _plain_prefix(message: str, plain_pattern: re.Pattern[str]) -> str:
+    plain = plain_pattern.match(message).group(0)
     credential = _CREDENTIAL_WORD.search(plain)
     if credential is not None:
-        plain = plain[: credential.start()] + "<credential omitted>"
-    elif plain != message:
-        plain += "<body omitted>"
-    return name.rstrip() + separator + plain + "\n"
+        return plain[: credential.start()] + "<credential omitted>"
+    if plain != message:
+        return plain + " <body omitted>"
+    return plain
 
 
 def poll_error_detail(exc: BaseException) -> str:
@@ -374,9 +378,18 @@ def poll_error_text(error: str | BaseException) -> str:
 
 def scrub_detail(detail: str) -> str:
     """`detail` with no URL, host path, token, credential value, body or
-    non-printable character."""
-    detail = _redact(_SECRET_BODY.sub(" <body omitted>", detail))
+    non-printable character.
+
+    After redaction the text is cut as poll_error_detail cuts a message:
+    at its first character outside the plain set, so no encoded or escaped
+    body survives, and at its first credential-like word."""
     detail = "".join(char if char.isprintable() else " " for char in detail)
+    detail = _redact(detail)
+    for placeholder, mark in _REDACTED_MARKS.items():
+        detail = detail.replace(placeholder, mark)
+    detail = _plain_prefix(detail, _PLAIN_REDACTED)
+    for placeholder, mark in _REDACTED_MARKS.items():
+        detail = detail.replace(mark, placeholder)
     return " ".join(detail.split())
 
 
