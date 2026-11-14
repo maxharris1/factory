@@ -235,7 +235,9 @@ def _kill_poller(home: Path) -> None:
         pass
 
 
-def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
+def _service(
+    home: Path, *args: str, cron: Path | None = None, service: Path = SERVICE, **extra: str
+):
     # Tests never reach a real crontab: ORCH_CRONTAB is always a fake or
     # a path that does not exist.
     env = {
@@ -255,7 +257,7 @@ def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
         env["ORCH_CRONTAB"] = str(crontab)
         env["FAKE_CRONTAB_FILE"] = str(cron)
     return subprocess.run(
-        ["bash", str(SERVICE), *args],
+        ["bash", str(service), *args],
         env=env,
         text=True,
         capture_output=True,
@@ -672,3 +674,168 @@ def test_ensure_probes_the_database_orch_poll_env_names(home: Path, tmp_path: Pa
     assert started.returncode == 0, started.stderr
     assert "started orch poll" in started.stdout
     assert _pidfile(home).exists()
+
+
+# --- issue #248: box restart with no crontab and a running copy-in ----------
+
+
+def _deploy_copy(tmp_path: Path, calls: Path) -> Path:
+    """deploy/ with the real poller scripts and a waiter-service.sh that only
+    records each call."""
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    for name in ("poller-service.sh", "run-poller.sh", "poller-ensure-loop.sh"):
+        shutil.copy(ROOT / "deploy" / name, deploy)
+    fake = deploy / "waiter-service.sh"
+    fake.write_text(f'#!/bin/sh\necho "$1 $2" >>{calls}\n', encoding="utf-8")
+    fake.chmod(0o755)
+    return deploy / "poller-service.sh"
+
+
+def _stop_loop(home: Path) -> None:
+    pidfile = home / ".local/state/factory/poller-ensure-loop.pid"
+    try:
+        os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
+def test_poller_ensure_also_ensures_every_autostarted_waiter(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    config = home / ".config/factory"
+    for name in ("waiter-autostart-claude-bot", "waiter-autostart-codex-bot",
+                 "waiter-autostart-bogus"):
+        (config / name).touch()
+
+    result = _service(home, "ensure", service=service)
+    assert result.returncode == 0, result.stderr
+    assert sorted(calls.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
+
+    assert _service(home, "stop", service=service).returncode == 0
+    held = _service(home, "ensure", service=service)
+    assert held.returncode == 0, held.stderr
+    assert held.stdout == ""
+    assert calls.read_text().count("claude-bot ensure") == 2
+    assert not _pidfile(home).exists()
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="needs flock(1)")
+def test_ensure_without_crontab_starts_the_ensure_loop_that_keeps_waiters_alive(
+    home: Path, tmp_path: Path
+) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    config = home / ".config/factory"
+    (config / "poller-autostart").touch()
+    (config / "waiter-autostart-claude-bot").touch()
+    (config / "waiter-autostart-codex-bot").touch()
+    state = home / ".local/state/factory"
+    loop_pid = state / "poller-ensure-loop.pid"
+    try:
+        first = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.2")
+        assert first.returncode == 0, first.stderr
+        assert "crontab not found" in first.stderr
+        deadline = time.monotonic() + 15
+        while calls.read_text().count("codex-bot ensure") < 3:
+            assert time.monotonic() < deadline, calls.read_text()
+            time.sleep(0.1)
+        loop = int(loop_pid.read_text())
+        assert alive(loop)
+
+        again = _service(home, "ensure", service=service, ORCH_POLL_ENSURE_SEC="0.2")
+        assert again.returncode == 0, again.stderr
+        assert "crontab not found" not in again.stderr
+        assert int(loop_pid.read_text()) == loop
+        assert (state / "poller.log").read_text().count("crontab not found") == 1
+    finally:
+        _stop_loop(home)
+
+
+def test_ensure_with_crontab_starts_no_ensure_loop(home: Path, tmp_path: Path) -> None:
+    calls = tmp_path / "waiter-calls"
+    service = _deploy_copy(tmp_path, calls)
+    (home / ".config/factory/poller-autostart").touch()
+    try:
+        result = _service(home, "ensure", service=service, cron=tmp_path / "crontab.txt")
+        assert result.returncode == 0, result.stderr
+        assert "crontab not found" not in result.stderr
+        time.sleep(0.5)
+        assert not (home / ".local/state/factory/poller-ensure-loop.pid").exists()
+    finally:
+        _stop_loop(home)
+
+
+def _copy_in(tmp_path: Path, phase: str) -> Path:
+    status = tmp_path / "sand-copy-in-status.json"
+    status.write_text(f'{{"phase": "{phase}", "percent": 96}}', encoding="utf-8")
+    return status
+
+
+def test_restore_waits_for_the_copy_in_and_keeps_the_db_it_brings_back(
+    home: Path, tmp_path: Path
+) -> None:
+    database = _lost_db(home)
+    calls = home / "calls.txt"
+    status = _copy_in(tmp_path, "copying")
+
+    def finish_copy_in() -> None:
+        time.sleep(1.5)
+        database.parent.mkdir(parents=True, exist_ok=True)
+        database.write_bytes(b"copied in")
+        status.write_text('{"phase": "done"}', encoding="utf-8")
+
+    import threading
+
+    copier = threading.Thread(target=finish_copy_in)
+    copier.start()
+    result = _service(
+        home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls),
+        ORCH_COPY_IN_STATUS=str(status), ORCH_COPY_IN_WAIT="30", ORCH_COPY_IN_POLL_SEC="0.2",
+    )
+    copier.join()
+
+    assert result.returncode == 0, result.stderr
+    assert "box copy-in is still running (phase copying)" in result.stderr
+    assert "RESTORED" not in result.stderr
+    assert not calls.exists()
+    assert database.read_bytes() == b"copied in"
+    assert _pidfile(home).exists()
+
+
+def test_restore_waits_a_bounded_time_for_a_stuck_copy_in(home: Path, tmp_path: Path) -> None:
+    database = _lost_db(home)
+    calls = home / "calls.txt"
+    status = _copy_in(tmp_path, "copying")
+
+    started = time.monotonic()
+    result = _service(
+        home, "ensure", FAKE_RESTORE="0", FAKE_ORCH_CALLS=str(calls),
+        ORCH_COPY_IN_STATUS=str(status), ORCH_COPY_IN_WAIT="2", ORCH_COPY_IN_POLL_SEC="0.2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started >= 2
+    assert "box copy-in did not finish within 2s; restoring orch.db anyway" in result.stderr
+    assert "RESTORED orch.db from backup" in result.stderr
+    assert calls.read_text() == f"restore-db --db {database}\n"
+
+
+@pytest.mark.parametrize("phase", ["done", None])
+def test_restore_does_not_wait_when_the_copy_in_is_done_or_absent(
+    home: Path, tmp_path: Path, phase: str | None
+) -> None:
+    status = _copy_in(tmp_path, phase) if phase else tmp_path / "no-status.json"
+
+    started = time.monotonic()
+    result = _service(
+        home, "ensure", FAKE_RESTORE="0", ORCH_COPY_IN_STATUS=str(status),
+        ORCH_COPY_IN_WAIT="30", ORCH_COPY_IN_POLL_SEC="0.2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 10
+    assert "copy-in" not in result.stderr
+    assert "RESTORED orch.db from backup" in result.stderr

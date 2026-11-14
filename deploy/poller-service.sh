@@ -34,6 +34,14 @@
 # background whenever a bot shell starts. When `crontab` exists it also
 # installs an @reboot line and a 5-minute `ensure` watchdog, tagged
 # "# factory-orch-poll" and replaced, never duplicated, on every run.
+# With poller-autostart on and no `crontab` (issue #248), `ensure` logs that
+# once per state directory and starts deploy/poller-ensure-loop.sh unless it
+# already runs, so `ensure` still runs every ORCH_POLL_ENSURE_SEC seconds.
+#
+# Waiters (issue #248): every `ensure`, held stopped or not, also runs
+# `waiter-service.sh <bot> ensure` for each ~/.config/factory/waiter-autostart-<bot>,
+# logging to waiter-<bot>-service.log, so whatever keeps the poller alive keeps
+# the autostarted waiters alive too.
 # ORCH_CRONTAB names the crontab command (default: crontab on PATH). If the
 # current crontab cannot be read (anything but "no crontab for <user>"),
 # install-autostart and remove-autostart change nothing and exit 1.
@@ -43,7 +51,12 @@
 # logging RESTORED. ORCH_DB and ORCH_DB_BACKUP are read with webhook.env and
 # orch-poll.env loaded, as run-poller.sh loads them, so recovery uses the
 # poller's own paths. With no backup it is created empty (`orch init-db`) with a
-# WARNING; any other restore failure starts nothing.
+# WARNING; any other restore failure starts nothing. While a box copy-in is
+# still restoring files (ORCH_COPY_IN_STATUS, default
+# /tmp/sand-copy-in-status.json, exists and its "phase" is not "done"), the
+# restore waits up to ORCH_COPY_IN_WAIT seconds (default 600) for it, checking
+# every ORCH_COPY_IN_POLL_SEC (default 5); an orch.db the copy-in brings back
+# is kept and nothing is restored.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +75,13 @@ START_WAIT="${ORCH_POLL_START_WAIT:-15}"
 STOP_WAIT="${ORCH_POLL_STOP_WAIT:-60}"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 PROC="${ORCH_PROC_DIR:-/proc}"
+WAITER_SERVICE="${HERE}/waiter-service.sh"
+ENSURE_LOOP="${HERE}/poller-ensure-loop.sh"
+ENSURE_LOOP_LOCK="${STATE}/poller-ensure-loop.lock"
+NO_CRONTAB_LOGGED="${STATE}/crontab-absent.logged"
+COPY_IN_STATUS="${ORCH_COPY_IN_STATUS:-/tmp/sand-copy-in-status.json}"
+COPY_IN_WAIT="${ORCH_COPY_IN_WAIT:-600}"
+COPY_IN_POLL="${ORCH_COPY_IN_POLL_SEC:-5}"
 # cron and fresh shells have a minimal PATH; the poller needs orch and gh.
 # The caller's PATH keeps precedence; the standard directories only follow it.
 export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
@@ -136,6 +156,32 @@ loud() {
     say "$@" | tee -a "$LOG" >&2
 }
 
+# The copy-in status file's "phase", or nothing when it has none.
+copy_in_phase() {
+    local text
+    text="$(cat "$COPY_IN_STATUS" 2>/dev/null)" || return 0
+    [[ "$text" =~ \"phase\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || return 0
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# #248: a box copy-in may still be restoring orch.db; wait (bounded) for it
+# to finish or for the database to come back.
+wait_for_copy_in() {
+    local db="$1" phase deadline
+    [[ -e "$COPY_IN_STATUS" ]] || return 0
+    phase="$(copy_in_phase)"
+    [[ "$phase" == done ]] && return 0
+    loud "box copy-in is still running (phase ${phase:-unknown}); waiting up to ${COPY_IN_WAIT}s before restoring orch.db"
+    deadline=$((SECONDS + COPY_IN_WAIT))
+    while ((SECONDS < deadline)); do
+        sleep "$COPY_IN_POLL"
+        [[ -e "$db" ]] && return 0
+        [[ -e "$COPY_IN_STATUS" ]] || return 0
+        [[ "$(copy_in_phase)" == done ]] && return 0
+    done
+    loud "box copy-in did not finish within ${COPY_IN_WAIT}s; restoring orch.db anyway"
+}
+
 # #66: never start the poller on a silently empty database. A subshell, so
 # the poller's environment stays out of this script.
 ensure_db() (
@@ -147,6 +193,11 @@ ensure_db() (
     db="${ORCH_DB:-${STATE}/orch.db}"
     mkdir -p "$STATE" "$(dirname "$db")"
     [[ -e "$db" ]] && return 0
+    wait_for_copy_in "$db"
+    if [[ -e "$db" ]]; then
+        loud "orch.db came back with the box copy-in; nothing restored"
+        return 0
+    fi
     orch restore-db --db "$db" >&2 || status=$?
     case "$status" in
         0) loud "RESTORED orch.db from backup" ;;
@@ -226,13 +277,53 @@ status() {
     return 3
 }
 
-ensure() {
+ensure_poller() {
     [[ -e "$STOPPED" ]] && return 0
     running_pid >/dev/null && return 0
     poll_lock_held && return 0
     # Re-check right before launching: a stop may have just landed.
     [[ -e "$STOPPED" ]] && return 0
     launch
+}
+
+ensure_waiters() {
+    local flag bot status
+    [[ -x "$WAITER_SERVICE" ]] || return 0
+    for flag in "${CONFIG}"/waiter-autostart-*; do
+        [[ -f "$flag" ]] || continue
+        bot="${flag##*/waiter-autostart-}"
+        case "$bot" in claude-bot | codex-bot | cursor-bot) ;; *) continue ;; esac
+        status=0
+        "$WAITER_SERVICE" "$bot" ensure >>"${STATE}/waiter-${bot}-service.log" 2>&1 </dev/null 9>&- || status=$?
+        ((status == 0)) || say "waiter-service.sh ${bot} ensure exited ${status}" >&2
+    done
+}
+
+# #248: with no crontab, poller-ensure-loop.sh is the watchdog.
+ensure_watchdog() {
+    local status=0
+    have_crontab && return 0
+    [[ -e "$AUTOSTART" ]] || return 0
+    if [[ ! -e "$NO_CRONTAB_LOGGED" ]]; then
+        loud "crontab not found; ${ENSURE_LOOP} runs ensure instead"
+        : >"$NO_CRONTAB_LOGGED"
+    fi
+    [[ -x "$ENSURE_LOOP" ]] || return 0
+    command -v flock >/dev/null 2>&1 || return 0
+    if [[ -e "$ENSURE_LOOP_LOCK" ]]; then
+        flock -n -E 75 "$ENSURE_LOOP_LOCK" true 9>&- || status=$?
+        ((status == 75)) && return 0
+    fi
+    nohup "$ENSURE_LOOP" >>"${STATE}/poller-ensure-loop.log" 2>&1 </dev/null 9>&- &
+}
+
+ensure() {
+    local status=0
+    mkdir -p "$STATE"
+    ensure_poller || status=$?
+    ensure_waiters
+    ensure_watchdog
+    return "$status"
 }
 
 # cron runs lines through /bin/sh and treats % specially, so only plain
@@ -281,7 +372,7 @@ install_autostart() {
     : >"$AUTOSTART"
     echo "poller autostart on: bot shells run '${SELF} ensure' (${AUTOSTART})"
     if ! have_crontab; then
-        echo "crontab not found; autostart uses the bot-shell profile hook only"
+        echo "crontab not found; autostart uses the bot-shell profile hook, and ensure starts deploy/poller-ensure-loop.sh"
         return 0
     fi
     {
