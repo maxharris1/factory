@@ -276,6 +276,14 @@ class RetryableShipError(RetryableStateError):
     pass
 
 
+class RouteError(RuntimeError):
+    """A ticket's restored routing fails factory.md's cross-family rule."""
+
+    def __init__(self, message: str, source_comment_id: str):
+        super().__init__(message)
+        self.source_comment_id = source_comment_id
+
+
 class ShipError(RuntimeError):
     """A ship that did not complete.
 
@@ -868,7 +876,18 @@ class Dispatcher:
         return prior is None or prior["workflow_state"] != "merged"
 
     def process(self, ticket: TrackedTicket) -> None:
-        ticket = self._routed(ticket)
+        try:
+            ticket = self._routed(ticket)
+        except RouteError as error:
+            self._mark_stuck_and_wake(
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                source_comment_id=error.source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                reason="route-same-family",
+                detail=str(error),
+            )
+            return
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         comments = sorted(ticket.comments, key=_comment_order)
         try:
@@ -1677,17 +1696,17 @@ class Dispatcher:
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
-            resumed = self._resume_after_cap(ticket, comment)
-            if resumed is not None:
-                return resumed
-        if not trusted:
-            return True, "rejected-go-author"
-        generation = self._generation(ticket.repo, ticket.ticket_id)
-        if action is not None:
             routed = _route_go(ticket, fields)
             if routed is None:
                 return True, "rejected-go-same-family"
             ticket = routed
+            resumed = self._resume_after_cap(ticket, comment)
+            if resumed is not None:
+                self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
+                return resumed
+        if not trusted:
+            return True, "rejected-go-author"
+        generation = self._generation(ticket.repo, ticket.ticket_id)
         if action is None:
             self.queue.enqueue(
                 JobRequest(
@@ -4146,13 +4165,14 @@ class Dispatcher:
     def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
         """The ticket with the builder and reviewer its latest plan, build or
         fix job was routed to (issue #206), or as read when that job names
-        no routing."""
+        no routing. Raises RouteError when the restored pair, with today's
+        factory.md model hints, fails the cross-family rule."""
         if ticket.factory_md is not None:
             return ticket
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT detail FROM jobs
+                SELECT detail, source_comment_id FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix')
                 ORDER BY created_at DESC, id DESC
@@ -4163,7 +4183,15 @@ class Dispatcher:
         routing = _detail_routing(None if row is None else row["detail"])
         if routing is None:
             return ticket
-        return _route(ticket, *routing)
+        routed = _route(ticket, *routing)
+        errors = _family_errors(routed.factory)
+        if errors:
+            raise RouteError(
+                f"{ticket.repo}#{ticket.ticket_id} routing "
+                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                str(row["source_comment_id"]),
+            )
+        return routed
 
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:
@@ -5711,7 +5739,10 @@ class ReviewShipper:
         ]
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
-        return self.dispatcher._routed(found[0])
+        try:
+            return self.dispatcher._routed(found[0])
+        except RouteError as error:
+            raise ShipError(str(error)) from error
 
 
 class PollLoop:
@@ -5950,16 +5981,20 @@ def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket
         fields.get("builder", base.builder_harness),
         fields.get("reviewer", base.reviewer_harness),
     )
-    config = routed.factory
-    findings = family_findings(
-        config.builder_harness,
-        config.builder_model,
-        config.reviewer_harness,
-        config.reviewer_model,
-    )
-    if any(finding.severity == "error" for finding in findings):
-        return None
-    return routed
+    return None if _family_errors(routed.factory) else routed
+
+
+def _family_errors(config: FactoryConfig) -> list[str]:
+    return [
+        finding.message
+        for finding in family_findings(
+            config.builder_harness,
+            config.builder_model,
+            config.reviewer_harness,
+            config.reviewer_model,
+        )
+        if finding.severity == "error"
+    ]
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:
