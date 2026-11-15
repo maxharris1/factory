@@ -132,9 +132,8 @@ def test_corners_are_square_and_elevation_is_a_ring(tmp_path: Path) -> None:
     assert "--elev-hi:0 0 0 1px rgba(255,255,255,.13)" in css
     panel = re.search(r"\.panel\{[^}]*\}", css).group(0)
     assert "box-shadow:var(--elev)" in panel and "radius" not in panel
-    # Only the round savings gauge keeps a radius.
-    radii = re.findall(r"([^{}]+)\{[^}]*border-radius", css)
-    assert [selector.strip() for selector in radii] == [".ring", ".ring span"]
+    # #144: the waffle replaced the round savings gauge, so every corner is square.
+    assert "border-radius" not in css
     # #139: the brand caret is a PixelStrip canvas whose rate comes from the
     # link state; the engine stills it under reduced motion.
     assert "@keyframes caret" not in css
