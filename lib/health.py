@@ -20,7 +20,11 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   device that answered counts as seen;
 * `tunnel`: the Linear listener's Funnel, from a GET the listener sends to
   `linear_webhook.public_url` every BEAT_SECONDS; only the listener's own
-  405 for that path counts as seen.
+  405 for that path counts as seen. While the tunnel loop has given up on a
+  port another owner holds on the tunnel host (`linear-webhook-tunnel.held`
+  beside orch.db, written by deploy/linear-webhook-service.sh, issue #427),
+  it runs no ssh, so the tunnel is down whatever answers the public URL, with
+  the reason "port held by another owner: PORT on HOST".
 
 A row is (component, device, bot, pid, started_at, last_seen, version,
 interval_seconds, stopped_at, checked_at), one per process: the key holds
@@ -121,6 +125,9 @@ BUSY_SECONDS = 0.5
 DB_BUSY_SECONDS = 5.0
 TUNNEL_TIMEOUT = 10.0
 TUNNEL_SEEN = 405
+TUNNEL_HELD = "linear-webhook-tunnel.held"
+PORT_HELD = "port held by another owner"
+_HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]*)")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
 DEFAULT_DEVICE = "box"
@@ -1138,6 +1145,7 @@ def build_report(
     expected: Expected | None = None,
     checkout_version: str = "unknown",
     devices: Sequence[DeviceSync] = (),
+    tunnel_held: str | None = None,
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
 
@@ -1146,15 +1154,16 @@ def build_report(
     the registry of components that should be running (default: the poller
     on the box); `checkout_version` is the checkout's commit: a poller,
     waiter or listener whose row names another known commit runs stale
-    code; `devices` are the factory checkouts' sync states."""
+    code; `devices` are the factory checkouts' sync states; `tunnel_held`
+    is the `PORT on HOST` the tunnel loop gave up on, if any."""
     checkout = checkout_version
     checkouts = tuple(devices)
-    if rows is None:
+    if rows is None and not tunnel_held:
         return HealthReport(known=False, code_version=checkout, devices=checkouts)
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row in _latest_checks(rows):
+    for row in _latest_checks(rows or ()):
         state, reason = classify(row, now)
         item = Component(
             component=row.component,
@@ -1179,6 +1188,9 @@ def build_report(
                    and c.device in slot.devices for c in components):
             components.append(Component(slot.component, slot.devices[0], slot.bot, None, DOWN,
                                         _never(slot.component), None, None, "unknown"))
+    if tunnel_held:
+        components = [replace(c, state=DOWN, reason=f"{PORT_HELD}: {tunnel_held}")
+                      if c.component == TUNNEL else c for c in components]
     components.sort(key=lambda c: (COMPONENTS.index(c.component), c.bot, c.device))
     jobs: dict[str, list[str]] = {}
     for job_id, recipient in queued:
@@ -1226,7 +1238,18 @@ def load_report(
                             code_version=factory_version(), devices=devices)
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
                         expected=expected_components(machines, orch),
-                        checkout_version=factory_version(), devices=devices)
+                        checkout_version=factory_version(), devices=devices,
+                        tunnel_held=read_tunnel_held(db))
+
+
+def read_tunnel_held(db: Path) -> str | None:
+    """`PORT on HOST` from the tunnel loop's held record beside orch.db, if any."""
+    try:
+        text = (db.parent / TUNNEL_HELD).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    match = _HELD_RECORD.fullmatch(text)
+    return f"{match[1]} on {match[2]}" if match else None
 
 
 def read_device_sync(db: Path) -> list[device_sync.Row]:

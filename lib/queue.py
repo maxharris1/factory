@@ -763,6 +763,11 @@ def plan_round(detail: str | None) -> int:
         return 1
     if value.get("plan_round") in (1, 2):
         return int(value["plan_round"])
+    evidence = value.get("evidence")
+    instructions = evidence.get("instructions") if isinstance(evidence, dict) else None
+    attempt = instructions.get("plan_attempt") if isinstance(instructions, dict) else None
+    if attempt in (1, 2):
+        return int(attempt)
     return 2 if str(value.get("instruction") or "").startswith("round=2/2") else 1
 
 
