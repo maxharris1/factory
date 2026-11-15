@@ -574,6 +574,15 @@ def test_factory_md_lookup_is_case_insensitive_on_the_repo(tmp_path: Path) -> No
     assert result.context is not None
 
 
+def test_an_unknown_factory_md_field_still_reaches_the_brief(tmp_path: Path) -> None:
+    text = FACTORY_MD.replace("base_branch: dev", "base_branch: dev\nnew_field: [x]")
+    assert "new_field" in text
+    run = FakeRun(stdout=contents(text))
+    result = GhContextSource(orch_config(tmp_path), run=run, environ={}).load("owner/repo")
+    assert result.context is not None and result.note is None
+    assert "Never apply migrations" in result.context.body
+
+
 @pytest.mark.parametrize(
     ("run", "repo", "note"),
     [
