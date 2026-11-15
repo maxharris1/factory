@@ -26,7 +26,7 @@ from lib.factory_md import FactoryConfig
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.machines_yml import Device, MachinesConfig
-from lib.orch_yml import load_orch_yml
+from lib.orch_yml import Approvals, load_orch_yml
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
 GO = (
@@ -7053,3 +7053,405 @@ def test_71_an_untrusted_question_does_not_stop_a_verdict_answering_its_ready(
     )
     assert _outcomes(queue)["ready"] == "answered-review"
     assert _reviews_71(queue) == [(HEAD_71, "cancelled", 1)]
+
+
+RETRY = "<!-- orch:v1 kind=retry from=grok-bot role=orchestrator -->\n{reason}"
+RETRY_HEAD = "a" * 40
+
+
+def retry(
+    comment_id: str = "retry-1",
+    *,
+    reason: str = "Max: the runner was down, try once more.\n",
+    author: str = "grok-login",
+    created_at: float = 50,
+) -> Comment:
+    return comment(
+        comment_id,
+        RETRY.format(reason=reason),
+        author=author,
+        created_at=created_at,
+    )
+
+
+def retry_setup(tmp_path: Path, **kwargs) -> tuple[Dispatcher, SQLiteJobQueue]:
+    return setup(tmp_path, grok_delivery=RaisingGrokDelivery(RuntimeError("down")), **kwargs)
+
+
+def seed_state(queue: SQLiteJobQueue, *, state: str, stuck: int = 0, **columns) -> None:
+    values = {"workflow_state": state, "stuck": stuck, "review_round": 1, **columns}
+    with queue.connect() as connection:
+        connection.execute(
+            f"""
+            INSERT INTO ticket_state (repo, ticket_id, gate_count, {", ".join(values)})
+            VALUES ('owner/repo', '42', 0, {", ".join("?" for _ in values)})
+            """,
+            tuple(values.values()),
+        )
+
+
+def fail_twice_through_t6(
+    dispatcher: Dispatcher,
+    queue: SQLiteJobQueue,
+    *,
+    action: str,
+    head: str | None = None,
+    source: str = "verdict-1",
+) -> Job:
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action=action,
+            recipient="claude",
+            source_comment_id=source,
+            timeout_seconds=5400,
+            head=head,
+            detail=json.dumps({"action": action, "head": head, "round": "2/3"}),
+        ),
+        dedupe_key=f"seed-{action}:g1",
+    )
+    return fail_once_through_t6(dispatcher, queue, times=2)
+
+
+def fail_once_through_t6(
+    dispatcher: Dispatcher, queue: SQLiteJobQueue, *, times: int = 1
+) -> Job:
+    for _ in range(times):
+        job = queue.claim("claude")
+        assert job is not None
+        queue.finish(job.id, owner="claude", handoff_comment_id=None)
+        dispatcher.reconcile_jobs()
+    return job
+
+
+def ticket_row(queue: SQLiteJobQueue) -> sqlite3.Row:
+    with queue.connect() as connection:
+        return connection.execute(
+            """
+            SELECT * FROM ticket_state
+            WHERE repo = 'owner/repo' AND ticket_id = '42'
+            """
+        ).fetchone()
+
+
+def queued_harness_jobs(queue: SQLiteJobQueue) -> list[Job]:
+    return [
+        job
+        for job in queue.outstanding()
+        if job.state == "queued" and job.request.recipient != "grok"
+    ]
+
+
+def jobs_of(queue: SQLiteJobQueue, action: str) -> list[sqlite3.Row]:
+    with queue.connect() as connection:
+        return connection.execute(
+            "SELECT * FROM jobs WHERE action = ? ORDER BY created_at, rowid",
+            (action,),
+        ).fetchall()
+
+
+def test_retry_resumes_failed_fix_on_same_head(tmp_path: Path) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state="fixing")
+    failed = fail_twice_through_t6(dispatcher, queue, action="fix", head=RETRY_HEAD)
+    before = ticket_row(queue)
+    assert (before["stuck"], before["stuck_reason"]) == (1, "job-failed-2")
+    (first_wake,) = jobs_of(queue, "stuck")
+    assert first_wake["state"] == "queued"
+
+    dispatcher.process(ticket(retry(), head=RETRY_HEAD))
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-fix"
+    (fix,) = queued_harness_jobs(queue)
+    assert (fix.request.action, fix.request.head, fix.request.source_comment_id) == (
+        "fix",
+        RETRY_HEAD,
+        "verdict-1",
+    )
+    assert fix.request.attempt == 2
+    detail = json.loads(fix.request.detail or "{}")
+    assert (detail["retry_of"], detail["retry_comment"], detail["resume"]) == (
+        failed.id,
+        "retry-1",
+        True,
+    )
+    after = ticket_row(queue)
+    assert (after["stuck"], after["stuck_reason"], after["workflow_state"]) == (
+        0,
+        None,
+        "fixing",
+    )
+    assert after["generation"] == before["generation"] + 1
+    assert (after["review_round"], after["cap_extra"]) == (1, 0)
+    assert jobs_of(queue, "stuck")[0]["state"] == "cancelled"
+
+    fail_once_through_t6(dispatcher, queue)
+
+    again = ticket_row(queue)
+    assert (again["stuck"], again["stuck_reason"]) == (1, "job-failed-2")
+    second_wake = jobs_of(queue, "stuck")[-1]
+    assert second_wake["state"] == "queued"
+    assert "after retry 1 (comment:retry-1)" in json.loads(second_wake["detail"])["detail"]
+
+
+@pytest.mark.parametrize(
+    ("ac", "outcome", "state"),
+    [("met", "queued-plan-build", "building"), ("unmet", "stuck-plan-gaps", "stuck")],
+)
+def test_retry_resumes_planning_after_plan_gaps(
+    tmp_path: Path, ac: str, outcome: str, state: str
+) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    go = comment("go-1", GO.format(state="planning"), author="grok-login")
+    gaps = [
+        comment(
+            f"plan-gap-{number}",
+            PLAN.format(round=number, ac="unmet"),
+            author="claude-login",
+            created_at=1 + number,
+        )
+        for number in (1, 2)
+    ]
+    thread: tuple[Comment, ...] = (go,)
+    dispatcher.process(ticket(*thread))
+    for gap in gaps:
+        plan = queue.claim("claude")
+        assert plan is not None and plan.request.action == "plan"
+        queue.finish(plan.id, owner="claude", handoff_comment_id=gap.id)
+        thread = (*thread, gap)
+        dispatcher.process(ticket(*thread))
+    stuck = ticket_row(queue)
+    assert (stuck["stuck_reason"], stuck["plan_gap_count"]) == ("plan-gaps-2", 2)
+
+    dispatcher.process(ticket(*thread, retry()))
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-plan"
+    (plan,) = queued_harness_jobs(queue)
+    assert plan.request.action == "plan"
+    detail = json.loads(plan.request.detail or "{}")
+    assert detail["instruction"] == "round=2/2; previous plan comment:plan-gap-2"
+    resumed = ticket_row(queue)
+    assert (resumed["stuck"], resumed["workflow_state"]) == (0, "planning")
+
+    claimed = queue.claim("claude")
+    assert claimed is not None
+    queue.finish(claimed.id, owner="claude", handoff_comment_id="plan-3")
+    third = comment(
+        "plan-3", PLAN.format(round=2, ac=ac), author="claude-login", created_at=60
+    )
+    dispatcher.process(ticket(*thread, retry(), third))
+
+    assert handled_outcome(queue, "plan-3") == outcome
+    assert ticket_row(queue)["workflow_state"] == state
+
+
+def test_retry_resumes_building_after_failed_build(tmp_path: Path) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state="building", review_round=0)
+    failed = fail_twice_through_t6(dispatcher, queue, action="build", source="go-1")
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-build"
+    (build,) = queued_harness_jobs(queue)
+    assert (build.request.action, build.request.source_comment_id, build.request.attempt) == (
+        "build",
+        "go-1",
+        2,
+    )
+    assert json.loads(build.request.detail or "{}")["retry_of"] == failed.id
+    assert len(jobs_of(queue, "build")) == 3
+    assert ticket_row(queue)["workflow_state"] == "building"
+
+
+def test_retry_after_ci_red_3_queues_ci_fix(tmp_path: Path) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_builder_job(queue)
+    readies = []
+    for number in range(1, 4):
+        head = str(number) * 7
+        readies.append(
+            comment(
+                f"ready-{number}",
+                READY.format(head=head),
+                author="claude-login",
+                created_at=number,
+            )
+        )
+        dispatcher.process(
+            ticket(*readies, head=head, ci={head: CIResult("failure", f"log-{number}")})
+        )
+        fix = queue.claim("claude")
+        if fix is not None:
+            queue.finish(fix.id, owner="claude", handoff_comment_id=f"ready-{number + 1}")
+    assert ticket_row(queue)["stuck_reason"] == "ci-red-3"
+
+    dispatcher.process(
+        ticket(*readies, retry(), head="3333333", ci={"3333333": CIResult("failure", "log-3")})
+    )
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-fix"
+    (fix,) = queued_harness_jobs(queue)
+    assert (fix.request.action, fix.request.head) == ("fix", "3333333")
+    detail = json.loads(fix.request.detail or "{}")
+    assert (detail["instruction"], detail["round"], detail["resume"]) == ("log-3", "1/3", True)
+    row = ticket_row(queue)
+    assert (row["stuck"], row["gate_count"]) == (0, 3)
+
+
+@pytest.mark.parametrize(("state", "action"), [("planning", "plan"), ("building", "build")])
+def test_a_built_retry_job_is_the_last_attempt(tmp_path: Path, state: str, action: str) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state=state, stuck=1, stuck_reason="t7-stuck")
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == f"queued-retry-{action}"
+    (job,) = queued_harness_jobs(queue)
+    assert (job.request.action, job.request.attempt) == (action, 2)
+    fail_once_through_t6(dispatcher, queue)
+    assert ticket_row(queue)["stuck_reason"] == "job-failed-2"
+    assert queued_harness_jobs(queue) == []
+
+
+def rejected_wakes(queue: SQLiteJobQueue) -> list[dict]:
+    return [json.loads(row["detail"]) for row in jobs_of(queue, "rejected")]
+
+
+def test_retry_on_live_ticket_is_noop(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="fixing")
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-not-stuck"
+    assert queued_harness_jobs(queue) == []
+    (wake,) = rejected_wakes(queue)
+    assert wake["outcome"] == "rejected-retry-not-stuck"
+    assert "not stuck" in wake["note"]
+
+
+def test_retry_on_capped_ticket_is_noop(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="capped")
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-not-stuck"
+    assert queued_harness_jobs(queue) == []
+    assert ticket_row(queue)["cap_extra"] == 0
+
+    go = comment("go-1", GO.format(state="building"), author="grok-login", created_at=60)
+    dispatcher.process(ticket(retry(), go))
+
+    assert handled_outcome(queue, "go-1") == "queued-fix"
+    assert ticket_row(queue)["cap_extra"] == 1
+
+
+def test_retry_while_job_active_is_noop(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="building", stuck=1, stuck_reason="t7-stuck")
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-1",
+            timeout_seconds=5400,
+        ),
+        dedupe_key="race:g1",
+    )
+
+    dispatcher.process(ticket(retry()))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-job-active"
+    assert len(queued_harness_jobs(queue)) == 1
+    assert ticket_row(queue)["stuck"] == 1
+    assert rejected_wakes(queue)[0]["outcome"] == "rejected-retry-job-active"
+
+
+def test_retry_untrusted_author(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="building", stuck=1, stuck_reason="t7-stuck")
+
+    dispatcher.process(ticket(retry(author="stranger")))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-author"
+    assert queued_harness_jobs(queue) == []
+    assert ticket_row(queue)["stuck"] == 1
+
+
+def test_retry_needs_an_approver_when_the_app_switch_is_on(tmp_path: Path) -> None:
+    path = tmp_path / "d.db"
+    queue = SQLiteJobQueue(path, clock=lambda: 100.0)
+    dispatcher = Dispatcher(
+        path,
+        queue,
+        trusted_logins={
+            **TRUSTED_LOGINS,
+            "github": {**TRUSTED_LOGINS["github"], "max-login": {"grok-bot"}},
+        },
+        review_actions=FakeReviewActions(),
+        grok_delivery=FakeGrokDelivery(),
+        approvals=Approvals(app_trust=True, logins=frozenset({"max-login"})),
+    )
+    seed_state(queue, state="building", stuck=1, stuck_reason="t7-stuck")
+    from_grok = retry("retry-1")
+    from_max = retry("retry-2", author="max-login", created_at=60)
+
+    dispatcher.process(ticket(from_grok, from_max))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-author"
+    assert handled_outcome(queue, "retry-2") == "queued-retry-build"
+
+
+def test_retry_without_reason(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="building", stuck=1, stuck_reason="t7-stuck")
+
+    dispatcher.process(ticket(retry(reason="\n  \n")))
+
+    assert handled_outcome(queue, "retry-1") == "rejected-retry-no-reason"
+    assert queued_harness_jobs(queue) == []
+    assert ticket_row(queue)["stuck"] == 1
+
+
+def test_duplicate_retry_comment_queues_one_job(tmp_path: Path) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state="fixing")
+    fail_twice_through_t6(dispatcher, queue, action="fix", head=RETRY_HEAD)
+
+    dispatcher.process(
+        ticket(retry("retry-1"), retry("retry-2", created_at=51), head=RETRY_HEAD)
+    )
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-fix"
+    assert handled_outcome(queue, "retry-2") == "rejected-retry-not-stuck"
+    assert len(queued_harness_jobs(queue)) == 1
+
+
+def test_retry_replay_after_crash(tmp_path: Path) -> None:
+    dispatcher, queue = retry_setup(tmp_path)
+    seed_state(queue, state="fixing")
+    fail_twice_through_t6(dispatcher, queue, action="fix", head=RETRY_HEAD)
+    dispatcher.process(ticket(retry(), head=RETRY_HEAD))
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM handled_comments WHERE comment_id = 'retry-1'")
+
+    dispatcher.process(ticket(retry(), head=RETRY_HEAD))
+
+    assert handled_outcome(queue, "retry-1") == "queued-retry-fix"
+    assert len(queued_harness_jobs(queue)) == 1
+    assert ticket_row(queue)["stuck"] == 0
+
+
+def test_go_on_a_stuck_ticket_is_still_ticket_stuck(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_state(queue, state="building", stuck=1, stuck_reason="t7-stuck")
+
+    dispatcher.process(ticket(comment("go-1", GO.format(state="building"), author="grok-login")))
+
+    assert handled_outcome(queue, "go-1") == "ticket-stuck"
+    assert queued_harness_jobs(queue) == []

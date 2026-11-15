@@ -212,6 +212,7 @@ SCRIPT = r"""
     var jobState = stateChip(r);
     if (jobState) add(row, jobState);
     if (r.overdue) add(row, chip('OVERDUE', 'bad'));
+    if (r.retries) add(row, chip('retried ' + r.retries + 'x'));
     var flow = r.flow || {state: null, path: [], state_age_seconds: null};
     var where = add(art, el('p', 'where'));
     add(where, el('span', null, 'now '));
@@ -344,6 +345,7 @@ def _job_article(row: dict, state: str, chart: dict | None) -> str:
         + timing
         + _state_chip(row)
         + (_chip("OVERDUE", "bad") if row.get("overdue") else "")
+        + (_chip(f"retried {row['retries']}x") if row.get("retries") else "")
         + "</div>"
         + where
         + f'<p class="path">path: {_e(path)}</p>'

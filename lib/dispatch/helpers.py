@@ -136,6 +136,18 @@ def _retry_detail(job: Job) -> str | None:
     return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
 
+def _append_detail(detail: str, note: str) -> str:
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return f"{detail}; {note}"
+    if not isinstance(context, dict):
+        return f"{detail}; {note}"
+    prior = context.get("detail")
+    context["detail"] = f"{prior}; {note}" if isinstance(prior, str) else note
+    return json.dumps(context, separators=(",", ":"), sort_keys=True)
+
+
 def _detail_round_number(detail: str | None) -> int | None:
     """The round number a job's detail JSON carries ("round": "N/CAP")."""
     if not detail:
