@@ -122,6 +122,14 @@ _REJECTED_OUTCOMES = (
     "ticket-abandoned",
 )
 
+_UPDATE_NO_HANDOFF_OUTCOMES = (
+    "update-failed-",
+    "update-failure-counted",
+    "update-superseded",
+    "update-unattributed",
+    "stuck-update-failed-2",
+)
+
 
 def _retry_detail(job: Job) -> str | None:
     """The failed job's detail naming it as `retry_of`, so the retry can

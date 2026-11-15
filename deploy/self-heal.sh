@@ -3,7 +3,8 @@
 # are down or run stale code, with no LLM and no tokens.
 #
 #   self-heal.sh once              one pass: `orch heal deploy`, then
-#                                  `orch health --json | orch heal`
+#                                  `orch health --json | orch heal`, then
+#                                  `orch heal devices` detached (#297)
 #   self-heal.sh kick              start one pass now, detached, and return
 #                                  (the poller runs it after a merge, #219)
 #   self-heal.sh start             start the loop unless running; clears a stop
@@ -30,6 +31,15 @@
 # but 1 (an unreadable health file, still reported) fails the pass. Health
 # runs after the deploy step in a new process, so a component still on the
 # old commit shows stale code and is restarted in the same pass.
+#
+# Then (#297) `once` starts `orch heal devices --state <state dir>` detached
+# in its own session (lib/device_deploy.py: each enabled remote device's
+# factory checkout moves to this checkout's HEAD once the device has no job;
+# it holds its own device-deploy.lock, so overlapping passes skip). The box
+# pass never waits for it. When `orch heal deploy` moved this checkout's
+# HEAD, `once` also starts `orch dashboard push --once` detached, so the
+# dashboard files (the PC's factory-dashboard) are rendered by the new code
+# at once rather than at the poller's next push.
 #
 # `kick` starts factory-self-heal.service with --no-block where the systemd
 # user timer is installed, and otherwise a detached `once` in its own
@@ -132,9 +142,21 @@ service_lock() {
     flock 9
 }
 
+detached() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    else
+        nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    fi
+}
+
+head_sha() {
+    git -C "$CHECKOUT" rev-parse -q --verify HEAD 2>/dev/null || true
+}
+
 # One pass. Without flock(1) passes are not serialized.
 once() {
-    local statuses
+    local statuses before after
     mkdir -p "$STATE"
     if command -v flock >/dev/null 2>&1; then
         exec 8>>"$RUN_LOCK"
@@ -152,10 +174,16 @@ once() {
         "${HERE}/app-token-service.sh" once 8>&- || say "token broker pass exited $?" >>"$LOG"
     fi
     set +e
+    before="$(head_sha)"
     "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
         say "orch heal deploy exited $?; healing anyway" >>"$LOG"
+    after="$(head_sha)"
     "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
+    detached "$ORCH" heal devices --state "$STATE"
+    if [[ -n "$after" && "$before" != "$after" ]]; then
+        detached "$ORCH" dashboard push --once
+    fi
     set -e
     case "${statuses[0]}" in
         0 | 1 | 3) ;;

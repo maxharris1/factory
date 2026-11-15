@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Mapping
 
 from lib import attention, project_rules
+from lib.intake_risk import INTAKE_RISK_SCHEMA
 from lib.pr_title import SOURCES_TABLE
 
 
@@ -88,6 +89,17 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comment_links (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    link TEXT,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",
@@ -135,6 +147,7 @@ class SchemaMixin:
                 """
             )
             project_rules.ensure_table(connection)
+            connection.execute(INTAKE_RISK_SCHEMA)
             connection.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {SOURCES_TABLE} (

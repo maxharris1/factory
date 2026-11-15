@@ -1,0 +1,13 @@
+when	step	hypothesis	result	verdict
+2026-11-14	read #156 gates	parse_gate_lines reads Depends on	only blocked by, conflicts with, touches	gap confirmed
+2026-11-14	read PR #131	its branch carried another open PR	merged factory/issue-108 (#113) into factory/issue-130	case confirmed
+2026-11-14	tests first	new tests fail before code	collection error, no lib/branch_stack.py	VERIFIED red
+2026-11-14	Depends on via #156 parser	one regex kind, same blocker graph	tests pass, cycle with Blocked by flagged	VERIFIED
+2026-11-14	stacked hold in _feed	held with one wake, feeds after merge	tests pass	VERIFIED
+2026-11-14	live reads on GitHub	compare and commits/sha/pulls shapes match	c10638d -> [332], own excluded -> ()	VERIFIED
+2026-11-15	r1 REVISE ac-1, f-1	new tests fail at a05887a	4 failed: resumed intake fed, review queued, one delivery key	VERIFIED red
+2026-11-15	recheck recorded PR's branch, hold_review before review, set in source id	reviewer repros and new tests pass	retry fed=[] state=waiting-blocked; review jobs=0 blocked wakes=1; keys 205:113 and 205:113,114	VERIFIED
+2026-11-15	r2 REVISE ac-1 (Linear linked PR)	new test fails at 748795e	ticket branch suggested/aut-42, expected actual/pr-branch	VERIFIED red
+2026-11-15	Linear ticket carries the linked PR head ref	reviewer repro and new tests pass	review jobs=0 blocked wakes=1, checked actual/pr-branch	VERIFIED
+2026-11-15	r3 REVISE ac-1 (+ branch, fork head)	new tests fail at 41b1778 merged with main	3 failed; fork repro review jobs=1 blocked wakes=0	VERIFIED red
+2026-11-15	review hold compares base...pinned head; round-3 Linear branch change reverted	reviewer fork repro and new tests pass	review jobs=0 blocked wakes=1, compare main...<head> only	VERIFIED

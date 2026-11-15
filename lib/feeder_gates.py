@@ -1,4 +1,4 @@
-"""Feeder gates: `Blocked by`, `Touches:` and `Conflicts with` lines (issue #156).
+"""Feeder gates: `Blocked by`, `Depends on`, `Touches:` and `Conflicts with` lines (issue #156).
 
 A ticket that carries its project's intake signal is fed only once every
 blocker it names is done and nothing in flight shares a path or a
@@ -8,10 +8,11 @@ the rows.
 
 Gate lines are explicit. A gate line is one whole line, outside fenced code,
 that starts (after an optional list marker and `**`) with `Blocked by`,
-`Conflicts with` or `Touches:`. Refs on a `Blocked by` or `Conflicts with`
-line are `#N` (the ticket's own repo; `PR #N` counts), `owner/repo#N` and
-GitHub issue or pull URLs. Paths on a `Touches:` line split on commas and
-spaces. Prose is never read: a ref on the next line does not count.
+`Depends on`, `Conflicts with` or `Touches:`. A `Depends on` line is a
+`Blocked by` line under the intake template's name for it (#205). Refs on a
+`Blocked by`, `Depends on` or `Conflicts with` line are `#N` (the ticket's
+own repo; `PR #N` counts), `owner/repo#N` and GitHub issue or pull URLs.
+Paths on a `Touches:` line split on commas and spaces. Prose is never read: a ref on the next line does not count.
 
 A `Touches:` path that matches the project's factory.md `shared_paths`
 (issue #261) never causes a collision wait; a `Conflicts with` edge still
@@ -43,7 +44,7 @@ FILE_PATH = re.compile(
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _GATE_LINE = re.compile(
     r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*"
-    r"(?P<kind>blocked\s+by|conflicts\s+with|touches)\b(?P<rest>.*)$",
+    r"(?P<kind>blocked\s+by|depends\s+on|conflicts\s+with|touches)\b(?P<rest>.*)$",
     re.IGNORECASE,
 )
 _LEAD = re.compile(r"^[\s:*_]*")
@@ -121,7 +122,7 @@ def parse_gate_lines(body: str, repo: str) -> GateLines:
             if ":" in separator:
                 touches.update(_paths(rest))
         else:
-            (blocked if kind == "blocked by" else conflicts).update(_refs(rest, repo))
+            (conflicts if kind == "conflicts with" else blocked).update(_refs(rest, repo))
     return GateLines(frozenset(blocked), frozenset(touches), frozenset(conflicts))
 
 
