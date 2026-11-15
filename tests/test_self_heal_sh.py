@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import time
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.child_reaper import TAG
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +120,7 @@ def _run(home: Path, *args: str, **extra: str) -> subprocess.CompletedProcess:
     env = {
         "HOME": str(home),
         "PATH": "/usr/bin:/bin",
+        TAG: os.environ.get(TAG, ""),
         "ORCH_HEAL_START_WAIT": "10",
         "ORCH_HEAL_STOP_WAIT": "10",
         "ORCH_SYSTEMCTL": str(home / "no-such-systemctl"),
