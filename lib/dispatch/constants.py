@@ -39,7 +39,7 @@ GROK_WAKE_REASONS = (
     "awaiting-ok",
     "go-not-from-approver",
 )
-CORE_KINDS = ("go", "plan", "ready")
+CORE_KINDS = ("go", "plan", "ready", "retry")
 SETTLE_FAILURES_TO_WAKE = 3
 STUCK_WAKE_FAILURE_LIMIT = 2
 _QUESTIONS_HEADING = re.compile(
