@@ -29,9 +29,13 @@ Name the module in a ticket's `Touches:` line.
 
 The Relay panel on `activity.html` merges `handoff_savings.recent` and
 `poller.verdicts` into one thread per ticket (`relay_threads`, and
-`relayThreads` in the script). A verdict's `age_seconds` is the time of the
-job its comment queued (`jobs.created_at`) or posted (`jobs.finished_at`),
-or null when no job names the comment. The rule:
+`relayThreads` in the script). A verdict's `age_seconds` is the first time
+recorded for its comment: the job it queued (`jobs.created_at`), the job
+that posted it (`jobs.finished_at`), the approval it recorded
+(`ticket_state.approved_at`) or the ship hold it raised
+(`ship_holds.held_at`). It is null when none of these names the comment.
+A new shipped verdict plays the settle sweep once (`PX.strip` with
+`settle: true`), never on first paint or under reduced motion. The rule:
 
 1. Each handoff and verdict is in exactly one thread, keyed by repo (any
    case) and ticket id.

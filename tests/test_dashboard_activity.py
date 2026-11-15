@@ -338,6 +338,7 @@ def test_a_new_shipped_verdict_plays_done_once_and_not_on_first_paint(tmp_path: 
     assert [markup.count('data-done="true"') for markup in snaps] == [0, 1, 0]
     row = re.search(r'data-thread="maxharris1/factory#114">.*?</div>', snaps[1]).group(0)
     assert 'class="rl-done" aria-hidden="true"' in row and 'data-tint="#9ece6a"' in row
+    assert 'data-done="true" data-settle="true"' in row
     still = [step["snap"]["relay"] for step in _script(tmp_path, rich, actions, STILL)["steps"] if "snap" in step]
     assert [markup.count('data-done="true"') for markup in still] == [0, 0, 0]
 
@@ -362,3 +363,10 @@ def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_pat
     assert running.endswith('<a class="at-go" href="job.html#job-r-cursor">open ticket')
     stuck = next(row for row in rows if "AUT-7" in row)
     assert stuck.endswith('<a class="at-go" href="job.html">open ticket')
+
+
+@layout.needs_node
+def test_a_relay_filter_keeps_focus_when_pressed(tmp_path: Path, snapshot: dict) -> None:
+    actions = [["focus", ["data-relay", "shipped"]], ["press", ["data-relay", "shipped"]], ["focused", "data-relay"]]
+    steps = _script(tmp_path, _rich(snapshot), actions)["steps"]
+    assert [step["focused"] for step in steps if "focused" in step] == [["button", "shipped"]]

@@ -374,7 +374,7 @@ PX_SCRIPT = r"""
     this._burstSeen = this._num(this.props.burst, 0);
     this._beatAt = -1000;
     this._burstAt = -1000;
-    this._doneAt = this._bool(this.props.done) ? -1000 : null;
+    this._doneAt = this._bool(this.props.done) && el.getAttribute('data-settle') === null ? -1000 : null;
     this._sysStill = sysStill;
   }
 
@@ -783,6 +783,7 @@ PX_SCRIPT = r"""
     if (seed !== null && seed !== undefined) el.setAttribute('data-seed', String(Number(seed)));
     if (opts.cell !== null && opts.cell !== undefined) el.setAttribute('data-cell', String(Math.max(2, Math.min(16, Math.floor(Number(opts.cell) || 4)))));
     if (opts.done) el.setAttribute('data-done', 'true');
+    if (opts.settle) el.setAttribute('data-settle', 'true');
     el.setAttribute('data-px-key', String(key));
     el.setAttribute('aria-hidden', 'true');
     el.setAttribute('style', style + 'height:' + height + 'px');

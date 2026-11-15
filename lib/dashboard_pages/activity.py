@@ -155,9 +155,9 @@ SCRIPT = r"""
       });
     });
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
+    var focused = document.activeElement;
     var root = panel('relay', 'Relay', relayCount(shown));
     if (!root) return;
-    var focused = document.activeElement;
     var bar = add(root, el('div', 'rl-filter'));
     bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', 'Filter');
@@ -186,7 +186,7 @@ SCRIPT = r"""
         if (played[t.key] && !still) {
           var box = add(row, el('span', 'rl-done'));
           box.setAttribute('aria-hidden', 'true');
-          add(box, PX.strip('relay-' + t.key, {effect: 'off', tint: DONE_TINT, done: true, cell: 4, height: 8}));
+          add(box, PX.strip('relay-' + t.key, {effect: 'off', tint: DONE_TINT, done: true, settle: true, cell: 4, height: 8}));
         }
       });
     }

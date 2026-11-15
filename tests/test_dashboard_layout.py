@@ -655,7 +655,11 @@ if (ids['flow-template'] && status.statechart) {
 global.window = global;
 global.addEventListener = () => {};
 const docListeners = {};
-global.document = {body, hidden: false, activeElement: null, getElementById: (id) => ids[id] || null,
+let focusedNode = null;
+global.document = {body, hidden: false,
+  get activeElement() { return focusedNode && focusedNode.isConnected ? focusedNode : null; },
+  set activeElement(node) { focusedNode = node; },
+  getElementById: (id) => ids[id] || null,
   createElement: (tag) => new Node(tag),
   createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
   addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
