@@ -39,8 +39,9 @@ running on that head. Ship still needs green CI on the approved head.
 
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
-of repo-relative globs, default none). It only acts on ship: merge; on any
-other ship it is accepted with a warning and never applied.
+of repo-relative globs, default none). It acts on ship: merge and ship:
+handoff (issue #183); on ship: after:<approver> it is accepted with a
+warning and never applied.
 
 finish_line is optional (issue #130): ready-for-review stops at the
 handoff; merge keeps watching the approved PR until it merges or closes.
@@ -170,6 +171,10 @@ class FactoryConfig:
         if self.finish_line is None:
             object.__setattr__(self, "finish_line", default_finish_line(self.ship))
 
+    @property
+    def hold_applies(self) -> bool:
+        return self.hold is not None and self.ship in ("merge", "handoff")
+
 
 def default_finish_line(ship: str) -> str:
     return "merge" if ship == "merge" else "ready-for-review"
@@ -272,9 +277,9 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
             )
         )
 
-    if hold is not None and ship is not None and ship != "merge":
+    if hold is not None and ship is not None and ship.startswith("after:"):
         findings.append(
-            Finding("warning", "hold has no effect unless ship is merge")
+            Finding("warning", "hold has no effect on ship: after:<approver>")
         )
 
     if any(item.severity == "error" for item in findings):

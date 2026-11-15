@@ -1,9 +1,9 @@
-"""Per-PR human hold before a ship: merge (issue #86, docs/SPEC.md 4.2 T4H).
+"""Per-PR human hold before a ship: merge or handoff (issues #86, #183, T4H).
 
 factory.md's optional hold: names a label (default factory:hold), an
 approver (default max, a GitHub login that must also be a trusted_logins
-key) and paths (globs). On a ship: merge repo, a covered APPROVE with
-green CI does not merge while the PR is held:
+key) and paths (globs). On a ship: merge or handoff repo, a covered APPROVE
+with green CI does not ship while the PR is held:
 
 - label: the PR carries the hold label, or the label's latest labeled /
   unlabeled event is a removal by someone other than the approver (a

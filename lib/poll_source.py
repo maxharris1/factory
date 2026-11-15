@@ -1320,12 +1320,12 @@ class LivePollSource:
     ) -> dict[str, Any]:
         """Issue #86: labels, diff paths and label events for a hold.
 
-        Read only on a ship: merge repo with hold: in factory.md, uncached,
+        Read only on a repo whose hold applies (FactoryConfig.hold_applies), uncached,
         so a label or push from the last minute is seen. A read that fails
-        is recorded and left None, which T4 treats as held (no merge) while
+        is recorded and left None, which T4 treats as held (no ship) while
         every other row still runs.
         """
-        if factory.ship != "merge" or factory.hold is None:
+        if not factory.hold_applies:
             return {}
         reads = {
             "labels": self.github.pull_labels,
