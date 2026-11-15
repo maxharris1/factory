@@ -1,5 +1,3 @@
-"""#189: a REVISE that blocks on the same rule again parks at waiting-max for Max."""
-
 from __future__ import annotations
 
 import json
@@ -36,7 +34,6 @@ def next_review(flow: AppFlow, number: int) -> None:
 
 
 def rounds(flow: AppFlow, *bodies: str, last_extra: str = "") -> str:
-    """Post one REVISE per body, a fix and review between each; the last outcome."""
     to_first_review(flow)
     for number, body in enumerate(bodies[:-1], start=1):
         assert revise(flow, f"{number}/3", f"revise-{number}", body=body) == "queued-review-fix"

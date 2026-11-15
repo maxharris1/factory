@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
@@ -216,13 +218,6 @@ class ResumeMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        """A go on a ticket an unsat= or repeat REVISE parked (#190, #189).
-
-        Only a login that may lift a cap releases it. Releasing a repeat block
-        at the cap also grants the next round, since a capped go needs the same
-        approver. Raising cap_extra lifts review_round below the cap, so a
-        retry after a failed resume raises nothing more.
-        """
         parked = self._parked_for_max(ticket)
         if parked is not None:
             if not self._may_lift_cap(comment.author):
@@ -253,8 +248,7 @@ class ResumeMixin:
             ).fetchone()
         return None if resumed is None else self._resume_paused(ticket, comment)
 
-    def _parked_for_max(self, ticket: TrackedTicket) -> str | None:
-        """"unsat" or "repeat" while a REVISE keeps the ticket at waiting-max."""
+    def _parked_for_max(self, ticket: TrackedTicket) -> Literal["unsat", "repeat"] | None:
         with self._connect() as connection:
             parked = connection.execute(
                 """
@@ -269,4 +263,4 @@ class ResumeMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        return None if parked is None else str(parked["outcome"]).removeprefix("waiting-max-")
+        return None if parked is None else "unsat" if parked["outcome"] == "waiting-max-unsat" else "repeat"

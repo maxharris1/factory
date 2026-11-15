@@ -24,12 +24,6 @@ class RepeatBlockMixin:
         comment: Comment,
         reported_round: int | None,
     ) -> RepeatBlock | None:
-        """The rule a REVISE blocks on again (#189), or None.
-
-        The reviewer names it with repeat=, in the header or as the first body
-        line. Without it, a blocking f-<n> or unmet ac-<n> id the REVISE T3
-        accepted for the round before also blocked counts. Free text never does.
-        """
         from lib.evidence.findings import blocking_ids
 
         handoff = parse_comment(comment.body)
@@ -52,7 +46,6 @@ class RepeatBlockMixin:
     def _accepted_revises(
         self, ticket: TrackedTicket, reported_round: int | None
     ) -> list[tuple[int, Comment]]:
-        """The REVISEs T3 accepted before reported_round, newest first."""
         with self._connect() as connection:
             accepted = {
                 str(row["comment_id"])
@@ -81,7 +74,6 @@ class RepeatBlockMixin:
         block: RepeatBlock,
         reported_round: int | None,
     ) -> tuple[bool, str]:
-        """Park the ticket at waiting-max with the fix paused and wake Grok once."""
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
