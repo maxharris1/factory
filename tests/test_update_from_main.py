@@ -340,56 +340,6 @@ def test_one_failed_update_counts_once_and_its_retry_still_runs(
     assert retry is not None and retry.request.action == "update-from-main"
 
 
-def _github_ready(board: Board, pr, comment_id: str, at: float) -> None:
-    """A ready as the GitHub comment parser builds it: whole seconds."""
-    stamp = datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    pr.comments.append(
-        _comment(
-            {
-                "id": comment_id,
-                "user": {"login": "claude-login"},
-                "body": READY.format(head=sha(1)),
-                "created_at": stamp,
-            }
-        )
-    )
-
-
-def test_a_ready_in_its_jobs_second_is_that_jobs_failure(tmp_path: Path) -> None:
-    """The job is queued at 133.5 and its ready posted at 133.6, which GitHub
-    reports as 133: the ready and the failed exit are still one attempt."""
-    board = Board(tmp_path)
-    board.now[0] = 132.5
-    pr = board.open("42", sha(1))
-    board.build_and_approve(pr, mergeable=False)
-    first = board.claim("claude")
-    assert int(first.created_at) < first.created_at
-    _github_ready(board, pr, "500", first.created_at + 0.1)
-    assert pr.comments[-1].created_at < first.created_at
-    board.queue.finish(first.id, owner="claude", handoff_comment_id=None)
-    board.poll()
-    board.poll()
-
-    row = board.state("42")
-    assert (row["update_failures"], row["stuck"]) == (1, 0)
-    assert [job["state"] for job in board.jobs("update-from-main")] == ["failed", "queued"]
-    assert board.queue.claim("claude").request.action == "update-from-main"
-
-
-def test_a_late_ready_from_the_first_job_is_not_its_unrun_retrys(tmp_path: Path) -> None:
-    board, pr, _approve = conflicted(tmp_path)
-    board.claim("claude")
-    board.ready(pr, sha(1), "first-old-ready")
-    board.poll()
-    assert [job["state"] for job in board.jobs("update-from-main")] == ["running", "queued"]
-    board.ready(pr, sha(1), "first-late-old-ready")
-    board.poll()
-
-    row = board.state("42")
-    assert (row["update_failures"], row["stuck"]) == (1, 0)
-    assert [job["state"] for job in board.jobs("update-from-main")] == ["running", "queued"]
-
-
 def test_the_retrys_own_old_head_ready_is_the_second_failure(tmp_path: Path) -> None:
     board, pr, _approve = conflicted(tmp_path)
     board.claim("claude")

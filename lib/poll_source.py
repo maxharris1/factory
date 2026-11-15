@@ -39,6 +39,7 @@ from lib.github_actions import (
     run_gh,
 )
 from lib.handoff import HandoffError, parse_comment
+from lib.intake_risk import INTAKE_RISK_SCHEMA, INTAKE_RISK_TABLE, stored_risk
 from lib.linear_webhook import DirtyRow, missed_delivery
 from lib.orch_yml import (
     LINEAR_POLL_SECONDS,
@@ -121,7 +122,6 @@ RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
 SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-INTAKE_RISK_TABLE = "intake_risk"
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
@@ -222,23 +222,10 @@ class IntakeRisks:
         self._connection = sqlite3.connect(
             ":memory:" if path is None else str(path), timeout=30, isolation_level=None
         )
-        self._connection.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {INTAKE_RISK_TABLE} (
-                repo TEXT NOT NULL,
-                ticket_id TEXT NOT NULL,
-                risk TEXT NOT NULL CHECK (risk IN ('low', 'high')),
-                PRIMARY KEY (repo, ticket_id)
-            )
-            """
-        )
+        self._connection.execute(INTAKE_RISK_SCHEMA)
 
     def get(self, repo: str, ticket_id: str) -> str | None:
-        row = self._connection.execute(
-            f"SELECT risk FROM {INTAKE_RISK_TABLE} WHERE repo = ? AND ticket_id = ?",
-            (repo.lower(), ticket_id),
-        ).fetchone()
-        return None if row is None else str(row[0])
+        return stored_risk(self._connection, repo, ticket_id)
 
     def keep(self, repo: str, ticket_id: str, risk: str) -> str:
         self._connection.execute(

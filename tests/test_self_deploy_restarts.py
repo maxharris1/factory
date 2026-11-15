@@ -1,5 +1,5 @@
 """#219 end to end: after self-deploy moves the checkout, the heal pass
-restarts the poller through its service script and an idle waiter in the
+restarts the poller through its service script and the waiter in the
 same pass, once the waiter acknowledges it has stopped claiming;
 an up-to-date checkout restarts nothing."""
 
@@ -14,7 +14,7 @@ from tests.test_self_deploy import Repo, run, write
 OWNED = frozenset({"poller", "waiter:codex-bot"})
 
 
-def heal_pass(tmp_path: Path, checkout: Path, running: str, jobs: int = 0) -> Runs:
+def heal_pass(tmp_path: Path, checkout: Path, running: str, *, acks: bool = True) -> Runs:
     code = health.factory_version(checkout)
     data = {"known": True, "code_version": code, "components": [
         dict(component("poller", bot="", version=running), stale_code=running != code),
@@ -23,17 +23,16 @@ def heal_pass(tmp_path: Path, checkout: Path, running: str, jobs: int = 0) -> Ru
     runs = Runs()
 
     def waiter_acknowledged() -> heal.Facts:
-        return heal.Facts("box", OWNED, waiter_jobs={"codex-bot": jobs},
-                          drain_acked={"codex-bot": code})
+        return heal.Facts("box", OWNED, drain_acked={"codex-bot": code} if acks else {})
 
-    heal.heal(data, facts=heal.Facts("box", OWNED, waiter_jobs={"codex-bot": jobs}),
+    heal.heal(data, facts=heal.Facts("box", OWNED),
               state_dir=tmp_path, deploy=checkout / "deploy", webhook=heal.Webhook(),
               environ={"PATH": "/usr/bin"}, now=1_800_000_000.0, run=runs, clock=lambda: 0.0,
               refresh=waiter_acknowledged, sleep=lambda _seconds: None)
     return runs
 
 
-def test_a_fast_forward_restarts_the_poller_and_an_idle_waiter(tmp_path: Path) -> None:
+def test_a_fast_forward_restarts_the_poller_and_the_waiter(tmp_path: Path) -> None:
     repo = Repo(tmp_path)
     old = health.factory_version(repo.box)
     write(repo.upstream, "lib/code.py", "VERSION = 2\n")
@@ -48,14 +47,14 @@ def test_a_fast_forward_restarts_the_poller_and_an_idle_waiter(tmp_path: Path) -
     ]
 
 
-def test_a_busy_waiter_drains_while_the_poller_restarts(tmp_path: Path) -> None:
+def test_a_waiter_that_never_acknowledges_drains_while_the_poller_restarts(tmp_path: Path) -> None:
     repo = Repo(tmp_path)
     old = health.factory_version(repo.box)
     write(repo.upstream, "lib/code.py", "VERSION = 2\n")
     repo.commit("code")
     run(repo)
     (tmp_path / "heal").mkdir()
-    runs = heal_pass(tmp_path / "heal", repo.box, old, jobs=1)
+    runs = heal_pass(tmp_path / "heal", repo.box, old, acks=False)
     assert [call[0] for call in runs.calls] == [
         [str(repo.box / "deploy/poller-service.sh"), "restart"]]
     assert (tmp_path / "heal/waiter-codex-bot.drain").read_text().strip() == (
