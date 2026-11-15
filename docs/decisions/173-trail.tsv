@@ -1,0 +1,10 @@
+decision	choice	why
+grammar	first non-blank line is /go (any case), at most one more non-blank line as the instruction; anything else is chat	a strict grammar keeps a chat message that mentions /go from moving a ticket
+insertion point	CommentsMixin._slash_go, reached where a headerless comment used to be dropped after the hooks	the only place a comment with no orch:v1 header reaches; T7 ignores headerless bodies, so no hook consumes it first
+author gate	approvals.may_approve (approver_logins) with the App switch on or off; a trusted bot login wakes Factory with go-not-from-approver, a stranger is ignored silently	AC3; _wake_comment_problem already wakes only for trusted logins, matching T7's no-wake rule for strangers
+release table	{capped: _resume_after_cap, waiting-max: _resume_paused}; any other state is slash-go-no-target	reuse the two release paths the model already covers (MaxOkAnotherRound, T5Answer); no new state or edge
+resume.py left unchanged	the plan moved _may_approve_go out of _resume_after_cap; the build keeps it there	a /go only reaches _resume_after_cap from an approver, for whom _may_approve_go is already true in both switch modes, so the move bought nothing
+_resume_paused	extracted from _t5_answers with no behavior change; returns None when nothing is paused	one release path for answers and /go; _t5_answers maps None to rejected-answers-without-question as before
+blocked	treated as no target	no blocked workflow_state is ever stored and blocked is Terminal in the model; resuming it needs a new state and edge (plan default, Max may ask for a follow-up)
+repeat and unsat	strict xfail tests keyed on #189 and #190	those tickets add the repeat= and unsat= keys; strict=True fails the day either lands so its builder removes the marker
+evidence prose	lib/evidence/instructions.py reads an approver's headerless /go as a go (extra-round for a fix) and takes its instruction line as the prose	plan required checking the reader; it returned None for a headerless comment, so the instruction never reached the builder

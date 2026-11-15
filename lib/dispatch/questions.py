@@ -122,6 +122,16 @@ class QuestionsMixin:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return True, "rejected-answers-author"
+        resumed = self._resume_paused(ticket, comment)
+        return (True, "rejected-answers-without-question") if resumed is None else resumed
+
+    def _resume_paused(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
+        """Queue again the step a waiting-max ticket paused, keyed on the
+        releasing comment. None when nothing is paused."""
         with self._connect() as connection:
             paused = connection.execute(
                 """
@@ -153,7 +163,7 @@ class QuestionsMixin:
             or paused["workflow_state"] != "waiting-max"
             or paused["paused_action"] is None
         ):
-            return True, "rejected-answers-without-question"
+            return None
         action = str(paused["paused_action"])
         recipient = str(paused["paused_recipient"])
         generation = int(paused["paused_generation"])

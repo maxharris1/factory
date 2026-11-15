@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from lib.approver_commands import parse_slash_go
 from lib.dispatch.constants import FINISHED_STATES, WATCHED_STATES
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
@@ -107,6 +108,8 @@ class CommentsMixin:
                     self._mark_handled(ticket, comment.id, outcome)
                 continue
             if fields is None:
+                if parse_slash_go(comment.body) is not None:
+                    self._mark_handled(ticket, comment.id, self._slash_go(ticket, comment))
                 continue
             kind = fields["kind"]
             if kind == "ok" and _holds(ticket):
@@ -207,6 +210,29 @@ class CommentsMixin:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 self._mark_handled(ticket, comment.id, outcome)
+
+    def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
+        """#173: Max's plain /go releases a capped or waiting-max ticket, as
+        an approver go does. A bot's /go wakes Factory and changes nothing."""
+        if comment.edited_at is not None:
+            self._reject_edited(ticket, comment)
+            return "rejected-edited"
+        if not self.approvals.may_approve(comment.author):
+            if not self._trusted_bots(comment):
+                return "ignored-slash-go-author"
+            self._wake_comment_problem(
+                ticket, comment, "go-not-from-approver", "go-not-from-approver"
+            )
+            return "go-not-from-approver"
+        if self._is_stuck(ticket):
+            self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
+            return "ticket-stuck"
+        release = {
+            "capped": self._resume_after_cap,
+            "waiting-max": self._resume_paused,
+        }.get(self._review_context(ticket)[0])
+        resumed = None if release is None else release(ticket, comment)
+        return "slash-go-no-target" if resumed is None else resumed[1]
 
     def _after_finish(self, ticket: TrackedTicket, comment: Comment) -> bool:
         """merged and done are absorbing (#108): on a finished ticket only a
