@@ -1,7 +1,10 @@
 """Issue #195: a ticket's risk is read once at intake and never silently low."""
 
 import json
+import subprocess
 from difflib import unified_diff
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -502,6 +505,58 @@ def test_a_sql_change_near_a_publication_or_in_an_unparsed_comment_fails_high(
 def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str) -> None:
     ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
     assert ticket.risk == "low"
+
+
+def git_change(before: str, after: str) -> dict:
+    with TemporaryDirectory() as directory:
+        old, new = Path(directory) / "old.sql", Path(directory) / "new.sql"
+        old.write_text(before)
+        new.write_text(after)
+        result = subprocess.run(
+            ["git", "diff", "--no-index", "--", str(old), str(new)],
+            capture_output=True, text=True,
+        )
+    assert result.returncode == 1, result.stderr
+    return {"filename": "db/schema.sql", "changes": 2, "patch": result.stdout}
+
+
+NOTES = "".join(f"  note {n};\n" for n in range(30))
+
+
+@pytest.mark.parametrize(
+    ("before", "header"),
+    [
+        (
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE /*\n{NOTES}*/ public.events;\n",
+            "@@ ALTER PUBLICATION supabase_realtime ADD TABLE /*",
+        ),
+        (
+            f'ALTER PUBLICATION supabase_realtime ADD TABLE "events\n{NOTES}";\n',
+            '@@ ALTER PUBLICATION supabase_realtime ADD TABLE "events',
+        ),
+        (
+            f"CREATE TABLE a ( /*\n{NOTES}*/ id int\n);\n",
+            "@@ CREATE TABLE a ( /*",
+        ),
+    ],
+    ids=[
+        "publication-and-comment-opener-only-in-the-hunk-header",
+        "publication-only-in-the-hunk-header",
+        "comment-opener-only-in-the-hunk-header",
+    ],
+)
+def test_sql_context_in_a_git_hunk_header_fails_high(before: str, header: str) -> None:
+    item = git_change(before, before.replace("  note 15;\n", "  changed note 15;\n"))
+    assert header in item["patch"]
+    ticket, _ = linear_ticket(labels=[], files=[item])
+    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+
+
+def test_an_ordinary_git_hunk_header_stays_low() -> None:
+    before = STATEMENTS * 3
+    item = git_change(before, before.replace("SELECT 5;\n", "SELECT 50;\n", 2))
+    assert "@@ SELECT" in item["patch"]
+    assert linear_ticket(labels=[], files=[item])[0].risk == "low"
 
 
 def test_a_non_sql_change_needs_no_statement_context() -> None:

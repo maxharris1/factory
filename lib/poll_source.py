@@ -2021,13 +2021,14 @@ def _sql_patch_risk(patch: str) -> bool | None:
     such a statement's start or end is outside the patch, or a changed hunk
     shows a block comment, so it cannot be classified."""
     decided: bool | None = False
-    hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*)$", patch, flags=re.MULTILINE)
-    for index in range(1, len(hunks) - 3, 4):
-        body = hunks[index + 3].splitlines()
+    hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*))$", patch, flags=re.MULTILINE)
+    for index in range(1, len(hunks) - 4, 5):
+        body = hunks[index + 4].splitlines()
         if any(line[:1] in "+-" for line in body):
-            if any(RISKY_CHANGE.search(line[1:]) for line in body):
+            shown = [hunks[index + 3], *(line[1:] for line in body)]
+            if any(RISKY_CHANGE.search(text) for text in shown):
                 return True
-            if any(SQL_COMMENT.search(line[1:]) for line in body):
+            if any(SQL_COMMENT.search(text) for text in shown):
                 decided = None
         for start, mark in ((int(hunks[index + 1]), "-"), (int(hunks[index + 2]), "+")):
             lines = [line for line in body if line[:1] in (" ", mark)]
