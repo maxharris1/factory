@@ -14,6 +14,7 @@ from lib.pstack_pin import (
     bump_pin,
     doctor,
     install_skills,
+    installed_errors,
     load_pin,
     pinned_token,
     verify_pin,
@@ -190,6 +191,20 @@ def test_install_is_idempotent_for_an_owned_symlink(tmp_path: Path) -> None:
     link = home / ".claude" / "skills" / "poteto-mode"
     assert link.is_symlink()
     assert link.resolve() == (ROOT / "skills" / "pstack" / "skills" / "poteto-mode").resolve()
+
+
+@pytest.mark.parametrize("rel", [".agents/skills/poteto-mode", ".claude/agents/poteto-agent.md"])
+def test_a_looping_link_is_reported_as_not_pinned_instead_of_raising(tmp_path: Path, rel: str) -> None:
+    home = tmp_path / "home"
+    assert install_skills(ROOT, home, "local") == []
+    loop = home / rel
+    loop.unlink()
+    loop.symlink_to(loop.name)
+
+    errors = installed_errors(ROOT, home)
+
+    assert len(errors) == 1
+    assert f"did not load the pinned version ({loop} is not the pinned" in errors[0]
 
 
 def test_doctor_passes_when_each_owning_bot_quotes_the_pinned_token(tmp_path: Path) -> None:
