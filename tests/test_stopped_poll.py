@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -132,24 +133,25 @@ def test_stopped_reads_after_a_start_are_spread_within_300_seconds(tmp_path: Pat
     assert len(first) >= 5
 
 
-def test_a_restart_delays_no_stopped_read_by_more_than_300_seconds(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cycle_seconds", [30, 120, 420])
+def test_a_restart_does_not_change_when_a_stopped_ticket_is_read(
+    tmp_path: Path, cycle_seconds: float
+) -> None:
     now = [1000.0]
-    dispatcher, queue = setup(tmp_path, now)
-    stopped = {str(number): ("capped", False) for number in range(40)}
-    _seed_states(queue, stopped)
-    _poll(dispatcher, RefSource(), now, 120, 4)
+    running, queue = setup(tmp_path / "running", now)
+    _seed_states(queue, {str(number): ("capped", False) for number in range(40)})
+    _poll(running, RefSource(), now, cycle_seconds, 4)
+    (tmp_path / "restarted").mkdir()
+    with sqlite3.connect(tmp_path / "running" / "d.db") as live, sqlite3.connect(
+        tmp_path / "restarted" / "d.db"
+    ) as copy:
+        live.backup(copy)
+    restarted, _ = setup(tmp_path / "restarted", now)
 
-    restarted, _ = setup(tmp_path, now)
-    started = now[0]
-    source = RefSource()
-    read_at: dict[str, float] = {}
-    for _ in range(11):
-        polled_at = now[0]
-        for ticket_id in _poll(restarted, source, now, 30, 1)[0]:
-            read_at.setdefault(ticket_id, polled_at)
-
-    assert set(read_at) == set(stopped)
-    assert max(read_at.values()) - started <= STOPPED_POLL_SECONDS
+    restarted_at = now[0]
+    expected = _poll(running, RefSource(), now, cycle_seconds, 12)
+    now[0] = restarted_at
+    assert _poll(restarted, RefSource(), now, cycle_seconds, 12) == expected
 
 
 def test_a_go_on_a_capped_ticket_is_handled_within_3_slow_cycles(tmp_path: Path) -> None:

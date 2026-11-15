@@ -86,7 +86,6 @@ class DispatcherBase:
         self._source_errors: dict[tuple[str, str], str] = {}
         # #105: the source's uncached read, for a ready naming a newer head.
         self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
-        self._stopped_read_at: dict[tuple[str, str], float] = {}
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
         # #219: repos (lowercased) with a ticket that entered merged this

@@ -276,21 +276,14 @@ class TrackingMixin:
         )
 
     def _tracked_refs(self, now: float | None = None) -> tuple[TicketRef, ...]:
-        """The tracked tickets poll_once reads (#108).
-
-        Every ticket that is not merged, done or abandoned, plus a merged or
-        handed-off one with a completed ship intent left to replay or an
-        external ship left to settle. A handed-off ticket stays polled, so
-        its merge is seen and a trusted ready may re-enter review.
-        """
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled
+                       unsettled, read_at
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                           state.workflow_state,
+                           state.workflow_state, reads.read_at,
                            COALESCE(state.stuck, 0) AS stuck,
                            EXISTS (
                                SELECT 1
@@ -315,6 +308,9 @@ class TrackingMixin:
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
                      AND state.ticket_id = tracked.ticket_id
+                    LEFT JOIN ticket_reads AS reads
+                      ON reads.repo = LOWER(tracked.repo)
+                     AND reads.ticket_id = tracked.ticket_id
                 )
                 WHERE workflow_state IS NULL
                    OR workflow_state NOT IN ('merged', 'done', 'abandoned')
@@ -323,17 +319,17 @@ class TrackingMixin:
                 """
             ).fetchall()
         refs: list[TicketRef] = []
-        stopped_keys: set[tuple[str, str]] = set()
+        first_reads: list[tuple[str, str, float]] = []
         for row in rows:
             state = row["workflow_state"]
             catching_up = bool(row["replay"]) or bool(row["unsettled"])
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
             if now is not None and stopped and not catching_up:
-                key = (str(row["repo"]).lower(), str(row["ticket_id"]))
-                stopped_keys.add(key)
-                read_at = self._stopped_read_at.setdefault(
-                    key, _staggered_first_read(now, key)
-                )
+                read_at = row["read_at"]
+                if read_at is None:
+                    key = (str(row["repo"]).lower(), str(row["ticket_id"]))
+                    read_at = _staggered_first_read(now, key)
+                    first_reads.append((*key, read_at))
                 if now - read_at < STOPPED_POLL_SECONDS:
                     continue
             refs.append(
@@ -348,12 +344,11 @@ class TrackingMixin:
                     ),
                 )
             )
-        if now is not None:
-            self._stopped_read_at = {
-                key: at
-                for key, at in self._stopped_read_at.items()
-                if key in stopped_keys
-            }
+        if first_reads:
+            with self._connect() as connection:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO ticket_reads VALUES (?, ?, ?)", first_reads
+                )
         return tuple(refs)
 
     def active_job_tickets(self) -> frozenset[tuple[str, str]]:

@@ -93,7 +93,7 @@ def _dispatcher(tmp_path: Path, actions: FakeReviewActions, now: list[float]):
 def _run(
     dispatcher: Dispatcher, source: Thread, now: list[float], cycles: int = 11
 ) -> None:
-    for _ in range(cycles):  # one STOPPED_POLL_SECONDS at 30 s
+    for _ in range(cycles):
         dispatcher.poll_once(source)
         now[0] += 30
 
@@ -149,7 +149,7 @@ def test_pr_89_is_flagged_after_the_cap_then_ends_merged(tmp_path: Path) -> None
         ("done", "grok"),
     ]
     assert actions.handoffs == [comments[0].body.split("head=")[1].split()[0]]
-    assert dispatcher._tracked_refs(now[0] + 300) == ()  # never read again
+    assert dispatcher._tracked_refs(now[0] + 300) == ()
 
 
 def test_aut_2284_on_an_empty_db_queues_no_build(tmp_path: Path) -> None:

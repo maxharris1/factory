@@ -71,7 +71,7 @@ class PollMixin:
             self.record_poll_exception("tracked", "-", exc)
             tracked = ()
         read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
-        self._stopped_read_at.update(dict.fromkeys(read, read_at))
+        self._record_reads(read, read_at)
         for ref in refs:
             identity = (ref.repo.lower(), ref.ticket_id)
             error = self._source_errors.get(identity)
@@ -203,6 +203,16 @@ class PollMixin:
         except Exception as exc:
             self.record_poll_error("factory", "-", type(exc).__name__)
 
+    def _record_reads(self, keys: set[tuple[str, str]], at: float) -> None:
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO ticket_reads (repo, ticket_id, read_at) VALUES (?, ?, ?)
+                ON CONFLICT (repo, ticket_id) DO UPDATE SET read_at = excluded.read_at
+                """,
+                [(repo, ticket_id, at) for repo, ticket_id in keys],
+            )
+
     def record_poll_error(
         self,
         repo: str,
@@ -212,7 +222,7 @@ class PollMixin:
         *,
         prefix: str = "",
     ) -> None:
-        self._stopped_read_at[(repo.lower(), ticket_id)] = self.queue.now()
+        self._record_reads({(repo.lower(), ticket_id)}, self.queue.now())
         self._source_errors[(repo.lower(), ticket_id)] = poll_error_text(error)
         with self._connect() as connection:
             connection.execute(
