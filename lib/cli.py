@@ -43,6 +43,7 @@ from lib.load import Finding
 from lib.device_monitor import DeviceMonitor
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
+from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
@@ -609,6 +610,7 @@ def _wait_autostart(
             log=log,
             approvals=policy,
             drain=waiter.drain_marker(args.bot),
+            orch_yml=orch_path,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -1560,6 +1562,7 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"sandboxed codex exec: added --add-dir {dirs} (the orch state dir) "
                 f"so orch job done can write {database.name}")
     code: int | None = None  # #91: how the command ended, for ended() and finish()
+    budget = job_run.Budget(timeout_seconds)  # #199: the brief prints it
     try:
         if placed.remote:
             code = job_run.follow(
@@ -1570,12 +1573,14 @@ def _job_run_command(argv: list[str]) -> int:
                     control,
                     report_env=session is not None,
                     output=session.consume if session is not None else None,
+                    budget=budget,
                 ),
                 beat=beat,
                 interval=interval,
                 log=log,
                 setup=setup,
                 teardown=teardown,
+                budget=budget,
             )
         else:
             code = job_run.run(
@@ -1589,6 +1594,7 @@ def _job_run_command(argv: list[str]) -> int:
                 started=placed.started,
                 output=session.consume if session is not None else None,
                 execed=placed.execed,
+                budget=budget,
             )
         return code
     except placed_run.CheckoutError as exc:
@@ -1614,6 +1620,10 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if budget.expired:
+            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log)
+            if session is not None:
+                session.wall_clock(budget.elapsed())
         if session is not None:
             if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
                 session.add_usage(usage_probe.remote_codex(
@@ -1625,9 +1635,12 @@ def _job_run_command(argv: list[str]) -> int:
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
         # only a box run is failed here.
+        # #199: a box run stopped past its budget is failed too, but only
+        # once no worker of it runs (run reaped its own), so T6 never
+        # retries it beside a live one.
         settle = (
-            (lambda: _fail_unfinished(queue, args.job_id, owner, log))
-            if placed.autostart and not placed.remote
+            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker))
+            if (placed.autostart or budget.expired) and not placed.remote
             else None
         )
         try:
@@ -1638,6 +1651,25 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
             if settle is not None:
                 settle()  # a settled or requeued job is no longer running: left alone
+
+
+def _settle_box(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    owner: str,
+    log: Callable[[str], None],
+    live: Callable[[], int | None],
+) -> None:
+    """Fail an ended box run's job for T6, unless `live` names a worker that still runs.
+
+    #199: then the poller's dead-job check fails it once the worker is gone,
+    so no retry starts beside it.
+    """
+    pid = live()
+    if pid is not None:
+        log(f"worker pid {pid} still runs; job {job_id} not failed while it runs")
+        return
+    _fail_unfinished(queue, job_id, owner, log)
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
@@ -1654,6 +1686,37 @@ def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callab
         log(f"could not fail job {job_id}: {' '.join(str(exc).split())}")
         return
     log(f"the command ended without orch job done; failed job {job_id} for T6")
+
+
+def _record_wall_clock(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    budget: job_run.Budget,
+    device: str,
+    log: Callable[[str], None],
+) -> None:
+    """#199: the `wall-clock` job event, while the job still runs. Never raises."""
+    name = signal.Signals(budget.signum).name if budget.signum is not None else "a stop"
+    hours = budget.elapsed() / 3600
+    detail = (
+        f"its command on {device} ran past its {budget.describe()}; stopped with {name} "
+        f"after {budget.elapsed() / 60:.1f} minutes ({hours:.2f} slot-hours lost)"
+    )
+
+    def write() -> None:
+        with queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is not None and row["state"] == "running":
+                record_job_event(connection, job_id, job_run.WALL_CLOCK, detail, queue.now())
+            connection.commit()
+
+    try:
+        retry_locked(write)
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        log(f"could not record job {job_id}'s wall-clock stop: {' '.join(str(exc).split())}")
+        return
+    log(f"job {job_id}: {detail}")
 
 
 def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, str | None]:

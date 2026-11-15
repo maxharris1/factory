@@ -433,6 +433,26 @@ def test_ci_runs_once_per_push() -> None:
     assert "pull_request" in triggers
 
 
+def test_ci_cancels_superseded_pr_runs_and_runs_every_shard_and_serial_test() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    concurrency = workflow["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert "github.event.pull_request.number || github.run_id" in concurrency["group"]
+
+    test = workflow["jobs"]["test"]
+    shards = test["strategy"]["matrix"]["shard"]
+    assert shards == list(range(1, len(shards) + 1))
+    pytest_runs = [step["run"] for step in test["steps"] if "pytest" in step.get("run", "")]
+    assert len(pytest_runs) == 1
+    assert '-m "not serial"' in pytest_runs[0]
+    assert "--shard ${{ matrix.shard }}/${{ strategy.job-total }}" in pytest_runs[0]
+
+    runs = [step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"]]
+    assert "pytest -m serial -p no:xdist" in runs
+
+
 FAKE_CRONTAB = """#!/usr/bin/python3
 import os, sys
 from pathlib import Path

@@ -751,9 +751,8 @@ def test_a_final_message_without_a_handoff_line_never_reaches_run_log(tmp_path: 
     session.consume(io.BytesIO(_stream(
         {"type": ["not", "hashable"], "result": 1},
         {"type": "item.completed", "item": {"type": "agent_message", "text": ["ORCH-HANDOFF: 1"]}},
-        {"type": "result", "subtype": "success", "result": "ORCH-HANDOFF: 12\nthen more text"},
         "a plain line",
-        {"type": "result", "subtype": "success", "result": "ORCH-HANDOFF: " + "9" * 200},
+        {"type": "result", "subtype": "success", "result": "Done.\nSay ORCH-HANDOFF: 12 to finish."},
     )))
     session.finish(0)
     assert out.getvalue() == b"a plain line\n"

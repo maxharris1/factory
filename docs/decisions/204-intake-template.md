@@ -14,6 +14,10 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/285
 
+- **Decision:** The other-PRs check reads each criterion as CommonMark (plus strikethrough) renders it: the text and code-span content, with markup and inline HTML dropped and entities and escapes decoded. Each link or image target is checked on its own, so a `/pull/N` link or autolink still counts. So `PR **#157**`, `[PR](https://example.com) #157` and `` `PR` #157 `` are refused like `PR #157`, while code such as `` `pr*2` `` stays literal and is not read as `pr2`. The stored criterion, the refusal reason and the brief keep the text as written.
+- **When:** 2026-11-14 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/319
+
 - **Decision:** A criterion that needs an operator action never refuses a ticket. Such a criterion is either tagged `ops:` / `(ops)` / `[ops]`, or reads as an operator step: it starts with "Manually", "By hand", "Restart the" or "Install the", says "on the box", or has Max or the operator as the subject ("Max restarts", "the operator installs"). Functionality a user performs by hand ("Users can manually trigger the retry") stays a builder criterion; tag a doubtful case `ops:`. The brief lists it under its own "Ops step" section, apart from the builder's criteria. A ticket whose only criteria are ops criteria has no builder criteria, so it is refused.
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/285

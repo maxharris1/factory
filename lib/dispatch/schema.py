@@ -242,6 +242,16 @@ class SchemaMixin:
                 connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ticket_reads (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    read_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS poll_error_streaks (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

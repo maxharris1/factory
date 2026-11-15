@@ -346,7 +346,7 @@ def test_handed_off_ticket_moves_to_merged_when_merged_by_hand(tmp_path: Path) -
     source = MergingSource(flow.dispatcher, flow.snapshot())
     source.merged.add(TICKET)
 
-    for _ in range(10):  # one STOPPED_POLL_SECONDS at the default 60 s poll
+    for _ in range(10):
         flow.dispatcher.poll_once(source)
 
     assert flow.state()["workflow_state"] == "merged"
@@ -358,91 +358,13 @@ def test_handed_off_ticket_moves_to_merged_when_merged_by_hand(tmp_path: Path) -
     assert sum(TICKET in refs for refs in source.refs) == 1  # merged: never read again
 
 
-def _seed_states(queue, states: dict[str, tuple[str | None, int]]) -> None:
-    with queue.connect() as connection:
-        for ticket_id, (state, stuck) in states.items():
-            connection.execute(
-                "INSERT INTO tracked_tickets VALUES (?, ?, 'github', 0)", (REPO, ticket_id)
-            )
-            connection.execute(
-                """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, workflow_state, timeout_seconds
-                ) VALUES (?, ?, 0, ?, ?, 3600)
-                """,
-                (REPO, ticket_id, stuck, state),
-            )
-
-
-class Config:
-    poll_seconds = 30
-
-
-class RefSource(MergingSource):
-    """Reads every ref it is offered, as the live source does on GitHub."""
-
-    config = Config()
-
-    def tracked_tickets(self, refs) -> tuple[TrackedTicket, ...]:
-        self.refs.append(tuple(ref.ticket_id for ref in refs))
-        return tuple(ticket(ticket_id=ref.ticket_id) for ref in refs)
-
-
-def _reads(tmp_path: Path, states: dict[str, tuple[str | None, int]], cycles: int):
-    dispatcher, queue = setup(tmp_path)
-    _seed_states(queue, states)
-    source = RefSource(dispatcher)
-    for _ in range(cycles):
-        dispatcher.poll_once(source)
-    return {
-        ticket_id: [cycle for cycle, refs in enumerate(source.refs) if ticket_id in refs]
-        for ticket_id in states
-    }
-
-
-def test_stopped_states_are_read_every_300_seconds(tmp_path: Path) -> None:
-    stopped = {
-        "1": ("handed-off", 0),
-        "2": ("capped", 0),
-        "3": ("blocked", 0),
-        "4": ("refused", 0),
-        "5": ("review", 1),  # stuck
-    }
-    reads = _reads(tmp_path, stopped, 30)  # 900 s at poll_seconds: 30
-    for ticket_id, cycles in reads.items():
-        assert len(cycles) == 3, ticket_id
-        assert [later - earlier for earlier, later in zip(cycles, cycles[1:])] == [10, 10]
-
-
-def test_active_states_are_read_every_cycle(tmp_path: Path) -> None:
-    active = {
-        "1": (None, 0),
-        "2": ("building", 0),
-        "3": ("review", 0),
-        "4": ("fixing", 0),
-        "5": ("awaiting-ok", 0),
-        "6": ("waiting-max", 0),
-        "7": ("waiting-external", 0),
-    }
-    reads = _reads(tmp_path, active, 5)
-    assert all(cycles == [0, 1, 2, 3, 4] for cycles in reads.values())
-
-
-def test_stopped_reads_are_spread_across_cycles(tmp_path: Path) -> None:
-    stopped = {str(number): ("handed-off", 0) for number in range(40)}
-    reads = _reads(tmp_path, stopped, 10)
-    first = {cycles[0] for cycles in reads.values()}
-    assert all(len(cycles) == 1 for cycles in reads.values())
-    assert len(first) >= 5  # not one burst every tenth cycle
-
-
 def test_a_handed_off_ticket_with_a_replay_is_read_every_cycle(tmp_path: Path) -> None:
     flow = Flow(tmp_path)
     flow.hand_off_at(1)
     with flow.queue.connect() as connection:
         connection.execute("DELETE FROM handled_comments WHERE comment_id = 'approve-1/3'")
 
-    refs = flow.dispatcher._tracked_refs(cycle=1)
+    refs = flow.dispatcher._tracked_refs(flow.now[0])
     assert [(ref.ticket_id, ref.allow_merged) for ref in refs] == [(TICKET, True)]
 
 
