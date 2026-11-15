@@ -147,7 +147,10 @@ const script = fs.readFileSync(process.argv[2], 'utf8');
 const added = [];
 global.window = global;
 global.FontFace = function (family, bytes, desc) {
-  this.family = family; this.size = bytes.byteLength; this.desc = desc;
+  const buf = Buffer.from(bytes);
+  this.family = family; this.size = buf.length; this.desc = desc;
+  this.sha256 = require('crypto').createHash('sha256').update(buf).digest('hex');
+  this.magic = buf.subarray(0, 4).toString('latin1');
   this.load = () => Promise.resolve(this); };
 global.document = {fonts: {add: (face) => { added.push(face); }}, body: {getAttribute: () => null},
   hidden: true, getElementById: () => null, createElement: () => ({}), addEventListener: () => {}};
@@ -156,16 +159,16 @@ global.location = {hash: '', reload: () => {}};
 global.fetch = () => new Promise(() => {});
 global.setInterval = () => 0;
 eval(script);
-process.stdout.write(JSON.stringify(added.map(f => [f.family, f.size, f.desc.weight, f.desc.display])));
+process.stdout.write(JSON.stringify(added.map(f => ({
+  family: f.family, size: f.size, sha256: f.sha256, magic: f.magic,
+  weight: f.desc.weight, display: f.desc.display}))));
 process.exit(0);
 """
 
 NODE = shutil.which("node")
 
 
-@pytest.mark.skipif(NODE is None, reason="node is not installed")
-def test_script_registers_each_font_from_its_bytes(tmp_path: Path) -> None:
-    script = _script(_pages(tmp_path)["index.html"])
+def _registered_fonts(tmp_path: Path, script: str) -> list[dict]:
     (tmp_path / "page.js").write_text(script, encoding="utf-8")
     (tmp_path / "harness.js").write_text(LOADER_HARNESS, encoding="utf-8")
     result = subprocess.run(
@@ -173,8 +176,40 @@ def test_script_registers_each_font_from_its_bytes(tmp_path: Path) -> None:
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stderr
-    expected = [
-        [family, (FONT_DIR / name).stat().st_size, weight, "swap"]
-        for family, name, weight in page.FONTS
-    ]
-    assert json.loads(result.stdout) == expected
+    return json.loads(result.stdout)
+
+
+def _font_mismatches(registered: list[dict]) -> list[tuple[str, str]]:
+    by_family = {face["family"]: face for face in registered}
+    mismatches = []
+    for family, name, weight in page.FONTS:
+        data = (FONT_DIR / name).read_bytes()
+        face = by_family[family]
+        expected = {
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "magic": "wOF2",
+            "weight": weight,
+            "display": "swap",
+        }
+        mismatches += [(family, key) for key, value in expected.items() if face[key] != value]
+    return mismatches
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_script_registers_each_font_from_its_bytes(tmp_path: Path) -> None:
+    registered = _registered_fonts(tmp_path, _script(_pages(tmp_path)["index.html"]))
+    assert [face["family"] for face in registered] == [family for family, _, _ in page.FONTS]
+    assert _font_mismatches(registered) == []
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_same_length_garbage_bytes_fail_the_hash_and_magic_checks(tmp_path: Path) -> None:
+    script = _script(_pages(tmp_path)["index.html"])
+    family, name, _ = page.FONTS[0]
+    data = (FONT_DIR / name).read_bytes()
+    real = base64.b64encode(data).decode("ascii")
+    garbage = base64.b64encode(b"x" * len(data)).decode("ascii")
+    assert script.count(real) == 1
+    registered = _registered_fonts(tmp_path, script.replace(real, garbage))
+    assert _font_mismatches(registered) == [(family, "sha256"), (family, "magic")]
