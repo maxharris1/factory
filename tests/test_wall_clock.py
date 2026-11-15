@@ -459,3 +459,150 @@ def test_a_detached_remote_worker_keeps_its_deadline_when_its_runner_dies(tmp_pa
         kill_quietly(worker)
         if proc.poll() is None:
             proc.kill()
+
+
+PID_WRITER = (
+    "import os, sys, time\n"
+    "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+    "f = open(sys.argv[2], 'a')\n"
+    "while True:\n"
+    "    f.write('x'); f.flush(); time.sleep(0.05)\n"
+)
+ORPHANS_WRITER = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]], env={}, "
+    "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+    "start_new_session=True)"
+)
+RUNS_ORPHANER = (
+    "import subprocess, sys, time; time.sleep(0.2); "
+    "subprocess.run([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]]); "
+    "time.sleep(float(sys.argv[5]))"
+)
+
+
+def _orphan_writer(tmp_path: Path, budget: Budget, sleep: float) -> tuple[int, int, Path]:
+    pid_file, ticks = tmp_path / "writer.pid", tmp_path / "ticks"
+    code = job_run.run(
+        [sys.executable, "-c", RUNS_ORPHANER, ORPHANS_WRITER, PID_WRITER, str(pid_file), str(ticks),
+         str(sleep)],
+        beat=lambda: None, interval=0.1, log=lambda _m: None, budget=budget,
+    )
+    return code, int(pid_file.read_text()), ticks
+
+
+def test_an_untagged_orphan_in_a_new_session_is_dead_when_run_returns_past_the_budget(
+    tmp_path: Path,
+) -> None:
+    writer = None
+    try:
+        code, writer, ticks = _orphan_writer(tmp_path, Budget(2.0, grace=5), 600)
+        assert code == 128 + signal.SIGTERM
+        assert not _alive(writer) and not _still_writes(ticks)
+    finally:
+        kill_quietly(writer)
+
+
+def test_an_untagged_orphan_of_a_harness_that_exited_in_time_is_dead_when_run_returns(
+    tmp_path: Path,
+) -> None:
+    writer = None
+    try:
+        code, writer, ticks = _orphan_writer(tmp_path, Budget(60), 1.5)
+        assert code == 0
+        assert not _alive(writer) and not _still_writes(ticks)
+    finally:
+        kill_quietly(writer)
+
+
+def test_an_untagged_orphan_does_not_run_beside_the_retry(tmp_path: Path) -> None:
+    poller, job_id = _box(tmp_path, timeout=2)
+    pid_file, ticks = tmp_path / "pid", tmp_path / "ticks"
+    try:
+        code, err = _job_run(
+            poller, job_id, sys.executable, "-c", RUNS_ORPHANER,
+            ORPHANS_WRITER, PID_WRITER, str(pid_file), str(ticks), "600",
+        )
+        assert code == 128 + signal.SIGTERM, err
+        assert poller.row(job_id)["state"] == "failed"
+        poller.now[0] = time.time()
+        poller.queue.clock = lambda: poller.now[0]
+        poller.dispatcher.reconcile_jobs()
+        retry = poller.claim()
+        observed = tmp_path / "observed"
+        watch = (
+            "from pathlib import Path; import sys, time; "
+            "p = Path(sys.argv[1]); before = p.stat().st_size; time.sleep(0.3); "
+            "Path(sys.argv[2]).write_text(f'{before} {p.stat().st_size}')"
+        )
+        code, err = _job_run(
+            poller, retry.job_id, sys.executable, "-c", watch, str(ticks), str(observed)
+        )
+        assert code == 0, err
+        before, after = map(int, observed.read_text().split())
+        assert after == before, "the old orphan still wrote during the retry"
+    finally:
+        if pid_file.exists():
+            kill_quietly(int(pid_file.read_text()))
+
+
+def _reap_children() -> None:
+    try:
+        while os.waitpid(-1, os.WNOHANG)[0]:
+            pass
+    except ChildProcessError:
+        pass
+
+
+def test_a_remote_deadline_kills_tagged_children_left_after_the_wrapper_exits(
+    tmp_path: Path,
+) -> None:
+    import ctypes
+    import subprocess
+
+    from lib import remote
+
+    libc = ctypes.CDLL(None)
+    assert libc.prctl(36, 1, 0, 0, 0) == 0
+    target = remote.RemoteTarget(
+        device="pc", alias="fake", user="codex-bot", workdir_root=str(tmp_path),
+        job_id="probe", tag=remote.new_tag(),
+    )
+    pid_file, ticks = tmp_path / "pid", tmp_path / "ticks"
+    writer = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " + PID_WRITER
+    parent = (
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[1], sys.argv[2]], "
+        "start_new_session=True); time.sleep(600)"
+    )
+    start = remote.start_script(
+        target, [sys.executable, "-c", parent, str(pid_file), str(ticks), writer], {}
+    )
+    launch = remote.launch_script(
+        target, start, size=1, not_after=int(time.time()) + 60, budget=2, grace=1
+    )
+    rundir = Path(remote.run_dir(target)) / target.tag
+    try:
+        subprocess.run(["sh", "-c", launch], input=b"x", capture_output=True, check=True)
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert pid_file.exists()
+        end = time.monotonic() + 8
+        while time.monotonic() < end and not (
+            (rundir / "exit").exists() and not _alive(int(pid_file.read_text()))
+        ):
+            _reap_children()
+            time.sleep(0.05)
+        _reap_children()
+        assert (rundir / "exit").read_text().strip() == str(128 + signal.SIGTERM)
+        assert not _still_writes(ticks), "a tagged child outlived the budget and its grace"
+    finally:
+        if pid_file.exists():
+            kill_quietly(int(pid_file.read_text()))
+        if (rundir / "pid").exists():
+            for pid in map(int, (rundir / "pid").read_text().split()):
+                kill_quietly(pid)
+        time.sleep(0.2)
+        _reap_children()
+        libc.prctl(36, 0, 0, 0, 0)

@@ -682,26 +682,29 @@ _DETACH = (
 
 # #199 r1: the run's deadline on the device, so it holds when the box's
 # runner dies. $1 the wrapper's pid, $2 the budget and $3 the grace (whole
-# seconds), $4 and $5 the stop and kill scripts (stop_script). It runs in a
-# session of its own, without the tag (no check counts it, no stop of the
-# start's groups reaches it), and ends once the wrapper has. Past the budget
-# it runs the stop script; past the grace after that, the kill script, again
-# each second until the wrapper is gone.
+# seconds), $4 and $5 the stop and kill scripts (stop_script), $6 the check
+# script (check_script). It runs in a session of its own, without the tag
+# (no check counts it, no stop of the start's groups reaches it). The run
+# lives while the wrapper does or (#199 r2) the check finds a process of it,
+# so a worker the wrapper left behind keeps the deadline going. Past the
+# budget it runs the stop script; past the grace after that, the kill
+# script, again each second until the run is gone.
 _DEADLINE = (
-    'W=$1; B=$2; G=$3; trap "" TERM INT HUP; '
+    'W=$1; B=$2; G=$3; C=$6; trap "" TERM INT HUP; '
     'late() { [ "$(date +%s)" -ge "$1" ]; }; '
+    'live() { kill -0 "$W" 2>/dev/null && return 0; sh -c "$C" > /dev/null 2>&1; [ $? -eq 1 ]; }; '
     'e=$(( $(date +%s) + B )); '
-    'while kill -0 "$W" 2>/dev/null; do late "$e" && break; sleep 1; done; '
-    'kill -0 "$W" 2>/dev/null || exit 0; '
+    'while live; do late "$e" && break; sleep 1; done; '
+    'live || exit 0; '
     'sh -c "$4"; e=$(( $(date +%s) + G )); '
-    'while kill -0 "$W" 2>/dev/null; do late "$e" && break; sleep 1; done; '
-    'while kill -0 "$W" 2>/dev/null; do sh -c "$5"; sleep 1; done'
+    'while live; do late "$e" && break; sleep 1; done; '
+    'while live; do sh -c "$5"; sleep 1; done'
 )
 
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
 # directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
 # budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
-# and kill scripts. It starts the start (lib/remote.py start_script, which
+# and kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
 # records the worker and execs the harness) in a session of its own with
 # the brief as its stdin and its output in `log`, records both pids, starts
 # its deadline (_DEADLINE) when it has a budget, waits for the start (again
@@ -713,7 +716,7 @@ _WRAPPER = (
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
     'if [ -n "$4" ]; then '
-    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7"; '
+    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
     'if [ "$S" = setsid ]; then env -u ORCH_WORKER_TAG setsid "$@" '
     '< /dev/null > /dev/null 2>&1 & '
     'else env -u ORCH_WORKER_TAG perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@" '
@@ -773,7 +776,7 @@ def launch_script(
         raise RemoteError("a launch's budget must be above 0 and its grace not below 0")
     limits = (
         f"{budget} {grace} {shlex.quote(stop_script(target))} "
-        f"{shlex.quote(stop_script(target, kill=True))}"
+        f"{shlex.quote(stop_script(target, kill=True))} {shlex.quote(check_script(target))}"
         if budget is not None
         else "''"
     )

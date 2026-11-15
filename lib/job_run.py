@@ -26,13 +26,18 @@ same process that runs the command:
   runs with RUN_TAG_ENV set to a fresh tag, run tracks its process tree
   while it runs, and once it has exited run stops (SIGSTOP), then kills
   (SIGKILL), every live process that carries the tag or descends from a
-  tracked one, and returns only when none is left.
+  tracked one, and returns only when none is left;
+* on Linux, run is the command's child subreaper while it runs (#199 r2),
+  so a descendant orphaned between two looks, even one that dropped the tag
+  and left the session, is reparented to run rather than to init, and is
+  killed with the rest.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
 
 from __future__ import annotations
 
+import ctypes
 import math
 import os
 import secrets
@@ -63,6 +68,9 @@ WALL_CLOCK = "wall-clock"
 RUN_TAG_ENV = "ORCH_RUN_TAG"
 # How often run looks at the command's process tree while it runs.
 TRACK_SECONDS = 1.0
+# prctl(2) options for a child subreaper (Linux).
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
 
 Beat = Callable[[], object]
 Log = Callable[[str], None]
@@ -228,6 +236,7 @@ def run(
     heartbeat = Heartbeat(beat, interval, log)
     child: subprocess.Popen[bytes] | None = None
     reader: threading.Thread | None = None
+    reaper: bool | None = None
     pending: list[int] = []
     previous: dict[int, object] = {}
 
@@ -252,6 +261,13 @@ def run(
             log(f"not starting {argv[0]}: got signal {pending[0]}")
             return 128 + pending[0]
         tag = secrets.token_hex(16)
+        me = os.getpid()
+        others = frozenset({
+            (pid, process.start)
+            for pid, process in processes(tag).items()
+            if process.ppid == me
+        })
+        reaper = _subreaper(True)
         tagged = {**(dict(env) if env is not None else os.environ), RUN_TAG_ENV: tag}
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
@@ -317,13 +333,15 @@ def run(
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
-        tree = Tree(child.pid, tag)
+        tree = Tree(child.pid, tag, adopts=reaper is not None, others=others)
         try:
             code = _wait(child, budget, argv[0], log, tree)
         finally:
             tree.end(log)
         code = _past_budget(code if code >= 0 else 128 - code, budget)
     finally:
+        if reaper is not None:
+            _subreaper(reaper)
         if reader is not None:
             reader.join(OUTPUT_GRACE_SECONDS)
         heartbeat.stop()
@@ -332,6 +350,22 @@ def run(
         if prepared and teardown is not None:
             teardown()
     return code
+
+
+def _subreaper(on: bool) -> bool | None:
+    """Make this process a child subreaper (or not); its earlier setting, None where it cannot."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+    was = ctypes.c_int(0)
+    if prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(was), 0, 0, 0) != 0:
+        return None
+    if prctl(PR_SET_CHILD_SUBREAPER, int(on), 0, 0, 0) != 0:
+        return None
+    return bool(was.value)
 
 
 def _past_budget(code: int, budget: Budget | None) -> int:
@@ -445,7 +479,9 @@ class Tree:
 
     A process belongs to the run when it carries the run's tag, or its parent
     belongs to it; once seen it stays a member (by pid and start time) after
-    its parent exits.
+    its parent exits. With `adopts` (run is the subreaper), a child of this
+    process belongs to it too, unless `others` (pid and start time) names it
+    as one this process had before the run.
     """
 
     def __init__(
@@ -455,9 +491,13 @@ class Tree:
         *,
         scan: Callable[[str], dict[int, Process]] = processes,
         signal_pid: Callable[[int, int], None] = os.kill,
+        adopts: bool = False,
+        others: frozenset[tuple[int, str]] = frozenset(),
     ):
         self.root = root
         self.tag = tag
+        self.adopts = adopts
+        self.others = others
         self.scan = scan
         self.signal_pid = signal_pid
         self.known: dict[int, str] = {}
@@ -481,11 +521,16 @@ class Tree:
             for process in listing.values():
                 if process.pid in members or process.pid == me or process.pid in self.foreign:
                     continue
-                if process.tagged or process.ppid in members:
+                if process.tagged or process.ppid in members or self._adopted(process, me):
                     members[process.pid] = process
                     grown = True
         self.known = {pid: process.start for pid, process in members.items()}
         return members
+
+    def _adopted(self, process: Process, me: int) -> bool:
+        return (
+            self.adopts and process.ppid == me and (process.pid, process.start) not in self.others
+        )
 
     def end(self, log: Log) -> None:
         """Kill every live process of the run; return once none is left.
@@ -507,10 +552,22 @@ class Tree:
                 members = self.track()
             for pid in members:
                 self._send(pid, signal.SIGKILL)
+            self._reap(members)
             if time.monotonic() - said >= KILL_GRACE_SECONDS:
                 log(f"processes {sorted(members)} of the run still live after SIGKILL; waiting")
                 said = time.monotonic()
             time.sleep(0.05)
+
+    def _reap(self, members: dict[int, Process]) -> None:
+        """Collect the killed processes this process adopted, so none is left a zombie."""
+        me = os.getpid()
+        for process in members.values():
+            if process.pid == self.root or not self._adopted(process, me):
+                continue
+            try:
+                os.waitpid(process.pid, 0)
+            except ChildProcessError:
+                pass
 
     def _send(self, pid: int, signum: int) -> None:
         try:
