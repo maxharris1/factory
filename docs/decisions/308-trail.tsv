@@ -1,0 +1,9 @@
+decision	choice	why
+host check	one POSIX sh predicate, factory_in_host_pidns in deploy/host-pidns.sh: NSpid with more than one field, or a pid namespace that differs from ~/.config/factory/host-pidns, is not host	a sandbox with its own /proc mount shows a one-field NSpid, so only a recorded value catches it (measured with unshare --mount-proc); profile may run under dash
+record	install.sh writes readlink /proc/self/ns/pid only when it passes the check without a record and has no ORCH_JOB_PROOF or CODEX_SANDBOX; otherwise it keeps the record and warns	an install run from a sandbox must not poison the record; a missing record falls back to NSpid so older installs keep working
+profile guard	all four hooks sit inside one factory_may_autostart gate; ORCH_DB, PATH and mkdir stay unconditional	jobs need the env; the hooks are what corrupt pidfiles
+service refusal	start, stop, restart, ensure and the internal loops of the waiter, poller, linear webhook and self-heal scripts exit 4 outside the host namespace; status and install/remove-autostart stay open	4 is unused (3 is not running, 76 is autostart removed); stop is guarded so a sandbox cannot write a .stopped hold
+self-heal	guarded too though AC2 names three scripts	same pidfile failure mode, one line each
+stale record	fail closed with a message naming both values and install.sh --update	failing open brings back the corrupted pidfiles
+linear foreign child record	no code change; message now says to remove the record once the sandbox exits	stop can no longer run inside the sandbox; no new records of that kind can appear
+delegation	the main job owned the diff; comment-sicko reviewed it	about 40 changed lines of shell across shared helper; Codex review supplies the separation
