@@ -8,12 +8,14 @@ import pytest
 import yaml
 
 from lib.brief import render_brief
-from lib.dispatcher import CIResult, TrackedTicket
+from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
 from lib.factory_md import load_factory_md, parse_factory_context, parse_factory_md
 from lib.feeder_gates import github_ref, parse_gate_lines
 from lib.followups import followup_findings, followup_issue
 from tests import regenerate_brief_snapshots as snapshots
+from tests.merge_queue_support import Board, sha
 from tests.test_dispatcher import (
+    TRUSTED_LOGINS,
     VERDICT,
     FakeReviewActions,
     comment,
@@ -379,3 +381,82 @@ def test_revise_with_a_blocking_finding_still_queues_the_same_fix(tmp_path: Path
     [(_title, body, _labels)] = actions.issues.values()
     assert "> 2. [follow-up] lib/a.py:10" in body
     assert "[blocking]" not in body
+
+
+NESTED = (
+    "1. [follow-up] lib/a.py:10 repeats the round 2 path rule.\n"
+    "   Repro:\n"
+    "   1. Write a Windows path.\n"
+    "   2. Run the parser.\n"
+    "   ```\n"
+    "1. not a finding\n"
+    "## not a heading\n"
+    "   ```\n"
+    "   Expected: normalized path. Actual: ValueError."
+)
+
+
+def test_nested_steps_and_fenced_lines_stay_in_their_finding() -> None:
+    body = f"{NESTED}\n\n2. [minor] lib/b.py:3 naming.\n   1. [follow-up] nested, not its own.\n"
+    assert followup_findings(body) == (NESTED,)
+
+
+@pytest.mark.parametrize("fail_at", ["file", "link"])
+@pytest.mark.parametrize("left_as", ["merged", "done", "abandoned"])
+def test_a_failed_filing_retries_after_the_ticket_leaves_the_loop(
+    tmp_path: Path, fail_at: str, left_as: str
+) -> None:
+    board = Board(tmp_path, ship="handoff", finish_line="merge")
+    board.factory = replace(board.factory, followup_from_round=4)
+    pr = board.open("42", sha(1))
+    calls = {"file": 0, "link": 0}
+    issues: list[int] = []
+    links: list[str] = []
+
+    def file_issue(*args) -> int:
+        calls["file"] += 1
+        if fail_at == "file" and calls["file"] == 1:
+            raise RuntimeError("transient issue API failure")
+        issues.append(300)
+        return 300
+
+    def comment_once(ticket, body, marker) -> None:
+        calls["link"] += 1
+        if fail_at == "link" and calls["link"] == 1:
+            raise RuntimeError("transient comment API failure")
+        links.append(body)
+
+    board.actions.file_issue = file_issue
+    board.actions.comment_once = comment_once
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    board.finish("codex")
+    with board.queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET review_round = 3, cap_extra = 2 WHERE ticket_id = '42'"
+        )
+    body = VERDICT.format(round="4/5", head=pr.head, verdict="APPROVE", risk="high")
+    board.post(pr, "verdict-4", body + FOLLOWUP_A + "\n", "codex-login")
+    board.poll()
+    assert board.state("42")["workflow_state"] == "merged"
+    with board.queue.connect() as connection:
+        connection.execute(
+            "UPDATE ticket_state SET workflow_state = ? WHERE ticket_id = '42'", (left_as,)
+        )
+    board.dispatcher = Dispatcher(
+        tmp_path / "d.db",
+        board.queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=board.actions,
+        grok_delivery=board.grok,
+    )
+    for _ in range(3):
+        board.poll()
+
+    assert filings(board.queue) == [("verdict-4", 4, "commented", 300)]
+    assert issues == [300]
+    assert len(links) == 1
+    assert board.last_refs == ()

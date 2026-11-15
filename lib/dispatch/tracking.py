@@ -276,7 +276,8 @@ class TrackingMixin:
 
         Every ticket that is not merged, done or abandoned, plus a merged or
         handed-off one with a completed ship intent left to replay or an
-        external ship left to settle. A handed-off ticket stays polled, so
+        external ship left to settle, and any ticket with a follow-up filing
+        not yet linked. A handed-off ticket stays polled, so
         its merge is seen and a trusted ready may re-enter review.
 
         With cycle, a ticket in a stopped state (handed-off, capped, blocked,
@@ -290,7 +291,7 @@ class TrackingMixin:
             rows = connection.execute(
                 """
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled
+                       unsettled, unlinked
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                            state.workflow_state,
@@ -313,7 +314,14 @@ class TrackingMixin:
                                WHERE external.repo = tracked.repo
                                  AND external.ticket_id = tracked.ticket_id
                                  AND external.settled = 0
-                           ) AS unsettled
+                           ) AS unsettled,
+                           EXISTS (
+                               SELECT 1
+                               FROM followup_filings AS filing
+                               WHERE filing.repo = tracked.repo
+                                 AND filing.ticket_id = tracked.ticket_id
+                                 AND filing.status IN ('pending', 'filed')
+                           ) AS unlinked
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
@@ -322,6 +330,7 @@ class TrackingMixin:
                 WHERE workflow_state IS NULL
                    OR workflow_state NOT IN ('merged', 'done', 'abandoned')
                    OR (workflow_state = 'merged' AND (replay OR unsettled))
+                   OR unlinked
                 ORDER BY repo, ticket_id
                 """
             ).fetchall()
@@ -330,7 +339,9 @@ class TrackingMixin:
         stopped_keys: set[tuple[str, str]] = set()
         for row in rows:
             state = row["workflow_state"]
-            catching_up = bool(row["replay"]) or bool(row["unsettled"])
+            catching_up = (
+                bool(row["replay"]) or bool(row["unsettled"]) or bool(row["unlinked"])
+            )
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
             if cycle is not None and stopped and not catching_up:
                 key = (str(row["repo"]).lower(), str(row["ticket_id"]))
@@ -345,6 +356,7 @@ class TrackingMixin:
                     ticket_id=str(row["ticket_id"]),
                     tracker=str(row["tracker"]),
                     allow_merged=state == "merged"
+                    or bool(row["unlinked"])
                     or (
                         state in ("handed-off", *WATCHED_STATES)
                         and bool(row["replay"])
