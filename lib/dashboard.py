@@ -1432,9 +1432,9 @@ def _add_job_tickets(
     telemetry: bool,
 ) -> None:
     """Give each running or queued job its ticket's tracker and flow (current
-    statechart state, the path its jobs took, time in state, the visits).
-    The job's round comes from its own detail (#75), not the ticket's
-    completed review count."""
+    statechart state, the path its jobs took, time in state). The job's
+    round comes from its own detail (#75), not the ticket's completed
+    review count."""
     if not active:
         return
     # One read for every ticket with a running or queued job, oldest first.

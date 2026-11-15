@@ -1,10 +1,3 @@
-"""Issue #145: one visit list for the ticket page's run log and journey.
-
-`job_flow` returns `visits` beside `path`, one per path entry in the same
-order, with who worked each visit, when it started and how long it took
-where the database knows, `hops_to_shipped` and `all_durations_known`.
-"""
-
 import json
 import sqlite3
 from pathlib import Path

@@ -14,11 +14,6 @@ filled in (intake -> questions -> building, since questions is Grok Bot's
 step and has no job of its own); longer gaps are kept as a jump with no
 edge drawn.
 
-Each path entry is a visit: the state, who worked it (the recipient of the
-first job behind it, or script), when it started and how long it took
-where the database knows, and the chart edge it came in by (job_flow's
-`visits`). The ticket page's run log and journey render from that list.
-
 The job view draws that path as a left-to-right chain, one node per visit
 (a ticket revised twice shows review, fixing, review, fixing, review), the
 current step highlighted, and the chart's direct successors of the current
@@ -178,8 +173,6 @@ class Visit(NamedTuple):
 def chart_visits(
     chart: dict | None, observed: Iterable[tuple[str | None, JobStep | None]]
 ) -> list[Visit]:
-    """The visits a ticket made, in order, on the chart, each with the job
-    steps that back it (none for a bridged visit)."""
     known = None if chart is None else {state["name"] for state in chart["states"]}
     adjacency = {} if chart is None else _adjacency(chart)
     visits: list[Visit] = []
@@ -274,8 +267,6 @@ def ticket_phases(chart: dict | None) -> dict[str, str]:
 
 
 def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
-    """The fewest transitions from `state` to a SHIPPED state, or None when
-    no shipped state is reachable."""
     if chart is None or state is None:
         return None
     adjacency = _adjacency(chart)
@@ -299,8 +290,6 @@ def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
 
 
 def _started_at(visit: Visit) -> float | None:
-    """When a visit began: its first job's telemetry start, else when that
-    job was queued; None for a visit no job backs."""
     if not visit.steps:
         return None
     step = visit.steps[0]
