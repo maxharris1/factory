@@ -23,6 +23,11 @@ from lib.dispatch.types import (
 )
 from lib.handoff import HandoffError, parse_comment
 
+_RECOVERS_EDITED = {
+    "ready": frozenset({"queued-review", "answered-review", "queued-ci-fix"}),
+    "verdict": frozenset({"answered-fix", "approve-ci-red-fix"}),
+}
+
 
 class CommentsMixin:
     def process(self, ticket: TrackedTicket) -> None:
@@ -60,6 +65,10 @@ class CommentsMixin:
         self._settle_external_ships(ticket)
         try:
             self._drain_followups(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._drain_auto_extra(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
 
@@ -214,6 +223,10 @@ class CommentsMixin:
             if handled:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                if outcome in _RECOVERS_EDITED.get(kind, ()) or (
+                    kind == "verdict" and _acted_verdict(outcome)
+                ):
+                    self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:

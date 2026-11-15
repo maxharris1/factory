@@ -79,6 +79,8 @@ Write the comment to `handoff.md` (never commit that file) and post it with this
 
 `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api repos/owner/repo/issues/42/comments -F body=@handoff.md --jq .id`
 
+Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction (a typo, an updated test count, a better summary) in a new comment and leave the posted one as it is.
+
 ## Finish the job
 - After the handoff comment is posted: `orch job done codex-bot 0123456789abcdef0123456789abcdef --handoff <comment-id>`.
 - If you cannot finish: `orch job done codex-bot 0123456789abcdef0123456789abcdef --failed` (T6 retries the job once).
@@ -230,6 +232,8 @@ Then plain prose for people and agents: **Review round N of CAP: VERDICT**, then
 Write the comment to `handoff.md` (never commit that file) and post it with this command, which prints the new comment's id:
 
 `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh api repos/owner/repo/issues/42/comments -F body=@handoff.md --jq .id`
+
+Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. Put any correction (a typo, an updated test count, a better summary) in a new comment and leave the posted one as it is.
 
 ## Finish the job
 - This device (mac) has no orch database: do not run `orch job done`.

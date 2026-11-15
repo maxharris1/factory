@@ -26,25 +26,25 @@ from tests.test_dashboard import NOW, make_db, seeded
 FACADE = Path(__file__).resolve().parent.parent / "lib" / "dashboard_page.py"
 
 GOLDEN = {
-    "CSS": "19a0b1f9f72d20351073fe719ac4971cdef5c2bff041dad108a8a8133b636237",
-    "SCRIPT": "d52ab72896b7b64a6108b5c3a0dbc37e050a7697b9787558cdde6b844342c14a",
+    "CSS": "d4df591e86666a87dd1943df050559e109c2613b37d9bdf5e6094dbe3fbcd346",
+    "SCRIPT": "241565fdf937aa408ea4d89f35f716794d13a2d3e438a1c3c609081c42c48bbb",
     "PX_SCRIPT": "777ae1a8b65aa0d735a696c3e6ba885f3e5e086f61c26784d9e5efcb5bc5bef5",
-    "page_script": "6aa34b812836b1b3b604d6988e932b0e8481463e25d866ffe3fe2705d3edb6f8",
-    "seeded/index.html": "006c641c59fd4190bfc69b4a87281eac00554b8b65896a7444f991718a68ad91",
-    "seeded/job.html": "6cf21a43b0cdd8b902798dae88b77c47a154aea07c3f4de22324d54c86ef4a8b",
-    "seeded/activity.html": "9f5632d96cd3b2db2f640de9c8451457750dc2b241943b9f2f738f74be555b57",
-    "seeded/efficiency.html": "9de5ca16d84018cacc14171cd7420fcdf66f7a9e5bd7845772fa587e6f2db9ba",
-    "seeded/health.html": "afe32d8f8070c26f4b4c0817baa2da4670d32651c6a7d97dd2d53b76f478aae5",
-    "hostile/index.html": "b7e9716fc1710ae165b11db744dd3da6a0003458b904307a212c7c2046312e14",
-    "hostile/job.html": "aeed3a30e0cb1d2027fc4012bd7564d26f110fc40971b9dee849732fc4bbf88e",
-    "hostile/activity.html": "a852c0b27ef0b93bde5345f49fb820521c83bb0ed28609866816ff1eb75225fb",
-    "hostile/efficiency.html": "f4d3ab5a8861afeb6e2fb3dd8a6f4b78de920e1a72e586f46e2cf10da21fae21",
-    "hostile/health.html": "632b1209cfa55917d0642c72bb4bfebc92a668fb912259e87071194ea9301d09",
-    "empty/index.html": "9d361bba608619ba97b504f6fc582b8d37f22c085eef27d6cf0887172750f0d8",
-    "empty/job.html": "0bce1598162e16c9cb71e0aae60119a5d972a053340344bd2d817100d129a2bd",
-    "empty/activity.html": "ae19457595184cbf74eed27ae75383794f208e944dd2f2ea8873a2f7a26460d3",
-    "empty/efficiency.html": "fd91589debbe7bc2d350cb9d654e71bd3e9fee5c7495a2aef1c25cae54f09053",
-    "empty/health.html": "f83dd4ea7f26ec6169efb411e8c50f96c510523758976c399cf43646189d068b",
+    "page_script": "365ceb72a3a04442ef4b5c0a4f7518166e13327824c443d3688176732123ed89",
+    "seeded/index.html": "06e88bfcb3d2336294a0fe1ebfa8521d8f007bd660d4348d8d9bc81b40f71ca1",
+    "seeded/job.html": "a0b2b11f9ec6486abc26ac403f2f8b4db681d0de114e9ee205bc6d2485ba2376",
+    "seeded/activity.html": "5caae40698f5f3c066ee5cfcee210bdafcfdb584659020c2914fe69c1088e4b8",
+    "seeded/efficiency.html": "00a50c36004375239b5801a7a919e49298caf0de3aa502c356d4316711ce6a9c",
+    "seeded/health.html": "cc16d0a50857c62c5507f72d346389619cad3e72a7117f392f262b03708bfb46",
+    "hostile/index.html": "d8c51c0dbc26e987b5556c412b076b4d7717148472e4d65ae291a6b86e6456bf",
+    "hostile/job.html": "177e882694bd7f0b96f37afb8c2e7d0a2ec86af60daf213bf23db2b81d948f5e",
+    "hostile/activity.html": "63cc92817f8d6e2ce7810284aa4596533bfc4040b28cb20d81414916197465a8",
+    "hostile/efficiency.html": "6ff09f7ad0bdc343369c871a515318ef8ebeadf5ed8acdafc54c17fe5594285a",
+    "hostile/health.html": "142f0bc6f6eef5dc8dbeb67847f8f344d4ea92a5645996d95472cfbd2eab2171",
+    "empty/index.html": "444ad5f848677b4f40ecf8e8724e66d1d1f996c624a60cb0c1dc052ad7cab2fd",
+    "empty/job.html": "358b331cf6ea5eaf9a1620f1c2b5ed1158e6745a1b85684e2a94c9683245eb29",
+    "empty/activity.html": "0f1cfb569e26f98a0214e76f5bf7213595bbe210f661b34f4fc3d28a974d6063",
+    "empty/efficiency.html": "eb3f4f88a5e6318f4e8db8791593f31647c93043b4d9510443958b7a38806c6d",
+    "empty/health.html": "65842f67026db5a3c0b6e610d801311b2cff3dda9159d4747b534376122fd961",
 }
 
 NAMES = (
@@ -62,7 +62,7 @@ NAMES = (
     "_health", "_HEALTH_STATE", "_ANCHOR", "_anchor_attr", "_components", "_no_waiter",
     "_savings", "_active_jobs", "_board", "_detail_model", "_job_article",
     "_jobview", "_PANELS", "_page", "render_pages", "TELEMETRY_CSS", "TELEMETRY_SCRIPT",
-    "job_block", "rollup_panel", "CODE_COMPONENTS", "label",
+    "rollup_panel", "CODE_COMPONENTS", "label",
 )
 
 

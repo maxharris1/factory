@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from lib.brief.common import NO_EDIT_RULE
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
 AUTHORITY = (
@@ -22,3 +23,12 @@ def test_every_brief_has_the_sentence_in_its_rules(kind: str, sentence: str) -> 
     for brief in render_snapshot(kind).split("=====")[2::2]:
         rules = brief.split("## Rules\n", 1)[1].split("\n## ", 1)[0] + "\n"
         assert sentence in rules
+
+
+@pytest.mark.parametrize("kind", sorted(CASES))
+def test_every_brief_forbids_editing_a_posted_handoff(kind: str) -> None:
+    briefs = render_snapshot(kind).split("=====")[2::2]
+    assert briefs
+    for brief in briefs:
+        handoff = brief.split("## Handoff comment\n", 1)[1].split("\n## ", 1)[0]
+        assert NO_EDIT_RULE in handoff

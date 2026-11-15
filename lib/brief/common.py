@@ -13,6 +13,11 @@ from lib.pr_title import SOURCE
 from lib.queue import Job
 
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
+NO_EDIT_RULE = (
+    "Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. "
+    "Put any correction (a typo, an updated test count, a better summary) in a new comment "
+    "and leave the posted one as it is."
+)
 QUESTIONS_LINES = [
     "If something left open needs a decision, post a `questions` handoff.",
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
@@ -80,6 +85,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "round": round_text if round_match is not None else None,
         "round_number": int(round_match.group(1)) if round_match is not None else None,
         "followup_from": context.config.followup_from_round if context is not None else None,
+        "auto_extra": context.config.auto_extra_rounds if context is not None else 0,
         "start_before_ci": context.config.start_before_ci if context is not None else False,
         "cap": cap,
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,
@@ -217,7 +223,8 @@ def _post_command(facts: dict) -> str:
     return (
         "Write the comment to `handoff.md` (never commit that file) and post it with this command, "
         "which prints the new comment's id:\n\n"
-        f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`"
+        f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`\n\n"
+        + NO_EDIT_RULE
     )
 
 

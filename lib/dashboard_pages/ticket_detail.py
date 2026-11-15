@@ -5,9 +5,10 @@ The Run log and the Journey render from one visit list and share one selection."
 from __future__ import annotations
 
 import json
+import math
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, ticket_phases
-from lib.dashboard_telemetry import job_block
+from lib.dashboard_telemetry import NO_DATA
 from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
@@ -119,6 +120,39 @@ CSS = """\
 .jd-chart summary{cursor:pointer;font:600 13px/1.8 var(--mono);color:var(--text)}
 .jd-chart summary .count{font-weight:400;font-size:12px;color:var(--muted)}
 .jd-chart .jd-box{margin-top:10px}
+.lr{--lr:var(--brand);display:flex;flex-direction:column;gap:14px;padding:14px 14px 12px;background:var(--field);color:var(--text);font:12px/1.5 var(--mono)}
+.lr-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.lr-spin{display:block;flex:0 0 16px}
+.lr-label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.lr-task{flex:1 1 320px;min-width:0;font:600 18px/1.35 var(--sans);color:var(--text);overflow-wrap:anywhere}
+.lr-task.ok{color:var(--ok)}.lr-task.muted{color:var(--muted);font-weight:400}
+.lr-last{min-width:0;color:var(--muted);overflow-wrap:anywhere}.lr-last span{color:var(--text-2)}
+.lr-cols{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 24px}
+.lr-col{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:8px}
+.lr-colhead{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.lr-count{color:var(--text-2)}
+.lr-col .px{height:8px}
+.lr-plan{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
+.lr-plan li{display:flex;align-items:baseline;gap:10px;padding:2px 6px}
+.lr-mark{flex:0 0 8px;height:8px;box-sizing:border-box;border:1px solid var(--line-hi)}
+.lr-text{flex:1 1 auto;min-width:0;font:400 13px/1.5 var(--sans);color:var(--muted);overflow-wrap:anywhere}
+.lr-tag{font-size:11px;white-space:nowrap;color:var(--muted)}
+.lr-plan .done .lr-mark{background:var(--ok);border-color:var(--ok)}.lr-plan .done .lr-text{color:var(--text-2)}
+.lr-plan .now{background:var(--panel)}
+.lr-plan .now .lr-mark{background:var(--lr);border-color:var(--lr)}.lr-plan .now .lr-text{font-weight:600;color:var(--text)}
+.lr-plan .now .lr-tag{color:var(--accent)}
+.lr-alone{padding:10px;border:1px dashed var(--line-hi);color:var(--muted)}
+.lr-agent{display:flex;flex-direction:column;background:var(--dim);box-shadow:var(--elev)}
+.lr-agent-body{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:6px 10px 8px}
+.lr-kind{min-width:0;padding:0 6px;border:1px solid var(--line-hi);color:var(--text-2);font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+.lr-desc{flex:1 1 200px;min-width:0;font:13px/1.5 var(--sans);color:var(--text);overflow-wrap:anywhere}
+.lr-status{font-size:11px;white-space:nowrap}
+.lr-status.running{color:var(--accent)}.lr-status.finished{color:var(--ok)}.lr-status.failed{color:var(--bad)}
+.lr-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.lr-tile{padding:8px 10px;background:var(--dim);box-shadow:var(--elev)}
+.lr-tile b{display:block;font-size:16px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--text)}
+.lr-tile span{color:var(--muted)}
+@media (max-width:640px){.lr-tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
 """
 
 
@@ -290,11 +324,139 @@ def _runlog(model: dict) -> str:
     )
 
 
+LIVE_FIELDS = ("current_task", "last_finished", "plan", "subagents")
+
+
+def live_mode(telemetry: dict | None) -> str:
+    """none: no telemetry; counters: #100's counters only; live: #148's fields too."""
+    if telemetry is None:
+        return "none"
+    return "live" if any(telemetry.get(name) is not None for name in LIVE_FIELDS) else "counters"
+
+
+def compact(n: int) -> str:
+    if n < 1000:
+        return str(n)
+    if n < 10000:
+        tenths = (n * 10 + 500) // 1000
+        return f"{tenths // 10}.{tenths % 10}k"
+    if n < 1000000:
+        return f"{(n + 500) // 1000}k"
+    tenths = (n * 10 + 500000) // 1000000
+    return f"{tenths // 10}.{tenths % 10}M"
+
+
+def _dollars(cost: float) -> str:
+    cents = math.floor(cost * 100 + 0.5)
+    return f"${cents // 100}.{cents % 100:02d}"
+
+
+def _lr_tiles(t: dict) -> str:
+    known = t.get("tokens_known", True)
+    tokens_in, cached = t["tokens_in"], t["tokens_cached"]
+    in_label = "tokens in"
+    if known and tokens_in:
+        in_label += f" · {(200 * cached + tokens_in) // (2 * tokens_in)}% cached"
+    tiles = (
+        (compact(tokens_in) if known else NO_DATA, in_label),
+        (compact(t["tokens_out"]) if known else NO_DATA, "tokens out"),
+        (NO_DATA if t["cost_usd"] is None else _dollars(t["cost_usd"]), "cost so far"),
+        (f"{t['files_touched']} files · {t['commands']} commands", "touched and run"),
+    )
+    body = "".join(f'<div class="lr-tile"><b>{_e(v)}</b>{_span(None, label)}</div>' for v, label in tiles)
+    return f'<div class="lr-tiles">{body}</div>'
+
+
+def _lr_head(row: dict, t: dict, moving: bool) -> str:
+    finished = bool(t.get("finished"))
+    task, last = t.get("current_task"), t.get("last_finished")
+    effect = "spin3" if moving and task and not finished else "off"
+    strip = _px().px_strip(f"live-head-{row['job']}", effect=effect, tint="bot", bot=row.get("recipient"),
+                           seed=71, still=not moving, cell=4, done=finished, height=12)
+    if finished:
+        label, text, cls = "finished", last or "nothing recorded", "lr-task ok" if last else "lr-task muted"
+    else:
+        label, text, cls = "working on", task or "no task in progress", "lr-task" if task else "lr-task muted"
+    return (
+        f'<div class="lr-head"><span class="lr-spin" aria-hidden="true">{strip}</span>'
+        f'{_span("lr-label", label)}{_span(cls, text)}'
+        f'<span class="lr-last">last finished: {_span(None, last or "nothing yet")}</span></div>'
+    )
+
+
+def _lr_plan(row: dict, plan: list[dict], moving: bool) -> str:
+    head = '<div class="lr-colhead"><span class="lr-label">Its plan</span>'
+    if not plan:
+        return f'<div class="lr-col">{head}</div><p class="empty">no plan yet</p></div>'
+    done = sum(1 for item in plan if item["status"] == "done")
+    strip = _px().px_strip(f"live-plan-{row['job']}", effect="fill", tint="bot", bot=row.get("recipient"),
+                           progress=done / len(plan), seed=72, still=not moving, cell=4, done=done == len(plan), height=8)
+    items = "".join(
+        f'<li class="{_PLAN_CLS[item["status"]]}"><span class="lr-mark" aria-hidden="true"></span>'
+        f'{_span("lr-text", item["text"])}{_span("lr-tag", _PLAN_TAG[item["status"]])}</li>'
+        for item in plan
+    )
+    return (
+        f'<div class="lr-col">{head}{_span("lr-count", f"{done} of {len(plan)} done")}</div>'
+        f'{strip}<ol class="lr-plan">{items}</ol></div>'
+    )
+
+
+_PLAN_CLS = {"done": "done", "in_progress": "now", "pending": "pending"}
+_PLAN_TAG = {"done": "done", "in_progress": "now", "pending": ""}
+
+
+def _lr_agents(row: dict, agents: list[dict] | None, moving: bool) -> str:
+    head = '<div class="lr-colhead"><span class="lr-label">Sub-agents</span>'
+    if agents is None:
+        return f'<div class="lr-col">{head}</div><p class="empty">no sub-agent data</p></div>'
+    running = sum(1 for a in agents if a["status"] == "running")
+    count = _span("lr-count", f"{len(agents)} spawned · {running} running")
+    if not agents:
+        return f'<div class="lr-col">{head}{count}</div><div class="lr-alone">working alone so far</div></div>'
+    cards = []
+    for i, agent in enumerate(agents):
+        status = agent["status"]
+        effect = {"running": "scan" if moving else "off", "finished": "off", "failed": "static"}[status]
+        strip = _px().px_strip(f"live-agent-{row['job']}-{i}", effect=effect,
+                               tint="#f7768e" if status == "failed" else "bot", bot=row.get("recipient"),
+                               seed=80 + i, still=not moving, cell=4, done=status == "finished", height=8)
+        cards.append(
+            f'<div class="lr-agent">{strip}<div class="lr-agent-body">{_span("lr-kind", agent["kind"])}'
+            f'{_span("lr-desc", agent["description"])}'
+            f'{_span("lr-status " + status, status)}</div></div>'
+        )
+    return f'<div class="lr-col">{head}{count}</div>{"".join(cards)}</div>'
+
+
+def _lr_moving(row: dict) -> bool:
+    return _px().px_state(row) in _px().PX_ACTIONS
+
+
+def live_run(row: dict) -> str:
+    """The Live run panel's body (RunTape.dc.html)."""
+    t = row.get("telemetry")
+    mode = live_mode(t)
+    if mode == "none":
+        return '<p class="empty">no telemetry</p>'
+    tint = row.get("recipient") if row.get("recipient") in _px().PX_BOT_TINTS else None
+    style = f' style="--lr:var(--{tint})"' if tint else ""
+    if mode == "counters":
+        return f'<div class="lr"{style}>{_lr_tiles(t)}</div>'
+    moving = _lr_moving(row)
+    plan = "" if t.get("plan") is None else _lr_plan(row, t["plan"], moving)
+    return (
+        f'<div class="lr"{style}>{_lr_head(row, t, moving)}'
+        f'<div class="lr-cols">{plan}{_lr_agents(row, t.get("subagents"), moving)}</div>'
+        f"{_lr_tiles(t)}</div>"
+    )
+
+
 def _liverun(row: dict) -> str:
     sub = f"{row.get('recipient')} · job {row['job']}"
     return (
         f'<section class="jd-panel" id="liverun-{_e(anchor(row["job"]))}">'
-        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{job_block(row.get("telemetry"))}</section>'
+        f'<h2>{_span("t", "Live run")}{_span("count", sub)}</h2>{live_run(row)}</section>'
     )
 
 
@@ -579,10 +741,118 @@ _SCRIPT = r"""
     add(sec, el('p', 'jd-foot', 'Pick a step here or on the chart; both follow.'));
     return sec;
   }
+  var LIVE = {fields: ['current_task', 'last_finished', 'plan', 'subagents'],
+              planCls: {done: 'done', in_progress: 'now', pending: 'pending'},
+              planTag: {done: 'done', in_progress: 'now', pending: ''}};
+  function liveMode(t) {
+    if (!t) return 'none';
+    return LIVE.fields.some(function (k) { return t[k] !== null && t[k] !== undefined; }) ? 'live' : 'counters';
+  }
+  function compact(n) {
+    var tenths;
+    if (n < 1000) return String(n);
+    if (n < 10000) { tenths = Math.floor((n * 10 + 500) / 1000); return Math.floor(tenths / 10) + '.' + (tenths % 10) + 'k'; }
+    if (n < 1000000) return Math.floor((n + 500) / 1000) + 'k';
+    tenths = Math.floor((n * 10 + 500000) / 1000000);
+    return Math.floor(tenths / 10) + '.' + (tenths % 10) + 'M';
+  }
+  function dollars(c) {
+    var cents = Math.floor(c * 100 + 0.5);
+    return '$' + Math.floor(cents / 100) + '.' + pad(cents % 100);
+  }
+  function lrTiles(t) {
+    var known = t.tokens_known !== false;
+    var inLabel = 'tokens in';
+    if (known && t.tokens_in) inLabel += ' · ' + Math.floor((200 * t.tokens_cached + t.tokens_in) / (2 * t.tokens_in)) + '% cached';
+    var box = el('div', 'lr-tiles');
+    [[known ? compact(t.tokens_in) : 'no data', inLabel],
+     [known ? compact(t.tokens_out) : 'no data', 'tokens out'],
+     [t.cost_usd === null || t.cost_usd === undefined ? 'no data' : dollars(t.cost_usd), 'cost so far'],
+     [t.files_touched + ' files · ' + t.commands + ' commands', 'touched and run']].forEach(function (s) {
+      var tile = add(box, el('div', 'lr-tile'));
+      add(tile, el('b', null, s[0]));
+      span(tile, null, s[1]);
+    });
+    return box;
+  }
+  function lrHead(r, t, moving) {
+    var finished = !!t.finished, task = t.current_task, last = t.last_finished;
+    var head = el('div', 'lr-head');
+    var spin = span(head, 'lr-spin');
+    spin.setAttribute('aria-hidden', 'true');
+    add(spin, PX.strip('live-head-' + r.job, {effect: moving && task && !finished ? 'spin3' : 'off', tint: 'bot', bot: r.recipient,
+                                              seed: 71, still: !moving, cell: 4, done: finished, height: 12}));
+    if (finished) {
+      span(head, 'lr-label', 'finished');
+      span(head, last ? 'lr-task ok' : 'lr-task muted', last || 'nothing recorded');
+    } else {
+      span(head, 'lr-label', 'working on');
+      span(head, task ? 'lr-task' : 'lr-task muted', task || 'no task in progress');
+    }
+    var lastEl = span(head, 'lr-last', 'last finished: ');
+    span(lastEl, null, last || 'nothing yet');
+    return head;
+  }
+  function lrCol(title) {
+    var col = el('div', 'lr-col');
+    var head = add(col, el('div', 'lr-colhead'));
+    span(head, 'lr-label', title);
+    return {col: col, head: head};
+  }
+  function lrPlan(r, plan, moving) {
+    var c = lrCol('Its plan');
+    if (!plan.length) { add(c.col, el('p', 'empty', 'no plan yet')); return c.col; }
+    var done = plan.filter(function (p) { return p.status === 'done'; }).length;
+    span(c.head, 'lr-count', done + ' of ' + plan.length + ' done');
+    add(c.col, PX.strip('live-plan-' + r.job, {effect: 'fill', tint: 'bot', bot: r.recipient, progress: done / plan.length,
+                                               seed: 72, still: !moving, cell: 4, done: done === plan.length, height: 8}));
+    var ol = add(c.col, el('ol', 'lr-plan'));
+    plan.forEach(function (p) {
+      var li = add(ol, el('li', LIVE.planCls[p.status]));
+      span(li, 'lr-mark').setAttribute('aria-hidden', 'true');
+      span(li, 'lr-text', p.text);
+      span(li, 'lr-tag', LIVE.planTag[p.status]);
+    });
+    return c.col;
+  }
+  function lrAgents(r, agents, moving) {
+    var c = lrCol('Sub-agents');
+    if (!agents) { add(c.col, el('p', 'empty', 'no sub-agent data')); return c.col; }
+    var running = agents.filter(function (a) { return a.status === 'running'; }).length;
+    span(c.head, 'lr-count', agents.length + ' spawned · ' + running + ' running');
+    if (!agents.length) { add(c.col, el('div', 'lr-alone', 'working alone so far')); return c.col; }
+    agents.forEach(function (a, i) {
+      var card = add(c.col, el('div', 'lr-agent'));
+      var effect = {running: moving ? 'scan' : 'off', finished: 'off', failed: 'static'}[a.status];
+      add(card, PX.strip('live-agent-' + r.job + '-' + i, {effect: effect, tint: a.status === 'failed' ? '#f7768e' : 'bot',
+                                                           bot: r.recipient, seed: 80 + i, still: !moving, cell: 4, done: a.status === 'finished', height: 8}));
+      var body = add(card, el('div', 'lr-agent-body'));
+      span(body, 'lr-kind', a.kind);
+      span(body, 'lr-desc', a.description);
+      span(body, 'lr-status ' + a.status, a.status);
+    });
+    return c.col;
+  }
+  function liveRun(r) {
+    var t = r.telemetry;
+    var mode = liveMode(t);
+    if (mode === 'none') return el('p', 'empty', 'no telemetry');
+    var box = el('div', 'lr');
+    if (PX.table.bots.hasOwnProperty(r.recipient)) box.setAttribute('style', '--lr:var(--' + r.recipient + ')');
+    if (mode === 'live') {
+      var moving = PX.table.actions.hasOwnProperty(PX.state(r));
+      add(box, lrHead(r, t, moving));
+      var cols = add(box, el('div', 'lr-cols'));
+      if (t.plan !== null && t.plan !== undefined) add(cols, lrPlan(r, t.plan, moving));
+      add(cols, lrAgents(r, t.subagents, moving));
+    }
+    add(box, lrTiles(t));
+    return box;
+  }
   function liverun(r) {
     var sec = jdPanel(null, 'Live run', r.recipient + ' · job ' + r.job);
     sec.setAttribute('id', 'liverun-' + anchor(r.job));
-    add(sec, telemetryBlock(r.telemetry));
+    add(sec, liveRun(r));
     return sec;
   }
   function legendItem(parent, cls, tint, text, bg) {

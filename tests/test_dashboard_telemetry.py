@@ -79,7 +79,8 @@ def test_a_database_without_the_table_shows_no_telemetry(tmp_path: Path) -> None
     pages = render_pages(snapshot)
     job = _no_script(pages["job.html"])
     article = _section(job, "job-r-codex-")
-    assert '<h3 class="tele-head">telemetry</h3><p class="empty">no telemetry</p>' in article
+    assert '<span class="t">Live run</span>' in article and '<p class="empty">no telemetry</p>' in article
+    assert "lr-tile" not in article
     tokens = _section(_no_script(pages["efficiency.html"]), "tokens")
     assert "Tokens and cost" in tokens and "no telemetry" in tokens
 
@@ -106,21 +107,23 @@ def test_a_running_job_gets_its_counters_and_no_step_feed(tmp_path: Path) -> Non
         ("running", "mcp:github.get_pr", 5),
     ]
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
-    for needle in ("codex · last activity 5s ago", "<b>3</b><span>turns</span>",
-                   '<b class="bad">40 / 1</b><span>tests pass / fail</span>',
-                   "<b>24,763 / 1,220</b><span>tokens in / out</span>", "4m 50s"):
+    for needle in ("<b>25k</b><span>tokens in · 99% cached</span>", "<b>1.2k</b><span>tokens out</span>",
+                   "<b>no data</b><span>cost so far</span>", "<b>2 files · 7 commands</b><span>touched and run</span>"):
         assert needle in article, needle
-    for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
+    for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools",
+                 "turns", "tests pass / fail"):
         assert gone not in article, gone
 
 
-def test_a_job_with_a_row_but_no_events_says_no_telemetry_yet(tmp_path: Path) -> None:
+def test_a_job_with_a_row_but_no_events_shows_its_tiles(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
-    add_telemetry(db, "r-codex-review", events=0, last_event_at=None, steps="[]")
+    add_telemetry(db, "r-codex-review", events=0, last_event_at=None, steps="[]", tokens_in=0, tokens_cached=0,
+                  tokens_out=0, files_touched=0, commands=0)
     snapshot = collect_snapshot(db, log, now=NOW)
     assert _running(snapshot)["13"]["telemetry"]["events"] == 0
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
-    assert "codex · no events yet" in article and "no telemetry yet" in article
+    assert "<b>no data</b><span>tokens in</span>" in article
+    assert "<b>0 files · 0 commands</b><span>touched and run</span>" in article
 
 
 def test_secrets_and_bad_values_in_the_table_never_reach_the_snapshot(tmp_path: Path) -> None:
@@ -454,9 +457,9 @@ def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path
     snapshot = collect_snapshot(db, log, now=NOW)
     out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
     view = out["text"]["jobview"]
-    for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220"):
+    for needle in ("Live run", "25k", "tokens in · 99% cached", "1.2k", "2 files · 7 commands"):
         assert needle in view, needle
-    assert re.search(r'section\.telemetry', out["dump"]["jobview"])
+    assert re.search(r'div\.lr\n', out["dump"]["jobview"])
     html = out["html"]["jobview"]
     for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
         assert gone not in html, gone
