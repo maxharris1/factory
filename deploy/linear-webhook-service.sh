@@ -49,8 +49,7 @@
 # LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives. A record
 # from another PID namespace cannot be checked, so a loop keeps it and
 # starts nothing until the record is removed. The loops, start, stop, restart
-# and ensure exit 4 outside the host PID namespace (deploy/host-pidns.sh), so
-# no such record is written any more.
+# and ensure exit 4 outside the host PID namespace (deploy/host-pidns.sh).
 #
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:

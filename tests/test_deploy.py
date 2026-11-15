@@ -845,9 +845,6 @@ def test_install_update_keeps_the_venv_running_processes_use(
     assert not witness.exists()
 
 
-# --- #308: no hook or pidfile from a foreign PID namespace ----------------------------------
-
-
 def _fake_proc(tmp_path: Path, nspid: str, ns: str) -> Path:
     proc = tmp_path / "fake-proc"
     (proc / "self/ns").mkdir(parents=True)
