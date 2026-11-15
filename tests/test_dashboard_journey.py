@@ -325,6 +325,31 @@ def test_fully_recorded_ticket_takes_every_time_from_the_rows() -> None:
     assert result["all_durations_known"] is True
 
 
+def test_a_job_enqueued_just_before_its_transition_belongs_to_the_state_it_works_in() -> None:
+    jobs = [step._replace(created_at=step.created_at - 1) for step in RECORDED_JOBS]
+    result = flow.job_flow(_chart(), jobs, "review", NOW, RECORDED, NOW - 7000)
+    assert [(v["state"], v["who"], v["started_at"]) for v in result["visits"]] == [
+        ("intake", "script", NOW - 7000),
+        ("questions", "script", NOW - 6000),
+        ("building", "claude", NOW - 5000),
+        ("review", "codex", NOW - 4000),
+        ("fixing", "claude", NOW - 3000),
+        ("review", "codex", NOW - 2000),
+    ]
+    assert result["all_durations_known"] is True
+
+
+def test_a_job_two_visits_before_its_state_keeps_its_time_window() -> None:
+    rows = [_row(None, "building", NOW - 3000), _row("building", "review", NOW - 2000)]
+    early = [_step("review", "codex", NOW - 3500), _step("build", "claude", NOW - 3001)]
+    result = flow.job_flow(_chart(), early, "review", NOW, rows, NOW - 4000)
+    assert [(v["state"], v["who"]) for v in result["visits"]] == [
+        ("intake", "codex"),
+        ("building", "claude"),
+        ("review", "script"),
+    ]
+
+
 @pytest.mark.parametrize("tracked_at", [None, NOW - 5500], ids=["untracked", "after-first-row"])
 def test_start_state_has_no_time_without_a_tracked_at_before_the_first_row(tracked_at) -> None:
     result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, RECORDED, tracked_at)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
 from lib.dispatch.transitions import write_workflow_state
 from lib.queue import JobRequest
 from tests.merge_queue_support import Board, sha
@@ -170,6 +171,51 @@ def test_a_revise_round_and_a_conflict_update_record_their_transitions(
     rows = _assert_ledger_matches(board)
     assert {"t3", "update-queued"} <= {r["source"] for r in rows}
     assert "fixing" in [r["to_state"] for r in rows]
+
+
+def test_journey_owners_survive_jobs_enqueued_before_their_transition(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    ticking = board.queue.clock
+
+    def tick() -> float:
+        board.now[0] += 1
+        return ticking()
+
+    board.queue.clock = tick
+    pr = board.open("42", sha(1))
+    board.go(pr, "go-42")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    board.finish("codex")
+    board.revise(pr, "1/3")
+    board.poll()
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+
+    with board.queue.connect() as connection:
+        jobs = [
+            JobStep(r["action"], r["recipient"], r["created_at"], None, None)
+            for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
+        ]
+        tracked_at = connection.execute("SELECT tracked_at FROM tracked_tickets").fetchone()[0]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    assert any(job.created_at < row.at for job in jobs for row in rows if job.action == "build"
+               and row.to_state == "building"), "the build is enqueued before its transition"
+
+    result = job_flow(load_chart(), jobs, "review", board.now[0], rows, tracked_at)
+    assert [(v["state"], v["who"]) for v in result["visits"]] == [
+        ("intake", "script"),
+        ("building", "claude"),
+        ("review", "codex"),
+        ("fixing", "claude"),
+        ("review", "codex"),
+    ]
 
 
 def test_a_closed_watched_pr_records_its_abandon(tmp_path: Path) -> None:

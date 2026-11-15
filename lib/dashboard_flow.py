@@ -315,25 +315,47 @@ def _recorded_walk(
     transitions. Before the first row the path is job-derived, unless that
     row is the ticket's first write (from_state None): then only the start
     state precedes it, started at tracked_at. Each row is one visit started
-    at its `at` and owning the jobs created before the next row."""
+    at its `at`. A job belongs to the visit in its own state that was next
+    or current when it was created, since the dispatcher enqueues a job just
+    before it writes the state the job works in. Any other job belongs to
+    the visit it was created in."""
     known = None if chart is None else {state["name"] for state in chart["states"]}
     start = None if chart is None else chart["start"]
     first = transitions[0]
+    ends = [row.at for row in transitions[1:]] + [math.inf]
+    lead = -math.inf
+    if first.from_state is not None:
+        lead = max(
+            (step.created_at for state, step in steps
+             if step.created_at < first.at and state != first.to_state),
+            default=-math.inf,
+        )
+    floors = [lead, *(row.at for row in transitions[:-1])]
+    owned: list[list[JobStep]] = [[] for _ in transitions]
+    before = []
+    for state, step in steps:
+        index = next(
+            (i for i, row in enumerate(transitions)
+             if row.to_state == state and floors[i] <= step.created_at < ends[i]),
+            None,
+        )
+        if index is None:
+            index = next(
+                (i for i, row in enumerate(transitions) if row.at <= step.created_at < ends[i]),
+                None,
+            )
+        if index is None:
+            before.append((state, step))
+        else:
+            owned[index].append(step)
     if first.from_state is None:
-        walk = [] if start is None else [
-            Visit(start, [step for _, step in steps if step.created_at < first.at])
-        ]
+        walk = [] if start is None else [Visit(start, [step for _, step in before])]
         opened = tracked_at if tracked_at is not None and tracked_at <= first.at else None
         starts = [opened] * len(walk)
     else:
-        before = [(state, step) for state, step in steps if step.created_at < first.at]
         walk = chart_visits(chart, [(start, None), *before, (first.from_state, None)])
         starts = [_started_at(visit) for visit in walk]
-    ends = [row.at for row in transitions[1:]] + [math.inf]
-    recorded = [
-        (row.to_state, row.at, [step for _, step in steps if row.at <= step.created_at < end])
-        for row, end in zip(transitions, ends)
-    ]
+    recorded = [(row.to_state, row.at, jobs) for row, jobs in zip(transitions, owned)]
     if current is not None and current != transitions[-1].to_state:
         recorded.append((current, None, []))
     for state, began, owned in recorded:

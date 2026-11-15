@@ -5,3 +5,4 @@ same-state writes	no row when the state does not change	a re-held ship to ship i
 upserts	read the row, then UPDATE with the guard or INSERT with defaults, in one BEGIN IMMEDIATE	keeps each old ON CONFLICT's insert and update columns exactly
 terminal guard	record_terminal uses _NOT_FINISHED	same SQL as the old inline COALESCE(...) NOT IN ('merged','done')
 writer enumeration	AST test maps each source literal to its file; regex test fails on any raw workflow_state write; Board flows check the ledger chains	on origin/main the guard flags all 19 old sites; driving every writer one by one did not fit the job budget
+visit owner (review f-1)	a job belongs to the recorded visit in its own state that was next or current when it was created; else the visit it was created in	the dispatcher enqueues a job just before it writes the state, so creation time alone put the build in intake on a real clock
