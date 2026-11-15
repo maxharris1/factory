@@ -9,11 +9,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from lib import heal, self_deploy
+from lib import device_sync, heal, self_deploy
+from lib.device_pool import DevicePool
+from lib.machines_yml import Device, MachinesConfig
+from lib.queue import JobRequest, SQLiteJobQueue
 from lib.grok_delivery import WebhookResult
 from lib.heal import Webhook
 
@@ -103,10 +107,12 @@ def repo(tmp_path: Path) -> Repo:
 
 
 def run(repo: Repo, *, now: float = NOW, runs: Runs | None = None, posts: Posts | None = None,
-        owner=lambda _path: True):
+        owner=lambda _path: True, db: Path | None = None):
     runs = runs if runs is not None else Runs()
     posts = posts if posts is not None else Posts()
     environ = {"PATH": os.environ["PATH"], "HOME": str(repo.box.parent), **GIT_ENV, **SECRETS}
+    if db is not None:
+        environ["ORCH_DB"] = str(db)
     outcome = self_deploy.deploy(repo.box, repo.state, device="box", environ=environ,
                                  webhook=WEBHOOK, now=now, install=runs, post=posts,
                                  owner=owner, clock=lambda: 0.0)
@@ -219,6 +225,100 @@ def test_a_failing_install_is_logged_and_escalated_and_the_checkout_stays_new(
     assert repo.head() == new
     assert [p["summary"] for p in posts.calls] == [
         "deploy @ box: deploy/install.sh --update exited 3"]
+
+
+def test_a_skills_change_runs_install_skills_from_the_new_checkout(repo: Repo) -> None:
+    write(repo.upstream, "skills/pstack/skills/new-skill/SKILL.md", "new\n")
+    repo.commit("skill")
+    outcome, runs, posts = run(repo)
+    assert outcome.kind == "deployed"
+    ((argv, env, log_path),) = runs.calls
+    assert argv == [sys.executable, str(repo.box / "bin/orch"), "install-skills"]
+    assert "FACTORY_WEBHOOK_URL" not in env and "FACTORY_WEBHOOK_AUTH" not in env
+    assert log(repo)[-1].endswith("self-deploy: install-skills exit=0 0.0s")
+    assert posts.calls == []
+
+
+def test_a_failing_install_skills_is_escalated_once_and_the_checkout_stays_new(
+    repo: Repo,
+) -> None:
+    write(repo.upstream, "skills/skills.lock", "commit: b\n")
+    new = repo.commit("pin")
+    outcome, _, posts = run(repo, runs=Runs(code=3))
+    assert outcome.kind == "deployed"
+    assert repo.head() == new
+    assert [p["summary"] for p in posts.calls] == ["deploy @ box: orch install-skills exited 3"]
+
+
+# --- the box's own jobs (#297) -------------------------------------------------------------
+
+
+def box_queue(tmp_path: Path) -> tuple[SQLiteJobQueue, DevicePool]:
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: NOW)
+    config = MachinesConfig(devices=(Device(name="box", local=True, slot_max=2,
+                                            harnesses={"codex": "codex-bot"}),))
+    return queue, DevicePool(queue, config)
+
+
+def enqueue(queue: SQLiteJobQueue, ticket: str) -> None:
+    queue.enqueue(JobRequest(repo="o/r", ticket_id=ticket, action="review", recipient="codex",
+                             source_comment_id=f"c{ticket}", timeout_seconds=60),
+                  dedupe_key=ticket)
+
+
+def box_rows(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [(row.device, row.state) for row in device_sync.read(connection)]
+
+
+def test_a_box_with_a_job_stays_on_its_old_head_until_the_job_is_gone(
+    repo: Repo, tmp_path: Path
+) -> None:
+    queue, pool = box_queue(tmp_path)
+    enqueue(queue, "1")
+    assert pool.claim("codex") is not None
+    old = repo.head()
+    write(repo.upstream, "lib/code.py", "VERSION = 2\n")
+    new = repo.commit("code")
+
+    outcome, _, posts = run(repo, db=queue.path)
+
+    assert outcome.kind == "busy"
+    assert outcome.detail == "1 jobs on box, retry next pass"
+    assert repo.head() == old
+    assert posts.calls == []
+    assert box_rows(queue) == []
+    with queue.connect() as connection:
+        connection.execute("DELETE FROM device_slots")
+        connection.execute("UPDATE jobs SET state = 'done'")
+        connection.commit()
+
+    assert run(repo, db=queue.path)[0].kind == "deployed"
+    assert repo.head() == new
+
+
+def test_no_job_is_placed_on_the_box_while_its_checkout_moves(repo: Repo, tmp_path: Path) -> None:
+    queue, pool = box_queue(tmp_path)
+    with queue.connect() as connection:
+        device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
+                           checkout=str(repo.box), target=None, sha=None,
+                           state=device_sync.LAGGING, detail="preflight-lagging", now=NOW)
+        connection.commit()
+    enqueue(queue, "1")
+    write(repo.upstream, "deploy/install.sh", "#!/bin/sh\necho install v2\n")
+    repo.commit("deploy")
+    during: list[tuple[list[tuple[str, str]], object]] = []
+
+    def install(argv, env, log_path):
+        during.append((box_rows(queue), pool.claim("codex")))
+        return 0
+
+    outcome, _, _ = run(repo, runs=install, db=queue.path)
+
+    assert outcome.kind == "deployed"
+    assert during == [([("box", "deploying"), ("box", "lagging")], None)]
+    assert box_rows(queue) == []
+    assert pool.claim("codex") is not None
 
 
 # --- conflicts and refusals ----------------------------------------------------------------

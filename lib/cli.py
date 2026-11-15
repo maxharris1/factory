@@ -327,7 +327,9 @@ heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
   edits to machines.yml, orch.yml and deploy/install.sh. Only the
   checkout's owner pulls. A conflict, local commits or other local edits
   leave the checkout unchanged and escalate once. Runs
-  `deploy/install.sh --update` when deploy/ or requirements.txt changed.
+  `deploy/install.sh --update` when deploy/ or requirements.txt changed,
+  and `orch install-skills` when skills/ changed. A box holding a job is
+  left on its old HEAD and retried next pass (issue #297).
   deploy/self-heal.sh runs it before each heal pass.
 heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
              [--orch PATH] [--dry-run]
