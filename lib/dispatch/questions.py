@@ -25,6 +25,7 @@ from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
+from lib.queue import plan_round as _plan_round
 from lib.state_backup import RESTORED
 from lib.update_check import UpdateScope
 
@@ -56,6 +57,22 @@ class QuestionsMixin:
             generation = self._generation(ticket.repo, ticket.ticket_id)
         else:
             action, recipient, head, generation = step
+        outcome = self._pause_for_questions(
+            ticket, comment, action, recipient, head, generation
+        )
+        if outcome == "waiting-max":
+            self._write_state_label(ticket, "waiting-max")
+        return True, outcome
+
+    def _pause_for_questions(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+        recipient: str,
+        head: str | None,
+        generation: int,
+    ) -> str:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             waiting = connection.execute(
@@ -67,13 +84,12 @@ class QuestionsMixin:
             ).fetchone()
             if waiting is not None and waiting["workflow_state"] == "blocked":
                 connection.commit()
-                return True, "questions-while-blocked"
+                return "questions-while-blocked"
             if waiting is not None and waiting["workflow_state"] == "waiting-max":
                 connection.commit()
                 if waiting["paused_question_id"] == comment.id:
-                    self._write_state_label(ticket, "waiting-max")
-                    return True, "waiting-max"
-                return True, "already-waiting-max"
+                    return "waiting-max"
+                return "already-waiting-max"
             paused = {
                 "paused_action": action,
                 "paused_recipient": recipient,
@@ -119,8 +135,7 @@ class QuestionsMixin:
                 ),
             )
             connection.commit()
-        self._write_state_label(ticket, "waiting-max")
-        return True, "waiting-max"
+        return "waiting-max"
 
     def _t5_answers(
         self,
@@ -144,7 +159,8 @@ class QuestionsMixin:
             paused = connection.execute(
                 """
                 SELECT workflow_state, paused_action, paused_recipient,
-                       paused_head, paused_generation, paused_question_id
+                       paused_head, paused_generation, paused_question_id,
+                       plan_gap_count
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -199,6 +215,9 @@ class QuestionsMixin:
                 instruction=_comment_link(comment),
                 resume=True,
                 update=UpdateScope.from_detail(prior or {}, head),
+                plan_round=(
+                    int(paused["plan_gap_count"]) + 1 if action == "plan" else None
+                ),
             ),
         )
         with self._connect() as connection:
@@ -244,17 +263,15 @@ class QuestionsMixin:
         queued_at: float,
         head: str | None = None,
         round_number: int | None = None,
+        plan_round: int | None = None,
+        unhandled_plan_by_round: bool = False,
     ) -> Comment | None:
         """The first later trusted orch:v1 comment that already answered the
         action job comment queues for recipient, or None (#108, #66).
 
-        Only the answer that job's step accepts counts: a plan for a plan, a
-        ready for a build or fix, and for a review a REVISE or APPROVE naming
-        head at round_number. It must come from a login trusted for
-        recipient's bot and role, and not have been handled as rejected. With an intact
-        database no such answer exists yet when a comment is handled; it is
-        found on a replay (a lost or restored database) or when both
-        comments landed while the poller was down.
+        With an intact database no such answer exists yet when a comment is
+        handled; it is found on a replay (a lost or restored database) or when
+        both comments landed while the poller was down.
         """
         kind, role = _ANSWERS[action]
         after = _comment_order(comment)
@@ -293,6 +310,14 @@ class QuestionsMixin:
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
+                continue
+            if action == "plan" and (
+                _round_number(fields.get("round")) != plan_round
+                or not (
+                    (unhandled_plan_by_round and handled is None)
+                    or self._t1p_accepted_or_accepts_plan(ticket, item, plan_round)
+                )
+            ):
                 continue
             if (
                 kind in _REGISTERING_ACTIONS
@@ -351,6 +376,7 @@ class QuestionsMixin:
                 queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
+                plan_round=_plan_round(job.request.detail),
             )
             if answer is not None:
                 answered.append((job, answer))
@@ -422,6 +448,7 @@ class QuestionsMixin:
                 queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
+                plan_round=_plan_round(job.request.detail),
             ) is None:
                 unanswered.append((job, requeue_reason))
         if not unanswered:

@@ -33,9 +33,11 @@ class T1Mixin:
             if routed is None:
                 return True, "rejected-go-same-family"
             ticket = routed
-            resumed = self._resume_after_blocked(
-                ticket, comment
-            ) or self._resume_after_cap(ticket, comment)
+            resumed = (
+                self._resume_after_blocked(ticket, comment)
+                or self._resume_after_cap(ticket, comment)
+                or self._resume_unsatisfiable(ticket, comment)
+            )
             if resumed is not None:
                 self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed

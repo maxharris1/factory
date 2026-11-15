@@ -251,17 +251,21 @@ def test_no_secrets_in_heartbeat_rows(tmp_path: Path, monkeypatch: pytest.Monkey
     assert columns == [
         "component", "device", "bot", "pid", "started_at", "last_seen",
         "version", "interval_seconds", "stopped_at", "checked_at",
+        "cycle_started_at", "last_cycle_seconds",
     ]
     for record in values:
-        component, device, bot, pid, started, seen, version, interval, stopped, checked = record
+        (component, device, bot, pid, started, seen, version, interval, stopped, checked,
+         cycle_started, last_cycle) = record
         assert component in health.COMPONENTS
         assert health.TOKEN.fullmatch(device)
         assert bot in ("", "claude-bot", "codex-bot", "cursor-bot")
         assert isinstance(pid, int)
         assert health.VERSION.fullmatch(version)
-        for number in (started, seen, interval, stopped, checked):
+        for number in (started, seen, interval, stopped, checked, cycle_started, last_cycle):
             assert number is None or isinstance(number, float)
-    raw = health.health_path(db).read_bytes()
+    path = health.health_path(db)
+    wal = Path(f"{path}-wal")
+    raw = path.read_bytes() + (wal.read_bytes() if wal.exists() else b"")
     for value in SECRETS.values():
         assert value.encode() not in raw
 
@@ -1157,7 +1161,8 @@ def test_the_inventory_is_machines_yml_plus_the_local_device(tmp_path: Path) -> 
 
 
 def test_a_locked_health_db_never_stalls_the_dashboard_push(tmp_path: Path, monkeypatch, capsys) -> None:
-    """A5: heartbeat I/O is bounded, and a dropped beat is logged and flagged."""
+    """A5: heartbeat I/O is bounded and a dropped beat is logged; under WAL
+    (#440) the writer's lock does not stop the snapshot reading the rows."""
     from lib import dashboard_cli
 
     db, _ = make_db(tmp_path)
@@ -1183,8 +1188,8 @@ def test_a_locked_health_db_never_stalls_the_dashboard_push(tmp_path: Path, monk
     assert sent and sent[0] - started < 4 * health.BUSY_SECONDS + 1
     assert "health: dashboard heartbeat failed: OperationalError" in capsys.readouterr().err
     status = json.loads((tmp_path / "out" / "status.json").read_text())
-    assert [i["component"] for i in status["attention"]["items"] if i["kind"] == "health"] == [
-        "health storage"]
+    assert [i for i in status["attention"]["items"] if i["kind"] == "health"] == []
+    assert "poller" in [c["component"] for c in status["health"]["components"]]
 
 
 def test_a_locked_health_db_bounds_a_waiters_exit(tmp_path: Path) -> None:

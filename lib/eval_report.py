@@ -19,6 +19,7 @@ dispatcher.log lines:
     TIMESTAMP repo=<owner/name> ticket=<id> [pr=<n>] comment path=<relative>
     TIMESTAMP repo=<owner/name> ticket=<id> [pr=<n>] wake role=<token> reason=<token> [wasted=yes] [handled=<token>]
     TIMESTAMP repo=<owner/name> ticket=<id> [pr=<n>] end
+    TIMESTAMP repo=<owner/name> [pr=<n>] message from=<bot> to=<bot> [kind=<token>]
 
 A run is one (repo, ticket). The ticket id is a GitHub number or a
 Linear id such as ENG-42, so Intake, Questions and Planning rows log
@@ -33,6 +34,10 @@ when their event is in the window. A run counts when it has an event in
 the window or a dwell that overlaps it. Chart comparison uses the
 section 4.1 edges. post-merge is on the chart and is still reported,
 because Phase 1 configures no post_merge.
+
+A message line is one manual bot-to-bot handoff and belongs to no run.
+Message lines in the window are counted against comment lines in the
+window, per repo and ISO week.
 
 A wake is wasted when wasted=yes, when reason=nobody, or when handled
 repeats for that ticket, including a first handling before the window.
@@ -88,10 +93,6 @@ snapshot prints as unrecorded:
   and unsatisfiable stops: nothing records these yet
 
 This module does not correct, reflect, run blinded evals, or maintain.
-
-TODO(#50): count bot-to-bot messages against scripted handoffs for the
-token-savings metric. Nothing logs a manual bot-to-bot handoff yet, so
-there is no input line to count.
 """
 
 from __future__ import annotations
@@ -100,7 +101,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, assert_never
@@ -163,6 +164,9 @@ CHART_TRANSITIONS = frozenset(
         ("waiting-max", "building"),
         ("waiting-max", "fixing"),
         ("waiting-max", "abandoned"),
+        ("review", "waiting-max"),
+        ("awaiting-ok", "waiting-max"),
+        ("waiting-max", "review"),
         ("capped", "fixing"),
         ("handed-off", "review"),
         ("handed-off", "merged"),
@@ -183,6 +187,7 @@ _TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _KEY = re.compile(r"^[a-z][a-z0-9_]*$")
 _VALUE = re.compile(r"^[A-Za-z0-9_.:/-]+$")
 _PR = re.compile(r"^[1-9][0-9]*$")
+_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _TICKET_PATTERN = r"(?:[1-9][0-9]*|[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*)"
 _TICKET = re.compile(rf"^{_TICKET_PATTERN}$")
 _STATE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -202,6 +207,7 @@ _EVENT_KEYS = {
     "wake": frozenset({"role", "reason", "wasted", "handled"}),
     "end": frozenset(),
 }
+_MESSAGE_KEYS = frozenset({"repo", "pr", "from", "to", "kind"})
 _REQUIRED_KEYS = {
     "enter": frozenset({"state"}),
     "comment": frozenset({"path"}),
@@ -241,6 +247,14 @@ class Mismatch:
 
 
 @dataclass(frozen=True)
+class Handoffs:
+    repo: str
+    week: str
+    manual: int
+    scripted: int
+
+
+@dataclass(frozen=True)
 class Report:
     runs: int
     seconds: tuple[tuple[str, int], ...]
@@ -250,6 +264,7 @@ class Report:
     stuck: tuple[tuple[str, str], ...]
     model: tuple[ModelBreak, ...] | None
     mismatches: tuple[Mismatch, ...]
+    handoffs: tuple[Handoffs, ...]
 
 
 @dataclass(frozen=True)
@@ -290,6 +305,12 @@ class _Event:
     ticket: str
     kind: EventKind
     fields: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _Handoff:
+    at: datetime
+    repo: str
 
 
 @dataclass(frozen=True)
@@ -335,18 +356,57 @@ def build_report(
 
     warnings: list[str] = []
     repos = _load_orch(_top_level(root, "orch.yml"), warnings)
-    events = _load_log(_top_level(root, "dispatcher.log"))
-    for event in events:
-        if event.repo not in repos:
-            raise EvalError(f"{event.repo} is not a project in orch.yml")
+    events, messages = _load_log(_top_level(root, "dispatcher.log"))
+    for item in [*events, *messages]:
+        if item.repo not in repos:
+            raise EvalError(f"{item.repo} is not a project in orch.yml")
     configs = _load_factories(root, {event.repo for event in events}, warnings)
     findings = _load_findings(_top_level(root, "model-findings.txt"), window)
     runs = [run for run in _measure(root, events, window) if run.active]
 
+    scripted = [
+        _Handoff(at=event.at, repo=event.repo)
+        for event in events
+        if event.kind == "comment" and window.contains(event.at)
+    ]
+    manual = [item for item in messages if window.contains(item.at)]
+
     return Built(
-        report=_assemble(runs, findings, configs),
+        report=_assemble(runs, findings, configs, _handoffs(manual, scripted)),
         warnings=tuple(warnings),
     )
+
+
+def append_message(
+    log: Path,
+    *,
+    repo: str,
+    pr: str | None,
+    sender: str,
+    recipient: str,
+    kind: str,
+    at: datetime,
+) -> None:
+    """Append one manual bot-to-bot message line, or raise and write nothing."""
+    if _REPO.fullmatch(repo) is None:
+        raise EvalError(f"bad repo {repo!r}: expected owner/name")
+    if pr is not None and _PR.fullmatch(pr) is None:
+        raise EvalError(f"bad pr {pr!r}")
+    for name, value in (("from", sender), ("to", recipient), ("kind", kind)):
+        if _TOKEN.fullmatch(value) is None:
+            raise EvalError(f"bad {name} {value!r}")
+    pr_field = "" if pr is None else f" pr={pr}"
+    line = f"{_format_time(at)} repo={repo}{pr_field} message from={sender} to={recipient} kind={kind}\n"
+    with log.open("a+b") as handle:
+        if handle.tell() > 0:
+            handle.seek(handle.tell() - 1)
+            if handle.read(1) != b"\n":
+                line = "\n" + line
+        handle.write(line.encode("utf-8"))
+
+
+def render_json(report: Report) -> str:
+    return json.dumps(asdict(report), default=_format_time, indent=2) + "\n"
 
 
 def render(report: Report) -> str:
@@ -406,6 +466,13 @@ def render(report: Report) -> str:
                 lines.append(f"{item.repo} {item.ticket} {item.code} {item.detail}")
             else:
                 lines.append(f"{item.repo} {item.ticket} {item.code}")
+    lines.append("")
+    lines.append("bot-to-bot messages vs scripted handoffs")
+    if not report.handoffs:
+        lines.append("none")
+    for item in report.handoffs:
+        lines.append(f"{item.repo} {item.week} manual={item.manual} scripted={item.scripted}")
+    lines.append("token savings: not measured (no per-message token count in the input)")
     return "\n".join(lines) + "\n"
 
 
@@ -419,10 +486,22 @@ def _run_key(repo: str, ticket: str) -> tuple[str, tuple[int, int, str]]:
     return (repo, _ticket_key(ticket))
 
 
+def _handoffs(manual: list[_Handoff], scripted: list[_Handoff]) -> tuple[Handoffs, ...]:
+    counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for column, items in ((0, manual), (1, scripted)):
+        for item in items:
+            counts[(item.repo, item.at.strftime("%G-W%V"))][column] += 1
+    return tuple(
+        Handoffs(repo=repo, week=week, manual=pair[0], scripted=pair[1])
+        for (repo, week), pair in sorted(counts.items())
+    )
+
+
 def _assemble(
     runs: list[_Run],
     findings: list[ModelBreak] | None,
     configs: dict[str, FactoryConfig],
+    handoffs: tuple[Handoffs, ...],
 ) -> Report:
     totals: dict[str, int] = defaultdict(int)
     for run in runs:
@@ -491,6 +570,7 @@ def _assemble(
         stuck=stuck,
         model=model,
         mismatches=tuple(mismatches),
+        handoffs=handoffs,
     )
 
 
@@ -747,18 +827,38 @@ def _warning_lines(path: Path, findings: list[Finding]) -> list[str]:
     ]
 
 
-def _load_log(path: Path) -> list[_Event]:
+def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff]]:
     if not path.is_file():
         raise EvalError("dispatcher.log not found")
     events: list[_Event] = []
+    messages: list[_Handoff] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        event = _parse_log_line(raw, number)
-        if event is not None:
-            events.append(event)
-    return events
+        parsed = _parse_log_line(raw, number)
+        if isinstance(parsed, _Event):
+            events.append(parsed)
+        elif isinstance(parsed, _Handoff):
+            messages.append(parsed)
+    return events, messages
 
 
-def _parse_log_line(raw: str, number: int) -> _Event | None:
+def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Handoff:
+    for key in fields:
+        if key not in _MESSAGE_KEYS:
+            raise EvalError(f"{where}: unknown key {key!r}")
+    for key in ("repo", "from", "to"):
+        if key not in fields:
+            raise EvalError(f"{where}: missing {key}")
+    if _REPO.fullmatch(fields["repo"]) is None:
+        raise EvalError(f"{where}: bad repo")
+    if "pr" in fields and _PR.fullmatch(fields["pr"]) is None:
+        raise EvalError(f"{where}: bad pr")
+    for key in ("from", "to", "kind"):
+        if key in fields and _TOKEN.fullmatch(fields[key]) is None:
+            raise EvalError(f"{where}: bad {key}")
+    return _Handoff(at=at, repo=fields["repo"])
+
+
+def _parse_log_line(raw: str, number: int) -> _Event | _Handoff | None:
     if raw.strip() == "":
         return None
     parts = raw.split()
@@ -779,6 +879,8 @@ def _parse_log_line(raw: str, number: int) -> _Event | None:
             bare.append(token)
     if len(bare) != 1:
         raise EvalError(f"{where}: expected one event")
+    if bare[0] == "message":
+        return _parse_message(_parse_time(parts[0], where), fields, where)
     kind = _event_kind(bare[0], number)
     allowed = _EVENT_KEYS[kind] | _ROW_KEYS
     for key in fields:

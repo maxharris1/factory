@@ -1,0 +1,3 @@
+- **Decision:** A REVISE with `unsat=<ac-n>` parks at `waiting-max` before T3 reads CI, because it queues no fix for CI to gate. Max can reverse this with "gate unsat on CI too".
+- **When:** 2026-11-15 4:30 PM ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/436#issuecomment-6901485841

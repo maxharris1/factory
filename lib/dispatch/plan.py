@@ -33,56 +33,18 @@ class PlanMixin:
         if ac not in ("met", "unmet"):
             return True, "rejected-plan-result"
         reported_round = _round_number(fields.get("round"))
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            prior = connection.execute(
-                """
-                SELECT outcome FROM plan_events
-                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
-            ).fetchone()
-            if prior is not None:
-                connection.commit()
-                outcome = str(prior["outcome"])
-                state = "stuck" if outcome == "stuck-plan-gaps" else (
-                    "planning" if outcome == "queued-plan-gap" else "building"
-                )
-                self._set_workflow_state(ticket, "plan-check")
-                self._set_workflow_state(ticket, state)
-                return True, outcome
-            state = connection.execute(
-                """
-                SELECT workflow_state, plan_gap_count, plan_check_comment_id
-                FROM ticket_state
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone()
-            resuming = (
-                state is not None
-                and state["workflow_state"] == "plan-check"
-                and state["plan_check_comment_id"] == comment.id
+        settled = self._open_plan_check(ticket, comment, reported_round)
+        if settled == "stale-plan":
+            return True, settled
+        if settled is not None:
+            self._set_workflow_state(ticket, "plan-check")
+            self._set_workflow_state(
+                ticket,
+                "stuck" if settled == "stuck-plan-gaps" else (
+                    "planning" if settled == "queued-plan-gap" else "building"
+                ),
             )
-            if (
-                state is None
-                or (state["workflow_state"] != "planning" and not resuming)
-                or reported_round != int(state["plan_gap_count"]) + 1
-            ):
-                connection.commit()
-                return True, "stale-plan"
-            gap_count = int(state["plan_gap_count"])
-            if not resuming:
-                write_workflow_state(
-                    connection,
-                    ticket.repo,
-                    ticket.ticket_id,
-                    "plan-check",
-                    source="plan-check",
-                    at=self.queue.now(),
-                    also={"plan_check_comment_id": comment.id},
-                )
-            connection.commit()
+            return True, settled
         self._write_state_label(ticket, "plan-check")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -156,6 +118,7 @@ class PlanMixin:
                                 "round=2/2; previous plan "
                                 f"{_comment_link(comment)}"
                             ),
+                            plan_round=2,
                         ),
                     ),
                     dedupe_key=(
@@ -218,6 +181,93 @@ class PlanMixin:
             connection.commit()
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _open_plan_check(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reported_round: int | None,
+    ) -> str | None:
+        """Move the ticket to plan-check for this plan comment, in one
+        transaction. Returns the outcome when the comment is already settled
+        (a replay, or stale-plan), None when the plan check is open."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT outcome FROM plan_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+            if prior is not None:
+                connection.commit()
+                return str(prior["outcome"])
+            state = connection.execute(
+                """
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            resuming = (
+                state is not None
+                and state["workflow_state"] == "plan-check"
+                and state["plan_check_comment_id"] == comment.id
+            )
+            if (
+                state is None
+                or (state["workflow_state"] != "planning" and not resuming)
+                or reported_round != int(state["plan_gap_count"]) + 1
+            ):
+                connection.commit()
+                return "stale-plan"
+            if not resuming:
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "plan-check",
+                    source="plan-check",
+                    at=self.queue.now(),
+                    also={"plan_check_comment_id": comment.id},
+                )
+            connection.commit()
+        return None
+
+    def _t1p_accepted_or_accepts_plan(
+        self, ticket: TrackedTicket, comment: Comment, reported_round: int | None
+    ) -> bool:
+        with self._connect() as connection:
+            if connection.execute(
+                """
+                SELECT 1 FROM plan_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone() is not None:
+                return True
+            state = connection.execute(
+                """
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return (
+            self._handled_outcome(ticket, comment.id) is None
+            and state is not None
+            and (
+                state["workflow_state"] == "planning"
+                or (
+                    state["workflow_state"] == "plan-check"
+                    and state["plan_check_comment_id"] == comment.id
+                )
+            )
+            and reported_round == int(state["plan_gap_count"]) + 1
+        )
 
     def _latest_plan_step(self, ticket: TrackedTicket) -> tuple[str, int] | None:
         with self._connect() as connection:

@@ -95,8 +95,12 @@ QUESTIONS_OUTCOMES = frozenset(
 )
 
 
-def _questions_outcome(outcome: str) -> bool:
-    return outcome in QUESTIONS_OUTCOMES or outcome.startswith("failed-questions-")
+def _answering_outcome(outcome: str) -> bool:
+    return not (
+        outcome in QUESTIONS_OUTCOMES
+        or outcome.startswith("failed-questions-")
+        or outcome == "woke-grok-unparsed"
+    )
 
 
 def _acted_verdict(outcome: str | None) -> bool:
@@ -206,23 +210,6 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
-
-
-def plan_round(detail: Mapping[str, object]) -> int:
-    evidence = detail.get("evidence")
-    instructions = evidence.get("instructions") if isinstance(evidence, dict) else None
-    attempt = instructions.get("plan_attempt") if isinstance(instructions, dict) else None
-    if isinstance(attempt, int):
-        return attempt
-    return 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1
-
-
-def _detail_plan_round(detail: str | None) -> int:
-    try:
-        context = json.loads(detail) if detail else {}
-    except ValueError:
-        context = {}
-    return plan_round(context if isinstance(context, dict) else {})
 
 
 def _detail_round(detail: str | None) -> str | None:

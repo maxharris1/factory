@@ -28,6 +28,8 @@ from lib import cli
 class Loop:
     def __init__(self, dispatcher, source, sleep=time.sleep):
         self.sleep = sleep
+    def cycle_state(self):
+        return None, None
     def run(self, **_kwargs):
         print("polling", flush=True)
         self.sleep(60)

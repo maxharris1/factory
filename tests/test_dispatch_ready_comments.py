@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -495,3 +496,74 @@ def test_a_reviews_own_questions_handoff_never_answers_the_review(
     pr.push(pr.head, ci="failure")
 
     assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+
+
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+def test_a_reviews_own_unparsed_handoff_never_answers_the_review(
+    tmp_path: Path, missing: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head, "review-ready")
+    board.poll()
+    unparsed = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer\nNo questions."
+    for handoff in ("first-handoff", "retry-handoff"):
+        board.post(pr, handoff, unparsed, "codex-login")
+        board.queue.finish(board.claim("codex").id, owner="codex", handoff_comment_id=handoff)
+        board.poll()
+        assert board.outcome(handoff) == "woke-grok-unparsed"
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+    pr.comments.remove(next(item for item in pr.comments if item.id == "retry-handoff"))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr.push(pr.head, ci="failure")
+
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+def test_a_stale_verdict_still_answers_its_review_after_an_upgrade(
+    tmp_path: Path, missing: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    snapshot = board.snapshot
+    board.snapshot = lambda pr, fresh=False: replace(
+        snapshot(pr, fresh=fresh), ready_starts_review=True
+    )
+    pr = board.open("42", sha(1))
+    pr.push(pr.head, ci="pending")
+    board.ready(pr, pr.head, "111111")
+    board.poll()
+    assert board.outcome("111111") == "queued-review"
+    review = board.claim("codex")
+    body = VERDICT.format(round="1/3", head=sha(1), verdict="REVISE", risk="high")
+    raw = {
+        "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+        "user": {"login": "codex-login"},
+        "body": body,
+    }
+    expected = expected_for(review, "codex-bot")
+    assert problems(expected, "123456", lambda _: raw, TRUSTED_LOGINS["github"]) == []
+    board.post(pr, "123456", body, "codex-login")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id="123456")
+    pr.push(sha(2), ci="pending")
+    board.poll()
+    assert board.outcome("123456") == "stale-revise"
+    pr.comments[:] = [item for item in pr.comments if item.id not in ("111111", "123456")]
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    pr.push(sha(1), ci="failure")
+    board.ready(pr, pr.head, "234567")
+    board.poll()
+
+    active = [
+        (job["action"], job["source_comment_id"])
+        for action in ("review", "fix")
+        for job in board.jobs(action)
+        if job["state"] in ("queued", "running")
+    ]
+    assert board.outcome("234567") == "queued-ci-fix"
+    assert active == [("fix", "234567")]
