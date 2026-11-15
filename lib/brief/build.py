@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from lib.brief.common import GH, QUESTIONS_LINES, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import (
+    GH,
+    QUESTIONS_LINES,
+    answers_lines,
+    comment_url,
+    detail_of,
+    evidence_part,
+    fenced,
+)
 from lib.queue import Job
 
 _RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
@@ -25,6 +33,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
         _title_line(facts),
+        *answers_lines(detail_of(job)),
         *builder_notes(job, facts),
     ]
 

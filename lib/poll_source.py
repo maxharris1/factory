@@ -1304,7 +1304,7 @@ class LivePollSource:
                 _object(pull.get("head"), "GitHub pull request head").get("ref")
             ),
             pr_number=number,
-            brief=_brief(comments),
+            brief=_brief(comments, self._trusted),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
             intake_label=project.intake.label if project.intake else None,
@@ -1488,7 +1488,7 @@ class LivePollSource:
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
             pr_number=pr_number,
-            brief=_brief(linear_comments),
+            brief=_brief(linear_comments, self._trusted),
             grok_bot=project.grok_bot,
             linear_issue_id=_optional_string(issue.get("id")),
             linear_ready_state_id=_linear_ready_state_id(issue),
@@ -2332,15 +2332,25 @@ def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
     return None if page.get("hasNextPage") is not False else False
 
 
-def _brief(comments: Sequence[Comment]) -> str | None:
+def _brief(
+    comments: Sequence[Comment],
+    trusted: Mapping[str, Mapping[str, frozenset[str]]],
+) -> str | None:
+    """The latest trusted brief's URL, or its body when it has none (#54)."""
+    latest: str | None = None
     for comment in comments:
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             continue
-        if fields["kind"] == "brief":
-            return comment.url or comment.body.strip()
-    return None
+        if (
+            fields["kind"] == "brief"
+            and fields.get("from") == ORCHESTRATOR
+            and fields.get("role") == "orchestrator"
+            and ORCHESTRATOR in trusted_bots(trusted, comment.author)
+        ):
+            latest = comment.url or comment.body.strip()
+    return latest
 
 
 def _pr_head(pull: Mapping[str, Any], repo: str, number: str) -> str:

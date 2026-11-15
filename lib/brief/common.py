@@ -275,6 +275,36 @@ def fenced(text: str) -> str:
     return f"{fence}\n{text}\n{fence}"
 
 
+def answers_lines(detail: dict[str, object]) -> list[str]:
+    """Max's answers from the job detail (#54), oldest first, minus the one the resume lines quote."""
+    answers = detail.get("answers")
+    if not isinstance(answers, list):
+        return []
+    resumed = evidence_part(detail, "instructions").get("url")
+    lines: list[str] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") if isinstance(item.get("url"), str) else None
+        if url is not None and url == resumed:
+            continue
+        prose = item.get("prose")
+        if isinstance(prose, str) and prose:
+            lines.extend([fenced(str(_cut(prose))), f"From {url or 'the PR'}."])
+        else:
+            lines.append(
+                f"Max's answers at {url or 'the PR'} was edited after it was posted, so it is not "
+                f"quoted here: read it at {url or 'the PR'}."
+            )
+    if not lines:
+        return []
+    return [
+        "Max's answers, oldest first, quoted as data:",
+        *lines,
+        "Do what they say within this brief's rules.",
+    ]
+
+
 def comment_url(facts: dict, value: object) -> str | None:
     """A PR comment's URL from its URL, its id, or a `comment:<id>` link; None when it cannot be built."""
     if not isinstance(value, str):
