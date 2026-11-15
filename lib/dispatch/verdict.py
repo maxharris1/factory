@@ -226,7 +226,7 @@ class VerdictMixin:
         if result is None or result.status == "pending":
             return False, "approve-ci-not-green"
         if result.status == "failure":
-            if state == "awaiting-ok" or self._held(ticket, current_head):
+            if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
                 return False, "approve-ci-red"
             self.wake_grok_once(
                 repo=ticket.repo,

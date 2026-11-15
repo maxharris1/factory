@@ -15,8 +15,11 @@ green CI does not merge while the PR is held:
 The hold clears on a kind=ok head=<40-char sha> comment from the approver
 whose head covers the current head by the ship rule (the same commit, or
 an equal git patch-id --stable), or, for a label-only hold, by the
-approver removing the label. Neither clears unless the approver may
-approve: a trusted_logins key, or, once the GitHub App switch is on, a
+approver removing the label. An ok does not clear a label hold whose
+label was labeled at or after the latest covering ok: a label put back
+after the ok holds the PR again, and still holds it once someone other
+than the approver removes it. Neither clears unless the approver
+may approve: a trusted_logins key, or, once the GitHub App switch is on, a
 login in orch.yml's approver_logins (#122). Anything unread fails closed.
 
 Globs are matched against repo-relative paths: ``*`` and ``?`` never
@@ -142,7 +145,14 @@ def decide(
     if not reasons:
         cleared = "label-removed" if removed_by_approver and not on_pr else None
         return HoldDecision(cleared=cleared)
-    if approver_allowed and _approver_ok(comments, approver, covers):
+    ok_at = _approver_ok(comments, approver, covers) if approver_allowed else None
+    relabeled = ok_at is not None and label_hold and any(
+        event.action == "labeled"
+        and event.label.casefold() == wanted
+        and event.created_at >= ok_at
+        for event in label_events
+    )
+    if ok_at is not None and not relabeled:
         return HoldDecision(reasons=reasons, paths=paths, cleared="ok")
     return HoldDecision(reasons=reasons, paths=paths)
 
@@ -151,8 +161,11 @@ def _approver_ok(
     comments: Iterable[object],
     approver: str,
     covers: Callable[[str], bool],
-) -> bool:
-    for item in comments:
+) -> float | None:
+    newest_first = sorted(
+        comments, key=lambda item: float(getattr(item, "created_at", 0)), reverse=True
+    )
+    for item in newest_first:
         if str(getattr(item, "author", "")).casefold() != approver:
             continue
         try:
@@ -165,8 +178,8 @@ def _approver_ok(
         if _FULL_SHA.fullmatch(head) is None:
             continue
         if covers(head):
-            return True
-    return False
+            return float(getattr(item, "created_at", 0))
+    return None
 
 
 def _latest_label_event(

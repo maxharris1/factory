@@ -123,14 +123,17 @@ class CommentsMixin:
                 "verdict",
                 "questions",
                 "answers",
+                "retry",
             ):
                 continue
-            if self._is_stuck(ticket):
+            if kind != "retry" and self._is_stuck(ticket):
                 self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
                 self._mark_handled(ticket, comment.id, "ticket-stuck")
                 continue
             try:
-                if kind == "go":
+                if kind == "retry":
+                    handled, outcome = self._t_retry(ticket, comment, fields)
+                elif kind == "go":
                     handled, outcome = self._t1(ticket, comment, fields)
                 elif kind == "plan":
                     handled, outcome = self._t_plan(ticket, comment, fields)
