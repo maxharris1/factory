@@ -14,6 +14,7 @@ from lib.dispatcher import (
     CIResult,
     Comment,
     Dispatcher,
+    PollCycleFailed,
     PollLoop,
     RetryableShipError,
     TicketRef,
@@ -1586,7 +1587,8 @@ def test_poll_records_an_error_when_listing_candidates_raises(
         dedupe_key="clarify:g1",
     )
 
-    dispatcher.poll_once(RaisingSource(failing))
+    with pytest.raises(PollCycleFailed, match=component):
+        dispatcher.poll_once(RaisingSource(failing))
 
     with queue.connect() as connection:
         errors = connection.execute(
@@ -2584,7 +2586,8 @@ def test_poll_step_error_records_message_and_traceback(tmp_path: Path) -> None:
         def github_candidates(self, label_prefix: str, *, exclude=frozenset()) -> tuple[TrackedTicket, ...]:
             raise RuntimeError("gh exploded token=ghp_abcdefghijklmnop")
 
-    dispatcher.poll_once(BrokenGithub())
+    with pytest.raises(PollCycleFailed, match="github: RuntimeError"):
+        dispatcher.poll_once(BrokenGithub())
 
     with queue.connect() as connection:
         row = connection.execute(
@@ -2758,7 +2761,8 @@ def test_poll_error_detail_hides_credential_values_in_the_exception_chain(
     dispatcher, queue = setup(tmp_path)
     log = tmp_path / "poller.log"
     with log.open("w") as stream, contextlib.redirect_stderr(stream):
-        dispatcher.poll_once(GhFailure(body))
+        with pytest.raises(PollCycleFailed, match="linear: ValueError"):
+            dispatcher.poll_once(GhFailure(body))
 
     with queue.connect() as connection:
         detail = connection.execute("SELECT detail FROM poll_errors").fetchone()[0]
@@ -5609,7 +5613,8 @@ def test_a_poll_error_row_holds_the_exception_message(tmp_path: Path) -> None:
     from lib.github_actions import GitHubAdapterError
 
     dispatcher, queue = setup(tmp_path, [0.0])
-    dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
+    with pytest.raises(PollCycleFailed, match="github: GitHubAdapterError"):
+        dispatcher.poll_once(_FailingSource(GitHubAdapterError("gh pr list exited 1: HTTP 502")))
     # Merged with #135: a poll step's exception keeps its class in `error`
     # and its message, redacted, in `detail` beside the traceback.
     assert _poll_errors(queue) == ["GitHubAdapterError"]

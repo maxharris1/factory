@@ -35,7 +35,7 @@ from lib import (
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatch.helpers import _retry_of
-from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
+from lib.dispatcher import Dispatcher, PollCycleFailed, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
@@ -145,6 +145,8 @@ eval-report --db PATH --baseline PATH
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
   --once runs one complete poll cycle. --db defaults to $ORCH_DB.
+  --once exits 1, naming the source, when a GitHub, Linear or ticket
+  read fails; the cycle still runs to its end first.
   Each poll also releases device slots whose worker is confirmed gone and,
   for a remote device holding a slot, runs one SSH check; a device that
   fails every check for 60 minutes marks its running jobs stuck (F2-02).
@@ -722,6 +724,7 @@ def _poll(argv: list[str]) -> int:
                     beats.stop()
     except (
         GrokDeliveryError,
+        PollCycleFailed,
         PollSourceError,
         QueueError,
         ShipError,

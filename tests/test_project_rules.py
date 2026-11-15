@@ -244,7 +244,7 @@ def test_a_source_without_factory_reads_stores_nothing(tmp_path: Path) -> None:
     world = fixture_world(tmp_path)
 
     class Plain:
-        def github_candidates(self, label_prefix):
+        def github_candidates(self, label_prefix, *, exclude=frozenset()):
             return ()
 
         def linear_candidates(self, query, *, exclude, reserve):

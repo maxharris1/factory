@@ -19,7 +19,7 @@ from lib.dispatch.constants import (
     _UNVERIFIED_HANDOFF,
 )
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
-from lib.dispatch.types import PollSource, TicketRef, TrackedTicket
+from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.orch_yml import POLL_SECONDS
 from lib.queue import Job, _job
@@ -39,6 +39,7 @@ class PollMixin:
         self._merged_repos = set()
         self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
+        self._cycle_failures: list[str] = []
         read_from = self.queue.now()
         self._feed(source)
         try:
@@ -47,6 +48,7 @@ class PollMixin:
             )
         except Exception as exc:
             self.record_poll_exception("github", "-", exc)
+            self._cycle_failures.append(f"github: {type(exc).__name__}")
             github = ()
         self._discover(github, tracker="github")
         active_refs = self._tracked_refs()
@@ -61,6 +63,7 @@ class PollMixin:
             )
         except Exception as exc:
             self.record_poll_exception("linear", "-", exc)
+            self._cycle_failures.append(f"linear: {type(exc).__name__}")
             linear = ()
         self._discover(linear, tracker="linear")
         read_at = self._read_started = self.queue.now()
@@ -70,6 +73,7 @@ class PollMixin:
             tracked = source.tracked_tickets(refs)
         except Exception as exc:
             self.record_poll_exception("tracked", "-", exc)
+            self._cycle_failures.append(f"tracked: {type(exc).__name__}")
             tracked = ()
         read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
         self._record_reads(read, read_at)
@@ -101,8 +105,16 @@ class PollMixin:
         finally:
             self._read_started = None
         self._record_factory_reads(source)
-        if end is not None:
-            end()
+        failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
+        try:
+            if end is not None:
+                end()
+        except Exception as exc:
+            if self._cycle_failures:
+                raise PollCycleFailed(f"{failed}; {exc}") from exc
+            raise
+        if self._cycle_failures:
+            raise PollCycleFailed(failed)
 
     def _verify_handoffs(self, source: PollSource, read_from: float) -> None:
         """#18: check each done job's handoff comment once, on the ticket read.
@@ -122,6 +134,7 @@ class PollMixin:
                     tickets[(ticket.repo.lower(), ticket.ticket_id)] = ticket
             except Exception as exc:
                 self.record_poll_error("verify", "-", type(exc).__name__)
+                self._cycle_failures.append(f"verify: {type(exc).__name__}")
         for (repo, ticket_id), ticket in tickets.items():
             with self._connect() as connection:
                 rows = connection.execute(
