@@ -15,10 +15,6 @@ trusted_linear_users:
     - grok-bot
 approver_linear_users:
   - REPLACE_WITH_LINEAR_USER_ID
-# Max's own Linear user: only its go lifts a cap on a Linear ticket
-# (docs/decisions/174-linear-approver.md).
-# approver_linear_users:
-#   - REPLACE_WITH_LINEAR_USER_ID
 linear_webhook:
   bind: 127.0.0.1:8787
   path: /linear-webhook

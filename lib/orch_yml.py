@@ -296,7 +296,7 @@ def linear_approver_findings(config: OrchConfig) -> list[Finding]:
     ):
         return []
     return [
-        Finding("warning", "approver_linear_users is unset: any trusted Linear go lifts a cap")
+        Finding("warning", "approver_linear_users is unset: no Linear go lifts a cap")
     ]
 
 

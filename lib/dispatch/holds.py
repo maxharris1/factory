@@ -171,7 +171,7 @@ class HoldsMixin:
         return self.approvals.may_approve(author)
 
     def _may_lift_cap(self, author: str) -> bool:
-        if author.startswith("linear:") and self.approvals.linear_users is not None:
+        if author.startswith("linear:"):
             return self.approvals.may_approve_linear(author)
         return self._may_approve_go(author)
 

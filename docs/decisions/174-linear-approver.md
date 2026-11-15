@@ -1,6 +1,6 @@
 # #174: the Linear identity that counts as Max for a capped `go`
 
-- **Decision:** On a Linear ticket, a capped `go` lifts the cap only when its author's stable Linear user id is in `approver_linear_users`, in both GitHub App switch states.
+- **Decision:** On a Linear ticket, a capped `go` lifts the cap only when its author's stable Linear user id is in `approver_linear_users`, in both GitHub App switch states. With the key unset, no capped Linear `go` lifts a cap.
 - **When:** 2026-11-15 ET, by Factory decided (technical), from the plan on PR #338
 - **Source:** https://github.com/maxharris1/factory/pull/338#issuecomment-6891022867
 
@@ -12,7 +12,7 @@ Max is the Linear user he signs in to Linear as. The factory knows that user by 
 
 ## Rule
 
-A Linear comment's author is `linear:<user id>`. With `approver_linear_users` set, a `go` on a capped Linear ticket raises `cap_extra` only when both hold:
+A Linear comment's author is `linear:<user id>`. A `go` on a capped Linear ticket raises `cap_extra` only when both hold:
 
 1. It passes today's trust: header `from=grok-bot role=orchestrator`, author trusted for `grok-bot` in `trusted_linear_users`.
 2. Its author's id is in `approver_linear_users`.
@@ -21,7 +21,7 @@ Any other `go` on a capped Linear ticket changes nothing and wakes Grok once wit
 
 | Check | Before #174 | After #174, key set | After #174, key unset |
 | --- | --- | --- | --- |
-| Capped Linear `go`, switch off or on | Author trusted for `grok-bot` | Author trusted for `grok-bot` and in `approver_linear_users` | As before |
+| Capped Linear `go`, switch off or on | Author trusted for `grok-bot` | Author trusted for `grok-bot` and in `approver_linear_users` | Refused |
 | Uncapped Linear `go` | Author trusted for `grok-bot` | Unchanged | Unchanged |
 | Linear `retry`, Linear `/go` | Today's rule | Unchanged | Unchanged |
 | Every GitHub path (capped `go`, hold `ok`, `/go`, retry, harness env) | #122 rules | Unchanged | Unchanged |
@@ -34,7 +34,7 @@ Any other `go` on a capped Linear ticket changes nothing and wakes Grok once wit
 
 ## Unset default
 
-With the key unset, a capped Linear `go` keeps today's rule, so a deploy does not freeze every capped Aut0 ticket before Max confirms his id. While any project has a `linear_project_id` and the key is unset, `orch check-config` prints `approver_linear_users is unset: any trusted Linear go lifts a cap`.
+With the key unset, every capped Linear `go` is refused and wakes Grok with `go-not-from-approver`. A capped Linear ticket stays capped until the box sets Max's id. The round-1 review asked for this: the shipped `orch.yml` does not set the key, so a fallback to today's rule left the gap open ([verdict](https://github.com/maxharris1/factory/pull/338#issuecomment-6891312598)). While any project has a `linear_project_id` and the key is unset, `orch check-config` prints `approver_linear_users is unset: no Linear go lifts a cap`.
 
 ## What this change cannot check
 

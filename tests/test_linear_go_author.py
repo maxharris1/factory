@@ -50,22 +50,6 @@ class LinearFlow(Flow):
 
 
 @pytest.mark.parametrize("enabled", SWITCH)
-def test_capped_linear_go_from_another_user_does_not_lift_the_cap(
-    tmp_path: Path, enabled: bool | None
-) -> None:
-    flow = LinearFlow(tmp_path, enabled=enabled)
-    flow.to_cap()
-    fixes = job_count(flow.queue, "fix")
-
-    assert flow.go("go-2", author=OTHER_LINEAR) == "go-not-from-approver"
-    flow.dispatcher.process(flow.snapshot())
-
-    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 0)
-    assert job_count(flow.queue, "fix") == fixes
-    assert [row["source_comment_id"] for row in grok_wakes(flow, "go-not-from-approver")] == ["go-2"]
-
-
-@pytest.mark.parametrize("enabled", SWITCH)
 def test_capped_linear_go_from_the_approver_raises_cap_extra(
     tmp_path: Path, enabled: bool | None
 ) -> None:
@@ -89,11 +73,28 @@ def test_uncapped_linear_go_from_another_user_keeps_todays_trust(
 
 
 @pytest.mark.parametrize("enabled", SWITCH)
-def test_unset_key_keeps_todays_capped_linear_go(tmp_path: Path, enabled: bool | None) -> None:
+@pytest.mark.parametrize("approver", [True, False])
+def test_capped_linear_go_from_another_user_does_not_lift_the_cap(
+    tmp_path: Path, enabled: bool | None, approver: bool
+) -> None:
+    flow = LinearFlow(tmp_path, enabled=enabled, approver=approver)
+    flow.to_cap()
+    fixes = job_count(flow.queue, "fix")
+
+    assert flow.go("go-2", author=OTHER_LINEAR) == "go-not-from-approver"
+    flow.dispatcher.process(flow.snapshot())
+
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 0)
+    assert job_count(flow.queue, "fix") == fixes
+    assert [row["source_comment_id"] for row in grok_wakes(flow, "go-not-from-approver")] == ["go-2"]
+
+
+@pytest.mark.parametrize("enabled", SWITCH)
+def test_unset_key_lifts_no_capped_linear_go(tmp_path: Path, enabled: bool | None) -> None:
     flow = LinearFlow(tmp_path, enabled=enabled, approver=False)
     flow.to_cap()
-    assert flow.go("go-2", author=OTHER_LINEAR) == "queued-fix"
-    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("fixing", 1)
+    assert flow.go("go-2", author=MAX_LINEAR) == "go-not-from-approver"
+    assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 0)
 
 
 @pytest.mark.parametrize(
