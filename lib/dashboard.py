@@ -1307,9 +1307,23 @@ def _read_db(
     verdicts = None
     if "handled_comments" in tables:
         verdicts = []
+        recorded = (
+            """
+            COALESCE(
+              (SELECT MIN(job.created_at) FROM jobs AS job
+                WHERE lower(job.repo) = lower(h.repo) AND job.ticket_id = h.ticket_id
+                  AND job.source_comment_id = h.comment_id),
+              (SELECT MAX(job.finished_at) FROM jobs AS job
+                WHERE lower(job.repo) = lower(h.repo) AND job.ticket_id = h.ticket_id
+                  AND job.handoff_comment_id = h.comment_id)
+            )
+            """
+            if jobs
+            else "NULL"
+        )
         for row in connection.execute(
-            "SELECT repo, ticket_id, outcome FROM handled_comments "
-            "ORDER BY rowid DESC LIMIT ?",
+            f"SELECT h.rowid AS seq, h.repo, h.ticket_id, h.outcome, {recorded} AS recorded_at "
+            "FROM handled_comments AS h ORDER BY h.rowid DESC LIMIT ?",
             (RECENT_VERDICTS,),
         ):
             outcome = str(row["outcome"])
@@ -1320,6 +1334,8 @@ def _read_db(
                     **_ticket_ref(sources, row["repo"], row["ticket_id"]),
                     "outcome": _clean(outcome, 48),
                     "kind": _verdict_kind(outcome),
+                    "seq": int(row["seq"]),
+                    "age_seconds": _age(now, row["recorded_at"]),
                 }
             )
 

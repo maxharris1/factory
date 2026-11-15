@@ -161,6 +161,8 @@ def test_recent_verdicts_newest_first_and_classified(tmp_path: Path) -> None:
         "ticket_id": "12",
         "outcome": "queued-review",
         "kind": "routed",
+        "seq": 1,
+        "age_seconds": None,
     }
 
 
