@@ -464,7 +464,7 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
         time.sleep(0.4)
         rebuilt = chrome.run(canvas)
         _click_canvas(chrome, 336, 140)
-        selected = chrome.run("document.querySelector('#job-h-review .runlog [aria-pressed=true]').dataset.visit")
+        selected = chrome.run("(b => [b.dataset.visit, b.dataset.state])(document.querySelector('#job-h-review .runlog [aria-pressed=true]'))")
         chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
         time.sleep(0.2)
         chart = chrome.run(f"{PAINTED}('#job-h-review canvas.jd-flowmap')")
@@ -474,7 +474,7 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
     assert {"scale drawn": clicked != even, "same as a fresh to-scale paint": clicked == rebuilt,
             "review drawn at x=336 to scale": selected, "chart painted": chart > 0} == {
         "scale drawn": True, "same as a fresh to-scale paint": True,
-        "review drawn at x=336 to scale": "3", "chart painted": True}
+        "review drawn at x=336 to scale": ["2", "review"], "chart painted": True}
 
 
 CONTROL_STRIP = r"""
