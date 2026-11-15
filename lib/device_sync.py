@@ -17,12 +17,18 @@ States:
 * deploying: a deploy runs now. No harness is placed on the device.
 * missing: the checkout does not exist; the next idle pass clones it.
 * refused: the deploy would discard local work (staged or modified files,
-  a merge or rebase in progress, local commits) or failed. Escalated once.
+  an untracked or ignored file in the checkout's way, a merge or rebase in
+  progress, local commits) or failed. Escalated once.
 * unreachable: ssh failed. Not a placement block: the device probe and the
   start's own preflight already cover an offline device.
 
 A device with no row is placeable, so a new device is not dead before its
 first pass; the start's preflight still checks its HEAD.
+
+The box has rows too, written by lib/self_deploy.py (device bot "",
+deploying while its checkout moves) and by the waiter (lagging, when a box
+start was refused); self-deploy drops them once the box HEAD is
+origin/main, and `orch heal devices` never forgets them.
 """
 
 from __future__ import annotations
@@ -185,16 +191,31 @@ def upsert(
     )
 
 
-def forget_except(connection: sqlite3.Connection, keep: Iterable[tuple[str, str]]) -> None:
+def forget_except(
+    connection: sqlite3.Connection,
+    keep: Iterable[tuple[str, str]],
+    keep_devices: Iterable[str] = (),
+) -> None:
     """Drop rows for targets no longer in machines.yml, so a removed device never blocks."""
     if not _exists(connection):
         return
     kept = set(keep)
+    devices = set(keep_devices)
     for row in read(connection):
-        if (row.device, row.bot) not in kept:
+        if (row.device, row.bot) not in kept and row.device not in devices:
             connection.execute(
                 f"DELETE FROM {TABLE} WHERE device = ? AND bot = ?", (row.device, row.bot)
             )
+
+
+def clear(connection: sqlite3.Connection, device: str, states: Iterable[str] = STATES) -> None:
+    if not _exists(connection):
+        return
+    wanted = tuple(states)
+    marks = ", ".join("?" for _ in wanted)
+    connection.execute(
+        f"DELETE FROM {TABLE} WHERE device = ? AND state IN ({marks})", (device, *wanted)
+    )
 
 
 @dataclass(frozen=True)

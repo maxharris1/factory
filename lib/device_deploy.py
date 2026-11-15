@@ -26,9 +26,11 @@ One pass:
    bot's login shell: clone a missing checkout, or fetch origin main and
    refuse (nothing written) on staged or modified tracked files, a merge or
    rebase in progress, or a HEAD or local main with commits the target
-   lacks; then `git checkout -B main <target>` with origin/main upstream,
-   and `bin/orch install-skills` from that checkout. Local edits are never
-   discarded.
+   lacks; then `git checkout -B main <target>` with origin/main upstream
+   (refused when an untracked or ignored local file is in the way), and
+   `bin/orch install-skills` from that checkout under the Python the
+   installed ~/.local/bin/orch wrapper names (deploy/install.sh's venv),
+   else python3. Local files are never overwritten or discarded.
 4. Observe again: synced, or refused with our own one-line reason.
    A refusal is escalated once per (target, reason, commit) through
    lib/heal.py; device-deploy.state.json remembers what was escalated.
@@ -54,7 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, health
-from lib.device_pool import slots_in_use
+from lib.device_pool import box_device, slots_in_use
 from lib.device_sync import Observed
 from lib.grok_delivery import send_webhook
 from lib.heal import ESCALATE, LOG_NAME, Action, Poster, Webhook, _webhook, escalate, stamp
@@ -118,9 +120,15 @@ _DEPLOY = (
     'git merge-base --is-ancestor "$m" "$target" || fail "local main has commits not on origin/main"; '
     "fi; "
     "fi; "
-    'git checkout -q -B main "$target" || fail "git checkout exited $?"; '
+    'git checkout -q --no-overwrite-ignore -B main "$target" '
+    '|| fail "git checkout exited $? (untracked or ignored files in the way?)"; '
     'git branch -q --set-upstream-to=origin/main main || fail "cannot set the upstream"; '
-    './bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
+    "py=python3; "
+    'if [ -f "$HOME/.local/bin/orch" ]; then '
+    """w=$(sed -n 's/^exec "\\{0,1\\}\\([^" ]*\\)"\\{0,1\\} .*/\\1/p' "$HOME/.local/bin/orch" | head -n 1); """
+    '[ -n "$w" ] && [ -x "$w" ] && py=$w; '
+    "fi; "
+    '"$py" ./bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
     f"printf '{SYNC_MARK} ok %s\\n' \"$(git rev-parse HEAD)\""
 )
 
@@ -247,7 +255,7 @@ def run_pass(
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         device_sync.ensure(connection)
-        device_sync.forget_except(connection, seen)
+        device_sync.forget_except(connection, seen, (box_device(config),))
         busy = slots_in_use(connection, config)
         when = now()
         waiting: dict[str, list[Target]] = {}
@@ -386,7 +394,13 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
     state_dir.mkdir(parents=True, exist_ok=True)
     checkout = args.checkout.resolve()
     machines = health.load_machines(args.machines)
+    db = args.db or Path(os.environ.get("ORCH_DB") or state_dir / "orch.db")
     if not targets(machines):
+        if db.is_file():
+            with SQLiteJobQueue(db, clock=clock).connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                device_sync.forget_except(connection, (), (box_device(machines),))
+                connection.commit()
         return 0
     with open(state_dir / LOCK_NAME, "a") as lock:
         try:
@@ -402,7 +416,6 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time,
         environ = dict(os.environ)
         for name in (*TOKEN_NAMES, *webhook.secret_names):
             os.environ.pop(name, None)
-        db = args.db or Path(os.environ.get("ORCH_DB") or state_dir / "orch.db")
         results = run_pass(
             SQLiteJobQueue(db, clock=clock),
             machines,

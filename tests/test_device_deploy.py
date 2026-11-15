@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import sys
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -21,7 +22,11 @@ from lib.queue import JobRequest, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
 
-ORCH_SCRIPT = '#!/bin/sh\necho "$PWD" >> "$HOME/install.log"\n'
+ORCH_SCRIPT = (
+    "import os, sys\n"
+    "with open(os.path.expanduser('~/install.log'), 'a') as log:\n"
+    "    log.write(os.getcwd() + ' ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+)
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -319,14 +324,101 @@ def test_a_dry_run_observes_and_writes_nothing(tmp_path: Path, fleet) -> None:
     assert not checkout(tmp_path, "mac").exists()
 
 
-def test_a_device_removed_from_machines_yml_loses_its_row(tmp_path: Path, fleet) -> None:
+def seed_box_row(queue: SQLiteJobQueue) -> None:
+    with queue.connect() as connection:
+        device_sync.upsert(connection, device="box", bot="claude-bot", harness="claude",
+                           checkout="/srv/factory", target=None, sha=None,
+                           state=device_sync.LAGGING, detail="preflight-lagging", now=1)
+        connection.commit()
+
+
+def test_a_device_removed_from_machines_yml_loses_its_row_and_the_box_keeps_its_own(
+    tmp_path: Path, fleet
+) -> None:
     origin, transport, config, queue, _home = fleet
     run(origin, transport, config, queue)
+    seed_box_row(queue)
     smaller = MachinesConfig(devices=tuple(d for d in config.devices if d.name != "lab"))
 
     run(origin, transport, smaller, queue)
 
     assert ("lab", "claude-bot") not in rows(queue)
+    assert states(queue)[("box", "claude-bot")] == "lagging"
+
+
+def test_removing_the_last_remote_device_still_drops_its_row(tmp_path: Path, fleet) -> None:
+    _origin, transport, _config, queue, _home = fleet
+    with queue.connect() as connection:
+        device_sync.upsert(connection, device="removed-pc", bot="claude-bot", harness="claude",
+                           checkout="/home/claude-bot/factory", target="a" * 40, sha=None,
+                           state=device_sync.MISSING, detail="", now=1)
+        connection.commit()
+    seed_box_row(queue)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "devices:\n  - name: box\n    local: true\n    slot_max: 2\n"
+        "    harnesses:\n      claude: claude-bot\n",
+        encoding="utf-8",
+    )
+
+    code = device_deploy.main(["--state", str(tmp_path / "state"), "--db", str(queue.path),
+                               "--machines", str(machines)], transport=transport)
+
+    assert code == 0
+    assert transport.scripts == []
+    assert list(states(queue)) == [("box", "claude-bot")]
+
+
+def test_an_ignored_local_file_upstream_starts_tracking_is_refused_untouched(
+    tmp_path: Path, fleet
+) -> None:
+    origin, transport, config, _queue, _home = fleet
+    before = origin.commit(".gitignore", "*.cache\n")
+    (origin.work / "important.cache").write_text("upstream\n", encoding="utf-8")
+    git(origin.work, "add", "-f", "important.cache")
+    git(origin.work, "commit", "-qm", "track a cache file")
+    git(origin.work, "push", "-q", "origin", "main")
+    after = git(origin.work, "rev-parse", "HEAD")
+    path = checkout(tmp_path, "mac")
+    clone_at(origin, path, before, detach=False)
+    (path / "important.cache").write_text("local work\n", encoding="utf-8")
+    target = next(t for t in device_deploy.targets(config) if t.device == "mac")
+
+    reason = device_deploy.run_deploy(transport, target, url=origin.url, sha=after)
+
+    assert reason == "git checkout exited 1 (untracked or ignored files in the way?)"
+    assert git(path, "rev-parse", "HEAD") == before
+    assert (path / "important.cache").read_text(encoding="utf-8") == "local work\n"
+
+
+def test_install_skills_runs_under_the_python_the_installed_wrapper_names(
+    tmp_path: Path, fleet
+) -> None:
+    origin, transport, config, _queue, home = fleet
+    managed = origin.commit(
+        "bin/orch",
+        "import os, sys\n"
+        "sys.exit(0 if os.environ.get('FACTORY_VENV') == '1' else 1)\n",
+    )
+    target = next(t for t in device_deploy.targets(config) if t.device == "mac")
+
+    assert device_deploy.run_deploy(transport, target, url=origin.url, sha=managed) == (
+        "install-skills exited 1")
+
+    venv = home / "venv" / "bin" / "python"
+    venv.parent.mkdir(parents=True)
+    venv.write_text(f'#!/bin/sh\nFACTORY_VENV=1 exec "{sys.executable}" "$@"\n', encoding="utf-8")
+    venv.chmod(0o755)
+    wrapper = home / ".local" / "bin" / "orch"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        f'#!/usr/bin/env bash\n# factory-orch-wrapper\nexec "{venv}" "/elsewhere/bin/orch" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    assert device_deploy.run_deploy(transport, target, url=origin.url, sha=managed) is None
+    assert on_main_at(Path(target.checkout), managed)
 
 
 def test_cli_runs_one_pass_and_skips_when_the_lock_is_held(tmp_path: Path, fleet, monkeypatch) -> None:
