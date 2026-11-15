@@ -9,6 +9,7 @@ from lib.dispatch.helpers import (
     _acted_verdict,
     _comment_link,
     _comment_order,
+    _detail_retry_comment,
     _detail_round_number,
     _has_questions,
     _matching_head,
@@ -567,7 +568,7 @@ class ReadyMixin:
             ticket,
             head,
             _detail_round_number(row["detail"]),
-            str(row["source_comment_id"]),
+            (str(row["source_comment_id"]), _detail_retry_comment(row["detail"])),
             float(row["created_at"]),
         )
 
@@ -576,7 +577,7 @@ class ReadyMixin:
         ticket: TrackedTicket,
         head: str,
         review_round: int | None,
-        ready_id: str,
+        queued_by: tuple[str, str | None],
         review_queued_at: float,
     ) -> bool:
         self._remember_verdicts(ticket, ticket.comments)
@@ -596,12 +597,18 @@ class ReadyMixin:
                       )
                   )
                   AND verdict.rowid > COALESCE((
-                      SELECT ready.rowid FROM handled_comments AS ready
-                      WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
-                        AND ready.comment_id = ?
+                      SELECT MAX(queued.rowid) FROM handled_comments AS queued
+                      WHERE queued.repo = verdict.repo AND queued.ticket_id = verdict.ticket_id
+                        AND queued.comment_id IN (?, ?)
                   ), 0)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, review_queued_at, review_round, ready_id),
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    review_queued_at,
+                    review_round,
+                    *queued_by,
+                ),
             ).fetchall()
         visible = {comment.id for comment in ticket.comments}
         return any(

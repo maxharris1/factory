@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatcher import Dispatcher
+from lib.hook_t7 import T7Hook
 from tests.merge_queue_support import APPROVE, TRUSTED_LOGINS, VERDICT, sha
 from tests.test_review_before_ci import (
     CI_LOG,
@@ -13,6 +15,7 @@ from tests.test_review_before_ci import (
     instruction,
     reviewed_at_pending_ci,
 )
+from tests.test_retry_resume import REASON
 
 
 @pytest.mark.parametrize("mode", ["interrupt", "upgrade", "existing-table"])
@@ -245,3 +248,78 @@ def test_an_upgrade_never_counts_a_handled_non_verdict_as_the_reviews_verdict(
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
     assert CI_LOG in instruction(fixes[0])
+
+
+def _upgrade_from(board, missing: str) -> None:
+    with board.queue.connect() as connection:
+        connection.execute(f"DROP TABLE {missing}")
+
+
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+@pytest.mark.parametrize("omitted", ["stale-revise", "stuck-go"])
+def test_a_comment_handled_before_a_retry_never_answers_the_retried_review(
+    tmp_path: Path, missing: str, omitted: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head, "review-ready")
+    board.poll()
+    if omitted == "stale-revise":
+        stale = VERDICT.format(round="1/3", head=sha(9), verdict="REVISE", risk="high")
+        board.post(pr, omitted, stale, "codex-login")
+        board.poll()
+        assert board.outcome(omitted) == "stale-revise"
+    board.fail("codex")
+    board.poll()
+    board.now[0] += STOPPED_POLL_SECONDS
+    board.poll()
+    board.fail("codex")
+    board.poll()
+    assert board.state("42")["stuck_reason"] == "job-failed-2"
+    if omitted == "stuck-go":
+        board.go(pr, omitted)
+        board.now[0] += STOPPED_POLL_SECONDS
+        board.poll()
+        assert board.outcome(omitted) == "ticket-stuck"
+    pr.comments.remove(next(item for item in pr.comments if item.id == omitted))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    board.post(pr, "retry-review", REASON, "grok-login")
+    board.now[0] += STOPPED_POLL_SECONDS
+    board.poll()
+    assert board.outcome("retry-review") == "queued-retry-review"
+    board.finish("codex")
+    pr.push(pr.head, ci="failure")
+    board.ready(pr, pr.head, "red-ready")
+    board.poll()
+    board.revise(pr, "1/3")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert board.outcome("red-ready") == "ci-red-in-flight"
+    assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
+
+
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
+    tmp_path: Path, missing: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    blocked = VERDICT.format(round="1/3", head=pr.head, verdict="BLOCKED", risk="high")
+    board.post(pr, "blocked-review", blocked, "codex-login")
+    board.poll()
+    assert board.outcome("blocked-review") == "woke-grok-blocked"
+    pr.comments.remove(next(item for item in pr.comments if item.id == "blocked-review"))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr.push(pr.head, ci="failure")
+    board.ready(pr, pr.head, "red-ready")
+    board.poll()
+
+    fix = board.queue.claim("claude")
+    assert board.outcome("red-ready") == "queued-ci-fix"
+    assert fix is not None and fix.request.source_comment_id == "red-ready"

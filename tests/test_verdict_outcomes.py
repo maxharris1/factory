@@ -77,10 +77,23 @@ def _handled_outcomes(roots: set[str]) -> set[str]:
     return outcomes
 
 
-def _verdict_branch_outcomes() -> set[str]:
+def _process_comments_outcomes() -> tuple[set[str], set[str]]:
     methods, constants = _methods()
-    outcomes: set[str] = set()
-    for node in ast.walk(methods["_process_comments"]):
+
+    def marked(nodes: list[ast.stmt]) -> set[str]:
+        outcomes: set[str] = set()
+        for call in ast.walk(ast.Module(body=nodes, type_ignores=[])):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "_mark_handled"
+            ):
+                outcomes |= _strings(call.args[2], constants)
+        return outcomes
+
+    process = methods["_process_comments"]
+    verdict: set[str] = set()
+    for node in ast.walk(process):
         if (
             isinstance(node, ast.If)
             and isinstance(node.test, ast.Compare)
@@ -89,14 +102,8 @@ def _verdict_branch_outcomes() -> set[str]:
             and isinstance(node.test.comparators[0], ast.Constant)
             and node.test.comparators[0].value == "verdict"
         ):
-            for call in ast.walk(ast.Module(body=node.body, type_ignores=[])):
-                if (
-                    isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "_mark_handled"
-                ):
-                    outcomes |= _strings(call.args[2], constants)
-    return outcomes
+            verdict |= marked(node.body)
+    return verdict, marked(process.body) - verdict
 
 
 VERDICT_HANDLERS = {"_t3", "_t4", "_revise_ci_gate"}
@@ -104,7 +111,7 @@ OTHER_HANDLERS = {"_t1", "_t2", "_t_plan", "_t5_questions", "_t5_answers", "_t_r
 
 
 def test_every_outcome_a_verdict_is_handled_with_is_a_verdict_outcome():
-    outcomes = _handled_outcomes(VERDICT_HANDLERS) | _verdict_branch_outcomes()
+    outcomes = _handled_outcomes(VERDICT_HANDLERS) | _process_comments_outcomes()[0]
 
     assert {"stale-revise", "merge-queue", "held-base-update", "duplicate-verdict"} <= outcomes
     assert sorted(o for o in outcomes if not _verdict_outcome(o)) == []
@@ -123,3 +130,18 @@ def test_outcomes_built_from_a_kind_are_verdict_outcomes_only_for_a_verdict():
     assert not _verdict_outcome("deduped-build")
     assert _verdict_outcome("failed-verdict-RuntimeError")
     assert not _verdict_outcome("failed-go-RuntimeError")
+
+
+def test_outcomes_any_kind_can_be_handled_with_are_not_verdict_outcomes():
+    outcomes = _process_comments_outcomes()[1]
+
+    assert {"ticket-abandoned", "ticket-stuck"} <= outcomes
+    assert sorted(o for o in outcomes if _verdict_outcome(o)) == []
+
+
+def test_t7_marks_a_blocked_verdict_with_a_verdict_outcome_and_nothing_else():
+    assert _verdict_outcome("woke-grok-blocked")
+    assert _verdict_outcome("rejected-blocked-author")
+    assert not _verdict_outcome("woke-grok-unparsed")
+    assert not _verdict_outcome("rejected-stuck-author")
+    assert not _verdict_outcome("ignored-unparsed-untrusted")

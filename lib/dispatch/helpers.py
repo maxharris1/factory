@@ -106,7 +106,8 @@ VERDICT_OUTCOMES = ACTED_VERDICT_OUTCOMES | frozenset(
         "rejected-unregistered-verdict",
         "duplicate-verdict",
         "after-handoff",
-        "ticket-stuck",
+        "rejected-blocked-author",
+        "woke-grok-blocked",
     }
 )
 
@@ -236,6 +237,17 @@ def _detail_round(detail: str | None) -> str | None:
     except ValueError:
         return None
     value = context.get("round") if isinstance(context, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _detail_retry_comment(detail: str | None) -> str | None:
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    value = context.get("retry_comment") if isinstance(context, dict) else None
     return value if isinstance(value, str) else None
 
 
