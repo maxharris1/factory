@@ -16,6 +16,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
+from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest
 from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
@@ -427,6 +428,8 @@ class DetailMixin:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if action in ("plan", "build") and (answers := self._answers(ticket)):
+            context["answers"] = answers
         if ticket.factory_md is not None:
             context["routing"] = {
                 "builder": ticket.factory.builder_harness,
@@ -450,6 +453,24 @@ class DetailMixin:
             # bug and ordinary work, after urgent (issue #85).
             context["resume"] = True
         return json.dumps(context, separators=(",", ":"), sort_keys=True)
+
+    def _answers(self, ticket: TrackedTicket) -> list[dict[str, str | None]]:
+        answers: list[dict[str, str | None]] = []
+        for comment in ticket.comments:
+            try:
+                handoff = parse_comment(comment.body)
+            except HandoffError:
+                continue
+            fields = handoff.as_dict()
+            if (
+                fields["kind"] != "answers"
+                or fields.get("state") == "abandoned"
+                or not self._trusted(ticket, comment, fields, "grok-bot", role="orchestrator")
+            ):
+                continue
+            prose = None if comment.edited_at is not None else handoff.body.strip()
+            answers.append({"id": comment.id, "url": comment.url, "prose": prose})
+        return answers
 
     def _wake_comment_problem(
         self,
