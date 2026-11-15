@@ -289,6 +289,8 @@ body.modal-open{overflow:hidden}
 background-image:repeating-linear-gradient(90deg,transparent 0 4px,var(--field) 4px 8px),
 repeating-linear-gradient(0deg,color-mix(in srgb,var(--px,var(--ok)) 30%,var(--field)) 0 4px,transparent 4px 8px)}
 .px[data-px=off],.px[data-px=twinkle]{background-image:none}
+.px[data-load]{background-image:repeating-linear-gradient(90deg,transparent 0 4px,var(--field) 4px 8px),
+repeating-linear-gradient(0deg,color-mix(in srgb,var(--px,var(--ok)) calc(6% + var(--l,1)*24%),var(--field)) 0 4px,transparent 4px 8px)}
 .px[data-px=fill]{background-image:linear-gradient(90deg,color-mix(in srgb,var(--px,var(--ok)) 62%,var(--field)) 0 calc(var(--p,0)*100%),transparent 0)}
 .px-held{position:relative}
 .px-held::after{content:"";position:absolute;inset:-1px;pointer-events:none;
@@ -304,7 +306,7 @@ background-position:0 0,0 100%,100% 0,0 0;animation:px-march 2s steps(4) infinit
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts,#health,#savings{grid-column:1/-1}}
 @media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
-.topbar .meta{margin-left:0}.statusline{position:static}}
+.topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
 .fresh{outline:2px solid var(--brand);outline-offset:-2px}
@@ -546,10 +548,10 @@ SCRIPT = r"""
     };
   }
 
-  function segment(key, text, state, label, age, prefix) {
+  function segment(key, text, state, label, age, prefix, href) {
     return {key: key, label: label === undefined ? null : label, text: text,
             state: state === undefined ? null : state,
-            href: Object.prototype.hasOwnProperty.call(SHELL.links, key) ? SHELL.links[key] : null,
+            href: href || (Object.prototype.hasOwnProperty.call(SHELL.links, key) ? SHELL.links[key] : null),
             age: age === undefined ? null : age, prefix: prefix === undefined ? null : prefix};
   }
   function present(v) { return v !== null && v !== undefined; }
@@ -577,7 +579,7 @@ SCRIPT = r"""
     out.push(segment('linear', 'linear ' + bs[0].toLowerCase(), bs[1]));
     var w = p.linear_webhook;
     if (!w) {
-      out.push(segment('webhook', 'no webhook', 'muted'));
+      out.push(segment('webhook', 'no webhook', 'muted', undefined, undefined, undefined, SHELL.absent));
     } else if (!present(w.last_received_age_seconds)) {
       out.push(segment('webhook', 'webhook never', present(w.warning) ? 'bad' : 'warn'));
     } else {
@@ -585,7 +587,7 @@ SCRIPT = r"""
                        null, w.last_received_age_seconds, 'webhook '));
     }
     var f = d.feeder;
-    if (!f) out.push(segment('feeder', 'no feeder', 'muted'));
+    if (!f) out.push(segment('feeder', 'no feeder', 'muted', undefined, undefined, undefined, SHELL.absent));
     else {
       var failing = (f.items || []).some(function (x) { return x.state === 'error'; });
       out.push(segment('feeder', 'feeder ' + num(f.fed) + ' fed', failing ? 'bad' : 'ok'));
@@ -1951,7 +1953,11 @@ PX_SCRIPT = r"""
       style += '--p:' + p + ';';
     }
     if (opts.heartbeat !== null && opts.heartbeat !== undefined) el.setAttribute('data-hb', String(Math.max(0, Math.floor(Number(opts.heartbeat) || 0))));
-    if (opts.load !== null && opts.load !== undefined) el.setAttribute('data-load', clamp(Number(opts.load) || 0).toFixed(3));
+    if (opts.load !== null && opts.load !== undefined) {
+      var l = clamp(Number(opts.load) || 0).toFixed(3);
+      el.setAttribute('data-load', l);
+      style += '--l:' + l + ';';
+    }
     var rate = opts.rate !== null && opts.rate !== undefined ? opts.rate : entry.rate;
     if (rate !== null && rate !== undefined) el.setAttribute('data-rate', String(Number(rate)));
     var seed = opts.seed !== null && opts.seed !== undefined ? opts.seed : entry.seed;
@@ -2180,7 +2186,9 @@ def px_strip(
     if heartbeat is not None:
         attrs.append(("data-hb", str(max(0, int(heartbeat)))))
     if load is not None:
-        attrs.append(("data-load", _fixed3(load)))
+        value = _fixed3(load)
+        attrs.append(("data-load", value))
+        style += f"--l:{value};"
     if rate is not None:
         attrs.append(("data-rate", f"{float(rate):g}"))
     if seed is not None:
@@ -2370,19 +2378,21 @@ def _attention_strip(snapshot: dict) -> str:
 
 # Where each status-line segment links (System anchors or Lanes).
 STATUS_LINKS = {
-    "poll": "health.html#health",
-    "poll-errors": "health.html#health",
-    "linear": "health.html#health",
+    "poll": "efficiency.html#health",
+    "poll-errors": "efficiency.html#health",
+    "linear": "efficiency.html#health",
     "webhook": "index.html#linear-webhook",
     "feeder": "index.html#feeder",
     "components": "health.html#components",
     "version": "health.html#components",
 }
+# A webhook or feeder segment with no block of its own links to the panel that would hold it.
+STATUS_ABSENT_LINK = "index.html#kpis"
 
 
 def shell_table() -> dict:
     """What the page script's shell needs from here (SHELL in SCRIPT)."""
-    return {"links": STATUS_LINKS, "code": sorted(CODE_COMPONENTS)}
+    return {"links": STATUS_LINKS, "absent": STATUS_ABSENT_LINK, "code": sorted(CODE_COMPONENTS)}
 
 
 def version_drift(health: dict | None) -> dict:
@@ -2402,9 +2412,9 @@ def version_drift(health: dict | None) -> dict:
 
 
 def _segment(key: str, text: str, state: str | None = None, label: str | None = None,
-             age: object = None, prefix: str | None = None) -> dict:
+             age: object = None, prefix: str | None = None, href: str | None = None) -> dict:
     return {"key": key, "label": label, "text": text, "state": state,
-            "href": STATUS_LINKS.get(key), "age": age, "prefix": prefix}
+            "href": href or STATUS_LINKS.get(key), "age": age, "prefix": prefix}
 
 
 def _count(value: object) -> str:
@@ -2441,7 +2451,7 @@ def status_segments(snapshot: dict) -> list[dict]:
     out.append(_segment("linear", f"linear {blabel.lower()}", bcls))
     webhook = poller.get("linear_webhook")
     if not webhook:
-        out.append(_segment("webhook", "no webhook", "muted"))
+        out.append(_segment("webhook", "no webhook", "muted", href=STATUS_ABSENT_LINK))
     elif webhook.get("last_received_age_seconds") is None:
         out.append(_segment("webhook", "webhook never",
                             "bad" if webhook.get("warning") is not None else "warn"))
@@ -2452,7 +2462,7 @@ def status_segments(snapshot: dict) -> list[dict]:
                             age=age, prefix="webhook "))
     feeder = snapshot.get("feeder")
     if not feeder:
-        out.append(_segment("feeder", "no feeder", "muted"))
+        out.append(_segment("feeder", "no feeder", "muted", href=STATUS_ABSENT_LINK))
     else:
         failing = any(item.get("state") == "error" for item in feeder.get("items") or [])
         out.append(_segment("feeder", f"feeder {_count(feeder['fed'])} fed", "bad" if failing else "ok"))

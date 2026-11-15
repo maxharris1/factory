@@ -236,25 +236,25 @@ SEGMENTS = [
     ("device-unlisted", _devices, "device:attic", "attic 1/—", None, None),
     ("queue", _set("queue.totals.queued", 1234), "queue", "queue 1,234", None, None),
     ("poll-ok", _set("poller.health", {"state": "ok", "last_cycle_age_seconds": 50}),
-     "poll", "poll ok · 50s", "ok", "health.html#health"),
+     "poll", "poll ok · 50s", "ok", "efficiency.html#health"),
     ("poll-late", _set("poller.health", {"state": "late", "last_cycle_age_seconds": 200}),
-     "poll", "poll late · 3m 20s", "warn", "health.html#health"),
+     "poll", "poll late · 3m 20s", "warn", "efficiency.html#health"),
     ("poll-stale", _set("poller.health", {"state": "stale", "last_cycle_age_seconds": 4000}),
-     "poll", "poll stale · 1h 06m", "bad", "health.html#health"),
-    ("poll-unknown", _set("poller.health", None), "poll", "poll unknown", "muted", "health.html#health"),
+     "poll", "poll stale · 1h 06m", "bad", "efficiency.html#health"),
+    ("poll-unknown", _set("poller.health", None), "poll", "poll unknown", "muted", "efficiency.html#health"),
     ("poll-errors-0", _set("poller.errors.last_hour", 0), "poll-errors", "0 poll errors / 1 h", "ok",
-     "health.html#health"),
+     "efficiency.html#health"),
     ("poll-errors-1", _set("poller.errors.last_hour", 1), "poll-errors", "1 poll error / 1 h", "bad",
-     "health.html#health"),
+     "efficiency.html#health"),
     ("poll-errors-bad", _set("poller.errors.last_hour", 45), "poll-errors", "45 poll errors / 1 h", "bad",
-     "health.html#health"),
-    ("linear-ok", _set("poller.linear_budget", None), "linear", "linear ok", "ok", "health.html#health"),
+     "efficiency.html#health"),
+    ("linear-ok", _set("poller.linear_budget", None), "linear", "linear ok", "ok", "efficiency.html#health"),
     ("linear-deferring", _set("poller.linear_budget.state", "deferring"), "linear", "linear deferring",
-     "warn", "health.html#health"),
+     "warn", "efficiency.html#health"),
     ("linear-exhausted", _set("poller.linear_budget.state", "exhausted"), "linear", "linear exhausted",
-     "bad", "health.html#health"),
+     "bad", "efficiency.html#health"),
     ("linear-rate-limited", _set("poller.linear_budget.state", "rate_limited"), "linear",
-     "linear rate limited", "bad", "health.html#health"),
+     "linear rate limited", "bad", "efficiency.html#health"),
     ("webhook-ok", _webhook(371), "webhook", "webhook 6m 11s", "ok", "index.html#linear-webhook"),
     ("webhook-warning", _webhook(371, "no event for 6m"), "webhook", "webhook 6m 11s", "bad",
      "index.html#linear-webhook"),
@@ -262,10 +262,10 @@ SEGMENTS = [
     ("webhook-never-warning", _webhook(None, "listener down"), "webhook", "webhook never", "bad",
      "index.html#linear-webhook"),
     ("webhook-absent", _set("poller.linear_webhook", None), "webhook", "no webhook", "muted",
-     "index.html#linear-webhook"),
+     "index.html#kpis"),
     ("feeder-ok", _feeder("fed", "eligible"), "feeder", "feeder 11 fed", "ok", "index.html#feeder"),
     ("feeder-error", _feeder("fed", "error"), "feeder", "feeder 11 fed", "bad", "index.html#feeder"),
-    ("feeder-absent", _set("feeder", None), "feeder", "no feeder", "muted", "index.html#feeder"),
+    ("feeder-absent", _set("feeder", None), "feeder", "no feeder", "muted", "index.html#kpis"),
     ("components-up", _health({}, _waiter(1)), "components", "2 / 2 up", "ok", "health.html#components"),
     ("components-stale", _health({}, _waiter(1, state="stale")), "components", "1 / 2 up", "warn",
      "health.html#components"),
@@ -334,7 +334,7 @@ def test_the_status_line_is_on_every_page_after_main(base: dict) -> None:
         footer = _footer(html)
         assert footer.count('<span class="sl-brand">factory</span>') == 1
         for href in re.findall(r'href="([^"]+)"', footer):
-            assert re.fullmatch(r"(health|index)\.html#[a-z-]+", href), href
+            assert re.fullmatch(r"(health|index|efficiency)\.html#[a-z-]+", href), href
 
 
 def test_bad_and_warn_segments_are_red_or_orange_text_and_block() -> None:
@@ -377,7 +377,8 @@ def test_band_brightness_is_running_over_total_slots(base: dict, change, load: s
     snapshot = change(base)
     band = _section(render_pages(snapshot)["index.html"], "band")
     assert ('<canvas class="px" data-px="field" data-tint="#9ece6a" data-load="' + load
-            + '" data-seed="21" data-px-key="band" aria-hidden="true" style="--px:#9ece6a;height:24px">') in band
+            + '" data-seed="21" data-px-key="band" aria-hidden="true" style="--px:#9ece6a;--l:' + load
+            + ';height:24px">') in band
 
 
 @needs_node
@@ -559,3 +560,54 @@ def test_topbar_markup_follows_the_artboard(base: dict) -> None:
     css = page.CSS
     assert ".top-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;min-height:56px;padding:8px 24px}" in css
     assert "min-height:36px;padding:6px 24px;" in css  # 56 + 24 + 36 = the artboard's 116 px
+
+
+# --- every shell link lands ------------------------------------------------------------
+
+
+def _without_webhook_or_feeder(snapshot: dict) -> dict:
+    out = copy.deepcopy(snapshot)
+    out["poller"]["linear_webhook"] = None
+    out["feeder"] = None
+    return out
+
+
+@pytest.mark.parametrize("change", [lambda s: s, _without_webhook_or_feeder], ids=["full", "bare"])
+def test_every_shell_link_lands_on_an_anchor_its_page_renders(base: dict, change) -> None:
+    snapshot = change(base)
+    pages = render_pages(snapshot)
+    ids = {name: set(re.findall(r'\sid="([^"]+)"', _no_script(html))) for name, html in pages.items()}
+    targets = {seg["key"]: seg["href"] for seg in page.status_segments(snapshot) if seg["href"]}
+    assert set(targets) == set(page.STATUS_LINKS)
+    for name, html in pages.items():
+        shell = (html[html.index('<header class="topbar"') : html.index("</header>")]
+                 + _footer(html))
+        for href in re.findall(r'href="([^"]+#[^"]+)"', shell) + list(targets.values()):
+            target, anchor = href.split("#")
+            assert anchor in ids[target], (name, href)
+
+
+@needs_node
+def test_the_script_status_line_links_where_the_server_links_without_webhook_or_feeder(
+        tmp_path: Path, base: dict) -> None:
+    bare = _without_webhook_or_feeder(base)
+    assert _script(tmp_path, bare)["html"]["statusline"] == _inner(render_pages(bare)["index.html"], "statusline")
+
+
+def test_the_status_line_stays_stuck_to_the_bottom_at_every_width() -> None:
+    positions = re.findall(r"\.statusline\{[^}]*?position:([a-z]+)", page.CSS)
+    assert positions == ["sticky"]
+
+
+def test_the_no_script_band_reflects_load(base: dict) -> None:
+    def band(held: int) -> str:
+        snapshot = copy.deepcopy(base)
+        snapshot["running"] = []
+        snapshot["slots"]["devices"] = [{"name": "box", "slot_max": 3, "held": held, "enabled": True,
+                                         "placeholder": False, "harnesses": []}]
+        return _section(render_pages(snapshot)["index.html"], "band")
+    idle, full = band(0), band(3)
+    assert 'data-load="0.000"' in idle and 'data-load="1.000"' in full
+    assert "--l:0.000;" in idle and "--l:1.000;" in full
+    rule = re.search(r"\n\.px\[data-load\]\{([^}]*)\}", page.CSS)
+    assert rule and "var(--l" in rule.group(1)
