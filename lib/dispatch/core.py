@@ -83,6 +83,7 @@ class DispatcherBase:
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.
         self._polled: dict[tuple[str, str], TrackedTicket] = {}
+        self._read_started: float | None = None
         # #109: tickets whose read the source reported failed, by error.
         self._source_errors: dict[tuple[str, str], str] = {}
         # #105: the source's uncached read, for a ready naming a newer head.

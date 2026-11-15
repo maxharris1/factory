@@ -35,6 +35,7 @@ class PollMixin:
         if begin is not None:
             begin()
         self._polled = {}
+        self._read_started = None
         self._merged_repos = set()
         self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
@@ -62,7 +63,7 @@ class PollMixin:
             self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
-        read_at = self.queue.now()
+        read_at = self._read_started = self.queue.now()
         refs = self._tracked_refs(read_at)
         self._source_errors = {}
         try:
@@ -95,7 +96,10 @@ class PollMixin:
                 self._record_poll_error(ticket, exc)
         self._advance_merge_queues()
         self._verify_handoffs(source, read_from)
-        self.reconcile_jobs()
+        try:
+            self.reconcile_jobs()
+        finally:
+            self._read_started = None
         self._record_factory_reads(source)
         if end is not None:
             end()

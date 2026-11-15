@@ -12,9 +12,10 @@ from lib import device_sync, lane_limit, skill_preflight
 from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
-    _ANSWERS,
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
+    _SETTLING_KINDS,
+    _NO_READ_SINCE_FAILURE,
     _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
     _comment_order,
@@ -695,9 +696,8 @@ class JobsMixin:
             self._ensure_stuck_wake(job.request.repo, job.request.ticket_id)
             self.queue.mark_failure_handled(job.id)
             return
-        # #91 (PR #88), #105: the job may have posted its handoff (a review's
-        # verdict, a build or fix's ready) and then failed. That handoff
-        # stands: done, never retried.
+        # #91 (PR #88), #105, #193: the job may have posted its result and
+        # then failed. That result stands: done, never retried.
         handoff = self._posted_handoff(job)
         if handoff is _HANDOFF_UNREAD:
             self._record_job_event_once(
@@ -707,8 +707,24 @@ class JobsMixin:
                 "PR head; T6 waits for T2 to route it or call it stale",
             )
             return
-        if handoff is not None:
+        if handoff is not None and handoff is not _NO_READ_SINCE_FAILURE:
             self._done_from_handoff(job, handoff)
+            return
+        if job.request.recipient != "grok" and self._waiting_max(job):
+            self._record_job_event_once(
+                job,
+                "waiting-max",
+                "the ticket waits on Max; his answers resume the paused step; no T6 retry",
+            )
+            self.queue.mark_failure_handled(job.id)
+            return
+        if handoff is _NO_READ_SINCE_FAILURE:
+            self._record_job_event_once(
+                job,
+                "reconcile-deferred",
+                "no ticket read since the job failed; T6 retries only after a "
+                "read shows no result",
+            )
             return
         if self._restored_failure_waits(job):
             return
@@ -954,43 +970,72 @@ class JobsMixin:
         self._done_from_handoff(job, answer)
         return True
 
-    def _posted_handoff(self, job: Job) -> Comment | object | None:
-        """The handoff a failed review, build, fix or update job already posted.
+    def _waiting_max(self, job: Job) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+                (job.request.repo.lower(), job.request.ticket_id),
+            ).fetchone()
+        return row is not None and row["workflow_state"] == "waiting-max"
 
-        Read from the ticket this poll fetched (None when it fetched none),
-        posted no earlier than the job was queued, from a login trusted for
-        its `from` and `role`, and not already rejected when it was handled
-        (stale, superseded, ...). A ready stale only because its review
-        already answered (#71 stale-ready-verdict) still counts. An update
-        job's ready is matched by TU's attribution, not by time.
+    def _no_read_since_failure(self, job: Job, ticket: TrackedTicket | None) -> bool:
+        """#193: inside poll_once, the ticket read began before the job failed,
+        or a tracked ticket was not read at all, so a result it posted may be
+        missing from the read."""
+        if self._read_started is None:
+            return False
+        if ticket is not None:
+            return self._read_started < (job.finished_at or 0)
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM tracked_tickets WHERE lower(repo) = ? AND ticket_id = ?",
+                (job.request.repo.lower(), job.request.ticket_id),
+            ).fetchone() is not None
+
+    def _posted_handoff(self, job: Job) -> Comment | object | None:
+        """The result a failed harness job already posted (#91, #105, #193).
+
+        Read from the ticket this poll fetched, posted no earlier than the
+        job was queued, from a login trusted for its `from` and `role`, of a
+        kind in _SETTLING_KINDS for the job's action, and not already
+        rejected when it was handled (stale, superseded, ...). A ready stale
+        only because its review already answered (#71 stale-ready-verdict)
+        still counts. An update job's result follows its source comment, and
+        its ready is matched by TU's attribution, not by time.
 
         A review's is a reviewer verdict for the job's head (as a prefix,
         like every head compare) and round; a review job with no round or no
-        head takes none. A build or fix job's is a builder ready from the
-        job's recipient at a new head: one other than the job's own, or any
-        head for a job that has none. That ready counts once T2 routed it,
-        or while it waits on CI at the polled PR head. One T2 left unhandled
-        at another head (its fresh PR read failed) may yet be stale:
-        _HANDOFF_UNREAD when no counted handoff comes first.
+        head takes none. A builder's questions count unless T5 found none in
+        them. A build or fix job's ready is at a new head: one other than
+        the job's own, or any head for a job that has none. That ready
+        counts once T2 routed it, or while it waits on CI at the polled PR
+        head. One T2 left unhandled at another head (its fresh PR read
+        failed) may yet be stale: _HANDOFF_UNREAD when no counted handoff
+        comes first. _NO_READ_SINCE_FAILURE when poll_once has no read of the
+        ticket that began at or after the failure.
         """
         ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if self._no_read_since_failure(job, ticket):
+            return _NO_READ_SINCE_FAILURE
         if ticket is None:
             return None
         action = job.request.action
+        kinds = _SETTLING_KINDS.get(action)
+        if kinds is None:
+            return None
         if action == "review":
             round_number = _detail_round_number(job.request.detail)
             if job.request.head is None or round_number is None:
                 return None
-            kind, bot, role = "verdict", f"{ticket.factory.reviewer_harness}-bot", "reviewer"
-        elif action in ("build", "fix", "update-from-main"):
-            round_number = None
-            kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"
+            bot, role = f"{ticket.factory.reviewer_harness}-bot", "reviewer"
         else:
-            return None
+            round_number = None
+            bot, role = f"{job.request.recipient}-bot", "builder"
         update = action == "update-from-main"
         comments = sorted(ticket.comments, key=_comment_order)
         ids = [item.id for item in comments]
-        if update and job.request.source_comment_id in ids:
+        after_source = job.request.source_comment_id in ids
+        if update and after_source:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
         for item in comments:
             if not update and item.created_at < job.created_at:
@@ -999,10 +1044,18 @@ class JobsMixin:
                 fields = parse_comment(item.body).as_dict()
             except HandoffError:
                 continue
-            if fields.get("kind") != kind:
+            kind = fields.get("kind")
+            if kind not in kinds:
                 continue
             if not self._trusted(ticket, item, fields, bot, role=role):
                 continue
+            outcome = self._handled_outcome(ticket, item.id)
+            if kind == "questions":
+                if (update and not after_source) or outcome == "no-questions" or (
+                    outcome is not None and outcome.startswith(_REJECTED_OUTCOMES)
+                ):
+                    continue
+                return item
             head = fields.get("head") or ""
             if kind == "verdict":
                 if _matching_head(head, job.request.head) is None:
@@ -1011,7 +1064,6 @@ class JobsMixin:
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
-            outcome = self._handled_outcome(ticket, item.id)
             if (
                 outcome is not None
                 and outcome != "stale-ready-verdict"
@@ -1034,8 +1086,7 @@ class JobsMixin:
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:
         """Mark a failed job done with the handoff it already posted."""
-        action = job.request.action
-        kind = "ready" if action == "update-from-main" else _ANSWERS[action][0]
+        kind = parse_comment(handoff.body).as_dict()["kind"]
         event = f"done-from-{kind}"
         now = self.queue.now()
         with self._connect() as connection:
