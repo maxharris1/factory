@@ -362,20 +362,16 @@ class CommentsMixin:
             ):
                 rows.append(
                     (
-                        fields.get("head") or "",
-                        _round_number(fields.get("round")),
                         ticket.repo.lower(),
                         ticket.ticket_id,
                         comment.id,
+                        fields.get("head") or "",
+                        _round_number(fields.get("round")),
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
-                """
-                UPDATE handled_comments SET verdict_head = ?, verdict_round = ?
-                WHERE repo = ? AND ticket_id = ? AND comment_id = ? AND verdict_head IS NULL
-                """,
-                rows,
+                "INSERT OR IGNORE INTO verdict_heads VALUES (?, ?, ?, ?, ?)", rows
             )
 
     def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:

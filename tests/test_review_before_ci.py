@@ -680,3 +680,18 @@ def test_a_red_ready_back_at_an_older_head_queues_a_ci_fix_while_the_handled_ver
     assert fix is not None, "the ready back at the older head left no runnable CI fix"
     assert fix.request.head == older
     assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+
+
+def test_remembering_verdict_heads_keeps_handled_comments_four_columns_wide(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    with board.queue.connect() as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(handled_comments)")]
+        connection.execute(
+            "INSERT INTO handled_comments VALUES ('owner/repo', '9', 'c9', 'handled')"
+        )
+    assert columns == ["repo", "ticket_id", "comment_id", "outcome"]

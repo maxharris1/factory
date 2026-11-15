@@ -100,10 +100,17 @@ class SchemaMixin:
                 )
                 """
             )
-            _add_missing_columns(
-                connection,
-                "handled_comments",
-                {"verdict_head": "TEXT", "verdict_round": "INTEGER"},
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS verdict_heads (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    head TEXT NOT NULL,
+                    review_round INTEGER,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
             )
             _add_missing_columns(
                 connection,
