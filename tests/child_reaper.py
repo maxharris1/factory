@@ -93,12 +93,12 @@ def leaked(before: set[int], tag: str, root: Path) -> set[int]:
     a scrubbed env and detached with nohup or setsid matches only the last."""
     table = _table()
     mine = descendants(os.getpid(), table)
-    needles = (f"{TAG}={tag}".encode(),)
+    needle = f"{TAG}={tag}".encode()
     prefixes = tuple(f"{name}={root}/".encode() for name in ("HOME", "ORCH_STATE_DIR"))
     found = set()
     for pid in table.keys() - before - {os.getpid()}:
         environ = _environ(pid)
-        if pid in mine or any(entry in needles or entry.startswith(prefixes) for entry in environ):
+        if pid in mine or any(entry == needle or entry.startswith(prefixes) for entry in environ):
             found.add(pid)
     return {pid for pid in found if alive(pid)}
 
