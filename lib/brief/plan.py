@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lib.brief.common import QUESTIONS_LINES, answers_lines, detail_of
+from lib.brief.common import QUESTIONS_LINES, answers_lines, detail_of, resume_lines
 from lib.queue import Job
 
 # The most a plan handoff carries: GitHub caps a comment at 65,536 characters.
@@ -18,6 +18,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         f"3. Post the plan handoff below with `round={facts['plan_round']}/2`: "
         "`ac=met` when every criterion is mapped, `ac=unmet` when one is not.",
         *answers_lines(detail_of(job)),
+        *resume_lines(detail_of(job)),
         *QUESTIONS_LINES,
     ]
 

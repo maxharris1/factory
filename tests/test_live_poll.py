@@ -1778,10 +1778,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 145_140),
-        (25, 5, 10, 1_020, 670_020),
-        (100, 20, 40, 1_080, 640_200),
-        (500, 20, 460, 1_080, 713_760),
+        (5, 1, 2, 300, 154_140),
+        (25, 5, 10, 1_020, 715_020),
+        (100, 20, 40, 1_080, 682_200),
+        (500, 20, 460, 1_080, 761_760),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(

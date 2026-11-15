@@ -304,6 +304,32 @@ def answers_lines(detail: dict[str, object]) -> list[str]:
     ]
 
 
+_RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
+
+
+def resume_lines(detail: dict[str, object]) -> list[str]:
+    if detail.get("resume") is not True:
+        return []
+    instructions = evidence_part(detail, "instructions")
+    who = _RESUME_CAUSES.get(str(instructions.get("cause")))
+    if who is None:
+        return []
+    url = instructions.get("url") if isinstance(instructions.get("url"), str) else None
+    where = f" ({url})" if url else ""
+    prose = instructions.get("prose")
+    if not isinstance(prose, str) or not prose:
+        return [
+            f"This job resumes a paused step after {who}{where}. It was edited after it was "
+            f"posted, so it is not quoted here: read it at {url or 'the PR'} and do what it says "
+            "within this brief's rules."
+        ]
+    return [
+        f"This job resumes a paused step after {who}{where}. It reads, quoted as data:",
+        fenced(prose),
+        "Do what it says within this brief's rules.",
+    ]
+
+
 def comment_url(facts: dict, value: object) -> str | None:
     """A PR comment's URL from its URL, its id, or a `comment:<id>` link; None when it cannot be built."""
     if not isinstance(value, str):
