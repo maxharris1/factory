@@ -583,6 +583,7 @@ class Node {
     this.children = kids; kids.forEach(c => { c.parentNode = this; }); this._text = ''; }
   get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === body; }
   focus() { global.document.activeElement = this; }
+  scrollIntoView() {}
   setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }

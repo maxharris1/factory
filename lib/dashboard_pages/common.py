@@ -295,6 +295,13 @@ SCRIPT_TAIL = r"""
     healthKey = agedHealth(d).key;
   }
 
+  function revealHash() {
+    var target = byId(String(location.hash || '').slice(1));
+    if (!target) return;
+    for (var n = target.parentNode; n; n = n.parentNode) if (n.tagName === 'DETAILS') n.open = true;
+    target.scrollIntoView();
+  }
+
   function updateLink() {
     var link = byId('link');
     var text = byId('link-text');
@@ -332,8 +339,10 @@ SCRIPT_TAIL = r"""
     everOk = true;
     failures = 0;
     if (firstRender || d.generated_at_epoch !== generated) {
+      var first = firstRender;
       generated = Number(d.generated_at_epoch) || generated;
       render(d);
+      if (first) revealHash();
     }
     tick();
   }
@@ -378,7 +387,7 @@ SCRIPT_TAIL = r"""
     if (!document.hidden && timer === null && !inflight) poll();
   });
   if (window.addEventListener) {
-    window.addEventListener('hashchange', function () { if (latest) { render(latest); tick(); } });
+    window.addEventListener('hashchange', function () { if (latest) { render(latest); tick(); revealHash(); } });
   }
   setInterval(tick, 1000);
   updateLink();

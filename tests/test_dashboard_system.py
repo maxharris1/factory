@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import functools
+import http.server
+import json
+import os
 import re
+import shutil
+import subprocess
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from lib import health as component_health
 from lib.dashboard import (
@@ -266,3 +276,117 @@ def test_an_unknown_project_shows_its_reason(tmp_path: Path) -> None:
                              "reason": "factory.md missing", "read_age_seconds": 3}]
     rules = _text(_section(_no_script(render_pages(snapshot)["health.html"]), "rules"))
     assert "ship mode and round cap: unknown (factory.md missing)" in rules
+
+
+CHROME = next(filter(None, map(shutil.which, ("google-chrome", "chromium", "chromium-browser"))), None)
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+class _Chrome:
+    """Headless Chrome driven over --remote-debugging-pipe: NUL-framed CDP JSON on fds 3 and 4."""
+
+    def __init__(self, profile: Path) -> None:
+        to_chrome_r, self._to_chrome = os.pipe()
+        self._from_chrome, from_chrome_w = os.pipe()
+        self._proc = subprocess.Popen(
+            ["bash", "-c", f'exec "$0" "$@" 3<&{to_chrome_r} 4>&{from_chrome_w}', CHROME,
+             "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run",
+             "--remote-debugging-pipe", f"--user-data-dir={profile}", "--window-size=1440,900",
+             "about:blank"],
+            pass_fds=(to_chrome_r, from_chrome_w), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        os.close(to_chrome_r)
+        os.close(from_chrome_w)
+        self._buf = b""
+        self._next = 0
+        target = self.send("Target.createTarget", url="about:blank")["targetId"]
+        self.session = self.send("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
+
+    def send(self, method: str, session: str | None = None, **params: object) -> dict:
+        self._next += 1
+        message: dict = {"id": self._next, "method": method, "params": params}
+        if session:
+            message["sessionId"] = session
+        os.write(self._to_chrome, json.dumps(message).encode() + b"\0")
+        while True:
+            while b"\0" not in self._buf:
+                chunk = os.read(self._from_chrome, 1 << 16)
+                assert chunk, "chrome closed the debugging pipe"
+                self._buf += chunk
+            raw, self._buf = self._buf.split(b"\0", 1)
+            reply = json.loads(raw)
+            if reply.get("id") == self._next:
+                assert "error" not in reply, reply
+                return reply["result"]
+
+    def run(self, expression: str) -> object:
+        result = self.send("Runtime.evaluate", self.session, expression=expression,
+                           awaitPromise=True, returnByValue=True)
+        assert "exceptionDetails" not in result, result
+        return result["result"].get("value")
+
+    def close(self) -> None:
+        self._proc.kill()
+        self._proc.wait()
+        os.close(self._to_chrome)
+        os.close(self._from_chrome)
+
+
+LAND_ON_EVERY_LINK = r"""
+(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 100 && /ACQUIRING|STATIC/.test(document.getElementById('link-text').textContent); i++) await sleep(50);
+  const hrefs = [...new Set([...document.querySelectorAll('a[href^="health.html#"], a[href^="#"]')]
+    .map(a => a.getAttribute('href')))].filter(h => h.split('#')[1]);
+  const out = [];
+  for (const href of hrefs) {
+    history.replaceState(null, '', location.pathname);
+    window.scrollTo(0, 0);
+    document.querySelectorAll('details').forEach(d => { d.open = false; });
+    await sleep(50);
+    document.querySelector('a[href="' + href + '"]').click();
+    await sleep(200);
+    const target = document.getElementById(href.split('#')[1]);
+    const box = target.getBoundingClientRect();
+    out.push({href, hash: location.hash, visible: target.checkVisibility(),
+              inView: box.bottom > 0 && box.top < innerHeight});
+  }
+  return out;
+})()
+"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_every_link_into_the_page_reveals_its_target_in_a_browser(tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    snapshot = _snapshot(tmp_path)
+    for name, html in render_pages(snapshot).items():
+        (site / name).write_text(html, encoding="utf-8")
+    (site / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    handler = functools.partial(QuietHandler, directory=str(site))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        chrome.send("Page.navigate", chrome.session,
+                    url=f"http://127.0.0.1:{server.server_address[1]}/health.html")
+        deadline = time.monotonic() + 30
+        while chrome.run("location.pathname + ' ' + document.readyState") != "/health.html complete":
+            assert time.monotonic() < deadline, "health.html never loaded"
+            time.sleep(0.05)
+        landed = chrome.run(LAND_ON_EVERY_LINK)
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert isinstance(landed, list)
+    hrefs = {row["href"] for row in landed}
+    assert {"health.html#health-linear-listener--box", "#health-linear-listener--box",
+            "health.html#health-no-waiter-codex", "health.html#components"} <= hrefs, hrefs
+    for row in landed:
+        assert row["hash"] == "#" + row["href"].split("#")[1], row
+        assert row["visible"] and row["inView"], row
