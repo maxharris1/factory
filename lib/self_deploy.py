@@ -132,18 +132,19 @@ class Git:
         self.checkout = checkout
         self.env = dict(env)
 
-    def run(self, *args: str, timeout: float = GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    def run(self, *args: str, timeout: float = GIT_TIMEOUT,
+            stdin: bytes | None = None) -> subprocess.CompletedProcess:
         try:
             return subprocess.run(["git", *args], cwd=self.checkout, env=self.env,
-                                  stdin=subprocess.DEVNULL, capture_output=True,
-                                  timeout=timeout, check=False)
+                                  input=stdin if stdin is not None else b"",
+                                  capture_output=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired:
             return subprocess.CompletedProcess(args, 124, b"", b"")
         except OSError:
             return subprocess.CompletedProcess(args, 126, b"", b"")
 
-    def out(self, *args: str, timeout: float = GIT_TIMEOUT) -> bytes:
-        result = self.run(*args, timeout=timeout)
+    def out(self, *args: str, timeout: float = GIT_TIMEOUT, stdin: bytes | None = None) -> bytes:
+        result = self.run(*args, timeout=timeout, stdin=stdin)
         if result.returncode != 0:
             raise GitError(args, result.returncode)
         return result.stdout
@@ -210,7 +211,46 @@ def _shape(git: Git) -> tuple[str | None, list[str]]:
     other = sorted(name for name in dirty if name not in KEPT)
     if other:
         return "local edits outside the keep list: " + ",".join(other[:5]), []
+    hidden = _hidden_edits(git, dirty)
+    if hidden:
+        return "local edits git diff does not report: " + ",".join(hidden[:5]), []
     return None, sorted(dirty)
+
+
+def _hidden_edits(git: Git, dirty: Sequence[str]) -> list[str]:
+    """Tracked paths whose local state `git diff` may not show, so a backup
+    built from it would miss them and a rollback's reset would erase them:
+    index flags that hide the working tree (assume-unchanged, skip-worktree),
+    and regular files whose bytes on disk hash differently from the index
+    (a stale fsmonitor or stat cache)."""
+    hidden: set[str] = set()
+    for line in git.names("ls-files", "-v", "-z"):
+        tag, _, name = line.partition(" ")
+        if tag.islower() or tag == "S":
+            hidden.add(name)
+    expected: dict[str, str] = {}
+    for line in git.names("ls-files", "-s", "-z"):
+        meta, _, name = line.partition("\t")
+        mode, blob, _ = meta.split(" ", 2)
+        if mode not in ("100644", "100755") or name in dirty or name in hidden:
+            continue
+        try:
+            regular = stat.S_ISREG(os.lstat(git.checkout / name).st_mode)
+        except FileNotFoundError:
+            regular = False
+        if not regular or "\n" in name:
+            hidden.add(name)
+        else:
+            expected[name] = blob
+    if expected:
+        names = list(expected)
+        hashes = git.out("hash-object", "--stdin-paths",
+                         stdin="".join(f"{name}\n" for name in names).encode()).split()
+        if len(hashes) != len(names):
+            raise GitError(("hash-object",), 1)
+        hidden.update(name for name, got in zip(names, hashes)
+                      if got.decode("ascii", "replace") != expected[name])
+    return sorted(hidden)
 
 
 def _odd_kept_path(checkout: Path) -> str | None:

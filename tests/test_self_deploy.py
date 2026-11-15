@@ -563,6 +563,58 @@ def test_an_edited_kept_file_upstream_turns_into_a_non_file_is_refused_untouched
     assert len(posts.calls) == 1
 
 
+# --- local edits git diff does not report are refused before any change -------------------
+
+
+def assume_unchanged(r: Repo, name: str) -> None:
+    git(r.box, "update-index", "--assume-unchanged", name)
+
+
+def skip_worktree(r: Repo, name: str) -> None:
+    git(r.box, "update-index", "--skip-worktree", name)
+
+
+def stale_fsmonitor(r: Repo, name: str) -> None:
+    hook = r.box.parent / "fsmonitor-hook"
+    hook.write_text("#!/bin/sh\nprintf 'token\\0'\n")
+    hook.chmod(0o755)
+    git(r.box, "config", "core.fsmonitor", str(hook))
+    git(r.box, "update-index", "--fsmonitor")
+    git(r.box, "status", "--porcelain")
+
+
+@pytest.mark.parametrize("hide", [assume_unchanged, skip_worktree, stale_fsmonitor])
+@pytest.mark.parametrize("name", ["machines.yml", "lib/code.py"])
+def test_a_local_edit_git_diff_does_not_report_is_refused_untouched(
+        repo: Repo, hide, name) -> None:
+    original = (repo.box / name).read_text(encoding="utf-8")
+    hide(repo, name)
+    write(repo.box, name, original + "LOCAL\n")
+    os.utime(repo.box / name, (NOW - 86400, NOW - 86400))
+    assert git(repo.box, "diff", "--name-only", "HEAD") == ""
+    write(repo.upstream, name, "UPSTREAM\n" + original)
+    repo.commit("upstream change to the hidden file")
+    old = repo.head()
+    before = tree(repo.box)
+    outcome, _, posts = run(repo)
+    assert (outcome.kind, outcome.detail) == (
+        "refused", f"local edits git diff does not report: {name}")
+    assert repo.head() == old
+    assert tree(repo.box) == before
+    assert len(posts.calls) == 1
+
+
+def test_an_index_flag_on_an_unedited_file_is_refused(repo: Repo) -> None:
+    assume_unchanged(repo, "lib/code.py")
+    write(repo.upstream, "lib/code.py", "VERSION = 2\n")
+    repo.commit("upstream")
+    old = repo.head()
+    outcome, _, _ = run(repo)
+    assert (outcome.kind, outcome.detail) == (
+        "refused", "local edits git diff does not report: lib/code.py")
+    assert repo.head() == old
+
+
 # --- orch heal deploy -------------------------------------------------------------------------
 
 

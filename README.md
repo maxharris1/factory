@@ -1313,7 +1313,11 @@ Only the account that owns the checkout pulls:
   rollback never deletes local data. So does an untracked or ignored file
   inside a directory upstream turns into a file or symlink, and a kept
   file with local edits that upstream turns (or a directory above it)
-  into a symlink, so the merged edit is never written through it. A fetch failing for 30 minutes escalates; its log
+  into a symlink, so the merged edit is never written through it. So does
+  a tracked file whose local state `git diff` would not show (an
+  assume-unchanged or skip-worktree index flag, or bytes on disk that do
+  not hash to the index entry, as with a stale fsmonitor), so the backup
+  always holds every local edit a rollback would reset. A fetch failing for 30 minutes escalates; its log
   line holds only the exit code.
 - When the merge changed `deploy/` or `requirements.txt` it runs
   `deploy/install.sh --update`, which installs requirements into the
