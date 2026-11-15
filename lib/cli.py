@@ -34,6 +34,7 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.helpers import _retry_of
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
@@ -1881,16 +1882,6 @@ def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, 
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
     return str(row["repo"]), row["head"], int(row["timeout_seconds"]), row["detail"]
-
-
-def _retry_of(detail: str | None) -> str | None:
-    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
-    try:
-        value = json.loads(detail) if detail else None
-    except ValueError:
-        return None
-    retry_of = value.get("retry_of") if isinstance(value, dict) else None
-    return retry_of if isinstance(retry_of, str) else None
 
 
 def _stdin_brief() -> bytes:
