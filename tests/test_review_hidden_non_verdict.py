@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.constants import STOPPED_POLL_SECONDS
+from lib.handoff_check import expected_for, problems
 from lib.hook_t7 import T7Hook
 from lib.queue import JobRequest
-from tests.merge_queue_support import VERDICT, sha
+from tests.merge_queue_support import TRUSTED_LOGINS, VERDICT, sha
 from tests.test_dispatch_ready_comments import _restart
 from tests.test_review_before_ci import (
     CI_LOG,
@@ -15,6 +17,7 @@ from tests.test_review_before_ci import (
     instruction,
     reviewed_at_pending_ci,
 )
+from tests.test_retry_resume import REASON
 
 BUILDER_BLOCKED = "<!-- orch:v1 kind=stuck from=claude-bot role=builder state=blocked -->\nBlocked.\n"
 
@@ -192,3 +195,78 @@ def test_a_hidden_registered_questions_handoff_never_answers_the_review(
 
     assert _active_fixes(board) == []
     assert board.outcome("red-ready") == "ci-red-in-flight"
+
+
+ORCHESTRATOR_STUCK = "<!-- orch:v1 kind=stuck from=grok-bot role=orchestrator state=stuck -->\nStuck.\n"
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
+def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retried_review(
+    tmp_path: Path, upgrade: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    board.dispatcher.hooks = (T7Hook(),)
+    older = sha(1)
+    pr = board.open("42", older)
+    pr.push(older, ci="pending")
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    board.queue.finish(build.id, owner="claude", handoff_comment_id="111111")
+    board.ready(pr, older, "111111")
+    board.poll()
+    assert board.outcome("111111") == "queued-review"
+    review = board.claim("codex")
+    body = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nWhich head should I review?"
+    raw = {
+        "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+        "user": {"login": "codex-login"},
+        "body": body,
+    }
+    expected = expected_for(review, "codex-bot")
+    assert problems(expected, "123456", lambda _: raw, TRUSTED_LOGINS["github"]) == []
+    board.post(pr, "stuck-report", ORCHESTRATOR_STUCK, "grok-login")
+    board.poll()
+    assert board.state("42")["stuck"]
+    board.post(pr, "123456", body, "codex-login")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id="123456")
+    board.now[0] += STOPPED_POLL_SECONDS
+    board.poll()
+    assert board.outcome("123456") == "ticket-stuck"
+    board.post(pr, "retry-review", REASON, "grok-login")
+    board.now[0] += STOPPED_POLL_SECONDS
+    board.poll()
+    assert board.outcome("retry-review") == "queued-retry-review"
+    retried = board.claim("codex")
+    board.queue.finish(retried.id, owner="codex", handoff_comment_id="654321")
+    _hide(pr, "123456")
+    _upgrade(board, tmp_path, upgrade, "123456")
+    board.dispatcher.hooks = (T7Hook(),)
+    pr.push(older, ci="failure")
+    board.queue.enqueue(
+        JobRequest(
+            repo=pr.repo,
+            ticket_id=pr.number,
+            action="build",
+            recipient="claude",
+            source_comment_id="build2",
+            timeout_seconds=5400,
+            head=older,
+        ),
+        dedupe_key="build2",
+    )
+    rebuild = board.claim("claude")
+    board.queue.finish(rebuild.id, owner="claude", handoff_comment_id="red-ready")
+    board.ready(pr, older, "red-ready")
+    board.poll()
+
+    assert board.outcome("red-ready") == "ci-red-in-flight"
+    assert _active_fixes(board) == []
+    revise = VERDICT.format(round="1/3", head=older, verdict="REVISE", risk="high")
+    board.post(pr, "654321", revise, "codex-login")
+    board.poll()
+
+    fixes = _active_fixes(board)
+    assert [job["source_comment_id"] for job in fixes] == ["654321"]
+    assert CI_LOG in instruction(fixes[0])
