@@ -24,6 +24,7 @@ from lib.dispatch.types import (
     TrackedTicket,
 )
 from lib.handoff import HandoffError, parse_comment
+from lib.wait import is_locked
 
 _RECOVERS_EDITED = {
     "ready": frozenset({"queued-review", "answered-review", "queued-ci-fix"}),
@@ -176,12 +177,14 @@ class CommentsMixin:
                         # #108: a verdict with no re-entry behind it wakes nobody.
                         self._mark_handled(ticket, comment.id, "after-handoff")
                         continue
-                    if verdict == "REVISE":
+                    if self._blocked_by_another(ticket, comment):
+                        handled, outcome = True, "verdict-while-blocked"
+                    elif verdict == "REVISE":
                         handled, outcome = self._t3(ticket, comment, fields)
                     elif verdict == "APPROVE":
                         handled, outcome = self._t4(ticket, comment, fields)
                     else:
-                        continue
+                        handled, outcome = self._t_blocked(ticket, comment, fields)
                 elif kind == "questions":
                     handled, outcome = self._t5_questions(ticket, comment, fields)
                 else:
@@ -195,6 +198,8 @@ class CommentsMixin:
                     raise
                 if isinstance(exc, RetryableStateError):
                     raise
+                if kind == "verdict" and fields["verdict"] == "BLOCKED" and is_locked(exc):
+                    raise RetryableStateError("blocked") from exc
                 if kind not in ("verdict", "questions", "answers"):
                     raise
                 error = safe_ship_error(exc)
@@ -251,8 +256,10 @@ class CommentsMixin:
         if self._is_stuck(ticket):
             self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return "ticket-stuck"
-        resumed = self._resume_after_cap(ticket, comment) or self._resume_paused(
-            ticket, comment
+        resumed = (
+            self._resume_after_blocked(ticket, comment)
+            or self._resume_after_cap(ticket, comment)
+            or self._resume_paused(ticket, comment)
         )
         return "slash-go-no-target" if resumed is None else resumed[1]
 

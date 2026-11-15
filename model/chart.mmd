@@ -60,6 +60,7 @@ stateDiagram-v2
   s9 --> s14: APPROVE on the current head
   s9 --> s10: device offline 60 minutes or job dies twice (T6)
   s9 --> s15: REVISE, under the round cap
+  s11 --> s9: approver's go, fresh review at the same round
   s13 --> s12: post-merge fails, follow-up filed or post-merge passes
   s14 --> s9: head changed and the patch differs
   s14 --> s16: ship = merge or handoff and the PR is held

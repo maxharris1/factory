@@ -21,7 +21,7 @@ States == {
 \* handed-off is not terminal (#108): the poll still watches it, for a merge
 \* and for a trusted ready that re-enters review inside the cap. merge-queue
 \* and updating (#130) are watched the same way, every cycle.
-Terminal == {"refused", "stuck", "blocked", "abandoned", "done"}
+Terminal == {"refused", "stuck", "abandoned", "done"}
 
 \* Every state a tracked PR can be in when the poll sees it merged (#108).
 \* Intake and questions have no PR yet; merged, post-merge and done are past it.
@@ -313,7 +313,7 @@ T3Revise ==
         /\ state' = "capped"
         /\ counts' = [counts EXCEPT !.acUnmet = 1, !.round = cap + counts.extra, !.deaths = 0]
 
-\* T7. BLOCKED. No known answer. Wake Grok Bot once.
+\* T7. BLOCKED, checked like REVISE. No known answer. Wake Grok Bot once.
 T7Blocked ==
   /\ "T7" \notin Omit
   /\ state = "review"
@@ -516,6 +516,15 @@ MaxOkAnotherRound ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0, !.gate = 0, !.extra = 1]
 
+\* #188. Only an approver's go leaves blocked. It queues a fresh review at the
+\* same round, since BLOCKED consumes none.
+MaxGoAfterBlocked ==
+  /\ state = "blocked"
+  /\ state' = "review"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = [counts EXCEPT !.deaths = 0]
+
 \* #108. A trusted ready at a new head after handoff re-enters review. The
 \* approved round counts as completed, so the next review is round + 2, and it
 \* must be within the effective cap. #130: the same from merge-queue.
@@ -645,7 +654,7 @@ Next ==
   \/ T4HoldPatchDiffers \/ T4HoldBaseUpdate
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
-  \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved
+  \/ MaxOkAnotherRound \/ MaxGoAfterBlocked \/ ReenterAfterHandoff \/ MergeObserved
   \/ T4ShipQueue \/ QueueMerge \/ QueueConflict \/ QueueClosed
   \/ QueueGoPlan \/ QueueGoBuild
   \/ UpdateTrivial \/ UpdateNonTrivial \/ UpdateRetry \/ UpdateStuck
@@ -775,6 +784,7 @@ ChartEdges ==
   /\ state = "plan-check" /\ counts.planGaps = 1 =>
        ENABLED T1PPlanGapStuck /\ ENABLED T1PPlanMapped
   /\ state = "capped" => ENABLED MaxOkAnotherRound
+  /\ state = "blocked" => ENABLED MaxGoAfterBlocked
 
 \* Drawing bound for the Mermaid chart. The full configs explore every interleaving.
 \* This keeps TLC under statechart's 500-state drawing limit and still reaches

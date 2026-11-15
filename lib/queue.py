@@ -55,6 +55,7 @@ ACTIONS = (
 )
 RECIPIENTS = ("claude", "codex", "cursor", "grok")
 STATES = ("queued", "running", "done", "failed", "cancelled")
+BUSY_TIMEOUT_SECONDS = 30
 # Device-pool placements (lib/device_pool.py). The table exists once a
 # DevicePool has opened this database; a queued job never holds a row.
 SLOTS_TABLE = "device_slots"
@@ -621,7 +622,7 @@ class SQLiteJobQueue:
             raise QueueError("failure is missing or already handled")
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
+        connection = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
         return connection
 

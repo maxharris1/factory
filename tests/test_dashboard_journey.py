@@ -175,7 +175,7 @@ HOPS = {
     "merged": 0,
     "done": 0,
     "stuck": None,
-    "blocked": None,
+    "blocked": 3,
     "refused": None,
     "abandoned": None,
 }
