@@ -52,6 +52,13 @@ globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
 as both sides still counts as a trivial update. Absent, it is empty.
 
+feeder is optional (issue #269): a mapping with max_holders_per_path (an
+integer of at least 1, default 2) and exclusive_paths (a list like
+shared_paths, default none). Up to max_holders_per_path tickets in flight
+may hold one Touches: path; a path matching exclusive_paths keeps one
+holder. A bad max_holders_per_path is an error under check-config and a
+warning elsewhere that falls back to 1.
+
 Unknown fields are errors by default, as check-config reads them. The
 poller, feeder and waiter read factory.md with strict=False (issue #288):
 an unknown field is a warning there, so a just-merged factory.md naming a
@@ -118,8 +125,11 @@ _TOP_KEYS = {
     "hold",
     "finish_line",
     "shared_paths",
+    "feeder",
 }
 _HOLD_KEYS = {"label", "approver", "paths"}
+_FEEDER_KEYS = {"max_holders_per_path", "exclusive_paths"}
+DEFAULT_MAX_HOLDERS_PER_PATH = 2
 
 
 @dataclass(frozen=True)
@@ -153,6 +163,8 @@ class FactoryConfig:
     followup_from_round: int | None = None
     auto_extra_rounds: int = 0
     start_before_ci: bool = False
+    max_holders_per_path: int = DEFAULT_MAX_HOLDERS_PER_PATH
+    exclusive_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -233,7 +245,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     github_labels = _optional_bool(data, "github_labels", findings)
     hold = _hold(data, findings, unknown)
     finish_line = _finish_line(data, ship, findings)
-    shared_paths = _shared_paths(data, findings)
+    shared_paths = _path_list(data.get("shared_paths"), "shared_paths", findings)
+    max_holders_per_path, exclusive_paths = _feeder(data, findings, unknown)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -298,6 +311,8 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         followup_from_round=followup_from_round,
         auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
+        max_holders_per_path=max_holders_per_path,
+        exclusive_paths=exclusive_paths,
     )
     return config, findings
 
@@ -649,12 +664,29 @@ def _hold(data: dict, findings: list[Finding], unknown: str) -> HoldConfig | Non
     return HoldConfig(label=label, approver=approver, paths=tuple(paths))
 
 
-def _shared_paths(data: dict, findings: list[Finding]) -> tuple[str, ...]:
-    value = data.get("shared_paths")
+def _feeder(data: dict, findings: list[Finding], unknown: str) -> tuple[int, tuple[str, ...]]:
+    value = data.get("feeder")
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        findings.append(Finding("error", "feeder must be a mapping"))
+        return 1, ()
+    findings.extend(_unknown(value, _FEEDER_KEYS, "feeder", unknown))
+    limit = value.get("max_holders_per_path", DEFAULT_MAX_HOLDERS_PER_PATH)
+    if not is_strict_int(limit) or limit < 1:
+        findings.append(
+            Finding(unknown, "feeder.max_holders_per_path must be an integer of at least 1")
+        )
+        limit = 1
+    exclusive = _path_list(value.get("exclusive_paths"), "feeder.exclusive_paths", findings)
+    return int(limit), exclusive
+
+
+def _path_list(value: object, name: str, findings: list[Finding]) -> tuple[str, ...]:
     if value is None:
         return ()
     if not isinstance(value, list):
-        findings.append(Finding("error", "shared_paths must be a list"))
+        findings.append(Finding("error", f"{name} must be a list"))
         return ()
     paths: list[str] = []
     for index, item in enumerate(value):
@@ -664,7 +696,7 @@ def _shared_paths(data: dict, findings: list[Finding]) -> tuple[str, ...]:
             findings.append(
                 Finding(
                     "error",
-                    f"shared_paths[{index}] must be a repo-relative path or glob",
+                    f"{name}[{index}] must be a repo-relative path or glob",
                 )
             )
     return tuple(paths)
