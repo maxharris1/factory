@@ -68,7 +68,8 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     }),
     "ci-fix": ("fix", "claude", 1, HEAD, {"instruction": CI_LOG, "round": "1/3"}),
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
-    "review": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
+    "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
+    "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
 }
 

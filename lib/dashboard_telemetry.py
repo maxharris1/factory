@@ -414,11 +414,8 @@ def _stats(item: dict) -> list[tuple[str, str, str]]:
     ]
 
 
-_STATUS = {"ok": ("ok", "ok"), "error": ("error", "bad"), "running": ("running", "accent")}
-
-
 def job_block(item: dict | None) -> str:
-    """The telemetry section of a job's article: counters and the step feed."""
+    """The telemetry section of a job's page: counters only."""
     head = '<h3 class="tele-head">telemetry</h3>'
     if item is None:
         return f'<section class="telemetry">{head}<p class="empty">no telemetry</p></section>'
@@ -445,30 +442,9 @@ def job_block(item: dict | None) -> str:
         else f'<div class="stat"><b>{value}</b>{_span(None, label)}</div>'
         for value, label, cls in _stats(item)
     )
-    tools = "".join(
-        _span("chip muted", f"{tool['name']} ×{tool['count']}") for tool in item["tool_calls"]
-    )
-    steps = list(reversed(item["steps"]))
-    feed = (
-        '<ul class="feed tele-steps">'
-        + "".join(
-            "<li>"
-            + _span("chip " + _STATUS[step["status"]][1], _STATUS[step["status"]][0])
-            + _span("what", step["label"])
-            + _span("when", f"{_dur(step['age_seconds'])} ago")
-            + "</li>"
-            for step in steps
-        )
-        + "</ul>"
-        if steps
-        else '<p class="empty">no steps yet</p>'
-    )
     return (
         f'<section class="telemetry">{head}{status}'
-        f'<div class="stats tele-stats">{stats}</div>'
-        + (f'<p class="tele-tools">{tools}</p>' if tools else "")
-        + feed
-        + "</section>"
+        f'<div class="stats tele-stats">{stats}</div></section>'
     )
 
 
@@ -566,9 +542,7 @@ TELEMETRY_CSS = (
     "#tokens .stat{flex:1 1 140px;padding:10px 14px 12px}"
     "#tokens .stat b{font:600 30px/1.15 var(--mono);letter-spacing:-.03em}"
     "#tokens .stat span{font:500 12px/1.3 var(--mono)}"
-    ".tele-tools{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}"
     ".tele-exit{display:flex;gap:8px;align-items:baseline;margin:4px 0}"
-    ".tele-steps .what{font-family:var(--mono);overflow-wrap:anywhere}"
 )
 
 
@@ -578,7 +552,6 @@ TELEMETRY_CSS = (
 TELEMETRY_SCRIPT = r"""
   // --- job telemetry (#93): the modal's feed and the Efficiency rollup -------
 
-  var TELE_STATUS = {ok: ['ok', 'ok'], error: ['error', 'bad'], running: ['running', 'accent']};
   function usd(v) { return (v === null || v === undefined || !isFinite(v)) ? '—' : '$' + Number(v).toFixed(2); }
   function teleTests(t) {
     if ((t.tests_passed === null || t.tests_passed === undefined) &&
@@ -615,20 +588,6 @@ TELEMETRY_SCRIPT = r"""
       var box = add(stats, el('div', 'stat'));
       add(box, el('b', s[2] || null, s[0]));
       add(box, el('span', null, s[1]));
-    });
-    if ((t.tool_calls || []).length) {
-      var tools = add(sec, el('p', 'tele-tools'));
-      t.tool_calls.forEach(function (c) { add(tools, chip(c.name + ' ×' + c.count, 'muted')); });
-    }
-    var steps = (t.steps || []).slice().reverse();
-    if (!steps.length) { add(sec, el('p', 'empty', 'no steps yet')); return sec; }
-    var ul = add(sec, el('ul', 'feed tele-steps'));
-    steps.forEach(function (s) {
-      var li = add(ul, el('li'));
-      var st = TELE_STATUS[s.status] || TELE_STATUS.running;
-      add(li, chip(st[0], st[1]));
-      add(li, el('span', 'what', s.label));
-      ticking(add(li, el('span', 'when')), s.age_seconds, '', ' ago');
     });
     return sec;
   }

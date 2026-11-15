@@ -147,7 +147,7 @@ def test_review_brief_states_the_round_and_the_verdict_header() -> None:
     assert (
         "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/3 "
         "head=3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6 ac=<met|unmet> "
-        "verdict=<APPROVE|REVISE|BLOCKED> risk=high -->"
+        "verdict=<APPROVE|REVISE|BLOCKED> risk=high repeat=<id> unsat=<id> -->"
     ) in text
     assert "Do not merge" in text
     assert "verify-cleffy" in text
@@ -210,6 +210,8 @@ def test_every_header_in_a_brief_parses_once_its_choices_are_filled(
             header.replace("<met|unmet>", "met")
             .replace("<APPROVE|REVISE|BLOCKED>", "REVISE")
             .replace("<pushed-head-sha>", "abcdef1")
+            .replace("repeat=<id>", "repeat=f-1")
+            .replace("unsat=<id>", "unsat=ac-1")
         )
         fields = parse_header_line(filled)
         assert fields["from"] == f"{recipient}-bot"
