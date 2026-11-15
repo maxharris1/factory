@@ -274,20 +274,13 @@ def pytest_collection(session: pytest.Session):
             session.ihook.pytest_collectreport(report=pytest.CollectReport("", "failed", leak, []))
 
 
-@pytest.hookimpl(wrapper=True, tryfirst=True)
-def pytest_sessionfinish(session: pytest.Session):
-    leaks = session.config.stash.get(_collection_leaks, [])
-    try:
-        return (yield)
-    except pytest.exit.Exception as stop:
-        if leaks:
-            session.config.get_terminal_writer().line("\n\n".join(leaks))
-            if stop.returncode == pytest.ExitCode.OK:
-                stop.returncode = pytest.ExitCode.TESTS_FAILED
-        raise
-    finally:
-        if leaks and session.exitstatus == pytest.ExitCode.OK:
-            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+@pytest.hookimpl(wrapper=True)
+def pytest_cmdline_main(config: pytest.Config):
+    status = yield
+    if status != pytest.ExitCode.OK or not (leaks := config.stash.get(_collection_leaks, [])):
+        return status
+    print("\n\n".join(leaks))
+    return pytest.ExitCode.TESTS_FAILED
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}

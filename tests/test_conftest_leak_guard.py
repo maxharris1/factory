@@ -135,9 +135,20 @@ def test_a_hook_object_a_module_registers_is_named_by_that_module(tmp_path: Path
     assert not alive(pid)
 
 
-def test_a_module_that_leaks_at_import_and_exits_zero_at_session_finish_fails_the_run(tmp_path: Path) -> None:
-    exit_zero = "import pytest\npytest_plugins = [__name__]\n\n\ndef pytest_sessionfinish(session):\n    pytest.exit('done', returncode=0)"
-    result, pid = _import_loop(tmp_path, exit_zero)
+EXIT_ZERO_AT_SESSION_FINISH = {
+    "plain": "def pytest_sessionfinish(session):\n    pytest.exit('done', returncode=0)",
+    "outer_wrapper": "@pytest.hookimpl(wrapper=True, tryfirst=True)\ndef pytest_sessionfinish(session):\n"
+                     "    yield\n    pytest.exit('done', returncode=0)",
+    "inner_wrapper": "@pytest.hookimpl(wrapper=True, trylast=True)\ndef pytest_sessionfinish(session):\n"
+                     "    yield\n    pytest.exit('done', returncode=0)",
+}
+
+
+@pytest.mark.parametrize("hook", EXIT_ZERO_AT_SESSION_FINISH.values(), ids=EXIT_ZERO_AT_SESSION_FINISH.keys())
+def test_a_module_that_leaks_at_import_and_exits_zero_at_session_finish_fails_the_run(
+    tmp_path: Path, hook: str
+) -> None:
+    result, pid = _import_loop(tmp_path, f"import pytest\npytest_plugins = [__name__]\n\n\n{hook}")
     assert result.returncode != 0, result.stdout + result.stderr
     assert "test_leak.py left processes running" in result.stdout
     assert not alive(pid)
