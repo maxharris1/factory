@@ -48,7 +48,9 @@
 # one recorded by an earlier loop (SIGTERM, SIGKILL after
 # LINEAR_WEBHOOK_STOP_WAIT) and starts nothing if it survives. A record
 # from another PID namespace cannot be checked, so a loop keeps it and
-# starts nothing until stop run in that namespace ends the child.
+# starts nothing until the record is removed. The loops, start, stop, restart
+# and ensure exit 4 outside the host PID namespace (deploy/host-pidns.sh), so
+# no such record is written any more.
 #
 # The listener loop starts serve only while nothing listens on
 # 127.0.0.1:PORT. Both loops back off after a run shorter than 30 seconds:
@@ -99,6 +101,10 @@ fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
+
+# shellcheck source=deploy/host-pidns.sh
+. "${HERE}/host-pidns.sh"
+
 CONFIG="${HOME}/.config/factory"
 AUTOSTART="${CONFIG}/linear-webhook-autostart"
 STOPPED="${STATE}/linear-webhook.stopped"
@@ -578,7 +584,7 @@ stop() {
             say "${mode} child pid ${pid} is still running after SIGKILL; its forward or port may still be held" >&2
             status=1
         elif ((found == 2)); then
-            say "$(child_file "$mode") names a process in another PID namespace; cannot verify it is gone; run stop there" >&2
+            say "$(child_file "$mode") names a process in another PID namespace; cannot verify it is gone; remove the record once that sandbox has exited" >&2
             status=1
         fi
     done
@@ -687,13 +693,13 @@ remove_autostart() {
 }
 
 case "$COMMAND" in
-    _listener-loop) check_settings && need_flock && listener_loop ;;
-    _tunnel-loop) check_settings && need_flock && tunnel_loop ;;
-    start) check_settings && need_flock && service_lock && start ;;
-    stop) need_flock && service_lock && stop ;;
-    restart) check_settings && need_flock && service_lock && restart ;;
+    _listener-loop) factory_host_pidns_or_refuse _listener-loop && check_settings && need_flock && listener_loop ;;
+    _tunnel-loop) factory_host_pidns_or_refuse _tunnel-loop && check_settings && need_flock && tunnel_loop ;;
+    start) factory_host_pidns_or_refuse start && check_settings && need_flock && service_lock && start ;;
+    stop) factory_host_pidns_or_refuse stop && need_flock && service_lock && stop ;;
+    restart) factory_host_pidns_or_refuse restart && check_settings && need_flock && service_lock && restart ;;
     status) need_flock && status ;;
-    ensure) check_settings && need_flock && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && check_settings && need_flock && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;
