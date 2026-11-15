@@ -304,6 +304,22 @@ def _started_at(visit: Visit) -> float | None:
     return step.created_at if step.started_at is None else step.started_at
 
 
+def _owning_row(
+    transitions: Sequence[Transition],
+    floors: Sequence[float],
+    ends: Sequence[float],
+    state: str,
+    created_at: float,
+) -> int | None:
+    for i, row in enumerate(transitions):
+        if row.to_state == state and floors[i] <= created_at < ends[i]:
+            return i
+    for i, row in enumerate(transitions):
+        if row.at <= created_at < ends[i]:
+            return i
+    return None
+
+
 def _recorded_walk(
     chart: dict | None,
     steps: Sequence[tuple[str, JobStep]],
@@ -311,14 +327,6 @@ def _recorded_walk(
     transitions: Sequence[Transition],
     tracked_at: float | None,
 ) -> tuple[list[Visit], list[float | None]]:
-    """The visits and their start times when the ticket has recorded
-    transitions. Before the first row the path is job-derived, unless that
-    row is the ticket's first write (from_state None): then only the start
-    state precedes it, started at tracked_at. Each row is one visit started
-    at its `at`. A job belongs to the visit in its own state that was next
-    or current when it was created, since the dispatcher enqueues a job just
-    before it writes the state the job works in. Any other job belongs to
-    the visit it was created in."""
     known = None if chart is None else {state["name"] for state in chart["states"]}
     start = None if chart is None else chart["start"]
     first = transitions[0]
@@ -334,16 +342,7 @@ def _recorded_walk(
     owned: list[list[JobStep]] = [[] for _ in transitions]
     before = []
     for state, step in steps:
-        index = next(
-            (i for i, row in enumerate(transitions)
-             if row.to_state == state and floors[i] <= step.created_at < ends[i]),
-            None,
-        )
-        if index is None:
-            index = next(
-                (i for i, row in enumerate(transitions) if row.at <= step.created_at < ends[i]),
-                None,
-            )
+        index = _owning_row(transitions, floors, ends, state, step.created_at)
         if index is None:
             before.append((state, step))
         else:
@@ -358,13 +357,13 @@ def _recorded_walk(
     recorded = [(row.to_state, row.at, jobs) for row, jobs in zip(transitions, owned)]
     if current is not None and current != transitions[-1].to_state:
         recorded.append((current, None, []))
-    for state, began, owned in recorded:
+    for state, began, jobs in recorded:
         if known is not None and state not in known:
             continue
         if walk and walk[-1].state == state:
-            walk[-1].steps.extend(owned)
+            walk[-1].steps.extend(jobs)
             continue
-        walk.append(Visit(state, owned))
+        walk.append(Visit(state, jobs))
         starts.append(began)
     return walk, starts
 
