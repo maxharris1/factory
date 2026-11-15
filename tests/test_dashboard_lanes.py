@@ -452,6 +452,18 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     clipped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes .tile-l3 .action, #lanes .tile-l3 .t'),
       function (e) { return e.scrollWidth > e.clientWidth; }).map(function (e) { return e.textContent; })""")
     assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"
+    rounds = browser.eval("""[].map.call(document.querySelectorAll('#lanes a.tile .tile-l3'), function (l3) {
+      var line = l3.getBoundingClientRect(), r = l3.querySelector('.round');
+      var pips = r.querySelector('.pips').getBoundingClientRect(), label = r.lastElementChild.getBoundingClientRect();
+      var x = label.left + label.width / 2, y = label.top + label.height / 2, hit = document.elementFromPoint(x, y);
+      return {job: l3.closest('a.tile').getAttribute('href'), label: r.lastElementChild.textContent,
+              shown: label.width > 0 && label.left >= line.left && label.right <= line.right + 0.5
+                && label.top >= line.top && label.bottom <= line.bottom + 0.5 && !!hit && r.contains(hit),
+              oneRow: Math.abs((pips.top + pips.bottom) - (label.top + label.bottom)) < 2};
+    })""")
+    assert len(rounds) == 13
+    broken = [r for r in rounds if not (r["shown"] and r["oneRow"] and r["label"] == "2/3")]
+    assert not broken, f"round pips and their n/m label must both show on one row: {broken}"
 
 
 def write_screenshots(out: Path) -> list[Path]:

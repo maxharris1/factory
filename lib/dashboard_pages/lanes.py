@@ -48,7 +48,7 @@ text-decoration:none;font:12px/1.3 var(--mono)}
 a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .tile.bad{border-color:var(--bad)}
 .tile.claude{--bt:var(--claude)}.tile.codex{--bt:var(--codex)}.tile.cursor{--bt:var(--cursor)}.tile.grok{--bt:var(--grok)}
-.tile-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
+.tile-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;container-type:inline-size}
 .tile-l1{display:flex;align-items:baseline;gap:6px;min-width:0}
 .tile-l1 .ticket{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 13px/1.25 var(--mono);color:var(--text)}
 .kind{padding:0 4px;color:var(--muted);font-size:10px}
@@ -60,11 +60,11 @@ a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
 .verb .h{color:#ffffff}.verb .n{color:var(--bt,var(--ok))}
 .tile-l3{display:flex;align-items:center;gap:8px;color:var(--muted)}
 .tile-l3 .action{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
-.round{flex:0 1000 auto;min-width:0;height:1.3em;overflow:hidden;display:flex;flex-wrap:wrap;align-content:flex-start;align-items:center;gap:0 6px}
-.pips{display:flex;align-items:center;height:1.3em;gap:2px}
+.round{flex:none;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.pips{display:flex;gap:2px}
 .pips i{width:6px;height:6px;background:var(--line-hi)}.pips i.done{background:var(--text)}.pips i.cur{background:var(--accent)}
-.tile-l3 .gap{flex:1 1 0}
-.tile-l3 .t{flex:none;white-space:nowrap}.tile-l3 .t b{font-weight:600;color:var(--text)}
+.tile-l3 .t{flex:none;margin-left:auto;white-space:nowrap}.tile-l3 .t b{font-weight:600;color:var(--text)}
+@container (max-width:175px){.tile-l3{gap:6px}.tile-l3 .action,.tile-l3 .t{font-size:11px}}
 .tile-l4{display:flex;align-items:center;gap:8px}
 .hbar{flex:1 1 0;height:3px;background:var(--line-hi)}
 .hbar i{display:block;height:3px;background:var(--ok)}
@@ -306,7 +306,6 @@ SCRIPT = r"""
       for (var k = 1; k <= cap; k++) add(pips, el('i', k < cur ? 'done' : k === cur ? 'cur' : null));
       add(rnd, el('span', null, String(r.round)));
     }
-    add(l3, el('span', 'gap'));
     var t = add(l3, el('span', 't', 'T+ '));
     ticking(add(t, el('b')), r.elapsed_seconds);
     var l4 = add(bodyEl, el('div', 'tile-l4'));
@@ -668,8 +667,8 @@ def _slot(row: dict, seed: int = 1) -> str:
             f"{_span(None, rnd)}</span>"
         )
     line3 = (
-        _span("action", row["action"]) + pips + '<span class="gap"></span>'
-        f'<span class="t">T+ <b>{duration(row["elapsed_seconds"])}</b></span>'
+        _span("action", row["action"]) + pips
+        + f'<span class="t">T+ <b>{duration(row["elapsed_seconds"])}</b></span>'
     )
     hb = spec["hb"]
     level = _tone(hb if hb in ("warn", "bad") else "")
