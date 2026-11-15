@@ -83,6 +83,7 @@ from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
 from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
+    LINK_DROP,
     REQUEUED_EARLY_EXIT,
     RUN_DIED,
     RUN_EXITED,
@@ -356,16 +357,18 @@ class PlacedRun:
         """#91: record how the command ended while the job still runs.
 
         RUN_EXITED for status 0, RUN_DIED otherwise (with the status or
-        signal). A job already done or failed records nothing. Never raises.
+        signal), and LINK_DROP after it when the follow lost the device
+        (#218). A job already done or failed records nothing. Never raises.
         """
         job_id = self.placement.job_id
         event = RUN_EXITED if code == 0 else RUN_DIED
         detail = f"orch job run's command on {self.device.name}: {exit_reason(code)}"
         end = self.follow_end
+        dropped = end is not None and end.kind == LOST
+        minutes = f"{self.grace / 60:g} minutes"
         if end is not None and end.kind == WORKER_GONE:
             detail = f"worker gone on {self.device.name} without an exit status"
-        elif end is not None and end.kind == LOST:
-            minutes = f"{self.grace / 60:g} minutes"
+        elif dropped:
             detail = (
                 f"lost contact with {self.device.name} for {minutes}; "
                 "worker not confirmed gone"
@@ -378,7 +381,16 @@ class PlacedRun:
                     "SELECT state FROM jobs WHERE id = ?", (job_id,)
                 ).fetchone()
                 if row is not None and row["state"] == "running":
-                    record_job_event(connection, job_id, event, detail, self.pool.queue.now())
+                    now = self.pool.queue.now()
+                    record_job_event(connection, job_id, event, detail, now)
+                    if dropped:
+                        record_job_event(
+                            connection,
+                            job_id,
+                            LINK_DROP,
+                            f"{self.device.name}: no certain answer for {minutes}",
+                            now,
+                        )
                 connection.commit()
 
         try:

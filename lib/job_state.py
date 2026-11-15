@@ -58,6 +58,7 @@ from dataclasses import dataclass
 
 from lib.device_pool import Placement
 from lib.queue import SLOTS_TABLE, retire_requeued
+from lib.remote_follow import LAUNCH_TTL_SECONDS
 
 CLAIMED = "claimed"
 RUNNING = "running"
@@ -417,3 +418,93 @@ def requeue_unstarted(
         )
     record_job_event(connection, job_id, outcome, detail, now)
     return outcome, detail
+
+
+# --- #218: a remote run whose SSH link dropped, and its own requeue budget ----
+
+# `orch job run` writes LINK_DROP right after RUN_DIED when its follow got no
+# certain answer from the device for the whole grace window (FollowEnd LOST).
+# T6 then requeues the same job row with REQUEUED_LINK_DROP, at most
+# MAX_LINK_DROP_REQUEUES times per row, each after its backoff from the
+# failure. The budget is apart from MAX_FREE_REQUEUES.
+LINK_DROP = "link-drop"
+REQUEUED_LINK_DROP = "requeued-link-drop"
+MAX_LINK_DROP_REQUEUES = 6
+LINK_DROP_BACKOFF_SECONDS = (60, 120, 300, 600, 600, 600)
+# The device kills a worker `grace` (30 s) past its budget; this also covers
+# clock skew between the box and the device.
+LINK_DROP_SETTLE_MARGIN_SECONDS = 5 * 60
+
+
+def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, float] | None:
+    """(detail, recorded_at) when the job row's latest run ended in a link drop.
+
+    Only run ends recorded after the row's latest REQUEUED_LINK_DROP count,
+    so an earlier run's drop never speaks for a later run.
+    """
+    if not has_job_events(connection):
+        return None
+    row = connection.execute(
+        f"""
+        SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
+        WHERE job_id = ? AND event IN (?, ?, ?, ?)
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id, RUN_DIED, RUN_EXITED, LINK_DROP, REQUEUED_LINK_DROP),
+    ).fetchone()
+    if row is None or row[0] != LINK_DROP:
+        return None
+    return str(row[1]), float(row[2])
+
+
+def link_drop_requeues(connection: sqlite3.Connection, job_id: str) -> int:
+    if not has_job_events(connection):
+        return 0
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM {JOB_EVENTS_TABLE} WHERE job_id = ? AND event = ?",
+        (job_id, REQUEUED_LINK_DROP),
+    ).fetchone()
+    return int(row[0])
+
+
+def link_drop_settled_at(recorded_at: float, timeout_seconds: float) -> float:
+    """When the device has stopped the dropped run's worker on its own.
+
+    Every launch came before the run end, the device refuses a launch
+    delivered past LAUNCH_TTL_SECONDS, and it kills a delivered worker past
+    its budget (at most timeout_seconds) plus grace (#199 r1).
+    """
+    return recorded_at + LAUNCH_TTL_SECONDS + timeout_seconds + LINK_DROP_SETTLE_MARGIN_SECONDS
+
+
+def requeue_link_drop(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str
+) -> tuple[str, str] | None:
+    """Requeue a failed, link-dropped job row in the caller's write transaction.
+
+    Guarded: still failed with its failure unhandled. The same row goes back
+    to queued with action, head, generation, attempt and detail kept, so no
+    round and no T6 attempt is charged, and its slot is freed. A finished
+    ticket's job is cancelled instead (retire_requeued). Returns (event,
+    detail), or None when the guard did not match.
+    """
+    used = link_drop_requeues(connection, job_id)
+    changed = connection.execute(
+        """
+        UPDATE jobs SET state = 'queued', finished_at = NULL, last_activity_at = ?
+        WHERE id = ? AND state = 'failed' AND failure_handled = 0
+        """,
+        (now, job_id),
+    ).rowcount
+    if changed != 1:
+        return None
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+    retired = retire_requeued(connection, job_id, reason, now=now)
+    if retired is not None:
+        return "cancelled", retired
+    detail = (
+        f"{reason}; requeued, no round or attempt charged "
+        f"(link-drop requeue {used + 1} of {MAX_LINK_DROP_REQUEUES})"
+    )
+    record_job_event(connection, job_id, REQUEUED_LINK_DROP, detail, now)
+    return REQUEUED_LINK_DROP, detail
