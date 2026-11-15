@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import Comment
+from lib.github_actions import _created_at
 from lib.queue import JobRequest
 from lib.state_backup import backup, restore
 from tests.merge_queue_support import APPROVE, Board, sha
+from tests.test_dispatcher import READY
 from tests.test_hold_merge_queue import APPROVER, OK, held_board
 
 
@@ -336,9 +340,7 @@ def test_a_ready_accepted_before_the_update_was_needed_does_not_cancel_it(
     assert board.state("42")["workflow_state"] == "fixing"
 
 
-def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_it(
-    tmp_path: Path,
-) -> None:
+def _red_fix(tmp_path: Path, fraction: float = 0.0):
     board = Board(tmp_path / "state", finish_line=None)
     board.factory = replace(board.factory, start_before_ci=True)
     pr = board.open("42", sha(1))
@@ -350,10 +352,18 @@ def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_
     board.finish("codex")
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-A", APPROVE.format(round="1/3", head=sha(1)), "codex-login")
+    board.now[0] += fraction
     board.poll()
     assert board.outcome("approve-A") == "approve-ci-red-fix"
     [fix] = board.jobs("fix")
     assert fix["head"] == sha(2)
+    return board, pr, fix
+
+
+def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_it(
+    tmp_path: Path,
+) -> None:
+    board, pr, _ = _red_fix(tmp_path)
     saved = tmp_path / "backup.db"
     backup(board.queue.path, saved)
     board.finish("claude")
@@ -366,3 +376,84 @@ def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_
 
     assert board.outcome("ready-rollback") == "queued-review"
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
+
+
+def test_a_ready_github_dates_to_the_fixs_own_second_still_settles_it(
+    tmp_path: Path,
+) -> None:
+    board, pr, fix = _red_fix(tmp_path, fraction=0.25)
+    saved = tmp_path / "backup.db"
+    backup(board.queue.path, saved)
+    board.finish("claude")
+    pr.push(sha(1))
+    board.now[0] += 0.5
+    reported = _created_at(
+        datetime.fromtimestamp(board.now[0], UTC).isoformat(timespec="seconds")
+    )
+    pr.comments.append(
+        Comment(
+            id="ready-rollback",
+            author="claude-login",
+            body=READY.format(head=sha(1)),
+            created_at=reported,
+        )
+    )
+    assert reported < fix["created_at"] < board.now[0]
+    shutil.rmtree(board.queue.path.parent)
+    restore(saved, board.queue.path)
+    board.poll()
+    board.poll()
+
+    assert board.outcome("ready-rollback") == "queued-review"
+    assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
+
+
+def test_a_ready_that_settles_a_fix_settles_its_later_retry(tmp_path: Path) -> None:
+    board, pr, _ = _red_fix(tmp_path)
+    fix = board.claim("claude")
+    read = board.tracked_tickets
+
+    def snapshot_then_worker_finishes(refs):
+        cached = read(refs)
+        pr.push(sha(1))
+        board.ready(pr, sha(1), "ready-rollback")
+        board.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+        board.now[0] += 1
+        return cached
+
+    board.tracked_tickets = snapshot_then_worker_finishes
+    board.poll()
+    board.tracked_tickets = read
+    board.poll()
+    board.poll()
+
+    assert board.outcome("ready-rollback") == "queued-review"
+    assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [
+        (1, "failed"),
+        (2, "cancelled"),
+    ]
+    assert board.queue.claim("claude") is None
+
+
+def test_a_failed_fix_whose_ready_github_dates_to_its_own_second_is_done(
+    tmp_path: Path,
+) -> None:
+    board, pr, fix = _red_fix(tmp_path, fraction=0.25)
+    board.claim("claude")
+    pr.push(sha(1))
+    board.now[0] += 0.5
+    pr.comments.append(
+        Comment(
+            id="ready-rollback",
+            author="claude-login",
+            body=READY.format(head=sha(1)),
+            created_at=float(int(board.now[0])),
+        )
+    )
+    assert int(board.now[0]) < fix["created_at"]
+    board.queue.finish(fix["id"], owner="claude", handoff_comment_id=None)
+    board.poll()
+    board.poll()
+
+    assert board.outcome("ready-rollback") == "queued-review"
+    assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]

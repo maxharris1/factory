@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -249,7 +251,10 @@ class QuestionsMixin:
         Only the answer that job's step accepts counts: a plan for a plan, a
         ready for a build or fix, and for a review a REVISE or APPROVE naming
         head at round_number. It must come from a login trusted for
-        recipient's bot and role, and not have been handled as rejected. With an intact
+        recipient's bot and role, and not have been handled as rejected. A
+        ready at comment's own head GitHub dates before the whole second the
+        work was first queued in (queued_at) predates the work, so it answers
+        nothing. With an intact
         database no such answer exists yet when a comment is handled; it is
         found on a replay (a lost or restored database) or when both
         comments landed while the poller was down.
@@ -284,7 +289,7 @@ class QuestionsMixin:
             elif head is not None and (
                 _matching_head(reported, head) is not None
                 or (
-                    item.created_at < queued_at
+                    item.created_at < math.floor(queued_at)
                     and _matching_head(reported, source_head) is not None
                 )
             ):
@@ -294,6 +299,25 @@ class QuestionsMixin:
                 continue
             return item
         return None
+
+    def _work_queued_at(self, job: Job) -> float:
+        """When job's first attempt was queued: a T6 retry or replay names
+        the job it repeats as retry_of, and its own row is newer than an
+        answer that settled the work it repeats."""
+        queued_at = job.created_at
+        retry_of = _retry_of(job.request.detail)
+        seen = {job.id}
+        with self._connect() as connection:
+            while retry_of is not None and retry_of not in seen:
+                seen.add(retry_of)
+                row = connection.execute(
+                    "SELECT created_at, detail FROM jobs WHERE id = ?", (retry_of,)
+                ).fetchone()
+                if row is None:
+                    break
+                queued_at = min(queued_at, float(row["created_at"]))
+                retry_of = _retry_of(row["detail"])
+        return queued_at
 
     def _cancel_answered_jobs(self, ticket: TrackedTicket) -> None:
         """Cancel this ticket's queued steps that a later trusted comment
@@ -327,7 +351,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
-                queued_at=job.created_at,
+                queued_at=self._work_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             )
@@ -398,7 +422,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
-                queued_at=job.created_at,
+                queued_at=self._work_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             ) is None:
@@ -465,7 +489,7 @@ class QuestionsMixin:
                     source,
                     job.request.action,
                     job.request.recipient,
-                    queued_at=job.created_at,
+                    queued_at=self._work_queued_at(job),
                     head=job.request.head,
                     round_number=review_round + 1,
                 )
@@ -508,3 +532,12 @@ class QuestionsMixin:
                 f"skipped {request.action}: answered by {answered.id} "
                 f"({request.repo}#{request.ticket_id})"
             )
+
+
+def _retry_of(detail: str | None) -> str | None:
+    try:
+        context = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    value = context.get("retry_of") if isinstance(context, dict) else None
+    return value if isinstance(value, str) else None
