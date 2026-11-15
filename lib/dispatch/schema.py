@@ -113,6 +113,25 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ticket_transitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT NOT NULL,
+                    at REAL NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ticket_transitions_ticket
+                ON ticket_transitions (repo, ticket_id, at, id)
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ci_events (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,
