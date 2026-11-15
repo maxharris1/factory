@@ -340,6 +340,8 @@ class GitHubReviewActions:
                     f"query={MARK_READY_QUERY}",
                     "-f",
                     f"id={node_id}",
+                    "-f",
+                    f"owner={ticket.repo.partition('/')[0]}",
                 )
             )
             if response.get("errors"):

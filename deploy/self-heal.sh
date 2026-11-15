@@ -35,6 +35,10 @@
 # user timer is installed, and otherwise a detached `once` in its own
 # session; the lock keeps it from overlapping a timer pass.
 #
+# Where no systemd user timer runs the token broker (#171), each pass first
+# runs deploy/app-token-service.sh once when ~/.config/factory/
+# app-token-autostart exists.
+#
 # Files, in ~/.local/state/factory (ORCH_STATE_DIR): self-heal.lock (one
 # pass at a time), self-heal.pid (the loop), self-heal.stopped (the stop
 # hold), self-heal-service.lock, and self-heal-service.log (this script's
@@ -140,6 +144,9 @@ once() {
     fi
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     export PYTHONUNBUFFERED=1
+    if [[ -f "${CONFIG}/app-token-autostart" && -x "${HERE}/app-token-service.sh" ]]; then
+        "${HERE}/app-token-service.sh" once 8>&- || say "token broker pass exited $?" >>"$LOG"
+    fi
     set +e
     "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
         say "orch heal deploy exited $?; healing anyway" >>"$LOG"
