@@ -1,0 +1,9 @@
+decision	choice	why
+non-descendant check	rebase_scope on the waiter's bare clone, beside #131's classify (merge-base --is-ancestor, then two merge-base calls)	the ticket says reuse #131's detection; it yields both fork points the range-diff needs, which the GitHub compare API does not
+where to compute	_queue_review, round > 1 and not an update re-review	one site covers T2's ready, merge-queue re-entry and T4's patch review
+failure mode	a missing or raising classifier gives no scope and logs poll error rebase-check:<Exc>; the review is still queued	a review is never dropped because the check failed; the brief keeps the generic line
+approval coverage (ac-2)	_approval_covers unchanged	the GitHub adapter has no stable_patch_id, so coverage is already exact SHA; removing the patch-id branch would contradict SPEC T4/T4H/TQ (open decision in the plan)
+ac-2 path	a force-push in merge-queue waits (approval does not cover); the builder's ready re-enters review, clears approved_head and queues round 2 with rebase	pinned by test_force_push_review
+ac-3	no code change; T2/T4/TQ already read CI at the ready or PR head	pinned by test_ci_is_read_on_the_force_pushed_head_not_the_approved_one
+reviewed_base per round	read back from review jobs' rebase detail into FindingsEvidence bases	no new column; round N's rebase carries round N-1's base and its own
+model/	untouched	no workflow transition changed
