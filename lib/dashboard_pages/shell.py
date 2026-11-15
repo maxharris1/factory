@@ -12,7 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from lib.dashboard_telemetry import rollup_panel, TELEMETRY_CSS
 from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
-from lib.dashboard_pages.activity import _ATTENTION, _attention, _handoffs, _health_link, _verdicts
+from lib.dashboard_pages.activity import _ATTENTION, _attention, _health_link, _relay
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
@@ -1231,9 +1231,9 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
-    "activity.html": (_attention, _handoffs, _verdicts, _log),
+    "activity.html": (_attention, _relay),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel, _health),
-    "health.html": (_components, _no_waiter),
+    "health.html": (_components, _no_waiter, _log),
     "job.html": (_board, _tickets, _jobview),
 }
 

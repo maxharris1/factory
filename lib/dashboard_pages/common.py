@@ -35,7 +35,7 @@ CSS_PANEL = """\
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
 #kpis,#ticket-filter,#pipeline,#shipped,#tickets,#log,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
-#handoffs,#verdicts,#health{grid-column:span 6}
+#health{grid-column:span 6}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
@@ -100,7 +100,7 @@ CSS_TAIL = """\
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @keyframes breathe{0%,100%{opacity:.18;stroke:var(--accent);stroke-width:3}50%{opacity:.8;stroke:var(--accent);stroke-width:7}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
-@media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts,#health{grid-column:1/-1}}
+@media (max-width:1100px){.panel,#lanes,#queue,#health{grid-column:1/-1}}
 @media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
 .topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
@@ -264,10 +264,10 @@ SCRIPT_TAIL = r"""
   var PAGES = {
     main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
     job: [renderBoard, renderTickets, renderJobView],
-    activity: [renderAttention, renderHandoffs, renderVerdicts, renderLog],
+    activity: [renderAttention, renderRelay],
     efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens,
                  renderHealth],
-    health: [renderComponents, renderNoWaiter]
+    health: [renderComponents, renderNoWaiter, renderLog]
   };
   var RENDERERS = [renderBand, renderAttentionStrip, renderStatusLine].concat(PAGES[PAGE] || []);
 

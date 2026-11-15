@@ -612,7 +612,9 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
         keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
         assert keys[:3] == ["caret", "band", "attention"], name
         board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
-        assert keys[3:] == (board if name == "job.html" else []), name
+        rows = [key for key in keys[3:] if key.startswith("attention-")]
+        assert keys[3:] == {"job.html": board, "activity.html": rows}.get(name, []), name
+        assert len(rows) == (html.count('class="at-row"') if name == "activity.html" else 0), name
         assert 'class="px-held"' not in html, name
 
 

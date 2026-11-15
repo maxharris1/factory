@@ -311,9 +311,9 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
     where = {
         "index.html": ("kpis", "lanes", "queue"),
-        "activity.html": ("attention", "handoffs", "verdicts", "log"),
+        "activity.html": ("attention", "relay"),
         "efficiency.html": ("health", "savings"),
-        "health.html": ("components", "no-waiter"),
+        "health.html": ("components", "no-waiter", "log"),
         "job.html": ("ticket-filter", "pipeline", "shipped", "tickets", "jobview"),
     }
     for name, panels in where.items():
