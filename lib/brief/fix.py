@@ -14,7 +14,13 @@ from lib.queue import Job
 
 def task_lines(job: Job, facts: dict) -> list[str]:
     detail = detail_of(job)
-    verdict = comment_url(facts, detail.get("instruction"))
+    instructions = evidence_part(detail, "instructions")
+    origin = (
+        instructions.get("prior_instruction")
+        if instructions.get("cause") == "answers"
+        else detail.get("instruction")
+    )
+    verdict = comment_url(facts, origin)
     lines = _review_fix(detail, facts, verdict) if verdict else _ci_fix(facts)
     return [*lines, *builder_notes(job, facts)]
 

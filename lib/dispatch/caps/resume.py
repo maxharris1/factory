@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from lib.dispatch.helpers import _scope
+from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -52,6 +52,20 @@ class ResumeAfterCapMixin:
                 )
                 return True, "go-not-from-approver"
             cap_extra = int(row["cap_extra"]) + 1
+            capping = connection.execute(
+                """
+                SELECT comment_id FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND outcome = 'capped-review'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            verdict = None
+            if capping is not None:
+                verdict = next(
+                    (_comment_link(item) for item in ticket.comments if item.id == capping["comment_id"]),
+                    f"comment:{capping['comment_id']}",
+                )
             self._enqueue_step(
                 connection,
                 ticket,
@@ -71,6 +85,7 @@ class ResumeAfterCapMixin:
                         head=ticket.current_head,
                         round_number=int(row["review_round"]) + 1,
                         cap=self._config_cap(ticket) + cap_extra,
+                        instruction=verdict,
                         resume=True,
                     ),
                 ),

@@ -16,8 +16,10 @@ body without its header, or None when the comment was edited after it was
 posted.
 
 prior_instruction is the resumed job's `instruction`, which the resume's own
-instruction replaces in its detail. plan_attempt is plan_gap_count + 1 for a
-plan job, else None: a question and its answer leave plan_gap_count as it was.
+instruction replaces in its detail. When the resumed job was itself resumed
+by answers, its instruction is that answers link, so prior_instruction is
+the one its own evidence carried: the instruction the step started from.
+plan_attempt is plan_gap_count + 1 for a plan job, else None: a question and its answer leave plan_gap_count as it was.
 retry_of is the failed job a T6 retry names. Only a fix job carries findings.
 Values of the wrong type in either detail are read as None.
 """
@@ -64,7 +66,7 @@ def instructions_evidence(
         cause=cause,
         prose=prose,
         url=url,
-        prior_instruction=_text(prior_detail, "instruction"),
+        prior_instruction=_original_instruction(prior_detail),
         plan_attempt=plan_gaps + 1 if action == "plan" else None,
         retry_of=_text(detail, "retry_of"),
         findings=tuple(findings) if action == "fix" else (),
@@ -102,6 +104,14 @@ def _trigger(
         return None, None, None
     prose = None if comment.edited_at is not None else handoff.body.strip()
     return cause, prose, comment.url
+
+
+def _original_instruction(prior_detail: Mapping[str, object] | None) -> str | None:
+    evidence = prior_detail.get("evidence") if prior_detail is not None else None
+    prior = evidence.get("instructions") if isinstance(evidence, Mapping) else None
+    if isinstance(prior, Mapping) and prior.get("cause") == "answers":
+        return _text(prior, "prior_instruction")
+    return _text(prior_detail, "instruction")
 
 
 def _text(detail: Mapping[str, object] | None, key: str) -> str | None:

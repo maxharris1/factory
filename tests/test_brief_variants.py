@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from lib.brief import render_brief
+from lib.dispatcher import CIResult, TrackedTicket
 from tests.regenerate_brief_snapshots import HEAD, _job
+from tests.test_dispatcher import ANSWERS, QUESTIONS, comment, handled_outcome
+from tests.test_rounds_and_caps import HEADS, Flow
 
 GO_URL = "https://github.com/owner/repo/pull/42#issuecomment-501"
 VERDICT_URL = "https://github.com/owner/repo/pull/42#issuecomment-777"
@@ -219,3 +224,98 @@ def test_the_remote_checkout_clones_into_a_subfolder_of_the_run_folder():
     assert ".orch-worker" in brief
     assert "repo clone owner/repo repo" in brief
     assert "`cd repo`" in brief
+
+
+class _URLCommentFlow(Flow):
+    def post(self, comment_id: str, body: str, author: str) -> str:
+        self.now[0] += 10
+        url = f"https://github.com/owner/repo/pull/42#issuecomment-{comment_id}"
+        self.comments.append(comment(comment_id, body, author=author, created_at=self.now[0], url=url))
+        self.dispatcher.process(self.snapshot())
+        return handled_outcome(self.queue, comment_id)
+
+
+class _URLCommentCIFlow(_URLCommentFlow):
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+        self.ci_result = CIResult("success")
+
+    def snapshot(self) -> TrackedTicket:
+        return replace(super().snapshot(), ci={self.head: self.ci_result})
+
+
+def _claimed_task(flow: Flow) -> str:
+    job = flow.queue.claim("claude")
+    assert job is not None
+    return _task(render_brief(job, bot="claude-bot", context=None, factory_root="/srv/orch/factory"))
+
+
+def _answer(flow: Flow, question_id: str, answer_id: str) -> None:
+    assert flow.post(question_id, QUESTIONS, "claude-login") == "waiting-max"
+    assert flow.post(answer_id, ANSWERS, "grok-login") == "resumed-fix"
+
+
+def _capped(tmp_path: Path) -> _URLCommentFlow:
+    flow = _URLCommentFlow(tmp_path)
+    flow.to_cap()
+    assert flow.go("2001") == "queued-fix"
+    return flow
+
+
+def _red_ci(tmp_path: Path) -> _URLCommentCIFlow:
+    flow = _URLCommentCIFlow(tmp_path)
+    assert flow.go("1001") == "queued-build"
+    flow.finish("claude")
+    flow.ci_result = CIResult("failure", "failed: tests")
+    assert flow.ready(HEADS[1]) == "queued-ci-fix"
+    return flow
+
+
+def _is_review_fix(task: str) -> bool:
+    assert ("name the rule it breaks" in task) != ("If it's infrastructure" in task), task
+    return "name the rule it breaks" in task
+
+
+def test_an_extra_round_fix_stays_a_review_fix(tmp_path: Path):
+    task = _claimed_task(_capped(tmp_path))
+    assert _is_review_fix(task)
+    assert "https://github.com/owner/repo/pull/42#issuecomment-revise-3/3" in task
+
+
+def test_an_answered_extra_round_fix_stays_a_review_fix(tmp_path: Path):
+    flow = _capped(tmp_path)
+    flow.queue.claim("claude")
+    _answer(flow, "2002", "2003")
+    task = _claimed_task(flow)
+    assert _is_review_fix(task)
+    assert "issuecomment-2003" not in task.split("This job resumes")[0]
+
+
+def test_an_answered_ci_fix_stays_a_ci_fix(tmp_path: Path):
+    flow = _red_ci(tmp_path)
+    flow.queue.claim("claude")
+    _answer(flow, "1002", "1003")
+    assert not _is_review_fix(_claimed_task(flow))
+
+
+def test_a_twice_answered_ci_fix_stays_a_ci_fix(tmp_path: Path):
+    flow = _red_ci(tmp_path)
+    flow.queue.claim("claude")
+    _answer(flow, "1002", "1003")
+    flow.queue.claim("claude")
+    _answer(flow, "1004", "1005")
+    assert not _is_review_fix(_claimed_task(flow))
+
+
+def test_an_answered_review_fix_stays_a_review_fix(tmp_path: Path):
+    flow = _URLCommentFlow(tmp_path)
+    assert flow.go("1001") == "queued-build"
+    flow.finish("claude")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    flow.revise("1/3")
+    flow.queue.claim("claude")
+    _answer(flow, "1002", "1003")
+    task = _claimed_task(flow)
+    assert _is_review_fix(task)
+    assert "https://github.com/owner/repo/pull/42#issuecomment-revise-1/3" in task
