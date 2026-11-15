@@ -627,15 +627,15 @@ class JobsMixin:
             return
         link_drop = self._link_drop(job)
         if link_drop is not None:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                release_link_dropped(connection, job.id)
+                connection.commit()
             if job.request.action == "review" and self._review_retry_waits(job):
                 return
             if link_drop.used < MAX_LINK_DROP_REQUEUES:
                 self._requeue_link_dropped(job, link_drop)
                 return
-            with self._connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                release_link_dropped(connection, job.id)
-                connection.commit()
         if job.request.action == "update-from-main":
             # #130: a failed update counts toward update-failed-2 in place of
             # the generic retry; the queue queues the next attempt.
