@@ -455,7 +455,6 @@ class DetailMixin:
         return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
     def _answers(self, ticket: TrackedTicket) -> list[dict[str, str | None]]:
-        """Max's trusted answers on the ticket, oldest first; an edited one has no prose (#54)."""
         answers: list[dict[str, str | None]] = []
         for comment in ticket.comments:
             try:

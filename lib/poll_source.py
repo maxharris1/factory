@@ -2336,7 +2336,6 @@ def _brief(
     comments: Sequence[Comment],
     trusted: Mapping[str, Mapping[str, frozenset[str]]],
 ) -> str | None:
-    """The latest trusted brief's URL, or its body when it has none (#54)."""
     latest: str | None = None
     for comment in comments:
         try:

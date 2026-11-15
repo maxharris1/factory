@@ -1,5 +1,3 @@
-"""#54: a plan or build job queued by a go carries Max's answers and the latest trusted brief."""
-
 import json
 from dataclasses import replace
 from pathlib import Path

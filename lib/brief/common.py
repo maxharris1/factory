@@ -276,17 +276,16 @@ def fenced(text: str) -> str:
 
 
 def answers_lines(detail: dict[str, object]) -> list[str]:
-    """Max's answers from the job detail (#54), oldest first, minus the one the resume lines quote."""
     answers = detail.get("answers")
     if not isinstance(answers, list):
         return []
-    resumed = evidence_part(detail, "instructions").get("url")
+    already_quoted = evidence_part(detail, "instructions").get("url")
     lines: list[str] = []
     for item in answers:
         if not isinstance(item, dict):
             continue
         url = item.get("url") if isinstance(item.get("url"), str) else None
-        if url is not None and url == resumed:
+        if url is not None and url == already_quoted:
             continue
         prose = item.get("prose")
         if isinstance(prose, str) and prose:
