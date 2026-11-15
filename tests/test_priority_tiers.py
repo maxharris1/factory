@@ -8,6 +8,7 @@ urgent, a resumed step, bug, how many tickets it unblocks, and age.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,43 @@ def test_tickets_waiting_on_a_path_count_toward_its_holder(tmp_path: Path) -> No
     assert unblocks == {"1": 0, "2": 2, "3": 1, "4": 1, "5": 1}
     _enqueue(queue, now, pull["1"], pull["2"])
     assert _claim_tickets(queue) == [pull["2"], pull["1"]]
+
+
+def test_a_linear_blocker_in_another_project_counts_its_dependent(tmp_path: Path) -> None:
+    orch = LINEAR_ORCH + (
+        "  - repo: acme/other-app\n    factory_ref: dev\n"
+        "    linear_project_id: proj-2\n    intake:\n      linear_state: In Progress\n"
+    )
+    linear = FakeLinear()
+    linear.issues = [
+        linear_issue("AUT-1", created_at=1),
+        linear_issue("AUT-2", created_at=2),
+        replace(linear_issue("EXT-3", created_at=3), repo="acme/other-app",
+                blocked_by=(("AUT-2", "started"),)),
+    ]
+    feeder, queue, _, _ = make_feeder(tmp_path, orch=orch, linear=linear, box=1, factory_text=LINEAR_FACTORY_MD)
+    fed = [item.ticket_id for item in feeder.feed_once().fed]
+    with queue.connect() as connection:
+        unblocks = {item["issue"]: item["unblocks"] for item in feeder_items(connection)}
+    assert rows(tmp_path / "orch.db")["EXT-3"]["waiting_reason"] == "waiting on AUT-2"
+    assert unblocks == {"AUT-1": 0, "AUT-2": 1, "EXT-3": 0}
+    assert fed == ["AUT-2"]
+
+
+def test_a_ticket_refused_at_intake_unblocks_nothing(tmp_path: Path) -> None:
+    feeder, queue, github, _ = make_feeder(tmp_path, box=1)
+    github.statuses = {ref(2): OPEN}
+    github.issues[HOME] = [
+        issue(1, created_at=1.0),
+        issue(2, created_at=2.0),
+        issue(3, created_at=3.0, body="Blocked by #2", template=False),
+    ]
+    fed = fed_heads(github, feeder.feed_once())
+    with queue.connect() as connection:
+        unblocks = {item["issue"]: item["unblocks"] for item in feeder_items(connection)}
+    assert rows(tmp_path / "orch.db")["3"]["state"] == "refused-intake"
+    assert unblocks == {"1": 0, "2": 0, "3": 0}
+    assert fed == ["factory/issue-1"]
 
 
 def _fed_tier_two(tmp_path: Path) -> Path:

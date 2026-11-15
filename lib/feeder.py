@@ -894,7 +894,7 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        unblocks = critical_path_counts(candidates, {c.ref for c in unstarted}, pull_of, holds.shared)
+        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, holds.shared)
         return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
@@ -1258,21 +1258,18 @@ class Feeder:
 
 def critical_path_counts(
     candidates: Sequence[_Candidate],
+    eligible_gates: Mapping[Ref, GateLines],
     unstarted: Collection[Ref],
     pull_of: Mapping[Ref, Ref],
     shared: Mapping[str, Collection[str]],
 ) -> dict[Ref, int]:
-    """How many of this poll's candidates each one unblocks (#258): those
-    whose Blocked by names it or its PR, the unstarted ones in its repo that
-    share a Touches: path with it, and every candidate blocked by one of
-    those, transitively."""
     owner = {c.ref: c.ref for c in candidates}
     owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
     blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
-    for c in candidates:
-        for blocker in c.lines.blocked_by:
-            if owner.get(blocker, c.ref) != c.ref:
-                blocks[owner[blocker]].add(c.ref)
+    for dependent, lines in eligible_gates.items():
+        for blocker in lines.blocked_by:
+            if owner.get(blocker, dependent) != dependent:
+                blocks[owner[blocker]].add(dependent)
     counts: dict[Ref, int] = {}
     for c in candidates:
         assert c.project.intake is not None
