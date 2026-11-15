@@ -67,10 +67,7 @@ def _sources_in_lib() -> dict[str, list[str]]:
 
 
 def test_every_workflow_state_writer_is_listed_once_with_its_file() -> None:
-    found = _sources_in_lib()
-    assert {source: files for source, files in found.items()} == {
-        source: [file] for source, file in WRITERS.items()
-    }
+    assert _sources_in_lib() == {source: [file] for source, file in WRITERS.items()}
 
 
 def test_no_sql_in_lib_writes_workflow_state_outside_the_helper() -> None:
@@ -191,12 +188,8 @@ def board(tmp_path: Path) -> Board:
     return Board(tmp_path)
 
 
-def _connect(board: Board) -> sqlite3.Connection:
-    return board.queue.connect()
-
-
 def _seed(board: Board, state: str | None) -> None:
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         connection.execute(
             "INSERT INTO ticket_state (repo, ticket_id, workflow_state) VALUES (?, ?, ?)",
             ("owner/repo", "7", state),
@@ -204,14 +197,14 @@ def _seed(board: Board, state: str | None) -> None:
 
 
 def _write(board: Board, state: str, **kwargs) -> bool:
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         return write_workflow_state(
             connection, "Owner/Repo", "7", state, source="test", at=5.0, **kwargs
         )
 
 
 def _ledger(board: Board) -> list[tuple]:
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         return [
             tuple(row)
             for row in connection.execute(
@@ -222,7 +215,7 @@ def _ledger(board: Board) -> list[tuple]:
 
 
 def _state(board: Board) -> str | None:
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         row = connection.execute(
             "SELECT workflow_state FROM ticket_state WHERE ticket_id = '7'"
         ).fetchone()
@@ -264,7 +257,7 @@ def test_a_failed_transition_insert_rolls_back_the_state_and_the_enqueue(
     board: Board,
 ) -> None:
     _seed(board, "review")
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         connection.execute(
             """
             CREATE TRIGGER refuse BEFORE INSERT ON ticket_transitions
@@ -280,7 +273,7 @@ def test_a_failed_transition_insert_rolls_back_the_state_and_the_enqueue(
         timeout_seconds=60,
     )
     with pytest.raises(sqlite3.IntegrityError, match="refused"):
-        with _connect(board) as connection:
+        with board.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             board.queue.enqueue_in_transaction(connection, request, dedupe_key="k")
             write_workflow_state(
@@ -292,7 +285,7 @@ def test_a_failed_transition_insert_rolls_back_the_state_and_the_enqueue(
 
 def test_a_failed_insert_rolls_back_a_dispatcher_state_write(board: Board) -> None:
     _seed(board, "merge-queue")
-    with _connect(board) as connection:
+    with board.queue.connect() as connection:
         connection.execute(
             """
             CREATE TRIGGER refuse BEFORE INSERT ON ticket_transitions
