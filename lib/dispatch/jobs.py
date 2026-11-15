@@ -1309,7 +1309,7 @@ class JobsMixin:
                 connection,
                 repo=ticket.repo,
                 ticket_id=ticket.ticket_id,
-                detail=str(error),
+                detail=self._project_wake_detail(ticket, str(error)),
             )
             connection.commit()
 
