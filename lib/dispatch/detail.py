@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict, replace
 
 from lib.dispatch.constants import GROK_WAKE_REASONS
 from lib.dispatch.helpers import (
@@ -159,6 +160,7 @@ class DetailMixin:
         comment queues goes through here, so no claim sees an answered step
         queued. Returns the job and that answer.
         """
+        request = self._with_evidence(connection, ticket, comment, request)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         if request.action not in _ANSWERS:
             return job, None
@@ -173,6 +175,101 @@ class DetailMixin:
         if answered is not None:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
+
+    def _with_evidence(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        request: JobRequest,
+    ) -> JobRequest:
+        detail = json.loads(request.detail or "{}")
+        resume = detail.get("resume") is True
+        if request.action not in ("review", "fix") and not resume:
+            return request
+        from lib.evidence.ci import ci_evidence
+        from lib.evidence.criteria import criteria_evidence
+        from lib.evidence.findings import findings_evidence
+        from lib.evidence.instructions import instructions_evidence
+
+        state = connection.execute(
+            "SELECT plan_gap_count FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+        findings = findings_evidence(
+            comments=ticket.comments,
+            trusted_logins=self.trusted_logins,
+            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            current_round=_detail_round_number(request.detail) or 1,
+            bases={},
+        )
+        result = ticket.ci.get(request.head or "")
+        ci = None
+        if result is not None and result.status == "failure":
+            ci = ci_evidence(
+                failed_checks=[
+                    name
+                    for name in (result.log or "").removeprefix("failed: ").split(", ")
+                    if name
+                ],
+                run_url=None,
+                fetch_log=str,
+            )
+        detail["evidence"] = {
+            "criteria": asdict(
+                criteria_evidence(
+                    issue_key=ticket.source_issue or ticket.ticket_id,
+                    issue_url=ticket.ticket_url,
+                    comments=ticket.comments,
+                    trusted_logins=self.trusted_logins,
+                    issue_body=None,
+                    pr_body=None,
+                    ready_starts_review=ticket.ready_starts_review,
+                    pr_url=ticket.ticket_url,
+                )
+            ),
+            "findings": asdict(findings),
+            "instructions": asdict(
+                instructions_evidence(
+                    comments=ticket.comments,
+                    trusted_logins=self.trusted_logins,
+                    source_comment_id=comment.id,
+                    action=request.action,
+                    detail=detail,
+                    prior_detail=(
+                        self._newest_earlier_detail(connection, ticket, comment, request.action)
+                        if resume
+                        else None
+                    ),
+                    plan_gaps=int(state["plan_gap_count"]) if state is not None else 0,
+                    findings=findings.findings,
+                    approvers=self.approvals.logins,
+                )
+            ),
+            "ci": asdict(ci) if ci is not None else None,
+        }
+        return replace(
+            request, detail=json.dumps(detail, separators=(",", ":"), sort_keys=True)
+        )
+
+    def _newest_earlier_detail(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            """
+            SELECT detail FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
+              AND source_comment_id != ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (ticket.repo.lower(), ticket.ticket_id, action, comment.id),
+        ).fetchone()
+        return json.loads(row["detail"] or "{}") if row is not None else None
 
     def _job_detail(
         self,
