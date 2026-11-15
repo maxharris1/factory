@@ -73,11 +73,19 @@ def review_rules(facts: dict) -> str:
 SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
 
 
-def rules() -> str:
+def rules(remote_device: str | None = None) -> str:
+    scratch = (
+        "- Put every scratch file and directory (venvs, pytest `--basetemp`, review checkouts, "
+        "comment drafts) under `$TMPDIR`. It is this job's own directory and is removed when "
+        "the job ends. Write nothing else under /tmp.\n"
+        if remote_device is None
+        else ""
+    )
     return (
         "## Rules\n"
         f"- Run GitHub as `{GH}`.\n"
         f"- {SECRET_RULE}\n"
+        f"{scratch}"
         "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
         "- Post only this job's handoff, or a `questions` handoff. Never post `go`, `ok`, `answers`, "
         "`brief`, or (outside a review job) a `verdict`. Never merge, close, approve or label a PR.\n"

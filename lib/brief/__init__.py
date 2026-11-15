@@ -140,7 +140,7 @@ def render_brief(
         *middle,
         finish_section(job, bot, remote_device),
         review_rules(facts),
-        rules(),
+        rules(remote_device),
         data_section(job, detail),
         context_section(facts, context, context_ref, context_note, kind),
     ]
