@@ -939,19 +939,22 @@ def test_profile_hook_starts_nothing_outside_the_host_pid_namespace(
         host = os.readlink("/proc/self/ns/pid")
         env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, nspid, ns or host))
 
-    sourced = subprocess.run(
-        ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
-        text=True, capture_output=True, timeout=30, check=False,
-    )
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
 
-    assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
-    assert sourced.stderr == ""
-    time.sleep(2)
-    assert not ran.exists()
-    for path, text in pidfiles.items():
-        assert path.read_text(encoding="utf-8") == text
-        assert path.stat().st_mtime_ns == stamps[path]
-    assert sorted(state.glob("*.log")) == logs_before
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        assert sourced.stderr == ""
+        time.sleep(2)
+        assert not ran.exists()
+        for path, text in pidfiles.items():
+            assert path.read_text(encoding="utf-8") == text
+            assert path.stat().st_mtime_ns == stamps[path]
+        assert sorted(state.glob("*.log")) == logs_before
+    finally:
+        reap_home(tmp_path)
 
 
 def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) -> None:
@@ -960,16 +963,21 @@ def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) 
     (tmp_path / ".config/factory/self-heal-autostart").unlink()
     (tmp_path / ".config/factory/poller-autostart").touch()
     env = _profile_env(tmp_path)
+    env.pop("ORCH_JOB_PROOF", None)
+    env.pop("CODEX_SANDBOX", None)
     env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "4484", os.readlink("/proc/self/ns/pid")))
 
-    sourced = subprocess.run(
-        ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
-        text=True, capture_output=True, timeout=30, check=False,
-    )
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
 
-    assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
-    log = tmp_path / ".local/state/factory/poller-service.log"
-    deadline = time.monotonic() + 10
-    while not log.exists():
-        assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
-        time.sleep(0.1)
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        log = tmp_path / ".local/state/factory/poller-service.log"
+        deadline = time.monotonic() + 10
+        while not log.exists():
+            assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
+            time.sleep(0.1)
+    finally:
+        reap_home(tmp_path)
