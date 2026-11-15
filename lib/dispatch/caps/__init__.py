@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping
 
+from lib.dispatch.caps.auto_extra import AutoExtraMixin
 from lib.dispatch.caps.effective import EffectiveCapMixin
 from lib.dispatch.caps.resume import ResumeAfterCapMixin
 from lib.dispatch.caps.t1 import T1Mixin
@@ -15,5 +16,7 @@ from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
 
-class CapsMixin(T1Mixin, ResumeAfterCapMixin, EffectiveCapMixin, CappedWakeMixin):
+class CapsMixin(
+    T1Mixin, ResumeAfterCapMixin, EffectiveCapMixin, CappedWakeMixin, AutoExtraMixin
+):
     pass

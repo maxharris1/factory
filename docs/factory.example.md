@@ -11,6 +11,7 @@ review:
     high: 3
   verify: verify-cleffy
   # followup_from_round: 4  # optional; from this round, variants of an earlier finding become a follow-up ticket
+  # auto_extra_rounds: 0  # optional; the poller grants this many extra rounds at the cap itself
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
 skills:

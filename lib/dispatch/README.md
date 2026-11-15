@@ -29,11 +29,12 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
 | Verdicts (T3, T4) | `verdict.py` (`VerdictMixin`) | `_t3`, `_t4`, `_record_approval`, `_approval_covers` |
-| Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the four rule mixins below and re-exports the old `caps.py` names |
+| Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the five rule mixins below and re-exports the old `caps.py` names |
 | Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build |
 | Caps: resume after a cap | `caps/resume.py` (`ResumeAfterCapMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix |
 | Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
 | Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
+| Caps: auto extra round | `caps/auto_extra.py` (`AutoExtraMixin`) | `_auto_granted_cap_extra`, `_record_auto_extra` (T3), `_drain_auto_extra`: the poller grants factory.md `review.auto_extra_rounds` rounds at the cap and posts one comment per grant (issue #263) |
 | Merge queue | `merge_queue.py` (`MergeQueueMixin`) | `_enter_merge_queue`, `_advance_merge_queue(s)`, base updates, `_settle_update`, `_classify_update`, `_update_failed` |
 | Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_hold_in_play`, `_may_approve*`, `_approver_go`, `_ship_head` |
 | Ship | `ship.py` (`ShipMixin`, `ReviewShipper`) | ship intents, handoff redrive, external ships |
