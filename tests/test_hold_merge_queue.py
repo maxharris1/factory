@@ -84,6 +84,31 @@ def test_a_label_hold_with_an_ok_merges_and_a_label_put_back_after_the_ok_holds_
     assert board.actions.merges == [(True, sha(1))]
 
 
+def test_an_old_ok_does_not_clear_a_label_put_back_then_removed_by_someone_else(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, ship="merge", hold=HoldConfig(approver=APPROVER))
+    pr = board.open("42", sha(1))
+    pr.labels = ("factory:hold",)
+    pr.label_events = (relabel(board, "e1"),)
+    board.build_and_approve(pr, mergeable=None)
+    board.post(pr, "ok-1", OK.format(head=pr.head), APPROVER)
+    board.poll()
+    assert board.state("42")["workflow_state"] == "merge-queue"
+
+    pr.label_events += (unlabel(board, "e2", "codex-login"), relabel(board, "e3"))
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
+    pr.labels = ()
+    pr.label_events += (unlabel(board, "e4", "codex-login"),)
+    board.poll()
+    assert board.actions.merges == []
+
+    pr.label_events += (unlabel(board, "e5", APPROVER),)
+    board.poll()
+    assert board.actions.merges == [(True, sha(1))]
+
+
 def test_the_queue_logs_each_wait_reason_once_per_head(tmp_path: Path) -> None:
     board = Board(tmp_path, ship="merge", hold=HoldConfig(approver=APPROVER))
     pr = board.open("42", sha(1))
@@ -95,6 +120,10 @@ def test_the_queue_logs_each_wait_reason_once_per_head(tmp_path: Path) -> None:
 
     for _ in range(3):
         board.poll()
+    pr.mergeable, pr.mergeable_state = None, None
+    board.poll()
+    pr.mergeable, pr.mergeable_state = True, "clean"
+    board.poll()
     pr.push(sha(2))
     for _ in range(3):
         board.poll()
@@ -133,6 +162,17 @@ def test_a_draft_queue_head_is_marked_ready_then_merged_at_the_head(tmp_path: Pa
     assert gh.keys() == [PULL, MARK_READY, MERGE]
     assert f"sha={HEAD}" in gh.calls[-1]
     assert board.state("42")["workflow_state"] == "merged"
+
+
+def unlabel(board: Board, event_id: str, actor: str) -> LabelEvent:
+    board.now[0] += 1
+    return LabelEvent(
+        id=event_id,
+        action="unlabeled",
+        label="factory:hold",
+        actor=actor,
+        created_at=board.now[0],
+    )
 
 
 def relabel(board: Board, event_id: str) -> LabelEvent:

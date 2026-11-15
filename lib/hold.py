@@ -15,9 +15,10 @@ green CI does not merge while the PR is held:
 The hold clears on a kind=ok head=<40-char sha> comment from the approver
 whose head covers the current head by the ship rule (the same commit, or
 an equal git patch-id --stable), or, for a label-only hold, by the
-approver removing the label. An ok does not clear a label that is on the
-PR and was last labeled at or after the latest covering ok: a label put
-back after the ok holds the PR again. Neither clears unless the approver
+approver removing the label. An ok does not clear a label hold whose
+label was labeled at or after the latest covering ok: a label put back
+after the ok holds the PR again, and still holds it once someone other
+than the approver removes it. Neither clears unless the approver
 may approve: a trusted_logins key, or, once the GitHub App switch is on, a
 login in orch.yml's approver_logins (#122). Anything unread fails closed.
 
@@ -145,7 +146,7 @@ def decide(
         cleared = "label-removed" if removed_by_approver and not on_pr else None
         return HoldDecision(cleared=cleared)
     ok_at = _approver_ok(comments, approver, covers) if approver_allowed else None
-    relabeled = ok_at is not None and on_pr and any(
+    relabeled = ok_at is not None and label_hold and any(
         event.action == "labeled"
         and event.label.casefold() == wanted
         and event.created_at >= ok_at

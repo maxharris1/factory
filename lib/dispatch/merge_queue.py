@@ -332,9 +332,13 @@ class MergeQueueMixin:
 
     def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
-        if self._logged_queue_waits.get(key) == (head, reason):
+        logged_head, reasons = self._logged_queue_waits.get(key, (None, set()))
+        if logged_head != head:
+            reasons = set()
+        if reason in reasons:
             return
-        self._logged_queue_waits[key] = (head, reason)
+        reasons.add(reason)
+        self._logged_queue_waits[key] = (head, reasons)
         if self.log is not None:
             self.log(
                 f"merge-queue: {ticket.repo}#{ticket.ticket_id} waits at "
