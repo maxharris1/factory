@@ -226,6 +226,11 @@ def test_the_remote_checkout_clones_into_a_subfolder_of_the_run_folder():
     assert "`cd repo`" in brief
 
 
+def test_only_a_box_brief_sends_scratch_to_the_job_tmpdir():
+    assert "under `$TMPDIR`" in _render(*BUILD)
+    assert "TMPDIR" not in _render(*BUILD, remote=True)
+
+
 class _URLCommentFlow(Flow):
     def post(self, comment_id: str, body: str, author: str) -> str:
         self.now[0] += 10

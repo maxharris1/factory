@@ -337,7 +337,7 @@ def test_stop_ends_every_loop_including_old_copies_and_their_children(
         time.sleep(0.5)
         assert _processes_of(home) == []
     finally:
-        foreign.kill()
+        os.killpg(foreign.pid, signal.SIGKILL)
         foreign.wait()
 
 

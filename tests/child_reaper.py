@@ -10,21 +10,36 @@ handler, before the timeout's exception unwinds through code such as
 `Popen.__exit__` that would wait on a live child. A whole process group is
 killed only when none of its members predates the test. A test that passes or
 fails any other way keeps its own cleanup.
+
+On Linux each pytest process is also a child subreaper, so a loop that
+detaches with a scrubbed environment stays its descendant. A daemon thread
+reaps such an orphan once it exits, so `kill -0` sees it gone, but never a
+child this process spawned itself, whose status its Popen still waits for.
 """
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import os
 import signal
 import subprocess
+import sys
 import threading
 import uuid
 from pathlib import Path
 
 import pytest
 
+from tests.procs import alive
+
 TAG = "FACTORY_TEST_PROC_TAG"
 PROC = Path("/proc")
+PR_SET_CHILD_SUBREAPER = 36
+ORPHAN_POLL_SECONDS = 0.05
+
+_spawned: set[int] = set()
+_spawning = threading.Lock()
 
 _before = pytest.StashKey[set]()
 _tag = pytest.StashKey[str]()
@@ -78,6 +93,39 @@ def tagged(tag: str) -> set[int]:
     return found
 
 
+def _environ(pid: int) -> list[bytes]:
+    try:
+        return (PROC / str(pid) / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+def leaked(before: set[int], tag: str, root: Path) -> set[int]:
+    table = _table()
+    mine = descendants(os.getpid(), table)
+    needle = f"{TAG}={tag}".encode()
+    prefixes = tuple(f"{name}={root}/".encode() for name in ("HOME", "ORCH_STATE_DIR"))
+    found = set()
+    for pid in table.keys() - before - {os.getpid()}:
+        environ = _environ(pid)
+        if pid in mine or any(entry == needle or entry.startswith(prefixes) for entry in environ):
+            found.add(pid)
+    return {pid for pid in found if alive(pid)}
+
+
+def kill(leftovers: set[int], protected: set[int], table: dict[int, tuple[int, int]]) -> None:
+    shared = {table[pid][1] for pid in protected if pid in table}
+    for pid in leftovers & table.keys():
+        group = table[pid][1]
+        try:
+            if group in shared:
+                os.kill(pid, signal.SIGKILL)
+            else:
+                os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def reap(before: set[int], tag: str) -> None:
     me = os.getpid()
     protected = before | {me}
@@ -86,16 +134,73 @@ def reap(before: set[int], tag: str) -> None:
         leftovers = ((descendants(me, table) | tagged(tag)) & table.keys()) - protected
         if not leftovers:
             return
-        shared = {table[pid][1] for pid in protected if pid in table}
-        for pid in leftovers:
-            group = table[pid][1]
-            try:
-                if group in shared:
-                    os.kill(pid, signal.SIGKILL)
-                else:
-                    os.killpg(group, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        kill(leftovers, protected, table)
+
+
+def _registered(spawn):
+    @functools.wraps(spawn)
+    def wrapper(*args, **kwargs):
+        with _spawning:
+            result = spawn(*args, **kwargs)
+            pid = result[0] if isinstance(result, tuple) else result
+            if pid:
+                _spawned.add(pid)
+            return result
+    return wrapper
+
+
+def _children() -> set[int]:
+    found: set[int] = set()
+    for task in (PROC / str(os.getpid()) / "task").iterdir():
+        try:
+            found.update(int(pid) for pid in (task / "children").read_text().split())
+        except OSError:
+            continue
+    return found
+
+
+def _zombie(pid: int) -> bool:
+    try:
+        return (PROC / str(pid) / "stat").read_text().rpartition(")")[2].split()[0] == "Z"
+    except OSError:
+        return False
+
+
+def reap_orphans() -> None:
+    with _spawning:
+        children = _children()
+        _spawned.intersection_update(children)
+        for pid in children - _spawned:
+            if _zombie(pid):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+
+def _reap_orphans_forever() -> None:
+    signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+    while True:
+        reap_orphans()
+        threading.Event().wait(ORPHAN_POLL_SECONDS)
+
+
+def _become_subreaper() -> None:
+    if not sys.platform.startswith("linux") or not (PROC / "self/task").is_dir():
+        return
+    import _posixsubprocess
+
+    for module, name in ((subprocess, "_fork_exec"), (_posixsubprocess, "fork_exec"),
+                         (os, "fork"), (os, "forkpty"), (os, "posix_spawn"), (os, "posix_spawnp")):
+        if hasattr(module, name):
+            setattr(module, name, _registered(getattr(module, name)))
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER)")
+    threading.Thread(target=_reap_orphans_forever, name="orphan-reaper", daemon=True).start()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    _become_subreaper()
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
