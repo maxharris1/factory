@@ -682,11 +682,26 @@ Filesystem   512-blocks      Used  Available Capacity  iused     ifree %iused  M
 /dev/disk3s5 1942700360 800000000 1142700360    42% 1000000 9000000   10%   /System/Volumes/Data
 """
 
+BSD_DF_SPACED_MOUNT = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/disk4s1 1000 300 700 30% /Volumes/Work Disk
+Filesystem 512-blocks Used Available Capacity iused ifree %iused Mounted on
+/dev/disk4s1 2000 600 1400 30% 900 100 90% /Volumes/Work Disk
+"""
+GNU_DF_SPACED_NAMES = """\
+Filesystem     1024-blocks Used Available Capacity Mounted on
+//nas/team share 1000 300 700 30% /mnt/team share 2
+Filesystem      Inodes IUsed IFree IUse% Mounted on
+//nas/team share 1000 860 140 86% /mnt/team share 2
+"""
+
 
 @pytest.mark.parametrize("text, expected", [
     (GNU_DF, (48, 85)),
     (GNU_DF_WRAPPED, (90, 50)),
     (BSD_DF, (42, 10)),
+    (BSD_DF_SPACED_MOUNT, (30, 90)),
+    (GNU_DF_SPACED_NAMES, (30, 86)),
     ("df: /nowhere: No such file or directory\n", (None, None)),
 ])
 def test_parse_df_reads_disk_and_inode_use_from_gnu_and_bsd_df(text: str, expected) -> None:
@@ -732,6 +747,13 @@ def test_remote_storage_runs_df_over_ssh_in_the_devices_workdir(tmp_path: Path) 
     argv = transport.calls[0]
     assert argv[0] == "ssh" and "BatchMode=yes" in argv
     assert argv[-1] == health.df_script("/home/codex-bot/factory-work")
+
+
+def test_a_device_workdir_on_a_mount_with_spaces_reports_and_alerts(tmp_path: Path) -> None:
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, BSD_DF_SPACED_MOUNT.encode(), "")})
+    [target] = health.probe_targets(machines_config(tmp_path))
+    entry = health.remote_storage(transport, target)
+    assert (entry.disk, entry.inodes, entry.alert, entry.error) == (30, 90, True, None)
 
 
 def test_an_unreachable_device_reports_unknown_storage_without_an_alert(tmp_path: Path) -> None:

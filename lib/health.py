@@ -1304,19 +1304,24 @@ def df_script(directory: str) -> str:
 
 
 def parse_df(text: str) -> tuple[int | None, int | None]:
-    """Values align to the header from the right: only the filesystem name,
-    first, may hold spaces, and GNU df may wrap the row after it."""
+    """The filesystem and mount names may both hold spaces, and GNU df may
+    wrap the row after a long filesystem name. The header names the value
+    columns between them, and the mount is the absolute path after them."""
     columns: dict[str, str] = {}
     for table in re.split(r"^(?=Filesystem)", text, flags=re.MULTILINE):
         lines = table.split("\n", 1)
         if len(lines) < 2:
             continue
-        header = lines[0].replace("Mounted on", "Mounted").lower().split()
-        values = lines[1].split()
-        if len(values) < len(header):
+        names = lines[0].lower().split()[1:-2]
+        if not names:
             continue
-        for name, value in zip(reversed(header), reversed(values)):
-            columns.setdefault(name, value)
+        value = r"(?:\d+%?|-)"
+        row = re.match(rf".*?\s({value}(?:\s+{value}){{{len(names) - 1}}})\s+/",
+                       " ".join(lines[1].split()))
+        if row is None:
+            continue
+        for name, found in zip(names, row.group(1).split()):
+            columns.setdefault(name, found)
 
     def pair(used: str, free: tuple[str, ...]) -> int | None:
         spare = next((columns[f] for f in free if f in columns), None)
