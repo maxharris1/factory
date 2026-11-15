@@ -134,7 +134,7 @@ record_host_pidns() {
     # shellcheck source=deploy/host-pidns.sh
     . "${ROOT}/deploy/host-pidns.sh"
     [[ -r "${PROC}/self/status" ]] || return 0
-    if ! factory_may_autostart /dev/null; then
+    if ! factory_may_autostart "$HOST_PIDNS_RECORD"; then
         echo "warning: not recording the host PID namespace from here; kept ${HOST_PIDNS_RECORD}" >&2
         return 0
     fi

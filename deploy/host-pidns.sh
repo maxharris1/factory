@@ -18,7 +18,7 @@ factory_in_host_pidns() (
         exit 0
     fi
     hint=""
-    [ "${depth:-0}" -gt 1 ] || hint="; if the record is stale, rerun deploy/install.sh --update from a host shell"
+    [ "${depth:-0}" -gt 1 ] || hint="; if the record is stale, delete ${file} and rerun deploy/install.sh --update from a host shell"
     echo "not the host PID namespace (NSpid: ${nspid:-none}; pid namespace: ${current:-unknown}; recorded host: ${recorded:-none})${hint}" >&2
     exit 1
 )

@@ -867,12 +867,32 @@ def test_install_records_the_host_pid_namespace(tmp_path: Path) -> None:
     helper = tmp_path / ".local/share/factory/host-pidns.sh"
     assert helper.read_bytes() == (ROOT / "deploy/host-pidns.sh").read_bytes()
 
-    environment["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "1728748\t61", "pid:[1]"))
-    again = _install(environment)
+
+@pytest.mark.parametrize(
+    ("nspid", "ns", "extra"),
+    [
+        ("1728748\t61", "pid:[1]", {}),
+        ("61", "pid:[4026532782]", {}),
+        ("4484", None, {"ORCH_JOB_PROOF": "x"}),
+        ("4484", None, {"CODEX_SANDBOX": "seatbelt"}),
+    ],
+    ids=["two-field-nspid", "own-proc-mount", "job", "codex-sandbox"],
+)
+def test_install_update_keeps_the_host_record_outside_the_host(
+    tmp_path: Path, nspid: str, ns: str | None, extra: dict[str, str],
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    record = tmp_path / ".config/factory/host-pidns"
+    host = os.readlink("/proc/self/ns/pid")
+    environment |= extra
+    environment["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, nspid, ns or host))
+
+    again = _install(environment, "--update")
 
     assert again.returncode == 0, again.stderr
     assert "not recording the host PID namespace" in again.stderr
-    assert record.read_text(encoding="utf-8").strip() == os.readlink("/proc/self/ns/pid")
+    assert record.read_text(encoding="utf-8").strip() == host
 
 
 @pytest.mark.parametrize(
