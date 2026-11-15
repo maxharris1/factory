@@ -614,6 +614,7 @@ _VERDICT_TIMES = (
     ("ticket_retries", "MAX", "recorded_at", "comment_id"),
     ("followup_filings", "MAX", "created_at", "comment_id"),
     ("auto_extra_comments", "MAX", "created_at", "comment_id"),
+    ("handled_times", "MAX", "handled_at", "comment_id"),
 )
 
 
@@ -769,7 +770,7 @@ def collect_snapshot(
             db["stuck_tickets"], db["overdue_jobs"], db["paused"], db["attention_flags"],
             report,
         ),
-        "health": {**component_health.report_json(report, now),
+        "health": {**_without_checkout_paths(component_health.report_json(report, now)),
                    "publish_seconds": publish_seconds},
         # The backlog feeder at its last poll (issue #85); None when none has run.
         "feeder": db["feeder"],
@@ -780,6 +781,12 @@ def collect_snapshot(
         "usage": usage,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+
+def _without_checkout_paths(health: dict) -> dict:
+    return {**health, "devices": [{key: value for key, value in device.items() if key != "checkout"}
+                                  for device in health["devices"]]}
 
 
 _CHART_RULES = (

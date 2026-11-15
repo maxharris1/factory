@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -955,6 +956,7 @@ class JobsMixin:
             source,
             job.request.action,
             job.request.recipient,
+            queued_at=self._first_queued_at(job),
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
         )
@@ -1036,8 +1038,8 @@ class JobsMixin:
     def _posted_handoff(self, job: Job, ticket: TrackedTicket | None) -> Comment | object | None:
         """The result a failed harness job already posted (#91, #105, #193).
 
-        Read from `ticket`, posted no earlier than the
-        job was queued, from a login trusted for its `from` and `role`, of a
+        Read from `ticket`, posted no earlier than its first
+        attempt was queued, from a login trusted for its `from` and `role`, of a
         kind in _SETTLING_KINDS for the job's action, and not already
         rejected when it was handled (stale, superseded, ...). A ready stale
         only because its review already answered (#71 stale-ready-verdict)
@@ -1074,8 +1076,9 @@ class JobsMixin:
         after_source = job.request.source_comment_id in ids
         if update and after_source:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
+        queued_at = math.floor(self._first_queued_at(job))
         for item in comments:
-            if not update and item.created_at < job.created_at:
+            if not update and item.created_at < queued_at:
                 continue
             try:
                 fields = parse_comment(item.body).as_dict()

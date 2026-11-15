@@ -160,6 +160,16 @@ def _retry_detail(job: Job) -> str | None:
     return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
 
+def _retry_of(detail: str | None) -> str | None:
+    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
+    try:
+        value = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    retry_of = value.get("retry_of") if isinstance(value, dict) else None
+    return retry_of if isinstance(retry_of, str) else None
+
+
 def _append_detail(detail: str, note: str) -> str:
     try:
         context = json.loads(detail)

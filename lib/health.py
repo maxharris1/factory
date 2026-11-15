@@ -67,14 +67,24 @@ target needs attention when missing or refused at once, or after
 SYNC_GRACE_SECONDS lagging or deploying; the box needs attention whenever its
 HEAD is not origin/main, since it has no `since` to wait on. Devices out of
 sync never change `orch health`'s exit status.
+
+Storage (#395): `orch health` alone (not `orch status` or the dashboard)
+measures disk and inode use where it runs: on the box with statvfs, for
+each filesystem holding the checkout, the database or /tmp; on each probed
+remote device with one `df` over SSH of its workdir_root. Inode use at
+INODE_ALERT_PERCENT (85) or more needs attention and makes `orch health`
+exit 3; a device that cannot be measured says so and leaves the exit status
+to its device probe.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import signal
 import sqlite3
 import stat
@@ -84,7 +94,8 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TextIO
@@ -93,7 +104,7 @@ from lib import device_sync
 from lib.dashboard_config import EVERY_MINUTES_MAX
 from lib.device_monitor import remote_target
 from lib.machines_yml import MachinesConfig, load_machines_yml
-from lib.remote import RemoteTarget, Transport, probe_device
+from lib.remote import ByteTransport, RemoteTarget, Transport, probe_device, ssh_argv
 from lib.wait import OWNING_BOTS
 
 if TYPE_CHECKING:
@@ -998,6 +1009,7 @@ class HealthReport:
     error: str | None = None
     code_version: str = "unknown"
     devices: tuple[DeviceSync, ...] = ()
+    storage: tuple[Storage, ...] = ()
 
     @property
     def down(self) -> tuple[Component, ...]:
@@ -1012,6 +1024,10 @@ class HealthReport:
     @property
     def devices_out_of_sync(self) -> tuple[DeviceSync, ...]:
         return tuple(d for d in self.devices if d.needs_attention)
+
+    @property
+    def storage_alerts(self) -> tuple[Storage, ...]:
+        return tuple(s for s in self.storage if s.alert)
 
     def no_waiter_for(self, harness: str) -> NoWaiter | None:
         return next((n for n in self.no_waiter if n.harness == harness), None)
@@ -1232,6 +1248,111 @@ def read_device_sync(db: Path) -> list[device_sync.Row]:
         return []
 
 
+# --- storage ---------------------------------------------------------------------------------
+
+INODE_ALERT_PERCENT = 85
+STORAGE_TIMEOUT = 15.0
+
+
+@dataclass(frozen=True)
+class Storage:
+    device: str
+    path: str
+    disk: int | None
+    inodes: int | None
+    error: str | None = None
+
+    @property
+    def alert(self) -> bool:
+        return self.inodes is not None and self.inodes >= INODE_ALERT_PERCENT
+
+
+def _df_percent(used: int, free: int) -> int | None:
+    return math.ceil(used * 100 / (used + free)) if used + free > 0 else None
+
+
+def _mount(path: Path) -> Path:
+    path = path.resolve()
+    while not os.path.ismount(path):
+        path = path.parent
+    return path
+
+
+def box_storage(device: str, paths: Iterable[Path],
+                statvfs: Callable[[Path], os.statvfs_result] = os.statvfs) -> list[Storage]:
+    seen: set[Path] = set()
+    found = []
+    for path in paths:
+        try:
+            mount = _mount(path)
+            if mount in seen:
+                continue
+            seen.add(mount)
+            st = statvfs(mount)
+        except OSError as exc:
+            found.append(Storage(device, str(path), None, None, type(exc).__name__))
+            continue
+        found.append(Storage(device, str(mount),
+                             _df_percent(st.f_blocks - st.f_bfree, st.f_bavail),
+                             _df_percent(st.f_files - st.f_ffree, st.f_ffree)))
+    return found
+
+
+def df_script(directory: str) -> str:
+    path = shlex.quote(directory)
+    return f"exec env -u DF_BLOCK_SIZE -u BLOCK_SIZE -u BLOCKSIZE LC_ALL=C sh -c {shlex.quote(f'df -Pk {path} && df -i {path}')}"
+
+
+def parse_df(text: str) -> tuple[int | None, int | None]:
+    """The filesystem and mount names may both hold spaces."""
+    columns: dict[str, str] = {}
+    for table in re.split(r"^(?=Filesystem)", text, flags=re.MULTILINE):
+        lines = table.split("\n", 1)
+        if len(lines) < 2:
+            continue
+        names = lines[0].lower().split()[1:-2]
+        if not names:
+            continue
+        value = r"(?:-?\d+%?|-)"
+        row = re.match(rf".*?\s({value}(?:\s+{value}){{{len(names) - 1}}})\s+/",
+                       " ".join(lines[1].split()))
+        if row is None:
+            continue
+        for name, found in zip(names, row.group(1).split()):
+            columns.setdefault(name, found)
+
+    def pair(used: str, free: tuple[str, ...]) -> int | None:
+        spare = next((columns[f] for f in free if f in columns), None)
+        if used not in columns or spare is None:
+            return None
+        try:
+            return _df_percent(int(columns[used]), int(spare))
+        except ValueError:
+            return None
+
+    return pair("used", ("available", "avail")), pair("iused", ("ifree",))
+
+
+def remote_storage(transport: ByteTransport, item: ProbeTarget,
+                   timeout: float = STORAGE_TIMEOUT) -> Storage:
+    path = item.target.workdir_root
+    result = transport.exchange(ssh_argv(item.target, df_script(path)), timeout=timeout)
+    disk, inodes = parse_df(result.stdout.decode("utf-8", "replace"))
+    if result.code != 0 or (disk is None and inodes is None):
+        return Storage(item.device, path, disk, inodes, f"df exited {result.code}")
+    return Storage(item.device, path, disk, inodes)
+
+
+def measure_storage(machines: MachinesConfig | None, db: Path,
+                    transport: ByteTransport) -> tuple[Storage, ...]:
+    box = box_storage(local_device(machines), (ROOT, db.parent, Path("/tmp")))
+    targets = probe_targets(machines)
+    if not targets:
+        return tuple(box)
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        return (*box, *pool.map(lambda item: remote_storage(transport, item), targets))
+
+
 # --- text ------------------------------------------------------------------------------------
 
 
@@ -1270,15 +1391,18 @@ def age_text(seconds: float) -> str:
 def render_lines(report: HealthReport, now: float) -> list[str]:
     """The Health section of `orch status` and `orch health`."""
     devices = [_device_line(d) for d in report.devices if d.state != device_sync.SYNCED]
+    storage = [_storage_line(s) for s in report.storage]
     if report.error is not None:
-        return ["Health", f"  unknown: {report.error}", *devices]
+        return ["Health", f"  unknown: {report.error}", *storage, *devices]
     if not report.known:
-        return ["Health", "  no heartbeats recorded yet", *devices]
+        return ["Health", "  no heartbeats recorded yet", *storage, *devices]
     header = f"{len(report.components)} components, {len(report.down)} down"
     if report.stale_code:
         header += f", {len(report.stale_code)} stale code"
     if report.devices_out_of_sync:
         header += f", {len(report.devices_out_of_sync)} devices out of sync"
+    if report.storage_alerts:
+        header += f", {len(report.storage_alerts)} inode alert{'' if len(report.storage_alerts) == 1 else 's'}"
     lines = [f"Health ({header})"]
     for c in report.components:
         reason = f" ({c.reason})" if c.reason else ""
@@ -1295,7 +1419,17 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
     for flag in report.no_waiter:
         count = len(flag.jobs)
         lines.append(f"  no waiter for {flag.harness}: {count} queued job{'' if count == 1 else 's'}")
-    return lines + devices
+    return lines + storage + devices
+
+
+def _storage_line(s: Storage) -> str:
+    def shown(value: int | None) -> str:
+        return "unknown" if value is None else f"{value}%"
+
+    line = f"  storage {s.device} {s.path}: disk {shown(s.disk)}, inodes {shown(s.inodes)}"
+    if s.alert:
+        line += f" (inode alert: at or over {INODE_ALERT_PERCENT}%)"
+    return line + (f" ({s.error})" if s.error else "")
 
 
 def _device_line(d: DeviceSync) -> str:
@@ -1346,6 +1480,12 @@ def report_json(report: HealthReport, now: float) -> dict:
             for d in report.devices
         ],
         "devices_out_of_sync": len(report.devices_out_of_sync),
+        "storage": [
+            {"device": s.device, "path": s.path, "disk_percent": s.disk,
+             "inode_percent": s.inodes, "alert": s.alert, "error": s.error}
+            for s in report.storage
+        ],
+        "storage_alerts": len(report.storage_alerts),
         "down": len(report.down),
         "stale_code": len(report.stale_code),
         "stale": sum(1 for c in report.components if c.state == STALE and c.configured),
@@ -1354,6 +1494,7 @@ def report_json(report: HealthReport, now: float) -> dict:
             "probe_seconds": PROBE_SECONDS,
             "stale_beats": STALE_BEATS,
             "down_beats": DOWN_BEATS,
+            "inode_alert_percent": INODE_ALERT_PERCENT,
         },
     }
 
@@ -1404,17 +1545,19 @@ def _queued(db: Path) -> list[tuple[str, str]]:
 
 
 def main(argv: list[str], *, stdout: TextIO | None = None,
-         clock: Callable[[], float] = time.time) -> int:
+         clock: Callable[[], float] = time.time,
+         transport: ByteTransport | None = None) -> int:
     out = stdout if stdout is not None else sys.stdout
     try:
         if argv[:1] == ["forget"]:
             return _forget(argv[1:])
-        return _report(argv, out, clock)
+        return _report(argv, out, clock, transport)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
 
 
-def _report(argv: list[str], out: TextIO, clock: Callable[[], float]) -> int:
+def _report(argv: list[str], out: TextIO, clock: Callable[[], float],
+            transport: ByteTransport | None) -> int:
     parser = _Parser(prog="orch health", usage=USAGE)
     parser.add_argument("--db", type=Path)
     parser.add_argument("--machines", type=Path)
@@ -1430,13 +1573,18 @@ def _report(argv: list[str], out: TextIO, clock: Callable[[], float]) -> int:
     except (HealthError, sqlite3.Error) as exc:
         print(f"orch health: {exc}", file=sys.stderr)
         return 1
+    if transport is None:
+        from lib.remote import SshTransport
+
+        transport = SshTransport()
+    report = replace(report, storage=measure_storage(machines, db, transport))
     if args.json:
         print(json.dumps(report_json(report, now), sort_keys=True), file=out)
     else:
         print("\n".join(render_lines(report, now)), file=out)
     if report.error is not None:
         return 1
-    return 3 if report.down or report.no_waiter else 0
+    return 3 if report.down or report.no_waiter or report.storage_alerts else 0
 
 
 def _orch(path: Path | None) -> OrchConfig | None:
