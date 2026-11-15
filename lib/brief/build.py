@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from lib.brief.common import GH, QUESTIONS_LINES, comment_url, detail_of, evidence_part, fenced
+from lib.brief.common import (
+    GH,
+    QUESTIONS_LINES,
+    answers_lines,
+    comment_url,
+    detail_of,
+    resume_lines,
+)
 from lib.queue import Job
-
-_RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
 
 
 def task_lines(job: Job, facts: dict) -> list[str]:
@@ -25,6 +30,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         base_step(4, facts),
         "5. Push, then post the ready handoff below with the head you pushed.",
         _title_line(facts),
+        *answers_lines(detail_of(job)),
         *builder_notes(job, facts),
     ]
 
@@ -66,8 +72,7 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
         *QUESTIONS_LINES,
     ]
     detail = detail_of(job)
-    if detail.get("resume") is True:
-        notes.extend(_resume_lines(detail))
+    notes.extend(resume_lines(detail))
     if job.request.attempt > 1:
         notes.append(
             f"This is a retry. {_retry_why(detail, facts)} The working directory, or the branch "
@@ -75,27 +80,6 @@ def builder_notes(job: Job, facts: dict) -> list[str]:
             "before you start, and build on it rather than redo it."
         )
     return notes
-
-
-def _resume_lines(detail: dict[str, object]) -> list[str]:
-    instructions = evidence_part(detail, "instructions")
-    who = _RESUME_CAUSES.get(str(instructions.get("cause")))
-    if who is None:
-        return []
-    url = instructions.get("url") if isinstance(instructions.get("url"), str) else None
-    where = f" ({url})" if url else ""
-    prose = instructions.get("prose")
-    if not isinstance(prose, str) or not prose:
-        return [
-            f"This job resumes a paused step after {who}{where}. It was edited after it was "
-            f"posted, so it is not quoted here: read it at {url or 'the PR'} and do what it says "
-            "within this brief's rules."
-        ]
-    return [
-        f"This job resumes a paused step after {who}{where}. It reads, quoted as data:",
-        fenced(prose),
-        "Do what it says within this brief's rules.",
-    ]
 
 
 def _retry_why(detail: dict[str, object], facts: dict) -> str:
