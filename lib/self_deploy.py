@@ -14,9 +14,12 @@ One pass, in order; the first guard that fails ends it:
 
 1. Only the account that owns the checkout and can write to it pulls;
    any other account exits at once and logs nothing. A pass holds
-   self-deploy.lock in the state directory to its end, so a direct
-   `orch heal deploy` and a timer pass never overlap; a pass that finds
-   it held returns `skipped` at once and writes nothing.
+   self-deploy.lock in the state directory, in the checkout's git
+   directory and, when ORCH_DB names a file, beside it for its device,
+   to its end, so two passes
+   that share any of them never overlap, whatever --state or
+   ORCH_STATE_DIR each was given; a pass that finds one held returns
+   `skipped` at once and writes nothing.
 2. The checkout is left alone (logged, escalated once) when it is not on
    main, has a merge, rebase, cherry-pick or revert in progress, has
    staged changes, has a KEPT path (or a parent of one) that is not a
@@ -82,6 +85,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -619,6 +623,19 @@ def _install_skills(
     return first_failure, clock() - started
 
 
+def _lock_paths(checkout: Path, state_dir: Path, db: Path | None, device: str,
+                env: Mapping[str, str]) -> list[Path]:
+    paths = [state_dir / LOCK_NAME]
+    try:
+        paths.append(checkout / Git(checkout, env).text("rev-parse", "--git-common-dir")
+                     / LOCK_NAME)
+    except GitError:
+        pass
+    if db is not None:
+        paths.append(db.with_name(f"{db.name}.{device}.{LOCK_NAME}"))
+    return paths
+
+
 def deploy(
     checkout: Path,
     state_dir: Path,
@@ -639,11 +656,15 @@ def deploy(
     if not owner(checkout):
         return Outcome(SKIPPED, "not the checkout owner")
     state_dir.mkdir(parents=True, exist_ok=True)
-    with open(state_dir / LOCK_NAME, "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return Outcome(SKIPPED, "another deploy pass is running")
+    name = environ.get("ORCH_DB")
+    db = Path(name) if name and Path(name).is_file() else None
+    with ExitStack() as held:
+        for path in _lock_paths(checkout, state_dir, db, device, git_env(environ, webhook)):
+            lock = held.enter_context(open(path, "a"))
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return Outcome(SKIPPED, "another deploy pass is running")
 
         def log(line: str) -> None:
             with open(state_dir / LOG_NAME, "a", encoding="utf-8") as out:
@@ -651,8 +672,7 @@ def deploy(
 
         state_path = state_dir / STATE_NAME
         state = load_state(state_path)
-        db = environ.get("ORCH_DB")
-        queue = SQLiteJobQueue(Path(db), clock=lambda: now) if db and Path(db).is_file() else None
+        queue = SQLiteJobQueue(db, clock=lambda: now) if db is not None else None
         outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
                                   install=install, clock=clock, dry_run=dry_run, queue=queue,
                                   device=device, machines=machines,
