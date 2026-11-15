@@ -3,3 +3,4 @@ failed process discovery during cleanup (r4)	ps or /proc that cannot be read rai
 failed discovery while the command runs	skip that look (track_if_listable); members already known stay known	a transient failure mid-run proves nothing either way; only cleanup decides death
 failed discovery before the command starts	do not start it: exit 127, the job goes to T6 with no child	the run could neither tell its own children from earlier ones nor confirm their death later
 ps exiting non-zero	treated like ps failing to start	a denied ps can still exit with partial or no output
+the ps that lists processes (CI fix)	_ps_processes runs ps through Popen and leaves its own pid out of the listing	the subreaper Tree adopts every new child of orch, so each look counted the ps it had just run as a member and cleanup never settled (CI timeout in test_no_retry_starts_while_process_discovery_fails_after_the_budget)

@@ -472,22 +472,30 @@ def _proc_processes(tag: str) -> dict[int, Process]:
 
 def _ps_processes() -> dict[int, Process]:
     try:
-        listing = subprocess.run(
+        ps = subprocess.Popen(
             ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
-            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"}, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ProcessesUnknown(f"cannot run ps: {_one_line(exc)}") from exc
-    if listing.returncode != 0:
-        raise ProcessesUnknown(f"ps exited {listing.returncode}: {' '.join(listing.stderr.split())}")
+    try:
+        stdout, stderr = ps.communicate(timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        ps.kill()
+        ps.communicate()
+        raise ProcessesUnknown(f"cannot run ps: {_one_line(exc)}") from exc
+    if ps.returncode != 0:
+        raise ProcessesUnknown(f"ps exited {ps.returncode}: {' '.join(stderr.split())}")
     found: dict[int, Process] = {}
-    for line in listing.stdout.splitlines():
+    for line in stdout.splitlines():
         parts = line.split(None, 3)
         if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
             continue
         if parts[2].startswith("Z"):
             continue
         found[int(parts[0])] = Process(int(parts[0]), int(parts[1]), parts[3].strip(), False)
+    found.pop(ps.pid, None)
     return found
 
 

@@ -75,7 +75,7 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
     ending = threading.Event()
     denied: list[int] = []
     held: list[tuple[str, bool, bool]] = []
-    real_run, real_end = subprocess.run, job_run.Tree.end
+    real_popen, real_end = subprocess.Popen, job_run.Tree.end
 
     def ps_denied_while_ending(args, *rest, **kwargs):
         if args[0] == "ps" and ending.is_set() and len(denied) < 3:
@@ -84,7 +84,7 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
                 dispatcher.reconcile_jobs()
                 held.append((state(), pool.placement(job_id) is not None, pool.claim("codex") is None))
             raise PermissionError("ps: Operation not permitted")
-        return real_run(args, *rest, **kwargs)
+        return real_popen(args, *rest, **kwargs)
 
     def state() -> str:
         with queue.connect() as connection:
@@ -96,7 +96,7 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
 
     monkeypatch.delenv("ORCH_DB", raising=False)
     monkeypatch.setattr(job_run, "_proc_processes", lambda _tag: job_run._ps_processes())
-    monkeypatch.setattr(job_run.subprocess, "run", ps_denied_while_ending)
+    monkeypatch.setattr(job_run.subprocess, "Popen", ps_denied_while_ending)
     monkeypatch.setattr(job_run.Tree, "end", end)
     try:
         code = cli.main([
@@ -120,18 +120,29 @@ def test_no_retry_starts_while_process_discovery_fails_after_the_budget(
     [
         PermissionError("Operation not permitted"),
         subprocess.TimeoutExpired("ps", 30),
-        subprocess.CompletedProcess(["ps"], 1, "", "ps: denied"),
+        1,
     ],
 )
 def test_a_ps_that_fails_or_exits_nonzero_is_unknown_not_empty(
     monkeypatch: pytest.MonkeyPatch, outcome: object
 ) -> None:
-    def ps(*_args, **_kwargs):
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome
+    class Ps:
+        pid = -1
+        returncode = 1
 
-    monkeypatch.setattr(job_run.subprocess, "run", ps)
+        def __init__(self, *_args, **_kwargs):
+            if isinstance(outcome, OSError):
+                raise outcome
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            if isinstance(outcome, subprocess.TimeoutExpired) and timeout is not None:
+                raise outcome
+            return "", "ps: denied"
+
+        def kill(self) -> None:
+            pass
+
+    monkeypatch.setattr(job_run.subprocess, "Popen", Ps)
     with pytest.raises(job_run.ProcessesUnknown):
         job_run._ps_processes()
 
@@ -177,3 +188,26 @@ def test_cleanup_returns_only_after_a_look_that_succeeds_and_finds_none() -> Non
     assert lines == [
         "cannot run ps: denied; holding the job until the run's processes are confirmed gone"
     ]
+
+
+def test_cleanup_by_ps_never_counts_the_ps_it_ran_as_a_run_process() -> None:
+    me = os.getpid()
+    before = frozenset(
+        (pid, process.start)
+        for pid, process in job_run._ps_processes().items()
+        if process.ppid == me
+    )
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    looks: list[int] = []
+
+    def scan(_tag: str) -> dict[int, job_run.Process]:
+        looks.append(1)
+        assert len(looks) <= 50, "each look found the ps that made it, so cleanup never settled"
+        return job_run._ps_processes()
+
+    try:
+        job_run.Tree(child.pid, "tag", scan=scan, adopts=True, others=before).end(lambda _line: None)
+        assert child.wait(5) == -signal.SIGKILL
+    finally:
+        child.kill()
+        child.wait()
