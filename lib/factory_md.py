@@ -37,6 +37,11 @@ globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
 as both sides still counts as a trivial update. Absent, it is empty.
 
+Unknown fields are errors by default, as check-config reads them. The
+poller, feeder and waiter read factory.md with strict=False (issue #288):
+an unknown field is a warning there, so a just-merged factory.md naming a
+field this code does not know yet still polls.
+
 parse_factory_context keeps the prose after the front block (Review, Ship,
 Context) for the waiter's standard brief (#80): the brief appends it as an
 additional-context section. Project-specific behavior lives there, not in
@@ -149,8 +154,10 @@ class FactoryContext:
     truncated: bool = False
 
 
-def parse_factory_context(text: str) -> tuple[FactoryContext | None, list[Finding]]:
-    config, findings = parse_factory_md(text)
+def parse_factory_context(
+    text: str, *, strict: bool = True
+) -> tuple[FactoryContext | None, list[Finding]]:
+    config, findings = parse_factory_md(text, strict=strict)
     if config is None:
         return None, findings
     _raw, body = split_front_matter(text)
@@ -169,7 +176,9 @@ def load_factory_md(path: Path) -> tuple[FactoryConfig | None, list[Finding]]:
     return parse_factory_md(path.read_text(encoding="utf-8"))
 
 
-def parse_factory_md(text: str) -> tuple[FactoryConfig | None, list[Finding]]:
+def parse_factory_md(
+    text: str, *, strict: bool = True
+) -> tuple[FactoryConfig | None, list[Finding]]:
     try:
         raw, _body = split_front_matter(text)
         data = load_yaml(raw)
@@ -177,24 +186,25 @@ def parse_factory_md(text: str) -> tuple[FactoryConfig | None, list[Finding]]:
         return None, [Finding("error", _yaml_message(exc))]
     if not isinstance(data, dict):
         return None, [Finding("error", "front matter must be a mapping")]
-    return _validate(data)
+    return _validate(data, strict)
 
 
-def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
+def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Finding]]:
     findings: list[Finding] = []
-    findings.extend(_unknown(data, _TOP_KEYS, ""))
+    unknown = "error" if strict else "warning"
+    findings.extend(_unknown(data, _TOP_KEYS, "", unknown))
 
     base_branch = _branch(data, findings)
     tickets = _choice(data, "tickets", TICKETS, findings)
-    builder_harness, builder_model = _actor(data, "builder", findings)
-    reviewer_harness, reviewer_model = _actor(data, "reviewer", findings)
-    rounds_low, rounds_high, verify = _review(data, findings)
+    builder_harness, builder_model = _actor(data, "builder", findings, unknown)
+    reviewer_harness, reviewer_model = _actor(data, "reviewer", findings, unknown)
+    rounds_low, rounds_high, verify = _review(data, findings, unknown)
     ship = _ship(data, findings)
     skills = _skills(data, findings)
     ci_runner = _optional_token(data, "ci_runner", findings)
     github_issues = _optional_bool(data, "github_issues", findings)
     github_labels = _optional_bool(data, "github_labels", findings)
-    hold = _hold(data, findings)
+    hold = _hold(data, findings, unknown)
     finish_line = _finish_line(data, ship, findings)
     shared_paths = _shared_paths(data, findings)
 
@@ -256,12 +266,12 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     return config, findings
 
 
-def _unknown(data: dict, allowed: set[str], prefix: str) -> list[Finding]:
+def _unknown(data: dict, allowed: set[str], prefix: str, severity: str) -> list[Finding]:
     findings: list[Finding] = []
     for key in sorted(data, key=lambda item: str(item)):
         if key not in allowed:
             dotted = f"{prefix}.{key}" if prefix else str(key)
-            findings.append(Finding("error", f"unknown field {dotted!r}"))
+            findings.append(Finding(severity, f"unknown field {dotted!r}"))
     return findings
 
 
@@ -297,6 +307,7 @@ def _actor(
     data: dict,
     key: str,
     findings: list[Finding],
+    unknown: str,
 ) -> tuple[str | None, str | None]:
     if key not in data:
         findings.append(Finding("error", f"missing required field '{key}.harness'"))
@@ -305,7 +316,7 @@ def _actor(
     if not isinstance(value, dict):
         findings.append(Finding("error", f"{key} must be a mapping"))
         return None, None
-    findings.extend(_unknown(value, {"harness", "model"}, key))
+    findings.extend(_unknown(value, {"harness", "model"}, key, unknown))
     harness: str | None = None
     if "harness" not in value:
         findings.append(Finding("error", f"missing required field '{key}.harness'"))
@@ -324,6 +335,7 @@ def _actor(
 def _review(
     data: dict,
     findings: list[Finding],
+    unknown: str,
 ) -> tuple[int | None, int | None, str | None]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
@@ -334,7 +346,7 @@ def _review(
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
         return None, None, None
-    findings.extend(_unknown(review, {"rounds", "verify"}, "review"))
+    findings.extend(_unknown(review, {"rounds", "verify"}, "review", unknown))
     low: int | None = None
     high: int | None = None
     if "rounds" not in review:
@@ -344,7 +356,7 @@ def _review(
         findings.append(Finding("error", "review.rounds must be a mapping"))
     else:
         rounds = review["rounds"]
-        findings.extend(_unknown(rounds, {"low", "high"}, "review.rounds"))
+        findings.extend(_unknown(rounds, {"low", "high"}, "review.rounds", unknown))
         low = _round(rounds, "low", findings)
         high = _round(rounds, "high", findings)
     verify: str | None = None
@@ -518,7 +530,7 @@ def _finish_line(
     return str(value)
 
 
-def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:
+def _hold(data: dict, findings: list[Finding], unknown: str) -> HoldConfig | None:
     if "hold" not in data:
         return None
     value = data["hold"]
@@ -527,8 +539,8 @@ def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:
     if not isinstance(value, dict):
         findings.append(Finding("error", "hold must be a mapping"))
         return None
-    errors = len(findings)
-    findings.extend(_unknown(value, _HOLD_KEYS, "hold"))
+    start = len(findings)
+    findings.extend(_unknown(value, _HOLD_KEYS, "hold", unknown))
     label = value.get("label", DEFAULT_HOLD_LABEL)
     if not isinstance(label, str) or _LABEL.fullmatch(label) is None:
         findings.append(Finding("error", "hold.label must be a GitHub label name"))
@@ -550,7 +562,7 @@ def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:
                 )
             else:
                 paths.append(item)
-    if len(findings) != errors:
+    if any(item.severity == "error" for item in findings[start:]):
         return None
     return HoldConfig(label=label, approver=approver, paths=tuple(paths))
 
