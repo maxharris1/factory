@@ -21,6 +21,7 @@ import pytest
 
 from lib import dashboard_telemetry, telemetry
 from lib.telemetry import STREAM_REASONS, Scrubber, Summary, stream_flags, stream_flags_line
+from lib.dashboard_pages.ticket_detail import live_run
 from tests.test_telemetry import _orch, _row, _running_job, _session, fixture_lines
 
 CLAUDE_FLAGS = ["--output-format", "stream-json", "--verbose"]
@@ -214,7 +215,8 @@ def test_the_dashboard_shows_no_data_for_a_job_without_usage(tmp_path: Path) -> 
     recent = rollup["recent"][0]
     assert recent["tokens_known"] is False
     assert rollup["totals"]["unmetered_jobs"] == 1
-    assert dashboard_telemetry._stats(recent)[5] == ("no data", "tokens in / out", "")
+    tiles = live_run({"job": recent["job"], "recipient": "claude", "telemetry": recent})
+    assert "<b>no data</b><span>tokens in</span>" in tiles and "<b>no data</b><span>tokens out</span>" in tiles
     page = dashboard_telemetry.rollup_panel({"telemetry": rollup})
     assert "1 jobs report no token usage (no data)" in page
     assert '<td class="num muted">no data</td>' in page
