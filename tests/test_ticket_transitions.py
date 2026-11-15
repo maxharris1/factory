@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
+from lib.dashboard_flow import QUEUE_JOB_BEFORE_ROW, JobStep, Transition, job_flow, load_chart
 from lib.dispatch.transitions import write_workflow_state
 from lib.queue import JobRequest
 from tests.merge_queue_support import Board, sha
@@ -70,6 +70,28 @@ def _sources_in_lib() -> dict[str, list[str]]:
 
 def test_every_workflow_state_writer_is_listed_once_with_its_file() -> None:
     assert _sources_in_lib() == {source: [file] for source, file in WRITERS.items()}
+
+
+def _called(call: ast.Call) -> str:
+    return getattr(call.func, "attr", None) or getattr(call.func, "id", "")
+
+
+def test_every_writer_that_queues_before_its_row_is_named_to_the_dashboard() -> None:
+    queued_first = {"set-state"}
+    for _, tree in _lib_files():
+        for function in ast.walk(tree):
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+            queues = [
+                call.lineno for call in calls
+                if "enqueue" in _called(call) or _called(call).startswith("_ensure_stuck_wake")
+            ]
+            for call in calls:
+                if _called(call) == "write_workflow_state" and any(at < call.lineno for at in queues):
+                    [source] = [k.value.value for k in call.keywords if k.arg == "source"]
+                    queued_first.add(source)
+    assert queued_first == QUEUE_JOB_BEFORE_ROW
 
 
 def test_no_sql_in_lib_writes_workflow_state_outside_the_helper() -> None:
@@ -204,7 +226,7 @@ def test_journey_owners_survive_jobs_enqueued_before_their_transition(
             for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
         tracked_at = connection.execute("SELECT tracked_at FROM tracked_tickets").fetchone()[0]
-    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"], r["source"]) for r in _rows(board)]
     assert any(job.created_at < row.at for job in jobs for row in rows if job.action == "build"
                and row.to_state == "building"), "the build is enqueued before its transition"
 
@@ -241,7 +263,7 @@ def test_a_legacy_tickets_first_row_keeps_the_older_review_on_its_own_visit(
             JobStep(r["action"], r["recipient"], r["created_at"], None, None)
             for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
-    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"], r["source"]) for r in _rows(board)]
     assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
 
     result = job_flow(load_chart(), jobs, "review", board.now[0], rows, None)

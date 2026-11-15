@@ -54,6 +54,9 @@ JOB_STATES = {
     "refused": "refused",
     "awaiting-ok": "awaiting-ok",
 }
+QUEUE_JOB_BEFORE_ROW = frozenset(
+    {"set-state", "plan-gap", "t3", "t5-answers", "cap-resume", "update-queued"}
+)
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -164,6 +167,7 @@ class JobStep(NamedTuple):
     created_at: float
     started_at: float | None
     finished_at: float | None
+    attempt: int = 1
 
 
 class Visit(NamedTuple):
@@ -175,6 +179,7 @@ class Transition(NamedTuple):
     from_state: str | None
     to_state: str
     at: float
+    source: str
 
 
 def chart_visits(
@@ -342,11 +347,13 @@ def _first_row_floor(
     )
     if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
         return last_other_job
-    *kept_by_old_visit, enqueued_with_first_row = sorted(
-        step.created_at for state, step in steps
+    if first.source not in QUEUE_JOB_BEFORE_ROW:
+        return first.at
+    kept_by_old_visit, *later = sorted(
+        (step.created_at, step.attempt) for state, step in steps
         if state == first.to_state and last_other_job < step.created_at < first.at
-    ) or [first.at]
-    return enqueued_with_first_row if kept_by_old_visit else first.at
+    ) or [None]
+    return max((at for at, attempt in later if attempt == 1), default=first.at)
 
 
 def _recorded_walk(
