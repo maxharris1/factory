@@ -46,7 +46,7 @@ poll_seconds: 30
 projects:
   - repo: owner/repo
 trusted_logins:
-  {app_bot}: [grok-bot, claude-bot, codex-bot]
+  {app_bot}: [grok-bot]
   maxharris1: [grok-bot]
   grok-login: [grok-bot]
   claude-login: [claude-bot]
@@ -62,12 +62,15 @@ def orch_text(*, enabled: bool | None = True, extra: str = "", profile: str | No
     if enabled is not None:
         text += (
             "github_app:\n"
-            f"  app_id: {FAKE_APP_ID}\n"
-            "  installations:\n"
-            f"    maxharris1: {FAKE_INSTALLATION}\n"
-            "  private_key_file: /nonexistent/fake-app.pem\n"
-            f"  bot_login: {APP_BOT}\n"
             f"  enabled: {'true' if enabled else 'false'}\n"
+            "  apps:\n"
+            "    grok-bot:\n"
+            f"      bot_login: {APP_BOT}\n"
+            f"      app_id: {FAKE_APP_ID}\n"
+            "      installations:\n"
+            f"        maxharris1: {FAKE_INSTALLATION}\n"
+            f"        owner: {FAKE_INSTALLATION + 1}\n"
+            "      private_key_file: /nonexistent/fake-app.pem\n"
         )
     return text + extra
 
@@ -94,13 +97,14 @@ def trusted(config) -> dict:
 def test_github_app_config_parses_with_fake_ids(tmp_path: Path) -> None:
     config, findings = load(tmp_path, orch_text(enabled=False, profile="/fake/home/gh-approver"))
     assert config is not None, findings
-    app = config.github_app
-    assert app is not None
-    assert (app.app_id, dict(app.installations), app.bot_login, app.enabled) == (
+    assert config.github_app is not None
+    assert config.github_app.enabled is False
+    app = config.github_app.apps["grok-bot"]
+    assert (app.bot, app.app_id, dict(app.installations), app.bot_login) == (
+        "grok-bot",
         FAKE_APP_ID,
-        {MAX: FAKE_INSTALLATION},
+        {MAX: FAKE_INSTALLATION, "owner": FAKE_INSTALLATION + 1},
         APP_BOT,
-        False,
     )
     assert app.private_key_file == Path("/nonexistent/fake-app.pem")
     assert config.approver_logins == frozenset({MAX})
@@ -109,7 +113,12 @@ def test_github_app_config_parses_with_fake_ids(tmp_path: Path) -> None:
 
     config, findings = load(tmp_path, orch_text(enabled=True))
     assert config is not None, findings
-    assert approvals(config) == Approvals(app_trust=True, logins=frozenset({MAX}))
+    switch = approvals(config)
+    assert (switch.app_trust, switch.logins, dict(switch.app_logins)) == (
+        True,
+        frozenset({MAX}),
+        {APP_BOT.casefold(): "grok-bot"},
+    )
 
 
 def test_no_app_block_means_the_switch_is_off(tmp_path: Path) -> None:
@@ -121,38 +130,38 @@ def test_no_app_block_means_the_switch_is_off(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        (orch_text().replace(f"app_id: {FAKE_APP_ID}", "app_id: 0"), "github_app.app_id must be a positive integer"),
-        (orch_text().replace(f"app_id: {FAKE_APP_ID}", "app_id: '1'"), "github_app.app_id must be a positive integer"),
+        (orch_text().replace(f"app_id: {FAKE_APP_ID}", "app_id: 0"), "github_app.apps.grok-bot.app_id must be a positive integer"),
+        (orch_text().replace(f"app_id: {FAKE_APP_ID}", "app_id: '1'"), "github_app.apps.grok-bot.app_id must be a positive integer"),
         (
             orch_text().replace(f"maxharris1: {FAKE_INSTALLATION}", "maxharris1: -3"),
-            "github_app.installations must map an account login to a positive installation id",
+            "github_app.apps.grok-bot.installations must map an account login to a positive installation id",
         ),
         (
-            orch_text().replace(f"    maxharris1: {FAKE_INSTALLATION}\n", ""),
-            "github_app.installations must map an account login to a positive installation id",
+            orch_text().replace(f"        owner: {FAKE_INSTALLATION + 1}\n", ""),
+            "github_app.apps.grok-bot.installations has no installation for owner",
         ),
         (
             orch_text().replace("/nonexistent/fake-app.pem", "keys/fake-app.pem"),
-            "github_app.private_key_file must be an absolute path",
+            "github_app.apps.grok-bot.private_key_file must be an absolute path",
         ),
         (
             orch_text().replace("/nonexistent/fake-app.pem", "~/fake-app.pem"),
-            "github_app.private_key_file must be an absolute path",
+            "github_app.apps.grok-bot.private_key_file must be an absolute path",
         ),
-        (orch_text().replace(f"bot_login: {APP_BOT}", "bot_login: factory-bots"), "github_app.bot_login must be"),
+        (orch_text().replace(f"bot_login: {APP_BOT}", "bot_login: factory-bots"), "github_app.apps.grok-bot.bot_login must be"),
         (orch_text().replace("enabled: true", "enabled: yes please"), "github_app.enabled must be true or false"),
         (orch_text().replace("  enabled: true\n", "  enabled: true\n  token: x\n"), "unknown field 'github_app.token'"),
         (
-            orch_text().replace(f"  bot_login: {APP_BOT}\n", ""),
-            "github_app.enabled requires github_app.bot_login",
+            orch_text().replace(f"      bot_login: {APP_BOT}\n", ""),
+            "github_app.apps.grok-bot.bot_login is required",
         ),
         (
             orch_text().replace("approver_logins:\n  - maxharris1\n", ""),
             "github_app.enabled requires approver_logins",
         ),
         (
-            orch_text().replace(f"  {APP_BOT}: [grok-bot, claude-bot, codex-bot]\n", ""),
-            "github_app.bot_login must be a trusted_logins key",
+            orch_text().replace(f"  {APP_BOT}: [grok-bot]\n", ""),
+            "github_app.apps.grok-bot.bot_login must be a trusted_logins key",
         ),
         (
             orch_text().replace("  - maxharris1\n", f"  - {APP_BOT}\n"),

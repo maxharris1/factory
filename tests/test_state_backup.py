@@ -102,6 +102,17 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
     _dispatcher, queue = _seeded(tmp_path)
     dest = tmp_path / "share" / "orch.db"
     backup(queue.path, dest)
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="43",
+            action="build",
+            recipient="claude",
+            source_comment_id="go-2",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="t2:build",
+    )
     before = _snapshot(queue.path)
 
     code = cli.main(["restore-db", "--db", str(queue.path), "--backup", str(dest)])
@@ -109,6 +120,7 @@ def test_restore_db_refuses_an_existing_db(tmp_path: Path, capsys) -> None:
 
     assert code == 1
     assert "exists; refusing to overwrite it" in capsys.readouterr().err
+    assert sorted(_dedupe_keys(queue.path)) == ["t1:build", "t2:build"]
     assert _snapshot(queue.path) == before
 
 

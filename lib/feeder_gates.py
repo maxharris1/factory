@@ -12,6 +12,10 @@ that starts (after an optional list marker and `**`) with `Blocked by`,
 line are `#N` (the ticket's own repo; `PR #N` counts), `owner/repo#N` and
 GitHub issue or pull URLs. Paths on a `Touches:` line split on commas and
 spaces. Prose is never read: a ref on the next line does not count.
+
+A `Touches:` path that matches the project's factory.md `shared_paths`
+(issue #261) never causes a collision wait; a `Conflicts with` edge still
+holds.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
+
+from lib.hold import glob_matches
 
 Tracker = Literal["github", "linear"]
 
@@ -143,6 +149,20 @@ def paths_collide(first: str, second: str) -> bool:
     if first.endswith("/") and second.startswith(first):
         return True
     return second.endswith("/") and first.startswith(second)
+
+
+def shared_path_matches(patterns: Iterable[str], path: str) -> bool:
+    """Whether path matches a shared_paths pattern: a glob with hold.paths
+    rules, where a trailing / names a directory and everything under it."""
+    path = path.removesuffix("/")
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            directory = pattern[:-1]
+            if glob_matches(directory, path) or glob_matches(directory + "/**", path):
+                return True
+        elif glob_matches(pattern, path):
+            return True
+    return False
 
 
 class Progress(Enum):
@@ -297,6 +317,7 @@ class Holds:
     """
 
     held: list[tuple[Ref, frozenset[Ref], GateLines, str]] = field(default_factory=list)
+    shared: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def take(
         self, holder: Ref, aliases: Iterable[Ref], lines: GateLines, note: str = "conflicts with it"
@@ -315,15 +336,18 @@ class Holds:
     def collision(self, ref: Ref, lines: GateLines, aliases: Iterable[Ref] = ()) -> Wait | None:
         """Why ref waits on a holder; aliases are other refs it goes by (its PR)."""
         own = frozenset({ref, *aliases})
+        shared = self.shared.get(ref.repo, ())
         for holder, names, held, note in self.held:
             if names & own:
                 continue
             for path in sorted(lines.touches) if holder.repo == ref.repo else ():
                 for other in sorted(held.touches):
+                    if shared_path_matches(shared, path) or shared_path_matches(shared, other):
+                        continue
                     if paths_collide(path, other):
-                        shared = path if len(path) >= len(other) else other
+                        longer = path if len(path) >= len(other) else other
                         return Wait(
-                            f"waiting on file {shared} held by {holder.label(ref.repo)}"
+                            f"waiting on file {longer} held by {holder.label(ref.repo)}"
                         )
             if lines.conflicts_with & names or own & held.conflicts_with:
                 return Wait(f"waiting on {holder.label(ref.repo)} ({note})")

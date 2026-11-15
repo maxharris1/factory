@@ -10,14 +10,14 @@ import time
 import traceback
 import zlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
 from lib import attention, project_rules
 from lib.device_pool import free_slots, used_slots
-from lib.factory_md import FactoryConfig
+from lib.factory_md import FactoryConfig, family_findings
 from lib.grok_delivery import GrokDeliveryError
 from lib.handoff import HandoffError, parse_comment
 from lib.hold import HoldDecision, LabelEvent, decide
@@ -54,6 +54,9 @@ from lib.update_check import UpdateClass
 GITHUB_STATE_LABEL_PREFIX = "orch:state/"
 # merged and done are absorbing (#108): no later write moves a ticket out.
 FINISHED_STATES = ("merged", "done")
+ORCHESTRATOR = "grok-bot"
+# #170: the kinds a worker bot's App login may post once the switch is on.
+WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})
 _NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
 # #108 (#42 N4): states where no bot is working and no person is waiting on
 # the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
@@ -63,6 +66,9 @@ STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
 WATCHED_STATES = ("merge-queue", "updating")
 UPDATE_FAILURES_TO_STOP = 2
 UPDATE_READY_GRACE_SECONDS = 600.0
+# #255: how long a ready on a conflicting PR waits for any check run on its
+# head before the dispatcher queues a merge-only base update.
+BASE_UPDATE_GRACE_SECONDS = 120.0
 STOPPED_POLL_SECONDS = 300
 MERGED_BEFORE_HANDOFF = "merged before handoff"
 LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
@@ -105,6 +111,9 @@ class Comment:
 class CIResult:
     status: str
     log: str | None = None
+    # False when the head has no check run and no commit status at all:
+    # GitHub ran nothing there (#255), as opposed to CI still running.
+    reported: bool = True
 
     def __post_init__(self) -> None:
         if self.status not in ("pending", "success", "failure"):
@@ -157,6 +166,9 @@ class TrackedTicket:
     labels: tuple[str, ...] | None = None
     changed_files: tuple[str, ...] | None = None
     label_events: tuple[LabelEvent, ...] | None = None
+    # Issue #206: factory.md's config when a go routed this ticket to other
+    # harnesses; factory then holds the routed pair.
+    factory_md: FactoryConfig | None = None
     # Issue #115: the source issue (`#115`, or a Linear key) and the open
     # PR's title, so the poller can prefix a title that lacks it.
     source_issue: str | None = None
@@ -291,6 +303,14 @@ class RetryableStateError(RuntimeError):
 
 class RetryableShipError(RetryableStateError):
     pass
+
+
+class RouteError(RuntimeError):
+    """A ticket's restored routing fails factory.md's cross-family rule."""
+
+    def __init__(self, message: str, source_comment_id: str):
+        super().__init__(message)
+        self.source_comment_id = source_comment_id
 
 
 class ShipError(RuntimeError):
@@ -535,9 +555,9 @@ class Feeder(Protocol):
     def feed_once(self) -> object: ...
 
 
-# (repo, base branch, approved head, updated head) -> whether the update is
+# (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
 # trivial, and why (lib/update_check.py).
-UpdateClassifier = Callable[[str, str, str, str], UpdateClass]
+UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]
 
 
 class Dispatcher:
@@ -960,6 +980,14 @@ class Dispatcher:
         return prior is None or prior["workflow_state"] != "merged"
 
     def process(self, ticket: TrackedTicket) -> None:
+        try:
+            ticket = self._routed(ticket)
+        except RouteError as error:
+            if ticket.closed and self._watched(ticket):
+                self._abandon_closed(ticket)
+            else:
+                self._reject_route(ticket, error)
+            return
         self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         try:
             self._title_pull(ticket)
@@ -1824,8 +1852,13 @@ class Dispatcher:
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
+            routed = _route_go(ticket, fields)
+            if routed is None:
+                return True, "rejected-go-same-family"
+            ticket = routed
             resumed = self._resume_after_cap(ticket, comment)
             if resumed is not None:
+                self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
         if not trusted:
             return True, "rejected-go-author"
@@ -1889,6 +1922,7 @@ class Dispatcher:
         )
         if job.request.source_comment_id != comment.id:
             return True, f"deduped-{action}"
+        self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
         self._set_workflow_state(ticket, state)
         return True, f"answered-{action}" if answered else f"queued-{action}"
 
@@ -2229,7 +2263,11 @@ class Dispatcher:
         comment: Comment,
         fields: Mapping[str, str],
     ) -> tuple[bool, str]:
-        builder_harness = self._job_builder_harness(ticket)
+        builder_harness = (
+            ticket.factory.builder_harness
+            if ticket.factory_md is not None
+            else self._job_builder_harness(ticket)
+        )
         if builder_harness is None and ticket.ready_starts_review:
             # The project builds its PRs outside the queue (orch.yml
             # projects[].ready_starts_review): factory.md's builder, trusted
@@ -2307,6 +2345,12 @@ class Dispatcher:
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
         if result is None or result.status == "pending":
+            if (
+                (result is None or not result.reported)
+                and ticket.mergeable_state == "dirty"
+                and state not in WATCHED_STATES
+            ):
+                return False, self._queue_base_update(ticket, comment, head, review_round)
             return False, "ci-pending"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
@@ -2368,6 +2412,48 @@ class Dispatcher:
         if reentry is not None or rereview:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
+
+    def _queue_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+    ) -> str:
+        """#255: GitHub runs no pull_request CI on a conflicting PR, so the
+        ready at head would wait on CI forever. Once the grace has passed
+        with nothing reported on head, queue one merge-only job there; the
+        ready it posts gets CI and review as usual. It charges no round."""
+        if self.queue.now() - comment.created_at < BASE_UPDATE_GRACE_SECONDS:
+            return "ci-pending"
+        request = JobRequest(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            action="fix",
+            recipient=ticket.factory.builder_harness,
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            generation=self._generation(ticket.repo, ticket.ticket_id),
+            head=head,
+            detail=self._job_detail(
+                ticket,
+                action="fix",
+                head=head,
+                round_number=review_round + 1,
+                instruction=(
+                    f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
+                    f"ran no CI on {head}: merge {ticket.factory.base_branch} in."
+                ),
+                kind="merge-only",
+            ),
+        )
+        self._enqueue_or_flag(
+            ticket,
+            comment,
+            request,
+            dedupe_key=f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
+        )
+        return "ci-pending-base-update"
 
     def _settle_update(
         self,
@@ -2467,7 +2553,11 @@ class Dispatcher:
             return UpdateClass(False, "no update check is configured")
         try:
             return self.update_classifier(
-                ticket.repo, ticket.factory.base_branch, approved_head, head
+                ticket.repo,
+                ticket.factory.base_branch,
+                approved_head,
+                head,
+                ticket.factory.shared_paths,
             )
         except Exception as exc:
             return UpdateClass(False, f"check failed: {type(exc).__name__}")
@@ -3121,7 +3211,8 @@ class Dispatcher:
         if ticket.factory.finish_line != "merge":
             return
         if ticket.mergeable_state in ("dirty", "behind"):
-            self._queue_update(ticket, row)
+            if not self._base_update_out(ticket):
+                self._queue_update(ticket, row)
             return
         head = ticket.current_head
         ci = ticket.ci.get(head) if head is not None else None
@@ -3278,6 +3369,24 @@ class Dispatcher:
             self._write_state_label(ticket, "abandoned")
         except RetryableStateError:
             self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
+
+    def _base_update_out(self, ticket: TrackedTicket) -> bool:
+        """A #255 base update for the current head is queued or running, so
+        the merge queue must not queue a second update job for that head."""
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM jobs
+                    WHERE dedupe_key = ? AND state IN ('queued', 'running')
+                    """,
+                    (
+                        f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:"
+                        f"{ticket.current_head}",
+                    ),
+                ).fetchone()
+                is not None
+            )
 
     def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
         """An update-from-main job for the conflicting queue head (#130)."""
@@ -3897,6 +4006,7 @@ class Dispatcher:
         return (
             sender is not None
             and sender in self._trusted_bots(comment)
+            and self._app_may_post(comment, fields)
         )
 
     def _latest_step(
@@ -3912,6 +4022,7 @@ class Dispatcher:
                   AND action IN (
                       'plan', 'build', 'review', 'fix', 'update-from-main', 'clarify'
                   )
+                  AND attempt = 1
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
@@ -4000,9 +4111,10 @@ class Dispatcher:
         tracker = self._tracker(ticket.repo, ticket.ticket_id)
         if tracker is None:
             return None
-        return self._observed(
+        fresh = self._observed(
             self._fresh_reader(TicketRef(ticket.repo, ticket.ticket_id, tracker))
         )
+        return None if fresh is None else self._routed(fresh)
 
     def _observed(self, fresh: TrackedTicket | None) -> TrackedTicket | None:
         """Every read outside the poll's snapshot passes here: one showing
@@ -5132,6 +5244,37 @@ class Dispatcher:
                 (ticket.repo.lower(), ticket.ticket_id, state),
             )
 
+    def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
+        """The ticket with the builder and reviewer its latest plan, build or
+        fix step was routed to (issue #206), or as read when that step names
+        no routing. A T6 retry is not a step: it repeats an older one. Raises RouteError when the restored pair, with today's
+        factory.md model hints, fails the cross-family rule."""
+        if ticket.factory_md is not None:
+            return ticket
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT detail, source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND action IN ('plan', 'build', 'fix') AND attempt = 1
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        routing = _detail_routing(None if row is None else row["detail"])
+        if routing is None:
+            return ticket
+        routed = _route(ticket, *routing)
+        errors = _family_errors(routed.factory)
+        if errors:
+            raise RouteError(
+                f"{ticket.repo}#{ticket.ticket_id} routing "
+                f"{routing[0]} / {routing[1]}: {'; '.join(errors)}",
+                str(row["source_comment_id"]),
+            )
+        return routed
+
     def _job_builder_harness(self, ticket: TrackedTicket) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -5139,6 +5282,7 @@ class Dispatcher:
                 SELECT recipient FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('plan', 'build', 'fix', 'update-from-main')
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -5154,6 +5298,7 @@ class Dispatcher:
                 """
                 SELECT recipient, generation FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'plan'
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -5500,6 +5645,39 @@ class Dispatcher:
             connection.commit()
         self._log_job_event(job, "retry-skipped", detail)
 
+    def _reject_route(self, ticket: TrackedTicket, error: RouteError) -> None:
+        """A restored same-family pair (#206): the ticket goes stuck and no
+        job queued under that pair can be claimed."""
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_stuck_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                source_comment_id=error.source_comment_id,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
+                reason="route-same-family",
+            )
+            for job in connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND state = 'queued'
+                  AND recipient != 'grok'
+                """,
+                key,
+            ).fetchall():
+                self.queue.cancel(
+                    str(job["id"]), "route-same-family", connection=connection
+                )
+            self._ensure_stuck_wake_in_transaction(
+                connection,
+                repo=ticket.repo,
+                ticket_id=ticket.ticket_id,
+                detail=str(error),
+            )
+            connection.commit()
+
     def _mark_stuck_and_wake(
         self,
         *,
@@ -5792,10 +5970,21 @@ class Dispatcher:
             fields.get("from") == expected_bot
             and fields.get("role") == role
             and expected_bot in self._trusted_bots(comment)
+            and self._app_may_post(comment, fields)
         )
 
     def _trusted_bots(self, comment: Comment) -> frozenset[str]:
-        return trusted_bots(self.trusted_logins, comment.author)
+        bots = trusted_bots(self.trusted_logins, comment.author)
+        app_bot = self.approvals.app_bot(comment.author)
+        if app_bot is None:
+            return bots
+        return bots & {app_bot}
+
+    def _app_may_post(self, comment: Comment, fields: Mapping[str, str]) -> bool:
+        """#170: with the switch on, a worker bot's App login speaks only
+        its own handoff kinds; answers, go and ok stay Factory's."""
+        app_bot = self.approvals.app_bot(comment.author)
+        return app_bot in (None, ORCHESTRATOR) or fields.get("kind") in WORKER_KINDS
 
     def _review_actions(self, ticket: TrackedTicket) -> ReviewActions:
         if isinstance(self.review_actions, Mapping):
@@ -5817,6 +6006,7 @@ class Dispatcher:
         instruction: str | None = None,
         resume: bool = False,
         cap: int | None = None,
+        kind: str | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -5846,6 +6036,13 @@ class Dispatcher:
         }
         if instruction is not None:
             context["instruction"] = instruction
+        if ticket.factory_md is not None:
+            context["routing"] = {
+                "builder": ticket.factory.builder_harness,
+                "reviewer": ticket.factory.reviewer_harness,
+            }
+        if kind is not None:
+            context["kind"] = kind
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
@@ -6729,7 +6926,10 @@ class ReviewShipper:
         if len(found) != 1:
             raise ShipError(f"{request.repo}#{request.ticket_id} was not found")
         self.dispatcher._observed(found[0])
-        return found[0]
+        try:
+            return self.dispatcher._routed(found[0])
+        except RouteError as error:
+            raise ShipError(str(error)) from error
 
 
 class PollLoop:
@@ -6919,6 +7119,70 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _detail_routing(detail: str | None) -> tuple[str, str] | None:
+    """The (builder, reviewer) a job's detail JSON was routed to (#206)."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    routing = context.get("routing") if isinstance(context, dict) else None
+    if not isinstance(routing, dict):
+        return None
+    builder, reviewer = routing.get("builder"), routing.get("reviewer")
+    if builder not in HARNESSES or reviewer not in HARNESSES:
+        return None
+    return builder, reviewer
+
+
+def _route(ticket: TrackedTicket, builder: str, reviewer: str) -> TrackedTicket:
+    """ticket with factory.md's harnesses swapped for builder and reviewer.
+    A model hint is kept only for a side whose harness stays factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    return replace(
+        ticket,
+        factory_md=base,
+        factory=replace(
+            base,
+            builder_harness=builder,
+            builder_model=base.builder_model if builder == base.builder_harness else None,
+            reviewer_harness=reviewer,
+            reviewer_model=(
+                base.reviewer_model if reviewer == base.reviewer_harness else None
+            ),
+        ),
+    )
+
+
+def _route_go(ticket: TrackedTicket, fields: Mapping[str, str]) -> TrackedTicket | None:
+    """The ticket routed as a go names it (#206), or None when the pair
+    fails factory.md's cross-family rule. A go naming neither harness
+    routes back to factory.md's."""
+    base = ticket.factory_md or ticket.factory
+    if "builder" not in fields and "reviewer" not in fields:
+        return replace(ticket, factory=base, factory_md=None)
+    routed = _route(
+        ticket,
+        fields.get("builder", base.builder_harness),
+        fields.get("reviewer", base.reviewer_harness),
+    )
+    return None if _family_errors(routed.factory) else routed
+
+
+def _family_errors(config: FactoryConfig) -> list[str]:
+    return [
+        finding.message
+        for finding in family_findings(
+            config.builder_harness,
+            config.builder_model,
+            config.reviewer_harness,
+            config.reviewer_model,
+        )
+        if finding.severity == "error"
+    ]
 
 
 def _matching_head(reported: str, current: str | None) -> str | None:

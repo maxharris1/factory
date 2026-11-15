@@ -269,6 +269,36 @@ class TicketFlow:
         self._questions = tuple(updated)
         return answers_comment(text, answer, visible=visible)
 
+    def post_answers(
+        self,
+        answers: Sequence[tuple[str, str]],
+        *,
+        visible: bool = False,
+    ) -> str:
+        """One answers comment for every open product question, in question order."""
+        if not self._questions_posted:
+            raise QuestionError("questions step has not run")
+        given = _answer_pairs(answers)
+        open_texts = [
+            question.text
+            for question in self._questions
+            if question.classification == "product" and question.answer is None
+        ]
+        if not open_texts:
+            raise QuestionError("no open product question")
+        if set(given) != set(open_texts):
+            raise QuestionError("answer every open product question, and only those")
+        self._questions = tuple(
+            replace(question, answer=given[question.text])
+            if question.text in given and question.answer is None
+            else question
+            for question in self._questions
+        )
+        return answers_for(
+            [(text, given[text]) for text in open_texts],
+            visible=visible,
+        )
+
     def post_go(
         self,
         decision: RouteDecision,
@@ -538,6 +568,27 @@ def answers_comment(
     )
 
 
+def answers_for(
+    answers: Sequence[tuple[str, str]],
+    *,
+    visible: bool = False,
+) -> str:
+    """One answers comment holding every answer to one questions comment.
+
+    The dispatcher resumes the paused step on the first trusted answers and
+    rejects any later one, so all answers go in this single comment."""
+    pairs = _answer_pairs(answers)
+    body = "\n".join(
+        f"**Question**\n{question}\n\n**Answer**\n{answer}\n"
+        for question, answer in pairs.items()
+    )
+    return _comment(
+        {"kind": "answers", "from": FROM, "role": ROLE},
+        body,
+        visible=visible,
+    )
+
+
 def go_comment(
     decision: RouteDecision,
     verify: str,
@@ -621,22 +672,63 @@ def approver_go_post(
         raise OrchestrateError(
             f"never post kind={kind} as Max: only a capped-ticket go, and Max posts his own ok"
         )
-    words = _text(max_words, "Max's exact words")
-    quoted = "\n".join(f"> {line}".rstrip() for line in words.splitlines())
     body = _comment(
         {"kind": "go", "from": FROM, "role": ROLE, "state": "building"},
-        f"**Max's words**\n{quoted}\n",
+        _max_words_block(max_words),
         visible=visible,
     )
+    return ApproverGo(body, _approver_env(environ, app_trust, gh_config_dir))
+
+
+def extra_round_go(
+    ticket: str,
+    max_words: str,
+    instruction: str,
+    environ: Mapping[str, str],
+    *,
+    app_trust: bool,
+    gh_config_dir: Path | None,
+    visible: bool = False,
+) -> ApproverGo:
+    """The go for one extra round on a capped ticket (D16, short-term until
+    T02f #173): the ticket, Max's exact words quoted unchanged, and the
+    instruction for the round, posted as maxharris1 through the same gh
+    environment as approver_go_post. It writes a go and nothing else."""
+    ticket = _one_line(ticket, "ticket")
+    instruction = _text(instruction, "instruction")
+    body = (
+        f"**Ticket**\n{ticket}\n\n"
+        f"{_max_words_block(max_words)}\n"
+        f"**Instruction**\n{instruction}\n"
+    )
+    comment = _comment(
+        {"kind": "go", "from": FROM, "role": ROLE, "state": "building"},
+        body,
+        visible=visible,
+    )
+    return ApproverGo(comment, _approver_env(environ, app_trust, gh_config_dir))
+
+
+def _max_words_block(max_words: str) -> str:
+    words = _text(max_words, "Max's exact words")
+    quoted = "\n".join(f"> {line}".rstrip() for line in words.splitlines())
+    return f"**Max's words**\n{quoted}\n"
+
+
+def _approver_env(
+    environ: Mapping[str, str],
+    app_trust: bool,
+    gh_config_dir: Path | None,
+) -> dict[str, str]:
     env = {key: value for key, value in environ.items() if key not in APPROVAL_TOKEN_VARIABLES}
     if not app_trust:
-        return ApproverGo(body, env)
+        return env
     if gh_config_dir is None:
         raise OrchestrateError(
             "no approver_gh_config_dir in orch.yml: post it from maxharris1 by hand"
         )
     env["GH_CONFIG_DIR"] = str(gh_config_dir)
-    return ApproverGo(body, env)
+    return env
 
 
 def format_stop_report(report: StopReport) -> str:
@@ -765,6 +857,22 @@ def _comment(
         Handoff(fields=tuple(fields.items()), body=text),
         visible=visible,
     )
+
+
+def _answer_pairs(answers: Sequence[tuple[str, str]]) -> dict[str, str]:
+    if isinstance(answers, str):
+        raise QuestionError("each answer must be a question and answer pair")
+    pairs: dict[str, str] = {}
+    for pair in answers:
+        if isinstance(pair, str) or len(pair) != 2:
+            raise QuestionError("each answer must be a question and answer pair")
+        question = _one_line(pair[0], "question text", QuestionError)
+        if question in pairs:
+            raise QuestionError(f"question {question!r} answered twice")
+        pairs[question] = _text(pair[1], "answer", QuestionError)
+    if not pairs:
+        raise QuestionError("answers need at least one answer")
+    return pairs
 
 
 def _text(

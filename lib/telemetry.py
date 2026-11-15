@@ -3,12 +3,16 @@
 `orch job run` (lib/cli.py, lib/job_run.py) runs the harness with its
 stdout on a pipe and hands the pipe to a `Session` here:
 
-* `harness_argv` adds the fixed stream flags to the bot's own command:
+* `stream_flags` adds the fixed stream flags to the bot's own command:
   Claude Code (`claude -p ...`) gets `--output-format stream-json --verbose`
-  and Codex (`codex exec ...`) gets `--json`. So does codex-bot's wrapper
-  around it (`<wrapper> exec ...`, #151), right after its `exec`. A command
-  that already picks an output format, or that is neither, is run as given.
-  Nothing from a job row reaches the argv; the flags are constants.
+  and Codex (`codex exec ...`) gets `--json`. So do the bots' wrappers:
+  claude-bot's `claude-harness -p ...` (#264) and codex-bot's
+  `<wrapper> exec ...` (#151, right after its `exec`). A command that
+  already picks an output format, or that is neither, is run as given.
+  Nothing from a job row reaches the argv; the flags are constants. Each
+  run logs one line, `telemetry: stream flags added|skipped (<reason>)`.
+  A remote run gets the same argv, and its stream comes back to this
+  process over the follower, so its summary lands in the box's table.
 * Every stdout line is appended to `<state dir>/events.jsonl` (mode 600, in
   a mode-700 directory) on the box that runs `orch job run`: the waiter's
   job directory ($ORCH_JOB_STATE_DIR), else `telemetry-<bot>/<job-id>`
@@ -26,7 +30,9 @@ stdout on a pipe and hands the pipe to a `Session` here:
   `turn.completed`), else when the stream ends, and only once.
 * Each JSON event updates a `Summary`: turns, tool calls by type, files
   touched, commands run, the last test run's pass and fail counts, tokens
-  in (of which cached) and out, cost when the CLI reports it, the last
+  in (of which cached) and out (`tokens_unknown` 1 while the CLI has
+  reported no usage, so the dashboard shows "no data", not 0, #264), cost
+  when the CLI reports it, the last
   activity and the CLI's own exit reason, plus the last RECENT_STEPS steps
   (tool calls and commands with their status, and errors). A step is its
   time, kind, status and a fixed label (`command`, the harness's tool name,
@@ -106,7 +112,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, NamedTuple
 
 from lib.codex_sandbox import exec_index
 from lib.job_token import PROOF_ENV
@@ -170,8 +176,10 @@ COLUMNS = (
     "current_task",
     "last_finished",
     "subagents",
+    "tokens_unknown",
 )
 LIVE_RUN_COLUMNS = ("plan", "current_task", "last_finished", "subagents")
+ADDED_COLUMNS = {**dict.fromkeys(LIVE_RUN_COLUMNS, "TEXT"), "tokens_unknown": "INTEGER"}
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -202,25 +210,26 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     plan TEXT,
     current_task TEXT,
     last_finished TEXT,
-    subagents TEXT
+    subagents TEXT,
+    tokens_unknown INTEGER
 )
 """
 INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_updated ON {TABLE} (updated_at)"
 
 
 def ensure_table(connection: sqlite3.Connection) -> None:
-    """Create the table, or add the live run columns (#147) to an older one.
+    """Create the table, or add the newer columns (#147, #264) to an older one.
 
     Two runners can migrate one database at once: the one that loses the
     race gets `duplicate column name`, which means the column is there."""
     connection.execute(DDL)
     connection.execute(INDEX)
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({TABLE})")}
-    for name in LIVE_RUN_COLUMNS:
+    for name, kind in ADDED_COLUMNS.items():
         if name in present:
             continue
         try:
-            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} TEXT")
+            connection.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {kind}")
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc):
                 raise
@@ -247,42 +256,91 @@ def last_seen(connection: sqlite3.Connection, job_id: str) -> float | None:
 # --- the harness argv ---------------------------------------------------------
 
 
-def harness_argv(
-    command: Sequence[str], bot_harness: str | None = None
-) -> tuple[list[str], str | None]:
-    """The command with its stream flags added, and the harness it names.
+class StreamFlags(NamedTuple):
+    """What `stream_flags` made of a command: the argv to run, the harness it
+    names (None when it names none), whether the flags were added, and why
+    (one of the fixed STREAM_REASONS)."""
+
+    argv: list[str]
+    harness: str | None
+    added: bool
+    reason: str
+
+
+STREAM_REASONS = (
+    "claude",
+    "claude wrapper",
+    "codex",
+    "codex wrapper",
+    "empty command",
+    "not print mode",
+    "output format already set",
+    "json already set",
+    "no exec subcommand",
+    "wrapper does not pass harness options",
+    "not a known harness",
+)
+
+
+def stream_flags(command: Sequence[str], bot_harness: str | None = None) -> StreamFlags:
+    """The command with its stream flags added, the harness it names, and why.
 
     Only constants are added. `claude` with `-p`/`--print` and no
     `--output-format` gets `--output-format stream-json` (and `--verbose`,
     which stream-json needs with --print); `codex ... exec` (or `e`) with no
     `--json` gets `--json` right after the subcommand word, found by skipping
     option values (`codex --profile exec exec` names its subcommand second).
-    For a codex bot (`bot_harness` "codex"), a wrapper whose own first word
-    is `exec` (codex-bot's `codex-review-harness exec ...`, which passes its
-    arguments on to `codex exec`) is read the same way (#151). Anything else
-    is returned unchanged.
+    A bot's wrapper is read the same way when its arguments go on to the CLI
+    as they are: for a claude bot, one whose first argument is an option
+    (claude-bot's `claude-harness -p ...`, which runs `claude "$@"`, #264);
+    for a codex bot, one whose own first word is `exec` (codex-bot's
+    `codex-review-harness exec ...`, #151). Anything else is returned
+    unchanged.
     """
     argv = list(command)
     if not argv:
-        return argv, None
+        return StreamFlags(argv, None, False, "empty command")
     name = os.path.basename(argv[0])
     rest = argv[1:]
-    if name == "claude":
+    if name == "claude" or bot_harness == "claude":
+        wrapper = name != "claude"
+        harness = None if wrapper else "claude"
+        if wrapper and not (rest and rest[0].startswith("-")):
+            return StreamFlags(argv, None, False, "wrapper does not pass harness options")
         if "-p" not in rest and "--print" not in rest:
-            return argv, "claude"
+            return StreamFlags(argv, harness, False, "not print mode")
         if any(part == "--output-format" or part.startswith("--output-format=") for part in rest):
-            return argv, "claude"
+            return StreamFlags(argv, harness, False, "output format already set")
         extra = ["--output-format", "stream-json"]
         if "--verbose" not in rest:
             extra.append("--verbose")
-        return [argv[0], *extra, *rest], "claude"
+        return StreamFlags(
+            [argv[0], *extra, *rest], "claude", True, "claude wrapper" if wrapper else "claude"
+        )
     if name == "codex" or bot_harness == "codex":
+        harness = "codex" if name == "codex" else None
         index = exec_index(["codex", *rest])
         options = rest[: rest.index("--")] if "--" in rest else rest
-        if index is None or "--json" in options or "--experimental-json" in options:
-            return argv, "codex" if name == "codex" else None
-        return [*argv[: index + 1], "--json", *argv[index + 1 :]], "codex"
-    return argv, None
+        if index is None:
+            return StreamFlags(argv, harness, False, "no exec subcommand")
+        if "--json" in options or "--experimental-json" in options:
+            return StreamFlags(argv, harness, False, "json already set")
+        reason = "codex" if name == "codex" else "codex wrapper"
+        return StreamFlags([*argv[: index + 1], "--json", *argv[index + 1 :]], "codex", True, reason)
+    return StreamFlags(argv, None, False, "not a known harness")
+
+
+def harness_argv(
+    command: Sequence[str], bot_harness: str | None = None
+) -> tuple[list[str], str | None]:
+    """`stream_flags`' argv and harness."""
+    flags = stream_flags(command, bot_harness)
+    return flags.argv, flags.harness
+
+
+def stream_flags_line(flags: StreamFlags) -> str:
+    """The one plain line each job logs about its stream flags (#264)."""
+    return f"telemetry: stream flags {'added' if flags.added else 'skipped'} ({flags.reason})"
 
 
 def enabled(environ: Mapping[str, str]) -> bool:
@@ -946,6 +1004,7 @@ class Summary:
         self.tokens_in = 0
         self.tokens_cached = 0
         self.tokens_out = 0
+        self.usage_seen = False
         self.cost_usd: float | None = None
         self.last_event_at: float | None = None
         self.cli_reason: str | None = None
@@ -1032,6 +1091,7 @@ class Summary:
                 self.turns += 1
             usage = message.get("usage")
             if isinstance(usage, dict) and not self._totals:
+                self.usage_seen = True
                 self._messages[ident] = self._claude_usage(usage)
                 self.tokens_in = sum(item[0] for item in self._messages.values())
                 self.tokens_cached = sum(item[1] for item in self._messages.values())
@@ -1085,6 +1145,7 @@ class Summary:
             self.turns = _int(event.get("num_turns"))
         usage = event.get("usage")
         if isinstance(usage, dict):
+            self.usage_seen = True
             self.tokens_in, self.tokens_cached, self.tokens_out = self._claude_usage(usage)
         cost = event.get("total_cost_usd", event.get("cost_usd"))
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
@@ -1113,6 +1174,7 @@ class Summary:
         elif kind == "turn.completed":
             usage = event.get("usage")
             if isinstance(usage, dict):
+                self.usage_seen = True
                 self.tokens_in += _int(usage.get("input_tokens"))
                 self.tokens_cached += _int(usage.get("cached_input_tokens"))
                 self.tokens_out += _int(usage.get("output_tokens"))
@@ -1183,6 +1245,7 @@ class Summary:
             "tokens_in": _int(self.tokens_in),
             "tokens_cached": _int(self.tokens_cached),
             "tokens_out": _int(self.tokens_out),
+            "tokens_unknown": 0 if self.usage_seen else 1,
             "cost_usd": self.cost_usd,
             "last_event_at": self.last_event_at,
             "steps": json.dumps(list(self.steps)),
@@ -1499,8 +1562,8 @@ def start_session(
     if not enabled(env):
         return None
     try:
-        argv, harness = harness_argv(command, HARNESS_BY_BOT.get(bot))
-        harness = harness or HARNESS_BY_BOT.get(bot, "other")
+        flags = stream_flags(command, HARNESS_BY_BOT.get(bot))
+        argv, harness = flags.argv, flags.harness or HARNESS_BY_BOT.get(bot, "other")
         scrub = Scrubber(env, blind=worker_env)
         raw = EventLog(
             state_dir(job_id, bot, database, env) / RAW_LOG_NAME, max_bytes=max_log_bytes, log=log
@@ -1508,6 +1571,7 @@ def start_session(
     except Exception as exc:  # telemetry never stops a job: run the command as given
         log(f"telemetry: off for this run ({type(exc).__name__})")
         return None
+    log(stream_flags_line(flags))
     return Session(
         connect=connect,
         job_id=job_id,

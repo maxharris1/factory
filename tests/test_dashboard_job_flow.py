@@ -39,10 +39,10 @@ from tests.test_dashboard_layout import (
 
 NAV = [
     ("index.html", "Lanes"),
-    ("job.html", "Jobs"),
+    ("job.html", "Tickets"),  # #139
     ("activity.html", "Activity"),
     ("efficiency.html", "Efficiency"),
-    ("health.html", "Health"),  # #92
+    ("health.html", "System"),  # #92, #139
 ]
 # Ticket 40 (tests/test_dashboard_layout.py _history): built, reviewed,
 # revised once, now in its second review.

@@ -9,6 +9,9 @@ runs as the owning bot's own user and login, starts the job itself:
   device takes the job: the box, or a remote device such as the PC or the
   Mac. A remote job runs over the bot's own SSH alias through `orch job
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
+* before anything starts it checks every pinned skill file on the placed
+  device against skills/skills.lock (lib/skill_preflight.py), and a missing
+  or changed file fails the job;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -101,6 +104,8 @@ from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.orch_yml import Approvals, OrchConfig
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue
+from lib import skill_preflight
+from lib.skill_preflight import PreflightError
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -547,7 +552,12 @@ class Waiter:
             self.pool.config.device(placement.device) if placement is not None else None
         )
         remote = device is not None and not device.local
+        factory_root = self._factory_root(device)
         try:
+            skill_preflight.preflight(
+                self.queue, job, bot=self.bot, placement=placement, device=device,
+                checkout=factory_root,
+            )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
                 self.orch,
@@ -562,7 +572,7 @@ class Waiter:
             brief = self._brief(
                 job,
                 remote_device=device.name if remote else None,
-                factory_root=self._factory_root(device),
+                factory_root=factory_root,
             )
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
@@ -574,7 +584,7 @@ class Waiter:
                 (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
                 offset = _size(job_dir / "run.log")
             child = self._spawn(argv, job_dir, brief_path)
-        except (WaiterError, BriefError, OSError, ValueError) as exc:
+        except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
             return None
@@ -606,11 +616,9 @@ class Waiter:
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.
 
-        A remote device names its own; the box falls back to this checkout."""
-        root = device.factory_root_for(self.recipient) if device is not None else None
-        if root is None and (device is None or device.local):
-            return str(FACTORY_CHECKOUT)
-        return root
+        A device names its own; the box falls back to this checkout. The
+        skill preflight checks this same checkout."""
+        return skill_preflight.checkout_root(device, self.recipient, FACTORY_CHECKOUT)
 
     def _brief(
         self, job: Job, *, remote_device: str | None = None, factory_root: str | None = None

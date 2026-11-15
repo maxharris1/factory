@@ -23,19 +23,43 @@ trusted_logins:
     - cursor-bot
 # Who may give a capped-ticket go or a hold ok once github_app.enabled is
 # true (#122, docs/decisions/122-approver-credential.md). Until then
-# trusted_logins decides, as before. Max fills in the app's real numbers
-# after he installs it; orch never opens private_key_file. Fake numbers:
+# trusted_logins decides, as before. Each bot gets its own App (#170,
+# docs/decisions/170-four-github-apps.md); Max fills in the real numbers
+# after he creates them. orch never opens private_key_file. Fake numbers:
 approver_logins:
   - maxharris1
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver
 # github_app:
-#   app_id: 123456
-#   installations:
-#     maxharris1: 1111111
-#     aut0-code: 2222222
-#   private_key_file: /home/box/.config/factory/github-app-bots.pem
-#   bot_login: factory-bots[bot]
 #   enabled: false
+#   apps:
+#     grok-bot:
+#       bot_login: factory-grok[bot]
+#       app_id: 111111
+#       installations:
+#         maxharris1: 1000001
+#         aut0-code: 1000002
+#       private_key_file: /home/box/.config/factory/apps/factory.pem
+#     claude-bot:
+#       bot_login: factory-claude[bot]
+#       app_id: 222222
+#       installations:
+#         maxharris1: 2000001
+#         aut0-code: 2000002
+#       private_key_file: /home/box/.config/factory/apps/claude.pem
+#     codex-bot:
+#       bot_login: factory-codex[bot]
+#       app_id: 333333
+#       installations:
+#         maxharris1: 3000001
+#         aut0-code: 3000002
+#       private_key_file: /home/box/.config/factory/apps/codex.pem
+#     cursor-bot:
+#       bot_login: factory-cursor[bot]
+#       app_id: 444444
+#       installations:
+#         maxharris1: 4000001
+#         aut0-code: 4000002
+#       private_key_file: /home/box/.config/factory/apps/cursor.pem
 # Before install, Max must add the confirmed stable Linear user ID under
 # trusted_linear_users. The poller refuses Linear polling without it.
 # intake (issue #85, docs/SPEC.md section 7): the backlog feeder turns a

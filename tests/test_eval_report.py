@@ -827,7 +827,9 @@ def test_eval_report_imports_and_does_not_touch_network(
             assert node.name not in banned_defs
     assert modules <= {
         "__future__",
+        "json",
         "re",
+        "sqlite3",
         "collections",
         "dataclasses",
         "datetime",
@@ -837,6 +839,7 @@ def test_eval_report_imports_and_does_not_touch_network(
         "lib.handoff",
         "lib.load",
         "lib.orch_yml",
+        "lib.schema",
     }
 
     def boom(*_args: object, **_kwargs: object) -> None:

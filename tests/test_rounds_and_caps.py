@@ -601,7 +601,7 @@ def _run(poller, job_id: str, harness: str, script: str, env: dict | None = None
 def test_claude_print_mode_gets_the_bg_wait_ceiling_on_the_box(
     tmp_path: Path, harness: str, expected: str | None
 ) -> None:
-    poller = Poller(tmp_path, now=time.time(), box_slots=3)
+    poller = Poller(tmp_path, now=time.time(), box_slots=3, pc=False)
     poller.queue.clock = time.time
     job_id = _claimed(poller, harness)
     script, report = _report_env(tmp_path)
