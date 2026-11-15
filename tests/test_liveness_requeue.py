@@ -33,6 +33,7 @@ from lib.job_state import (
     exit_reason,
 )
 from lib.queue import JobRequest, SQLiteJobQueue
+from tests.handoff_store import serve_job
 from tests.test_dispatcher import (
     ABANDONED,
     READY,
@@ -183,6 +184,7 @@ def test_a_command_that_exited_0_is_left_to_its_bots_orch_job_done(tmp_path: Pat
 
 def test_a_finished_job_records_no_run_end(tmp_path: Path) -> None:
     poller, job_id = _box_poller(tmp_path)
+    serve_job(poller.path, job_id, "77")
     script = (
         "import subprocess, sys; "
         f"subprocess.run([sys.executable, {str(Path(__file__).parents[1] / 'bin' / 'orch')!r}, "

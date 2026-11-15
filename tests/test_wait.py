@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from lib import cli as cli_module
 from lib.cli import main as cli_main
 from lib.dispatcher import Comment, Dispatcher, TrackedTicket
 from lib.factory_md import FactoryConfig
@@ -29,6 +30,7 @@ from lib.wait import (
     open_queue,
     wait_for_job,
 )
+from tests.handoff_store import env_store, serve_handoff
 from tests.pool_helpers import pool_claim
 
 
@@ -234,18 +236,20 @@ def test_job_done_finishes_with_the_handoff_comment_and_repeats_idempotently(
 ) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
-    unclaimed = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
+    serve_handoff(env_store(), job, "1009")
+    serve_handoff(env_store(), job, "1010")
+    unclaimed = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db)
     assert unclaimed.returncode == 1
     assert "running" in unclaimed.stderr
     run(["wait", "claude-bot"], db)
-    done = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
+    done = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db)
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"done {job.id}\n"
     row = state_of(db, job.id)
-    assert (row["state"], row["handoff_comment_id"]) == ("done", "c-9")
-    again = run(["job", "done", "claude-bot", job.id, "--handoff", "c-9"], db)
+    assert (row["state"], row["handoff_comment_id"]) == ("done", "1009")
+    again = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db)
     assert again.returncode == 0, again.stderr
-    other = run(["job", "done", "claude-bot", job.id, "--handoff", "c-10"], db)
+    other = run(["job", "done", "claude-bot", job.id, "--handoff", "1010"], db)
     assert other.returncode == 1
 
 
@@ -322,7 +326,8 @@ def test_heartbeat_on_a_finished_job_fails(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
     run(["wait", "claude-bot"], db)
-    run(["job", "done", "claude-bot", job.id, "--handoff", "c-1"], db)
+    serve_handoff(env_store(), job, "1001")
+    assert run(["job", "done", "claude-bot", job.id, "--handoff", "1001"], db).returncode == 0
     beat = run(["job", "heartbeat", "claude-bot", job.id], db)
     assert beat.returncode == 1
     assert "running" in beat.stderr
@@ -490,7 +495,8 @@ def test_wait_and_job_never_exec_a_harness(tmp_path: Path) -> None:
     assert proc.returncode == 0, stderr
     assert json.loads(stdout)["id"] == job.id
     assert run(["job", "heartbeat", "cursor-bot", job.id], db, PATH=path).returncode == 0
-    assert run(["job", "done", "cursor-bot", job.id, "--handoff", "c"], db, PATH=path).returncode == 0
+    serve_handoff(env_store(), job, "1001")
+    assert run(["job", "done", "cursor-bot", job.id, "--handoff", "1001"], db, PATH=path).returncode == 0
     assert not marker.exists()
     for name in ("wait.py", "cli.py"):
         assert _exec_calls(ROOT / "lib" / name) == []
@@ -1159,7 +1165,7 @@ def test_wait_still_fails_on_a_real_database_error(
     ("command", "expected_state", "expected_out"),
     [
         (["heartbeat"], "running", "heartbeat {id}\n"),
-        (["done", "--handoff", "c-9"], "done", "done {id}\n"),
+        (["done", "--handoff", "1009"], "done", "done {id}\n"),
     ],
     ids=["heartbeat", "done"],
 )
@@ -1171,9 +1177,12 @@ def test_heartbeat_and_done_retry_a_held_write_lock(
     expected_state: str,
     expected_out: str,
 ) -> None:
+    # The handoff read (#191) waits on gh with the time.sleep these tests count.
+    monkeypatch.setattr(cli_module, "_check_handoff", lambda *_args: None)
     monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.05)
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
+    serve_handoff(env_store(), job, "1009")
     assert queue.claim("claude") is not None
     holder = hold_write_lock(db)
     sleeps: list[float] = []
@@ -1197,16 +1206,19 @@ def test_heartbeat_and_done_retry_a_held_write_lock(
     assert state_of(db, job.id)["state"] == expected_state
 
 
-@pytest.mark.parametrize("command", [["heartbeat"], ["done", "--handoff", "c-9"]])
+@pytest.mark.parametrize("command", [["heartbeat"], ["done", "--handoff", "1009"]])
 def test_heartbeat_and_done_give_up_after_bounded_lock_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     command: list[str],
 ) -> None:
+    # The handoff read (#191) waits on gh with the time.sleep these tests count.
+    monkeypatch.setattr(cli_module, "_check_handoff", lambda *_args: None)
     monkeypatch.setattr(wait_module, "BUSY_TIMEOUT_SECONDS", 0.01)
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
+    serve_handoff(env_store(), job, "1009")
     assert queue.claim("claude") is not None
     holder = hold_write_lock(db)
     sleeps: list[float] = []

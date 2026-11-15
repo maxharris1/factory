@@ -56,7 +56,8 @@ from lib.orch_yml import (
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
-from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
+from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
+from lib.queue import MAX_INVALID_HANDOFFS, SLOTS_TABLE, QueueError, SQLiteJobQueue, job_from_row
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
@@ -251,9 +252,16 @@ job cancel <job-id> [--db PATH] [--reason TEXT]
   (a running one's worker must be stopped first) and 2 for an unknown one.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
+         [--orch PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
   with the handoff comment ID; --failed hands it to T6. Repeating the
-  same done is a no-op.
+  same done is a no-op. --handoff first reads the comment from GitHub
+  and checks it against the job (#191): the repo, the PR, an author that
+  orch.yml's trusted_logins lets speak for <bot>, and the header's kind,
+  from, role, head and round. One that does not fit is submitted-invalid:
+  exit 1, the job keeps running, and the ticket is flagged needs-attention
+  once; the third fails the job for T6. A GitHub read that fails exits 1
+  and changes nothing.
 
 gc [--work-root DIR] [--older-than HOURS] [--dry-run]
   Report and remove job worktrees older than HOURS (default 24) whose
@@ -1078,6 +1086,7 @@ def _job(argv: list[str]) -> int:
         sub.add_argument("bot")
         sub.add_argument("job_id")
         sub.add_argument("--db", type=Path)
+    done.add_argument("--orch", type=Path)
     outcome = done.add_mutually_exclusive_group(required=True)
     outcome.add_argument("--handoff", dest="handoff")
     outcome.add_argument("--failed", action="store_true")
@@ -1099,6 +1108,9 @@ def _job(argv: list[str]) -> int:
             code, message = settled
             print(f"{prog}: {message}" if code else message, file=sys.stderr if code else sys.stdout)
             return code
+        refused = _check_handoff(queue, args, prog)
+        if refused is not None:
+            return refused
     try:
         if args.command == "heartbeat":
             retry_locked(
@@ -1116,11 +1128,65 @@ def _job(argv: list[str]) -> int:
                 handoff_comment_id=args.handoff,
             )
         )
+        if args.handoff is not None:
+            queue.clear_invalid_handoff(job.id)
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{job.state} {job.id}")
     return 0
+
+
+def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -> int | None:
+    """#191: the handoff comment must fit the job before it is done.
+
+    None when it does. A read that fails (GitHub, orch.yml) exits 1 and
+    records nothing; a handoff that does not fit is submitted-invalid,
+    exits 1, and the MAX_INVALID_HANDOFFS-th fails the job for T6."""
+    if args.handoff is None:
+        return None
+    try:
+        with queue.connect() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
+        if row is None or row["state"] != "running":
+            return None
+        config_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+        config, findings = load_orch_yml(config_path, allow_placeholders=True)
+        errors = [item.message for item in findings if item.severity == "error"]
+        if config is None or errors:
+            raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
+        found = handoff_problems(
+            expected_for(job_from_row(row), args.bot),
+            args.handoff,
+            gh_reader(),
+            config.trusted_logins,
+        )
+        if not found:
+            return None
+        count, job = retry_locked(
+            lambda: queue.record_invalid_handoff(
+                args.job_id,
+                owner=recipient_for(args.bot),
+                comment_id=args.handoff,
+                detail="; ".join(found),
+            )
+        )
+    except (ReadError, ValueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"{prog}: submitted-invalid {args.handoff}: {'; '.join(found)}", file=sys.stderr)
+    if job.state == "failed":
+        print(
+            f"{prog}: {count} invalid handoffs; job {job.id} is failed for T6",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{prog}: invalid handoff {count} of {MAX_INVALID_HANDOFFS}; the job is still "
+            "running: post a handoff that fits it and run orch job done again",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def _job_cancel(argv: list[str]) -> int:
