@@ -290,3 +290,136 @@ def test_broken_jobs_and_human_waits_hold_the_journey_still(tmp_path: Path) -> N
         chrome.close()
         server.shutdown()
     assert still == {"working": False, "stale": True, "dead": True, "human": True}
+
+
+BEATS = r"""
+const [script, rowsText] = process.argv.slice(2);
+let nowMs = 1000;
+Date.now = () => nowMs;
+const page = new Function('window', require('fs').readFileSync(script, 'utf8') + '\nreturn {selection: selection};');
+const {selection} = page({matchMedia: () => ({matches: false})});
+const m = {selected: 0, visits: [{}], all_durations_known: false};
+console.log(JSON.stringify(JSON.parse(rowsText).map(r => { nowMs += 20000; return selection(r, m).beatStart; })));
+"""
+
+
+def _beats(tmp_path: Path, rows: list[dict]) -> list:
+    """beatStart after each poll's row goes through the page's own selection()."""
+    import subprocess
+    from tests.test_dashboard_layout import NODE
+    (tmp_path / "page.js").write_text(ticket_detail.SCRIPT, encoding="utf-8")
+    (tmp_path / "beats.js").write_text(BEATS, encoding="utf-8")
+    result = subprocess.run([NODE, str(tmp_path / "beats.js"), str(tmp_path / "page.js"), json.dumps(rows)],
+                            capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)
+
+
+@needs_node
+def test_the_journey_beats_once_per_real_heartbeat(tmp_path: Path) -> None:
+    import sqlite3
+    from lib.dashboard import collect_snapshot
+    from tests.test_dashboard import add_job, seeded
+    from tests.test_dashboard_layout import NOW, _history
+
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _history(connection)
+        add_job(connection, "h-next", action="fix", recipient="claude", state="queued",
+                ticket_id="40", created_at=NOW - 10, last_activity_at=NOW - 10)
+
+    def rows(now: float) -> dict:
+        snap = collect_snapshot(db, log, now=now)
+        return {r["job"]: r for r in snap["running"] + snap["queued"]}
+
+    polls = [rows(NOW + 0.1), rows(NOW + 20.9), rows(NOW + 40.1)]
+    assert [p["h-review"]["heartbeat_age_seconds"] for p in polls] == [30, 50, 70]
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET last_activity_at = ? WHERE id = 'h-review2'", (NOW + 55,))
+        connection.execute("UPDATE jobs SET state = 'running', last_activity_at = ? WHERE id = 'h-next'", (NOW + 55,))
+    polls.append(rows(NOW + 60.4))
+    assert _beats(tmp_path, [p["h-review"] for p in polls]) == [None, None, None, 81000]
+    assert _beats(tmp_path, [p["h-next"] for p in polls]) == [None, None, None, 81000]
+
+
+def _caption(markup: str) -> str:
+    return re.sub(r"<[^>]+>", "|", re.search(r'<div class="jd-cap[^"]*"[^>]*>.*?</div>', markup, re.S).group(0))
+
+
+def test_the_caption_names_the_selected_visit(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    row = _review(snapshot)
+    visits = row["flow"]["visits"]
+    caption = _caption(_journey(_article(snapshot)))
+    now = visits[-1]
+    assert f"|{len(visits):02d} of {len(visits)}|" in caption
+    assert f"|{now['state']} · now|" in caption
+    assert f"|{now['who']}|" in caption
+    assert " so far|" in caption or "|in progress|" in caption
+
+
+@needs_node
+def test_picking_a_visit_rewrites_the_caption_in_both_renderers(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    visit = _review(snapshot)["flow"]["visits"][2]
+    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
+                    actions=[["click", {"attr": {"data-visit": "2", "data-state": visit["state"]}}]])
+    caption = _caption(out["html"]["jobview"])
+    total = len(_review(snapshot)["flow"]["visits"])
+    assert f"|03 of {total}|" in caption, caption
+    assert f"|{visit['state']}|" in caption and f"|{visit['who']}|" in caption, caption
+    if visit["reason"]:
+        assert visit["reason"] in caption, caption
+    loaded = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
+    assert _caption(loaded["html"]["jobview"]) == _caption(_article(snapshot))
+
+
+DRAWN_NAMES = r"""
+window.journeyTexts = [];
+const original = CanvasRenderingContext2D.prototype.fillText;
+CanvasRenderingContext2D.prototype.fillText = function (text, ...args) {
+  if (this.canvas.classList.contains('jd-journey')) window.journeyTexts.push(String(text));
+  return original.call(this, text, ...args);
+};
+"""
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_the_journey_names_each_visit_up_to_now_on_its_bar(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    flow = _review(snapshot)["flow"]
+    server = _serve(tmp_path, {"fixture": snapshot})
+    chrome = _Chrome(tmp_path / "profile")
+    try:
+        chrome.send("Page.enable", chrome.session)
+        chrome.send("Page.addScriptToEvaluateOnNewDocument", chrome.session, source=DRAWN_NAMES)
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/fixture/job.html#job-h-review",
+              "document.querySelector('#job-h-review canvas.jd-journey')")
+        time.sleep(3.4)
+        drawn = set(chrome.run("[...new Set(window.journeyTexts)]"))
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert set(flow["path"]) <= drawn
+    assert not (set(flow["next"]) - set(flow["path"])) & drawn
+
+
+@pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
+def test_a_rebuild_keeps_the_picked_scale_pressed(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path)
+    _review(snapshot)["flow"]["all_durations_known"] = True
+    server = _serve(tmp_path, {"timed": snapshot})
+    chrome = _Chrome(tmp_path / "profile")
+    pressed = "[...document.querySelectorAll('#job-h-review [data-scale]')].map(b => b.dataset.scale + '=' + b.getAttribute('aria-pressed'))"
+    try:
+        _open(chrome, f"http://127.0.0.1:{server.server_address[1]}/timed/job.html#job-h-review",
+              "document.querySelector('#job-h-review [data-scale=\"scale\"]')")
+        chrome.run("document.querySelector('#job-h-review [data-scale=\"scale\"]').click()")
+        chrome.run("location.hash = '#job-r-cursor'")
+        _wait(chrome, "document.querySelector('#job-r-cursor canvas.jd-journey')")
+        chrome.run("location.hash = '#job-h-review'")
+        _wait(chrome, "document.querySelector('#job-h-review [data-scale]')")
+        after = chrome.run(pressed)
+    finally:
+        chrome.close()
+        server.shutdown()
+    assert after == ["even=false", "scale=true"]

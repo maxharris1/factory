@@ -137,13 +137,16 @@ def test_every_frame_draws_without_throwing(tmp_path: Path) -> None:
 
 
 @needs_node
-def test_no_state_name_is_drawn_and_nothing_ahead_is_named(tmp_path: Path) -> None:
+def test_bars_up_to_now_carry_their_names_and_nothing_ahead_is_named(tmp_path: Path) -> None:
     frames = _run(tmp_path, _model())["frames"]
-    names = set(LANE) | set(FUTURE) | {state for state, *_ in PATH}
+    past = {state for state, *_ in PATH}
+    ahead = set(FUTURE) - past
     for name, frame in frames.items():
         for text in frame["texts"]:
-            for state in names:
+            for state in ahead:
                 assert not re.search(r"(?<![\w-])" + re.escape(state) + r"(?![\w-])", text), (name, text, state)
+    assert past <= set(frames["t10"]["texts"])
+    assert not past & set(frames["t0"]["texts"])
     texts = frames["t10"]["texts"]
     assert "NOW · 3:48 PM" in texts
     assert "1:47 PM" in texts

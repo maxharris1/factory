@@ -84,6 +84,13 @@ CSS = """\
 .journey li{display:contents}
 .journey button{position:absolute;padding:0;border:0;background:transparent;cursor:pointer}
 .journey button:focus-visible{outline:2px solid var(--accent)}
+.jd-cap{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;padding:10px 12px;border-top:1px solid var(--line);font:12px/1.5 var(--mono)}
+.jd-cap .idx{color:var(--muted)}
+.jd-cap .st{font-size:13px;font-weight:600;color:var(--text)}
+.jd-cap.now .st{color:var(--accent)}
+.jd-cap .who{padding:0 6px;border:1px solid var(--m);color:var(--m);font-size:11px;line-height:1.6;white-space:nowrap}
+.jd-cap .dur{color:var(--text);white-space:nowrap}
+.jd-cap .note{flex:1 1 240px;min-width:0;font:13px/1.5 var(--sans);color:var(--text-2)}
 .jd-ctl{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;font:12px/1.5 var(--mono);color:var(--muted)}
 .jd-ctl button{padding:2px 8px;border:1px solid var(--line-hi);background:transparent;color:var(--text-2);font:inherit;cursor:pointer}
 .jd-ctl button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
@@ -241,11 +248,16 @@ def _visit_dur(visit: dict) -> str:
     return "—" if visit["duration_seconds"] is None else duration(visit["duration_seconds"])
 
 
+def _reason(visit: dict) -> str:
+    if visit["reason"] is not None:
+        return visit["reason"]
+    return FIRST_REASON if visit["index"] == 0 else ""
+
+
 def _runlog_row(visit: dict, selected: int) -> str:
     tint = _who_tint(visit["who"])
     cls = " ".join(c for c in ("now" if visit["current"] else "", "stop" if visit["stop"] else "") if c)
     mark_tint = STOP_TINT if visit["stop"] else tint
-    reason = visit["reason"] if visit["reason"] is not None else (FIRST_REASON if visit["index"] == 0 else "")
     name = visit["state"] + (" · now" if visit["current"] else "")
     num = f"{visit['index'] + 1:02d}"
     return (
@@ -258,7 +270,7 @@ def _runlog_row(visit: dict, selected: int) -> str:
         f'<span class="main"><span class="top">{_span("name", name)}{_span("who", visit["who"])}'
         f'{_span("dur", _visit_dur(visit))}'
         + (_span("offchip", "off-chart") if visit["off_chart"] else "")
-        + f'</span>{_span("note", reason)}</span></button></li>'
+        + f'</span>{_span("note", _reason(visit))}</span></button></li>'
     )
 
 
@@ -288,6 +300,28 @@ def _journey_label(model: dict) -> str:
 _LEGEND_WHO = ("script", "claude", "codex", "cursor", "grok")
 
 
+def _caption_dur(visit: dict, model: dict) -> str:
+    if visit["current"]:
+        age = model["state_age_seconds"]
+        return "in progress" if age is None else f"{duration(age)} so far"
+    return "—" if visit["duration_seconds"] is None else f"took {duration(visit['duration_seconds'])}"
+
+
+def _caption(model: dict) -> str:
+    visits = model["visits"]
+    if not visits:
+        return '<div class="jd-cap" aria-live="polite"></div>'
+    visit = visits[model["selected"]]
+    index = f"{visit['index'] + 1:02d} of {len(visits)}"
+    return (
+        f'<div class="jd-cap{" now" if visit["current"] else ""}" aria-live="polite">'
+        f'{_span("idx", index)}'
+        f'{_span("st", visit["state"] + (" · now" if visit["current"] else ""))}'
+        f'<span class="who" style="--m:{_who_tint(visit["who"])}">{_e(visit["who"])}</span>'
+        f'{_span("dur", _caption_dur(visit, model))}{_span("note", _reason(visit))}</div>'
+    )
+
+
 def _journey(row: dict, model: dict) -> str:
     hits = "".join(
         f'<li><button type="button" data-visit="{v["index"]}" data-state="{_e(v["state"])}" '
@@ -307,7 +341,7 @@ def _journey(row: dict, model: dict) -> str:
         f'<section class="jd-panel"><h2>{_span("t", "Journey")}'
         f'{_span("count", "this ticket through time · pick a step for its reason")}</h2>'
         f'<div class="jd-box"><canvas class="jd-journey" width="1000" height="336" role="img" '
-        f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>'
+        f'aria-label="{_e(_journey_label(model))}"></canvas><ol class="journey">{hits}</ol></div>{_caption(model)}'
         '<div class="jd-ctl"><button type="button" data-scale="even" aria-pressed="true">even steps</button>'
         f'{scale}<button type="button" data-replay="1">replay</button></div>'
         f'<div class="jd-legend">{legend}</div></section>'
@@ -533,7 +567,7 @@ _SCRIPT = r"""
         if (v.current) d.textContent = 'in progress';
         else d.textContent = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : dur(v.duration_seconds);
         if (v.off_chart) span(top, 'offchip', 'off-chart');
-        span(main, 'note', v.reason !== null && v.reason !== undefined ? v.reason : (v.index === 0 ? DETAIL.first : ''));
+        span(main, 'note', reasonOf(v));
       });
     }
     add(sec, el('p', 'jd-foot', 'Pick a step here or on the chart; both follow.'));
@@ -552,7 +586,24 @@ _SCRIPT = r"""
     if (bg) i.style.background = bg;
     s.appendChild(document.createTextNode(text));
   }
-  function journeyPanel(r, m, hits, scales) {
+  function reasonOf(v) {
+    return v.reason !== null && v.reason !== undefined ? v.reason : (v.index === 0 ? DETAIL.first : '');
+  }
+  function fillCaption(cap, m, i) {
+    cap.replaceChildren();
+    var v = m.visits[i];
+    cap.className = 'jd-cap' + (v && v.current ? ' now' : '');
+    if (!v) return;
+    span(cap, 'idx', pad(v.index + 1) + ' of ' + m.visits.length);
+    span(cap, 'st', v.state + (v.current ? ' · now' : ''));
+    span(cap, 'who', v.who).style.setProperty('--m', JOURNEY.tint[v.who] || JOURNEY.tint.script);
+    var d;
+    if (v.current) d = m.state_age_seconds === null ? 'in progress' : dur(m.state_age_seconds) + ' so far';
+    else d = v.duration_seconds === null || v.duration_seconds === undefined ? '—' : 'took ' + dur(v.duration_seconds);
+    span(cap, 'dur', d);
+    span(cap, 'note', reasonOf(v));
+  }
+  function journeyPanel(r, m, hits, scales, scale) {
     var sec = jdPanel(null, 'Journey', 'this ticket through time · pick a step for its reason');
     var box = add(sec, el('div', 'jd-box'));
     var canvas = add(box, el('canvas', 'jd-journey'));
@@ -571,6 +622,9 @@ _SCRIPT = r"""
       b.setAttribute('aria-label', v.state);
       b.setAttribute('aria-pressed', v.index === m.selected ? 'true' : 'false');
     });
+    var cap = add(sec, el('div', 'jd-cap'));
+    cap.setAttribute('aria-live', 'polite');
+    fillCaption(cap, m, m.selected);
     var ctl = add(sec, el('div', 'jd-ctl'));
     function ctlButton(text, attr, val, pressed) {
       var b = add(ctl, el('button', null, text));
@@ -579,14 +633,14 @@ _SCRIPT = r"""
       if (pressed !== null) { b.setAttribute('aria-pressed', pressed ? 'true' : 'false'); scales.push(b); }
       return b;
     }
-    ctlButton('even steps', 'data-scale', 'even', true);
-    if (m.all_durations_known) ctlButton('to scale', 'data-scale', 'scale', false);
+    ctlButton('even steps', 'data-scale', 'even', scale === 'even');
+    if (m.all_durations_known) ctlButton('to scale', 'data-scale', 'scale', scale === 'scale');
     ctlButton('replay', 'data-replay', '1', null);
     var legend = add(sec, el('div', 'jd-legend'));
     DETAIL.who.forEach(function (w) { legendItem(legend, null, JOURNEY.tint[w], w); });
     legendItem(legend, null, DETAIL.stop, 'stopped');
     legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart hop');
-    return {sec: sec, canvas: canvas};
+    return {sec: sec, canvas: canvas, cap: cap};
   }
   function nextPanel(m) {
     var sub = m.terminal || !m.state ? 'no way out' : m.next.length + ' ways out of ' + m.state;
@@ -631,18 +685,17 @@ _SCRIPT = r"""
     return {sec: box, canvas: canvas};
   }
 
-  function selection(r, m, generated) {
+  function selection(r, m) {
     var s = SEL[r.job];
-    var beatAt = r.heartbeat_age_seconds === null || r.heartbeat_age_seconds === undefined
-      ? null : generated - r.heartbeat_age_seconds;
+    var beatAt = typeof r.heartbeat_at === 'number' ? r.heartbeat_at : null;
     if (!s) {
       s = SEL[r.job] = {selected: m.selected, picked: false, tPlay: Date.now(), beatAt: beatAt, beatStart: null,
                         flashAt: null, scale: 'even'};
       return s;
     }
     if (!s.picked || s.selected >= m.visits.length) { s.selected = m.selected; s.picked = false; }
-    if (beatAt !== null && s.beatAt !== null && beatAt > s.beatAt + 0.5) s.beatStart = Date.now();
-    if (beatAt !== null) s.beatAt = beatAt;
+    if (beatAt !== null && beatAt !== s.beatAt) s.beatStart = Date.now();
+    s.beatAt = beatAt;
     if (s.scale === 'scale' && !m.all_durations_known) s.scale = 'even';
     return s;
   }
@@ -658,6 +711,7 @@ _SCRIPT = r"""
         if (on && fromChart && buttons === j.logButtons && b.scrollIntoView) b.scrollIntoView({block: 'nearest'});
       });
     });
+    fillCaption(j.cap, j.m, i);
     drawOne(j, Date.now());
   }
   function placeHits(j) {
@@ -705,7 +759,7 @@ _SCRIPT = r"""
     var running = state === 'running';
     var motion = motionOf(r, m);
     var generated = Number(d.generated_at_epoch) || Date.now() / 1000;
-    var s = selection(r, m, generated);
+    var s = selection(r, m);
     m.selected = s.selected;
     var art = el('article', 'jobpage');
     art.setAttribute('id', anchor(r.job));
@@ -716,13 +770,13 @@ _SCRIPT = r"""
     add(cols, runlog(r, m, logButtons));
     var right = add(cols, el('div', 'jd-right'));
     add(right, liverun(r));
-    var jp = journeyPanel(r, m, hitButtons, scales);
+    var jp = journeyPanel(r, m, hitButtons, scales, s.scale);
     add(right, jp.sec);
     add(right, nextPanel(m));
     var cp = chartPanel(r, m, chart);
     add(right, cp.sec);
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
-    var j = {r: r, m: m, still: holdsStill(motion), logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
+    var j = {r: r, m: m, still: holdsStill(motion), logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, cap: jp.cap, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: starts.length ? clock(Math.min.apply(null, starts)) : '', nowClock: clock(generated)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');

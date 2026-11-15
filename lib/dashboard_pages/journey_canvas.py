@@ -102,10 +102,10 @@ function journeyLayout(model, scale) {
     hex = v.stop ? JOURNEY.stop : (JOURNEY.tint[v.who] || JOURNEY.tint.script);
     rgb = journeyRgb(hex);
     bars.push({
-      index: v.index === undefined ? i : v.index,
+      index: v.index === undefined ? i : v.index, name: String(v.state),
       x: x, w: w[i], y0: JOURNEY_LANE_Y[lane], lane: lane,
       offChart: !!v.off_chart, stop: !!v.stop,
-      lit: hex, dim: journeyMix(bg, rgb, 0.3), crest: journeyMix(rgb, white, 0.5)
+      lit: hex, dim: journeyMix(bg, rgb, 0.3), crest: journeyMix(rgb, white, 0.5), ink: journeyMix(rgb, white, 0.35)
     });
     if (!toScale) {
       ticks.push(x);
@@ -292,11 +292,11 @@ function drawJourney(ctx, model, opts) {
     block(tokenX, tokenY + 1, 2, 7);
   }
 
-  journeyText(ctx, L, model, opts, hops);
+  journeyText(ctx, L, opts, hops, arrived ? L.nowX : revealX, arrived);
 }
 
-function journeyText(ctx, L, model, opts, hops) {
-  var i, r, tag, tw, spaced = 'letterSpacing' in ctx;
+function journeyText(ctx, L, opts, hops, revealX, arrived) {
+  var i, r, v, tag, tw, spaced = 'letterSpacing' in ctx;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   ctx.font = '11px ' + JOURNEY_FONT;
@@ -306,6 +306,20 @@ function journeyText(ctx, L, model, opts, hops) {
     ctx.fillText(JOURNEY_LANE_LABELS[i][0].toUpperCase(), 10, JOURNEY_LANE_LABELS[i][1] * 4 + 10 + 7);
   }
   if (spaced) ctx.letterSpacing = '0px';
+
+  for (i = 0; i < L.bars.length; i++) {
+    v = L.bars[i];
+    if (v.x + v.w > revealX || v.name.length * 6 + 4 > (v.w - 1) * 4) continue;
+    var now = arrived && i === L.cur;
+    ctx.font = (now ? '700' : '500') + ' 10px ' + JOURNEY_FONT;
+    ctx.fillStyle = now ? '#0c0e10' : v.ink;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(v.x * 4, v.y0 * 4 + 8, (v.w - 1) * 4, 20);
+    ctx.clip();
+    ctx.fillText(v.name, v.x * 4 + 5, v.y0 * 4 + 18);
+    ctx.restore();
+  }
 
   ctx.font = '10px ' + JOURNEY_FONT;
   ctx.textAlign = 'center';
