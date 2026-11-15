@@ -1,0 +1,6 @@
+decision	choice	why
+f-6 edited handoff	_handoff_candidate skips an unhandled comment whose edited_at is set, for every settling kind	comment processing rejects any unhandled non-brief orch:v1 comment that carries edited_at (rejected-edited), so T6 must not settle on one before that rejection is recorded; once handled, the existing rejected-outcome check already skips it
+f-6 alternative	rejected a plan-only check in _t1p_accepted_or_accepts_plan	the edited-comment rule is global, so a ready, verdict or questions edited before handling has the same gap
+f-7 deleted source	with the queueing comment missing, skip a comment handled no later than it (handled_times join on the source comment id)	the job is queued while its source is handled, so nothing handled at or before that time can be the job's result; handled_times keeps the source row after GitHub deletes the comment, and the bound breaks the same-second tie that _predates leaves open
+f-7 alternative	rejected changing _predates to handled_at <= queued_at	it changes the bound for every job, not only the missing-source case, and leans on clock ties instead of the source's own handling order
+verification	Repro E and Repro F from the #430 r4 verdict now pass; both are in tests/test_recovery_reconcile.py	the reviewer's repros fail on the base and pass on this head

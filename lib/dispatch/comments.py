@@ -355,6 +355,27 @@ class CommentsMixin:
             ).fetchone()
         return row is not None
 
+    def _handled_by(
+        self, ticket: TrackedTicket, comment_id: str, source_id: str | None
+    ) -> bool:
+        """True when comment_id was handled no later than source_id, whose
+        handling queued the job, even after source_id left the ticket."""
+        if source_id is None:
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM handled_times AS item
+                JOIN handled_times AS source
+                  ON source.repo = item.repo AND source.ticket_id = item.ticket_id
+                WHERE item.repo = ? AND item.ticket_id = ?
+                  AND item.comment_id = ? AND source.comment_id = ?
+                  AND item.handled_at <= source.handled_at
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id, source_id),
+            ).fetchone()
+        return row is not None
+
     def _is_handled(self, ticket: TrackedTicket, comment_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
