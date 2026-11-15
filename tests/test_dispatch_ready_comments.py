@@ -200,9 +200,10 @@ def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
     assert CI_LOG in instruction(fixes[0])
 
 
+@pytest.mark.parametrize("omitted", [False, True])
 @pytest.mark.parametrize("upgrade", [False, True])
 def test_an_upgrade_never_counts_a_handled_builder_ready_as_the_reviews_verdict(
-    tmp_path: Path, upgrade: bool
+    tmp_path: Path, upgrade: bool, omitted: bool
 ) -> None:
     board = board_with(tmp_path, on=True)
     older = sha(1)
@@ -211,6 +212,8 @@ def test_an_upgrade_never_counts_a_handled_builder_ready_as_the_reviews_verdict(
     board.ready(pr, sha(2), "wrong-head-ready")
     board.poll()
     assert board.outcome("wrong-head-ready") == "stale-ready-head"
+    if omitted:
+        pr.comments.remove(next(item for item in pr.comments if item.id == "wrong-head-ready"))
     if upgrade:
         with board.queue.connect() as connection:
             connection.execute("DROP TABLE verdict_heads")
