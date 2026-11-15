@@ -371,7 +371,9 @@ the stable Linear user ID for Max to confirm. Max approved the GitHub map at
 comments on factory PRs". This approves the login map, not stronger identity:
 any session using that login can choose a marker. While any configured Linear
 project lacks `trusted_linear_users`, `orch poll` refuses to start at all,
-including for GitHub projects. Missing secrets fail by environment-variable
+including for GitHub projects. `approver_linear_users` names the Linear users
+whose `go` lifts a cap on a Linear ticket
+([docs/decisions/174-linear-approver.md](docs/decisions/174-linear-approver.md)). Missing secrets fail by environment-variable
 name; values are never printed or included in exceptions.
 
 Linear issues are searched by ID with comments included; each hit is then
@@ -977,7 +979,17 @@ and `deploy/linear-webhook-service.sh install-autostart` when `orch.yml` or
 `orch.local.yml` has `linear_webhook`. It always installs self-heal (see
 "Self-heal"). The generated `profile.sh` runs once per shell (a second
 source is a no-op) and creates the state directory before any hook writes
-a log there.
+a log there. Its hooks run only in the host PID namespace and outside
+factory jobs (issue #308): `install.sh` records the host namespace in
+`~/.config/factory/host-pidns` once and never replaces a record that
+differs from its own namespace, and a shell whose `NSpid` has more than one
+entry, whose namespace differs from that record, or that has `ORCH_JOB_PROOF`
+or `CODEX_SANDBOX` set starts nothing. The poller, waiter, Linear webhook and
+self-heal scripts refuse `start`, `stop`, `restart`, `ensure` and their
+internal loops in a non-host namespace (exit 4), so a sandboxed shell never
+writes its own pids into the host's pidfiles. After a host restart that
+renumbers namespaces (WSL), delete that record and rerun
+`deploy/install.sh --update` from a host shell.
 
 It also retires the launchers that lived outside the repository (issue
 #107): for `~/.local/share/factory/run-poller.sh` and, unless it is already

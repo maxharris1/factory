@@ -63,6 +63,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
+
+# shellcheck source=deploy/host-pidns.sh
+. "${HERE}/host-pidns.sh"
+
 STATE="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
 CONFIG="${HOME}/.config/factory"
 PIDFILE="${STATE}/poller.pid"
@@ -420,11 +424,11 @@ remove_autostart() {
 }
 
 case "${1:-}" in
-    start) service_lock && start ;;
-    stop) service_lock && stop ;;
-    restart) service_lock && restart ;;
+    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
+    restart) factory_host_pidns_or_refuse restart && service_lock && restart ;;
     status) status ;;
-    ensure) service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *)

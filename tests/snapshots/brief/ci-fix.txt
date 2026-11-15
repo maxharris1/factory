@@ -65,11 +65,12 @@ You may start helper agents as pstack recommends. They never post to GitHub or p
 If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file: `/srv/orch/factory/skills/pstack/agents/comment-sicko.md`, `/srv/orch/factory/skills/pstack/agents/poteto-agent.md`.
 
 ## What to do
-Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). Follow the router in Skills above.
-1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
-2. Test first: a test that fails on the current head and covers the whole class of the finding. Then fix the class.
-3. Run only the new test and the tests for the files you touched, plus a short smoke set. Then run the router's "Before ready" steps.
-4. Push, then post the ready handoff below with the head you pushed.
+Fix the red CI on this PR. The failed checks and log are in Job data (`instruction`, and `evidence.ci` when present). Follow the router in Skills above.
+1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
+2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun <run-id> --failed`, once, never wait on it, and skip steps 3 to 5.
+3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set. Then run the router's "Before ready" steps.
+4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+5. Push, then post the ready handoff below with the head you pushed.
 Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.
@@ -178,7 +179,7 @@ You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this
 - attempt: 1
 - wall-clock budget: 60 minutes from the start of this run. Near it, push what you have and post `questions`. Past it, `orch job run` stops you and the job fails `wall-clock`.
 - repo skills: `.claude/skills/verify-cleffy/SKILL.md`
-- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`), empty at the start: clone owner/repo there with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone` and check out the branch the task names. This brief is on your stdin only.
+- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`). It is not empty: the run's `.orch-worker*.pid` record is there, so clone into a subfolder with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone owner/repo repo`, then `cd repo` and check out the branch the task names. This brief is on your stdin only.
 
 ## Skills
 Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with `Read`: the Skill tool refuses most pstack skills (`docs/harness/claude-code.md`, Tools).
@@ -222,11 +223,12 @@ You may start helper agents as pstack recommends. They never post to GitHub or p
 If your harness does not know an agent name the router uses (`comment-sicko`, `poteto-agent`), start a general helper (`subagent_type: "general-purpose"`) and tell it first to read and follow the agent file: `/home/claude-bot/factory/skills/pstack/agents/comment-sicko.md`, `/home/claude-bot/factory/skills/pstack/agents/poteto-agent.md`.
 
 ## What to do
-Fix what the job's `instruction` names (a REVISE verdict link or a CI log, in Job data). Follow the router in Skills above.
-1. Check out the PR branch at 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
-2. Test first: a test that fails on the current head and covers the whole class of the finding. Then fix the class.
-3. Run only the new test and the tests for the files you touched, plus a short smoke set. Then run the router's "Before ready" steps.
-4. Push, then post the ready handoff below with the head you pushed.
+Fix the red CI on this PR. The failed checks and log are in Job data (`instruction`, and `evidence.ci` when present). Follow the router in Skills above.
+1. Check out the PR branch (`gitBranchName` in Job data) and confirm `git rev-parse HEAD` is 3f9c2ab0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6.
+2. First decide whether this PR caused the failure. If it's infrastructure, don't patch the repo; rerun the failed check and post `ready` at the same head. Rerun it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh run rerun <run-id> --failed`, once, never wait on it, and skip steps 3 to 5.
+3. If this PR caused it: a test that fails on the current head and covers the whole class of the failure. Then fix the class. Run only that test and the tests for the files you touched, plus a short smoke set. Then run the router's "Before ready" steps.
+4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+5. Push, then post the ready handoff below with the head you pushed.
 Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
 If something left open needs a decision, post a `questions` handoff.

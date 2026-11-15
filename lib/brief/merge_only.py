@@ -21,7 +21,7 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "Do not poll, watch or wait on GitHub Actions or any other CI from inside this job: "
         "the factory's own review and CI gate check CI after `ready`.",
         *_approved_note(job),
-        *builder_notes(job),
+        *builder_notes(job, facts),
     ]
 
 

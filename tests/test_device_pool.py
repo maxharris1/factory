@@ -6,7 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
-from lib import device_pool
+from lib import device_pool, device_sync
 from lib.device_pool import DevicePool, choose_device
 from lib.machines_yml import Device, MachinesConfig, load_machines_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
@@ -501,3 +501,60 @@ def test_forget_worker_drops_only_the_worker_that_was_confirmed_gone(tmp_path: P
     assert (slot.worker_pid, slot.remote_started, slot.worker_tag) == (None, False, None)
     assert pool.requeue_unstarted(job.id, owner="codex", runner=11, reason="preflight")
     assert job_state(queue, job.id) == "queued"
+
+
+def mark_sync(queue: SQLiteJobQueue, device_name: str, harness: str, state: str) -> None:
+    with queue.connect() as connection:
+        device_sync.upsert(
+            connection,
+            device=device_name,
+            bot=f"{harness}-bot",
+            harness=harness,
+            checkout=f"/home/{harness}-bot/factory",
+            target="a" * 40,
+            sha="b" * 40,
+            state=state,
+            detail="",
+            now=100.0,
+        )
+
+
+@pytest.mark.parametrize("state", ["lagging", "missing", "refused"])
+def test_a_lagging_checkout_keeps_its_harness_off_the_device(tmp_path: Path, state: str) -> None:
+    pool, queue = make_pool(tmp_path, device("mac", 2, "claude", "codex"), device("pc", 1, "claude"))
+    mark_sync(queue, "mac", "claude", state)
+    enqueue(queue, "claude", "1")
+    enqueue(queue, "codex", "2")
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "pc"
+    codex = pool.claim("codex")
+    assert codex is not None and codex[1].device == "mac"
+
+
+def test_a_deploying_device_takes_no_harness(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("mac", 2, "claude", "codex"))
+    mark_sync(queue, "mac", "claude", "deploying")
+    enqueue(queue, "codex", "1")
+
+    assert pool.claim("codex") is None
+    assert device_pool.free_slots(pool.config, "codex", {}, device_pool.sync_blocks(queue)) == 0
+
+
+@pytest.mark.parametrize("state", ["synced", "unreachable"])
+def test_a_synced_or_unreachable_checkout_stays_placeable(tmp_path: Path, state: str) -> None:
+    pool, queue = make_pool(tmp_path, device("mac", 2, "claude"))
+    mark_sync(queue, "mac", "claude", state)
+    enqueue(queue, "claude", "1")
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "mac"
+
+
+def test_a_device_with_no_sync_row_stays_placeable(tmp_path: Path) -> None:
+    pool, queue = make_pool(tmp_path, device("mac", 2, "claude"))
+    enqueue(queue, "claude", "1")
+
+    claimed = pool.claim("claude")
+    assert claimed is not None and claimed[1].device == "mac"
+    assert device_pool.free_slots(pool.config, "claude", {}, device_pool.sync_blocks(queue)) == 2

@@ -93,19 +93,68 @@ class DetailMixin:
             )
             return
         self.queue.enqueue(
-            JobRequest(
-                repo=repo,
-                ticket_id=ticket_id,
-                action=reason,
-                recipient="grok",
-                source_comment_id=source_comment_id,
-                timeout_seconds=timeout_seconds,
-                generation=self._generation(repo, ticket_id),
-                head=head,
-                detail=detail,
+            self._grok_request(
+                JobRequest(
+                    repo=repo,
+                    ticket_id=ticket_id,
+                    action=reason,
+                    recipient="grok",
+                    source_comment_id=source_comment_id,
+                    timeout_seconds=timeout_seconds,
+                    generation=self._generation(repo, ticket_id),
+                    head=head,
+                    detail=detail,
+                )
             ),
             dedupe_key=f"t7:{_scope(repo, ticket_id)}:{reason}:{once_key}",
         )
+
+    def _grok_request(self, request: JobRequest) -> JobRequest:
+        return replace(
+            request,
+            detail=self._linked_wake_detail(
+                request.repo,
+                request.ticket_id,
+                request.source_comment_id,
+                request.detail or "",
+            ),
+        )
+
+    def _linked_wake_detail(
+        self,
+        repo: str,
+        ticket_id: str,
+        source_comment_id: str,
+        detail: str,
+    ) -> str:
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            parsed = {"detail": detail}
+        parsed.setdefault("link", self._wake_link(repo, ticket_id, source_comment_id))
+        return json.dumps(parsed, separators=(",", ":"), sort_keys=True)
+
+    def _wake_link(self, repo: str, ticket_id: str, source_comment_id: str) -> str:
+        ticket = self._polled.get((repo.lower(), ticket_id))
+        if ticket is not None:
+            for comment in ticket.comments:
+                if comment.id == source_comment_id and comment.url:
+                    return comment.url
+        with self._connect() as connection:
+            remembered = connection.execute(
+                """
+                SELECT link FROM comment_links
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (repo.lower(), ticket_id, source_comment_id),
+            ).fetchone()
+        if remembered is not None and remembered["link"]:
+            return str(remembered["link"])
+        if ticket is not None and ticket.ticket_url:
+            return ticket.ticket_url
+        return f"comment:{source_comment_id}"
 
     def _enqueue_or_flag(
         self,
@@ -160,6 +209,8 @@ class DetailMixin:
         comment queues goes through here, so no claim sees an answered step
         queued. Returns the job and that answer.
         """
+        if request.recipient == "grok":
+            request = self._grok_request(request)
         request = self._with_evidence(connection, ticket, comment, request)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         if request.action not in _ANSWERS:
@@ -410,6 +461,7 @@ class DetailMixin:
     ) -> None:
         detail: dict[str, object] = {
             "project_bot": ticket.grok_bot,
+            "follow_up_owner": ticket.grok_bot,
             "outcome": outcome,
             "pr_number": ticket.pr_number,
             "post_to": ticket.ticket_url,

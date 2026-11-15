@@ -88,6 +88,17 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comment_links (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    link TEXT,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",
@@ -238,6 +249,24 @@ class SchemaMixin:
                     ticket_id TEXT NOT NULL,
                     comment_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS followup_filings (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    round INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    labels TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'filed', 'commented')),
+                    issue_number INTEGER,
+                    created_at REAL NOT NULL,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """

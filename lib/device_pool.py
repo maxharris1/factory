@@ -48,6 +48,8 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from fractions import Fraction
 
+from lib.device_sync import NOTHING_BLOCKED, Blocked
+from lib.device_sync import blocked as sync_blocked
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import (
     SLOTS_TABLE,
@@ -115,31 +117,41 @@ def choose_device(
     config: MachinesConfig,
     harness: str,
     used: Mapping[str, int],
+    blocked: Blocked = NOTHING_BLOCKED,
+    avoid: Collection[str] = frozenset(),
 ) -> Device | None:
     """The schedulable device listing harness with the lowest utilization, or None.
 
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
-    (issue #223). A full device is never chosen.
+    (issue #223). A full device is never chosen, nor one whose factory
+    checkout for harness is out of sync or being updated (#297). A device
+    in `avoid` is chosen only when no other has a free slot (#218).
     """
     candidates = []
     for index, device in enumerate(config.devices):
-        if not device.eligible(harness):
+        if not device.eligible(harness) or blocked.blocks(device.name, harness):
             continue
         assert device.slot_max is not None
         held = used.get(device.name, 0)
         if held < device.slot_max:
-            candidates.append(((Fraction(held, device.slot_max), device.local, index), device))
+            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
+            candidates.append((rank, device))
     if not candidates:
         return None
     return min(candidates, key=lambda candidate: candidate[0])[1]
 
 
-def free_slots(config: MachinesConfig, harness: str, used: Mapping[str, int]) -> int:
-    """Free slots, summed over every schedulable device listing harness."""
+def free_slots(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked = NOTHING_BLOCKED,
+) -> int:
+    """Free slots, summed over every schedulable device listing harness that choose_device may pick."""
     total = 0
     for device in config.devices:
-        if device.eligible(harness):
+        if device.eligible(harness) and not blocked.blocks(device.name, harness):
             assert device.slot_max is not None
             total += max(0, device.slot_max - used.get(device.name, 0))
     return total
@@ -231,7 +243,9 @@ class DevicePool:
                 WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
                 """
             )
-            device = choose_device(self.config, harness, _used(connection, self.config))
+            device = choose_device(
+                self.config, harness, _used(connection, self.config), sync_blocked(connection)
+            )
             if device is None:
                 connection.commit()
                 return None
@@ -246,6 +260,16 @@ class DevicePool:
             if row is None:
                 connection.commit()
                 return None
+            dropped = _link_dropped_on(connection, str(row["id"]))
+            if dropped == device.name:
+                device = choose_device(
+                    self.config,
+                    harness,
+                    _used(connection, self.config),
+                    sync_blocked(connection),
+                    avoid={dropped},
+                )
+                assert device is not None
             changed = connection.execute(
                 """
                 UPDATE jobs
@@ -688,6 +712,11 @@ def box_device(config: MachinesConfig | None) -> str:
     return "box"
 
 
+def sync_blocks(queue: SQLiteJobQueue) -> Blocked:
+    with queue.connect() as connection:
+        return sync_blocked(connection)
+
+
 def used_slots(queue: SQLiteJobQueue, config: MachinesConfig | None) -> dict[str, int]:
     """Slots in use per device, as claims see them (issue #90)."""
     with queue.connect() as connection:
@@ -700,6 +729,33 @@ def slots_in_use(
 ) -> dict[str, int]:
     """used_slots on an open connection (the feeder's capacity read)."""
     return _used(connection, config)
+
+
+LINK_DROP_TAG = "; worker tag "
+
+
+def link_drop_detail(device: str, minutes: str, tag: str) -> str:
+    return f"{device}: no certain answer for {minutes}{LINK_DROP_TAG}{tag}"
+
+
+def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """#218: the device job_id's latest run lost its link to, or None."""
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
+    ).fetchone()
+    if table is None:
+        return None
+    row = connection.execute(
+        """
+        SELECT event, detail FROM job_events
+        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    if row is None or row[0] != "link-drop":
+        return None
+    return str(row[1]).split(": no certain answer for ", 1)[0]
 
 
 def _used(

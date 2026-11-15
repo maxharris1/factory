@@ -53,6 +53,7 @@ from lib.orch_yml import (
     OrchConfig,
     approvals,
     hold_approver_findings,
+    linear_approver_findings,
     load_approvals,
     load_orch_yml,
     parse_bind,
@@ -332,8 +333,18 @@ heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
   edits to machines.yml, orch.yml and deploy/install.sh. Only the
   checkout's owner pulls. A conflict, local commits or other local edits
   leave the checkout unchanged and escalate once. Runs
-  `deploy/install.sh --update` when deploy/ or requirements.txt changed.
+  `deploy/install.sh --update` when deploy/ or requirements.txt changed,
+  and `orch install-skills` when skills/ changed. A box holding a job is
+  left on its old HEAD and retried next pass (issue #297).
   deploy/self-heal.sh runs it before each heal pass.
+heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
+             [--orch PATH] [--dry-run]
+  Bring each enabled remote device's factory checkout (machines.yml
+  factory_root) to this checkout's HEAD on main and run install-skills
+  there (issue #297). A device with a job on it is skipped and retried next
+  pass; local edits on a device are never discarded (refused, escalated
+  once). --dry-run prints each target's state and writes nothing.
+  deploy/self-heal.sh starts it detached after each heal pass.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
@@ -436,6 +447,8 @@ def _check_config(argv: list[str]) -> int:
         orch_path,
         allow_placeholders=args.allow_placeholders,
     )
+    if orch_config is not None:
+        orch_findings = orch_findings + linear_approver_findings(orch_config)
     failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:

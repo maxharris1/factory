@@ -657,6 +657,7 @@ class MergeQueueMixin:
                 detail=json.dumps(
                     {
                         "project_bot": project_bot,
+                        "job_id": job_id,
                         "detail": (
                             "update-from-main failed twice on "
                             f"{str(row['update_from_head'] or '')[:12]} ({why}): ask Max"
