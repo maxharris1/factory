@@ -341,9 +341,13 @@ def _first_row_floor(
          if step.created_at < first.at and state != first.to_state),
         default=(-math.inf, start),
     )
-    if _every_path_visits(chart, last_state, first.from_state, first.to_state):
-        return first.at
-    return last_other_job
+    if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
+        return last_other_job
+    *kept_by_old_visit, enqueued_with_first_row = sorted(
+        step.created_at for state, step in steps
+        if state == first.to_state and last_other_job < step.created_at < first.at
+    ) or [first.at]
+    return enqueued_with_first_row if kept_by_old_visit else first.at
 
 
 def _recorded_walk(

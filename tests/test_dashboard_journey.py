@@ -9,6 +9,7 @@ from lib.dashboard import collect_snapshot
 from lib.telemetry import DDL as TELEMETRY_DDL
 from tests.test_dashboard import NOW, add_job, add_ticket
 from tests.test_dashboard_layout import CHART, _snapshot, seeded
+from tests.merge_queue_support import Board, sha
 
 FIXTURE = [
     "intake", "questions", "planning", "plan-check", "building",
@@ -364,18 +365,55 @@ def test_first_row_back_through_a_script_only_state_leaves_the_old_visit_its_job
     ]
 
 
+@pytest.mark.parametrize("enqueued", [NOW - 2000, NOW - 2001, NOW - 2030], ids=["same-tick", "one-tick", "slow-label"])
 @pytest.mark.parametrize("from_state", ["handed-off", "merge-queue", "updating"])
-def test_first_row_back_from_beyond_the_bridge_leaves_the_old_visit_its_job(from_state) -> None:
+def test_first_row_back_from_beyond_the_bridge_leaves_the_old_visit_its_job(from_state, enqueued) -> None:
     jobs = [
         _step("build", "claude", NOW - 5000),
         _step("review", "codex", NOW - 4000),
-        _step("review", "codex", NOW - 2000),
+        _step("review", "codex", enqueued),
     ]
     rows = [_row(from_state, "review", NOW - 2000)]
     result = flow.job_flow(_chart(), jobs, "review", NOW, rows, None)
     reviews = [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"]
     assert reviews == [("codex", NOW - 4000), ("codex", NOW - 2000)]
     assert result["path"][-2] == from_state
+
+
+def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path: Path) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 1000
+    frozen = board.queue.clock
+
+    def ticking() -> float:
+        board.now[0] += 1
+        return frozen()
+
+    board.queue.clock = ticking
+    pr.push(sha(2))
+    board.ready(pr, pr.head, "new-ready")
+    board.poll()
+    assert board.outcome("new-ready") == "queued-review"
+    with board.queue.connect() as connection:
+        jobs = [
+            flow.JobStep(row["action"], row["recipient"], row["created_at"], None, None)
+            for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
+        ]
+        rows = [
+            flow.Transition(row["from_state"], row["to_state"], row["at"])
+            for row in connection.execute("SELECT * FROM ticket_transitions ORDER BY id")
+        ]
+    old, new = [job.created_at for job in jobs if job.action == "review"]
+    assert new < rows[0].at
+    result = flow.job_flow(_chart(), jobs, "review", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"] == [
+        ("codex", old),
+        ("codex", rows[0].at),
+    ]
 
 
 @pytest.mark.parametrize(
