@@ -1,0 +1,10 @@
+decision	choice	why
+where a link drop is detected	PlacedRun.ended writes link-drop after run-died only for FollowEnd LOST; no extra probe	LOST already means no certain answer for the whole grace window (the ticket's or-clause); run-died is kept so existing readers and tests do not change
+where the requeue is decided	one T6 branch after _posted_handoff and _restored_failure_waits, before update-from-main and the attempt-1 retry	AC2 then holds by ordering; #193's reconcile can replace _posted_handoff there later
+no requeue beside a live worker	requeue only after the device confirms the worker gone (dead, as today) or past link_drop_settled_at: drop time + launch TTL + job timeout + 5 min	keeps #87 r3 F2.1; the device kills the worker on its own budget (#199 r1), so the settle time is proof, not a guess
+backoff	T6 leaves the failure unhandled with requeue-deferred until finished_at + LINK_DROP_BACKOFF_SECONDS[used]	no queue schema change; same pattern as _review_retry_waits
+budget spent	fall through to the normal attempt-2 retry, then job-failed-2; the wake detail names the link drop	consumers compare job-failed-2 by value, so no new stuck reason; worst case bounded at 2 x (6 + 1) runs
+device preference	choose_device(avoid=) ranks the dropped device last; claim reads the row's latest run end	a requeue moves off a dead device when another has room, so a dead device usually costs one cycle
+lib/remote.py, lib/remote_follow.py untouched	no change	FollowEnd(LOST) already carries the fact needed
+status and dashboard history	out of scope, follow-up	neither renders job_events today; that is a new view outside the Touches line
+model/check.sh	not run locally: java is not installed on this device; CI's statechart job runs it	the same-row requeue is a stutter step like the claimed requeue; the TLA model is unchanged
