@@ -160,7 +160,7 @@ def review_brief(round_text: str, followup: int | None) -> str:
     )
 
 
-FOLLOWUP_STEP = "4. Mark a finding `[follow-up]` instead of `[blocking]`"
+FOLLOWUP_STEP = "8. Mark a finding `[follow-up]` instead of `[blocking]`"
 FOLLOWUP_RULES = (
     "- From round 4 (`review.followup_from_round`), variants of an already-raised rule are follow-ups, "
     "not blockers. A real new failure still blocks at any round.",
@@ -172,8 +172,8 @@ FOLLOWUP_RULES = (
 def test_review_brief_without_the_key_is_the_snapshot() -> None:
     snapshot = (snapshots.SNAPSHOTS / "review.txt").read_text(encoding="utf-8")
     box = snapshot.split("===== box =====\n", 1)[1].split("===== remote", 1)[0]
-    assert review_brief("2/3", None) == box
-    assert review_brief("2/3", 4) == box
+    assert review_brief("1/3", None) == box
+    assert review_brief("1/3", 4) == box
 
 
 def test_review_brief_before_the_follow_up_round_is_unchanged() -> None:
@@ -185,7 +185,7 @@ def test_review_brief_before_the_follow_up_round_is_unchanged() -> None:
 def test_review_brief_from_the_follow_up_round_defines_the_tag(round_text: str) -> None:
     brief = review_brief(round_text, 4)
     assert FOLLOWUP_STEP in brief
-    assert "5. Pick `ac` and the verdict" in brief
+    assert "9. Pick `ac` and the verdict" in brief
     assert "`[blocking]`, `[follow-up]` or `[minor]`" in brief
     for rule in FOLLOWUP_RULES:
         assert rule in brief.splitlines()
