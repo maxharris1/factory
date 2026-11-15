@@ -115,7 +115,8 @@ def _trigger(
     else:
         return None, None, None
     trusted = ORCHESTRATOR in trusted_bots(trusted_logins, comment.author) or (
-        cause == "extra-round"
+        kind == "go"
+        and action in ("fix", "review")
         and comment.author.casefold() in {login.casefold() for login in approvers}
     )
     if not trusted or fields.get("from") != ORCHESTRATOR or fields.get("role") != "orchestrator":

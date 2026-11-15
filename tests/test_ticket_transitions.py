@@ -35,6 +35,7 @@ WRITERS = {
     "plan-check": "lib/dispatch/plan.py",
     "plan-gap": "lib/dispatch/plan.py",
     "t3": "lib/dispatch/verdict/t3.py",
+    "t3-unsat": "lib/dispatch/verdict/t3.py",
     "cap-resume": "lib/dispatch/caps/resume.py",
     "retry": "lib/dispatch/retry.py",
 }

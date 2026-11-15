@@ -4,9 +4,13 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from lib.brief import render_brief
 from lib.dispatch.helpers import ACTED_VERDICT_OUTCOMES
-from tests.test_approver_credential import APP_BOT, MAX, AppFlow, grok_wakes
-from tests.test_dispatcher import VERDICT, comment, job_count
+from lib.dispatcher import RetryableStateError
+from tests.test_approver_credential import APP_BOT, MAX, WITHOUT_MAX_GROK_TRUST, AppFlow, grok_wakes
+from tests.test_dispatcher import GO, READY, VERDICT, comment, handled_outcome, job_count
 from tests.test_rounds_and_caps import HEADS
 from tests.test_slash_go import jobs
 
@@ -160,3 +164,53 @@ def test_a_go_from_a_bot_leaves_the_unsat_pause(tmp_path: Path) -> None:
 
 def test_an_unsat_pause_never_suppresses_the_re_review() -> None:
     assert "waiting-max-unsat" not in ACTED_VERDICT_OUTCOMES
+
+
+def park_with_ready_starts_review(tmp_path: Path, text: str | None = None) -> AppFlow:
+    flow = AppFlow(tmp_path, enabled=True, text=text)
+    snapshot = flow.snapshot
+    flow.snapshot = lambda: replace(snapshot(), ready_starts_review=True)
+    flow.comments.append(comment("brief-1", BRIEF, author="grok-login", created_at=flow.now[0]))
+    assert flow.ready(HEADS[1]) == "queued-review"
+    review = flow.queue.claim("codex")
+    assert review is not None
+    flow.queue.finish(review.id, owner="codex", handoff_comment_id="unsat-1")
+    assert revise(flow, "1/3", "unsat-1", " unsat=ac-1") == "waiting-max-unsat"
+    return flow
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("changed_head", [False, True])
+def test_a_builder_ready_leaves_the_unsat_pause(tmp_path: Path, changed_head: bool) -> None:
+    flow = park_with_ready_starts_review(tmp_path)
+    before = jobs(flow)
+    if changed_head:
+        flow.head = HEADS[2]
+    assert flow.post("new-ready", READY.format(head=flow.head), "claude-login") == "ready-while-unsat"
+    assert flow.state()["workflow_state"] == "waiting-max"
+    assert jobs(flow) == before
+    assert flow.dispatcher.review_actions.merges == []
+
+
+@pytest.mark.job_bound
+def test_a_replayed_go_after_a_failed_label_write_queues_nothing_more(tmp_path: Path) -> None:
+    flow = park_with_ready_starts_review(tmp_path)
+    flow.dispatcher.review_actions.state_failures.add(("owner/repo", "review"))
+    with pytest.raises(RetryableStateError):
+        flow.go("go-resume", author=MAX)
+    before = jobs(flow)
+    flow.dispatcher.review_actions.state_failures.clear()
+    flow.dispatcher.process(flow.snapshot())
+    assert handled_outcome(flow.queue, "go-resume") == "resumed-review"
+    assert jobs(flow) == before
+    assert flow.state()["workflow_state"] == "review"
+
+
+@pytest.mark.job_bound
+def test_an_approvers_go_carries_the_rewrite_into_the_review_brief(tmp_path: Path) -> None:
+    flow = park_with_ready_starts_review(tmp_path, text=WITHOUT_MAX_GROK_TRUST)
+    rewrite = "ac-1 now reads: the CLI exits 2."
+    assert flow.post("go-rewrite", GO.format(state="building") + "\n" + rewrite, MAX) == "resumed-review"
+    review = flow.queue.claim("codex")
+    assert review is not None
+    assert rewrite in render_brief(review, bot="codex-bot", context=None)

@@ -118,6 +118,25 @@ class ResumeAfterCapMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
+        if self._unsat_parked(ticket):
+            if not self._may_lift_cap(comment.author):
+                self._wake_comment_problem(
+                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
+                )
+                return True, "go-not-from-approver"
+            return self._resume_paused(ticket, comment)
+        with self._connect() as connection:
+            resumed = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
+                  AND source_comment_id = ? AND dedupe_key LIKE 't5:%'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+        return None if resumed is None else self._resume_paused(ticket, comment)
+
+    def _unsat_parked(self, ticket: TrackedTicket) -> bool:
         with self._connect() as connection:
             parked = connection.execute(
                 """
@@ -132,11 +151,4 @@ class ResumeAfterCapMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
-        if parked is None:
-            return None
-        if not self._may_lift_cap(comment.author):
-            self._wake_comment_problem(
-                ticket, comment, "go-not-from-approver", "go-not-from-approver"
-            )
-            return True, "go-not-from-approver"
-        return self._resume_paused(ticket, comment)
+        return parked is not None
