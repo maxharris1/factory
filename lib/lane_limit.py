@@ -6,14 +6,14 @@ nothing for that recipient while the limit is active, on every device,
 because every claim reads the box's orch.db. T6 requeues the dead job as
 itself with nothing charged.
 
-A limit lifts at `until`. Storing readings (usage_readings.store) moves
-`until` to what the readings observed since the row's last evidence say, on
-any device: the newest reading of each window that has one, at its
-observation when it shows room, else at its own reset. Each evaluation
-advances `evidence_at`, so a reading that later replaces that evidence,
-such as a no-reading, never restores a lifted limit, and an older reading
-never overrides a newer one. A later limit replaces the row with its own
-reset. Nothing deletes a row, so recording and reading are idempotent.
+A limit lifts at `until`. Storing readings (usage_readings.store) keeps
+the account's evidence per window: the newest reading of that window on any
+device, free at its observation when it shows room, else at its own reset.
+An older reading never replaces a window's newer evidence, and a no-reading
+is no evidence. Once any window's evidence is newer than a limit, `until`
+moves to when every window is free, so a healthy reading of one window never
+clears another window still full. A later limit replaces the row with its
+own reset. Nothing deletes a row, so recording and reading are idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
 (SPEC section 10).
@@ -42,8 +42,19 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     limited_at REAL NOT NULL,
     until INTEGER NOT NULL,
     source TEXT NOT NULL,
-    job_id TEXT NOT NULL,
-    evidence_at REAL NOT NULL
+    job_id TEXT NOT NULL
+)
+"""
+
+EVIDENCE_TABLE = "lane_limit_evidence"
+EVIDENCE_DDL = f"""
+CREATE TABLE IF NOT EXISTS {EVIDENCE_TABLE} (
+    harness TEXT NOT NULL,
+    bot TEXT NOT NULL,
+    window TEXT NOT NULL,
+    observed_at REAL NOT NULL,
+    free_at REAL NOT NULL,
+    PRIMARY KEY (harness, bot, window)
 )
 """
 
@@ -214,41 +225,47 @@ def record(
     connection.execute(
         f"""
         INSERT OR REPLACE INTO {TABLE}
-            (recipient, harness, bot, limited_at, until, source, job_id, evidence_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (recipient, harness, bot, limited_at, until, source, job_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (recipient, harness, bot, now, reset, source, job_id, now),
+        (recipient, harness, bot, now, reset, source, job_id),
     )
     return active(connection, recipient, now)
 
 
 def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
-    """Move each of the account's limits to what the readings observed
-    since its last evidence say, in the caller's transaction."""
+    """Fold the account's stored readings into its per-window evidence, then
+    move each of its limits that has newer evidence to when every window is
+    free, in the caller's transaction."""
+    connection.execute(EVIDENCE_DDL)
+    connection.executemany(
+        f"""
+        INSERT INTO {EVIDENCE_TABLE} (harness, bot, window, observed_at, free_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (harness, bot, window) DO UPDATE SET
+            observed_at = excluded.observed_at, free_at = excluded.free_at
+        WHERE excluded.observed_at > {EVIDENCE_TABLE}.observed_at
+        """,
+        [
+            (harness, bot, r.window, r.observed_at, r.observed_at if r.used < 1.0 else r.resets_at)
+            for r in readings(connection, harness, bot)
+            if r.used is not None
+        ],
+    )
     if not _has_table(connection, TABLE):
         return
-    rows = connection.execute(
-        f"SELECT recipient, evidence_at FROM {TABLE} WHERE harness = ? AND bot = ?",
+    evidence = connection.execute(
+        f"SELECT observed_at, free_at FROM {EVIDENCE_TABLE} WHERE harness = ? AND bot = ?",
         (harness, bot),
     ).fetchall()
-    stored = readings(connection, harness, bot)
-    for recipient, evidence_at in rows:
-        newest: dict[str, usage_readings.Reading] = {}
-        for r in stored:
-            if r.used is not None and r.observed_at > evidence_at and (
-                r.window not in newest or r.observed_at > newest[r.window].observed_at
-            ):
-                newest[r.window] = r
-        if not newest:
-            continue
-        free = max(
-            r.observed_at if r.used < 1.0 else r.resets_at
-            for r in newest.values()
-        )
-        connection.execute(
-            f"UPDATE {TABLE} SET until = ?, evidence_at = ? WHERE recipient = ?",
-            (math.ceil(free), max(r.observed_at for r in newest.values()), recipient),
-        )
+    if not evidence:
+        return
+    newest = max(observed for observed, _ in evidence)
+    free = math.ceil(max(free_at for _, free_at in evidence))
+    connection.execute(
+        f"UPDATE {TABLE} SET until = ? WHERE harness = ? AND bot = ? AND limited_at < ?",
+        (free, harness, bot, newest),
+    )
 
 
 def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLimit | None:
@@ -274,14 +291,13 @@ def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
     return [limit for limit in (active(connection, str(r[0]), now) for r in rows) if limit]
 
 
-def lifted(connection: sqlite3.Connection, now: float) -> dict[str, float]:
-    """When each recipient's latest limit ended, for lanes no longer limited."""
+def paused_through(connection: sqlite3.Connection, now: float) -> dict[str, float]:
+    """How far each recipient's latest limit has paused its lane: its end
+    once lifted, else now. Time up to it is waiting, never lag."""
     if not _has_table(connection, TABLE):
         return {}
-    rows = connection.execute(
-        f"SELECT recipient, until FROM {TABLE} WHERE until <= ?", (now,)
-    ).fetchall()
-    return {str(recipient): float(until) for recipient, until in rows}
+    rows = connection.execute(f"SELECT recipient, until FROM {TABLE}").fetchall()
+    return {str(recipient): min(float(until), now) for recipient, until in rows}
 
 
 def label(limit: LaneLimit) -> str:

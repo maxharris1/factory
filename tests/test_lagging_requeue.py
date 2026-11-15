@@ -24,6 +24,7 @@ from lib.device_pool import Placement, choose_device
 from lib.device_monitor import DeviceMonitor
 from lib.dispatcher import Dispatcher
 from lib.job_state import LAGGING_BACKOFF_SECONDS, LAGGING_WAIT_SECONDS, free_requeues
+from lib.queue import JobRequest
 from lib.remote import SshTransport
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, TRUSTED_LOGINS
 from tests.test_remote_start import FakeTransport
@@ -36,6 +37,7 @@ from tests.test_skill_preflight import (
     lock_root,
     sync_rows,
 )
+from tests.test_usage_limit import _feed
 from tests.test_waiter import state
 
 __all__ = ["lock_root"]
@@ -252,6 +254,28 @@ def test_time_in_a_usage_limited_lane_never_counts_toward_the_lagging_bound(
         factory.device.waiter.step()
     assert factory.stuck() == (1, "device-lagging")
     assert [job[1:] for job in factory.jobs()] == [("failed", 1)], "no attempt 2"
+
+
+def test_a_refusal_awaiting_its_first_reconcile_is_not_stuck_while_the_lane_is_paused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    another = factory.device.queue.enqueue(
+        JobRequest("owner/repo", "43", "build", "claude", "c43", 3600),
+        dedupe_key="other-device-build",
+    )
+    factory.now[0] = START + 1
+    _feed(factory.device.db, tmp_path, another.id, "claude", {
+        "type": "result", "subtype": "success", "is_error": True,
+        "result": f"Claude AI usage limit reached|{int(START) + 3600}",
+    }, factory.now)
+    factory.poll(START + LAGGING_WAIT_SECONDS + 1)
+    with sqlite3.connect(factory.device.db) as connection:
+        assert lane_limit.active(connection, "claude", factory.now[0]) is not None
+    assert factory.stuck() == (0, None), "an active pause is waiting, not lag"
+    assert (job_id, "failed", 1) not in factory.jobs()
 
 
 def test_a_checkout_that_recovers_during_the_last_backoff_starts_the_job_unstuck(

@@ -163,13 +163,13 @@ class JobsMixin:
             )
         )
 
-    def _fail_lag_blocked_past_wait(self, job: Job, now: float, limit_ended: float) -> bool:
+    def _fail_lag_blocked_past_wait(self, job: Job, now: float, paused: float) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             lagging = lagging_requeue(connection, job.id)
             failed = (
                 lagging is not None
-                and lagging.past_wait(now, since=limit_ended)
+                and lagging.past_wait(now, since=paused)
                 and fail_lag_blocked(
                     connection,
                     job.id,
@@ -204,7 +204,7 @@ class JobsMixin:
         lag_blocked = self._lag_blocked_recipients()
         with self._connect() as connection:
             limited = {limit.recipient for limit in lane_limit.all_active(connection, now)}
-            lifted = lane_limit.lifted(connection, now)
+            paused = lane_limit.paused_through(connection, now)
         for job in self.queue.outstanding():
             if job.state == "queued" and job.request.recipient in limited:
                 self._restart_queue_wait(job, now)
@@ -214,13 +214,13 @@ class JobsMixin:
             # (#77 F1.2), so a release never times out a job for the wait
             # before its claim. A running job's is its last heartbeat.
             waited_since = job.last_activity_at
-            if job.state == "queued" and lifted.get(job.request.recipient, 0.0) > waited_since:
-                waited_since = lifted[job.request.recipient]
+            if job.state == "queued" and paused.get(job.request.recipient, 0.0) > waited_since:
+                waited_since = paused[job.request.recipient]
                 self._restart_queue_wait(job, waited_since)
             if (
                 job.state == "queued"
                 and job.request.recipient in lag_blocked
-                and self._fail_lag_blocked_past_wait(job, now, lifted.get(job.request.recipient, 0.0))
+                and self._fail_lag_blocked_past_wait(job, now, paused.get(job.request.recipient, 0.0))
             ):
                 continue
             if now - waited_since >= job.request.timeout_seconds:
@@ -804,13 +804,13 @@ class JobsMixin:
         now = self.queue.now()
         with self._connect() as connection:
             lagging = lagging_end(connection, job.id)
-            limit_ended = lane_limit.lifted(connection, now).get(job.request.recipient, 0.0)
+            paused = lane_limit.paused_through(connection, now).get(job.request.recipient, 0.0)
         if lagging is None:
             return False
         if job.request.action == "review" and self._review_retry_waits(job):
             return True
         if (
-            lagging.past_wait(now, since=limit_ended)
+            lagging.past_wait(now, since=paused)
             and job.request.recipient in self._lag_blocked_recipients()
         ):
             self._mark_stuck_and_wake(
