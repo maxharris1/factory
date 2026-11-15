@@ -99,6 +99,15 @@ class Mac:
             f'*) echo "  {group} {group} {os.getuid()}";; esac\n',
         )
 
+    def vanishing(self, group: str, pid: str, first_listing_done: Path) -> None:
+        self._tool(
+            "ps",
+            'case "$*" in *-A*) ;; *) exit 1;; esac\n'
+            f"if mkdir {shlex.quote(str(first_listing_done))} 2>/dev/null; then "
+            f'echo "  {group} {pid} {os.getuid()}"; '
+            f'else echo "  999999 999999 {os.getuid()}"; fi\n',
+        )
+
     def pause_starts(self, gate: Path, paused: Path) -> None:
         """The first start (the only caller carrying ORCH_WORKER_TAG) to run ps
         waits, before it can write its record, until gate is removed. A check
@@ -973,6 +982,20 @@ def test_r1_darwin_record_of_group_0_or_1_is_unknown_even_when_all_else_matches(
     mac.ps_listing(pgid, when)
     write_record(t, f"{pgid} {BOOT} {TAG} {when}\n")
     assert remote.check_worker(remote.SshTransport(), t) == remote.UNKNOWN
+
+
+@pytest.mark.parametrize("who", ["leader", "keeper"])
+def test_darwin_process_that_exits_between_the_listing_and_its_probe_leaves_the_group_gone(
+    tmp_path: Path, mac_ssh, who: str
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    group = "4242"
+    pid = group if who == "leader" else "4243"
+    write_record(t, f"{group} {BOOT} {TAG} Mon Jan 1 00:00:00 2001\n")
+    members_of(t).write_text("4243 Mon Jan 1 00:00:01 2001\n", encoding="utf-8")
+    mac.vanishing(group, pid, tmp_path / "listed")
+    assert remote.check_worker(remote.SshTransport(), t) == remote.GONE
 
 
 def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(

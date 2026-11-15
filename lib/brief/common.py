@@ -152,6 +152,9 @@ def job_section(job: Job, bot: str, kind: str, facts: dict, remote_device: str |
         f"- reviewer harness: {facts['reviewer']}" if facts["reviewer"] else "- reviewer harness: see factory.md",
         f"- verify skill: {facts['verify']}" if facts["verify"] else "- verify skill: see factory.md",
         f"- attempt: {request.attempt}",
+        f"- wall-clock budget: {request.timeout_seconds / 60:g} minutes from the start of this run. "
+        "Near it, push what you have and post `questions`. Past it, `orch job run` stops you "
+        "and the job fails `wall-clock`.",
     ]
     if facts["skills"]:
         lines.append("- repo skills: " + ", ".join(f"`{item}`" for item in facts["skills"]))

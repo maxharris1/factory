@@ -45,6 +45,14 @@ class StatusError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Retried:
+    count: int
+    stuck_reason: str | None
+    action: str | None
+    recorded_at: float
+
+
+@dataclass(frozen=True)
 class TrackerRow:
     repo: str
     ticket_id: str
@@ -60,6 +68,7 @@ class TrackerRow:
     # Issue #115: the source issue and the PR, shown issue first.
     source: str | None = None
     pr_number: str | None = None
+    retried: Retried | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,7 @@ class JobRow:
     job_state: str | None = None
     source: str | None = None
     pr_number: str | None = None
+    retried: Retried | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +107,7 @@ class FeederItem:
     state: str
     pr: str | None = None
     reason: str | None = None  # why a waiting-blocked ticket waits (#156)
+    tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +217,7 @@ class SQLiteStatusReader:
                     state=str(item["state"]),
                     pr=str(item["pr_number"]) if item["pr_number"] is not None else None,
                     reason=str(item["waiting_reason"]) if item["waiting_reason"] else None,
+                    tier=None if item["tier"] is None else int(item["tier"]),
                 )
                 for item in items
             ),
@@ -309,6 +321,7 @@ class SQLiteStatusReader:
             )
             self._slots = read_placements(connection) if has_slots else {}
             sources = read_sources(connection)
+            retried = _retried_by_ticket(connection)
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -342,6 +355,7 @@ class SQLiteStatusReader:
                     float(row["approved_at"]) if row["approved_at"] is not None else None
                 ),
                 **_source(sources, row),
+                retried=retried.get((str(row["repo"]).casefold(), str(row["ticket_id"]))),
             )
             for row in tracker_rows
         )
@@ -356,6 +370,7 @@ class SQLiteStatusReader:
                 created_at=float(row["created_at"]),
                 last_activity_at=float(row["last_activity_at"]),
                 **_source(sources, row),
+                retried=retried.get((str(row["repo"]).casefold(), str(row["ticket_id"]))),
             )
             for row in job_rows
         )
@@ -393,6 +408,28 @@ def _has_table(connection: sqlite3.Connection, name: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
     ).fetchone() is not None
+
+
+def _retried_by_ticket(connection: sqlite3.Connection) -> dict[tuple[str, str], Retried]:
+    if not _has_table(connection, "ticket_retries"):
+        return {}
+    found: dict[tuple[str, str], Retried] = {}
+    for row in connection.execute(
+        """
+        SELECT repo, ticket_id, stuck_reason, resumed_action, recorded_at
+        FROM ticket_retries WHERE outcome NOT LIKE 'rejected-%'
+        ORDER BY recorded_at, rowid
+        """
+    ):
+        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+        previous = found.get(key)
+        found[key] = Retried(
+            count=(previous.count if previous else 0) + 1,
+            stuck_reason=row["stuck_reason"],
+            action=row["resumed_action"],
+            recorded_at=float(row["recorded_at"]),
+        )
+    return found
 
 
 def _ticket_key(ticket_id: str) -> tuple[int, int | str]:
@@ -623,7 +660,7 @@ def render(status: Status) -> str:
             reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
             state = f"stuck{reason}"
         lines.append(
-            f"  {_label(row)} {state} [{row.tracker}]{action}"
+            f"  {_label(row)} {state}{_retried(row, status.observed_at)} [{row.tracker}]{action}"
         )
     if not status.paused:
         lines.append("  empty")
@@ -637,7 +674,7 @@ def render(status: Status) -> str:
             key = row.repo.casefold()
             positions[key] = positions.get(key, 0) + 1
             lines.append(
-                f"  {row.repo}#{row.ticket_id} {row.state} "
+                f"  {row.repo}#{row.ticket_id} {row.state}{_retried(row, status.observed_at)} "
                 f"{positions[key]} of {sizes[key]} [{row.tracker}]"
             )
     if status.attention:
@@ -663,7 +700,8 @@ def render(status: Status) -> str:
                 "closed": "PR closed, not fed",
             }.get(item.state, item.state)
             where = f" -> PR #{item.pr}" if item.pr else ""
-            lines.append(f"  {item.repo}#{item.issue} {label}{where}")
+            tier = "" if item.tier is None else f"tier {item.tier} "
+            lines.append(f"  {item.repo}#{item.issue} {tier}{label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
@@ -677,6 +715,16 @@ def render(status: Status) -> str:
         lines.append("")
         lines.extend(component_health.render_lines(status.health, status.observed_at))
     return "\n".join(lines) + "\n"
+
+
+def _retried(row: TrackerRow | JobRow, observed_at: float) -> str:
+    retried = row.retried
+    if retried is None:
+        return ""
+    return (
+        f" retried {retried.count}x ({retried.stuck_reason or 'stuck'} -> "
+        f"{retried.action or 'no job'}, {_age(observed_at, retried.recorded_at)} ago)"
+    )
 
 
 def _no_waiter(status: Status, row: JobRow) -> str:
@@ -770,6 +818,7 @@ def _job_line(row: JobRow, observed_at: float, since: float) -> str:
     return (
         f"  {_label(row)} {row.action} -> {row.recipient} "
         f"{row.job_state or row.state} {_age(observed_at, since)}"
+        f"{_retried(row, observed_at)}"
     )
 
 

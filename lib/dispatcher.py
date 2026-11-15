@@ -149,6 +149,9 @@ from lib.dispatch.questions import (
 from lib.dispatch.ready import (
     ReadyMixin,
 )
+from lib.dispatch.retry import (
+    RetryMixin,
+)
 from lib.dispatch.schema import (
     SchemaMixin,
     _add_missing_columns,
@@ -228,6 +231,7 @@ class Dispatcher(
     ShipMixin,
     QuestionsMixin,
     PlanMixin,
+    RetryMixin,
     JobsMixin,
     DetailMixin,
     FollowupsMixin,

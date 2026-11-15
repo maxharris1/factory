@@ -243,6 +243,21 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ticket_retries (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    stuck_reason TEXT,
+                    resumed_action TEXT,
+                    job_id TEXT,
+                    outcome TEXT NOT NULL,
+                    recorded_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS poll_errors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     repo TEXT NOT NULL,
@@ -258,6 +273,16 @@ class SchemaMixin:
                 for row in connection.execute("PRAGMA table_info(poll_errors)").fetchall()
             }:
                 connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ticket_reads (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    read_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id)
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_error_streaks (

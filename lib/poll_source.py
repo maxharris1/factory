@@ -6,13 +6,15 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -30,6 +32,7 @@ from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context,
 from lib.github_actions import (
     GhResult,
     GitHubReviewActions,
+    PULL_FILES_LIMIT,
     LinearReviewActions,
     Runner,
     _is_read,
@@ -95,6 +98,7 @@ query FactoryIssue($id: String!) {
       nodes { url }
       pageInfo { hasNextPage }
     }
+    labels(first: 50) { nodes { name } pageInfo { hasNextPage } }
   }
 }
 """.strip()
@@ -111,7 +115,13 @@ LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
-LINEAR_ISSUE_COMPLEXITY = 672  # +12 for the issue state and state order (#47)
+LINEAR_ISSUE_COMPLEXITY = 729  # +12 for the issue state and state order (#47), +57 for its labels (#195)
+ORCHESTRATOR = "grok-bot"
+RISKY_PATH = re.compile(r"migration|realtime")
+RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
+SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
+BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+INTAKE_RISK_TABLE = "intake_risk"
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
@@ -204,6 +214,44 @@ def post_json(
         ) from None
 
 
+class IntakeRisks:
+    """#195: each ticket's stored risk. Written once from intake and only
+    ever raised to high, in the dispatcher database so a restart keeps it."""
+
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+        self._connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {INTAKE_RISK_TABLE} (
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                risk TEXT NOT NULL CHECK (risk IN ('low', 'high')),
+                PRIMARY KEY (repo, ticket_id)
+            )
+            """
+        )
+
+    def get(self, repo: str, ticket_id: str) -> str | None:
+        row = self._connection.execute(
+            f"SELECT risk FROM {INTAKE_RISK_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (repo.lower(), ticket_id),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def keep(self, repo: str, ticket_id: str, risk: str) -> str:
+        self._connection.execute(
+            f"""
+            INSERT INTO {INTAKE_RISK_TABLE} (repo, ticket_id, risk) VALUES (?, ?, ?)
+            ON CONFLICT (repo, ticket_id) DO UPDATE SET risk = 'high'
+            WHERE excluded.risk = 'high'
+            """,
+            (repo.lower(), ticket_id, risk),
+        )
+        return self.get(repo, ticket_id) or "high"
+
+
 class LivePollSource:
     def __init__(
         self,
@@ -219,8 +267,10 @@ class LivePollSource:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
+        risks: IntakeRisks | None = None,
     ):
         self.config = config
+        self.risks = IntakeRisks() if risks is None else risks
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -1233,7 +1283,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci={head: self.github.ci_status(project.repo, head)},
-            risk=_risk(comments, self._trusted),
+            risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
             git_branch_name=_optional_string(
@@ -1380,19 +1430,20 @@ class LivePollSource:
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
         factory = self._factory(project)
+        hold = (
+            self._hold_inputs(project.repo, pr_number, factory)
+            if pr_number is not None
+            else {}
+        )
         ticket = TrackedTicket(
-            **(
-                self._hold_inputs(project.repo, pr_number, factory)
-                if pr_number is not None
-                else {}
-            ),
+            **hold,
             repo=project.repo,
             ticket_id=identifier,
             factory=factory,
             comments=comments,
             current_head=head,
             ci=ci,
-            risk=_risk(comments, self._trusted),
+            risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
@@ -1410,6 +1461,92 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _intake_risk(
+        self, repo: str, ticket_id: str, comments: Sequence[Comment]
+    ) -> str | None:
+        """#195: the stored risk, else the intake header's, which is then
+        stored. None while no intake header has been read."""
+        stored = self.risks.get(repo, ticket_id)
+        if stored is not None:
+            return stored
+        header = _risk_header(comments, self._trusted)
+        return None if header is None else self.risks.keep(repo, ticket_id, header)
+
+    def _linear_risk(
+        self,
+        repo: str,
+        identifier: str,
+        issue: Mapping[str, Any],
+        comments: Sequence[Comment],
+        pr_number: str | None,
+    ) -> str:
+        """#195: the intake risk, raised to high for good by a `migrations`
+        label or a migration or realtime change in the linked PR. Labels or
+        changes that cannot be read count as high for this poll."""
+        intake = self._intake_risk(repo, identifier, comments)
+        if intake == "high":
+            return "high"
+        label = _linear_migrations_label(issue)
+        if label is True:
+            return self.risks.keep(repo, identifier, "high")
+        change = False if pr_number is None else self._risky_change(repo, identifier, pr_number)
+        if change is True:
+            return self.risks.keep(repo, identifier, "high")
+        return "low" if intake == "low" and label is False and change is False else "high"
+
+    def _risky_change(self, repo: str, identifier: str, number: str) -> bool | None:
+        """True when the PR touches a migration or realtime path, or its patch
+        changes a realtime table; None when that cannot be read or decided."""
+        try:
+            pages = self._gh_pages(f"repos/{repo}/pulls/{number}/files?per_page=100")
+            files = [
+                _object(item, "pull request file")
+                for page in pages
+                for item in _array(page, "pull request files page")
+            ]
+        except Exception as exc:
+            self._record(repo, identifier, exc)
+            return None
+        if len(files) >= PULL_FILES_LIMIT:
+            return None
+        undecided = False
+        for item in files:
+            paths = [item.get(key) for key in ("filename", "previous_filename") if key in item]
+            if not paths or not all(isinstance(path, str) and path for path in paths):
+                return None
+            if any(RISKY_PATH.search(path.lower()) for path in paths):
+                return True
+            patch = item.get("patch")
+            if isinstance(patch, str):
+                if any(
+                    line[:1] in "+-" and RISKY_CHANGE.search(line)
+                    for line in patch.splitlines()
+                ):
+                    return True
+                if paths[0].lower().endswith(SQL_SUFFIXES):
+                    statement = _sql_patch_risk(
+                        patch, lambda: self._blob_text(repo, identifier, item.get("sha"))
+                    )
+                    if statement is True:
+                        return True
+                    undecided = undecided or statement is None
+            elif item.get("changes") != 0:
+                undecided = True
+        return None if undecided else False
+
+    def _blob_text(self, repo: str, identifier: str, sha: object) -> str | None:
+        if not isinstance(sha, str) or not BLOB_SHA.fullmatch(sha):
+            return None
+        try:
+            content = _json_object(self._gh_call(f"repos/{repo}/git/blobs/{sha}"), "GitHub blob")
+            encoded = content.get("content")
+            if content.get("encoding") != "base64" or not isinstance(encoded, str):
+                raise PollSourceError(f"{repo} blob {sha} is not base64 content")
+            return base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
+        except Exception as exc:
+            self._record(repo, identifier, exc)
+            return None
 
     def _linear_merged(
         self, project: Project, identifier: str, allow_merged: bool
@@ -1906,20 +2043,242 @@ def _newest_comment_at(issue: Mapping[str, Any]) -> float | None:
     return newest
 
 
-def _risk(
+def _risk_header(
     comments: Sequence[Comment],
     trusted: Mapping[str, Mapping[str, frozenset[str]]],
-) -> str:
-    """The last risk= a trusted author wrote, else high (#68)."""
-    risk = "high"
+) -> str | None:
+    """#195: the risk= of the first brief or go the trusted orchestrator
+    wrote. None when there is none, or that comment was edited."""
     for comment in comments:
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             continue
-        if "risk" in fields and fields.get("from") in trusted_bots(trusted, comment.author):
-            risk = fields["risk"]
-    return risk
+        if (
+            "risk" in fields
+            and fields["kind"] in ("brief", "go")
+            and fields.get("role") == "orchestrator"
+            and fields.get("from") == ORCHESTRATOR
+            and ORCHESTRATOR in trusted_bots(trusted, comment.author)
+        ):
+            return None if comment.edited_at is not None else fields["risk"]
+    return None
+
+
+def _risk(
+    comments: Sequence[Comment],
+    trusted: Mapping[str, Mapping[str, frozenset[str]]],
+) -> str:
+    """The intake header's risk, else high (#68)."""
+    return _risk_header(comments, trusted) or "high"
+
+
+class Hunk(NamedTuple):
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    header: str
+    body: tuple[str, ...]
+
+
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", re.MULTILINE)
+
+
+def _hunks(patch: str) -> list[Hunk]:
+    matches = list(HUNK_HEADER.finditer(patch))
+    hunks = []
+    for match, end in zip(matches, [*(found.start() for found in matches[1:]), len(patch)]):
+        lines = patch[match.end() : end].split("\n")[1:]
+        if lines and lines[-1] == "":
+            lines.pop()
+        old_start, old_count, new_start, new_count, header = match.groups()
+        body = tuple(line or " " for line in lines if not line.startswith("\\"))
+        hunks.append(
+            Hunk(
+                int(old_start),
+                1 if old_count is None else int(old_count),
+                int(new_start),
+                1 if new_count is None else int(new_count),
+                header,
+                body,
+            )
+        )
+    return hunks
+
+
+def _sql_patch_risk(patch: str, read_source: Callable[[], str | None]) -> bool | None:
+    """#195: True when a changed line falls in a SQL statement that changes a
+    realtime table, or a changed hunk shows a realtime word at all. #292: a
+    patch that does not start at line 1 is lexed over the whole head file
+    from `read_source`; None when that file cannot be read or does not match
+    the patch."""
+    hunks = _hunks(patch)
+    for hunk in hunks:
+        if any(line.startswith(("+", "-")) for line in hunk.body) and any(
+            RISKY_CHANGE.search(text) for text in (hunk.header, *hunk.body)
+        ):
+            return True
+    if not hunks:
+        return False
+    whole = not (len(hunks) == 1 and hunks[0].old_start <= 1 and hunks[0].new_start <= 1)
+    if whole:
+        source = read_source()
+        body = None if source is None else _patch_over_source(source, hunks)
+        if body is None:
+            return None
+    else:
+        body = list(hunks[0].body)
+    sides = {mark: _sql_side(body, mark) for mark in "-+"}
+    before, after = (_sql_statements_risk(sides[mark], mark, whole=whole)[1] for mark in "-+")
+    also_changed = frozenset(
+        at for at, line in enumerate(body) if line.startswith(" ") and before[at] != after[at]
+    )
+    verdicts = [
+        _sql_statements_risk(sides[mark], mark, whole=whole, also_changed=also_changed)[0] for mark in "-+"
+    ]
+    if True in verdicts:
+        return True
+    return None if None in verdicts else False
+
+
+def _patch_over_source(source: str, hunks: Sequence[Hunk]) -> list[str] | None:
+    lines = source.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    body: list[str] = []
+    old = new = 0
+    for hunk in hunks:
+        old_first = hunk.old_start - 1 if hunk.old_count else hunk.old_start
+        new_first = hunk.new_start - 1 if hunk.new_count else hunk.new_start
+        if not new <= new_first <= len(lines) or old_first - new_first != old - new:
+            return None
+        body += [" " + line for line in lines[new:new_first]]
+        old, new = old_first, new_first
+        for line in hunk.body:
+            if line.startswith("-"):
+                old += 1
+            elif line.startswith((" ", "+")) and new < len(lines) and line[1:] == lines[new]:
+                old += line.startswith(" ")
+                new += 1
+            else:
+                return None
+            body.append(line)
+        if (old - old_first, new - new_first) != (hunk.old_count, hunk.new_count):
+            return None
+    return body + [" " + line for line in lines[new:]]
+
+
+def _sql_side(body: Sequence[str], mark: str) -> list[str]:
+    """#292: one side of a diff body. The other side's lines become empty
+    changed lines, so a change that leaves nothing on this side still marks
+    the statement it falls in."""
+    return [line if line.startswith((" ", mark)) else mark for line in body]
+
+
+SQL_IDENT_START = "A-Za-z_\x80-\U0010ffff"
+SQL_TOKEN = re.compile(
+    rf"--|/\*|;|(?<![{SQL_IDENT_START}0-9$])[eE]'|'|\""
+    rf"|(?<![{SQL_IDENT_START}0-9$])\$(?:[{SQL_IDENT_START}][{SQL_IDENT_START}0-9]*)?\$"
+)
+SQL_COMMENT = re.compile(r"/\*|\*/")
+
+
+class SqlLexState(NamedTuple):
+    comment_depth: int
+    quote: str | None
+
+
+def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
+    """The pattern that scans a quoted run, and the match that closes it."""
+    if opener in ("'", '"'):
+        return re.compile(re.escape(opener * 2) + "|" + re.escape(opener)), opener
+    if opener in ("e'", "E'"):
+        return re.compile(r"\\.|''|'", re.DOTALL), "'"
+    return re.compile(re.escape(opener)), opener
+
+
+def _sql_statements_risk(
+    lines: Sequence[str], mark: str, *, whole: bool, also_changed: Collection[int] = ()
+) -> tuple[bool | None, list[SqlLexState]]:
+    """#195: lexes one side of a diff body from line 1 as PostgreSQL. Comments
+    are dropped; quoted strings, identifiers and dollar-quoted bodies keep
+    their words but never end a statement. #292: a whole file that ends inside
+    a comment or quote, or a lone hunk that ends inside a changed statement,
+    cannot be classified."""
+    text, changed, risky, bare_cr_or_escape_string = "", False, False, False
+    depth, quote, close = 0, None, ""
+    states: list[SqlLexState] = []
+    for index, line in enumerate(lines):
+        states.append(SqlLexState(depth, None if quote is None else quote.pattern))
+        mine = line.startswith(mark) or index in also_changed
+        changed = changed or mine
+        bare_cr_or_escape_string = bare_cr_or_escape_string or "\r" in line.removesuffix("\r")
+        code, at = line[1:] + "\n", 0
+        while at < len(code):
+            if depth:
+                found = SQL_COMMENT.search(code, at)
+                if found is None:
+                    break
+                at = found.end()
+                depth += 1 if found.group() == "/*" else -1
+                text += "" if depth else " "
+                continue
+            if quote is not None:
+                found = quote.search(code, at)
+                piece = code[at : len(code) if found is None else found.end()]
+                text += piece
+                changed = changed or (mine and bool(piece.strip()))
+                if found is None:
+                    break
+                at = found.end()
+                if found.group() == close:
+                    quote = None
+                continue
+            found = SQL_TOKEN.search(code, at)
+            piece = code[at : len(code) if found is None else found.start()]
+            text += piece
+            changed = changed or (mine and bool(piece.strip()))
+            if found is None:
+                break
+            token, at = found.group(), found.end()
+            if token == ";":
+                risky = risky or (changed and bool(RISKY_CHANGE.search(text)))
+                text, changed = "", False
+            elif token == "--":
+                text, at = text + " ", len(code)
+            elif token == "/*":
+                depth = 1
+            else:
+                bare_cr_or_escape_string = bare_cr_or_escape_string or token in ("e'", "E'")
+                quote, close = _sql_quote(token)
+                text += token
+    if risky or (changed and RISKY_CHANGE.search(text)):
+        return True, states
+    realtime_possible = not whole or any(RISKY_CHANGE.search(line) for line in lines)
+    if bare_cr_or_escape_string and realtime_possible:
+        return None, states
+    unfinished = bool(depth) or quote is not None
+    begun = changed and (unfinished or bool(text.strip()))
+    return (None if (unfinished if whole else begun) else False), states
+
+
+def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
+    """Whether the issue has a `migrations` label; None when its labels
+    cannot be read."""
+    labels = issue.get("labels")
+    if not isinstance(labels, dict):
+        return None
+    page = labels.get("pageInfo")
+    nodes = labels.get("nodes")
+    if not isinstance(page, dict) or not isinstance(nodes, list):
+        return None
+    names = [node.get("name") if isinstance(node, dict) else None for node in nodes]
+    if not all(isinstance(name, str) for name in names):
+        return None
+    if any(name.strip().lower() == "migrations" for name in names):
+        return True
+    return None if page.get("hasNextPage") is not False else False
 
 
 def _brief(comments: Sequence[Comment]) -> str | None:

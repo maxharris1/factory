@@ -95,15 +95,21 @@ MARK_READY_QUERY = (
     "{ pullRequest { id isDraft headRefOid } } }"
 )
 # GitHub has no REST route for draft -> ready. gh pr ready uses this mutation.
-MARK_READY = (
-    "-X",
-    "POST",
-    "graphql",
-    "-f",
-    f"query={MARK_READY_QUERY}",
-    "-f",
-    f"id={NODE_ID}",
-)
+def mark_ready(repo: str = "owner/repo") -> tuple[str, ...]:
+    return (
+        "-X",
+        "POST",
+        "graphql",
+        "-f",
+        f"query={MARK_READY_QUERY}",
+        "-f",
+        f"id={NODE_ID}",
+        "-f",
+        f"owner={repo.partition('/')[0]}",
+    )
+
+
+MARK_READY = mark_ready()
 PREVIEW = (
     "-X",
     "POST",
@@ -1285,6 +1291,8 @@ def test_handoff_marks_a_draft_ready_with_the_exact_graphql_gh_argv() -> None:
             "input: {pullRequestId: $id}) { pullRequest { id isDraft headRefOid } } }",
             "-f",
             "id=PR_kwDOKfac0s6CiTKq",
+            "-f",
+            "owner=owner",
         ],
     ]
     assert not any("ready_for_review" in part for call in gh.calls for part in call)

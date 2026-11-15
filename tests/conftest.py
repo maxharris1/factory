@@ -16,13 +16,67 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import site
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
+
+LIVE_STATE_ENV_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
+_live_state_env: dict[str, str] = {}
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    _live_state_env.update({name: os.environ.pop(name) for name in list(os.environ)
+                            if name.startswith(LIVE_STATE_ENV_PREFIXES)})
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    os.environ.update(_live_state_env)
+
+
+def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_RUNTIME_DIR": str(home / ".run"),
+        "ORCH_STATE_DIR": str(home / ".local/state/factory"),
+        **extra,
+    }
+
+
+def reap_home(home: Path) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        deadline = time.monotonic() + 2
+        while (pids := _homed(home)) and time.monotonic() < deadline:
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+
+
+def _homed(home: Path) -> list[int]:
+    needle = f"HOME={home}".encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                environ = (entry / "environ").read_bytes()
+            except OSError:
+                continue
+            if needle in environ.split(b"\0"):
+                found.append(int(entry.name))
+    return found
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -109,6 +163,26 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
         os.environ.pop("ORCH_DB_BACKUP", None)
     else:
         os.environ["ORCH_DB_BACKUP"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _a_ssh_control_dir():
+    """#222: each test gets its own short ControlMaster socket directory, so
+    no fake master outlives its test and a socket path stays bindable. It
+    takes no monkeypatch, so a test's own patches are undone before this
+    teardown runs. pytest orders same-scope autouse fixtures by name: the
+    `_a_` prefix keeps this one ahead of any autouse fixture that requests
+    monkeypatch (such as `_skill_preflight`), so monkeypatch is always set up
+    after it and undone before its teardown."""
+    directory = tempfile.mkdtemp(prefix="orch-ssh-", dir="/tmp")
+    previous = os.environ.get("ORCH_SSH_CONTROL_DIR")
+    os.environ["ORCH_SSH_CONTROL_DIR"] = directory
+    yield directory
+    if previous is None:
+        os.environ.pop("ORCH_SSH_CONTROL_DIR", None)
+    else:
+        os.environ["ORCH_SSH_CONTROL_DIR"] = previous
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

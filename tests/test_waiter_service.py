@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import reap_home, sandbox_env
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,37 +57,52 @@ while True:
 """
 
 
-@pytest.fixture
-def home(tmp_path: Path):
-    home = tmp_path / "home"
+def _make_home(home: Path) -> Path:
     orch = home / ".local" / "bin" / "orch"
     orch.parent.mkdir(parents=True)
     orch.write_text(FAKE_ORCH, encoding="utf-8")
     orch.chmod(0o755)
     (home / ".config" / "factory").mkdir(parents=True)
-    yield home
-    for bot in ("claude-bot", "codex-bot"):
-        _service(home, bot, "stop")
-    for pid in _all_starts(home):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    return home
 
 
-def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
-    env = {
-        "HOME": str(home),
+def _cleanup(home: Path) -> None:
+    try:
+        for bot in ("claude-bot", "codex-bot"):
+            _service(home, bot, "stop")
+    finally:
+        for pid in _all_starts(home):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        reap_home(home)
+
+
+@pytest.fixture
+def home(tmp_path: Path, request):
+    home = _make_home(tmp_path / getattr(request, "param", "home"))
+    try:
+        yield home
+    finally:
+        _cleanup(home)
+
+
+def _env(home: Path, cron: Path | None = None, **extra: str) -> dict[str, str]:
+    return sandbox_env(home, **{
         "PATH": "/usr/bin:/bin",
         "ORCH_WAITER_RESTART_SEC": "0.2",
         "ORCH_WAITER_START_WAIT": "10",
         "ORCH_WAITER_STOP_WAIT": "10",
         "ORCH_CRONTAB": str(cron) if cron is not None else str(home / "no-such-crontab"),
         **extra,
-    }
+    })
+
+
+def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
     return subprocess.run(
         ["bash", str(SERVICE), *args],
-        env=env,
+        env=_env(home, cron, **extra),
         text=True,
         capture_output=True,
         timeout=60,
@@ -231,6 +247,175 @@ def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) 
         bystander.wait()
 
 
+def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
+    tag = f"waiter-service.sh {bot} _supervise {home / '.local/state/factory'}"
+    listing = subprocess.run(
+        ["ps", "-ww", "-A", "-o", "pid=", "-o", "ppid=", "-o", "command="],
+        text=True, capture_output=True, check=True,
+    ).stdout
+    rows = [line.split(None, 2) for line in listing.splitlines() if tag in line]
+    pids = {int(pid) for pid, _, _ in rows}
+    forks = {int(pid) for pid, ppid, _ in rows if int(ppid) in pids}
+    return sorted(pid for pid in pids - forks if alive(pid))
+
+
+def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False) -> int:
+    """Detached so that init reaps it."""
+    state = home / ".local/state/factory"
+    state.mkdir(parents=True, exist_ok=True)
+    tail = "" if legacy else ' "$2"'
+    started = subprocess.run(
+        ["bash", "-c", f'nohup bash "$0" "$1" _supervise{tail} >>"$3" 2>&1 </dev/null & echo $!',
+         str(SERVICE), bot, str(state), str(state / f"waiter-{bot}.log")],
+        env=_env(home), text=True, capture_output=True, check=True,
+    )
+    return int(started.stdout)
+
+
+PS_SHIM = """#!/bin/bash
+[[ "$(uname)" == Darwin ]] && exec /bin/ps "$@"
+args=()
+for arg in "$@"; do
+    [[ "$arg" == -E ]] && arg=e
+    args+=("$arg")
+done
+exec /bin/ps "${args[@]}"
+"""
+
+
+def _proc_or_ps_shim_env(tmp_path: Path, proc: str) -> dict[str, str]:
+    if proc == "/proc":
+        return {"ORCH_PROC_DIR": "/proc", "COLUMNS": "80"}
+    shim = tmp_path / "ps-shim" / "ps"
+    shim.parent.mkdir(exist_ok=True)
+    shim.write_text(PS_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return {
+        "ORCH_PROC_DIR": str(tmp_path / "no-proc"),
+        "COLUMNS": "80",
+        "PATH": f"{shim.parent}:/usr/bin:/bin",
+    }
+
+
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_reaches_a_supervisor_started_before_the_state_argv(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
+    legacy = _stray(home, legacy=True)
+    waiter = _wait_for(lambda: _starts(home))[0]
+    named = _stray(home)
+    _wait_for(lambda: _supervisor(home) == named)
+    _wait_for(lambda: (home / "refused-claude-bot").exists())
+    assert alive(legacy) and alive(waiter)
+
+    stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
+    assert stopped.returncode == 0, stopped.stderr
+    assert f"stopped stray waiter supervisor (pid {legacy})" in stopped.stdout
+    assert not alive(legacy) and not alive(named)
+    _wait_for(lambda: not alive(waiter))
+
+
+def test_concurrent_ensures_leave_one_supervisor(home: Path) -> None:
+    env = _env(home)
+    calls = [
+        subprocess.Popen(["bash", str(SERVICE), "claude-bot", "ensure"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(4)
+    ]
+    for call in calls:
+        assert call.wait(timeout=60) == 0
+    _wait_for(lambda: _starts(home))
+    time.sleep(0.6)
+    assert _supervisors(home) == [_supervisor(home)]
+    assert len(_starts(home)) == 1
+
+
+def test_a_supervisor_the_pidfile_does_not_name_exits(home: Path) -> None:
+    assert _service(home, "claude-bot", "start").returncode == 0
+    waiter = _wait_for(lambda: _starts(home))[0]
+    supervisor = _supervisor(home)
+    pidfile = home / ".local/state/factory/waiter-claude-bot.pid"
+
+    stray = _stray(home)
+    _wait_for(lambda: _supervisor(home) == stray)
+    pidfile.write_text(f"{supervisor}\n", encoding="utf-8")
+    _wait_for(lambda: not alive(stray))
+    assert alive(supervisor) and alive(waiter)
+    assert _supervisor(home) == supervisor
+    assert _supervisors(home) == [supervisor]
+    log = (home / ".local/state/factory/waiter-claude-bot.log").read_text()
+    assert f"no longer names this supervisor (pid {stray})" in log
+
+
+@pytest.mark.parametrize("home", ["home", "home with spaces"], indirect=True)
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_restart_after_a_pidfile_mismatch_leaves_one_supervisor_and_one_waiter(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
+    proc_env = _proc_or_ps_shim_env(tmp_path, proc)
+    assert _service(home, "claude-bot", "start", **proc_env).returncode == 0
+    old_waiter = _wait_for(lambda: _starts(home))[0]
+    old_supervisor = _supervisor(home)
+    stray = _stray(home)
+    _wait_for(lambda: _supervisor(home) == stray)
+    _wait_for(lambda: (home / "refused-claude-bot").exists())
+    assert sorted(_supervisors(home)) == sorted([old_supervisor, stray])
+    before = set(_starts(home))
+
+    restarted = _service(home, "claude-bot", "restart", **proc_env)
+    assert restarted.returncode == 0, restarted.stderr
+    assert f"stopped stray waiter supervisor (pid {old_supervisor})" in restarted.stdout
+    assert not alive(stray) and not alive(old_supervisor) and not alive(old_waiter)
+    _wait_for(lambda: [pid for pid in _starts(home) if alive(pid)])
+    time.sleep(0.6)
+    live = [pid for pid in _starts(home) if alive(pid)]
+    assert len(live) == 1 and live[0] not in before
+    supervisors = _supervisors(home)
+    assert supervisors == [_supervisor(home)]
+    assert supervisors[0] not in {old_supervisor, stray}
+
+
+def test_stop_spares_a_supervisor_under_another_state_directory(
+    home: Path, tmp_path: Path
+) -> None:
+    other = _make_home(tmp_path / "other")
+    try:
+        assert _service(other, "claude-bot", "start").returncode == 0
+        other_waiter = _wait_for(lambda: _starts(other))[0]
+        other_supervisor = _supervisor(other)
+        assert _service(home, "claude-bot", "start").returncode == 0
+        _wait_for(lambda: _starts(home))
+        assert _service(home, "claude-bot", "stop").returncode == 0
+        assert _supervisors(home) == []
+        time.sleep(0.4)
+        assert alive(other_supervisor) and alive(other_waiter)
+    finally:
+        _cleanup(other)
+
+
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_a_legacy_supervisor_under_another_state_directory(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
+    other = _make_home(tmp_path / "other")
+    try:
+        legacy = _stray(other, legacy=True)
+        other_waiter = _wait_for(lambda: _starts(other))[0]
+        assert _service(home, "claude-bot", "start").returncode == 0
+        _wait_for(lambda: _starts(home))
+        stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"pid {legacy}" not in stopped.stdout
+        time.sleep(0.4)
+        assert alive(legacy) and alive(other_waiter)
+    finally:
+        _cleanup(other)
+        try:
+            os.kill(legacy, signal.SIGTERM)
+        except OSError:
+            pass
+
+
 def test_a_waiter_that_keeps_failing_is_retried_with_backoff(home: Path) -> None:
     assert _service(home, "claude-bot", "start", FAKE_WAITER_FAIL="1").returncode == 0
     _wait_for(lambda: len(_starts(home)) >= 3, 20)
@@ -354,8 +539,12 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
     (home / ".config/factory/waiter-autostart-claude-bot").touch()
     (home / ".config/factory/waiter-autostart-codex-bot").touch()
     (home / ".config/factory/waiter-autostart-bogus").touch()
-    subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
-                   env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, check=True, timeout=30)
-    _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
+    (home / ".config/factory/self-heal-autostart").unlink()
+    try:
+        subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
+                       env=sandbox_env(home, PATH="/usr/bin:/bin"), check=True, timeout=30)
+        _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
+    finally:
+        reap_home(home)
     assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()

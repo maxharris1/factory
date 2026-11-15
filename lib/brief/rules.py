@@ -63,11 +63,14 @@ def review_rules(facts: dict) -> str:
     )
 
 
+SECRET_RULE = "Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values."
+
+
 def rules() -> str:
     return (
         "## Rules\n"
         f"- Run GitHub as `{GH}`.\n"
-        "- Never read credentials, runner tokens, `.env`, `auth.json`, `.runner` or `FACTORY_WEBHOOK_*` values.\n"
+        f"- {SECRET_RULE}\n"
         "- Message no other bot. Everything you hand on goes in the one handoff comment.\n"
         "- Post only this job's handoff, or a `questions` handoff. Never post `go`, `ok`, `answers`, "
         "`brief`, or (outside a review job) a `verdict`. Never merge, close, approve or label a PR.\n"

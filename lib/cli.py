@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -35,7 +36,9 @@ from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -43,6 +46,7 @@ from lib.load import Finding
 from lib.device_monitor import DeviceMonitor
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
+from lib.job_state import record_job_event
 from lib.device_pool import DevicePool
 from lib.machines_yml import MachinesConfig, load_machines_yml
 from lib.orch_yml import (
@@ -53,7 +57,7 @@ from lib.orch_yml import (
     load_orch_yml,
     parse_bind,
 )
-from lib.poll_source import LivePollSource, PollSourceError
+from lib.poll_source import IntakeRisks, LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
@@ -101,6 +105,7 @@ commands:
   health           component heartbeats: report or forget (issue #92)
   heal             restart down or stale-code components (issue #107)
   status           read-only snapshot of the queue, devices and paused tickets
+  retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -336,6 +341,18 @@ status [--db PATH] [--machines PATH] [--orch PATH]
   read-only. A database without the dispatcher tables shows the empty
   state. --db defaults to ORCH_DB. Exits 1 when the database or a given
   config file cannot be read, else 0.
+
+retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH]
+  Post a grok-bot kind=retry comment ("Retry requested: TEXT") on a GitHub
+  ticket (owner/repo#n or its PR or issue URL) through gh with the token
+  variables unset; the dispatcher then resumes the step that got stuck for
+  one more attempt (docs/SPEC.md 4.2 TR). The gh login must be a
+  trusted_logins login for grok-bot. With --db or $ORCH_DB readable, it
+  first refuses (exit 1, nothing posted) a ticket that is not stuck or has
+  a queued or running harness job; --force skips that check, and the
+  dispatcher still refuses either case. Linear tickets are out of scope.
+  Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
+  when refused or the post fails.
 """
 
 
@@ -381,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         return heal.main(argv[1:])
     if argv[0] == "status":
         return _call(status_main, argv[1:])
+    if argv[0] == "retry":
+        return _call(_retry, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -609,6 +628,7 @@ def _wait_autostart(
             log=log,
             approvals=policy,
             drain=waiter.drain_marker(args.bot),
+            orch_yml=orch_path,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -865,7 +885,7 @@ def _runtime(
         auth_env=config.grok.webhook_auth_env,
     )
     t8 = T8Hook()
-    source = LivePollSource(config)
+    source = LivePollSource(config, risks=None if create else IntakeRisks(path))
     devices = None
     machines = None
     if not create:
@@ -1229,6 +1249,108 @@ def _job_cancel(argv: list[str]) -> int:
     return 0
 
 
+RETRY_HEADER = {"kind": "retry", "from": "grok-bot", "role": "orchestrator"}
+_REPO = r"(?P<repo>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)"
+_TICKET_REF = re.compile(_REPO + r"#(?P<ticket>\S+)")
+_TICKET_URL = re.compile(
+    r"https://github\.com/" + _REPO + r"/(?:pull|issues)/(?P<ticket>[0-9]+)(?:[/?#]\S*)?"
+)
+
+
+def _retry(argv: list[str]) -> int:
+    prog = "orch retry"
+    parser = _Parser(prog=prog, add_help=True)
+    parser.add_argument("ticket")
+    parser.add_argument("--reason", required=True)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--db", type=Path)
+    args = parser.parse_args(argv)
+    reason = args.reason.strip()
+    if not reason:
+        print(f"{prog}: --reason must say why (Max's words)", file=sys.stderr)
+        return 2
+    match = _TICKET_REF.fullmatch(args.ticket) or _TICKET_URL.fullmatch(args.ticket)
+    if match is None or not match["ticket"].isdigit():
+        linear = "linear.app/" in args.ticket or match is not None
+        print(
+            f"{prog}: {args.ticket!r} is not owner/repo#<n> or a GitHub PR or issue URL"
+            + ("; Linear tickets are out of scope, Grok posts kind=retry there" if linear else ""),
+            file=sys.stderr,
+        )
+        return 2
+    repo, number = match["repo"], int(match["ticket"])
+    if not args.force:
+        refusal = _retry_refusal(args.db or os.environ.get(DB_ENV), repo, number, prog)
+        if refusal is not None:
+            print(f"{prog}: {repo}#{number} {refusal}", file=sys.stderr)
+            return 1
+    body = f"{format_header(RETRY_HEADER)}\n\nRetry requested: {reason}\n"
+    try:
+        comment_id = GitHubIntakeClient().post_comment(repo, number, body)
+    except GitHubAdapterError as exc:
+        print(f"{prog}: {exc.safe_detail}", file=sys.stderr)
+        if gh_status(exc) in (401, 403):
+            print(
+                f"{prog}: the gh login must be a trusted_logins login for grok-bot "
+                "in orch.yml",
+                file=sys.stderr,
+            )
+        return 1
+    print(f"posted kind=retry comment {comment_id} on {repo}#{number}")
+    return 0
+
+
+def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> str | None:
+    path = Path(db) if db else None
+    if path is None or not path.is_file():
+        print(
+            f"{prog}: warning: no dispatcher database (pass --db or set {DB_ENV}); "
+            "posting without the stuck check",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            state = (
+                connection.execute(
+                    "SELECT stuck, COALESCE(workflow_state, 'intake') FROM ticket_state "
+                    "WHERE repo = ? AND ticket_id = ?",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if "ticket_state" in tables
+                else None
+            )
+            job = (
+                connection.execute(
+                    "SELECT id, action, recipient, state FROM jobs "
+                    "WHERE lower(repo) = ? AND ticket_id = ? "
+                    "AND state IN ('queued', 'running') AND recipient != 'grok' "
+                    "ORDER BY created_at LIMIT 1",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if "jobs" in tables
+                else None
+            )
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        print(
+            f"{prog}: warning: cannot read {path} ({exc}); posting without the stuck check",
+            file=sys.stderr,
+        )
+        return None
+    if state is None or not state[0]:
+        return f"not stuck (state {state[1] if state else 'untracked'}); nothing to retry"
+    if job is not None:
+        return f"has job {job[0]} {job[1]} -> {job[2]} {job[3]}; nothing to retry until it ends"
+    return None
+
+
 def _done_settled(
     queue: SQLiteJobQueue, job_id: str, handoff: str | None
 ) -> tuple[int, str] | None:
@@ -1560,6 +1682,7 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"sandboxed codex exec: added --add-dir {dirs} (the orch state dir) "
                 f"so orch job done can write {database.name}")
     code: int | None = None  # #91: how the command ended, for ended() and finish()
+    budget = job_run.Budget(timeout_seconds)  # #199: the brief prints it
     try:
         if placed.remote:
             code = job_run.follow(
@@ -1570,12 +1693,14 @@ def _job_run_command(argv: list[str]) -> int:
                     control,
                     report_env=session is not None,
                     output=session.consume if session is not None else None,
+                    budget=budget,
                 ),
                 beat=beat,
                 interval=interval,
                 log=log,
                 setup=setup,
                 teardown=teardown,
+                budget=budget,
             )
         else:
             code = job_run.run(
@@ -1589,6 +1714,7 @@ def _job_run_command(argv: list[str]) -> int:
                 started=placed.started,
                 output=session.consume if session is not None else None,
                 execed=placed.execed,
+                budget=budget,
             )
         return code
     except placed_run.CheckoutError as exc:
@@ -1614,6 +1740,10 @@ def _job_run_command(argv: list[str]) -> int:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
+        if budget.expired:
+            _record_wall_clock(queue, args.job_id, budget, placed.device.name, log)
+            if session is not None:
+                session.wall_clock(budget.elapsed())
         if session is not None:
             if placed.target is not None:  # #151: a remote Codex job's rollout rate limits
                 session.add_usage(usage_probe.remote_codex(
@@ -1625,9 +1755,12 @@ def _job_run_command(argv: list[str]) -> int:
         # A remote run's job is finished by its waiter on the box, from the
         # run's exit status and final ORCH-HANDOFF line (lib/waiter.py), so
         # only a box run is failed here.
+        # #199: a box run stopped past its budget is failed too, but only
+        # once no worker of it runs (run reaped its own), so T6 never
+        # retries it beside a live one.
         settle = (
-            (lambda: _fail_unfinished(queue, args.job_id, owner, log))
-            if placed.autostart and not placed.remote
+            (lambda: _settle_box(queue, args.job_id, owner, log, placed.live_worker))
+            if (placed.autostart or budget.expired) and not placed.remote
             else None
         )
         try:
@@ -1638,6 +1771,25 @@ def _job_run_command(argv: list[str]) -> int:
             log(f"could not release the device slot: {' '.join(str(exc).split())}")
             if settle is not None:
                 settle()  # a settled or requeued job is no longer running: left alone
+
+
+def _settle_box(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    owner: str,
+    log: Callable[[str], None],
+    live: Callable[[], int | None],
+) -> None:
+    """Fail an ended box run's job for T6, unless `live` names a worker that still runs.
+
+    #199: then the poller's dead-job check fails it once the worker is gone,
+    so no retry starts beside it.
+    """
+    pid = live()
+    if pid is not None:
+        log(f"worker pid {pid} still runs; job {job_id} not failed while it runs")
+        return
+    _fail_unfinished(queue, job_id, owner, log)
 
 
 def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callable[[str], None]) -> None:
@@ -1654,6 +1806,37 @@ def _fail_unfinished(queue: SQLiteJobQueue, job_id: str, owner: str, log: Callab
         log(f"could not fail job {job_id}: {' '.join(str(exc).split())}")
         return
     log(f"the command ended without orch job done; failed job {job_id} for T6")
+
+
+def _record_wall_clock(
+    queue: SQLiteJobQueue,
+    job_id: str,
+    budget: job_run.Budget,
+    device: str,
+    log: Callable[[str], None],
+) -> None:
+    """#199: the `wall-clock` job event, while the job still runs. Never raises."""
+    name = signal.Signals(budget.signum).name if budget.signum is not None else "a stop"
+    hours = budget.elapsed() / 3600
+    detail = (
+        f"its command on {device} ran past its {budget.describe()}; stopped with {name} "
+        f"after {budget.elapsed() / 60:.1f} minutes ({hours:.2f} slot-hours lost)"
+    )
+
+    def write() -> None:
+        with queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is not None and row["state"] == "running":
+                record_job_event(connection, job_id, job_run.WALL_CLOCK, detail, queue.now())
+            connection.commit()
+
+    try:
+        retry_locked(write)
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        log(f"could not record job {job_id}'s wall-clock stop: {' '.join(str(exc).split())}")
+        return
+    log(f"job {job_id}: {detail}")
 
 
 def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, str | None]:

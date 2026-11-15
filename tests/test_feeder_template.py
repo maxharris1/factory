@@ -163,8 +163,17 @@ def test_an_operator_step_is_an_ops_criterion(criterion: str) -> None:
         ("No conflicts with\n  any open pull request.", (0, 1, 0)),
         ("Pull request #157 is merged first.", (0, 1, 0)),
         ("Users can manually trigger the retry from the dashboard.", (1, 0, 1)),
+        ("**Pull request** #157 is merged first.", (0, 1, 0)),
+        ("PR **#157** is merged first.", (0, 1, 0)),
+        ("`PR` #157 is merged first.", (0, 1, 0)),
+        ("Lands after <https://github.com/owner/app/pull/157> does.", (0, 1, 0)),
+        ("Evaluates `pr*2` correctly when pr is the pressure ratio.", (1, 0, 1)),
+        ("Accepts `pr~1` as the parent revision of branch pr.", (1, 0, 1)),
+        ("[PR](https://example.com) #157 is merged first.", (0, 1, 0)),
+        ("PR [#157](https://example.com) is merged first.", (0, 1, 0)),
     ],
-    ids=["wrapped", "spelled-out", "user-manual"],
+    ids=["wrapped", "spelled-out", "user-manual", "bold-words", "bold-number", "code",
+         "autolink", "code-star", "code-tilde", "link-word", "link-number"],
 )
 def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, expected) -> None:
     feeder, _, github, _ = make_feeder(tmp_path)
@@ -173,8 +182,76 @@ def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, exp
     assert (len(report.fed), report.refused, len(github.pulls)) == expected
 
 
+@pytest.mark.parametrize(
+    ("criterion", "definitions"),
+    [
+        ("[PR][docs] #157 is merged first.", "[docs]: https://example.com"),
+        ("PR [#157][docs] is merged first.", "[docs]: https://example.com"),
+        ("[PR][] #157 is merged first.", "[PR]: https://example.com"),
+        ("[PR] #157 is merged first.", "[pr]: https://example.com"),
+        ("Lands after [the fix][fix] does.", "[fix]: https://github.com/owner/app/pull/157"),
+        ("Lands after ![diagram][d] does.", "[d]: https://github.com/owner/app/pull/157"),
+        ("Lands after <a href=\"https://github.com/owner/app/pull/157\">the fix</a> does.", ""),
+    ],
+    ids=["full-word", "full-number", "collapsed", "shortcut", "ref-target", "ref-image", "html-anchor"],
+)
+def test_the_feeder_refuses_other_prs_criteria_that_resolve_through_the_document(
+    tmp_path: Path, criterion: str, definitions: str
+) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    text = body(criteria=("- [ ] " + criterion,)) + f"\n{definitions}\n"
+    github.issues[HOME] = [issue(7, body=text, template=False)]
+    report = feeder.feed_once()
+    assert (len(report.fed), report.refused, len(github.pulls)) == (0, 1, 0)
+
+
+def test_a_bracketed_word_without_a_definition_is_not_an_other_prs_criterion() -> None:
+    assert codes(body(criteria=("- [ ] Shows [draft] next to #120.",)) + "\n[draft]: https://example.com\n") == set()
+
+
 def test_a_plain_issue_reference_is_not_an_other_prs_criterion() -> None:
     assert codes(body(criteria=("- [ ] Fixes the crash in #120.",))) == set()
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "<b>PR</b> #157 is merged first.",
+        "PR \\#157 is merged first.",
+        "~~PR~~ #157 is merged first.",
+        "__Pull request__ #157 is merged first.",
+        "*PR* #157 is merged first.",
+        "[**PR** #157](https://example.com) is merged first.",
+        "PR&nbsp;#157 is merged first.",
+        "Lands after [the fix](https://github.com/owner/app/pull/9) does.",
+        "![PR #157](diagram.png) is merged first.",
+        "PR <span>#157</span> is merged first.",
+    ],
+)
+def test_a_formatted_other_prs_criterion_is_refused(criterion: str) -> None:
+    parsed = parse_intake(body(criteria=(f"- [ ] {criterion}",)), ())
+    assert {defect.code for defect in parsed.defects} == {"other-prs-criterion"}
+    assert repr(criterion) in parsed.defects[0].reason
+    assert parsed.criteria == (criterion,)
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    ["Keeps `pr_157` as one name.", "Fixes **#120**.", "Edits `lib/feeder.py` **only**.",
+     "Parses `pr*2` and `pr~1` literally.", "Renders `<b>pr</b>2` as code.",
+     "Escapes `pr\\_2` as written."],
+)
+def test_formatting_alone_does_not_make_an_other_prs_criterion(criterion: str) -> None:
+    assert codes(body(criteria=(f"- [ ] {criterion}",))) == set()
+
+
+def test_the_brief_keeps_a_formatted_criterion_as_written(tmp_path: Path) -> None:
+    criterion = "Edits `lib/feeder.py` **only**."
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(criteria=(f"- [ ] {criterion}",)), template=False)]
+    feeder.feed_once()
+    _, brief = go_and_brief(github)
+    assert f"- {criterion}" in brief.split("### Acceptance criteria")[1].split("###")[0]
 
 
 def test_ops_criteria_are_flagged_apart_and_alone_are_no_criteria() -> None:

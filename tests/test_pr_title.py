@@ -265,7 +265,7 @@ def test_the_dashboard_shows_the_issue_first_and_the_pr_second(tmp_path: Path) -
     pages = render_pages(snapshot)
     assert ">repo#115 (PR #116)<" in pages["index.html"]
     assert ">repo#115 (PR #116)<" in pages["job.html"]
-    assert ">owner/repo#115 (PR #116)<" in pages["activity.html"]
+    assert ">owner/repo#115 (PR #116)<" in pages["job.html"]
 
 
 @pytest.mark.parametrize("source", ["ABCDEFGHIJ-1234567890", "#1234567890"])
@@ -288,7 +288,7 @@ def test_the_live_page_script_shows_the_issue_first_too(tmp_path: Path) -> None:
     _, snapshot = seeded(tmp_path)
 
     queue = _run_page(tmp_path, snapshot, "main", ["queue"])["text"]["queue"]
-    tickets = _run_page(tmp_path, snapshot, "activity", ["tickets"])["text"]["tickets"]
+    tickets = _run_page(tmp_path, snapshot, "job", ["tickets"])["text"]["tickets"]
 
     assert "repo#115 (PR #116)" in queue
     assert "AUT-2284 (PR #123)" in queue

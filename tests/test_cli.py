@@ -1,7 +1,12 @@
 import copy
+import json
+import os
+import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -482,3 +487,201 @@ def test_job_cancel_of_an_unknown_job_exits_2(tmp_path: Path, capsys) -> None:
 
     assert cli.main(["job", "cancel", "nope", "--db", str(queue.path)]) == 2
     assert "unknown job nope" in capsys.readouterr().err
+
+
+TOKEN_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+RETRY_GH = """\
+import json, os, sys
+with open(os.environ["RETRY_GH_LOG"], "a", encoding="utf-8") as handle:
+    tokens = sorted(name for name in {tokens!r} if name in os.environ)
+    handle.write(json.dumps({{"argv": sys.argv[1:], "tokens": tokens}}) + "\\n")
+status = os.environ.get("RETRY_GH_STATUS")
+if status:
+    print(f"gh: Resource not accessible (HTTP {{status}})", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({{"id": 987654}}))
+"""
+
+
+@pytest.fixture
+def retry_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    directory = tmp_path / "retry-gh"
+    directory.mkdir()
+    fallback = None
+    script = _write_retry_gh(directory)
+    if not os.access(script, os.X_OK):
+        fallback = Path(tempfile.mkdtemp(prefix="pytest-retry-gh-", dir="/tmp"))
+        directory, script = fallback, _write_retry_gh(fallback)
+    log = tmp_path / "gh-calls.jsonl"
+    log.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{directory}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("RETRY_GH_LOG", str(log))
+    for name in TOKEN_VARIABLES:
+        monkeypatch.setenv(name, "must-not-reach-gh")
+    yield lambda: [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    if fallback is not None:
+        shutil.rmtree(fallback, ignore_errors=True)
+
+
+def _write_retry_gh(directory: Path) -> Path:
+    body = directory / "retry_gh.py"
+    body.write_text(RETRY_GH.format(tokens=TOKEN_VARIABLES), encoding="utf-8")
+    script = directory / "gh"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{body}" "$@"\n', encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def _retry_db(tmp_path: Path, *, stuck: bool | None, state: str = "fixing"):
+    from tests.test_dispatcher import setup
+
+    queue = setup(tmp_path)[1]
+    if stuck is not None:
+        with sqlite3.connect(queue.path) as connection:
+            connection.execute(
+                "INSERT INTO ticket_state (repo, ticket_id, stuck, workflow_state, stuck_reason) "
+                "VALUES ('owner/repo', '42', ?, ?, ?)",
+                (int(stuck), state, "job-failed-2" if stuck else None),
+            )
+    return queue
+
+
+def _posted_body(call: dict) -> str:
+    argv = call["argv"]
+    field = argv[argv.index("-f") + 1]
+    assert field.startswith("body=")
+    return field[len("body="):]
+
+
+@pytest.mark.parametrize(
+    "ticket",
+    [
+        "owner/repo#42",
+        "https://github.com/owner/repo/pull/42",
+        "https://github.com/owner/repo/issues/42",
+        "https://github.com/owner/repo/pull/42#issuecomment-1",
+    ],
+)
+def test_retry_posts_on_the_parsed_ticket(tmp_path: Path, retry_gh, capsys, ticket: str) -> None:
+    queue = _retry_db(tmp_path, stuck=True)
+
+    code = cli.main(["retry", ticket, "--reason", "Max: try once more", "--db", str(queue.path)])
+
+    assert code == 0
+    [call] = retry_gh()
+    assert call["argv"][:4] == ["api", "-X", "POST", "repos/owner/repo/issues/42/comments"]
+    assert "987654" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "ticket",
+    [
+        "owner/repo",
+        "repo#42",
+        "owner/repo#",
+        "aut0-code/aut0#AUT-7",
+        "https://linear.app/aut0/issue/AUT-7",
+        "https://gitlab.com/owner/repo/pull/42",
+        "https://github.com/owner/repo/commit/42",
+    ],
+)
+def test_retry_rejects_anything_but_a_github_ticket(retry_gh, ticket: str) -> None:
+    assert cli.main(["retry", ticket, "--reason", "why", "--force"]) == 2
+    assert retry_gh() == []
+
+
+def test_retry_names_linear_as_out_of_scope(retry_gh, capsys) -> None:
+    assert cli.main(["retry", "aut0-code/aut0#AUT-7", "--reason", "why", "--force"]) == 2
+    assert "Linear tickets are out of scope" in capsys.readouterr().err
+
+
+def test_retry_needs_a_reason(retry_gh) -> None:
+    assert cli.main(["retry", "owner/repo#42", "--reason", "  ", "--force"]) == 2
+    assert cli.main(["retry", "owner/repo#42", "--force"]) == 2
+    assert retry_gh() == []
+
+
+@pytest.mark.parametrize(
+    ("stuck", "shown"), [(False, "state fixing"), (None, "state untracked")]
+)
+def test_retry_refuses_a_ticket_that_is_not_stuck(
+    tmp_path: Path, retry_gh, capsys, stuck: bool | None, shown: str
+) -> None:
+    queue = _retry_db(tmp_path, stuck=stuck)
+
+    code = cli.main(["retry", "Owner/Repo#42", "--reason", "why", "--db", str(queue.path)])
+
+    assert code == 1
+    assert f"not stuck ({shown}); nothing to retry" in capsys.readouterr().err
+    assert retry_gh() == []
+
+
+def test_retry_refuses_while_a_harness_job_is_active(
+    tmp_path: Path, retry_gh, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lib.queue import JobRequest
+
+    queue = _retry_db(tmp_path, stuck=True)
+    job = queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="fix",
+            recipient="claude",
+            source_comment_id="c-1",
+            timeout_seconds=3600,
+        ),
+        dedupe_key="fix:k",
+    )
+    monkeypatch.setenv("ORCH_DB", str(queue.path))
+
+    assert cli.main(["retry", "owner/repo#42", "--reason", "why"]) == 1
+    assert f"has job {job.id} fix -> claude queued" in capsys.readouterr().err
+    assert retry_gh() == []
+
+
+def test_retry_force_posts_without_the_check(tmp_path: Path, retry_gh) -> None:
+    queue = _retry_db(tmp_path, stuck=False)
+
+    code = cli.main(
+        ["retry", "owner/repo#42", "--reason", "why", "--force", "--db", str(queue.path)]
+    )
+
+    assert code == 0
+    assert len(retry_gh()) == 1
+
+
+def test_retry_posts_a_grok_header_with_max_words_and_no_token(
+    tmp_path: Path, retry_gh
+) -> None:
+    from lib.handoff import parse_comment
+
+    queue = _retry_db(tmp_path, stuck=True)
+
+    code = cli.main(
+        ["retry", "owner/repo#42", "--reason", "Max: one more go", "--db", str(queue.path)]
+    )
+
+    assert code == 0
+    [call] = retry_gh()
+    assert call["tokens"] == []
+    posted = parse_comment(_posted_body(call))
+    assert posted.as_dict() == {"kind": "retry", "from": "grok-bot", "role": "orchestrator"}
+    assert posted.body == "\nRetry requested: Max: one more go\n"
+
+
+def test_retry_names_the_trusted_login_on_a_403(
+    tmp_path: Path, retry_gh, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = _retry_db(tmp_path, stuck=True)
+    monkeypatch.setenv("RETRY_GH_STATUS", "403")
+
+    code = cli.main(["retry", "owner/repo#42", "--reason", "why", "--db", str(queue.path)])
+
+    assert code == 1
+    assert "trusted_logins login for grok-bot" in capsys.readouterr().err
+
+
+def test_help_lists_retry(capsys) -> None:
+    assert cli.main(["--help"]) == 0
+    assert "retry <owner/repo>#<n> --reason TEXT" in capsys.readouterr().out

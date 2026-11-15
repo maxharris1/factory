@@ -333,6 +333,85 @@ def snapshot_for(tmp_path: Path, **kwargs) -> dict:
     return collect_snapshot(db, log, now=NOW, **kwargs)
 
 
+RETRIES_TABLE = """
+CREATE TABLE IF NOT EXISTS ticket_retries (
+    repo TEXT NOT NULL, ticket_id TEXT NOT NULL, comment_id TEXT NOT NULL,
+    stuck_reason TEXT, resumed_action TEXT, job_id TEXT,
+    outcome TEXT NOT NULL, recorded_at REAL NOT NULL,
+    PRIMARY KEY (repo, ticket_id, comment_id)
+)
+"""
+
+
+def test_retry_outcomes_group_as_routed_or_rejected(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    outcomes = [
+        "queued-retry-fix",
+        "retried-no-job",
+        "retried-merge-queue",
+        "rejected-retry-author",
+        "rejected-retry-no-reason",
+        "rejected-retry-not-stuck",
+        "rejected-retry-job-active",
+    ]
+    with sqlite3.connect(db) as connection:
+        connection.executemany(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) "
+            "VALUES ('maxharris1/cleffy', '14', ?, ?)",
+            [(f"c{index}", outcome) for index, outcome in enumerate(outcomes)],
+        )
+    verdicts = collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]
+    kinds = {row["outcome"]: row["kind"] for row in verdicts}
+    assert kinds == {
+        "queued-retry-fix": "routed",
+        "retried-no-job": "routed",
+        "retried-merge-queue": "routed",
+        "rejected-retry-author": "rejected",
+        "rejected-retry-no-reason": "rejected",
+        "rejected-retry-not-stuck": "rejected",
+        "rejected-retry-job-active": "rejected",
+    }
+
+
+def test_active_jobs_count_their_tickets_accepted_retries(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(RETRIES_TABLE)
+        connection.executemany(
+            "INSERT INTO ticket_retries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("maxharris1/cleffy", "14", "c1", "job-failed-2", "fix", "j1",
+                 "queued-retry-fix", NOW - 900),
+                ("maxharris1/cleffy", "14", "c2", "ci-red-3", "fix", "j2",
+                 "queued-retry-fix", NOW - 300),
+                ("maxharris1/cleffy", "13", "c3", None, None, None,
+                 "rejected-retry-not-stuck", NOW - 60),
+            ],
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    running = {row["ticket_id"]: row for row in snapshot["running"]}
+    assert running["14"]["retries"] == 2
+    assert "retries" not in running["13"]
+    assert all("retries" not in row for row in snapshot["queued"])
+
+
+def test_the_job_page_shows_its_tickets_retries(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(RETRIES_TABLE)
+        connection.execute(
+            "INSERT INTO ticket_retries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("maxharris1/cleffy", "14", "c1", "job-failed-2", "fix", "j1",
+             "queued-retry-fix", NOW - 900),
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    page = dashboard.render_pages(snapshot)["job.html"]
+    assert "retried 1x" in page
+    running = next(row for row in snapshot["running"] if row["ticket_id"] == "14")
+    running["retries"] = 999
+    assert "retried 999x" in dashboard.render_pages(snapshot)["job.html"]
+
+
 # --- read-only open -------------------------------------------------------
 
 
@@ -523,6 +602,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "statechart",
         "telemetry",
         "projects",  # per-project ship mode and round caps (#152)
+        "rules",
         "usage",  # subscription headroom per bot account (#151)
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
@@ -1238,8 +1318,7 @@ def test_html_escapes_markup_from_the_database(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(db, log, now=NOW))
     for html in pages.values():
         assert "<script>alert(1)</script>" not in html
-    # Poll errors are on the Efficiency page now.
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in pages["efficiency.html"]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in pages["health.html"]
 
 
 def test_unknown_enum_values_are_not_echoed(tmp_path: Path) -> None:

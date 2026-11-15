@@ -138,10 +138,16 @@ SCRIPT = r"""
       ' · waiting on blockers or files ' + f.waiting_blocked));
     var list = add(box, el('ul'));
     (f.items || []).forEach(function (item) {
-      add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
+      var tiered = item.tier !== null && item.tier !== undefined;
+      var li = add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
         (item.reason || FEEDER_STATE[item.state] || item.state) +
-        (item.pr ? ' → PR #' + item.pr : '')));
+        (item.pr ? ' → PR #' + item.pr : '') + (tiered ? ' ' : '')));
+      tierChip(li, item.tier);
     });
+  }
+
+  function tierChip(parent, tier) {
+    if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
   }
 
   function slotCard(r) {
@@ -237,6 +243,7 @@ SCRIPT = r"""
       var a = add(li, opensModal(link('queue-item', 'job.html#' + anchor(r.job)), r.job));
       add(a, bot(r.recipient));
       add(a, el('span', 'ticket', jobLabel(r)));
+      tierChip(a, r.tier);
       add(a, el('span', 'what', r.action));
       ticking(add(a, el('span', 'when')), r.age_seconds, 'waiting ');
       if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
@@ -369,6 +376,7 @@ def _feeder(snapshot: dict) -> str:
         f"<li>{_e(item['repo'])}#{_e(item['issue'])} "
         f"{_e(item.get('reason') or _FEEDER_STATE.get(item['state'], item['state']))}"
         + (f" → PR #{_e(item['pr'])}" if item.get("pr") else "")
+        + ("" if item.get("tier") is None else " " + _tier_chip(item["tier"]))
         + "</li>"
         for item in feeder["items"]
     )
@@ -379,6 +387,10 @@ def _feeder(snapshot: dict) -> str:
         f"waiting on blockers or files {_e(feeder.get('waiting_blocked', 0))}</p>"
         f"<ul>{rows}</ul></div>"
     )
+
+
+def _tier_chip(tier: object) -> str:
+    return "" if tier is None else _chip(f"tier {tier}", "accent")
 
 
 def _linear_webhook(snapshot: dict) -> str:
@@ -554,7 +566,7 @@ def _queue(snapshot: dict) -> str:
     def draw(row: dict) -> str:
         return (
             f'<a class="queue-item" href="job.html#{anchor(row["job"])}">'
-            f'{_bot(row["recipient"])}{_span("ticket", _job_label(row))}'
+            f'{_bot(row["recipient"])}{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}'
             f'{_span("what", row["action"])}{_when(row["age_seconds"], "waiting ")}</a>'
             + (
                 f'<a class="chip bad" href="{_e(_health_link(row.get("no_waiter_link")))}">'

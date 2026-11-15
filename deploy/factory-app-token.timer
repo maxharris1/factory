@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the factory token broker every 5 minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+Unit=factory-app-token.service
+
+[Install]
+WantedBy=timers.target
