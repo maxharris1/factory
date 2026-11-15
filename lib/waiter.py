@@ -27,12 +27,11 @@ runs as the owning bot's own user and login, starts the job itself:
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started;
-* while this bot has no box run (no box slot and no unplaced running job
-  in orch.db) it brings its own box factory_root to the deployed box
-  checkout's HEAD with lib/device_deploy.py's git steps, then its home's
-  installed skills to that pin with the preflight's own hash and install
-  code (#345). It
-  records the result as its (box, bot) device_sync row: synced, or refused
+* before each claim, whatever jobs it runs (#366), it brings its own box
+  factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
+  git steps, then its home's installed skills to that pin with the preflight's
+  own hash and install code (#345). It records the result as its (box, bot)
+  device_sync row: synced, or refused
   with the reason (retried after HOME_RETRY_SECONDS). It runs as this
   bot's account, so no other account writes into this checkout or home.
 
@@ -612,23 +611,13 @@ class Waiter:
         job, placement = claimed
         return self._start(job, placement)
 
-    def _box_busy(self, box: str) -> bool:
-        if any(job_id not in self._remote for job_id in self._children):
-            return True
-        try:
-            return retry_locked(lambda: self.pool.busy(box, self.recipient))
-        except (QueueError, sqlite3.Error, OSError) as exc:
-            self.log(f"skills in {self.home}: cannot tell whether {box} is idle "
-                     f"({_one_line(exc)}); left alone")
-            return True
-
     def _reconcile_home(self) -> None:
         if self.home is None:
             return
         device = next((d for d in self.pool.config.devices if d.local), None)
         name = device.name if device is not None else "box"
         checkout = self._factory_root(device)
-        if checkout is None or self._box_busy(name):
+        if checkout is None:
             return
         root = Path(checkout)
         target = checkout_sha(FACTORY_CHECKOUT)

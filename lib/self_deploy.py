@@ -56,7 +56,7 @@ One pass, in order; the first guard that fails ends it:
    checkout into HOME, this account's own home. A home it cannot read
    counts as missing the pin. Other bot accounts are never written from
    here (#345): each box bot's waiter, running as that account, installs
-   into its own home while it has no box job (lib/waiter.py). An
+   into its own home before each claim (lib/waiter.py). An
    up-to-date pass makes the same check, so a failed install is rerun once
    its cause is gone; that install takes the same `deploying` mark as step
    6, and a failure is `install-failed`, never `up-to-date`.
