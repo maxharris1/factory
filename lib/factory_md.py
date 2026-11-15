@@ -32,6 +32,11 @@ handoff; merge keeps watching the approved PR until it merges or closes.
 Omitted, it follows ship: ship: merge gives merge, any other ship gives
 ready-for-review. ship: merge with finish_line: ready-for-review is refused.
 
+shared_paths is optional (issue #261): a list of repo-relative paths or
+globs, a trailing / naming a directory. A Touches: path that matches never
+causes a feeder collision wait, and in a matching file a conflict hunk kept
+as both sides still counts as a trivial update. Absent, it is empty.
+
 parse_factory_context keeps the prose after the front block (Review, Ship,
 Context) for the waiter's standard brief (#80): the brief appends it as an
 additional-context section. Project-specific behavior lives there, not in
@@ -92,6 +97,7 @@ _TOP_KEYS = {
     "github_labels",
     "hold",
     "finish_line",
+    "shared_paths",
 }
 _HOLD_KEYS = {"label", "approver", "paths"}
 
@@ -123,6 +129,7 @@ class FactoryConfig:
     # None resolves from ship (default_finish_line), so a config built in
     # code gets the same default as one parsed from factory.md.
     finish_line: str | None = None
+    shared_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -189,6 +196,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
     github_labels = _optional_bool(data, "github_labels", findings)
     hold = _hold(data, findings)
     finish_line = _finish_line(data, ship, findings)
+    shared_paths = _shared_paths(data, findings)
 
     if builder_harness is not None and reviewer_harness is not None:
         findings.extend(
@@ -243,6 +251,7 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
         github_labels=github_labels,
         hold=hold,
         finish_line=finish_line,
+        shared_paths=shared_paths,
     )
     return config, findings
 
@@ -544,6 +553,27 @@ def _hold(data: dict, findings: list[Finding]) -> HoldConfig | None:
     if len(findings) != errors:
         return None
     return HoldConfig(label=label, approver=approver, paths=tuple(paths))
+
+
+def _shared_paths(data: dict, findings: list[Finding]) -> tuple[str, ...]:
+    value = data.get("shared_paths")
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        findings.append(Finding("error", "shared_paths must be a list"))
+        return ()
+    paths: list[str] = []
+    for index, item in enumerate(value):
+        if isinstance(item, str) and _is_glob(item.removesuffix("/")):
+            paths.append(item)
+        else:
+            findings.append(
+                Finding(
+                    "error",
+                    f"shared_paths[{index}] must be a repo-relative path or glob",
+                )
+            )
+    return tuple(paths)
 
 
 def _is_glob(value: object) -> bool:

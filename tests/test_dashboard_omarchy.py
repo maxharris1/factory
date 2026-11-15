@@ -126,7 +126,8 @@ def test_palette_is_tokyo_night(tmp_path: Path) -> None:
 
 
 def test_corners_are_square_and_elevation_is_a_ring(tmp_path: Path) -> None:
-    css = _css(_pages(tmp_path)["index.html"])
+    html = _pages(tmp_path)["index.html"]
+    css = _css(html)
     assert "--elev:0 0 0 1px rgba(255,255,255,.07)" in css
     assert "--elev-hi:0 0 0 1px rgba(255,255,255,.13)" in css
     panel = re.search(r"\.panel\{[^}]*\}", css).group(0)
@@ -134,8 +135,10 @@ def test_corners_are_square_and_elevation_is_a_ring(tmp_path: Path) -> None:
     # Only the round savings gauge keeps a radius.
     radii = re.findall(r"([^{}]+)\{[^}]*border-radius", css)
     assert [selector.strip() for selector in radii] == [".ring", ".ring span"]
-    # The brand caret blinks only when motion is allowed.
-    assert "animation:caret" in css and "@keyframes caret" in css
+    # #139: the brand caret is a PixelStrip canvas whose rate comes from the
+    # link state; the engine stills it under reduced motion.
+    assert "@keyframes caret" not in css
+    assert re.search(r'<span class="caret" id="caret" aria-hidden="true"><canvas class="px" data-px="caret"', html)
 
 
 # --- the font loader, in node ---------------------------------------------------------

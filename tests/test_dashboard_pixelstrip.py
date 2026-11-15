@@ -607,9 +607,12 @@ def _pages(tmp_path: Path) -> dict[str, str]:
     return render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
 
 
-def test_no_page_shows_a_strip_yet(tmp_path: Path) -> None:
+def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
+    """#139: the caret, the band and (with something to attend to) the
+    attention block; the page tickets place the rest."""
     for name, html in _pages(tmp_path).items():
-        assert 'class="px"' not in html, name
+        keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
+        assert keys == ["caret", "band", "attention"], name
         assert 'class="px-held"' not in html, name
 
 

@@ -87,10 +87,14 @@ class Board:
         path = tmp_path / "d.db"
         self.queue = SQLiteJobQueue(path, clock=lambda: self.now[0])
         self.classified: list[tuple[str, str, str, str]] = []
+        self.classified_shared: list[tuple[str, ...]] = []
         self.verdict = UpdateClass(True, "each hunk took one side")
 
-        def default_classifier(repo: str, base: str, approved: str, head: str) -> UpdateClass:
+        def default_classifier(
+            repo: str, base: str, approved: str, head: str, shared_paths: tuple[str, ...]
+        ) -> UpdateClass:
             self.classified.append((repo, base, approved, head))
+            self.classified_shared.append(shared_paths)
             return self.verdict
 
         self.dispatcher = Dispatcher(

@@ -36,7 +36,7 @@ from lib.job_state import (
 )
 from lib.orch_yml import load_orch_yml
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
-from tests.test_dashboard_layout import BAR, _run_page, needs_node
+from tests.test_dashboard_layout import BAR, _run_page, attention_count, needs_node
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, TRUSTED_LOGINS
 from tests.test_remote_start import FakeTransport, config_of, machines_file
 
@@ -171,6 +171,7 @@ class Poller:
         now: float = CLAIMED_AT,
         box: bool = True,
         box_slots: int = 1,
+        pc: bool = True,
         check: int = 0,
         job_states: JobStateConfig | None = None,
     ):
@@ -178,7 +179,7 @@ class Poller:
         self.now = [now]
         self.path = tmp_path / "orch.db"
         self.queue = SQLiteJobQueue(self.path, clock=lambda: self.now[0])
-        self.machines = machines_file(tmp_path, box_enabled=box, box_slots=box_slots)
+        self.machines = machines_file(tmp_path, box_enabled=box, box_slots=box_slots, pc=pc)
         self.config = config_of(self.machines)
         self.pool = DevicePool(self.queue, self.config)
         self.live: set[int] = set()
@@ -678,7 +679,7 @@ def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
                    "stale heartbeat", "runner dead", "running"):
         assert needle in lanes, (needle, lanes)
     assert "round 0" not in lanes
-    assert out["text"]["attention-count"] == "2"
+    assert attention_count(out) == "2"
     assert "2stuck / overdue" in out["text"]["kpis"]
     # The claimed card has no heartbeat bar.
     dump = out["dump"]["lanes"]

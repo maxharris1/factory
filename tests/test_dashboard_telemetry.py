@@ -209,6 +209,7 @@ def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: 
     assert rollup["totals"] == {
         "jobs": 3, "tokens_in": 24763 + 5460 + 1000, "tokens_cached": 24448 + 5000,
         "tokens_out": 1220 + 300 + 100, "cost_usd": 0.4713, "priced_jobs": 2,
+        "unmetered_jobs": 0,
     }
     harness = {row["name"]: row for row in rollup["by_harness"]}
     assert harness["codex"]["jobs"] == 1 and harness["codex"]["priced_jobs"] == 0

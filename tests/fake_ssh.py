@@ -9,7 +9,9 @@ appends one JSON line per call to $FAKE_SSH_LOG, and then plays the device:
   255, as a refused login would;
 * `<alias>.offline` in $FAKE_SSH_HOSTS makes the device unreachable (255);
 * otherwise SCRIPT runs under `sh -c` in a new session with a fresh
-  environment (PATH and HOME only: ssh forwards no variables), as sshd
+  environment (PATH and HOME only: ssh forwards no variables; the test
+  harness's FACTORY_TEST_PROC_TAG rides along so tests/child_reaper.py can
+  find a hung test's "remote" workers), as sshd
   runs a command, so killing this process leaves the "remote" worker
   running. $FAKE_SSH_PATH, when set, is the device's non-login PATH.
   HOME is $FAKE_SSH_HOME, else an empty `fake-ssh-home` beside the log,
@@ -73,6 +75,11 @@ def _seconds(path: str) -> float | None:
             return float(handle.read().strip() or 0)
     except FileNotFoundError:
         return None
+
+
+def _test_tag() -> dict[str, str]:
+    tag = os.environ.get("FACTORY_TEST_PROC_TAG")
+    return {"FACTORY_TEST_PROC_TAG": tag} if tag else {}
 
 
 def _relay(source, sink) -> None:
@@ -254,6 +261,7 @@ def main(argv: list[str]) -> int:
         env={
             "PATH": os.environ.get("FAKE_SSH_PATH") or os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": home,
+            **_test_tag(),
         },
         stdout=subprocess.PIPE if drop is not None else None,
         stderr=subprocess.PIPE if drop is not None else None,

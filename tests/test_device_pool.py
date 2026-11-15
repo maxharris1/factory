@@ -141,13 +141,15 @@ def test_choose_device_skips_full_ineligible_placeholder_and_disabled() -> None:
             device("off", 9, "claude", enabled=False),
             device("full", 1, "claude"),
             device("other", 9, "codex"),
-            device("free", 1, "claude"),
+            device("free", 2, "claude"),
         )
     )
 
     chosen = choose_device(config, "claude", {"full": 1})
     assert chosen is not None and chosen.name == "free"
-    assert choose_device(config, "claude", {"full": 1, "free": 1}) is None
+    chosen = choose_device(config, "claude", {"full": 1, "free": 1})
+    assert chosen is not None and chosen.name == "free"
+    assert choose_device(config, "claude", {"full": 1, "free": 2}) is None
 
 
 def test_concurrent_claims_never_take_the_same_last_slot(tmp_path: Path) -> None:

@@ -42,7 +42,7 @@ def test_kinds_and_example_keys_match_spec_section_5() -> None:
     key_line = next(line for line in spec.splitlines() if "header keys in the example" in line)
     example_keys = tuple(re.findall(r"`([a-z]+)`", key_line))
     assert example_keys == KEYS[:8]
-    assert KEYS[8:] == ("state", "builder")
+    assert KEYS[8:] == ("state", "builder", "reviewer")
     assert set(REQUIRED_BY_KIND) == set(KINDS)
 
 
