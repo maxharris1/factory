@@ -32,7 +32,6 @@ _REFUSED_VERDICT_OUTCOMES = (
     "refused-",
     "woke-grok-unparsed",
 )
-_REFUSED_REVIEW_RETRY_ATTEMPT = 2
 
 
 class QuestionsMixin:
@@ -375,6 +374,8 @@ class QuestionsMixin:
             else:
                 continue
             job = _job(row)
+            if job.request.action == "review" and self._open_fix_for_head(job):
+                continue
             if source is None or self._answered_by(
                 ticket,
                 source,
@@ -417,24 +418,28 @@ class QuestionsMixin:
                 SELECT * FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
                   AND recipient != 'grok'
-                  AND (state IN ('queued', 'running')
-                       OR (state = 'done' AND attempt < ?))
                 ORDER BY created_at, id
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, _REFUSED_REVIEW_RETRY_ATTEMPT),
+                (ticket.repo.lower(), ticket.ticket_id),
             ).fetchall()
+        retry_prefix = f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
         owed: tuple[Job, Comment] | None = None
         for row in rows:
             job = _job(row)
-            if job.state != "done":
+            if job.state in ("queued", "running"):
                 return
-            round_number = _detail_round_number(job.request.detail)
+            if (
+                _detail_round_number(job.request.detail) != review_round + 1
+                or _matching_head(job.request.head or "", ticket.current_head) is None
+            ):
+                continue
+            if job.dedupe_key.startswith(retry_prefix):
+                return
             source = sources.get(job.request.source_comment_id)
             outcome = self._handled_outcome(ticket, job.handoff_comment_id or "")
             if (
-                source is None
-                or round_number != review_round + 1
-                or _matching_head(job.request.head or "", ticket.current_head) is None
+                job.state != "done"
+                or source is None
                 or outcome is None
                 or not outcome.startswith(_REFUSED_VERDICT_OUTCOMES)
                 or self._answered_by(
@@ -443,13 +448,13 @@ class QuestionsMixin:
                     job.request.action,
                     job.request.recipient,
                     head=job.request.head,
-                    round_number=round_number,
+                    round_number=review_round + 1,
                 )
                 is not None
             ):
                 continue
             owed = (job, source)
-        if owed is None:
+        if owed is None or self._open_fix_for_head(owed[0]):
             return
         job, source = owed
         with self._connect() as connection:
@@ -458,11 +463,8 @@ class QuestionsMixin:
                 connection,
                 ticket,
                 source,
-                replace(job.request, attempt=_REFUSED_REVIEW_RETRY_ATTEMPT),
-                dedupe_key=(
-                    f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
-                    f"{job.handoff_comment_id}"
-                ),
+                replace(job.request, attempt=1),
+                dedupe_key=f"{retry_prefix}{job.handoff_comment_id}",
             )
             connection.commit()
         if self.log is not None:

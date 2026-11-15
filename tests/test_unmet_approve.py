@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.dispatcher import CIResult, Dispatcher
 from lib.handoff import HandoffError, parse_comment
-from lib.handoff_check import Expected, problems
+from lib.handoff_check import Expected, expected_for, problems
 from lib.hook_t7 import T7Hook
 from lib.queue import SQLiteJobQueue
 from tests.test_dispatcher import (
@@ -17,6 +18,7 @@ from tests.test_dispatcher import (
     FakeGrokDelivery,
     FakeReviewActions,
     comment,
+    factory,
     seed_builder_job,
     seed_review_job,
     ticket,
@@ -211,7 +213,7 @@ def test_a_refused_verdict_gives_its_review_back_once(
     assert outcome(queue, stale.id) in wakes[0]["detail"]
     retry = queue.claim("codex")
     assert retry is not None
-    assert (retry.request.action, retry.request.head, retry.request.attempt) == ("review", head, 2)
+    assert (retry.request.action, retry.request.head, retry.request.attempt) == ("review", head, 1)
     assert json.loads(retry.request.detail)["round"] == "1/3"
 
     queue.finish(retry.id, owner="codex", handoff_comment_id="verdict-again")
@@ -220,3 +222,136 @@ def test_a_refused_verdict_gives_its_review_back_once(
 
     assert queue.claim("codex") is None
     assert state(queue) == ("review", 0)
+
+
+HEAD = "a" * 40
+
+
+def finish_with_edited_verdict(queue, job, comment_id: str = "101"):
+    edited = replace(
+        comment(comment_id, verdict(HEAD, ac="met", round_="1/3"), author="codex-login", created_at=101),
+        edited_at=102,
+    )
+    data = {
+        "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+        "user": {"login": "codex-login"},
+        "body": edited.body,
+        "updated_at": "2026-11-15T10:02:00Z",
+    }
+
+    def read(path):
+        return data if "/issues/comments/" in path else {"head": {"ref": "review", "sha": HEAD}}
+
+    assert problems(expected_for(job, "codex-bot"), comment_id, read, {"codex-login": frozenset({"codex-bot"})}) == []
+    queue.finish(job.id, owner="codex", handoff_comment_id=edited.id)
+    return edited
+
+
+def review_jobs(queue) -> list[tuple[str, int]]:
+    return [(row["state"], row["attempt"]) for row in jobs(queue, "codex")]
+
+
+def test_first_refusal_after_t6_retry_preserves_review(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    ready = comment("ready-" + HEAD, READY.format(head=HEAD), author="claude-login")
+    snapshot = ticket(ready, head=HEAD, ci={HEAD: CIResult("success")})
+    dispatcher.process(snapshot)
+    first = queue.claim("codex")
+    queue.finish(first.id, owner="codex", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+    t6_retry = queue.claim("codex")
+    assert t6_retry is not None and t6_retry.request.attempt == 2
+    edited = finish_with_edited_verdict(queue, t6_retry)
+
+    dispatcher.process(replace(snapshot, comments=(ready, edited)))
+
+    assert outcome(queue, edited.id) == "rejected-edited"
+    assert state(queue) == ("review", 0)
+    retry = queue.claim("codex")
+    assert retry is not None, review_jobs(queue)
+    assert (retry.request.head, json.loads(retry.request.detail)["round"]) == (HEAD, "1/3")
+
+
+def test_a_refusal_retry_t6_retried_and_refused_again_is_not_requeued(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    ready = comment("ready-" + HEAD, READY.format(head=HEAD), author="claude-login")
+    snapshot = ticket(ready, head=HEAD, ci={HEAD: CIResult("success")})
+    dispatcher.process(snapshot)
+    first = finish_with_edited_verdict(queue, queue.claim("codex"), "101")
+    dispatcher.process(replace(snapshot, comments=(ready, first)))
+    refusal_retry = queue.claim("codex")
+    assert refusal_retry is not None
+    queue.finish(refusal_retry.id, owner="codex", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+    t6_retry = queue.claim("codex")
+    assert t6_retry is not None and t6_retry.request.attempt == 2
+    second = finish_with_edited_verdict(queue, t6_retry, "102")
+
+    dispatcher.process(replace(snapshot, comments=(ready, first, second)))
+
+    assert outcome(queue, second.id) == "rejected-edited"
+    assert queue.claim("codex") is None, review_jobs(queue)
+    assert state(queue) == ("review", 0)
+
+
+def open_fix_and_running_review(tmp_path: Path):
+    dispatcher, queue = setup(tmp_path)
+    queue.clock = lambda: 1000
+    config = replace(factory(), start_before_ci=True)
+    seed_builder_job(queue)
+    ready = comment("ready-" + HEAD, READY.format(head=HEAD), author="claude-login", created_at=1)
+    dispatcher.process(ticket(ready, head=HEAD, factory_config=config, ci={HEAD: CIResult("pending")}))
+    review = queue.claim("codex")
+    assert review is not None
+    newer = comment("ready-conflict", READY.format(head=HEAD), author="claude-login", created_at=2)
+    snapshot = replace(ticket(ready, newer, head=HEAD, factory_config=config), mergeable_state="dirty")
+    dispatcher.process(snapshot)
+    with queue.connect() as connection:
+        fix = connection.execute("SELECT id FROM jobs WHERE action = 'fix' AND state = 'queued'").fetchone()
+    assert fix is not None
+    edited = finish_with_edited_verdict(queue, review)
+    snapshot = replace(snapshot, comments=(ready, newer, edited))
+    dispatcher.process(snapshot)
+    assert outcome(queue, edited.id) == "rejected-edited"
+    return dispatcher, queue, snapshot, str(fix["id"])
+
+
+def test_refusal_retry_waits_for_same_head_fix(tmp_path: Path) -> None:
+    _, queue, _, _ = open_fix_and_running_review(tmp_path)
+
+    assert state(queue) == ("review", 0)
+    assert queue.claim("codex") is None, review_jobs(queue)
+
+
+def test_refusal_retry_runs_once_the_fix_keeps_the_head(tmp_path: Path) -> None:
+    dispatcher, queue, snapshot, fix_id = open_fix_and_running_review(tmp_path)
+    queue.cancel(fix_id, "superseded")
+
+    dispatcher.process(snapshot)
+
+    retry = queue.claim("codex")
+    assert retry is not None, review_jobs(queue)
+    assert retry.request.head == HEAD
+
+
+def test_a_review_cancelled_by_a_rejected_verdict_waits_for_same_head_fix(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    queue.clock = lambda: 1000
+    config = replace(factory(), start_before_ci=True)
+    seed_builder_job(queue)
+    ready = comment("ready-" + HEAD, READY.format(head=HEAD), author="claude-login", created_at=1)
+    dispatcher.process(ticket(ready, head=HEAD, factory_config=config, ci={HEAD: CIResult("pending")}))
+    newer = comment("ready-conflict", READY.format(head=HEAD), author="claude-login", created_at=2)
+    conflicted = replace(ticket(ready, newer, head=HEAD, factory_config=config), mergeable_state="dirty")
+    dispatcher.process(conflicted)
+    edited = replace(
+        comment("101", verdict(HEAD, ac="met", round_="1/3"), author="codex-login", created_at=101),
+        edited_at=102,
+    )
+
+    dispatcher.process(replace(conflicted, comments=(ready, newer, edited)))
+
+    assert outcome(queue, edited.id) == "rejected-edited"
+    assert queue.claim("codex") is None, review_jobs(queue)
