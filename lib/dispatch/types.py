@@ -299,6 +299,6 @@ class Feeder(Protocol):
     def feed_once(self) -> object: ...
 
 
-# (repo, base branch, approved head, updated head) -> whether the update is
+# (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
 # trivial, and why (lib/update_check.py).
-UpdateClassifier = Callable[[str, str, str, str], UpdateClass]
+UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]

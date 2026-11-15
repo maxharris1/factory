@@ -23,6 +23,7 @@ def test_update_brief_names_base_head_and_one_side_per_hunk() -> None:
     assert f"Check out the PR branch at {HEAD}" in text
     assert "`git merge origin/dev`: a merge commit only, no rebase, no force-push." in text
     assert "taking exactly one side" in text
+    assert "keeping both sides of a hunk, one after the other and unchanged" in text
     assert "Any other edit sends the PR back to review." in text
 
 
