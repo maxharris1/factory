@@ -300,6 +300,28 @@ def linear_approver_findings(config: OrchConfig) -> list[Finding]:
     ]
 
 
+def _harness_bot_logins(config: OrchConfig) -> dict[str, tuple[str, ...]]:
+    bots = {f"{harness}-bot" for harness in HARNESSES}
+    return {
+        login.casefold(): tuple(sorted(identities & bots))
+        for login, identities in config.trusted_logins.items()
+        if identities & bots
+    }
+
+
+def bot_approver_findings(config: OrchConfig) -> list[Finding]:
+    carried = _harness_bot_logins(config)
+    return [
+        Finding(
+            "warning",
+            f"login {login} carries harness bot {', '.join(carried[login.casefold()])} "
+            "and is in approver_logins: that bot could lift its own cap",
+        )
+        for login in sorted(config.approver_logins or ())
+        if login.casefold() in carried
+    ]
+
+
 def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]:
     """A hold whose approver can never clear it (#122): not in
     approver_logins, or, with the switch off, not a trusted_logins key."""
@@ -307,6 +329,15 @@ def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[
         return []
     approver = hold.approver.casefold()
     findings: list[Finding] = []
+    bots = _harness_bot_logins(config).get(approver)
+    if bots:
+        findings.append(
+            Finding(
+                "warning",
+                f"hold.approver {hold.approver} carries harness bot {', '.join(bots)}: "
+                "that bot could clear its own hold",
+            )
+        )
     if config.approver_logins is not None and approver not in {
         login.casefold() for login in config.approver_logins
     }:

@@ -95,7 +95,9 @@ def test_check_config_accepts_the_factory_hold_approver(
     orch, _ = load_orch_yml(ORCH_YML, allow_placeholders=True)
     assert orch is not None
 
-    assert hold_approver_findings(orch, config.hold) == []
+    assert [
+        finding.severity for finding in hold_approver_findings(orch, config.hold)
+    ] == ["warning"]
     assert (
         cli._check_config(
             [

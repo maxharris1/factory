@@ -1,0 +1,11 @@
+decision	choice	why
+item order	item 3, then 1, then 2, one commit each	riskiest first; Max can drop any item at plan review and the other two still land
+item 3 diff source	GitHub compare base...head as application/vnd.github.diff, piped to git patch-id --stable	plan-time measurement: the API diff and a local git diff gave the same patch id on two main commits; no clone needed
+item 3 three-dot	compare <base.ref>...<head>	diffs head against its merge base, so an old approved head and a rebased head each diff against their own fork point
+item 3 fail closed	raise on gh error, empty diff, binary file, git missing or failing	T4 and _approval_covers already re-review on any exception; a binary file is omitted from GitHub's diff, so two heads differing only there would match
+item 3 ship.py	no change	the T4 consumer and _approval_covers already call stable_patch_id and fail closed; only the adapter raised
+item 3 subprocess seam	second seam git_patch_id beside run_gh	the seam test now pins both functions and still forbids shell=True
+item 2 bot logins	trusted_logins keys carrying claude-bot, codex-bot or cursor-bot	plan default (open decision 2): counts even while github_app.enabled is false, so the repo's own orch.yml warns until the Apps are on
+item 2 App bot_login source	dropped	approver_logins refuses [bot] logins and hold.approver must be a GitHub login, so an App login can never overlap; a test trying it got a config error
+item 2 call sites	approver_logins in bot_approver_findings beside linear_approver_findings; hold.approver inside hold_approver_findings	hold_approver_findings already runs once per factory.md; a warning never changes the exit status
+item 1 release	no orch job release verb	plan default (open decision 1): no bot-facing release command exists, so there is no bot path to guard

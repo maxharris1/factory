@@ -477,6 +477,7 @@ projects:
 # Approval credential (issue #122, docs/decisions/122-approver-credential.md)
 # and one GitHub App per bot (issue #170, docs/decisions/170-four-github-apps.md).
 # approver_logins: [maxharris1]     # capped-ticket go and hold ok, once enabled
+#                                   # check-config warns (issue #127) when a trusted_logins key carrying a harness bot (claude-bot, codex-bot, cursor-bot) is in approver_logins or is hold.approver: that bot could lift its own cap or clear its own hold
 # approver_gh_config_dir: /home/grok/.config/factory/gh-approver  # absolute, outside every harness HOME
 # github_app:
 #   enabled: false                  # the switch; false keeps today's trusted_logins trust
