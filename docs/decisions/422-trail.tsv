@@ -1,0 +1,5 @@
+decision	choice	why
+f-3 floor seed (ac-2)	seed verdict_heads_floor whenever it holds no row, not only when verdict_heads was missing	an old-process DB and the deployed DB keep verdict_heads with an empty floor; Repro B and the existing-table mode fail before and pass after
+fresh DB floor (ac-2)	seed COALESCE(MAX(rowid), 0) so a fresh DB stores floor 0	the legacy branch then never applies on a fresh DB, so a second start cannot sweep rows handled by current code under the floor; the plan's HAVING COUNT(*) > 0 left that open
+f-2 classifier (ac-1)	one non-verdict outcome classifier replaces the ready-only one; strings shared with verdict paths stay counted	a missed shared string would drop a real verdict and stall recovery, which is worse than the split fix f-2 describes
+Repro B in the suite	keep it as a test that skips when eb2b606 is absent	CI checks out shallow; the existing-table mode covers the same history in CI

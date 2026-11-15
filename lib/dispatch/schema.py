@@ -107,11 +107,13 @@ class SchemaMixin:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verdict_heads_floor (handled_rowid INTEGER NOT NULL)"
             )
-            if verdict_heads_existed is None:
+            if verdict_heads_existed is None or connection.execute(
+                "SELECT 1 FROM verdict_heads_floor"
+            ).fetchone() is None:
                 connection.execute(
                     """
                     INSERT INTO verdict_heads_floor
-                    SELECT MAX(rowid) FROM handled_comments HAVING COUNT(*) > 0
+                    SELECT COALESCE(MAX(rowid), 0) FROM handled_comments
                     """
                 )
             connection.execute(
