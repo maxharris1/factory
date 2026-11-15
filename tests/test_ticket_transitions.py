@@ -218,6 +218,40 @@ def test_journey_owners_survive_jobs_enqueued_before_their_transition(
     ]
 
 
+def test_a_legacy_tickets_first_row_keeps_the_older_review_on_its_own_visit(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    board.finish("codex")
+    ticket = board.snapshot(pr)
+    board.dispatcher._prepare_ship_intent(ticket, "approval", pr.head, "handoff")
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 100
+    board.dispatcher._discard_pending_ship_intent(ticket, "approval")
+
+    with board.queue.connect() as connection:
+        jobs = [
+            JobStep(r["action"], r["recipient"], r["created_at"], None, None)
+            for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
+        ]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
+
+    result = job_flow(load_chart(), jobs, "review", board.now[0], rows, None)
+    assert [(v["state"], v["who"], v["started_at"]) for v in result["visits"]][-3:] == [
+        ("review", "codex", jobs[-1].created_at),
+        ("ship", "script", None),
+        ("review", "script", rows[0].at),
+    ]
+
+
 def test_a_closed_watched_pr_records_its_abandon(tmp_path: Path) -> None:
     board = Board(tmp_path)
     pr = board.open("42", sha(1))

@@ -350,6 +350,48 @@ def test_a_job_two_visits_before_its_state_keeps_its_time_window() -> None:
     ]
 
 
+def test_first_row_back_through_a_script_only_state_leaves_the_old_visit_its_job() -> None:
+    jobs = [_step("build", "claude", NOW - 5000), _step("review", "codex", NOW - 4000)]
+    rows = [_row("ship", "review", NOW - 2000)]
+    result = flow.job_flow(_chart(), jobs, "review", NOW, rows, None)
+    assert [(v["state"], v["who"], v["started_at"]) for v in result["visits"]] == [
+        ("intake", "script", None),
+        ("questions", "script", None),
+        ("building", "claude", NOW - 5000),
+        ("review", "codex", NOW - 4000),
+        ("ship", "script", None),
+        ("review", "script", NOW - 2000),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("jobs", "from_state", "to_state", "visits"),
+    [
+        (
+            [_step("build", "claude", NOW - 5000), _step("review", "codex", NOW - 4000),
+             _step("fix", "claude", NOW - 3001)],
+            "review",
+            "fixing",
+            [("building", "claude", NOW - 5000), ("review", "codex", NOW - 4000),
+             ("fixing", "claude", NOW - 3000)],
+        ),
+        (
+            [_step("build", "claude", NOW - 3001)],
+            "questions",
+            "building",
+            [("intake", "script", None), ("questions", "script", None),
+             ("building", "claude", NOW - 3000)],
+        ),
+    ],
+    ids=["job-backed-from-state", "script-only-from-state"],
+)
+def test_first_row_takes_the_job_enqueued_just_before_it(jobs, from_state, to_state, visits) -> None:
+    rows = [_row(from_state, to_state, NOW - 3000)]
+    result = flow.job_flow(_chart(), jobs, to_state, NOW, rows, None)
+    assert [(v["state"], v["who"], v["started_at"]) for v in result["visits"]][-len(visits):] == visits
+    assert [v["state"] for v in result["visits"]].count(to_state) == 1
+
+
 @pytest.mark.parametrize("tracked_at", [None, NOW - 5500], ids=["untracked", "after-first-row"])
 def test_start_state_has_no_time_without_a_tracked_at_before_the_first_row(tracked_at) -> None:
     result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, RECORDED, tracked_at)

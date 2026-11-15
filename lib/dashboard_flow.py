@@ -31,6 +31,7 @@ import math
 import re
 from collections import deque
 from collections.abc import Iterable, Sequence
+from itertools import takewhile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -320,6 +321,24 @@ def _owning_row(
     return None
 
 
+def _first_row_floor(
+    chart: dict | None, steps: Sequence[tuple[str, JobStep]], first: Transition
+) -> float:
+    if first.from_state is None:
+        return -math.inf
+    last_other_job = max(
+        (step.created_at for state, step in steps
+         if step.created_at < first.at and state != first.to_state),
+        default=-math.inf,
+    )
+    start = None if chart is None else chart["start"]
+    prior = [(state, step) for state, step in steps if step.created_at <= last_other_job]
+    walk = chart_visits(chart, [(start, None), *prior, (first.from_state, None)])
+    jobless_since = takewhile(lambda visit: not visit.steps, reversed(walk))
+    passed_through_state = any(visit.state == first.to_state for visit in jobless_since)
+    return first.at if passed_through_state else last_other_job
+
+
 def _recorded_walk(
     chart: dict | None,
     steps: Sequence[tuple[str, JobStep]],
@@ -331,14 +350,7 @@ def _recorded_walk(
     start = None if chart is None else chart["start"]
     first = transitions[0]
     ends = [row.at for row in transitions[1:]] + [math.inf]
-    lead = -math.inf
-    if first.from_state is not None:
-        lead = max(
-            (step.created_at for state, step in steps
-             if step.created_at < first.at and state != first.to_state),
-            default=-math.inf,
-        )
-    floors = [lead, *(row.at for row in transitions[:-1])]
+    floors = [_first_row_floor(chart, steps, first), *(row.at for row in transitions[:-1])]
     owned: list[list[JobStep]] = [[] for _ in transitions]
     before = []
     for state, step in steps:
