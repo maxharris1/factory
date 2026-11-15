@@ -85,6 +85,11 @@ maxharris1/Cleffy 15 post-merge-in-phase-1
 maxharris1/tracy-harris-coaching 3 illegal-transition review qa
 maxharris1/tracy-harris-coaching 3 unknown-state qa
 maxharris1/tracy-harris-coaching 4 round-over-cap low 2 1
+
+bot-to-bot messages vs scripted handoffs
+maxharris1/Cleffy 2026-W45 manual=0 scripted=6
+maxharris1/tracy-harris-coaching 2026-W45 manual=0 scripted=1
+token savings: not measured (no per-message token count in the input)
 """
 
 WINDOW = """\
@@ -114,6 +119,10 @@ none
 
 chart mismatches
 none
+
+bot-to-bot messages vs scripted handoffs
+maxharris1/Cleffy 2026-W45 manual=0 scripted=1
+token savings: not measured (no per-message token count in the input)
 """
 
 MIN_FACTORY = """\
