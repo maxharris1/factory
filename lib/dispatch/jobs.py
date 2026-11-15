@@ -7,12 +7,13 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.device_pool import free_slots, used_slots
+from lib.device_pool import free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _ANSWERS,
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
+    _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
     _comment_order,
     _detail_project_bot,
@@ -107,11 +108,12 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
+        blocked = sync_blocks(self.queue)
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
-            and free_slots(config, harness, used) == 0
+            and free_slots(config, harness, used, blocked) == 0
         )
 
     def _restart_queue_wait(self, job: Job, now: float) -> None:
@@ -777,13 +779,14 @@ class JobsMixin:
         return True
 
     def _posted_handoff(self, job: Job) -> Comment | object | None:
-        """The handoff a failed review, build or fix job already posted.
+        """The handoff a failed review, build, fix or update job already posted.
 
         Read from the ticket this poll fetched (None when it fetched none),
         posted no earlier than the job was queued, from a login trusted for
         its `from` and `role`, and not already rejected when it was handled
         (stale, superseded, ...). A ready stale only because its review
-        already answered (#71 stale-ready-verdict) still counts.
+        already answered (#71 stale-ready-verdict) still counts. An update
+        job's ready is matched by TU's attribution, not by time.
 
         A review's is a reviewer verdict for the job's head (as a prefix,
         like every head compare) and round; a review job with no round or no
@@ -808,8 +811,13 @@ class JobsMixin:
             kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"
         else:
             return None
-        for item in sorted(ticket.comments, key=_comment_order):
-            if item.created_at < job.created_at:
+        update = action == "update-from-main"
+        comments = sorted(ticket.comments, key=_comment_order)
+        ids = [item.id for item in comments]
+        if update and job.request.source_comment_id in ids:
+            comments = comments[ids.index(job.request.source_comment_id) + 1 :]
+        for item in comments:
+            if not update and item.created_at < job.created_at:
                 continue
             try:
                 fields = parse_comment(item.body).as_dict()
@@ -832,6 +840,11 @@ class JobsMixin:
                 outcome is not None
                 and outcome != "stale-ready-verdict"
                 and outcome.startswith(_REJECTED_OUTCOMES)
+            ):
+                continue
+            if update and (
+                (outcome is not None and outcome.startswith(_UPDATE_NO_HANDOFF_OUTCOMES))
+                or self._update_job_before(ticket, item) != job.id
             ):
                 continue
             if (
