@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from lib import attention
+from lib import attention, lane_limit
 from lib.state_backup import RESTORED, RESTORED_CLAIM
 
 ACTIONS = (
@@ -256,7 +256,7 @@ class SQLiteJobQueue:
             row = next(
                 (
                     candidate
-                    for candidate in claim_order(connection, recipient)
+                    for candidate in claim_order(connection, recipient, now=now)
                     if str(candidate["id"]) not in excluded
                 ),
                 None,
@@ -752,8 +752,13 @@ def is_resume(detail: str | None) -> bool:
     return isinstance(value, dict) and value.get("resume") is True
 
 
-def claim_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.Row]:
-    """Queued jobs for recipient in claim order (see the module doc)."""
+def claim_order(
+    connection: sqlite3.Connection, recipient: str, *, now: float
+) -> list[sqlite3.Row]:
+    """Queued jobs for recipient in claim order (see the module doc); none
+    while recipient's lane is at its usage limit (#367)."""
+    if lane_limit.active(connection, recipient, now) is not None:
+        return []
     abandoned = (
         """
         AND NOT EXISTS (

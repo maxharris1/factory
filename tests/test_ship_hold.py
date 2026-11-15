@@ -257,11 +257,7 @@ def test_a_repo_with_no_hold_configured_merges_without_reading_holds(
     assert actions.merges == [(True, HEAD)]
 
 
-@pytest.mark.parametrize("ship", ["handoff", "after:tracy-site"])
-def test_a_hold_is_never_applied_on_a_handoff_or_after_repo(
-    tmp_path: Path,
-    ship: str,
-) -> None:
+def test_a_hold_is_never_applied_on_an_after_repo(tmp_path: Path) -> None:
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
     actions.states.clear()
@@ -269,7 +265,7 @@ def test_a_hold_is_never_applied_on_a_handoff_or_after_repo(
     dispatcher.process(
         snapshot(
             approve(),
-            factory=hold_factory(ship=ship),
+            factory=hold_factory(ship="after:tracy-site"),
             labels=("factory:hold",),
             files=("src/view/Board.tsx",),
         )
@@ -277,12 +273,8 @@ def test_a_hold_is_never_applied_on_a_handoff_or_after_repo(
 
     assert "awaiting-ok" not in actions.states
     assert not any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
-    if ship == "handoff":
-        assert actions.handoffs == [HEAD]
-        assert actions.states == ["handed-off"]
-    else:
-        assert actions.approvals == [(HEAD, "tracy-site")]
-        assert actions.states == ["waiting-external"]
+    assert actions.approvals == [(HEAD, "tracy-site")]
+    assert actions.states == ["waiting-external"]
     assert actions.merges == []
 
 
@@ -363,10 +355,13 @@ def test_a_ci_failure_while_held_does_not_consume_the_approve(
     "interrupted",
     ["labels", "files", "events", "state-write", "red-poll-unread", "ok-before-red"],
 )
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
 def test_red_ci_before_the_hold_is_entered_does_not_consume_the_approve(
     tmp_path: Path,
     interrupted: str,
+    ship: str,
 ) -> None:
+    factory = hold_factory(ship=ship)
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue)
     files = ("src/view/A.tsx",)
@@ -378,13 +373,13 @@ def test_red_ci_before_the_hold_is_entered_does_not_consume_the_approve(
     else:
         first["labels"] = None
     try:
-        dispatcher.process(snapshot(approve(), **first))
+        dispatcher.process(snapshot(approve(), factory=factory, **first))
     except Exception:
         pass
     actions.state_failures.clear()
     assert workflow_state(queue) == "review"
 
-    red = {"files": files, "ci": "failure"}
+    red = {"files": files, "ci": "failure", "factory": factory}
     if interrupted == "red-poll-unread":
         red["labels"] = None
     comments = (approve(), ok(HEAD)) if interrupted == "ok-before-red" else (approve(),)
@@ -395,10 +390,14 @@ def test_red_ci_before_the_hold_is_entered_does_not_consume_the_approve(
         ).fetchone()
     assert handled is None
     assert actions.merges == []
+    assert actions.handoffs == []
 
     for _ in range(2):
-        dispatcher.process(snapshot(approve(), ok(HEAD), files=files))
-    assert actions.merges == [(True, HEAD)]
+        dispatcher.process(snapshot(approve(), ok(HEAD), files=files, factory=factory))
+    if ship == "merge":
+        assert actions.merges == [(True, HEAD)]
+    else:
+        assert actions.handoffs == [HEAD]
 
 
 def test_a_red_ci_on_an_unheld_pr_still_consumes_the_approve(tmp_path: Path) -> None:
@@ -1018,15 +1017,20 @@ def test_factory_md_refuses_a_bad_hold(hold: object, message: str) -> None:
     assert message in [finding.message for finding in findings]
 
 
-@pytest.mark.parametrize("ship", ["handoff", "after:tracy-site"])
-def test_factory_md_warns_that_hold_has_no_effect_without_ship_merge(
+@pytest.mark.parametrize(
+    ("ship", "expected"),
+    [
+        ("after:tracy-site", [("warning", "hold has no effect on ship: after:<approver>")]),
+        ("handoff", []),
+    ],
+)
+def test_factory_md_warns_that_hold_has_no_effect_only_on_an_after_ship(
     ship: str,
+    expected: list[tuple[str, str]],
 ) -> None:
     config, findings = parse(ship=ship, hold={"paths": ["src/**"]})
     assert config is not None
-    assert [(item.severity, item.message) for item in findings] == [
-        ("warning", "hold has no effect unless ship is merge")
-    ]
+    assert [(item.severity, item.message) for item in findings] == expected
 
 
 # --- globs ---------------------------------------------------------------
@@ -1156,8 +1160,9 @@ def live_ticket(gh: HoldGh) -> tuple[TrackedTicket, list[tuple[str, str, str]]]:
     return found, errors
 
 
-def test_the_poll_source_reads_labels_files_and_events_uncached() -> None:
-    gh = HoldGh(HOLD_FACTORY.format(ship="merge", hold="hold:\n  paths: ['src/**']\n"))
+@pytest.mark.parametrize("ship", ["merge", "handoff"])
+def test_the_poll_source_reads_labels_files_and_events_uncached(ship: str) -> None:
+    gh = HoldGh(HOLD_FACTORY.format(ship=ship, hold="hold:\n  paths: ['src/**']\n"))
 
     found, errors = live_ticket(gh)
 
@@ -1184,11 +1189,12 @@ def test_the_poll_source_reads_labels_files_and_events_uncached() -> None:
 
 
 @pytest.mark.parametrize(
-    "hold",
-    ["", "hold:\n  paths: ['src/**']\n"],
+    ("ship", "hold"),
+    [("merge", ""), ("after:tracy-site", "hold:\n  paths: ['src/**']\n")],
 )
-def test_the_poll_source_skips_hold_reads_without_hold_on_ship_merge(hold: str) -> None:
-    ship = "merge" if hold == "" else "handoff"
+def test_the_poll_source_skips_hold_reads_unless_the_hold_applies(
+    ship: str, hold: str
+) -> None:
     gh = HoldGh(HOLD_FACTORY.format(ship=ship, hold=hold))
 
     found, errors = live_ticket(gh)

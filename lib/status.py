@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from lib import health as component_health
+from lib import lane_limit
 from lib.device_pool import SLOTS_TABLE, Placement
 from lib.feeder import feeder_counts, feeder_items, last_feeder_poll
 from lib.job_state import Alive, JobStateConfig, derive, liveness, read_placements
@@ -154,6 +155,7 @@ class Status:
     started: Mapping[str, float] = field(default_factory=dict)
     # #130: approved tickets watched until merge, oldest approval first.
     merge_queue: tuple[TrackerRow, ...] = ()
+    lane_limits: Mapping[str, str] = field(default_factory=dict)
 
 
 class TrackerReader(Protocol):
@@ -194,6 +196,17 @@ class SQLiteStatusReader:
         for device in self.placements().values():
             counts[device] = counts.get(device, 0) + 1
         return counts
+
+    def lane_limits(self, now: float) -> dict[str, str]:
+        """#367: recipient -> `usage limit until <time>` for each paused lane."""
+        connection = self._connect()
+        try:
+            return {
+                limit.recipient: lane_limit.label(limit)
+                for limit in lane_limit.all_active(connection, now)
+            }
+        finally:
+            connection.close()
 
     def feeder(self) -> FeederState | None:
         """The feeder's last poll, or None when no feeder has run here."""
@@ -493,6 +506,7 @@ def build_status(
     attention: Sequence[AttentionRow] = (),
     health: Callable[[float, list[tuple[str, str]]], component_health.HealthReport]
     | None = None,
+    lane_limits: Callable[[float], Mapping[str, str]] | None = None,
 ) -> Status:
     """`placements` maps job id -> device for held device-pool slots. A
     running job with a placement is listed under its device. A running
@@ -566,6 +580,7 @@ def build_status(
             )
     return Status(
         observed_at=observed_at,
+        lane_limits=lane_limits(observed_at) if lane_limits is not None else {},
         queued=tuple(
             sorted(
                 (row for row in job_rows if row.state == "queued"),
@@ -628,11 +643,16 @@ def render(status: Status) -> str:
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [f"orch status {timestamp}", "", f"Queue ({len(status.queued)})"]
     lines.extend(
-        _job_line(row, status.observed_at, row.created_at) + _no_waiter(status, row)
+        _job_line(row, status.observed_at, row.created_at) + _queued_flag(status, row)
         for row in status.queued
     )
     if not status.queued:
         lines.append("  empty")
+    if status.lane_limits:
+        lines.extend(("", f"Lanes ({len(status.lane_limits)})"))
+        lines.extend(
+            f"  {recipient}: {label}" for recipient, label in sorted(status.lane_limits.items())
+        )
 
     lines.extend(("", f"Devices ({len(status.devices)})"))
     for device in status.devices:
@@ -727,6 +747,11 @@ def _retried(row: TrackerRow | JobRow, observed_at: float) -> str:
     )
 
 
+def _queued_flag(status: Status, row: JobRow) -> str:
+    limited = status.lane_limits.get(row.recipient)
+    return f" [{limited}]" if limited is not None else _no_waiter(status, row)
+
+
 def _no_waiter(status: Status, row: JobRow) -> str:
     flag = status.health.no_waiter_for(row.recipient) if status.health else None
     return f" [no waiter for {flag.harness}]" if flag is not None else ""
@@ -802,6 +827,7 @@ def main(
                 alive=pid_alive,
                 feeder=reader.feeder(),
                 attention=reader.attention(),
+                lane_limits=reader.lane_limits,
                 health=lambda now, queued: component_health.load_report(
                     path, now, queued=queued, machines=machines, orch=orch
                 ),

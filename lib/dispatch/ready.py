@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import (
+    _HANDOFF_UNREAD,
     _acted_verdict,
     _comment_link,
     _comment_order,
@@ -144,7 +145,10 @@ class ReadyMixin:
         assert result is not None
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
-        if ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head):
+        carried = ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head)
+        if carried is _HANDOFF_UNREAD:
+            return False, "ci-red-handoff-unread"
+        if carried:
             return True, "ci-red-in-flight"
         self._queue_ci_fix(
             ticket,
@@ -521,21 +525,28 @@ class ReadyMixin:
             return str(latest["dedupe_key"])
         return f"{repeat}{latest['later_id']}"
 
-    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
+    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool | object:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state, source_comment_id, detail FROM jobs
+                SELECT id, action, state, source_comment_id, detail,
+                       state IN ('queued', 'running')
+                       OR (state = 'failed' AND failure_handled = 0) AS open
+                FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
-                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
+                ORDER BY open DESC, rowid DESC
                 LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
         if row is None:
             return False
-        if row["state"] in ("queued", "running"):
+        if (row["action"], row["state"]) == ("fix", "failed") and row["open"]:
+            failed = next(job for job in self.queue.unhandled_failures() if job.id == row["id"])
+            handoff = self._posted_handoff(failed)
+            return handoff if handoff is _HANDOFF_UNREAD else handoff is None
+        if row["open"]:
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
             ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])

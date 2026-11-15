@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
+from lib import lane_limit
 from lib.machines_yml import MachinesConfig
 from lib.usage_readings import (
     NOT_TRACKED,
@@ -120,12 +121,25 @@ def read_usage(
     for account in sorted(stored or {}):
         if account not in accounts:
             accounts.append(account)
+    limits = {(limit.harness, limit.bot): limit for limit in lane_limit.all_active(connection, now)}
     bots = [
-        _entry(
-            account,
-            None if stored is None else stored.get(account, {}),
-            now,
+        _limited(
+            _entry(
+                account,
+                None if stored is None else stored.get(account, {}),
+                now,
+            ),
+            limits.get((account[1], account[2])),
         )
         for account in accounts
     ]
     return {"state": "no telemetry" if stored is None else "ok", "bots": bots}
+
+
+def _limited(entry: dict, limit: lane_limit.LaneLimit | None) -> dict:
+    """#367: the account's lane pause, as its reset time and display label."""
+    return {
+        **entry,
+        "limited_until": None if limit is None else limit.until,
+        "limit_label": None if limit is None else lane_limit.label(limit),
+    }

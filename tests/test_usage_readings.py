@@ -543,6 +543,8 @@ def test_snapshot_usage_has_one_entry_per_bot_account(tmp_path: Path) -> None:
         "headroom": 0.655,
         "observed_at": CAPTURED,
         "age_seconds": 120,
+        "limited_until": None,
+        "limit_label": None,
     }
     assert bots[("box", "codex")]["state"] == "no reading"
     assert bots[("box", "codex")]["headroom"] is None
