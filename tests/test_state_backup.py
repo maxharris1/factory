@@ -57,7 +57,7 @@ def _poll_once(monkeypatch, dispatcher, db: Path, backup_path: Path) -> int:
     monkeypatch.setenv("ORCH_DB_BACKUP", str(backup_path))
     monkeypatch.setattr(cli, "_runtime", lambda path, orch, create, **_: (dispatcher, object()))
     monkeypatch.setattr(cli, "PollLoop", OneCycle)
-    monkeypatch.setattr(cli, "_dashboard_pusher", lambda *_args: None)
+    monkeypatch.setattr(cli, "_dashboard_pusher", lambda *_args: (None, 0.0))
     return cli.main(["poll", "--db", str(db), "--once"])
 
 

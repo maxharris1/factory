@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,7 @@ from lib.dispatch.constants import (
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
 )
+from lib.dispatch.cycle_clock import CycleClock
 from lib.dispatch.errors_text import poll_error_detail, poll_error_text
 from lib.dispatch.types import PollCycleFailed, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -30,9 +32,16 @@ if TYPE_CHECKING:
 
 
 class PollMixin:
+    cycle_clock: CycleClock | None = None
+
+    def _phase(self, name: str) -> AbstractContextManager[None]:
+        return nullcontext() if self.cycle_clock is None else self.cycle_clock.phase(name)
+
     def poll_once(self, source: PollSource) -> None:
         begin = getattr(source, "begin_cycle", None)
         end = getattr(source, "end_cycle", None)
+        if hasattr(source, "cycle_clock"):
+            source.cycle_clock = self.cycle_clock
         if begin is not None:
             begin()
         self._polled = {}
@@ -42,70 +51,79 @@ class PollMixin:
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._cycle_failures: list[str] = []
         read_from = self.queue.now()
-        self._feed(source)
-        try:
-            github = source.github_candidates(
-                GITHUB_STATE_LABEL_PREFIX, exclude=self._tracked_github_ids()
-            )
-        except Exception as exc:
-            self.record_poll_exception("github", "-", exc)
-            self._cycle_failures.append(f"github: {type(exc).__name__}")
-            github = ()
-        self._discover(github, tracker="github")
-        active_refs = self._tracked_refs()
-        try:
-            linear = source.linear_candidates(
-                LINEAR_HANDOFF_QUERY,
-                exclude=self._tracked_linear_ids(),
-                reserve=sum(
-                    ref.tracker == "linear"
-                    for ref in active_refs
-                ),
-            )
-        except Exception as exc:
-            self.record_poll_exception("linear", "-", exc)
-            self._cycle_failures.append(f"linear: {type(exc).__name__}")
-            linear = ()
-        self._discover(linear, tracker="linear")
-        read_at = self._read_started = self.queue.now()
-        refs = self._tracked_refs(read_at)
-        self._source_errors = {}
-        try:
-            tracked = source.tracked_tickets(refs)
-        except Exception as exc:
-            self.record_poll_exception("tracked", "-", exc)
-            self._cycle_failures.append(f"tracked: {type(exc).__name__}")
-            tracked = ()
-        read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
-        self._record_reads(read, read_at)
-        for ref in refs:
-            identity = (ref.repo.lower(), ref.ticket_id)
-            error = self._source_errors.get(identity)
-            if error is not None and identity not in read:
-                self._advance_poll_error_streak(*identity, error)
-        self._ticket_pass, self._deferred_ships = True, {}
-        try:
-            for ticket in tracked:
+        with self._phase("feed"):
+            self._feed(source)
+        with self._phase("github-candidates"):
+            try:
+                github = source.github_candidates(
+                    GITHUB_STATE_LABEL_PREFIX, exclude=self._tracked_github_ids()
+                )
+            except Exception as exc:
+                self.record_poll_exception("github", "-", exc)
+                self._cycle_failures.append(f"github: {type(exc).__name__}")
+                github = ()
+            self._discover(github, tracker="github")
+        with self._phase("linear-candidates"):
+            active_refs = self._tracked_refs()
+            try:
+                linear = source.linear_candidates(
+                    LINEAR_HANDOFF_QUERY,
+                    exclude=self._tracked_linear_ids(),
+                    reserve=sum(
+                        ref.tracker == "linear"
+                        for ref in active_refs
+                    ),
+                )
+            except Exception as exc:
+                self.record_poll_exception("linear", "-", exc)
+                self._cycle_failures.append(f"linear: {type(exc).__name__}")
+                linear = ()
+            self._discover(linear, tracker="linear")
+        with self._phase("tracked-read"):
+            read_at = self._read_started = self.queue.now()
+            refs = self._tracked_refs(read_at)
+            self._source_errors = {}
+            try:
+                tracked = source.tracked_tickets(refs)
+            except Exception as exc:
+                self.record_poll_exception("tracked", "-", exc)
+                self._cycle_failures.append(f"tracked: {type(exc).__name__}")
+                tracked = ()
+            read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
+            self._record_reads(read, read_at)
+            for ref in refs:
+                identity = (ref.repo.lower(), ref.ticket_id)
+                error = self._source_errors.get(identity)
+                if error is not None and identity not in read:
+                    self._advance_poll_error_streak(*identity, error)
+        with self._phase("process"):
+            self._ticket_pass, self._deferred_ships = True, {}
+            try:
+                for ticket in tracked:
+                    try:
+                        self.process(ticket)
+                    except Exception as exc:
+                        self._record_poll_error(ticket, exc)
+                    else:
+                        self._clear_poll_error_streak(ticket)
+            finally:
+                self._ticket_pass = False
+            for key, ticket in self._deferred_ships.items():
                 try:
-                    self.process(ticket)
+                    self.process(self._polled.get(key, ticket))
                 except Exception as exc:
                     self._record_poll_error(ticket, exc)
-                else:
-                    self._clear_poll_error_streak(ticket)
-        finally:
-            self._ticket_pass = False
-        for key, ticket in self._deferred_ships.items():
+        with self._phase("merge-queue"):
+            self._advance_merge_queues()
+        with self._phase("verify-handoffs"):
+            self._verify_handoffs(source, read_from)
+        with self._phase("reconcile-jobs"):
             try:
-                self.process(self._polled.get(key, ticket))
-            except Exception as exc:
-                self._record_poll_error(ticket, exc)
-        self._advance_merge_queues()
-        self._verify_handoffs(source, read_from)
-        try:
-            self.reconcile_jobs()
-        finally:
-            self._read_started = None
-        self._record_factory_reads(source)
+                self.reconcile_jobs()
+            finally:
+                self._read_started = None
+        with self._phase("factory-reads"):
+            self._record_factory_reads(source)
         self._prune_poll_errors()
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
         try:
@@ -420,6 +438,10 @@ class PollLoop:
             config = getattr(source, "config", None)
             interval_seconds = getattr(config, "poll_seconds", POLL_SECONDS)
         self.interval_seconds = interval_seconds
+        self.clock = CycleClock()
+
+    def cycle_state(self) -> tuple[float | None, float | None]:
+        return self.clock.state()
 
     def run(
         self,
@@ -442,16 +464,22 @@ class PollLoop:
             raise ValueError("max_polls must be positive")
         polls = 0
         while True:
+            print(self.clock.start(), flush=True)
+            self.dispatcher.cycle_clock = self.clock
             try:
-                self.dispatcher.poll_once(self.source)
-            except Exception as exc:
-                if on_error is None:
-                    raise
-                on_error(exc)
-            # Not in a `finally`: a stop (SIGTERM, Ctrl-C) or a fatal --once
-            # error must not start a push on the way out.
-            if after_poll is not None:
-                _after_poll(after_poll)
+                try:
+                    self.dispatcher.poll_once(self.source)
+                except Exception as exc:
+                    if on_error is None:
+                        raise
+                    on_error(exc)
+                # Not in a `finally`: a stop (SIGTERM, Ctrl-C) or a fatal --once
+                # error must not start a push on the way out.
+                if after_poll is not None:
+                    with self.clock.phase("after-poll"):
+                        _after_poll(after_poll)
+            finally:
+                print(self.clock.end(), flush=True)
             polls += 1
             if max_polls is not None and polls >= max_polls:
                 return
