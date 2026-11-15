@@ -333,6 +333,68 @@ def snapshot_for(tmp_path: Path, **kwargs) -> dict:
     return collect_snapshot(db, log, now=NOW, **kwargs)
 
 
+# --- #216: kind=retry history ----------------------------------------------
+
+RETRIES_TABLE = """
+CREATE TABLE IF NOT EXISTS ticket_retries (
+    repo TEXT NOT NULL, ticket_id TEXT NOT NULL, comment_id TEXT NOT NULL,
+    stuck_reason TEXT, resumed_action TEXT, job_id TEXT,
+    outcome TEXT NOT NULL, recorded_at REAL NOT NULL,
+    PRIMARY KEY (repo, ticket_id, comment_id)
+)
+"""
+
+
+def test_retry_outcomes_group_as_routed_or_rejected(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    outcomes = [
+        "queued-retry-fix",
+        "retried-no-job",
+        "rejected-retry-author",
+        "rejected-retry-no-reason",
+        "rejected-retry-not-stuck",
+        "rejected-retry-job-active",
+    ]
+    with sqlite3.connect(db) as connection:
+        connection.executemany(
+            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) "
+            "VALUES ('maxharris1/cleffy', '14', ?, ?)",
+            [(f"c{index}", outcome) for index, outcome in enumerate(outcomes)],
+        )
+    verdicts = collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]
+    kinds = {row["outcome"]: row["kind"] for row in verdicts}
+    assert kinds == {
+        "queued-retry-fix": "routed",
+        "retried-no-job": "routed",
+        "rejected-retry-author": "rejected",
+        "rejected-retry-no-reason": "rejected",
+        "rejected-retry-not-stuck": "rejected",
+        "rejected-retry-job-active": "rejected",
+    }
+
+
+def test_active_jobs_count_their_tickets_accepted_retries(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(RETRIES_TABLE)
+        connection.executemany(
+            "INSERT INTO ticket_retries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("maxharris1/cleffy", "14", "c1", "job-failed-2", "fix", "j1",
+                 "queued-retry-fix", NOW - 900),
+                ("maxharris1/cleffy", "14", "c2", "ci-red-3", "fix", "j2",
+                 "queued-retry-fix", NOW - 300),
+                ("maxharris1/cleffy", "13", "c3", None, None, None,
+                 "rejected-retry-not-stuck", NOW - 60),
+            ],
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    running = {row["ticket_id"]: row for row in snapshot["running"]}
+    assert running["14"]["retries"] == 2
+    assert "retries" not in running["13"]
+    assert all("retries" not in row for row in snapshot["queued"])
+
+
 # --- read-only open -------------------------------------------------------
 
 

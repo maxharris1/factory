@@ -45,6 +45,16 @@ class StatusError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Retried:
+    """Issue #216: accepted kind=retry comments, and the newest one."""
+
+    count: int
+    stuck_reason: str | None
+    action: str | None
+    recorded_at: float
+
+
+@dataclass(frozen=True)
 class TrackerRow:
     repo: str
     ticket_id: str
@@ -60,6 +70,7 @@ class TrackerRow:
     # Issue #115: the source issue and the PR, shown issue first.
     source: str | None = None
     pr_number: str | None = None
+    retried: Retried | None = None
 
 
 @dataclass(frozen=True)
@@ -309,6 +320,7 @@ class SQLiteStatusReader:
             )
             self._slots = read_placements(connection) if has_slots else {}
             sources = read_sources(connection)
+            retried = _retried_by_ticket(connection)
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -342,6 +354,7 @@ class SQLiteStatusReader:
                     float(row["approved_at"]) if row["approved_at"] is not None else None
                 ),
                 **_source(sources, row),
+                retried=retried.get((str(row["repo"]).casefold(), str(row["ticket_id"]))),
             )
             for row in tracker_rows
         )
@@ -393,6 +406,28 @@ def _has_table(connection: sqlite3.Connection, name: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
     ).fetchone() is not None
+
+
+def _retried_by_ticket(connection: sqlite3.Connection) -> dict[tuple[str, str], Retried]:
+    if not _has_table(connection, "ticket_retries"):
+        return {}
+    found: dict[tuple[str, str], Retried] = {}
+    for row in connection.execute(
+        """
+        SELECT repo, ticket_id, stuck_reason, resumed_action, recorded_at
+        FROM ticket_retries WHERE outcome NOT LIKE 'rejected-%'
+        ORDER BY recorded_at, rowid
+        """
+    ):
+        key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+        previous = found.get(key)
+        found[key] = Retried(
+            count=(previous.count if previous else 0) + 1,
+            stuck_reason=row["stuck_reason"],
+            action=row["resumed_action"],
+            recorded_at=float(row["recorded_at"]),
+        )
+    return found
 
 
 def _ticket_key(ticket_id: str) -> tuple[int, int | str]:
@@ -623,7 +658,7 @@ def render(status: Status) -> str:
             reason = f" ({row.stuck_reason})" if row.stuck_reason else ""
             state = f"stuck{reason}"
         lines.append(
-            f"  {_label(row)} {state} [{row.tracker}]{action}"
+            f"  {_label(row)} {state}{_retried(row, status.observed_at)} [{row.tracker}]{action}"
         )
     if not status.paused:
         lines.append("  empty")
@@ -637,7 +672,7 @@ def render(status: Status) -> str:
             key = row.repo.casefold()
             positions[key] = positions.get(key, 0) + 1
             lines.append(
-                f"  {row.repo}#{row.ticket_id} {row.state} "
+                f"  {row.repo}#{row.ticket_id} {row.state}{_retried(row, status.observed_at)} "
                 f"{positions[key]} of {sizes[key]} [{row.tracker}]"
             )
     if status.attention:
@@ -677,6 +712,16 @@ def render(status: Status) -> str:
         lines.append("")
         lines.extend(component_health.render_lines(status.health, status.observed_at))
     return "\n".join(lines) + "\n"
+
+
+def _retried(row: TrackerRow, observed_at: float) -> str:
+    retried = row.retried
+    if retried is None:
+        return ""
+    return (
+        f" retried {retried.count}x ({retried.stuck_reason or 'stuck'} -> "
+        f"{retried.action or 'no job'}, {_age(observed_at, retried.recorded_at)} ago)"
+    )
 
 
 def _no_waiter(status: Status, row: JobRow) -> str:
