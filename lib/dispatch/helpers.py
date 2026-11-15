@@ -195,6 +195,17 @@ def _round_number(value: object) -> int | None:
 # _posted_handoff: a ready whose head T2 could not yet check against the PR.
 _HANDOFF_UNREAD = object()
 
+_NO_READ_SINCE_FAILURE = object()
+
+# The result kinds that settle each failed harness job, so T6 never retries it (#193).
+_SETTLING_KINDS = {
+    "review": ("verdict",),
+    "plan": ("plan", "questions"),
+    "build": ("ready", "questions"),
+    "fix": ("ready", "questions"),
+    "update-from-main": ("ready", "questions"),
+}
+
 _REGISTERING_ACTIONS = {
     "ready": ("build", "fix", "update-from-main"),
     "verdict": ("review",),
