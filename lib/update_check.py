@@ -51,6 +51,43 @@ class UpdateScope:
 
 
 @dataclass(frozen=True)
+class RebaseScope:
+    last_reviewed_head: str
+    reviewed_base: str
+    base: str
+
+
+def rebase_scope(
+    clone: Path, last_reviewed_head: str, head: str, base_ref: str
+) -> RebaseScope | None:
+    """None when head descends from last_reviewed_head (a plain push);
+    otherwise both fork points from base_ref, for `git range-diff`.
+    Raises ValueError when the clone cannot answer."""
+    last = _resolve(clone, last_reviewed_head)
+    new = _resolve(clone, head)
+    ancestry = _run(clone, "merge-base", "--is-ancestor", last, new).returncode
+    if ancestry == 0:
+        return None
+    if ancestry != 1:
+        raise ValueError("git merge-base --is-ancestor failed")
+    return RebaseScope(last, _merge_base(clone, last, base_ref), _merge_base(clone, new, base_ref))
+
+
+def _resolve(clone: Path, name: str) -> str:
+    result = _run(clone, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}")
+    if result.returncode != 0:
+        raise ValueError(f"no commit {name}")
+    return result.stdout.decode("ascii").strip()
+
+
+def _merge_base(clone: Path, commit: str, base_ref: str) -> str:
+    result = _run(clone, "merge-base", commit, base_ref)
+    if result.returncode != 0:
+        raise ValueError(f"no merge base for {commit}")
+    return result.stdout.decode("ascii").strip()
+
+
+@dataclass(frozen=True)
 class UpdateClass:
     trivial: bool
     reason: str

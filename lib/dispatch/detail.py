@@ -17,7 +17,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.queue import Job, JobRequest
-from lib.update_check import UpdateScope
+from lib.update_check import RebaseScope, UpdateScope
 
 
 class DetailMixin:
@@ -234,6 +234,21 @@ class DetailMixin:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
 
+    def _reviewed_head(
+        self, ticket: TrackedTicket, comment: Comment, through_round: int
+    ) -> str | None:
+        from lib.evidence.findings import findings_evidence
+
+        with self._connect() as connection:
+            comments = _verdict_sources(connection, ticket, comment)
+        return findings_evidence(
+            comments=comments,
+            trusted_logins=self.trusted_logins,
+            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            current_round=through_round + 1,
+            bases={},
+        ).reviewed_head
+
     def _with_evidence(
         self,
         connection: sqlite3.Connection,
@@ -258,29 +273,30 @@ class DetailMixin:
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
         scope = (ticket.repo.lower(), ticket.ticket_id)
-        accepted = {
-            row[0]
-            for row in connection.execute(
-                """
-                SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT approve_comment_id FROM ship_holds
-                    WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT source_comment_id FROM jobs
-                    WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-                """,
-                scope * 4,
-            )
-        }
         findings = findings_evidence(
-            comments=[
-                item for item in ticket.comments if item.id == comment.id or item.id in accepted
-            ],
+            comments=_verdict_sources(connection, ticket, comment),
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
-            current_round=_detail_round_number(request.detail) or 1,
-            bases={},
+            current_round=(_detail_round_number(request.detail) or 1)
+            + (request.action == "review"),
+            bases=_review_bases(
+                [
+                    str(row["detail"] or "{}")
+                    for row in connection.execute(
+                        """
+                        SELECT detail FROM jobs
+                        WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                        ORDER BY rowid
+                        """,
+                        scope,
+                    )
+                ]
+                + [request.detail or "{}"]
+            ),
         )
+        rebase = detail.get("rebase")
+        if rebase is not None and rebase["last_reviewed_head"] == findings.reviewed_head:
+            findings = replace(findings, reviewed_base=rebase["reviewed_base"])
         result = ticket.ci.get(request.head or "")
         ci = None
         if result is not None and result.status == "failure":
@@ -377,6 +393,7 @@ class DetailMixin:
         cap: int | None = None,
         kind: str | None = None,
         update: UpdateScope | None = None,
+        rebase: RebaseScope | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -420,6 +437,8 @@ class DetailMixin:
                 update_merge=update.merge,
                 update_commits=list(update.commits),
             )
+        if rebase is not None:
+            context["rebase"] = asdict(rebase)
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
@@ -496,3 +515,36 @@ class DetailMixin:
             ),
             head=ticket.current_head,
         )
+
+
+def _verdict_sources(
+    connection: sqlite3.Connection, ticket: TrackedTicket, comment: Comment
+) -> list[Comment]:
+    accepted = {
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT approve_comment_id FROM ship_holds
+                WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+            """,
+            (ticket.repo.lower(), ticket.ticket_id) * 4,
+        )
+    }
+    return [item for item in ticket.comments if item.id == comment.id or item.id in accepted]
+
+
+def _review_bases(details: list[str]) -> dict[int, str]:
+    bases: dict[int, str] = {}
+    for text in details:
+        detail = json.loads(text)
+        rebase = detail.get("rebase")
+        number = _detail_round_number(text)
+        if not isinstance(rebase, dict) or number is None:
+            continue
+        bases[number - 1] = str(rebase["reviewed_base"])
+        bases[number] = str(rebase["base"])
+    return bases
