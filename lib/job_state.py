@@ -688,14 +688,12 @@ _USAGE_LIMIT_RESETS = (
     RELEASED_UNSTARTED,
     PREFLIGHT_LAGGING,
     LAG_BLOCKED,
-    LINK_DROP,
 )
 
 
 def usage_limit_end(connection: sqlite3.Connection, job_id: str) -> str | None:
     """The usage-limit detail when the row's latest run reported its
-    account's usage limit, or None. The run's own end events come after the
-    limit and are passed over."""
+    account's usage limit, or None."""
     if not has_job_events(connection):
         return None
     events = (USAGE_LIMIT, *_USAGE_LIMIT_RESETS)

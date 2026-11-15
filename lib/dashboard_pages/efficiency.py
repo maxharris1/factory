@@ -190,7 +190,8 @@ SCRIPT = r"""
   function usageLevel(x) { return x >= 0.5 ? 'ok' : x >= 0.2 ? 'warn' : 'bad'; }
   function usageCells(e, now) {
     if (e.state === 'not tracked' || e.state === 'no telemetry') {
-      return [0, 1, 2, 3].map(function () { return [e.state, 'muted']; });
+      return [0, 1, 2].map(function () { return [e.state, 'muted']; })
+        .concat([e.limit_label ? [e.limit_label, 'bad'] : [e.state, 'muted']]);
     }
     var cells = ['five_hour', 'seven_day'].map(function (w) {
       return e[w].state === 'ok' ? [pct(e[w].used) + ' used', null] : [e[w].state, 'muted'];
@@ -407,7 +408,8 @@ def _working(snapshot: dict) -> str:
 def _usage_cells(entry: dict, now: float) -> list[tuple[str, str | None]]:
     state = entry["state"]
     if state in ("not tracked", "no telemetry"):
-        return [(state, "muted")] * 4
+        last = (entry["limit_label"], "bad") if entry.get("limit_label") else (state, "muted")
+        return [(state, "muted")] * 3 + [last]
     cells: list[tuple[str, str | None]] = [
         (f"{_half_up(entry[w]['used'] * 100)}% used", None) if entry[w]["state"] == "ok"
         else (entry[w]["state"], "muted")

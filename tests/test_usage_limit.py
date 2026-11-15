@@ -15,15 +15,18 @@ from datetime import datetime
 from pathlib import Path
 
 from lib import dashboard_usage, lane_limit
+from lib.dashboard import collect_snapshot, render_pages
 from lib.device_pool import DevicePool
 from lib.machines_yml import load_machines_yml
-from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT
+from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT, link_drop_requeues, usage_limit_end
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.status import JobRow, SQLiteStatusReader, Status, render
 from lib.telemetry import EventLog, Scrubber, Session
 from lib.usage_readings import Reading, store
 from tests.pool_helpers import ROOT
 from tests.test_hooks import FakeGrokDelivery, say, setup, ticket
+from tests.test_job_state import Poller
+from tests.test_link_drop_requeue import BACKOFF, dropped_run, poll, retries
 
 START = 1_800_000_000.0
 RESET = int(START) + 5 * 3600
@@ -280,3 +283,132 @@ def test_a_fresh_reading_below_one_lifts_the_limit_and_an_older_one_does_not(tmp
     reading(limited_at + 30)
     job = queue.claim("claude")
     assert job is not None and job.id == first
+
+
+def test_a_limited_queued_job_waits_without_spending_attempts_or_sticking(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    original = next(job for job in queue.outstanding() if job.id == first)
+    for _ in range(2):
+        now[0] += original.request.timeout_seconds + 1
+        assert now[0] < RESET
+        dispatcher.reconcile_jobs()
+    with sqlite3.connect(db) as connection:
+        jobs = connection.execute("SELECT id, state FROM jobs WHERE recipient = 'claude'").fetchall()
+        stuck = connection.execute("SELECT stuck FROM ticket_state WHERE ticket_id = '42'").fetchall()
+    assert jobs == [(first, "queued")]
+    assert stuck == [(0,)]
+    now[0] = RESET - 1
+    dispatcher.reconcile_jobs()
+    now[0] = RESET + original.request.timeout_seconds - 2
+    dispatcher.reconcile_jobs()
+    assert _job(db, first) == ("queued", 1)
+    assert queue.claim("claude").id == first
+
+
+def test_a_new_limit_after_an_early_resume_obeys_its_own_reset(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    now[0] = START + 60
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[Reading("five_hour", 0.4, RESET, now[0])])
+        assert lane_limit.active(connection, "claude", now[0]) is None
+    new_reset = int(now[0]) + 3600
+    second = _die_on_limit(tmp_path, now, queue, dispatcher, db,
+                           {**CLAUDE_LIMIT, "result": f"Claude AI usage limit reached|{new_reset}"})
+    assert second == first
+    assert queue.claim("claude") is None
+    now[0] = new_reset + 1
+    assert queue.claim("claude").id == first
+
+
+def test_an_early_resume_holds_after_its_reading_ages_out(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    long_reset = int(START) + 7 * 86400
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db,
+                          {**CLAUDE_LIMIT, "result": f"Claude AI usage limit reached|{long_reset}"})
+    now[0] = START + 60
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[Reading("five_hour", 0.4, int(START) + 3600, now[0])])
+    resumed = queue.claim("claude")
+    assert resumed is not None and resumed.id == first
+    queue.release(resumed.id, owner="claude")
+    now[0] = START + 3601
+    with sqlite3.connect(db) as connection:
+        assert lane_limit.all_active(connection, now[0]) == []
+    assert queue.claim("claude").id == first
+
+
+def test_the_newest_reading_of_a_window_on_any_device_decides(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    week = int(START) + 7 * 86400
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="older",
+              readings=[Reading("five_hour", 1.0, RESET, START + 30),
+                        Reading("seven_day", 0.1, week, START + 30)])
+        store(connection, harness="claude", bot="claude-bot", device="remote", job_id="newer",
+              readings=[Reading("five_hour", 0.4, RESET, START + 60),
+                        Reading("seven_day", 0.1, week, START + 60)])
+    now[0] = START + 61
+    assert queue.claim("claude").id == first
+
+
+def test_a_newer_full_reading_keeps_the_lane_paused(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="older",
+              readings=[Reading("five_hour", 0.4, RESET, START + 30)])
+        store(connection, harness="claude", bot="claude-bot", device="remote", job_id="newer",
+              readings=[Reading("five_hour", 1.0, RESET, START + 60)])
+    now[0] = START + 61
+    assert queue.claim("claude") is None
+
+
+def _feed_codex(poller, job_id: str, event: dict) -> None:
+    session = Session(
+        connect=lambda: sqlite3.connect(poller.path), job_id=job_id,
+        bot="codex-bot", repo="owner/repo", harness="codex", argv=["codex"],
+        raw_log=None, scrub=Scrubber({}), log=lambda _: None, stdout=io.BytesIO(),
+        clock=lambda: poller.now[0],
+    )
+    session.consume(io.BytesIO((json.dumps(event) + "\n").encode()))
+    session.finish(1)
+
+
+def test_a_limit_then_a_link_drop_in_the_same_run_is_still_a_free_retry(tmp_path: Path) -> None:
+    poller = Poller(tmp_path, box=False, check=0)
+    job_id = poller.queue.enqueue(
+        JobRequest("owner/repo", "42", "build", "codex", "go-1", 3600), dedupe_key="build-42"
+    ).id
+    for round_number in range(7):
+        assert poller.pool.claim("codex") is not None
+        reset = int(poller.now[0] + 5 * 3600) // 60 * 60
+        reset_text = datetime.fromtimestamp(reset).strftime("%b %d, %Y %I:%M %p")
+        _feed_codex(poller, job_id, {"type": "error", "message":
+            f"You've hit your usage limit. Please try again at {reset_text}."})
+        dropped_run(poller, job_id)
+        failed_at = poller.now[0] + 5
+        poll(poller, failed_at)
+        poll(poller, failed_at + BACKOFF[min(round_number, 5)])
+        with poller.queue.connect() as connection:
+            assert link_drop_requeues(connection, job_id) == 0
+            assert usage_limit_end(connection, job_id) is None
+        poller.now[0] = reset + 1
+    assert retries(poller) == []
+    assert [(row[1], row[2]) for row in poller.jobs()] == [("queued", 1)]
+
+
+def test_the_dashboard_shows_a_limit_before_any_reading(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    log = tmp_path / "orch.log"
+    log.write_text("")
+    snapshot = collect_snapshot(db, log, now=now[0], machines_path=ROOT / "machines.yml")
+    entry = next(e for e in snapshot["usage"]["bots"] if e["harness"] == "claude")
+    assert entry["state"] == "no telemetry"
+    page = render_pages(snapshot)["efficiency.html"]
+    assert entry["limit_label"] in page.split("<script>")[0]

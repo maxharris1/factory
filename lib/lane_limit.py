@@ -6,9 +6,11 @@ nothing for that recipient while the limit is active, on every device,
 because every claim reads the box's orch.db. T6 requeues the dead job as
 itself with nothing charged.
 
-A limit lifts when it is read: at `until`, or once usage readings observed
-after the limit are all below 1.0. Nothing deletes a row, so recording and
-reading are idempotent.
+A limit lifts when it is read: at `until`, or once the newest reading of
+every window observed after the limit, on any device, shows room. It stays
+lifted as those readings age out, and a later limit replaces the row with
+its own reset. Nothing deletes a row, so recording and reading are
+idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
 (SPEC section 10).
@@ -23,7 +25,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from lib.usage_readings import TABLE as READINGS_TABLE
-from lib.usage_readings import Reading, from_row, reset_time, window_state
+from lib.usage_readings import Reading, from_row, reset_time
 
 TABLE = "lane_limits"
 DEFAULT_LIMIT_SECONDS = 3600
@@ -194,24 +196,22 @@ def record(
     now: float,
 ) -> LaneLimit | None:
     """Mark job_id's recipient lane limited in the caller's transaction,
-    keeping the later `until`. None when the job row is missing."""
+    keeping the later `until` while an earlier limit still holds. None when
+    the job row is missing."""
     job = connection.execute("SELECT recipient FROM jobs WHERE id = ?", (job_id,)).fetchone()
     if job is None:
         return None
     recipient = str(job[0])
     reset, source = until(limit, readings(connection, harness, bot), now)
+    held = active(connection, recipient, now)
+    if held is not None and held.until > reset:
+        reset, source = held.until, held.source
     connection.execute(DDL)
     connection.execute(
         f"""
-        INSERT INTO {TABLE} (recipient, harness, bot, limited_at, until, source, job_id)
+        INSERT OR REPLACE INTO {TABLE}
+            (recipient, harness, bot, limited_at, until, source, job_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (recipient) DO UPDATE SET
-            harness = excluded.harness,
-            bot = excluded.bot,
-            limited_at = excluded.limited_at,
-            until = max(excluded.until, {TABLE}.until),
-            source = excluded.source,
-            job_id = excluded.job_id
         """,
         (recipient, harness, bot, now, reset, source, job_id),
     )
@@ -232,12 +232,17 @@ def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLi
     if row is None:
         return None
     limit = LaneLimit(str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]))
-    fresh = [
-        r
-        for r in readings(connection, limit.harness, limit.bot)
-        if r.observed_at > limit.limited_at and window_state(r, now) == "ok"
+    newest: dict[str, Reading] = {}
+    for r in readings(connection, limit.harness, limit.bot):
+        if r.used is not None and r.observed_at > limit.limited_at and (
+            r.window not in newest or r.observed_at > newest[r.window].observed_at
+        ):
+            newest[r.window] = r
+    full = [
+        r for r in newest.values()
+        if r.used is not None and r.used >= 1.0 and (r.resets_at is None or r.resets_at > now)
     ]
-    if fresh and all(r.used is not None and r.used < 1.0 for r in fresh):
+    if newest and not full:
         return None
     return limit
 

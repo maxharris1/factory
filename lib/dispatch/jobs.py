@@ -202,7 +202,12 @@ class JobsMixin:
         now = self.queue.now()
         busy = self._busy_recipients()
         lag_blocked = self._lag_blocked_recipients()
+        with self._connect() as connection:
+            limited = {limit.recipient for limit in lane_limit.all_active(connection, now)}
         for job in self.queue.outstanding():
+            if job.state == "queued" and job.request.recipient in limited:
+                self._restart_queue_wait(job, now)
+                continue
             if (
                 job.state == "queued"
                 and job.request.recipient in lag_blocked
@@ -852,6 +857,7 @@ class JobsMixin:
             self._record_job_event_once(job, "requeue-deferred", lane_limit.label(limit))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            release_link_dropped(connection, job.id)
             result = requeue_usage_limited(
                 connection, job.id, now=self.queue.now(), reason=detail
             )
