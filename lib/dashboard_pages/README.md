@@ -35,7 +35,9 @@ that posted it (`jobs.finished_at`), the approval it recorded
 (`ticket_state.approved_at`) or the ship hold it raised
 (`ship_holds.held_at`). It is null when none of these names the comment.
 A new shipped verdict plays the settle sweep once (`PX.strip` with
-`settle: true`), never on first paint or under reduced motion. The rule:
+`settle: true`), never on first paint or under reduced motion. The strip
+is keyed by the verdict (`repo#ticket:seq`), so each new shipped verdict
+on a ticket sweeps, not just the first. The rule:
 
 1. Each handoff and verdict is in exactly one thread, keyed by repo (any
    case) and ticket id.
