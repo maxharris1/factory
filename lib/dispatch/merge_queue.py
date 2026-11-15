@@ -18,6 +18,8 @@ from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     FAILED_UNSTARTED,
     JOB_EVENTS_TABLE,
+    LINK_DROP,
+    REQUEUED_LINK_DROP,
     Placement,
     has_job_events,
     never_started,
@@ -98,10 +100,21 @@ class MergeQueueMixin:
             "back_to": back_to,
             "job_id": self._update_job_before(ticket, comment),
         }
+
+        def update_failed(why: str) -> str:
+            if failed["job_id"] is None:
+                if self.log is not None:
+                    self.log(
+                        f"update ready no started job produced: "
+                        f"{ticket.repo}#{ticket.ticket_id}: {why}"
+                    )
+                return "update-unattributed"
+            return self._update_failed(**failed, why=why)
+
         if row["update_from_head"] is not None and _matching_head(
             reported_head, str(row["update_from_head"])
         ):
-            return True, self._update_failed(**failed, why="the ready names the old head")
+            return True, update_failed("the ready names the old head")
         try:
             fresh = self._fresh_ticket(ticket)
         except Exception:
@@ -116,7 +129,7 @@ class MergeQueueMixin:
             return True, "stale-ready-head"
         self._polled[key] = fresh
         if fresh.mergeable_state == "dirty":
-            return True, self._update_failed(**failed, why="the PR still conflicts")
+            return True, update_failed("the PR still conflicts")
         if fresh.mergeable is None:
             return False, "update-mergeable-pending"
         ci = fresh.ci.get(head)
@@ -370,9 +383,11 @@ class MergeQueueMixin:
                 if job["handoff_comment_id"] == comment.id:
                     return str(job["id"])
             placements = read_placements(connection)
-            unstarted = _failed_unstarted(connection, [str(job["id"]) for job in jobs])
+            ids = [str(job["id"]) for job in jobs]
+            ran = _with_event(connection, ids, LINK_DROP, REQUEUED_LINK_DROP)
+            unstarted = _with_event(connection, ids, FAILED_UNSTARTED)
         return next(
-            (str(job["id"]) for job in jobs if _started(job, placements, unstarted)),
+            (str(job["id"]) for job in jobs if _started(job, placements, ran, unstarted)),
             None,
         )
 
@@ -567,7 +582,7 @@ class MergeQueueMixin:
         timeout_seconds: int,
         project_bot: str | None,
         back_to: str,
-        job_id: str | None,
+        job_id: str,
         why: str,
     ) -> str:
         """Count one failed update job, once however many signals report it
@@ -589,7 +604,7 @@ class MergeQueueMixin:
             if row is None:
                 connection.commit()
                 return "update-not-pending"
-            if job_id is not None and row["update_failed_job"] == job_id:
+            if row["update_failed_job"] == job_id:
                 connection.commit()
                 return "update-failure-counted"
             newest = connection.execute(
@@ -601,7 +616,7 @@ class MergeQueueMixin:
                 """,
                 key,
             ).fetchone()
-            if job_id is not None and str(newest["id"]) != job_id:
+            if str(newest["id"]) != job_id:
                 connection.commit()
                 return "update-superseded"
             failures = int(row["update_failures"]) + 1
@@ -753,22 +768,30 @@ class MergeQueueMixin:
 
 
 def _started(
-    job: sqlite3.Row, placements: dict[str, Placement], unstarted: set[str]
+    job: sqlite3.Row,
+    placements: dict[str, Placement],
+    ran: set[str],
+    unstarted: set[str],
 ) -> bool:
-    placement = placements.get(str(job["id"]))
+    job_id = str(job["id"])
+    if job_id in ran:
+        return True
+    placement = placements.get(job_id)
     if placement is not None:
         return not never_started(placement)
-    return job["state"] in ("running", "done", "failed") and str(job["id"]) not in unstarted
+    return job["state"] in ("running", "done", "failed") and job_id not in unstarted
 
 
-def _failed_unstarted(connection: sqlite3.Connection, job_ids: list[str]) -> set[str]:
+def _with_event(connection: sqlite3.Connection, job_ids: list[str], *events: str) -> set[str]:
     if not job_ids or not has_job_events(connection):
         return set()
-    marks = ", ".join("?" for _ in job_ids)
+    jobs = ", ".join("?" for _ in job_ids)
+    kinds = ", ".join("?" for _ in events)
     return {
         str(row[0])
         for row in connection.execute(
-            f"SELECT job_id FROM {JOB_EVENTS_TABLE} WHERE event = ? AND job_id IN ({marks})",
-            (FAILED_UNSTARTED, *job_ids),
+            f"SELECT job_id FROM {JOB_EVENTS_TABLE} "
+            f"WHERE event IN ({kinds}) AND job_id IN ({jobs})",
+            (*events, *job_ids),
         )
     }

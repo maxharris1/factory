@@ -12,7 +12,17 @@ import pytest
 
 from lib.device_pool import DevicePool
 from lib.github_actions import _comment
-from lib.job_state import CLAIMED, FAILED_UNSTARTED, derive, never_started, record_job_event
+from lib.job_state import (
+    CLAIMED,
+    FAILED_UNSTARTED,
+    MAX_FREE_REQUEUES,
+    REQUEUED_EARLY_EXIT,
+    derive,
+    never_started,
+    record_job_event,
+    requeue_link_drop,
+    requeue_unstarted,
+)
 from lib.machines_yml import Device, MachinesConfig
 from lib.update_check import classify
 from tests.merge_queue_support import Board, sha
@@ -269,3 +279,68 @@ def test_a_ready_handled_as_an_update_failure_is_no_later_jobs_handoff(tmp_path:
     row = board.state("42")
     assert (row["update_failures"], row["stuck_reason"]) == (2, "update-failed-2")
     assert board.jobs("update-from-main")[-1]["state"] == "failed"
+
+
+def _link_drop_then_fail_unstarted(board: Board, pool: DevicePool, job_id: str) -> None:
+    board.queue.finish(job_id, owner="claude", handoff_comment_id=None)
+    with board.queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        assert requeue_link_drop(connection, job_id, now=board.now[0], reason="SSH link dropped")
+        connection.commit()
+    for _ in range(MAX_FREE_REQUEUES + 1):
+        claimed, placement = pool.claim("claude")
+        assert claimed.id == job_id and never_started(placement)
+        with board.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = requeue_unstarted(
+                connection,
+                job_id,
+                now=board.now[0],
+                event=REQUEUED_EARLY_EXIT,
+                reason="runner exited before harness start",
+                slot_guard="harness = ?",
+                slot_params=("claude",),
+            )
+            connection.commit()
+    assert result[0] == FAILED_UNSTARTED
+
+
+def test_a_job_that_ran_before_a_link_drop_keeps_its_late_ready(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    pool = _pool(board)
+    first, _ = pool.claim("claude")
+    pool.attach_worker(first.id, owner="claude", pid=os.getpid())
+    board.ready(pr, sha(1), "first-old-ready")
+    board.poll()
+    _link_drop_then_fail_unstarted(board, pool, first.id)
+    board.poll()
+    board.poll()
+    retry, placement = pool.claim("claude")
+    assert retry.id != first.id and never_started(placement)
+    late = board.ready(pr, sha(1), "first-late-old-ready")
+    assert _attributed(board, pr) == first.id
+    board.poll()
+    assert board.outcome(late) == "update-failure-counted"
+    row = board.state("42")
+    assert (row["update_failures"], row["stuck"]) == (1, 0)
+
+
+def test_a_ready_no_started_job_produced_charges_no_update_failure(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    board.ready(pr, sha(1), "orphan-old-ready")
+    assert _attributed(board, pr) is None
+    board.poll()
+    assert board.outcome("orphan-old-ready") == "update-unattributed"
+    row = board.state("42")
+    assert (row["update_failures"], row["stuck"]) == (0, 0)
+
+    pr.push(sha(2), state="dirty")
+    board.ready(pr, sha(2), "orphan-dirty-ready")
+    board.poll()
+    assert board.outcome("orphan-dirty-ready") == "update-unattributed"
+    row = board.state("42")
+    assert (row["update_failures"], row["stuck"]) == (0, 0)
