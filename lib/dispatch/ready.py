@@ -543,7 +543,7 @@ class ReadyMixin:
             row = connection.execute(
                 """
                 SELECT id, action, state, source_comment_id, detail, created_at,
-                       state IN ('queued', 'running')
+                       handoff_comment_id, state IN ('queued', 'running')
                        OR (state = 'failed' AND failure_handled = 0) AS open
                 FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
@@ -569,6 +569,7 @@ class ReadyMixin:
             _detail_round_number(row["detail"]),
             str(row["source_comment_id"]),
             float(row["created_at"]),
+            row["handoff_comment_id"],
         )
 
     def _verdict_handled(
@@ -578,16 +579,13 @@ class ReadyMixin:
         review_round: int | None,
         ready_id: str,
         review_queued_at: float,
+        handoff_id: str | None,
     ) -> bool:
         self._remember_verdicts(ticket, ticket.comments)
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT verdict.comment_id, verdict.outcome, recorded.head, EXISTS (
-                    SELECT 1 FROM jobs AS review
-                    WHERE lower(review.repo) = verdict.repo AND review.ticket_id = verdict.ticket_id
-                      AND review.action = 'review' AND review.handoff_comment_id = verdict.comment_id
-                ) AS registered
+                SELECT verdict.comment_id, verdict.outcome, recorded.head
                 FROM handled_comments AS verdict
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
@@ -595,7 +593,7 @@ class ReadyMixin:
                   AND NOT COALESCE(recorded.posted_at < ?, 0)
                   AND (
                       recorded.review_round = ?
-                      OR recorded.head IS NULL AND verdict.rowid <= (
+                      OR recorded.head IS NULL AND verdict.comment_id = ? AND verdict.rowid <= (
                           SELECT MAX(handled_rowid) FROM verdict_heads_floor
                       )
                   )
@@ -605,15 +603,20 @@ class ReadyMixin:
                         AND ready.comment_id = ?
                   ), 0)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, review_queued_at, review_round, ready_id),
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    review_queued_at,
+                    review_round,
+                    handoff_id,
+                    ready_id,
+                ),
             ).fetchall()
         visible = {comment.id for comment in ticket.comments}
         return any(
             _matching_head(str(row["head"]), head) is not None
             if row["head"] is not None
-            else row["comment_id"] not in visible
-            and row["registered"]
-            and not _questions_outcome(str(row["outcome"]))
+            else row["comment_id"] not in visible and not _questions_outcome(str(row["outcome"]))
             for row in rows
         )
 
