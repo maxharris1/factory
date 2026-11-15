@@ -93,6 +93,8 @@ class DispatcherBase:
         self._stopped_due: set[tuple[str, str]] = set()
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
+        # #323: the (head, reason) each merge queue head last logged waiting at.
+        self._queue_waits: dict[tuple[str, str], tuple[str | None, str]] = {}
         # #219: repos (lowercased) with a ticket that entered merged this
         # poll, for the self-deploy kick after the cycle.
         self.merged_this_poll: set[str] = set()
