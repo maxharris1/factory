@@ -69,7 +69,7 @@ from lib.queue import MAX_INVALID_HANDOFFS, SLOTS_TABLE, QueueError, SQLiteJobQu
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
-from lib.update_check import UpdateClass, classify as classify_update
+from lib.update_check import RebaseScope, UpdateClass, classify as classify_update, rebase_scope
 from lib.wait import (
     WaitError,
     open_queue,
@@ -931,6 +931,7 @@ def _runtime(
         log=lambda line: print(f"orch poll: {line}", file=sys.stderr, flush=True),
         feeder=feeder,
         update_classifier=_classify_update,
+        rebase_classifier=_rebase_check,
         approvals=approvals(config),
     )
     source.error_sink = dispatcher.record_poll_error
@@ -955,6 +956,14 @@ def _classify_update(
     return classify_update(
         clone, approved, head, f"refs/remotes/origin/{base}", shared_paths
     )
+
+
+def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | None:
+    """#207: whether head rewrote the last reviewed head, on the waiter's bare clone."""
+    clone = worktrees.fetched_clone(
+        worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
+    )
+    return rebase_scope(clone, last, head, f"refs/remotes/origin/{base}")
 
 
 def _feeder(

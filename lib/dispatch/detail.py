@@ -17,7 +17,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.queue import Job, JobRequest
-from lib.update_check import UpdateScope
+from lib.update_check import RebaseScope, UpdateScope
 
 
 class DetailMixin:
@@ -276,7 +276,20 @@ class DetailMixin:
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
             current_round=_detail_round_number(request.detail) or 1,
-            bases={},
+            bases=_review_bases(
+                [
+                    str(row["detail"] or "{}")
+                    for row in connection.execute(
+                        """
+                        SELECT detail FROM jobs
+                        WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                        ORDER BY rowid
+                        """,
+                        scope,
+                    )
+                ]
+                + [request.detail or "{}"]
+            ),
         )
         result = ticket.ci.get(request.head or "")
         ci = None
@@ -374,6 +387,7 @@ class DetailMixin:
         cap: int | None = None,
         kind: str | None = None,
         update: UpdateScope | None = None,
+        rebase: RebaseScope | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -417,6 +431,8 @@ class DetailMixin:
                 update_merge=update.merge,
                 update_commits=list(update.commits),
             )
+        if rebase is not None:
+            context["rebase"] = asdict(rebase)
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).
@@ -493,3 +509,18 @@ class DetailMixin:
             ),
             head=ticket.current_head,
         )
+
+
+def _review_bases(details: list[str]) -> dict[int, str]:
+    """#207: each round's merge base with the base branch, as recorded by the
+    rebase scope of a review job (its own round, and the round before)."""
+    bases: dict[int, str] = {}
+    for text in details:
+        detail = json.loads(text)
+        rebase = detail.get("rebase")
+        number = _detail_round_number(text)
+        if not isinstance(rebase, dict) or number is None:
+            continue
+        bases[number - 1] = str(rebase["reviewed_base"])
+        bases[number] = str(rebase["base"])
+    return bases
