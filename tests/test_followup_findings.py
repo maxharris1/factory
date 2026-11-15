@@ -11,7 +11,7 @@ import yaml
 
 from lib.brief import render_brief
 from lib.dispatcher import CIResult, TrackedTicket
-from lib.factory_md import parse_factory_context, parse_factory_md
+from lib.factory_md import load_factory_md, parse_factory_context, parse_factory_md
 from lib.feeder_gates import github_ref, parse_gate_lines
 from lib.followups import followup_findings, followup_issue
 from tests import regenerate_brief_snapshots as snapshots
@@ -34,6 +34,7 @@ VALID = {
     "ship": "merge",
     "skills": [],
 }
+ROOT = Path(__file__).resolve().parents[1]
 BAD_ROUND = "review.followup_from_round must be an integer of at least 2"
 
 
@@ -72,6 +73,12 @@ def test_followup_from_round_is_refused_with_linear_tickets() -> None:
     assert [(f.severity, f.message) for f in findings] == [
         ("error", "tickets is linear and review.followup_from_round is set")
     ]
+
+
+def test_the_factory_repo_turns_follow_ups_on_from_round_four() -> None:
+    config, findings = load_factory_md(ROOT / "factory.md")
+    assert [f for f in findings if f.severity == "error"] == []
+    assert config is not None and config.followup_from_round == 4
 
 
 SAMPLE_VERDICT = """<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=4/5 head=abc ac=met verdict=APPROVE risk=high -->
