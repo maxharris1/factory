@@ -362,3 +362,128 @@ def test_once_starts_the_device_deploy_where_setsid_is_missing(home: Path, tmp_p
     assert result.returncode == 0, result.stderr
     assert "unbound variable" not in result.stderr
     assert [call["argv"][:2] for call in _detached(home, 1)] == [["heal", "devices"]]
+
+
+def _loops(home: Path) -> list[int]:
+    state = str(home / STATE)
+    found = []
+    for cmdline in Path("/proc").glob("[1-9]*/cmdline"):
+        try:
+            argv = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"_loop" in argv and state.encode() in argv and alive(int(cmdline.parent.name)):
+            found.append(int(cmdline.parent.name))
+    return sorted(found)
+
+
+def _spawn_loop(home: Path, seconds: str) -> subprocess.Popen:
+    with (home / "loops.log").open("a") as out:
+        return subprocess.Popen(["bash", str(SCRIPT), "_loop", str(home / STATE)],
+                                env={"HOME": str(home), "PATH": "/usr/bin:/bin",
+                                     "ORCH_HEAL_SECONDS": seconds},
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+
+
+def _loops_log(home: Path) -> str:
+    return (home / "loops.log").read_text(encoding="utf-8")
+
+
+def _wait_for(predicate, timeout: float = 10) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return predicate()
+
+
+def test_two_loops_on_one_state_dir_leave_exactly_one_within_an_interval(home: Path) -> None:
+    first = _spawn_loop(home, "1")
+    assert _wait_for(lambda: len(_calls(home)) == 1)
+    second = _spawn_loop(home, "1")
+    assert _wait_for(lambda: len(_calls(home)) == 2)
+
+    first.wait(timeout=1.5)
+
+    assert _loops(home) == [second.pid]
+    assert _pid(home) == second.pid
+    assert f"loop {first.pid} no longer owns" in _loops_log(home)
+
+
+def test_a_loop_that_lost_its_pidfile_exits_before_the_next_pass_and_says_so(
+    home: Path,
+) -> None:
+    loop = _spawn_loop(home, "0.5")
+    assert _wait_for(lambda: len(_calls(home)) == 1)
+    (home / STATE / "self-heal.pid").unlink()
+
+    loop.wait(timeout=5)
+
+    assert len(_calls(home)) == 1
+    pidfile = home / STATE / "self-heal.pid"
+    assert f"loop {loop.pid} no longer owns {pidfile} (missing); exiting" in _loops_log(home)
+
+
+@pytest.mark.parametrize("pidfile", ["missing", "stale"])
+@pytest.mark.parametrize("command", ["start", "ensure"])
+def test_start_and_ensure_refuse_a_second_loop_whatever_the_pidfile_says(
+    home: Path, command: str, pidfile: str,
+) -> None:
+    assert _run(home, "start", ORCH_HEAL_SECONDS="60").returncode == 0
+    pid = _pid(home)
+    if pidfile == "missing":
+        (home / STATE / "self-heal.pid").unlink()
+    else:
+        (home / STATE / "self-heal.pid").write_text("999999999\n")
+
+    result = _run(home, command, ORCH_HEAL_SECONDS="60")
+
+    assert result.returncode == 0, result.stderr
+    assert f"self-heal loop already running (pid {pid})" in result.stdout
+    assert _loops(home) == [pid]
+
+
+def test_a_loop_started_before_368_counts_by_its_environment(home: Path, tmp_path: Path) -> None:
+    old = _executable(tmp_path / "old-checkout" / "self-heal.sh",
+                      "while :; do sleep 0.1; done\n")
+    legacy = subprocess.Popen(["bash", str(old), "_loop"], env={"HOME": str(home),
+                                                                "PATH": "/usr/bin:/bin"})
+    try:
+        assert _wait_for(lambda: Path(f"/proc/{legacy.pid}/cmdline").read_bytes().endswith(
+            b"_loop\0"))
+        refused = _run(home, "start")
+        assert f"self-heal loop already running (pid {legacy.pid})" in refused.stdout
+        assert not (home / STATE / "self-heal.pid").exists()
+
+        assert _run(home, "stop").returncode == 0
+        legacy.wait(timeout=5)
+    finally:
+        legacy.kill()
+        legacy.wait()
+
+
+def test_stop_stops_every_loop_on_the_state_dir(home: Path) -> None:
+    loops = []
+    for count in (1, 2, 3):
+        loops.append(_spawn_loop(home, "60"))
+        assert _wait_for(lambda: len(_calls(home)) == count)
+    assert len(_loops(home)) == 3
+
+    assert _run(home, "stop").returncode == 0
+
+    for loop in loops:
+        loop.wait(timeout=5)
+    assert _loops(home) == []
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "ensure"])
+def test_a_job_environment_never_starts_a_loop_unless_forced(home: Path, command: str) -> None:
+    refused = _run(home, command, ORCH_JOB_ID="job-1", ORCH_HEAL_SECONDS="60")
+
+    assert refused.returncode == 0
+    assert f"not running {command} from a job" in refused.stderr
+    assert not (home / STATE).exists()
+    assert _loops(home) == []
+
+    forced = _run(home, command, ORCH_JOB_ID="job-1", ORCH_HEAL_FORCE="1", ORCH_HEAL_SECONDS="60")
+    assert forced.returncode == 0, forced.stderr
+    assert _loops(home) == [_pid(home)]

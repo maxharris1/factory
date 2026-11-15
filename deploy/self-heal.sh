@@ -8,7 +8,8 @@
 #   self-heal.sh kick              start one pass now, detached, and return
 #                                  (the poller runs it after a merge, #219)
 #   self-heal.sh start             start the loop unless running; clears a stop
-#   self-heal.sh stop              stop the loop and hold it stopped
+#   self-heal.sh stop              stop every loop on the state dir and hold
+#                                  it stopped
 #   self-heal.sh restart           stop, then start
 #   self-heal.sh status            exit 0 if the loop runs, 3 if not
 #   self-heal.sh ensure            start unless running or held stopped; prints
@@ -55,6 +56,14 @@
 # lines and health's stderr). The loop runs `once` every ORCH_HEAL_SECONDS
 # (default 120).
 #
+# One loop per state dir (#368). The loop runs as `self-heal.sh _loop <state
+# dir>` and exits before its next pass once self-heal.pid no longer names it.
+# `start` and `ensure`, under self-heal-service.lock, scan /proc for a live
+# loop on the same state dir (a loop started before #368 carries no state dir
+# in its argv, so its environment names it) and start none while one runs,
+# whatever the pidfile says. `start`, `restart` and `ensure` do nothing in a
+# job's environment (ORCH_JOB_ID set) unless ORCH_HEAL_FORCE is set.
+#
 # Autostart: where `systemctl --user` works (ORCH_SYSTEMCTL names the
 # command), install-autostart writes deploy/factory-self-heal.service and
 # .timer, with this checkout's path, to ~/.config/systemd/user and enables
@@ -95,6 +104,7 @@ SYSTEMCTL="${ORCH_SYSTEMCTL:-systemctl}"
 UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 TIMER="factory-self-heal.timer"
 PROC="${ORCH_PROC_DIR:-/proc}"
+LOOP_STATE=""
 # cron, systemd and fresh shells have a minimal PATH; orch needs gh and git.
 export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 
@@ -105,15 +115,54 @@ usage() {
     exit 2
 }
 
-# Is this argv the loop (`bash .../self-heal.sh _loop`)?
+# Is this argv the loop (`bash .../self-heal.sh _loop <state dir>`)? Sets
+# LOOP_STATE to the state dir it names, empty for a loop started before #368.
 is_loop_argv() {
+    local -a argv=("$@")
     local i
     for i in 0 1; do
-        if (($# > i + 1)) && [[ "${@:i+1:1}" =~ (^|/)self-heal\.sh$ && "${@:i+2:1}" == _loop ]]; then
+        if [[ "${argv[i]:-}" =~ (^|/)self-heal\.sh$ && "${argv[i + 1]:-}" == _loop ]]; then
+            LOOP_STATE="${argv[i + 2]:-}"
             return 0
         fi
     done
     return 1
+}
+
+# Sets LOOP_STATE to the state dir a pre-#368 loop runs on, from its environment.
+legacy_loop_state() {
+    local entry home=""
+    local -a environ=()
+    mapfile -d '' -t environ 2>/dev/null <"${PROC}/$1/environ" || return 1
+    for entry in "${environ[@]}"; do
+        case "$entry" in
+            ORCH_STATE_DIR=*) LOOP_STATE="${entry#ORCH_STATE_DIR=}" ;;
+            HOME=*) home="${entry#HOME=}" ;;
+        esac
+    done
+    [[ -n "$LOOP_STATE" || -n "$home" ]] || return 1
+    LOOP_STATE="${LOOP_STATE:-${home}/.local/state/factory}"
+}
+
+# Print the pid of every live loop on this state dir, whatever the pidfile says.
+loop_pids() {
+    local dir pid command
+    local -a argv=()
+    if [[ -d "$PROC" ]]; then
+        for dir in "$PROC"/[1-9]*; do
+            pid="${dir##*/}"
+            mapfile -d '' -t argv 2>/dev/null <"${dir}/cmdline" || continue
+            is_loop_argv "${argv[@]}" || continue
+            [[ -n "$LOOP_STATE" ]] || legacy_loop_state "$pid" || continue
+            [[ "$LOOP_STATE" != "$STATE" ]] || printf '%s\n' "$pid"
+        done
+    else
+        while read -r pid command; do
+            read -r -a argv <<<"$command"
+            is_loop_argv "${argv[@]}" || continue
+            [[ "$LOOP_STATE" != "$STATE" ]] || printf '%s\n' "$pid"
+        done < <(ps -axo pid=,command= 2>/dev/null)
+    fi
 }
 
 # Print the pid of the running loop, or fail.
@@ -210,13 +259,20 @@ kick() {
     say "kick: started a detached pass (pid $!)" >>"$LOG"
 }
 
-# The loop. It owns the pidfile; SIGTERM stops it between passes.
+# The loop. It owns the pidfile and exits once another loop takes it (#368);
+# SIGTERM stops it between passes.
 run_loop() {
-    local stopping="" pause=""
+    local stopping="" pause="" owner
     trap 'stopping=1; [[ -n "$pause" ]] && kill -TERM "$pause" 2>/dev/null || true' TERM INT HUP
     mkdir -p "$STATE"
-    printf '%s\n' "$$" >"$PIDFILE"
+    printf '%s\n' "$$" >"${PIDFILE}.$$"
+    mv -f "${PIDFILE}.$$" "$PIDFILE"
     while [[ -z "$stopping" && ! -e "$STOPPED" ]]; do
+        owner="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
+        if [[ "$owner" != "$$" ]]; then
+            say "loop $$ no longer owns ${PIDFILE} (${owner:-missing}); exiting"
+            return 0
+        fi
         bash "$SELF" once 9>&- || say "pass exited $?"
         [[ -z "$stopping" && ! -e "$STOPPED" ]] || break
         sleep "$INTERVAL" &
@@ -239,11 +295,12 @@ start() {
 launch() {
     local pid child i
     mkdir -p "$STATE"
-    if pid="$(running_pid)"; then
+    pid="$(running_pid || loop_pids | head -n 1 || true)"
+    if [[ -n "$pid" ]]; then
         say "self-heal loop already running (pid ${pid})"
         return 0
     fi
-    nohup bash "$SELF" _loop >>"$LOG" 2>&1 </dev/null 9>&- &
+    nohup bash "$SELF" _loop "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
@@ -260,23 +317,41 @@ launch() {
     return 1
 }
 
+# A zombie (an exited loop its new parent has not reaped) is not alive.
+alive() {
+    local stat=""
+    kill -0 "$1" 2>/dev/null || return 1
+    [[ -r "${PROC}/$1/stat" ]] || return 0
+    read -r stat 2>/dev/null <"${PROC}/$1/stat" || return 1
+    [[ "${stat##*) }" != Z* ]]
+}
+
 stop() {
     local pid i
+    local -a pids=() left=()
     mkdir -p "$STATE"
     : >"$STOPPED"
-    if ! pid="$(running_pid)"; then
+    mapfile -t pids < <({
+        running_pid || true
+        loop_pids
+    } | sort -u)
+    if ((${#pids[@]} == 0)); then
         say "self-heal loop is not running"
         return 0
     fi
-    kill -TERM "$pid"
+    kill -TERM "${pids[@]}" 2>/dev/null || true
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            say "stopped self-heal loop (pid ${pid})"
+        left=()
+        for pid in "${pids[@]}"; do
+            alive "$pid" && left+=("$pid")
+        done
+        if ((${#left[@]} == 0)); then
+            say "stopped self-heal loop (pid ${pids[*]})"
             return 0
         fi
         sleep 0.1
     done
-    say "self-heal loop (pid ${pid}) did not stop within ${STOP_WAIT}s" >&2
+    say "self-heal loop (pid ${left[*]}) did not stop within ${STOP_WAIT}s" >&2
     return 1
 }
 
@@ -398,15 +473,21 @@ remove_autostart() {
     fi
 }
 
+not_from_a_job() {
+    [[ -n "${ORCH_JOB_ID:-}" && -z "${ORCH_HEAL_FORCE:-}" ]] || return 0
+    echo "self-heal: not running $1 from a job (ORCH_JOB_ID is set; set ORCH_HEAL_FORCE=1 to force)" >&2
+    exit 0
+}
+
 case "$COMMAND" in
     once) once ;;
     kick) kick ;;
     _loop) factory_host_pidns_or_refuse _loop && run_loop ;;
-    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    start) factory_host_pidns_or_refuse start && not_from_a_job start && service_lock && start ;;
     stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
-    restart) factory_host_pidns_or_refuse restart && service_lock && stop && start ;;
+    restart) factory_host_pidns_or_refuse restart && not_from_a_job restart && service_lock && stop && start ;;
     status) status ;;
-    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && not_from_a_job ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;
