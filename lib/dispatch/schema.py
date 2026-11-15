@@ -104,10 +104,13 @@ class SchemaMixin:
             verdict_heads_existed = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_heads'"
             ).fetchone()
+            floor_existed = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verdict_heads_floor'"
+            ).fetchone()
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS verdict_heads_floor (handled_rowid INTEGER NOT NULL)"
             )
-            if verdict_heads_existed is None:
+            if verdict_heads_existed is None or floor_existed is None:
                 connection.execute(
                     """
                     INSERT INTO verdict_heads_floor

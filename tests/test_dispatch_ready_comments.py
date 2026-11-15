@@ -15,7 +15,7 @@ from tests.test_review_before_ci import (
 )
 
 
-@pytest.mark.parametrize("mode", ["interrupt", "upgrade"])
+@pytest.mark.parametrize("mode", ["interrupt", "upgrade", "existing-table"])
 def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_never_recorded(
     tmp_path: Path, mode: str
 ) -> None:
@@ -40,6 +40,10 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
         board.dispatcher._mark_handled = stop_after_handled
         with pytest.raises(KeyboardInterrupt):
             board.poll()
+    if mode == "existing-table":
+        with board.queue.connect() as connection:
+            connection.execute("DELETE FROM verdict_heads WHERE comment_id = 'approve-older'")
+            connection.execute("DROP TABLE verdict_heads_floor")
     board.dispatcher = Dispatcher(
         tmp_path / "d.db",
         board.queue,
