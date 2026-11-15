@@ -1,0 +1,8 @@
+decision	choice	why
+cadence clock	queue clock (self.queue.now()), last read per tracked ticket kept in the ticket_reads table	round 1 kept it in memory; codex showed a restart with 120 s cycles added 360 s to an overdue capped ticket's read (AC 2). A table keeps the schedule across restarts, and a new table leaves positional tracked_tickets inserts alone
+what counts as a read	a ticket the tracked read returned, or a poll error for it	same rule as the old _stopped_due set, so a deferred Linear read or a GitHub-only cycle keeps the ticket offered
+first read after a start	offset crc32(repo#ticket) % 300 from the first cycle that sees a stopped ticket with no recorded read	only the first deploy of the table, or a ticket never read, lacks a row; the spread stops 40 reads bursting into one cycle
+new-comment fast path	not built	ticket makes it conditional on a repo issue-comment listing already fetched each cycle; lib/poll_source.py fetches none
+old cycle tests	moved to tests/test_stopped_poll.py and driven by a fake clock; test_live_poll and test_lifecycle_replay advance their clocks 30 s per cycle	with a frozen clock a stopped ticket is never 300 s old
+verified	new tests fail on the old lib/ (6 of 9) and pass on the new one; 929 tests across 12 touched or neighbouring files pass	prove-it-works
+restart check	test_a_restart_does_not_change_when_a_stopped_ticket_is_read copies the database mid-run and runs the running and restarted dispatchers side by side at 30, 120 and 420 s cycles	fails on 6a97940 for all three cycle lengths, passes after; the offered tickets match every cycle
