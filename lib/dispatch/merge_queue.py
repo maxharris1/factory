@@ -588,6 +588,18 @@ class MergeQueueMixin:
             if job_id is not None and row["update_failed_job"] == job_id:
                 connection.commit()
                 return "update-failure-counted"
+            newest = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                key,
+            ).fetchone()
+            if job_id is not None and str(newest["id"]) != job_id:
+                connection.commit()
+                return "update-superseded"
             failures = int(row["update_failures"]) + 1
             if failures < UPDATE_FAILURES_TO_STOP:
                 connection.execute(

@@ -360,6 +360,14 @@ def _darwin_worker(
     anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
+    empty_group_is_gone = (
+        f"{_DARWIN_LIST} || {blind}; "
+        'set -f; set -- $o; set +f; w=$(($# / 3)); '
+        f"r=$({_DARWIN_GROUP}) || {blind}; "
+        "set -f; set -- $r; set +f; "
+        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
+        f'[ "$1" = 1 ] || {gone}; '
+    )
     no_record = (
         'if [ ! -e "$f" ]; then '
         'mkdir -p -- "$d" 2>/dev/null; '
