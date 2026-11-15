@@ -144,7 +144,15 @@ class ReadyMixin:
             return True, "stuck-ci-red-3"
         if ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head):
             return True, "ci-red-in-flight"
-        self._queue_ci_fix(ticket, comment, head, result, review_round, generation)
+        self._queue_ci_fix(
+            ticket,
+            comment,
+            head,
+            result,
+            review_round,
+            generation,
+            dedupe_key=f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}",
+        )
         if rereview:
             self._leave_merge_queue(ticket, "update-ci-red")
         if reentry is not None or rereview:
@@ -177,6 +185,8 @@ class ReadyMixin:
         result: CIResult,
         review_round: int,
         generation: int,
+        *,
+        dedupe_key: str,
     ) -> None:
         self._enqueue_or_flag(
             ticket,
@@ -198,10 +208,7 @@ class ReadyMixin:
                     instruction=result.log or f"CI failed on {head}",
                 ),
             ),
-            dedupe_key=(
-                f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:"
-                f"g{generation}"
-            ),
+            dedupe_key=dedupe_key,
         )
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
@@ -488,14 +495,18 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT 1 FROM jobs
+                SELECT action, state FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
-                  AND action IN ('review', 'fix') AND state IN ('queued', 'running')
+                  AND action IN ('review', 'fix') AND state != 'cancelled'
+                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
                 LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
-        return row is not None
+        return row is not None and (
+            row["state"] in ("queued", "running")
+            or (row["action"], row["state"]) == ("review", "done")
+        )
 
     def _flag_ready_after_cap(
         self,

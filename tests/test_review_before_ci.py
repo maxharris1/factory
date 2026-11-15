@@ -438,3 +438,53 @@ def test_on_a_green_revise_at_the_round_cap_resets_the_red_count(tmp_path: Path)
     state = board.state("42")
     assert board.outcome("revise-42-3/3") == "capped-review"
     assert (state["workflow_state"], state["gate_count"], state["stuck"]) == ("capped", 0, 0)
+
+
+def test_on_a_red_ready_before_the_revise_leaves_one_combined_fix(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    ready = board.ready(pr, pr.head, "ready-red-before-verdict")
+    board.poll()
+
+    assert board.outcome(ready) == "ci-red-in-flight"
+    assert board.jobs("fix") == []
+
+    board.revise(pr, "1/3")
+    board.poll()
+    [fix] = board.jobs("fix")
+    assert fix["source_comment_id"] == "revise-42-1/3"
+    assert CI_LOG in instruction(fix)
+
+
+@pytest.mark.parametrize("retried_review", [False, True])
+def test_on_each_red_approve_at_the_same_head_queues_a_runnable_ci_fix(
+    tmp_path: Path, retried_review: bool
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head)
+    board.poll()
+    if retried_review:
+        board.fail("codex")
+        board.poll()
+        board.now[0] += 600
+        board.poll()
+    board.finish("codex")
+    for cycle in (1, 2):
+        pr.ci[pr.head] = "failure"
+        approve = board.approve(pr, "1/3", f"approve-cycle-{cycle}")
+        board.poll()
+        assert board.outcome(approve) == "approve-ci-red-fix"
+        fix = board.queue.claim("claude")
+        assert fix is not None, f"cycle {cycle}: the red APPROVE left no runnable CI fix"
+        assert fix.request.source_comment_id == approve
+        board.queue.finish(fix.id, owner="claude", handoff_comment_id=f"fix-handoff-{cycle}")
+        pr.ci[pr.head] = "success"
+        ready = board.ready(pr, pr.head, f"ready-cycle-{cycle}")
+        board.poll()
+        assert board.outcome(ready) == "queued-review"
+        review = board.finish("codex")
+        assert json.loads(review.request.detail)["round"].startswith("1/")
+    assert [job["state"] for job in board.jobs("fix")] == ["done", "done"]

@@ -388,6 +388,7 @@ class VerdictMixin:
             result,
             review_round,
             self._generation(ticket.repo, ticket.ticket_id),
+            dedupe_key=f"t4:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",
         )
         self._set_workflow_state(ticket, "fixing")
         return True, "approve-ci-red-fix"
