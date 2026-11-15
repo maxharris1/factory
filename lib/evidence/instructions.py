@@ -17,9 +17,14 @@ posted. An approver's plain `/go` (#173) counts too, as extra-round for a fix an
 go otherwise; its prose is its instruction line.
 
 prior_instruction is the resumed job's `instruction`, which the resume's own
-instruction replaces in its detail. plan_attempt is plan_gap_count + 1 for a
-plan job, else None: a question and its answer leave plan_gap_count as it was.
+instruction replaces in its detail. When the resumed job was itself resumed
+by answers, its instruction is that answers link, so prior_instruction is
+the one its own evidence carried: the instruction the step started from.
+plan_attempt is plan_gap_count + 1 for a plan job, else None: a question and its answer leave plan_gap_count as it was.
 retry_of is the failed job a T6 retry names. Only a fix job carries findings.
+A retry replays the failed job's step, so when its own trigger is no go or
+answers, it keeps the cause, prose, url and prior_instruction that the failed
+job's evidence carried: the go or answers the step started from.
 Values of the wrong type in either detail are read as None.
 """
 
@@ -62,11 +67,18 @@ def instructions_evidence(
 ) -> InstructionsEvidence:
     """The trigger's prose and the typed resume facts. See the module doc."""
     cause, prose, url = _trigger(comments, trusted_logins, approvers, source_comment_id, action)
+    prior_instruction = _original_instruction(prior_detail)
+    replayed = _replayed_instructions(detail)
+    if cause is None and replayed is not None:
+        cause = _text(replayed, "cause") if replayed.get("cause") in CAUSES else None
+        prose = _text(replayed, "prose")
+        url = _text(replayed, "url")
+        prior_instruction = _text(replayed, "prior_instruction")
     return InstructionsEvidence(
         cause=cause,
         prose=prose,
         url=url,
-        prior_instruction=_text(prior_detail, "instruction"),
+        prior_instruction=prior_instruction,
         plan_attempt=plan_gaps + 1 if action == "plan" else None,
         retry_of=_text(detail, "retry_of"),
         findings=tuple(findings) if action == "fix" else (),
@@ -110,6 +122,22 @@ def _trigger(
         return None, None, None
     prose = None if comment.edited_at is not None else handoff.body.strip()
     return cause, prose, comment.url
+
+
+def _replayed_instructions(detail: Mapping[str, object]) -> Mapping[str, object] | None:
+    if _text(detail, "retry_of") is None:
+        return None
+    evidence = detail.get("evidence")
+    instructions = evidence.get("instructions") if isinstance(evidence, Mapping) else None
+    return instructions if isinstance(instructions, Mapping) else None
+
+
+def _original_instruction(prior_detail: Mapping[str, object] | None) -> str | None:
+    evidence = prior_detail.get("evidence") if prior_detail is not None else None
+    prior = evidence.get("instructions") if isinstance(evidence, Mapping) else None
+    if isinstance(prior, Mapping) and prior.get("cause") == "answers":
+        return _text(prior, "prior_instruction")
+    return _text(prior_detail, "instruction")
 
 
 def _text(detail: Mapping[str, object] | None, key: str) -> str | None:
