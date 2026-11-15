@@ -171,6 +171,7 @@ class VerdictMixin:
                     outcome,
                 ),
             )
+            self._record_followups(connection, ticket, comment, round_number)
             connection.commit()
         if next_state == "capped":
             self._wake_capped(ticket, comment)
@@ -267,6 +268,9 @@ class VerdictMixin:
             held = self._hold_gate(ticket, comment, current_head)
             if held is not None:
                 return held
+        with self._connect() as connection:
+            self._record_followups(connection, ticket, comment, reported_round)
+            connection.commit()
         intent_status, replay = self._prepare_ship_intent(
             ticket,
             comment.id,

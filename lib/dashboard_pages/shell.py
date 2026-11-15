@@ -15,7 +15,7 @@ from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _handoffs, _health_link, _verdicts
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
 from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
-from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
+from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_devices, _lanes
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE,
 )
@@ -325,7 +325,7 @@ PX_SCRIPT = r"""
 (function () {
   var TABLE = __PX__;
   var FPS = 20;
-  var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst'];
+  var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst', 'still'];
   var STRIPS = new Map();
   var HOOKS = [];
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
@@ -748,6 +748,7 @@ PX_SCRIPT = r"""
     if (!row) return 'unknown';
     if (row.job_state === 'dead') return 'dead';
     if (row.overdue) return 'overdue';
+    if (row.stuck) return 'stuck';
     if (row.job_state === 'stale') return 'stale';
     if (row.job_state === 'claimed') return 'claimed';
     if (row.job_state === 'running' && TABLE.actions.hasOwnProperty(row.action)) return TABLE.actions[row.action];
@@ -788,6 +789,10 @@ PX_SCRIPT = r"""
     if (rate !== null && rate !== undefined) el.setAttribute('data-rate', String(Number(rate)));
     var seed = opts.seed !== null && opts.seed !== undefined ? opts.seed : entry.seed;
     if (seed !== null && seed !== undefined) el.setAttribute('data-seed', String(Number(seed)));
+    ['speed', 'used', 'slots', 'burst'].forEach(function (k) {
+      if (opts[k] !== null && opts[k] !== undefined) el.setAttribute('data-' + k, String(Number(opts[k])));
+    });
+    if (opts.still) el.setAttribute('data-still', 'true');
     if (opts.cell !== null && opts.cell !== undefined) el.setAttribute('data-cell', String(Math.max(2, Math.min(16, Math.floor(Number(opts.cell) || 4)))));
     if (opts.done) el.setAttribute('data-done', 'true');
     el.setAttribute('data-px-key', String(key));
@@ -928,6 +933,8 @@ def px_state(row: dict) -> str:
         return "dead"
     if row.get("overdue"):
         return "overdue"
+    if row.get("stuck"):
+        return "stuck"
     if job_state in ("stale", "claimed"):
         return str(job_state)
     if job_state == "running" and row.get("action") in PX_ACTIONS:
@@ -967,6 +974,11 @@ def px_strip(
     load: float | None = None,
     rate: float | None = None,
     seed: float | None = None,
+    speed: float | None = None,
+    used: int | None = None,
+    slots: int | None = None,
+    burst: int | None = None,
+    still: bool = False,
     cell: int | None = None,
     done: bool = False,
     height: int = 16,
@@ -1004,6 +1016,11 @@ def px_strip(
         attrs.append(("data-rate", f"{float(rate):g}"))
     if seed is not None:
         attrs.append(("data-seed", f"{float(seed):g}"))
+    for name, value in (("speed", speed), ("used", used), ("slots", slots), ("burst", burst)):
+        if value is not None:
+            attrs.append((f"data-{name}", f"{float(value):g}"))
+    if still:
+        attrs.append(("data-still", "true"))
     if cell is not None:
         attrs.append(("data-cell", str(max(2, min(16, int(cell))))))
     if done:
@@ -1117,7 +1134,7 @@ STATUS_LINKS = {
 
 
 # A webhook or feeder segment with no block of its own links to the panel that would hold it.
-STATUS_ABSENT_LINK = "index.html#kpis"
+STATUS_ABSENT_LINK = "index.html#intake"
 
 
 def shell_table() -> dict:
@@ -1238,7 +1255,7 @@ def _statusline(snapshot: dict) -> str:
 
 
 _PANELS = {
-    "index.html": (_kpis, _lanes, _queue),
+    "index.html": (_kpis, _lanes, _just_happened_and_intake),
     "activity.html": (_attention, _handoffs, _verdicts),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel),
     "health.html": (_components, _drift_row, _log_row, _no_waiter),

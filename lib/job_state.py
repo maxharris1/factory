@@ -56,8 +56,9 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib.device_pool import Placement
+from lib.device_pool import LINK_DROP_TAG, Placement
 from lib.queue import SLOTS_TABLE, retire_requeued
+from lib.remote_follow import LAUNCH_TTL_SECONDS
 
 CLAIMED = "claimed"
 RUNNING = "running"
@@ -74,6 +75,7 @@ HEARTBEAT_SECONDS = 15.0
 # stale threshold orch.yml allows (1 minute), so even a beat that lands late
 # never shows a live job as stale, and far below the 2-minute default.
 MAX_HEARTBEAT_SECONDS = 30.0
+KILL_GRACE_SECONDS = 30.0
 
 Alive = Callable[[int | None, str | None], bool]
 # True: the remote worker is confirmed gone. False: it still runs.
@@ -417,3 +419,103 @@ def requeue_unstarted(
         )
     record_job_event(connection, job_id, outcome, detail, now)
     return outcome, detail
+
+
+LINK_DROP = "link-drop"
+REQUEUED_LINK_DROP = "requeued-link-drop"
+MAX_LINK_DROP_REQUEUES = 6
+LINK_DROP_BACKOFF_SECONDS = (60, 120, 300, 600, 600, 600)
+DEVICE_CLOCK_SKEW_SECONDS = 4.5 * 60
+
+
+def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, float] | None:
+    """(detail, recorded_at) when the row's latest run end since its last
+    REQUEUED_LINK_DROP is a link drop of the run its slot still names."""
+    if not has_job_events(connection):
+        return None
+    row = connection.execute(
+        f"""
+        SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
+        WHERE job_id = ? AND event IN (?, ?, ?, ?)
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id, RUN_DIED, RUN_EXITED, LINK_DROP, REQUEUED_LINK_DROP),
+    ).fetchone()
+    if row is None or row[0] != LINK_DROP:
+        return None
+    detail = str(row[1])
+    slot = connection.execute(
+        f"SELECT worker_tag FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if slot is not None and detail.rpartition(LINK_DROP_TAG)[2] != slot[0]:
+        return None
+    return detail, float(row[2])
+
+
+def release_link_dropped(connection: sqlite3.Connection, job_id: str) -> None:
+    """Free a failed, unhandled link-dropped row's slot in the caller's write
+    transaction."""
+    if link_drop_end(connection, job_id) is None:
+        return
+    connection.execute(
+        f"""
+        DELETE FROM {SLOTS_TABLE} WHERE job_id = ? AND EXISTS (
+            SELECT 1 FROM jobs WHERE id = ? AND state = 'failed' AND failure_handled = 0
+        )
+        """,
+        (job_id, job_id),
+    )
+
+
+def link_drop_requeues(connection: sqlite3.Connection, job_id: str) -> int:
+    if not has_job_events(connection):
+        return 0
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM {JOB_EVENTS_TABLE} WHERE job_id = ? AND event = ?",
+        (job_id, REQUEUED_LINK_DROP),
+    ).fetchone()
+    return int(row[0])
+
+
+def link_drop_settled_at(recorded_at: float, timeout_seconds: float) -> float:
+    """When the device has killed the dropped run's worker on its own (#199 r1)."""
+    return (
+        recorded_at
+        + LAUNCH_TTL_SECONDS
+        + timeout_seconds
+        + KILL_GRACE_SECONDS
+        + DEVICE_CLOCK_SKEW_SECONDS
+    )
+
+
+def requeue_link_drop(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str
+) -> tuple[str, str] | None:
+    """Requeue a failed, link-dropped job row in the caller's write transaction.
+
+    Guarded: still failed with its failure unhandled. The same row goes back
+    to queued with action, head, generation, attempt and detail kept, so no
+    round and no T6 attempt is charged, and its slot is freed. A finished
+    ticket's job is cancelled instead (retire_requeued). Returns (event,
+    detail), or None when the guard did not match.
+    """
+    used = link_drop_requeues(connection, job_id)
+    changed = connection.execute(
+        """
+        UPDATE jobs SET state = 'queued', finished_at = NULL, last_activity_at = ?
+        WHERE id = ? AND state = 'failed' AND failure_handled = 0
+        """,
+        (now, job_id),
+    ).rowcount
+    if changed != 1:
+        return None
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+    retired = retire_requeued(connection, job_id, reason, now=now)
+    if retired is not None:
+        return "cancelled", retired
+    detail = (
+        f"{reason}; requeued, no round or attempt charged "
+        f"(link-drop requeue {used + 1} of {MAX_LINK_DROP_REQUEUES})"
+    )
+    record_job_event(connection, job_id, REQUEUED_LINK_DROP, detail, now)
+    return REQUEUED_LINK_DROP, detail

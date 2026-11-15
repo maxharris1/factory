@@ -30,8 +30,8 @@ def test_status_json_carries_webhook_health_and_the_panel_sits_in_factory_status
     assert status["poller"]["linear_webhook"]["warning"] is None
     assert status["poller"]["linear_webhook"]["note"].startswith("quiet: no Linear webhook")
 
-    kpis = _section(_no_script((out / "index.html").read_text(encoding="utf-8")), "kpis")
-    assert '<div id="linear-webhook"><h2>Linear webhook</h2>' in kpis
+    kpis = _section(_no_script((out / "index.html").read_text(encoding="utf-8")), "intake")
+    assert '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>' in kpis
     assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in kpis
     assert '<p class="muted">note: quiet: no Linear webhook for 1h' in kpis
     for name in ("activity.html", "efficiency.html", "job.html"):
@@ -43,27 +43,27 @@ def test_script_redraws_webhook_health_from_status_json(tmp_path: Path) -> None:
     fresh = _hooked(
         tmp_path / "fresh", last_received=NOW - 300, started=NOW - 7200, dirty=2, active_linear=1
     )
-    out = _run_page(tmp_path / "fresh", fresh, "main", BAR + ["hud", "kpis", "lanes", "queue"])
-    kpis = out["text"]["kpis"]
-    assert "Factory status" in kpis
+    out = _run_page(tmp_path / "fresh", fresh, "main", BAR + ["hud", "kpis", "lanes", "intake"])
+    kpis = out["text"]["intake"]
+    assert "Intake" in kpis
     assert "last received 5m 00s ago (Issue.update) · dirty queue 2" in kpis
     assert "warning" not in kpis
 
     silent = _hooked(
         tmp_path / "silent", last_received=NOW - 4000, started=NOW - 9000, dirty=3, active_linear=1
     )
-    out = _run_page(tmp_path / "silent", silent, "main", BAR + ["hud", "kpis", "lanes", "queue"])
-    assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in out["text"]["kpis"]
-    assert "p.muted \"note: quiet: no Linear webhook for 1h" in out["dump"]["kpis"]
-    assert "warning" not in out["text"]["kpis"]
+    out = _run_page(tmp_path / "silent", silent, "main", BAR + ["hud", "kpis", "lanes", "intake"])
+    assert "last received 1h 06m ago (Issue.update) · dirty queue 3" in out["text"]["intake"]
+    assert "p.muted \"note: quiet: no Linear webhook for 1h" in out["dump"]["intake"]
+    assert "warning" not in out["text"]["intake"]
 
     waiting = _hooked(
         tmp_path / "waiting", last_received=None, started=NOW - 600, dirty=0, active_linear=1
     )
-    out = _run_page(tmp_path / "waiting", waiting, "main", BAR + ["hud", "kpis", "lanes", "queue"])
-    assert "last received never · dirty queue 0" in out["text"]["kpis"]
+    out = _run_page(tmp_path / "waiting", waiting, "main", BAR + ["hud", "kpis", "lanes", "intake"])
+    assert "last received never · dirty queue 0" in out["text"]["intake"]
 
     db, log = seeded(tmp_path / "plain")
     plain = collect_snapshot(db, log, now=NOW)
-    out = _run_page(tmp_path / "plain", plain, "main", BAR + ["hud", "kpis", "lanes", "queue"])
-    assert "Linear webhook" not in out["text"]["kpis"]
+    out = _run_page(tmp_path / "plain", plain, "main", BAR + ["hud", "kpis", "lanes", "intake"])
+    assert "Linear webhook" not in out["text"]["intake"]
