@@ -170,6 +170,13 @@ class HoldsMixin:
             return True
         return self.approvals.may_approve(author)
 
+    def _may_lift_cap(self, author: str) -> bool:
+        """A Linear go lifts a cap only from approver_linear_users, once that
+        key is set, in both switch states (#174)."""
+        if author.startswith("linear:") and self.approvals.linear_users is not None:
+            return self.approvals.may_approve_linear(author)
+        return self._may_approve_go(author)
+
     def _trusted_login(self, login: str) -> bool:
         wanted = login.casefold()
         return any(
