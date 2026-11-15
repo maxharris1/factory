@@ -11,7 +11,7 @@ import pytest
 from lib.brief import render_brief
 from lib.dispatcher import CIResult, TrackedTicket
 from tests.regenerate_brief_snapshots import HEAD, _job
-from tests.test_dispatcher import ANSWERS, QUESTIONS, comment, handled_outcome
+from tests.test_dispatcher import ANSWERS, QUESTIONS, RETRY, comment, fail_once_through_t6, handled_outcome
 from tests.test_rounds_and_caps import HEADS, Flow
 
 GO_URL = "https://github.com/owner/repo/pull/42#issuecomment-501"
@@ -319,3 +319,36 @@ def test_an_answered_review_fix_stays_a_review_fix(tmp_path: Path):
     task = _claimed_task(flow)
     assert _is_review_fix(task)
     assert "https://github.com/owner/repo/pull/42#issuecomment-revise-1/3" in task
+
+
+def _answered_stuck_then_retried(flow: _URLCommentFlow, question_id: str, answer_id: str, retry_id: str) -> None:
+    paused = flow.queue.claim("claude")
+    assert paused is not None
+    assert flow.post(question_id, QUESTIONS, "claude-login") == "waiting-max"
+    flow.queue.finish(paused.id, owner="claude", handoff_comment_id=question_id)
+    assert flow.post(answer_id, ANSWERS, "grok-login") == "resumed-fix"
+    fail_once_through_t6(flow.dispatcher, flow.queue, times=2)
+    assert flow.state()["stuck"] == 1
+    assert flow.post(retry_id, RETRY.format(reason="Max: runner repaired."), "grok-login") == "queued-retry-fix"
+
+
+def test_an_answered_ci_fix_stays_a_ci_fix_after_max_retries_it(tmp_path: Path):
+    flow = _red_ci(tmp_path)
+    _answered_stuck_then_retried(flow, "1002", "1003", "1004")
+    task = _claimed_task(flow)
+    assert not _is_review_fix(task)
+    assert "This job resumes a paused step after Max's answers" in task
+    assert "issuecomment-1003" in task
+
+
+def test_an_answered_review_fix_keeps_its_verdict_after_max_retries_it(tmp_path: Path):
+    flow = _URLCommentFlow(tmp_path)
+    assert flow.go("1001") == "queued-build"
+    flow.finish("claude")
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    flow.revise("1/3")
+    _answered_stuck_then_retried(flow, "1002", "1003", "1004")
+    task = _claimed_task(flow)
+    assert _is_review_fix(task)
+    assert "REVISE verdict at https://github.com/owner/repo/pull/42#issuecomment-revise-1/3" in task
