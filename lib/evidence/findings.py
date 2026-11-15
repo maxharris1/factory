@@ -30,6 +30,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
@@ -38,8 +39,10 @@ _TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?=[*_`]*(
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
 _MARKDOWN = MarkdownIt("commonmark")
-_UNMET_CRITERION = re.compile(
-    r"^(?:\|\s*)?(?:\[blocking\]\s+)?[*_`]*ac-([1-9][0-9]*)(?![0-9])(?=.*\bunmet\b)", re.IGNORECASE
+_CRITERION = re.compile(
+    r"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*)(?![0-9])[*_`]*\s*"
+    r"(?:[:,|\u2013\u2014-]\s*)?[*_`]*(?P<status>unmet\b)?",
+    re.IGNORECASE,
 )
 
 
@@ -126,17 +129,42 @@ def _verdicts(
 
 
 def blocking_ids(body: str) -> frozenset[str]:
-    """The f-<n> ids a verdict body marks [blocking], and the ac-<n> ids a list
-    item or table row opens with and calls unmet. Code blocks are not read."""
-    found = {f"f-{n}" for tag, n, _ in _tagged_items(body) if tag == "blocking"}
-    for token in _MARKDOWN.parse(body):
-        if token.type != "inline":
-            continue
-        for line in token.content.splitlines():
-            match = _UNMET_CRITERION.match(line.strip())
-            if match is not None:
-                found.add(f"ac-{match.group(1)}")
+    found: set[str] = set()
+    for entry in _entries(body):
+        finding = _TAGGED.match(entry)
+        if finding is not None and finding.group(1).lower() == "blocking":
+            found.add(f"f-{finding.group(3)}")
+        criterion = _CRITERION.match(entry)
+        if criterion is not None and (criterion["tag"] or criterion["status"]):
+            found.add(f"ac-{criterion['n']}")
     return frozenset(found)
+
+
+def _entries(body: str) -> list[str]:
+    tokens = _MARKDOWN.parse(body)
+    entries: list[str] = []
+    quoted = 0
+    for index, token in enumerate(tokens):
+        if token.type == "blockquote_open":
+            quoted += 1
+        elif token.type == "blockquote_close":
+            quoted -= 1
+        elif token.type == "inline" and not quoted:
+            entries.extend(_list_item_lead(tokens, index) + _table_rows(token))
+    return entries
+
+
+def _list_item_lead(tokens: list[Token], index: int) -> list[str]:
+    opener = [token.type for token in tokens[max(index - 2, 0) : index]]
+    opens_item = opener == ["list_item_open", "paragraph_open"]
+    return [" ".join(tokens[index].content.split())] if opens_item else []
+
+
+def _table_rows(inline: Token) -> list[str]:
+    if inline.level != 1:
+        return []
+    rows = (line.strip() for line in inline.content.splitlines())
+    return [row[1:].strip() for row in rows if row.startswith("|")]
 
 
 def _tagged_items(body: str) -> list[tuple[str, int, str]]:

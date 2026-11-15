@@ -5,16 +5,29 @@ from dataclasses import dataclass
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.handoff import parse_comment, repeat_id
+from lib.handoff import HandoffError, parse_comment, repeat_id
 from lib.queue import JobRequest
 
-_ACCEPTED_REVISE = ("queued-review-fix", "answered-fix", "capped-review")
+_ACCEPTED_REVISE = (
+    "queued-review-fix",
+    "answered-fix",
+    "capped-review",
+    "waiting-max-repeat",
+    "waiting-max-unsat",
+)
 
 
 @dataclass(frozen=True)
 class RepeatBlock:
     rule_id: str
     earlier: Comment | None
+
+
+@dataclass(frozen=True)
+class _EarlierRevise:
+    round: int
+    comment: Comment
+    blocking: frozenset[str]
 
 
 class RepeatBlockMixin:
@@ -29,23 +42,20 @@ class RepeatBlockMixin:
         handoff = parse_comment(comment.body)
         named = repeat_id(handoff)
         earlier = self._accepted_revises(ticket, reported_round)
-        previous = next(
-            (item for number, item in earlier if number == (reported_round or 0) - 1), None
-        )
+        previous = next((item for item in earlier if item.round == (reported_round or 0) - 1), None)
         if named is not None:
-            holding = next(
-                (item for _, item in earlier if named in blocking_ids(parse_comment(item.body).body)),
-                previous,
-            )
-            return RepeatBlock(named, holding)
+            holding = next((item for item in earlier if named in item.blocking), previous)
+            return RepeatBlock(named, None if holding is None else holding.comment)
         if previous is None:
             return None
-        shared = blocking_ids(handoff.body) & blocking_ids(parse_comment(previous.body).body)
-        return RepeatBlock(min(shared), previous) if shared else None
+        shared = blocking_ids(handoff.body) & previous.blocking
+        return RepeatBlock(min(shared), previous.comment) if shared else None
 
     def _accepted_revises(
         self, ticket: TrackedTicket, reported_round: int | None
-    ) -> list[tuple[int, Comment]]:
+    ) -> list[_EarlierRevise]:
+        from lib.evidence.findings import blocking_ids
+
         with self._connect() as connection:
             accepted = {
                 str(row["comment_id"])
@@ -62,10 +72,14 @@ class RepeatBlockMixin:
         for item in ticket.comments:
             if item.id not in accepted:
                 continue
-            number = _round_number(parse_comment(item.body).as_dict().get("round"))
+            try:
+                handoff = parse_comment(item.body)
+            except HandoffError:
+                continue
+            number = _round_number(handoff.as_dict().get("round"))
             if number is not None and number < (reported_round or 0):
-                found.append((number, item))
-        return sorted(found, key=lambda pair: (pair[0], pair[1].created_at), reverse=True)
+                found.append(_EarlierRevise(number, item, blocking_ids(handoff.body)))
+        return sorted(found, key=lambda entry: (entry.round, entry.comment.created_at), reverse=True)
 
     def _t3_repeat(
         self,

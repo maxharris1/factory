@@ -1,10 +1,11 @@
 decision	choice	why
 park record	reuse T5's paused_* columns with paused_action=fix and review_round set to the reported round; outcome waiting-max-repeat	_resume_paused rebuilds the paused fix at review_round + 1, the round a normal T3 fix gets; no schema change
 where the branch sits	right after the unsat branch in _t3, before the CI gate and the cap	no fix is queued, so pending CI must not hold it and a repeat at the cap must park, not cap
-reused-id match	blocking_ids of this REVISE against the REVISE T3 accepted for round - 1 only	the ticket says consecutive; f-1, f-2, f-1 takes the fix path
-ac ids	an ac-<n> list item or table row counts only when it says unmet	met and unverified do not block; unsatisfiable routes through unsat=
+reused-id match	blocking_ids of this REVISE against the REVISE T3 accepted for round - 1 only; accepted means any REVISE outcome, waiting-max-repeat and waiting-max-unsat included	the ticket says consecutive; f-1, f-2, f-1 takes the fix path; a released repeat is still the next round's predecessor (review f-1)
+ac ids	an ac-<n> list item or table row counts only when its status right after the id is unmet, or it is tagged [blocking]; prose, headings and blockquotes are not read	met and unverified do not block; a later mention of unmet is history, not status (review f-2)
 release	_resume_for_max serves both parks; repeat refuses Grok answers and non-approver gos	MF-4: leaving a repeat block needs an approver
 go at the cap	the releasing go raises cap_extra by 1 when review_round is at the effective cap	a capped go needs the same approver; the raise lifts review_round under the cap, so a retry raises nothing more
 answers wake reason	go-not-from-approver with outcome answers-while-repeat-block	wake reasons are a closed list in lib/queue.py; that reason already says an approver must go
 model and chart	left unchanged	T3Unsat already draws review/awaiting-ok to waiting-max and waiting-max to fixing exists; no java on the box to rerun model/check.sh
 auto_extra repeat check	deleted	a repeat= REVISE parks before the cap, so the check could no longer fire
+earlier verdict unreadable	skip an accepted REVISE whose body no longer parses	an edited historical comment must not fail the current verdict, which is marked handled and never retried (review f-3)

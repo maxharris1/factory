@@ -110,8 +110,10 @@ def test_a_reused_blocking_id_in_consecutive_revises_parks(tmp_path: Path, bodie
         ("- [minor] f-1: naming.\n", "- [minor] f-1: naming.\n"),
         ("```\n- [blocking] f-1: x\n```\n" + F2, "```\n- [blocking] f-1: x\n```\n"),
         ("- ac-2: met.\n", "- ac-2: met.\n"),
+        (AC2 + F1, "- ac-2: met. The previously unmet requirement now passes.\n" + F2),
+        ("ac-2 was unmet in an old review.\n" + F1, "ac-2 was unmet in an old review.\n" + F2),
     ],
-    ids=["free-text-same-rule", "not-consecutive", "minor", "code-block", "met"],
+    ids=["free-text-same-rule", "not-consecutive", "minor", "code-block", "met", "now-met", "prose"],
 )
 def test_no_repeat_id_or_reused_id_takes_the_fix_path(tmp_path: Path, bodies: tuple[str, ...]) -> None:
     flow = AppFlow(tmp_path, enabled=True)
@@ -131,6 +133,46 @@ def test_a_repeat_at_the_cap_parks_instead_of_capping(tmp_path: Path) -> None:
     assert_parked(flow, 2, "revise-3", 3)
     with flow.queue.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM auto_extra_comments").fetchone()[0] == 0
+
+
+def test_a_repeat_after_maxs_release_parks_again(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    flow.factory = replace(flow.factory, auto_extra_rounds=2)
+    assert rounds(flow, F1, F1) == "waiting-max-repeat"
+    assert flow.post("go-max", "/go", MAX) == "resumed-fix"
+    next_review(flow, 2)
+    fixes = job_count(flow.queue, "fix")
+
+    assert revise(flow, "3/3", "revise-3", body=F1) == "waiting-max-repeat"
+
+    assert_parked(flow, fixes, "revise-3", 3)
+    assert len(repeat_wakes(flow)) == 2
+
+
+def withdraw_first_verdict(flow: AppFlow) -> None:
+    to_first_review(flow)
+    assert revise(flow, "1/3", "revise-1", body=F1) == "queued-review-fix"
+    next_review(flow, 1)
+    flow.comments = [
+        replace(item, body="Withdrawn.\n", edited_at=flow.now[0]) if item.id == "revise-1" else item
+        for item in flow.comments
+    ]
+
+
+def test_an_unreadable_earlier_verdict_still_lets_a_new_finding_fix(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    withdraw_first_verdict(flow)
+
+    assert revise(flow, "2/3", "revise-2", body=F2) == "queued-review-fix"
+
+
+def test_an_unreadable_earlier_verdict_still_lets_a_named_repeat_park(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    withdraw_first_verdict(flow)
+
+    assert revise(flow, "2/3", "revise-2", " repeat=f-1", body=F1) == "waiting-max-repeat"
+
+    assert repeat_wakes(flow)[0].startswith("repeat-block: f-1, no earlier verdict, ")
 
 
 def test_a_repeat_parks_while_ci_is_pending(tmp_path: Path) -> None:
@@ -225,6 +267,13 @@ def test_maxs_go_at_the_cap_also_grants_the_next_round(tmp_path: Path) -> None:
         ("| id | status |\n| --- | --- |\n| ac-3 | unmet |\n", {"ac-3"}),
         ("- [closed] f-1: fixed.\n- ac-10: met.\n- Note: ac-1 was unmet.\n", set()),
         ("    - [blocking] f-4: indented code\n", set()),
+        ("- ac-2, unmet.\n- ac-3: **unmet**\n- ac-4 | unmet\n", {"ac-2", "ac-3", "ac-4"}),
+        ("- ac-2: met. The previously unmet requirement now passes.\n", set()),
+        ("- ac-2 was unmet last round and is met now.\n", set()),
+        ("ac-2: unmet.\n", set()),
+        ("## ac-2: unmet\n", set()),
+        ("> - ac-2: unmet\n> - [blocking] f-1: quoted.\n", set()),
+        ("| ac-3 | met | was unmet |\n", set()),
     ],
 )
 def test_blocking_ids(body: str, expected: set[str]) -> None:
