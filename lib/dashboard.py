@@ -59,6 +59,7 @@ from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
 from lib.dashboard_flow import JobStep, job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_usage import read_usage
 from lib.dashboard_page import PAGES, render_pages
@@ -1465,8 +1466,8 @@ def _add_job_tickets(
                 str(row["action"]),
                 _enum(row["recipient"], RECIPIENTS),
                 float(row["created_at"]),
-                None if row["started_at"] is None else float(row["started_at"]),
-                None if row["finished_at"] is None else float(row["finished_at"]),
+                _telemetry_time(row["started_at"]),
+                _telemetry_time(row["finished_at"]),
             ))
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)

@@ -247,3 +247,44 @@ def test_unknown_recipient_is_not_echoed_in_visits(tmp_path: Path) -> None:
     job = next(row for row in snapshot["queued"] if row["ticket_id"] == "61")
     assert job["flow"]["visits"][-1]["who"] == "other"
     assert "mallory" not in json.dumps(snapshot)
+
+
+def _telemetry_snapshot(tmp_path: Path, state: str, started_at: object, finished_at: object):
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(TELEMETRY_DDL)
+        add_ticket(connection, "maxharris1/cleffy", "62", state=state)
+        add_job(connection, "t-clock", action="build", state="running", ticket_id="62",
+                created_at=NOW - 900)
+        connection.execute(
+            "INSERT INTO job_telemetry (job_id, bot, harness, repo, started_at, finished_at, "
+            "updated_at, elapsed_seconds, events, turns, tool_calls, files_touched, commands, "
+            "test_runs, tokens_in, tokens_cached, tokens_out, steps) "
+            "VALUES ('t-clock', 'claude-bot', 'claude', 'maxharris1/cleffy', ?, ?, ?, 0, 0, 0, "
+            "'{}', 0, 0, 0, 0, 0, 0, '[]')",
+            (started_at, finished_at, NOW),
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "62")
+    return {visit["state"]: visit for visit in job["flow"]["visits"]}
+
+
+BAD_TIMES = ["bad-clock", float("inf"), float("-inf")]
+
+
+@pytest.mark.parametrize("bad", BAD_TIMES, ids=repr)
+def test_unusable_telemetry_start_falls_back_to_created_at(tmp_path: Path, bad: object) -> None:
+    visit = _telemetry_snapshot(tmp_path, "building", bad, None)["building"]
+    assert (visit["started_at"], visit["duration_seconds"], visit["time_known"]) == (
+        NOW - 900, 900, True
+    )
+
+
+@pytest.mark.parametrize("bad", BAD_TIMES, ids=repr)
+def test_unusable_telemetry_finish_leaves_the_duration_unknown(
+    tmp_path: Path, bad: object
+) -> None:
+    visit = _telemetry_snapshot(tmp_path, "review", NOW - 700, bad)["building"]
+    assert (visit["started_at"], visit["duration_seconds"], visit["time_known"]) == (
+        NOW - 700, None, False
+    )

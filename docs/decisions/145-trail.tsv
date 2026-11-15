@@ -7,3 +7,4 @@ off-chart reason	the existing OFF_CHART text shared with render_path_svg	no hand
 older job_telemetry table	PRAGMA table_info; a missing column reads as NULL	test_an_older_or_odd_table_reads_as_unreadable_not_an_error caught the first query taking the snapshot down
 state_age_seconds	unchanged (created_at based)	existing page and tests rely on it; visits carry the telemetry-based duration
 ticket_detail.py	no change, no screenshots	ticket says data only; #146 renders visits
+telemetry times	started_at and finished_at pass dashboard_telemetry._number; text, +inf and -inf read as unknown, so the start falls back to created_at and an unknown end leaves the duration null	round-1 REVISE: one bad job_telemetry row crashed collect_snapshot; read_telemetry sorted finished_at with float() and crashed the same way on main
