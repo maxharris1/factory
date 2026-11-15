@@ -295,7 +295,9 @@ class QuestionsMixin:
             ):
                 continue
             handled = self._handled_outcome(ticket, item.id)
-            if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
+            if (handled is None and item.edited_at is not None) or (
+                handled is not None and handled.startswith(_REJECTED_OUTCOMES)
+            ):
                 continue
             if action == "plan" and (
                 _round_number(fields.get("round")) != plan_round

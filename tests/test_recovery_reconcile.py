@@ -883,11 +883,16 @@ def test_the_gap_report_that_queued_round_two_does_not_settle_its_failure(tmp_pa
     assert board.workflow_state() == "planning"
 
 
+@pytest.mark.parametrize("restored", [False, True])
 def test_a_plan_edited_before_it_was_handled_does_not_settle_a_failed_plan_job(
-    tmp_path: Path,
+    tmp_path: Path, restored: bool
 ) -> None:
     board = Board(tmp_path)
     plan_job = board.start("planning")
+    if restored:
+        with board.queue.connect() as connection:
+            record_job_event(connection, plan_job, "restored-claim", "restored", board.now[0])
+            connection.commit()
     cached = board.snapshot()
     board.post("own-plan", PLAN.format(round=1, ac="met"))
     board.comments[-1] = replace(board.comments[-1], edited_at=board.now[0] + 0.1)
