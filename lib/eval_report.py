@@ -168,6 +168,7 @@ CHART_TRANSITIONS = frozenset(
         ("waiting-max", "review"),
         ("capped", "fixing"),
         ("handed-off", "review"),
+        ("handed-off", "fixing"),
         ("handed-off", "merged"),
         ("ship", "merge-queue"),
         ("merge-queue", "merged"),

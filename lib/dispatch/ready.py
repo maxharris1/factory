@@ -17,6 +17,7 @@ from lib.dispatch.helpers import (
     _scope,
 )
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
+from lib.dispatch.verdict.shipped import _approved_round
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 from lib.update_check import RebaseScope, UpdateScope
@@ -81,11 +82,7 @@ class ReadyMixin:
                 approved is not None and _matching_head(reported_head, approved)
             ):
                 return True, "ready-already-shipped"
-            reentry = (
-                shipped[1]
-                if shipped is not None and shipped[1] is not None
-                else review_round + 1
-            )
+            reentry = _approved_round(shipped, review_round)
             if reentry + 1 > self._effective_cap(ticket):
                 self._flag_ready_after_cap(ticket, comment, reported_head)
                 return True, "ready-after-cap"

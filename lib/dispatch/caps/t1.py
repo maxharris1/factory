@@ -22,10 +22,6 @@ class T1Mixin:
         if not trusted and not self._approver_go(comment, fields):
             return True, "rejected-go-author"
         current = self._review_context(ticket)[0]
-        if current == "handed-off":
-            # #108: a handed-off ticket re-enters only through the builder's
-            # ready, inside the cap; a go changes nothing.
-            return True, "go-after-handoff"
         state = fields.get("state")
         action = {"planning": "plan", "building": "build"}.get(state)
         if action is not None:
@@ -41,6 +37,10 @@ class T1Mixin:
             if resumed is not None:
                 self._polled[(ticket.repo.lower(), ticket.ticket_id)] = ticket
                 return resumed
+        if current == "handed-off":
+            # #108, #118: inside the cap a handed-off ticket re-enters only
+            # through the builder's ready; a go changes nothing.
+            return True, "go-after-handoff"
         if not trusted:
             return True, "rejected-go-author"
         generation = self._generation(ticket.repo, ticket.ticket_id)

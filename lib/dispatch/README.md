@@ -51,7 +51,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Verdicts: latest verdict | `verdict/latest.py` (`LatestVerdictMixin`) | `_latest_review_verdict` |
 | Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the five rule mixins below and re-exports the old `caps.py` names |
 | Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build |
-| Caps: resume after a cap or BLOCKED | `caps/resume.py` (`ResumeMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix. `_resume_after_blocked`: queue a fresh review at the same round |
+| Caps: resume after a cap or BLOCKED | `caps/resume.py` (`ResumeMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix, on a `capped` ticket or a `handed-off` one at the cap (issue #118). `_resume_after_blocked`: queue a fresh review at the same round |
 | Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
 | Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
 | Caps: auto extra round | `caps/auto_extra.py` (`AutoExtraMixin`) | `_auto_granted_cap_extra`, `_record_auto_extra` (T3), `_drain_auto_extra`: the poller grants factory.md `review.auto_extra_rounds` rounds at the cap and posts one comment per grant (issue #263) |
