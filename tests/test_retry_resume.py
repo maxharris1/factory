@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatch.helpers import _spread
+from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.types import Comment
 from tests.merge_queue_support import PR, Board, sha
 from tests.test_dispatcher import PLAN, RETRY
@@ -23,8 +23,8 @@ def _stuck_fix_with_unsettled_failure(b: Board, p: PR) -> None:
     b.poll()
     b.fail("claude")
     b.poll()
-    while (b.dispatcher._cycle + 2 + _spread("owner/repo", "42")) % 5 != 0:
-        b.poll()
+    b.now[0] += STOPPED_POLL_SECONDS
+    b.poll()
     b.fail("claude")
     settle = b.queue.mark_failure_handled
 
@@ -124,22 +124,20 @@ def test_retry_of_a_failed_plan_accepts_the_replacement_plan(tmp_path: Path) -> 
 
 
 def _stuck_update(
-    b: Board, p: PR, *, pushed: str | None = None, late_ready: bool = False
+    b: Board, p: PR, *, pushed: str | None = None, late_from: int | None = None
 ) -> Comment | None:
     b.build_and_approve(p, mergeable=False)
-    b.fail("claude")
-    for _ in range(10):
-        b.poll()
-    second = b.claim("claude")
-    if pushed is not None:
-        p.push(pushed)
     delayed = None
-    if late_ready:
-        b.ready(p, p.head, "delayed-ready")
-        delayed = p.comments.pop()
-    b.queue.finish(second.id, owner="claude", handoff_comment_id=None)
-    for _ in range(10):
-        b.poll()
+    for attempt in (1, 2):
+        job = b.claim("claude")
+        if attempt == 2 and pushed is not None:
+            p.push(pushed)
+        if attempt == late_from:
+            b.ready(p, p.head, "delayed-ready")
+            delayed = p.comments.pop()
+        b.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+        for _ in range(10):
+            b.poll()
     assert b.state("42")["stuck_reason"] == "update-failed-2"
     return delayed
 
@@ -167,12 +165,15 @@ def test_retry_of_an_update_that_pushed_a_clean_head_resumes_the_update(
     assert p.merged
 
 
+@pytest.mark.parametrize(
+    ("late_from", "outcome"), [(1, "update-superseded"), (2, "update-failure-counted")]
+)
 def test_a_late_ready_from_a_counted_update_leaves_the_retry_queued(
-    tmp_path: Path,
+    tmp_path: Path, late_from: int, outcome: str
 ) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
-    delayed = _stuck_update(b, p, late_ready=True)
+    delayed = _stuck_update(b, p, late_from=late_from)
 
     b.post(p, "retry-update", REASON, "grok-login")
     b.now[0] += 600
@@ -183,6 +184,6 @@ def test_a_late_ready_from_a_counted_update_leaves_the_retry_queued(
     for _ in range(10):
         b.poll()
 
-    assert b.outcome("delayed-ready") == "update-failure-counted"
+    assert b.outcome("delayed-ready") == outcome
     assert b.state("42")["stuck"] == 0
     assert [r["state"] for r in b.jobs("update-from-main")] == ["failed", "failed", "queued"]
