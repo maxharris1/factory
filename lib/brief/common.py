@@ -13,6 +13,11 @@ from lib.pr_title import SOURCE
 from lib.queue import Job
 
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
+NO_EDIT_RULE = (
+    "Never edit a comment after you post it: the dispatcher refuses an edited `orch:v1` comment. "
+    "Put any correction (a typo, an updated test count, a better summary) in a new comment "
+    "and leave the posted one as it is."
+)
 QUESTIONS_LINES = [
     "If something left open needs a decision, post a `questions` handoff.",
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
@@ -217,7 +222,8 @@ def _post_command(facts: dict) -> str:
     return (
         "Write the comment to `handoff.md` (never commit that file) and post it with this command, "
         "which prints the new comment's id:\n\n"
-        f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`"
+        f"`{GH} api repos/{repo}/issues/{pr}/comments -F body=@handoff.md --jq .id`\n\n"
+        + NO_EDIT_RULE
     )
 
 
