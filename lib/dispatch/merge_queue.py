@@ -28,6 +28,7 @@ from lib.job_state import (
     REQUEUED_LINK_DROP,
     Placement,
     has_job_events,
+    lagging_end,
     never_started,
     read_placements,
 )
@@ -398,7 +399,9 @@ class MergeQueueMixin:
             placements = read_placements(connection)
             ids = [str(job["id"]) for job in jobs]
             ran = _with_event(connection, ids, LINK_DROP, REQUEUED_LINK_DROP)
-            unstarted = _with_event(connection, ids, FAILED_UNSTARTED)
+            unstarted = _with_event(connection, ids, FAILED_UNSTARTED) | {
+                job_id for job_id in ids if lagging_end(connection, job_id) is not None
+            }
         return next(
             (str(job["id"]) for job in jobs if _started(job, placements, ran, unstarted)),
             None,

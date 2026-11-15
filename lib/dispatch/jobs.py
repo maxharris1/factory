@@ -724,6 +724,8 @@ class JobsMixin:
             lagging = lagging_end(connection, job.id)
         if lagging is None:
             return False
+        if job.request.action == "review" and self._review_retry_waits(job):
+            return True
         now = self.queue.now()
         if now - lagging.first_refused_at >= LAGGING_WAIT_SECONDS:
             self._mark_stuck_and_wake(
