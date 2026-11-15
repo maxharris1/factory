@@ -603,9 +603,11 @@ class Waiter:
         job, placement = claimed
         return self._start(job, placement)
 
+    def _has_box_run(self) -> bool:
+        return any(job_id not in self._remote for job_id in self._children)
+
     def _reconcile_home(self) -> None:
-        """Keep this bot's own home at the box checkout's pin while it has no box run (#345)."""
-        if self.home is None or any(job_id not in self._remote for job_id in self._children):
+        if self.home is None or self._has_box_run():
             return
         device = next((d for d in self.pool.config.devices if d.local), None)
         checkout = self._factory_root(device)
