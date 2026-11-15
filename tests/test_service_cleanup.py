@@ -69,9 +69,9 @@ def test_the_linear_profile_test_stops_its_listener_when_it_fails(
 
 
 def test_the_waiter_fixture_kills_its_waiters_when_stop_times_out(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
-    fixture = waiter.home.__wrapped__(tmp_path)
+    fixture = waiter.home.__wrapped__(tmp_path, request)
     home = next(fixture)
     try:
         assert waiter._service(home, "claude-bot", "start").returncode == 0
