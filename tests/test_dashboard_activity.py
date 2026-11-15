@@ -343,6 +343,17 @@ def test_a_new_shipped_verdict_plays_done_once_and_not_on_first_paint(tmp_path: 
     assert [markup.count('data-done="true"') for markup in still] == [0, 0, 0]
 
 
+@layout.needs_node
+def test_each_new_shipped_verdict_on_one_ticket_gets_its_own_settle(tmp_path: Path, snapshot: dict) -> None:
+    rich = _rich(snapshot)
+    first = _shipped(rich, 10)
+    second = _shipped(first, 11)
+    actions = [["poll", first], ["snap", ["relay"]], ["poll", second], ["snap", ["relay"]]]
+    snaps = [step["snap"]["relay"] for step in _script(tmp_path, rich, actions)["steps"] if "snap" in step]
+    keys = [re.findall(r'data-px-key="(relay-[^"]+)"', markup) for markup in snaps]
+    assert keys == [["relay-maxharris1/factory#114:10"], ["relay-maxharris1/factory#114:11"]]
+
+
 def test_attention_rows_are_full_rows_with_a_static_red_block_and_a_link(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW)

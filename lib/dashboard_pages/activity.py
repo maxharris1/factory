@@ -151,7 +151,7 @@ SCRIPT = r"""
         if (s.type !== 'verdict' || s.row.kind !== 'shipped') return;
         var key = t.key + ':' + s.row.seq;
         seen[key] = true;
-        if (!firstRender && !known[key]) played[t.key] = true;
+        if (!firstRender && !known[key]) played[t.key] = key;
       });
     });
     var shown = all.filter(function (t) { return rlFilter === 'all' || t[rlFilter]; });
@@ -186,7 +186,7 @@ SCRIPT = r"""
         if (played[t.key] && !still) {
           var box = add(row, el('span', 'rl-done'));
           box.setAttribute('aria-hidden', 'true');
-          add(box, PX.strip('relay-' + t.key, {effect: 'off', tint: DONE_TINT, done: true, settle: true, cell: 4, height: 8}));
+          add(box, PX.strip('relay-' + played[t.key], {effect: 'off', tint: DONE_TINT, done: true, settle: true, cell: 4, height: 8}));
         }
       });
     }
