@@ -1,0 +1,12 @@
+decision	choice	why
+sync state store	orch.db table device_sync keyed (device, bot) with a harness column	marking lagging and counting slots happen in the same BEGIN IMMEDIATE as DevicePool.claim, so no job lands mid-update; harness column avoids a lib.wait import cycle
+fleet target	the box checkout HEAD, not raw origin/main	a refused box deploy would otherwise put remotes ahead of the skills.lock the waiter checks, failing every remote start with preflight-hash
+busy	any device_slots row on the device	ticket: update a device only when it has no factory jobs running
+drain	lagging blocks only that harness on the device; deploying blocks every harness	a device drains without stopping unrelated harnesses until the deploy actually starts
+remote local edits	refused, escalated once per (target, reason, commit); never reset	never discard work on a device
+lag at start	CheckoutLagging is a free requeue counted as released-unstarted	released-unstarted is in FREE_REQUEUE_EVENTS, so the shared budget of 3 bounds a loop; a new event name would not be counted
+box lag	shown in health, never refused	refusing box jobs would stop the factory shipping its own fix (plan decision 1)
+dashboard refresh	self-heal starts orch dashboard push --once detached when heal deploy moved HEAD	orch heal deploy always exits 0, so self-heal compares HEAD before and after; detached so the box pass never waits
+fan-out placement	detached orch heal devices with its own flock	a slow clone never holds self-heal.lock
+health box entry	needs attention at once when HEAD != origin/main	no since to start a grace period from
+helper delegation	health slice delegated to a poteto-agent; the rest built in the main job	disjoint files after device_sync landed; job time cap of 60 minutes
