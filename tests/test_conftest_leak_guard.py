@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 
 import pytest
@@ -164,5 +165,45 @@ def test_a_hook_object_that_unregisters_itself_is_named_by_its_module(tmp_path: 
     result = _run_guarded(tmp_path, UNREGISTERING_HOOK.format(record=str(record)))
     pid = int(record.read_text(encoding="utf-8"))
     assert result.returncode != 0, result.stdout + result.stderr
+    assert "collection hooks in test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
+
+
+SYSTEM_EXIT_AT_SESSION_FINISH = {
+    "plain": "def pytest_sessionfinish(session):\n    raise SystemExit(0)",
+    "outer_wrapper": "@pytest.hookimpl(wrapper=True, tryfirst=True)\ndef pytest_sessionfinish(session):\n"
+                     "    yield\n    raise SystemExit(None)",
+}
+
+
+@pytest.mark.parametrize("hook", SYSTEM_EXIT_AT_SESSION_FINISH.values(), ids=SYSTEM_EXIT_AT_SESSION_FINISH.keys())
+def test_a_module_that_leaks_at_import_and_raises_a_successful_system_exit_fails_the_run(
+    tmp_path: Path, hook: str
+) -> None:
+    result, pid = _import_loop(tmp_path, f"import pytest\npytest_plugins = [__name__]\n\n\n{hook}")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
+
+
+FAILING_SESSION_FINISH_EXITS = {
+    "pytest_exit_1": ("pytest.exit('done', returncode=1)", 1),
+    "pytest_exit_5": ("pytest.exit('done', returncode=5)", 5),
+    "system_exit_5": ("raise SystemExit(5)", 5),
+    "keyboard_interrupt": ("raise KeyboardInterrupt", -signal.SIGINT),
+}
+
+
+@pytest.mark.parametrize(
+    ("stop", "code"), FAILING_SESSION_FINISH_EXITS.values(), ids=FAILING_SESSION_FINISH_EXITS.keys()
+)
+def test_a_leak_from_an_unregistered_hook_is_named_past_a_failing_session_finish_exit(
+    tmp_path: Path, stop: str, code: int
+) -> None:
+    record = tmp_path / "pid"
+    exit_hook = f"\n\nimport pytest\n\npytest_plugins = [__name__]\n\n\ndef pytest_sessionfinish(session):\n    {stop}"
+    result = _run_guarded(tmp_path, UNREGISTERING_HOOK.format(record=str(record)) + exit_hook)
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode == code, result.stdout + result.stderr
     assert "collection hooks in test_leak.py left processes running" in result.stdout
     assert not alive(pid)

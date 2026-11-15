@@ -268,19 +268,36 @@ def pytest_collection(session: pytest.Session):
         added = session.config.pluginmanager.get_plugins() - plugins
         sources = {getattr(plugin, "__file__", None) or registered.get(plugin)
                    for plugin in added | registered.keys()}
-        loaded = sorted(os.path.relpath(source, session.config.rootpath) for source in sources if source)
+        loaded = sorted({os.path.relpath(source, session.config.rootpath) for source in sources if source})
         owner = f"collection hooks in {', '.join(loaded)}" if loaded else "collection"
         if leak := _collection_leak(session.config, before, owner):
             session.ihook.pytest_collectreport(report=pytest.CollectReport("", "failed", leak, []))
 
 
+_summarized = pytest.StashKey[bool]()
+
+
+def pytest_terminal_summary(config: pytest.Config) -> None:
+    config.stash[_summarized] = True
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_cmdline_main(config: pytest.Config):
-    status = yield
-    if status != pytest.ExitCode.OK or not (leaks := config.stash.get(_collection_leaks, [])):
-        return status
-    print("\n\n".join(leaks))
-    return pytest.ExitCode.TESTS_FAILED
+    try:
+        status = yield
+    except BaseException as exc:
+        if not _report_collection_leaks(config, exc.code if isinstance(exc, SystemExit) else exc):
+            raise
+        return pytest.ExitCode.TESTS_FAILED
+    return pytest.ExitCode.TESTS_FAILED if _report_collection_leaks(config, status) else status
+
+
+def _report_collection_leaks(config: pytest.Config, code: object) -> bool:
+    if not (leaks := config.stash.get(_collection_leaks, [])):
+        return False
+    if not config.stash.get(_summarized, False):
+        print("\n\n".join(leaks))
+    return code in (pytest.ExitCode.OK, None)
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}
