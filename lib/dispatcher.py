@@ -163,6 +163,7 @@ from lib.dispatch.ship import (
 from lib.dispatch.tracking import (
     TrackingMixin,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     LINEAR_STATE_PHASES,
     AlreadyMergedShip,
@@ -184,6 +185,7 @@ from lib.dispatch.types import (
     UpdateClassifier,
 )
 from lib.dispatch.verdict import (
+    ReviseCIGate,
     VerdictMixin,
 )
 from lib.factory_md import FactoryConfig, family_findings
