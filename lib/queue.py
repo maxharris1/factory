@@ -55,8 +55,10 @@ STATES = ("queued", "running", "done", "failed", "cancelled")
 # Device-pool placements (lib/device_pool.py). The table exists once a
 # DevicePool has opened this database; a queued job never holds a row.
 SLOTS_TABLE = "device_slots"
-# Urgent and bug marks per ticket for the claim order (issue #85).
+# Urgent and bug marks (issue #85), tier and unblocks (#258) per ticket for
+# the claim order.
 PRIORITY_TABLE = "ticket_priority"
+_PRIORITY_COLUMNS = (("tier", "INTEGER"), ("unblocks", "INTEGER NOT NULL DEFAULT 0"))
 SUBMITTED_INVALID = "submitted-invalid"
 MAX_INVALID_HANDOFFS = 3
 
@@ -651,20 +653,32 @@ class SQLiteJobQueue:
                     )
                     """
                 )
-                connection.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
-                        repo TEXT NOT NULL,
-                        ticket_id TEXT NOT NULL,
-                        urgent INTEGER NOT NULL DEFAULT 0,
-                        bug INTEGER NOT NULL DEFAULT 0,
-                        updated_at REAL NOT NULL,
-                        PRIMARY KEY (repo, ticket_id)
-                    )
-                    """
-                )
+                ensure_priority_table(connection)
         except sqlite3.DatabaseError as exc:
             raise QueueError("database file is not valid SQLite") from exc
+
+
+def ensure_priority_table(connection: sqlite3.Connection) -> None:
+    """Create ticket_priority, and add the columns a database from before
+    issue #258 lacks."""
+    connection.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
+            repo TEXT NOT NULL,
+            ticket_id TEXT NOT NULL,
+            urgent INTEGER NOT NULL DEFAULT 0,
+            bug INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            tier INTEGER,
+            unblocks INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (repo, ticket_id)
+        )
+        """
+    )
+    present = _columns(connection, PRIORITY_TABLE)
+    for name, kind in _PRIORITY_COLUMNS:
+        if name not in present:
+            connection.execute(f"ALTER TABLE {PRIORITY_TABLE} ADD COLUMN {name} {kind}")
 
 
 def set_ticket_priority(
@@ -675,29 +689,58 @@ def set_ticket_priority(
     urgent: bool,
     bug: bool,
     at: float,
+    tier: int | None = None,
+    unblocks: int = 0,
 ) -> None:
-    """Record a ticket's urgent and bug marks for the claim order."""
+    """Record a ticket's marks for the claim order."""
     connection.execute(
         f"""
-        INSERT INTO {PRIORITY_TABLE} (repo, ticket_id, urgent, bug, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO {PRIORITY_TABLE} (repo, ticket_id, urgent, bug, tier, unblocks, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(repo, ticket_id) DO UPDATE SET
-            urgent = excluded.urgent, bug = excluded.bug,
-            updated_at = excluded.updated_at
+            urgent = excluded.urgent, bug = excluded.bug, tier = excluded.tier,
+            unblocks = excluded.unblocks, updated_at = excluded.updated_at
         """,
-        (repo.lower(), ticket_id, int(urgent), int(bug), at),
+        (repo.lower(), ticket_id, int(urgent), int(bug), tier, unblocks, at),
     )
 
 
-def priority_rank(*, urgent: bool, resume: bool, bug: bool) -> int:
-    """0 urgent, 1 a resumed paused step, 2 bug, 3 everything else."""
-    if urgent:
-        return 0
-    if resume:
-        return 1
-    if bug:
-        return 2
-    return 3
+@dataclass(frozen=True)
+class PriorityMark:
+    """A ticket's claim-order marks as the feeder last wrote them."""
+
+    urgent: bool = False
+    bug: bool = False
+    tier: int | None = None
+    unblocks: int = 0
+
+
+def priority_marks(connection: sqlite3.Connection) -> dict[tuple[str, str], PriorityMark]:
+    """Every ticket's marks, keyed (repo, ticket_id); empty with no table,
+    and a column from after the database was made reads as unset."""
+    if not _has_table(connection, PRIORITY_TABLE):
+        return {}
+    present = _columns(connection, PRIORITY_TABLE)
+    tier = "tier" if "tier" in present else "NULL"
+    unblocks = "unblocks" if "unblocks" in present else "0"
+    return {
+        (str(repo), str(ticket_id)): PriorityMark(
+            bool(urgent), bool(bug), None if level is None else int(level), int(count)
+        )
+        for repo, ticket_id, urgent, bug, level, count in connection.execute(
+            f"SELECT repo, ticket_id, urgent, bug, {tier}, {unblocks} FROM {PRIORITY_TABLE}"
+        )
+    }
+
+
+def rank(
+    *, tier: int | None, urgent: bool, resume: bool, bug: bool, unblocks: int
+) -> tuple[bool, int, int, int]:
+    """Sort key ahead of age (issue #258): a tier first (no tier after every
+    tier), then urgent, a resumed paused step, bug, everything else, then
+    the ticket that unblocks more. Callers append their age and key."""
+    base = 0 if urgent else 1 if resume else 2 if bug else 3
+    return tier is None, tier or 0, base, -unblocks
 
 
 def is_resume(detail: str | None) -> bool:
@@ -733,20 +776,16 @@ def claim_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.
         """,
         (recipient,),
     ).fetchall()
-    marks: dict[tuple[str, str], tuple[bool, bool]] = {}
-    if rows and _has_table(connection, PRIORITY_TABLE):
-        for mark in connection.execute(
-            f"SELECT repo, ticket_id, urgent, bug FROM {PRIORITY_TABLE}"
-        ):
-            marks[(str(mark["repo"]), str(mark["ticket_id"]))] = (
-                bool(mark["urgent"]),
-                bool(mark["bug"]),
-            )
+    marks = priority_marks(connection) if rows else {}
 
-    def key(row: sqlite3.Row) -> tuple[int, float, str]:
-        urgent, bug = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), (False, False))
-        rank = priority_rank(urgent=urgent, resume=is_resume(row["detail"]), bug=bug)
-        return rank, float(row["created_at"]), str(row["id"])
+    def key(row: sqlite3.Row) -> tuple[bool, int, int, int, float, str]:
+        mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
+        return (
+            *rank(tier=mark.tier, urgent=mark.urgent, resume=is_resume(row["detail"]),
+                  bug=mark.bug, unblocks=mark.unblocks),
+            float(row["created_at"]),
+            str(row["id"]),
+        )
 
     return sorted(rows, key=key)
 
@@ -901,6 +940,10 @@ def _ensure_job_events(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:

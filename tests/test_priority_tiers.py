@@ -7,14 +7,29 @@ urgent, a resumed step, bug, how many tickets it unblocks, and age.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
+from lib.feeder import ensure_tables, feeder_items
 from lib.orch_yml import load_orch_yml
-from tests.test_feeder import GITHUB_ORCH, LINEAR_ORCH, orch_config
+from lib.queue import JobRequest, SQLiteJobQueue, claim_order
+from tests.test_feeder import (
+    GITHUB_ORCH,
+    LINEAR_FACTORY_MD,
+    LINEAR_ORCH,
+    FakeLinear,
+    issue,
+    linear_issue,
+    make_feeder,
+    orch_config,
+    rows,
+)
+from tests.test_feeder_gates import HOME, MERGED, OPEN_PULL, fed_heads, ref, states
 
 TIERS = "      priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]\n"
+READY = "factory:ready"
 
 
 def _with(orch: str, intake_lines: str) -> str:
@@ -64,3 +79,138 @@ def test_bad_priority_config_is_refused(tmp_path: Path, lines: str, message: str
 def test_priority_from_linear_must_be_a_bool(tmp_path: Path) -> None:
     messages = _refused(tmp_path, _with(LINEAR_ORCH, "      priority_from_linear: 1\n"))
     assert any("priority_from_linear must be true or false" in item for item in messages), messages
+
+
+def _claim_tickets(queue: SQLiteJobQueue) -> list[str]:
+    with queue.connect() as connection:
+        return [str(row["ticket_id"]) for row in claim_order(connection, "claude")]
+
+
+def _enqueue(queue: SQLiteJobQueue, now: list[float], *tickets: str) -> None:
+    for ticket in tickets:
+        now[0] += 1
+        queue.enqueue(JobRequest(repo=HOME, ticket_id=ticket, action="build", recipient="claude",
+                                 source_comment_id=ticket, timeout_seconds=600), dedupe_key=ticket)
+
+
+def test_a_newer_p0_ticket_takes_a_freed_path_before_an_older_urgent_one(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=3)
+    holder = issue(1, created_at=1.0, body="Touches: lib/x.py")
+    github.issues[HOME] = [holder]
+    github.statuses = {ref(501): OPEN_PULL}
+    feeder.feed_once()
+    github.issues[HOME] = [
+        holder,
+        issue(2, labels=(READY, "urgent"), created_at=2.0, body="Touches: lib/x.py"),
+        issue(3, labels=(READY, "priority:p0"), created_at=3.0, body="Touches: lib/x.py"),
+    ]
+    assert feeder.feed_once().fed == ()
+    github.statuses[ref(501)] = MERGED
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-3"]
+    assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on file lib/x.py held by #3")
+
+
+def test_relabeling_a_queued_ticket_changes_its_claim_order_on_the_next_poll(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, TIERS), box=2, now=now)
+    github.issues[HOME] = [issue(1, labels=(READY, "priority:p1"), created_at=1.0),
+                           issue(2, labels=(READY, "priority:p0"), created_at=2.0)]
+    feeder.feed_once()
+    pull = {key: row["ticket_id"] for key, row in rows(tmp_path / "orch.db").items()}
+    _enqueue(queue, now, pull["1"], pull["2"])
+    assert _claim_tickets(queue) == [pull["2"], pull["1"]]
+    github.issues[HOME] = [issue(1, labels=(READY, "Priority:P0"), created_at=1.0),
+                           issue(2, labels=(READY, "priority:p1"), created_at=2.0)]
+    now[0] += 1
+    feeder.feed_once()
+    assert _claim_tickets(queue) == [pull["1"], pull["2"]]
+
+
+@pytest.mark.parametrize(("opt_in", "first"), [(False, "AUT-1"), (True, "AUT-2")])
+def test_linear_priority_sets_the_tier_only_when_the_project_opts_in(
+    tmp_path: Path, opt_in: bool, first: str
+) -> None:
+    linear = FakeLinear()
+    linear.issues = [linear_issue("AUT-1", priority=4, created_at=1.0),
+                     linear_issue("AUT-2", priority=2, created_at=2.0)]
+    orch = _with(LINEAR_ORCH, "      priority_from_linear: true\n") if opt_in else LINEAR_ORCH
+    feeder, _, _, _ = make_feeder(tmp_path, orch=orch, box=1, linear=linear,
+                                  factory_text=LINEAR_FACTORY_MD)
+    assert [item.ticket_id for item in feeder.feed_once().fed] == [first]
+
+
+# The two tables exactly as they were before issue #258.
+OLD_PRIORITY = """
+CREATE TABLE ticket_priority (
+    repo TEXT NOT NULL,
+    ticket_id TEXT NOT NULL,
+    urgent INTEGER NOT NULL DEFAULT 0,
+    bug INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (repo, ticket_id)
+)
+"""
+OLD_FEEDER = """
+CREATE TABLE feeder_items (
+    repo TEXT NOT NULL,
+    issue TEXT NOT NULL,
+    tracker TEXT NOT NULL,
+    title TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    state TEXT NOT NULL,
+    urgent INTEGER NOT NULL DEFAULT 0,
+    bug INTEGER NOT NULL DEFAULT 0,
+    risk TEXT NOT NULL,
+    issue_created_at REAL NOT NULL,
+    branch TEXT,
+    pr_number TEXT,
+    ticket_id TEXT,
+    brief_comment_id TEXT,
+    go_comment_id TEXT,
+    first_seen_at REAL NOT NULL,
+    seen_at REAL NOT NULL,
+    fed_at REAL,
+    error TEXT,
+    waiting_reason TEXT,
+    touches TEXT,
+    conflicts TEXT,
+    released INTEGER NOT NULL DEFAULT 0,
+    capped_release INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, issue)
+)
+"""
+
+
+def test_a_database_from_before_tiers_still_reads_and_then_migrates(tmp_path: Path) -> None:
+    db = tmp_path / "orch.db"
+    now = [100.0]
+    _enqueue(SQLiteJobQueue(db, clock=lambda: now[0]), now, "7", "8")
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE ticket_priority")
+        connection.execute(OLD_PRIORITY)
+        connection.execute("INSERT INTO ticket_priority VALUES (?, '8', 1, 0, 100.0)", (HOME,))
+        connection.execute(OLD_FEEDER)
+        connection.execute("CREATE TABLE feeder_poll (id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)")
+        connection.execute("INSERT INTO feeder_poll VALUES (1, 100.0)")
+        connection.execute(
+            "INSERT INTO feeder_items (repo, issue, tracker, title, harness, state, urgent, bug, risk,"
+            " issue_created_at, first_seen_at, seen_at) VALUES (?, '8', 'github', 'Eight', 'claude',"
+            " 'eligible', 1, 0, 'low', 5.0, 100.0, 100.0)",
+            (HOME,),
+        )
+    with sqlite3.connect(db) as connection:
+        connection.row_factory = sqlite3.Row
+        assert [row["ticket_id"] for row in claim_order(connection, "claude")] == ["8", "7"]
+        assert [(item["issue"], item["tier"], item["unblocks"]) for item in feeder_items(connection)] == [
+            ("8", None, 0)
+        ]
+    SQLiteJobQueue(db, clock=lambda: now[0])
+    with sqlite3.connect(db) as connection:
+        ensure_tables(connection)
+    with sqlite3.connect(db) as connection:
+        assert list(connection.execute("SELECT ticket_id, urgent, tier, unblocks FROM ticket_priority")) == [
+            ("8", 1, None, 0)
+        ]
+        assert list(connection.execute("SELECT issue, urgent, tier, unblocks FROM feeder_items")) == [
+            ("8", 1, None, 0)
+        ]

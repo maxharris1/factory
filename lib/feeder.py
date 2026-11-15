@@ -96,10 +96,10 @@ from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project
 from lib.pr_title import prefixed
 from lib.queue import (
-    PRIORITY_TABLE,
     SQLiteJobQueue,
     _has_table,
-    priority_rank,
+    ensure_priority_table,
+    rank,
     set_ticket_priority,
 )
 
@@ -132,6 +132,8 @@ _COLUMNS = (
     ("conflicts", "TEXT"),
     ("released", "INTEGER NOT NULL DEFAULT 0"),
     ("capped_release", "INTEGER NOT NULL DEFAULT 0"),
+    ("tier", "INTEGER"),
+    ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -139,6 +141,7 @@ URGENT_LABELS = frozenset({"urgent", "priority:urgent"})
 BUG_LABELS = frozenset({"bug"})
 RISK_HIGH_LABEL = "risk:high"
 LINEAR_URGENT_PRIORITY = 1
+LINEAR_PRIORITIES = (1, 2, 3, 4)  # Urgent, High, Medium, Low; 0 is no priority
 PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a plan
 # A fed ticket holds room until its job is queued, at most this long: a go
 # the poller never acts on (say, an untrusted author) must not stall the
@@ -244,18 +247,37 @@ class _Candidate:
     issue: IntakeIssue
 
     lines: GateLines = GateLines()
+    unblocks: int = 0
 
     @property
     def harness(self) -> str:
         return self.context.config.builder_harness
 
     @property
+    def tier(self) -> int | None:
+        """The index of the first priority label the ticket carries, else its
+        Linear priority as 0-3 when the project opts in, else None."""
+        intake = self.project.intake
+        assert intake is not None
+        labels = {label.lower() for label in self.issue.labels}
+        for index, label in enumerate(intake.priority_labels):
+            if label.lower() in labels:
+                return index
+        if intake.priority_from_linear and self.issue.priority in LINEAR_PRIORITIES:
+            return LINEAR_PRIORITIES.index(self.issue.priority)
+        return None
+
+    @property
     def ref(self) -> Ref:
         return Ref(self.issue.tracker, self.issue.repo.lower(), self.issue.key)  # type: ignore[arg-type]
 
-    def order(self) -> tuple[int, float, tuple[int, int, str]]:
-        rank = priority_rank(urgent=self.issue.urgent, resume=False, bug=self.issue.bug)
-        return rank, self.issue.created_at, _key_order(self.issue.key)
+    def order(self) -> tuple[bool, int, int, int, float, tuple[int, int, str]]:
+        return (
+            *rank(tier=self.tier, urgent=self.issue.urgent, resume=False, bug=self.issue.bug,
+                  unblocks=self.unblocks),
+            self.issue.created_at,
+            _key_order(self.issue.key),
+        )
 
 
 def _holding(lines: GateLines, capped: bool) -> GateLines:
@@ -340,6 +362,8 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             conflicts TEXT,
             released INTEGER NOT NULL DEFAULT 0,
             capped_release INTEGER NOT NULL DEFAULT 0,
+            tier INTEGER,
+            unblocks INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, issue)
         )
         """
@@ -353,18 +377,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
-            repo TEXT NOT NULL,
-            ticket_id TEXT NOT NULL,
-            urgent INTEGER NOT NULL DEFAULT 0,
-            bug INTEGER NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL,
-            PRIMARY KEY (repo, ticket_id)
-        )
-        """
-    )
+    ensure_priority_table(connection)
 
 
 def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -396,11 +409,12 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    reason = "waiting_reason" if "waiting_reason" in present else "NULL AS waiting_reason"
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0"}
+    optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error, {reason}
+               pr_number, issue_created_at, error, {optional}
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),
@@ -409,7 +423,8 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     items = [dict(zip(names, tuple(row))) for row in cursor.fetchall()]
     items.sort(
         key=lambda row: (
-            priority_rank(urgent=bool(row["urgent"]), resume=False, bug=bool(row["bug"])),
+            *rank(tier=row["tier"], urgent=bool(row["urgent"]), resume=False,
+                  bug=bool(row["bug"]), unblocks=int(row["unblocks"])),
             float(row["issue_created_at"]),
             str(row["repo"]),
             _key_order(str(row["issue"])),
@@ -751,15 +766,16 @@ class Feeder:
                 connection.execute(
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
-                        repo, issue, tracker, title, harness, state, urgent, bug,
+                        repo, issue, tracker, title, harness, state, urgent, bug, tier,
                         risk, issue_created_at, first_seen_at, seen_at, touches, conflicts
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
                         conflicts = excluded.conflicts,
                         urgent = excluded.urgent,
                         bug = excluded.bug,
+                        tier = excluded.tier,
                         risk = CASE WHEN state IN ('fed', 'done', 'closed') THEN risk
                                     ELSE excluded.risk END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
@@ -774,6 +790,7 @@ class Feeder:
                         candidate.harness,
                         int(issue.urgent),
                         int(issue.bug),
+                        candidate.tier,
                         issue.risk,
                         issue.created_at,
                         now,
@@ -790,7 +807,8 @@ class Feeder:
                 ).fetchone()[0]
                 if ticket is not None:
                     set_ticket_priority(
-                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug, at=now
+                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
+                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
                     )
             connection.execute(
                 f"INSERT INTO {POLL_TABLE} (id, at) VALUES (1, ?) "
@@ -912,7 +930,8 @@ class Feeder:
         holds.alias(candidate.ref, github_ref(repo, number))
         with self.queue.connect() as connection:
             set_ticket_priority(
-                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug, at=now
+                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug,
+                tier=candidate.tier, unblocks=candidate.unblocks, at=now,
             )
         linear = issue.tracker == "linear"
         if not linear and config.tickets == "github":
