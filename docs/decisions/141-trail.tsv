@@ -9,3 +9,5 @@ layout	two sys-row flex wrappers with the artboard's flex bases; panels keep the
 process details columns	kept today's 9 columns including last seen (ET)	ticket says today's full table; additions allowed
 test change	test_health _states reads chips after 'process details'	the matrix adds UP/DOWN text before the table
 delegation	main job owned the diff; comment-sicko reviewed it; Codex reviews the PR	one-hour job budget; review separation comes from the cross-family reviewer
+fragment reveal (round 2)	revealHash in the shared page script opens every details ancestor of the fragment target and scrolls to it, after the first render and after each hashchange redraw; not on every poll	fixes the round-1 REVISE in the shared redraw path so every details on every page is covered; skipping polls keeps a later operator collapse
+browser regression test	headless Chrome over --remote-debugging-pipe, driven from pytest; skipped where no Chrome is installed	the node fake DOM has no details or hashchange; the pipe needs no WebSocket client, and ubuntu-latest ships google-chrome
