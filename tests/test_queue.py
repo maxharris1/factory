@@ -504,7 +504,7 @@ def test_claim_refuses_a_row_that_is_no_longer_queued(
     running = queue.claim("claude")
     assert running is not None
 
-    def stale_order(connection: sqlite3.Connection, recipient: str) -> list[sqlite3.Row]:
+    def stale_order(connection: sqlite3.Connection, recipient: str, *, now: float) -> list[sqlite3.Row]:
         return connection.execute("SELECT * FROM jobs").fetchall()
 
     monkeypatch.setattr(queue_module, "claim_order", stale_order)

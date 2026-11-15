@@ -18,7 +18,7 @@ finish_line: merge
 skills: []
 shared_paths: [docs/SPEC.md, docs/decisions/, docs/plans/, README.md]
 feeder:
-  max_holders_per_path: 2
+  max_holders_per_path: 4
   exclusive_paths: [model/]
 hold:
   approver: maxharris1

@@ -256,8 +256,7 @@ def _redrive_eligible(exc: BaseException, policy: str) -> bool:
 
 
 def _holds(ticket: TrackedTicket) -> bool:
-    """Issue #86: the hold applies only on a ship: merge repo."""
-    return ticket.factory.ship == "merge" and ticket.factory.hold is not None
+    return ticket.factory.hold_applies
 
 
 def ship_mode(policy: str) -> str:

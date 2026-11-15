@@ -200,13 +200,13 @@ class HoldsMixin:
         )
 
     def _held(self, ticket: TrackedTicket, head: str) -> HoldDecision | None:
-        if ticket.factory.ship != "merge" or ticket.factory.hold is None:
+        if not ticket.factory.hold_applies:
             return None
         decision = self._hold_decision(ticket, head)
         return decision if decision.blocks else None
 
     def _hold_in_play(self, ticket: TrackedTicket, head: str) -> bool:
-        if ticket.factory.ship != "merge" or ticket.factory.hold is None:
+        if not ticket.factory.hold_applies:
             return False
         decision = self._hold_decision(ticket, head)
         return decision.unread is not None or bool(decision.reasons)

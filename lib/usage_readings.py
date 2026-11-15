@@ -45,6 +45,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 
+from lib import lane_limit
 from lib.usage import UsageReport
 
 TABLE = "usage_readings"
@@ -225,6 +226,7 @@ def store(
             for r in readings
         ],
     )
+    lane_limit.reevaluate(connection, harness, bot)
 
 
 def from_row(window: object, used: object, resets_at: object, observed_at: object) -> Reading | None:

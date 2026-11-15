@@ -113,7 +113,7 @@ class T4Mixin:
             )
         if not covered:
             return self._queue_patch_review(ticket, comment, current_head)
-        if ship == "merge" and ticket.factory.hold is not None:
+        if _holds(ticket):
             held = self._hold_gate(ticket, comment, current_head)
             if held is not None:
                 return held
