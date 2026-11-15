@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from lib.dispatch.helpers import _is_full_sha, ship_mode
+from lib.dispatch.constants import _NOT_FINISHED
+from lib.dispatch.helpers import _base_update_key, _is_full_sha, ship_mode
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide
+
+_HELD_BASE_UPDATE = "held-base-update"
 
 
 class HoldsMixin:
@@ -29,6 +32,8 @@ class HoldsMixin:
             return False, "hold-unread"
         if not decision.blocks:
             return None
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return self._hold_base_update(ticket, comment, head)
         scope = (ticket.repo.lower(), ticket.ticket_id)
         reasons = ",".join(decision.reasons)
         with self._connect() as connection:
@@ -112,6 +117,74 @@ class HoldsMixin:
             ),
         )
         return False, "awaiting-ok"
+
+    def _hold_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+    ) -> tuple[bool, str]:
+        _state, review_round = self._review_context(ticket)
+        base = ticket.factory.base_branch
+        request = self._base_update_request(
+            ticket,
+            comment,
+            head,
+            review_round,
+            f"The approved PR is {ticket.mergeable_state} against {base} while "
+            f"it waits for an ok: merge {base} in.",
+        )
+        out = self._base_update_out(ticket)
+        job = None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not out:
+                job, _answered = self._enqueue_step(
+                    connection,
+                    ticket,
+                    comment,
+                    request,
+                    dedupe_key=_base_update_key(ticket, head),
+                )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO review_events (
+                    repo, ticket_id, comment_id, outcome
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, _HELD_BASE_UPDATE),
+            )
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "fixing",
+                source="held-base-update",
+                at=self.queue.now(),
+                guard=_NOT_FINISHED,
+            )
+            connection.commit()
+        if job is not None:
+            self._flag_dropped(ticket, request, job)
+        self._write_state_label(ticket, "fixing")
+        return True, _HELD_BASE_UPDATE
+
+    def _replay_held_base_update(
+        self, ticket: TrackedTicket, comment: Comment
+    ) -> tuple[bool, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND outcome = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, _HELD_BASE_UPDATE),
+            ).fetchone()
+        if row is None:
+            return None
+        self._write_state_label(ticket, self._review_context(ticket)[0])
+        return True, _HELD_BASE_UPDATE
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         hold = ticket.factory.hold

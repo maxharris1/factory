@@ -55,7 +55,15 @@ JOB_STATES = {
     "awaiting-ok": "awaiting-ok",
 }
 QUEUE_JOB_BEFORE_ROW = frozenset(
-    {"set-state", "plan-gap", "t3", "t5-answers", "cap-resume", "update-queued"}
+    {
+        "set-state",
+        "plan-gap",
+        "t3",
+        "t5-answers",
+        "cap-resume",
+        "update-queued",
+        "held-base-update",
+    }
 )
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.

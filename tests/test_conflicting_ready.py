@@ -58,7 +58,9 @@ def test_ready_on_a_conflicting_pr_with_no_ci_queues_one_merge_only_job(
     assert job["dedupe_key"] == f"base-update:owner/repo\x1f42:{sha(1)}"
     detail = json.loads(job["detail"])
     assert detail["round"] == "1/3"  # the next round, not charged
-    assert "merge" in detail["instruction"]
+    assert detail["instruction"] == (
+        f"The PR conflicts with main, so GitHub ran no CI on {sha(1)}: merge main in."
+    )
     assert board.jobs("review", "42") == []
     assert board.state("42")["review_round"] == 0
 
