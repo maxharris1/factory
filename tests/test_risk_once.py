@@ -1,6 +1,7 @@
 """Issue #195: a ticket's risk is read once at intake and never silently low."""
 
 import json
+from difflib import unified_diff
 
 import pytest
 
@@ -269,6 +270,96 @@ def test_a_linear_realtime_table_change_outside_a_realtime_path_is_high(line: st
 
 def test_a_realtime_word_only_in_unchanged_context_stays_low() -> None:
     item = realtime_patch(" -- realtime notes\n+SELECT 1;")
+    assert linear_ticket(labels=[], files=[item])[0].risk == "low"
+
+
+def sql_change(before: str, after: str, path: str = "db/schema.sql") -> dict:
+    patch = "".join(
+        unified_diff(
+            before.splitlines(True), after.splitlines(True), fromfile=f"a/{path}", tofile=f"b/{path}"
+        )
+    )
+    return {"filename": path, "changes": 2, "patch": patch}
+
+
+TABLES = "".join(f"    public.t{n},\n" for n in range(12))
+STATEMENTS = "".join(f"SELECT {n};\n" for n in range(12))
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE\n    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE\n    public.messages, public.events;\n",
+        ),
+        (
+            "alter publication supabase_realtime\n  add table\n    public.messages;\n",
+            "alter publication supabase_realtime\n  add table\n    public.events;\n",
+        ),
+        (
+            "ALTER TABLE public.messages\n  REPLICA IDENTITY DEFAULT;\n",
+            "ALTER TABLE public.events\n  REPLICA IDENTITY DEFAULT;\n",
+        ),
+        (
+            "CREATE TABLE a (id int);\nALTER PUBLICATION supabase_realtime ADD TABLE a, b;\n",
+            "CREATE TABLE a (id int);\nALTER PUBLICATION supabase_realtime ADD TABLE a,\n  c; SELECT 1;\n",
+        ),
+        (
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}    public.last;\n",
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}    public.last,\n    public.events;\n",
+        ),
+        (
+            f"CREATE TABLE a (\n{TABLES}    id int\n);\n",
+            f"CREATE TABLE a (\n{TABLES}    id bigint\n);\n",
+        ),
+        ("SELECT\n  1\n", "SELECT\n  2\n"),
+    ],
+    ids=[
+        "keyword-line-is-context",
+        "keyword-two-lines-up",
+        "replica-identity-trailing-context",
+        "statement-split-mid-line",
+        "statement-head-outside-the-hunk",
+        "unreadable-statement-head",
+        "unterminated-statement",
+    ],
+)
+def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
+    before: str, after: str
+) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
+    assert ticket.risk == "high"
+    assert Dispatcher._config_cap(None, ticket) == 3
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
+            "CREATE TABLE a (\n  id int\n);\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
+            "CREATE TABLE a (\n  id bigint\n);\n",
+        ),
+        (
+            "-- realtime tables live elsewhere; see docs\nCREATE TABLE a (\n  id int\n);\n",
+            "-- realtime tables live elsewhere; see docs\nCREATE TABLE a (\n  id bigint\n);\n",
+        ),
+        (
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id int\n);\n",
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id bigint\n);\n",
+        ),
+    ],
+    ids=["next-to-a-realtime-statement", "after-a-realtime-comment", "statement-head-in-context"],
+)
+def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
+    assert ticket.risk == "low"
+
+
+def test_a_non_sql_change_needs_no_statement_context() -> None:
+    item = sql_change("// realtime\nconst a = 1\nconst b = 2\n", "// realtime\nconst a = 1\nconst b = 3\n", "src/app.ts")
     assert linear_ticket(labels=[], files=[item])[0].risk == "low"
 
 

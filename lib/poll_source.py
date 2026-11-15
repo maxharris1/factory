@@ -119,6 +119,7 @@ LINEAR_ISSUE_COMPLEXITY = 729  # +12 for the issue state and state order (#47), 
 ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
+SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 INTAKE_RISK_TABLE = "intake_risk"
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
@@ -1480,6 +1481,11 @@ class LivePollSource:
                     for line in patch.splitlines()
                 ):
                     return True
+                if paths[0].lower().endswith(SQL_SUFFIXES):
+                    statement = _sql_patch_risk(patch)
+                    if statement is True:
+                        return True
+                    undecided = undecided or statement is None
             elif item.get("changes") != 0:
                 undecided = True
         return None if undecided else False
@@ -2007,6 +2013,47 @@ def _risk(
 ) -> str:
     """The intake header's risk, else high (#68)."""
     return _risk_header(comments, trusted) or "high"
+
+
+def _sql_patch_risk(patch: str) -> bool | None:
+    """#195: True when a changed line falls in a SQL statement that changes a
+    realtime table; None when such a statement's start or end is outside the
+    patch, so it cannot be classified."""
+    decided: bool | None = False
+    hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*)$", patch, flags=re.MULTILINE)
+    for index in range(1, len(hunks) - 3, 4):
+        body = hunks[index + 3].splitlines()
+        for start, mark in ((int(hunks[index + 1]), "-"), (int(hunks[index + 2]), "+")):
+            lines = [line for line in body if line[:1] in (" ", mark)]
+            verdict = _sql_statements_risk(lines, mark, headed=start <= 1)
+            if verdict is True:
+                return True
+            if verdict is None:
+                decided = None
+    return decided
+
+
+def _sql_statements_risk(lines: Sequence[str], mark: str, *, headed: bool) -> bool | None:
+    decided: bool | None = False
+    text, changed = "", False
+    for line in lines:
+        code = line[1:].split("--", 1)[0]
+        pieces = code.split(";")
+        for number, piece in enumerate(pieces):
+            text += piece
+            changed = changed or (line[:1] == mark and bool(piece.strip()))
+            if number == len(pieces) - 1:
+                break
+            changed = changed or line[:1] == mark
+            if changed and RISKY_CHANGE.search(text):
+                return True
+            if changed and not headed:
+                decided = None
+            text, changed, headed = "", False, True
+        text += "\n"
+    if changed:
+        return True if RISKY_CHANGE.search(text) else None
+    return decided
 
 
 def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
