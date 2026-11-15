@@ -74,6 +74,7 @@ _TOP_KEYS = {
     "job_states",
     "refused_harnesses",
     "approver_logins",
+    "approver_linear_users",
     "approver_gh_config_dir",
     "github_app",
 }
@@ -206,9 +207,13 @@ class Approvals:
     logins: frozenset[str] = frozenset()
     gh_config_dir: Path | None = None
     app_logins: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    linear_users: frozenset[str] | None = None
 
     def may_approve(self, login: str) -> bool:
         return login.casefold() in self.logins
+
+    def may_approve_linear(self, author: str) -> bool:
+        return author in (self.linear_users or ())
 
     def app_bot(self, login: str) -> str | None:
         """The bot whose App posts as login, when the switch is on."""
@@ -238,12 +243,16 @@ class OrchConfig:
     refused_harnesses: tuple[str, ...] = ()
     github_app: GitHubApps | None = None
     approver_logins: frozenset[str] | None = None
+    approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
 
 
 def approvals(config: OrchConfig) -> Approvals:
     return _approvals(
-        config.github_app, config.approver_logins, config.approver_gh_config_dir
+        config.github_app,
+        config.approver_logins,
+        config.approver_gh_config_dir,
+        config.approver_linear_users,
     )
 
 
@@ -251,6 +260,7 @@ def _approvals(
     github_app: GitHubApps | None,
     approver_logins: frozenset[str] | None,
     gh_config_dir: Path | None,
+    approver_linear_users: frozenset[str] | None,
 ) -> Approvals:
     apps = github_app.apps.values() if github_app is not None else ()
     return Approvals(
@@ -258,6 +268,7 @@ def _approvals(
         logins=frozenset(login.casefold() for login in approver_logins or ()),
         gh_config_dir=gh_config_dir,
         app_logins=MappingProxyType({app.bot_login.casefold(): app.bot for app in apps}),
+        linear_users=approver_linear_users,
     )
 
 
@@ -269,13 +280,26 @@ def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
     if data is None:
         return None, findings
     approver_logins = _approver_logins(data, findings)
+    approver_linear_users = _approver_linear_users(data, findings)
     gh_config_dir = _absolute_path(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
     app = _github_app(data, findings)
     if findings:
         return None, findings
-    return _approvals(app, approver_logins, gh_config_dir), findings
+    return _approvals(app, approver_logins, gh_config_dir, approver_linear_users), findings
+
+
+def linear_approver_findings(config: OrchConfig) -> list[Finding]:
+    """A Linear project with no approver_linear_users leaves the capped-go
+    gap open (#174): any trusted Linear go lifts a cap."""
+    if config.approver_linear_users is not None or not any(
+        project.linear_project_id is not None for project in config.projects
+    ):
+        return []
+    return [
+        Finding("warning", "approver_linear_users is unset: any trusted Linear go lifts a cap")
+    ]
 
 
 def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]:
@@ -372,6 +396,16 @@ def _validate(
     job_states = _job_states(data, findings)
     refused_harnesses = _refused_harnesses(data, findings)
     approver_logins = _approver_logins(data, findings)
+    approver_linear_users = _approver_linear_users(data, findings)
+    for author in sorted(approver_linear_users or ()):
+        if author not in trusted_linear_users:
+            findings.append(
+                Finding(
+                    "error",
+                    f"approver_linear_users {author.removeprefix('linear:')} "
+                    "is not a trusted_linear_users key",
+                )
+            )
     approver_gh_config_dir = _absolute_path(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
@@ -418,6 +452,7 @@ def _validate(
             refused_harnesses=refused_harnesses,
             github_app=github_app,
             approver_logins=approver_logins,
+            approver_linear_users=approver_linear_users,
             approver_gh_config_dir=approver_gh_config_dir,
         ),
         findings,
@@ -874,6 +909,24 @@ def _approver_logins(data: dict, findings: list[Finding]) -> frozenset[str] | No
         )
         return None
     return frozenset(value)
+
+
+def _approver_linear_users(data: dict, findings: list[Finding]) -> frozenset[str] | None:
+    """Stable Linear user ids whose go on a capped Linear ticket lifts the
+    cap (#174), as linear:<id> authors."""
+    if "approver_linear_users" not in data:
+        return None
+    value = data["approver_linear_users"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        findings.append(
+            Finding("error", "approver_linear_users must list stable Linear user ids")
+        )
+        return None
+    return frozenset(f"linear:{item}" for item in value)
 
 
 def _absolute_path(
