@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from lib.brief import render_brief
+from lib.queue import _job as queue_job
 from lib.update_check import UpdateClass, UpdateScope
 from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT, HEAD, UPDATE, _job
 from tests.test_update_check import Repo, run
 from tests.test_update_from_main import conflicted
 from tests.merge_queue_support import sha
+from tests.test_dispatcher import ANSWERS
 
 LAST = "a" * 40
 MERGE = "b" * 40
@@ -169,3 +171,43 @@ def test_an_unscoped_update_queues_the_normal_review(tmp_path: Path) -> None:
     assert detail["round"] == "1/3"
     assert "kind" not in detail
     assert "last_reviewed_head" not in detail
+
+
+def test_an_update_review_keeps_its_scope_when_it_resumes_after_an_answer(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.verdict = UpdateClass(
+        False, "edits outside conflict resolution", UpdateScope(sha(1), sha(3), (sha(2),))
+    )
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    job = board.claim("codex")
+    board.post(
+        pr,
+        "question",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nWhich behavior?",
+        "codex-login",
+    )
+    board.queue.finish(job.id, owner="codex", handoff_comment_id="question")
+    board.poll()
+    assert board.outcome("question") == "waiting-max"
+    board.post(pr, "answer", ANSWERS, "grok-login")
+    board.poll()
+
+    assert board.outcome("answer") == "resumed-review"
+    row = board.jobs("review")[-1]
+    detail = json.loads(row["detail"])
+    assert detail["resume"] is True
+    assert detail["round"] == "1/3"
+    assert detail["kind"] == "update"
+    assert detail["last_reviewed_head"] == sha(1)
+    assert detail["update_merge"] == sha(3)
+    assert detail["update_commits"] == [sha(2)]
+    brief = render_brief(
+        queue_job(row), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
+    )
+    assert "--remerge-diff" in brief
+    assert "Read the whole diff" not in brief

@@ -37,6 +37,16 @@ class UpdateScope:
     merge: str
     commits: tuple[str, ...]
 
+    @classmethod
+    def from_detail(cls, detail: dict[str, object]) -> UpdateScope | None:
+        if detail.get("kind") != "update":
+            return None
+        return cls(
+            str(detail["last_reviewed_head"]),
+            str(detail["update_merge"]),
+            tuple(str(sha) for sha in detail["update_commits"]),
+        )
+
 
 @dataclass(frozen=True)
 class UpdateClass:

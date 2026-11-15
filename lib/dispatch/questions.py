@@ -24,6 +24,7 @@ from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.state_backup import RESTORED
+from lib.update_check import UpdateScope
 
 _REFUSED_VERDICT_OUTCOMES = (
     "rejected-",
@@ -173,6 +174,10 @@ class QuestionsMixin:
         recipient = str(paused["paused_recipient"])
         generation = int(paused["paused_generation"])
         head = str(paused["paused_head"]) if paused["paused_head"] is not None else None
+        with self._connect() as connection:
+            prior = self._resumed_step_detail(
+                connection, ticket, comment, action, paused["paused_question_id"]
+            )
         request = JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -191,6 +196,7 @@ class QuestionsMixin:
                 ),
                 instruction=_comment_link(comment),
                 resume=True,
+                update=UpdateScope.from_detail(prior or {}),
             ),
         )
         with self._connect() as connection:
