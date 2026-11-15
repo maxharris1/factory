@@ -17,10 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_sync
+from lib import device_sync, skill_preflight
+from lib.device_pool import Placement
 from lib.device_monitor import DeviceMonitor
 from lib.dispatcher import Dispatcher
 from lib.job_state import LAGGING_BACKOFF_SECONDS, LAGGING_WAIT_SECONDS, free_requeues
+from lib.remote import SshTransport
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, TRUSTED_LOGINS
 from tests.test_remote_start import FakeTransport
 from tests.test_skill_preflight import (
@@ -201,3 +203,74 @@ def test_a_remote_placement_refused_for_a_box_lag_marks_the_box_lagging_not_the_
     error = (f"preflight-lagging: box claude-bot {lock_root.resolve()} at {factory.head[:12]}, "
              f"origin/main at {factory.later[:12]}")
     assert sync_rows(factory.device.db) == [("box", "claude-bot", "lagging", error)]
+
+
+def test_a_job_queued_behind_a_lagging_box_sticks_device_lagging_once_past_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    elapsed = 0
+    while elapsed < LAGGING_WAIT_SECONDS:
+        elapsed += 30
+        factory.poll(START + elapsed)
+        assert factory.device.waiter.step() is None, "the lagging box takes no job"
+        if elapsed < LAGGING_WAIT_SECONDS:
+            assert factory.stuck() == (0, None), "not stuck inside the bound"
+            assert factory.jobs() in ([(job_id, "queued", 1)], [(job_id, "failed", 1)])
+
+    assert factory.stuck() == (1, "device-lagging")
+    assert factory.jobs() == [(job_id, "failed", 1)], "no attempt 2"
+    assert factory.events(job_id)[-1] == "lag-blocked"
+    [wake] = factory.wakes()
+    assert f"origin/main at {factory.later[:12]}" in wake["detail"]
+    assert not any("job-failed-2" in line for line in factory.lines)
+
+
+def test_a_checkout_that_recovers_during_the_last_backoff_starts_the_job_unstuck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root, remote=True)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    for retry_at in (30, 91, 212, 453, 694):
+        factory.poll(START + retry_at)
+        factory.now[0] = START + retry_at + 1
+        assert factory.device.waiter.step() is None
+        assert factory.jobs() == [(job_id, "failed", 1)]
+    factory.now[0] = START + 800
+    factory.deployed()
+    subprocess.run(["git", "clone", "-q", str(factory.root), str(factory.device.checkout)],
+                   check=True)
+    report = skill_preflight.check(
+        bot="claude-bot", placement=Placement(job_id, "pc", "claude", "claude-bot", START),
+        device=factory.device.waiter.pool.config.device("pc"), transport=SshTransport(),
+        home=factory.device.home, checkout=str(factory.device.checkout), root=factory.root,
+    )
+    assert report.error is None, "both checkouts are current"
+
+    factory.poll(START + 800)
+    factory.poll(START + LAGGING_WAIT_SECONDS)
+    assert factory.stuck() == (0, None), "the lag is gone; its age alone sticks nothing"
+    factory.poll(START + 935)
+    assert factory.device.waiter.step() == job_id
+    assert factory.jobs() == [(job_id, "running", 1)]
+    assert factory.stuck() == (0, None)
+
+
+def test_a_remote_start_still_refused_past_the_bound_sticks_device_lagging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root, remote=True)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    for retry_at in (30, 91, 212, 453, 694, 935):
+        factory.poll(START + retry_at)
+        assert factory.stuck() == (0, None), "not stuck inside the bound"
+        factory.now[0] = START + retry_at + 1
+        assert factory.device.waiter.step() is None
+    factory.poll(START + 937)
+
+    assert factory.stuck() == (1, "device-lagging")
+    assert factory.jobs() == [(job_id, "failed", 1)], "no attempt 2"

@@ -556,6 +556,7 @@ def _requeue_failed(
 # --- #357: a start refused because a factory checkout lags -------------------
 
 PREFLIGHT_LAGGING = "preflight-lagging"
+LAG_BLOCKED = "lag-blocked"
 REQUEUED_LAGGING = "requeued-lagging"
 LAGGING_BACKOFF_SECONDS = (30, 60, 120, 240)
 LAGGING_WAIT_SECONDS = SYNC_GRACE_SECONDS
@@ -565,10 +566,17 @@ LAGGING_WAIT_SECONDS = SYNC_GRACE_SECONDS
 class LaggingEnd:
     detail: str
     first_refused_at: float
+    latest_lag_event_at: float
     requeues: int
 
     def backoff(self) -> int:
         return LAGGING_BACKOFF_SECONDS[min(self.requeues, len(LAGGING_BACKOFF_SECONDS) - 1)]
+
+    def past_wait(self, at: float) -> bool:
+        return at - self.first_refused_at >= LAGGING_WAIT_SECONDS
+
+    def still_lagging_past_wait(self, now: float, *, harness_blocked: bool) -> bool:
+        return self.past_wait(now) and (self.past_wait(self.latest_lag_event_at) or harness_blocked)
 
 
 def fail_lagging(
@@ -613,10 +621,37 @@ def requeue_lagging(
 
 
 def lagging_end(connection: sqlite3.Connection, job_id: str) -> LaggingEnd | None:
-    """The row's refusal when its latest end is a lagging preflight, or None."""
+    """The row's lag when its latest end is a refusal or lag-blocked, or None."""
+    return _lag_since_run(connection, job_id, (PREFLIGHT_LAGGING, LAG_BLOCKED))
+
+
+def lagging_requeue(connection: sqlite3.Connection, job_id: str) -> LaggingEnd | None:
+    return _lag_since_run(connection, job_id, (REQUEUED_LAGGING,))
+
+
+def fail_lag_blocked(
+    connection: sqlite3.Connection, job_id: str, *, now: float, detail: str
+) -> bool:
+    changed = connection.execute(
+        """
+        UPDATE jobs SET state = 'failed', finished_at = ?, last_activity_at = ?,
+            failure_handled = 0
+        WHERE id = ? AND state = 'queued'
+        """,
+        (now, now, job_id),
+    ).rowcount
+    if changed != 1:
+        return False
+    record_job_event(connection, job_id, LAG_BLOCKED, detail, now)
+    return True
+
+
+def _lag_since_run(
+    connection: sqlite3.Connection, job_id: str, latest: tuple[str, ...]
+) -> LaggingEnd | None:
     if not has_job_events(connection):
         return None
-    ends = (PREFLIGHT_LAGGING, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
+    ends = (PREFLIGHT_LAGGING, LAG_BLOCKED, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
             REQUEUED_LINK_DROP)
     marks = ", ".join("?" for _ in ends)
     rows = connection.execute(
@@ -626,15 +661,23 @@ def lagging_end(connection: sqlite3.Connection, job_id: str) -> LaggingEnd | Non
         """,
         (job_id, *ends),
     ).fetchall()
-    if not rows or rows[-1][0] != PREFLIGHT_LAGGING:
+    if not rows or rows[-1][0] not in latest:
         return None
-    first_refused_at = float(rows[-1][2])
+    detail: str | None = None
+    first_refused_at: float | None = None
+    latest_lag_event_at: float | None = None
     requeues = 0
-    for event, _detail, recorded_at in reversed(rows):
+    for event, event_detail, recorded_at in reversed(rows):
         if event in (RUN_DIED, RUN_EXITED):
             break
+        if event in (PREFLIGHT_LAGGING, LAG_BLOCKED) and latest_lag_event_at is None:
+            latest_lag_event_at = float(recorded_at)
         if event == PREFLIGHT_LAGGING:
             first_refused_at = float(recorded_at)
+            if detail is None:
+                detail = str(event_detail)
         elif event == REQUEUED_LAGGING:
             requeues += 1
-    return LaggingEnd(str(rows[-1][1]), first_refused_at, requeues)
+    if first_refused_at is None or latest_lag_event_at is None or detail is None:
+        return None
+    return LaggingEnd(detail, first_refused_at, latest_lag_event_at, requeues)

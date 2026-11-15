@@ -38,7 +38,9 @@ from lib.job_state import (
     Liveness,
     claimed_too_long,
     derive,
+    fail_lag_blocked,
     lagging_end,
+    lagging_requeue,
     last_run_end,
     link_drop_end,
     link_drop_requeues,
@@ -120,6 +122,41 @@ class JobsMixin:
             and free_slots(config, harness, used, blocked) == 0
         )
 
+    def _lag_blocked_recipients(self) -> frozenset[str]:
+        config = getattr(self.devices, "config", None)
+        if config is None:
+            return frozenset()
+        blocked = sync_blocks(self.queue)
+        return frozenset(
+            harness
+            for harness in HARNESSES
+            if any(device.eligible(harness) for device in config.devices)
+            and all(
+                blocked.blocks(device.name, harness)
+                for device in config.devices
+                if device.eligible(harness)
+            )
+        )
+
+    def _fail_lag_blocked_past_wait(self, job: Job, now: float) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lagging = lagging_requeue(connection, job.id)
+            failed = (
+                lagging is not None
+                and lagging.past_wait(now)
+                and fail_lag_blocked(
+                    connection,
+                    job.id,
+                    now=now,
+                    detail=f"queued; every {job.request.recipient} checkout is lagging",
+                )
+            )
+            connection.commit()
+        if failed:
+            self._log_job_event(job, "lag-blocked", "queued; every checkout is lagging")
+        return failed
+
     def _restart_queue_wait(self, job: Job, now: float) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -139,7 +176,14 @@ class JobsMixin:
         self._close_abandoned_jobs()
         now = self.queue.now()
         busy = self._busy_recipients()
+        lag_blocked = self._lag_blocked_recipients()
         for job in self.queue.outstanding():
+            if (
+                job.state == "queued"
+                and job.request.recipient in lag_blocked
+                and self._fail_lag_blocked_past_wait(job, now)
+            ):
+                continue
             # A queued job's last_activity_at is its queue-wait start: when
             # it was queued, or when a claim that never started was released
             # (#77 F1.2), so a release never times out a job for the wait
@@ -718,8 +762,8 @@ class JobsMixin:
 
     def _lagging_handled(self, job: Job) -> bool:
         """#357: a start refused because a checkout lags requeues the same row
-        after a backoff, and sticks the ticket device-lagging once the first
-        refusal is LAGGING_WAIT_SECONDS old. True when T6 handled the job."""
+        after a backoff, and sticks the ticket device-lagging if it still lags
+        past the wait. True when T6 handled the job."""
         with self._connect() as connection:
             lagging = lagging_end(connection, job.id)
         if lagging is None:
@@ -727,7 +771,9 @@ class JobsMixin:
         if job.request.action == "review" and self._review_retry_waits(job):
             return True
         now = self.queue.now()
-        if now - lagging.first_refused_at >= LAGGING_WAIT_SECONDS:
+        if lagging.still_lagging_past_wait(
+            now, harness_blocked=job.request.recipient in self._lag_blocked_recipients()
+        ):
             self._mark_stuck_and_wake(
                 repo=job.request.repo,
                 ticket_id=job.request.ticket_id,
