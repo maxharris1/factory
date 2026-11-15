@@ -525,17 +525,20 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state, source_comment_id, detail FROM jobs
+                SELECT action, state, source_comment_id, detail,
+                       state IN ('queued', 'running')
+                       OR (state = 'failed' AND failure_handled = 0) AS open
+                FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
-                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
+                ORDER BY open DESC, rowid DESC
                 LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
         if row is None:
             return False
-        if row["state"] in ("queued", "running"):
+        if row["open"]:
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
             ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])

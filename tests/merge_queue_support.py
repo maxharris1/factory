@@ -217,13 +217,15 @@ class Board:
         self.post(pr, comment_id, APPROVE.format(round=round_text, head=pr.head), "codex-login")
         return comment_id
 
-    def revise(self, pr: PR, round_text: str) -> None:
+    def revise(self, pr: PR, round_text: str) -> str:
+        comment_id = f"revise-{pr.number}-{round_text}"
         self.post(
             pr,
-            f"revise-{pr.number}-{round_text}",
+            comment_id,
             VERDICT.format(round=round_text, head=pr.head, verdict="REVISE", risk="high"),
             "codex-login",
         )
+        return comment_id
 
     def claim(self, recipient: str) -> Job:
         job = self.queue.claim(recipient)

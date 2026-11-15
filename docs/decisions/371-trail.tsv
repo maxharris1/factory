@@ -1,0 +1,5 @@
+decision	choice	why
+f-1 moved-head return	no code change; regression test only	#373 already fixed it on main: the verdict's exact repro passes at 2194422
+f-3 carried rule	a failed review or fix that T6 has not handled yet carries the CI failure like a queued or running one	T6 runs after T2 in a poll, so the failed job's retry (or its late verdict) is still coming; queuing a CI-only fix beside it made two fixes. Matches _open_fix_for_head, which already counts such a fix as open
+f-3 self-carry	safe	_ci_failure_carried reads jobs at the ready's head, and T6 counts a fix's ready as its handoff only at another head, so a fix can never carry its own ready
+f-2 dedupe key	left unchanged; asked Max	ac-2 contradicts #373 r2 f-3, which the same reviewer closed and which two committed tests pin (a same-head red ready after a finished fix dedupes and flags dedupe-dropped). Changing the key failed both tests
