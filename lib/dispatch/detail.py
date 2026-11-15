@@ -231,7 +231,7 @@ class DetailMixin:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
 
-    def _reviewed_head(self, ticket: TrackedTicket, round_number: int) -> str | None:
+    def _reviewed_head(self, ticket: TrackedTicket, through_round: int) -> str | None:
         from lib.evidence.findings import findings_evidence
 
         with self._connect() as connection:
@@ -240,7 +240,7 @@ class DetailMixin:
             comments=[item for item in ticket.comments if item.id in accepted],
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
-            current_round=round_number,
+            current_round=through_round + 1,
             bases={},
         ).reviewed_head
 
@@ -275,7 +275,8 @@ class DetailMixin:
             ],
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
-            current_round=_detail_round_number(request.detail) or 1,
+            current_round=(_detail_round_number(request.detail) or 1)
+            + (request.action == "review"),
             bases=_review_bases(
                 [
                     str(row["detail"] or "{}")
@@ -291,6 +292,9 @@ class DetailMixin:
                 + [request.detail or "{}"]
             ),
         )
+        rebase = detail.get("rebase")
+        if rebase is not None and rebase["last_reviewed_head"] == findings.reviewed_head:
+            findings = replace(findings, reviewed_base=rebase["reviewed_base"])
         result = ticket.ci.get(request.head or "")
         ci = None
         if result is not None and result.status == "failure":

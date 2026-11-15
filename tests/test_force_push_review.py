@@ -15,6 +15,7 @@ from lib.queue import Job, _job as queue_job
 from lib.update_check import RebaseScope, UpdateClass, rebase_scope
 from tests.merge_queue_support import Board, sha
 from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT, FACTORY_MD
+from tests.test_hold_merge_queue import held_board
 from tests.test_rebase_scope import Repo
 
 OLD_BASE, NEW_BASE = sha(90), sha(91)
@@ -157,6 +158,63 @@ def test_a_queued_unreviewed_head_is_never_the_range_diff_baseline(
     assert (
         f"git range-diff {git.base}..{reviewed} {git.base}..{latest}"
         in brief(queue_job(rows[-1]))
+    )
+
+
+@pytest.mark.job_bound
+def test_a_same_round_approval_is_the_range_diff_baseline(tmp_path: Path) -> None:
+    git = Repo(tmp_path / "git")
+    revised = git.pr_commit("value = 1\n")
+    approved = git.pr_commit("value = 2\n")
+    git.git("checkout", "-q", "-B", "pr", git.base)
+    (git.root / "feature.py").write_text("value = 1\n")
+    reverted = git.commit("pr reworded")
+    board = held_board(tmp_path)
+    board.dispatcher.rebase_classifier = lambda _repo, _base, last, head: rebase_scope(
+        git.gitdir, last, head, "refs/heads/main"
+    )
+    snapshot = board.snapshot
+    board.snapshot = lambda pr, fresh=False: replace(
+        snapshot(pr, fresh=fresh), ready_starts_review=True
+    )
+
+    def build(head: str) -> str:
+        job = board.claim("claude")
+        ready = board.ready(pr, head)
+        board.queue.finish(job.id, owner="claude", handoff_comment_id=ready)
+        board.poll()
+        return ready
+
+    def review(verdict) -> None:
+        job = board.claim("codex")
+        board.queue.finish(job.id, owner="codex", handoff_comment_id=verdict())
+        board.poll()
+
+    pr = board.open("42", revised)
+    pr.changed_files = ("src/view/Button.tsx",)
+    pr.mergeable = None
+    pr.mergeable_state = None
+    board.go(pr, "go-42")
+    board.poll()
+    assert board.outcome(build(revised)) == "queued-review"
+    review(lambda: board.revise(pr, "1/3"))
+
+    pr.push(approved)
+    assert board.outcome(build(approved)) == "queued-review"
+    review(lambda: board.approve(pr, "2/3"))
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+
+    pr.push(reverted)
+    board.poll()
+    row = board.jobs("review")[-1]
+    detail = json.loads(row["detail"])
+    assert (row["head"], row["state"], detail["round"]) == (reverted, "queued", "2/3")
+    assert detail["rebase"]["last_reviewed_head"] == approved
+    evidence = detail["evidence"]["findings"]
+    assert (evidence["reviewed_head"], evidence["reviewed_base"]) == (approved, git.base)
+    assert (
+        f"git range-diff {git.base}..{approved} {git.base}..{reverted}"
+        in brief(queue_job(row))
     )
 
 

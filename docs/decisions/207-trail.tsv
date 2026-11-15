@@ -8,3 +8,4 @@ ac-3	no code change; T2/T4/TQ already read CI at the ready or PR head	pinned by 
 reviewed_base per round	read back from review jobs' rebase detail into FindingsEvidence bases	no new column; round N's rebase carries round N-1's base and its own
 model/	untouched	no workflow transition changed
 f-1 range-diff baseline	last accepted reviewer verdict head (findings_evidence), shared with the evidence bundle	_latest_review_head counted queued unreviewed reviews; pinned by test_a_queued_unreviewed_head_is_never_the_range_diff_baseline
+f-1 same-round baseline	count accepted verdicts through the queued review round, in _reviewed_head and the review evidence	a same-round APPROVE then force-push queues another review at that round, and the strict earlier-round filter skipped the APPROVE; pinned by test_a_same_round_approval_is_the_range_diff_baseline
