@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import reap_state, sandbox_env
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,26 +65,29 @@ def home(tmp_path: Path):
     orch.write_text(FAKE_ORCH, encoding="utf-8")
     orch.chmod(0o755)
     (home / ".config" / "factory").mkdir(parents=True)
-    yield home
-    for bot in ("claude-bot", "codex-bot"):
-        _service(home, bot, "stop")
-    for pid in _all_starts(home):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    try:
+        yield home
+    finally:
+        for bot in ("claude-bot", "codex-bot"):
+            _service(home, bot, "stop")
+        for pid in _all_starts(home):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        reap_state(home)
 
 
 def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
-    env = {
-        "HOME": str(home),
-        "PATH": "/usr/bin:/bin",
-        "ORCH_WAITER_RESTART_SEC": "0.2",
-        "ORCH_WAITER_START_WAIT": "10",
-        "ORCH_WAITER_STOP_WAIT": "10",
-        "ORCH_CRONTAB": str(cron) if cron is not None else str(home / "no-such-crontab"),
+    env = sandbox_env(
+        home,
+        PATH="/usr/bin:/bin",
+        ORCH_WAITER_RESTART_SEC="0.2",
+        ORCH_WAITER_START_WAIT="10",
+        ORCH_WAITER_STOP_WAIT="10",
+        ORCH_CRONTAB=str(cron) if cron is not None else str(home / "no-such-crontab"),
         **extra,
-    }
+    )
     return subprocess.run(
         ["bash", str(SERVICE), *args],
         env=env,
@@ -354,8 +358,12 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
     (home / ".config/factory/waiter-autostart-claude-bot").touch()
     (home / ".config/factory/waiter-autostart-codex-bot").touch()
     (home / ".config/factory/waiter-autostart-bogus").touch()
-    subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
-                   env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, check=True, timeout=30)
-    _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
+    (home / ".config/factory/self-heal-autostart").unlink()
+    try:
+        subprocess.run(["sh", "-c", patched + "\nwait\nsleep 0.3\n"],
+                       env=sandbox_env(home, PATH="/usr/bin:/bin"), check=True, timeout=30)
+        _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
+    finally:
+        reap_state(home)
     assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()

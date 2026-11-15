@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import reap_state, sandbox_env
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,20 +99,16 @@ python.chmod(0o755)
         + "\ntrusted_linear_users:\n  test-user-id: [grok-bot]\n",
         encoding="utf-8",
     )
-    environment = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
-    environment.update(
-        {
-            "EXPECTED_REQUIREMENTS": str(ROOT / "requirements.txt"),
-            "FAKE_VENV_PYTHON": FAKE_VENV_PYTHON,
-            "HOME": str(tmp_path),
-            "ORCH_CONFIG": str(orch_config),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            # Never a real crontab or systemd; autostart tests point these at fakes.
-            "ORCH_CRONTAB": str(fake_bin / "no-such-crontab"),
-            "ORCH_SYSTEMCTL": str(fake_bin / "no-such-systemctl"),
-        }
+    return sandbox_env(
+        tmp_path,
+        EXPECTED_REQUIREMENTS=str(ROOT / "requirements.txt"),
+        FAKE_VENV_PYTHON=FAKE_VENV_PYTHON,
+        ORCH_CONFIG=str(orch_config),
+        PATH=f"{fake_bin}:/usr/bin:/bin",
+        # Never a real crontab or systemd; autostart tests point these at fakes.
+        ORCH_CRONTAB=str(fake_bin / "no-such-crontab"),
+        ORCH_SYSTEMCTL=str(fake_bin / "no-such-systemctl"),
     )
-    return environment
 
 
 @pytest.mark.parametrize("installer", ["uv", "venv"])
@@ -167,7 +165,7 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
             "set -e; source deploy/profile.sh; printf ok",
         ],
         cwd=ROOT,
-        env={**os.environ, "HOME": str(tmp_path)},
+        env=sandbox_env(tmp_path),
         text=True,
         capture_output=True,
         check=False,
@@ -383,7 +381,7 @@ def test_run_poller_exports_both_env_files_unbuffered(tmp_path: Path) -> None:
     result = subprocess.run(
         ["bash", "deploy/run-poller.sh", "--once"],
         cwd=ROOT,
-        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
         text=True,
         capture_output=True,
         check=False,
@@ -417,7 +415,7 @@ def test_run_poller_refuses_to_start_without_its_env(tmp_path: Path, missing: st
     orch.chmod(0o755)
 
     result = subprocess.run(["bash", "deploy/run-poller.sh"], cwd=ROOT,
-                            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                            env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 78
@@ -510,12 +508,12 @@ def test_install_refuses_an_unknown_option(tmp_path: Path) -> None:
 
 
 def _profile_env(tmp_path: Path) -> dict[str, str]:
-    return {
-        "HOME": str(tmp_path),
-        "PATH": "/usr/bin:/bin",
-        "ORCH_POLL_START_WAIT": "10",
-        "ORCH_CRONTAB": str(tmp_path / "no-such-crontab"),
-    }
+    return sandbox_env(
+        tmp_path,
+        PATH="/usr/bin:/bin",
+        ORCH_POLL_START_WAIT="10",
+        ORCH_CRONTAB=str(tmp_path / "no-such-crontab"),
+    )
 
 
 def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> None:
@@ -562,9 +560,9 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
             ).read_text() if (tmp_path / ".local/state/factory/poller-service.log").exists() else "no log"
             time.sleep(0.1)
     finally:
-        time.sleep(0.2)
-        if pidfile.exists():
-            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        subprocess.run(["bash", "deploy/poller-service.sh", "stop"], cwd=ROOT,
+                       env=_profile_env(tmp_path), capture_output=True, timeout=60, check=False)
+        reap_state(tmp_path)
 
 
 # --- #107: profile, self-heal and legacy launchers ---------------------------------------------
@@ -694,10 +692,11 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         f"@reboot {listener} ensure\n"
         "0 3 * * * /usr/bin/true # keep\n",
         encoding="utf-8")
-    poller_env = {**os.environ, "HOME": str(tmp_path)}
+    poller_env = sandbox_env(tmp_path)
     pollers = [subprocess.Popen(["/bin/sh", str(poller)], env=poller_env) for _ in range(20)]
     children = [_child(tmp_path / f"child-{proc.pid}") for proc in pollers]
-    bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"])
+    bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"],
+                                 start_new_session=True)
     try:
         result = _install(environment)
 
@@ -720,10 +719,16 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         assert f"removed legacy launcher {listener}" not in again.stdout
         assert listener.exists()
     finally:
+        os.killpg(bystander.pid, signal.SIGKILL)
         for proc in (*pollers, bystander):
             if proc.poll() is None:
                 proc.kill()
-                proc.wait()
+            proc.wait()
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(
@@ -774,6 +779,7 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
     }
     source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
     lock = tmp_path / ".local/state/factory/linear-webhook-listener.lock"
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
 
     off = subprocess.run(source, cwd=ROOT, env=env, text=True,
                          capture_output=True, timeout=30, check=False)
@@ -796,6 +802,7 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
     finally:
         stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
                                  capture_output=True, timeout=60, check=False)
+        reap_state(tmp_path)
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
 
 

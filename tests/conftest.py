@@ -10,19 +10,86 @@ process unless a test overrides `_skill_preflight`, as
 tests/test_skill_preflight.py does. A waiter a test starts as its own
 process runs the real preflight, so HOME is a session home holding the
 pinned skills, installed as install-skills does.
+
+No `ORCH_*`, `FACTORY_*`, `LINEAR_WEBHOOK_*` or `XDG_*` name from the
+calling shell reaches a test (#299): a box job exports ORCH_DB and friends
+at the live state dir, and a deploy script a test runs would act on it.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import site
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
+
+SCRUBBED_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _a_clean_factory_env():
+    scrubbed = {name: os.environ.pop(name) for name in list(os.environ)
+                if name.startswith(SCRUBBED_PREFIXES)}
+    yield
+    os.environ.update(scrubbed)
+
+
+def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
+    """The scrubbed environment with HOME, the XDG dirs and the factory state
+    dir all under `home`, then `extra`."""
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_RUNTIME_DIR": str(home / ".run"),
+        "ORCH_STATE_DIR": str(home / ".local/state/factory"),
+        **extra,
+    }
+
+
+def reap_state(home: Path) -> None:
+    """Kill every process a pidfile or lock in home's factory state dir names,
+    and its process group when it leads one, but only while that process's
+    HOME is still `home`: a reused pid is never signalled."""
+    state = home / ".local/state/factory"
+    pids = set()
+    for path in (*state.glob("*.pid"), *state.glob("*.lock")):
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if text.isdigit():
+            pids.add(int(text))
+    ours = [pid for pid in pids if _home_of(pid) == str(home)]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in ours:
+            try:
+                if os.getpgid(pid) == pid:
+                    os.killpg(pid, sig)
+                else:
+                    os.kill(pid, sig)
+            except OSError:
+                pass
+        if sig == signal.SIGTERM and ours:
+            time.sleep(0.2)
+
+
+def _home_of(pid: int) -> str | None:
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    for entry in environ:
+        if entry.startswith(b"HOME="):
+            return entry[5:].decode(errors="replace")
+    return None
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -85,7 +152,7 @@ def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_local_overlay():
+def _no_local_overlay(_a_clean_factory_env):
     """No host's orch.local.yml or machines.local.yml leaks into a test (#107).
     Overlay tests clear ORCH_NO_LOCAL_OVERLAY with monkeypatch.delenv."""
     previous = os.environ.get("ORCH_NO_LOCAL_OVERLAY")
@@ -98,7 +165,7 @@ def _no_local_overlay():
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
+def _no_real_db_backup(_a_clean_factory_env, tmp_path_factory: pytest.TempPathFactory):
     """#66: `orch poll` backs up after every cycle; never to the real
     ~/.local/share/factory/backup. Tests that need a path set their own."""
     backup = tmp_path_factory.mktemp("db-backup") / "orch.db"
