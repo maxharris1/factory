@@ -129,6 +129,29 @@ def test_an_exclusive_path_keeps_one_holder_from_either_side() -> None:
     assert wait is not None and wait.reason == "waiting on file model/x.yml held by #1"
 
 
+@pytest.mark.parametrize(
+    ("exclusive", "held", "asked", "reason"),
+    [
+        ("lib/model/", "lib/", "lib/", "waiting on file lib/ held by #1"),
+        ("model/*.yml", "model/", "model/", "waiting on file model/ held by #1"),
+        ("lib/model/", "lib/", "lib/model/x.py", "waiting on file lib/model/x.py held by #1"),
+        ("**/*.sql", "db/", "db/", "waiting on file db/ held by #1"),
+        ("lib/model/", "lib/", "lib/x.py", None),
+        ("lib/model/", "lib/other/", "lib/", None),
+        ("model/*.yml", "model/", "model/x.json", None),
+        ("docs/**/*.sql", "lib/", "lib/", None),
+        ("lib/**", "lib/", "lib/", "waiting on file lib/ held by #1"),
+    ],
+)
+def test_an_exclusive_path_under_the_overlap_of_two_declarations_keeps_one_holder(
+    exclusive: str, held: str, asked: str, reason: str | None
+) -> None:
+    holds = Holds(policies={HOME: PathPolicy(exclusive=(exclusive,), max_holders=2)})
+    holds.take(ref(1), (), touches(held))
+    wait = holds.collision(ref(2), touches(asked))
+    assert (wait and wait.reason) == reason
+
+
 def test_a_path_both_shared_and_exclusive_never_collides() -> None:
     policy = PathPolicy(shared=("docs/SPEC.md",), exclusive=("docs/SPEC.md",), max_holders=2)
     holds = Holds(policies={HOME: policy})
@@ -242,4 +265,16 @@ def test_a_path_shared_and_exclusive_never_collides_in_the_feeder(tmp_path: Path
         issue(2, created_at=2.0, body="Touches: docs/SPEC.md"),
     ]
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1", "factory/issue-2"]
+    assert not any(" shares " in line for line in log)
+
+
+def test_parent_directory_declarations_wait_on_an_exclusive_descendant(tmp_path: Path) -> None:
+    text = FACTORY_MD.replace(PIN, "feeder:\n  exclusive_paths: [lib/model/]\n")
+    feeder, github, log = logged_feeder(tmp_path, text)
+    github.issues[HOME] = [
+        issue(1, created_at=1.0, body="Touches: lib/"),
+        issue(2, created_at=2.0, body="Touches: lib/"),
+    ]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1"]
+    assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on file lib/ held by #1")
     assert not any(" shares " in line for line in log)

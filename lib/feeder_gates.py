@@ -174,6 +174,25 @@ def path_matches(patterns: Iterable[str], path: str) -> bool:
     return False
 
 
+def matches_at_or_under(patterns: Iterable[str], path: str) -> bool:
+    if path_matches(patterns, path):
+        return True
+    if not path.endswith("/"):
+        return False
+    parts = path.removesuffix("/").split("/")
+    for pattern in patterns:
+        steps = pattern.removesuffix("/").split("/")
+        for step, part in zip(steps, parts):
+            if "**" in step:
+                return True
+            if not glob_matches(step, part):
+                break
+        else:
+            if len(steps) > len(parts):
+                return True
+    return False
+
+
 class Progress(Enum):
     DONE = "done"
     OPEN = "open"
@@ -362,9 +381,8 @@ class Holds:
                 for other in sorted(held.touches):
                     if path_matches(policy.shared, other) or not paths_collide(path, other):
                         continue
-                    exclusive = path_matches(policy.exclusive, path) or path_matches(
-                        policy.exclusive, other
-                    )
+                    longer = path if len(path) >= len(other) else other
+                    exclusive = matches_at_or_under(policy.exclusive, longer)
                     limit = 1 if exclusive else policy.max_holders
                     groups = ({holder},) if limit == 1 else (
                         self._holders_on(ref.repo, own, path, policy),
@@ -372,7 +390,6 @@ class Holds:
                     )
                     for group in groups:
                         if len(group) >= limit:
-                            longer = path if len(path) >= len(other) else other
                             return Wait(
                                 f"waiting on file {longer} held by {labels(group, ref.repo)}"
                             )

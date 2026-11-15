@@ -672,7 +672,9 @@ tickets in feed order keeping the spots. The limit counts holders on both
 sides of a collision: a ticket on `lib/y.py` waits while `lib/` and
 `lib/x.py` already have two holders between them, so a held directory
 never goes over the limit. A path matching `feeder.exclusive_paths` and a
-`Conflicts with` edge keep one holder. The reason names every holder that
+`Conflicts with` edge keep one holder, and so do two directory declarations
+whose overlap holds an exclusive path: with `exclusive_paths: [lib/model/]`,
+two `Touches: lib/` tickets keep one holder. The reason names every holder that
 fills the limit, `waiting on file lib/x.py held by #1, #2` (one holder reads
 `held by #1`, as before). A ticket fed onto a path others hold logs
 `feeder: owner/app#3 shares lib/x.py with #1`, one line per extra holder,
