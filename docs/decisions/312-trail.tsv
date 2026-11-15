@@ -1,0 +1,8 @@
+decision	choice	why
+module layout	seven rule modules (t3, t4, record, coverage, shipped, preview, latest) and an __init__ that only composes VerdictMixin	each method has its own callers; one module per rule means two tickets on different rules never share a Touches path (plan comment 6896269418)
+how the move was made	a generator sliced each method's source by AST line range and wrote it verbatim; imports per module are the old imports filtered to the names that module uses	a byte-for-byte copy cannot drift; the generator is the lever a reviewer can rerun
+how to prove a pure move	ast.dump of each of the 9 methods and ReviseCIGate in origin/main:lib/dispatch/verdict.py equals the moved node; all 24 old names resolve from lib.dispatch.verdict and lib.dispatcher	any change to logic, a docstring or a message string changes the dump
+edits outside Touches	lib/dispatcher.py imports ReviseCIGate and write_workflow_state; tests/test_ticket_transitions.py WRITERS t3 path moves to verdict/t3.py	AC3 needs both names on the facade; the WRITERS map reads a file path
+_t4 duplicates _approval_covers	kept as it is	pure-move ticket; a follow-up can merge them
+full suite	ran the touched and dispatch-related test files plus check-config, not the whole suite	the build brief forbids running the full suite locally; CI is the gate
+empty feeder commit	dropped by the rebase onto main	git rebase skips an empty commit; it carried no content
