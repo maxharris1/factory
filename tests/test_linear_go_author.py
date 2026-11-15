@@ -1,8 +1,3 @@
-"""#174: a capped go on a Linear ticket lifts the cap only from the Linear
-user listed in approver_linear_users, with the GitHub App switch on or off.
-Every Linear user id here is fake.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,12 +10,12 @@ from lib.orch_yml import approvals, load_approvals
 from tests.test_approver_credential import (
     APP_BOT,
     MAX,
-    AppFlow,
     grok_wakes,
     load,
     orch_text,
 )
 from tests.test_dispatcher import FakeGrokDelivery, FakeReviewActions, job_count
+from tests.test_rounds_and_caps import Flow
 
 MAX_LINEAR = "linear:max-id"
 OTHER_LINEAR = "linear:other-id"
@@ -36,19 +31,17 @@ def linear_text(*, enabled: bool | None, approver: bool = True) -> str:
     )
 
 
-class LinearFlow(AppFlow):
-    """AppFlow with trusted_linear_users wired in the way orch poll wires it."""
-
+class LinearFlow(Flow):
     def __init__(self, tmp_path: Path, *, enabled: bool | None, approver: bool = True):
-        super().__init__(tmp_path, enabled=enabled, text=linear_text(enabled=enabled, approver=approver))
+        super().__init__(tmp_path)
         config, findings = load(tmp_path, linear_text(enabled=enabled, approver=approver))
         assert config is not None, findings
         self.dispatcher = Dispatcher(
             self.queue.path,
             self.queue,
             trusted_logins={
-                "github": {login: set(bots) for login, bots in config.trusted_logins.items()},
-                "linear": {user: set(bots) for user, bots in config.trusted_linear_users.items()},
+                "github": dict(config.trusted_logins),
+                "linear": dict(config.trusted_linear_users),
             },
             review_actions=FakeReviewActions(),
             grok_delivery=FakeGrokDelivery(),

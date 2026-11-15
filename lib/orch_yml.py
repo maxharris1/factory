@@ -291,8 +291,6 @@ def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
 
 
 def linear_approver_findings(config: OrchConfig) -> list[Finding]:
-    """A Linear project with no approver_linear_users leaves the capped-go
-    gap open (#174): any trusted Linear go lifts a cap."""
     if config.approver_linear_users is not None or not any(
         project.linear_project_id is not None for project in config.projects
     ):
@@ -912,8 +910,6 @@ def _approver_logins(data: dict, findings: list[Finding]) -> frozenset[str] | No
 
 
 def _approver_linear_users(data: dict, findings: list[Finding]) -> frozenset[str] | None:
-    """Stable Linear user ids whose go on a capped Linear ticket lifts the
-    cap (#174), as linear:<id> authors."""
     if "approver_linear_users" not in data:
         return None
     value = data["approver_linear_users"]

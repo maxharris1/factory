@@ -16,11 +16,9 @@ class ResumeAfterCapMixin:
 
         One transaction raises cap_extra by 1, moves the ticket to fixing
         and queues the fix, keyed on the go comment so every go Max relays
-        queues exactly one fix. None when the ticket is not capped. With the
-        GitHub App switch on, only an approver's go counts (#122), and on
-        Linear only an approver_linear_users go once that key is set (#174);
-        any other wakes Grok once with go-not-from-approver and changes
-        nothing.
+        queues exactly one fix. None when the ticket is not capped. A go
+        _may_lift_cap refuses wakes Grok once with go-not-from-approver and
+        changes nothing (#122, #174).
         """
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:

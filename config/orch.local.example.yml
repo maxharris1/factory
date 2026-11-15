@@ -13,6 +13,8 @@ projects:
 trusted_linear_users:
   REPLACE_WITH_LINEAR_USER_ID:
     - grok-bot
+approver_linear_users:
+  - REPLACE_WITH_LINEAR_USER_ID
 # Max's own Linear user: only its go lifts a cap on a Linear ticket
 # (docs/decisions/174-linear-approver.md).
 # approver_linear_users:
