@@ -314,6 +314,66 @@ STATEMENTS = "".join(f"SELECT {n};\n" for n in range(12))
             f"CREATE TABLE a (\n{TABLES}    id bigint\n);\n",
         ),
         ("SELECT\n  1\n", "SELECT\n  2\n"),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /* existing members; more below */\n"
+            "    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /* existing members; more below */\n"
+            "    public.messages, public.events;\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n  members; more\n  below */\n"
+            "    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n  members; more\n  below */\n"
+            "    public.messages, public.events;\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /* outer /* inner; */ still; */\n"
+            "    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /* outer /* inner; */ still; */\n"
+            "    public.events;\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE -- members; more below\n"
+            "    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE -- members; more below\n"
+            "    public.messages, public.events;\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime SET (publish = 'insert;\n  update');\n",
+            "ALTER PUBLICATION supabase_realtime SET (publish = 'insert;\n  update, delete');\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE \"odd;name\",\n    public.messages;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE \"odd;name\",\n    public.events;\n",
+        ),
+        (
+            "DO $$ BEGIN EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE ' ||\n"
+            "  'public.messages'; END $$;\n",
+            "DO $$ BEGIN EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE ' ||\n"
+            "  'public.events'; END $$;\n",
+        ),
+        (
+            "DO $body$ BEGIN\n  EXECUTE format($q$ALTER PUBLICATION supabase_realtime ADD TABLE %s;$q$,\n"
+            "    'public.messages');\nEND $body$;\n",
+            "DO $body$ BEGIN\n  EXECUTE format($q$ALTER PUBLICATION supabase_realtime ADD TABLE %s;$q$,\n"
+            "    'public.events');\nEND $body$;\n",
+        ),
+        (
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE /*\n  a\n  b; c\n  d\n  e\n*/ public.messages;\n",
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE /*\n  a\n  b; c\n  d\n  e\n*/ public.events;\n",
+        ),
+        (
+            f"{STATEMENTS}CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\n"
+            "  ALTER PUBLICATION supabase_realtime ADD TABLE public.a;\n"
+            "  SELECT 1;\n  SELECT 2;\n  SELECT 3;\n  SELECT 4;\nEND $$ LANGUAGE plpgsql;\n",
+            f"{STATEMENTS}CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\n"
+            "  ALTER PUBLICATION supabase_realtime ADD TABLE public.a;\n"
+            "  SELECT 1;\n  SELECT 2;\n  SELECT 3;\n  SELECT 5;\nEND $$ LANGUAGE plpgsql;\n",
+        ),
+        (
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE public.a, '\n  x\n  y; z\n  w\n  v\n', public.messages;\n",
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE public.a, '\n  x\n  y; z\n  w\n  v\n', public.events;\n",
+        ),
     ],
     ids=[
         "keyword-line-is-context",
@@ -323,6 +383,17 @@ STATEMENTS = "".join(f"SELECT {n};\n" for n in range(12))
         "statement-head-outside-the-hunk",
         "unreadable-statement-head",
         "unterminated-statement",
+        "semicolon-in-block-comment",
+        "semicolon-in-multiline-block-comment",
+        "semicolon-in-nested-block-comment",
+        "semicolon-in-line-comment",
+        "semicolon-in-string-literal",
+        "semicolon-in-quoted-identifier",
+        "publication-in-dynamic-sql-string",
+        "semicolon-in-dollar-quoted-body",
+        "hunk-starts-inside-a-block-comment",
+        "hunk-starts-inside-a-dollar-quoted-body",
+        "hunk-starts-inside-a-string-literal",
     ],
 )
 def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
@@ -350,8 +421,34 @@ def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
             f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id int\n);\n",
             f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id bigint\n);\n",
         ),
+        (
+            "CREATE TABLE a ( -- not realtime; plain\n  id int\n);\n",
+            "CREATE TABLE a ( -- not realtime; plain\n  id bigint\n);\n",
+        ),
+        (
+            "/* realtime; publication notes */ CREATE TABLE a (\n  id int\n);\n",
+            "/* realtime; publication notes */ CREATE TABLE a (\n  id bigint\n);\n",
+        ),
+        (
+            "INSERT INTO a VALUES ('x; y',\n  1);\n",
+            "INSERT INTO a VALUES ('x; y',\n  2);\n",
+        ),
+        (
+            "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
+            "CREATE TABLE a (\n  id int\n);\n/* a long note\n  that goes on\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
+            "CREATE TABLE a (\n  id bigint\n);\n/* a long note\n  that goes on\n",
+        ),
     ],
-    ids=["next-to-a-realtime-statement", "after-a-realtime-comment", "statement-head-in-context"],
+    ids=[
+        "next-to-a-realtime-statement",
+        "after-a-realtime-comment",
+        "statement-head-in-context",
+        "realtime-only-in-a-line-comment-inside-the-statement",
+        "realtime-only-in-a-block-comment-before-the-statement",
+        "semicolon-in-an-ordinary-string",
+        "headed-hunk-ending-inside-a-comment",
+    ],
 )
 def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str) -> None:
     ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])

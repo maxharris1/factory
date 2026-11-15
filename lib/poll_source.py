@@ -2033,27 +2033,83 @@ def _sql_patch_risk(patch: str) -> bool | None:
     return decided
 
 
+SQL_TOKEN = re.compile(
+    r"--|/\*|\*/|;|(?<![\w$])[eE]'|'|\"|(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$"
+)
+SQL_COMMENT = re.compile(r"/\*|\*/")
+
+
+def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
+    """The pattern that scans a quoted run, and the match that closes it."""
+    if opener in ("'", '"'):
+        return re.compile(re.escape(opener * 2) + "|" + re.escape(opener)), opener
+    if opener in ("e'", "E'"):
+        return re.compile(r"\\.|''|'", re.DOTALL), "'"
+    return re.compile(re.escape(opener)), opener
+
+
 def _sql_statements_risk(lines: Sequence[str], mark: str, *, headed: bool) -> bool | None:
+    """#195: lexes one side of a hunk as PostgreSQL. Comments are dropped;
+    quoted strings, identifiers and dollar-quoted bodies keep their words but
+    never end a statement. A hunk that starts past line 1 and shows it began
+    inside a comment or quote cannot be split into statements."""
     decided: bool | None = False
+    from_top, touched, stray = headed, False, False
     text, changed = "", False
+    depth, quote, close = 0, None, ""
     for line in lines:
-        code = line[1:].split("--", 1)[0]
-        pieces = code.split(";")
-        for number, piece in enumerate(pieces):
+        mine = line[:1] == mark
+        touched = touched or mine
+        code, at = line[1:] + "\n", 0
+        while at < len(code):
+            if depth:
+                found = SQL_COMMENT.search(code, at)
+                if found is None:
+                    break
+                at = found.end()
+                depth += 1 if found.group() == "/*" else -1
+                text += "" if depth else " "
+                continue
+            if quote is not None:
+                found = quote.search(code, at)
+                piece = code[at : len(code) if found is None else found.end()]
+                text += piece
+                changed = changed or (mine and bool(piece.strip()))
+                if found is None:
+                    break
+                at = found.end()
+                if found.group() == close:
+                    quote = None
+                continue
+            found = SQL_TOKEN.search(code, at)
+            piece = code[at : len(code) if found is None else found.start()]
             text += piece
-            changed = changed or (line[:1] == mark and bool(piece.strip()))
-            if number == len(pieces) - 1:
+            changed = changed or (mine and bool(piece.strip()))
+            if found is None:
                 break
-            changed = changed or line[:1] == mark
-            if changed and RISKY_CHANGE.search(text):
-                return True
-            if changed and not headed:
-                decided = None
-            text, changed, headed = "", False, True
-        text += "\n"
-    if changed:
-        return True if RISKY_CHANGE.search(text) else None
-    return decided
+            token, at = found.group(), found.end()
+            if token == ";":
+                changed = changed or mine
+                if changed and RISKY_CHANGE.search(text):
+                    return True
+                if changed and not headed:
+                    decided = None
+                text, changed, headed = "", False, True
+            elif token == "--":
+                text, at = text + " ", len(code)
+            elif token == "/*":
+                depth = 1
+            elif token == "*/":
+                stray = True
+            else:
+                quote, close = _sql_quote(token)
+                text += token
+                changed = changed or mine
+    if changed and RISKY_CHANGE.search(text):
+        return True
+    if touched and not from_top and (stray or depth or quote is not None):
+        return None
+    return None if changed else decided
 
 
 def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
