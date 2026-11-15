@@ -402,8 +402,8 @@ def test_the_box_is_checked_in_place_without_ssh(
 
     assert started is None
     assert device.ssh.calls() == []
-    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == (
-        "preflight-missing: ~/.claude/skills/interrogate/SKILL.md"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"].startswith(
+        "preflight-missing: ~/.claude/skills/interrogate/SKILL.md (install-skills: "
     )
 
 

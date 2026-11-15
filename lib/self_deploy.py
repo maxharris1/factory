@@ -47,9 +47,12 @@ One pass, in order; the first guard that fails ends it:
    dropped when the apply ends, and every box row once HEAD is origin/main.
 7. When the merge changed deploy/ or requirements.txt, it runs
    `deploy/install.sh --update` (output in self-deploy-install.log). When
-   it changed skills/ (the pin and the pinned files), it then runs
-   `orch install-skills` from the new checkout, so this account's installed
-   skills match the new pin.
+   it changed skills/ (the pin and the pinned files), or this account's
+   installed skills (under HOME) miss the checkout's pin, it then runs
+   `orch install-skills` from the checkout. An up-to-date pass makes the
+   same check, so an install that failed is rerun once its cause is gone.
+   Every other bot account's waiter installs into its own home before a
+   box start (lib/skill_preflight.py).
 
 Escalation goes through lib/heal.py's webhook POST (URL and auth from the
 environment, never logged), once per reason: self-deploy.state.json keeps
@@ -73,7 +76,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import device_sync, health
+from lib import device_sync, health, pstack_pin
 from lib.device_pool import slots_in_use
 from lib.heal import (
     ESCALATE,
@@ -449,9 +452,14 @@ def run_pass(
     except GitError as exc:
         return Outcome(REFUSED, f"git unreadable ({exc})"), {}
     if old == new:
-        if queue is not None and not dry_run:
-            _release(queue, device, device_sync.STATES)
-        return Outcome(UP_TO_DATE, old=old, new=new), {}
+        extra: dict = {}
+        if not dry_run:
+            if queue is not None:
+                _release(queue, device, device_sync.STATES)
+            if _skills_stale(checkout, environ):
+                extra["skills"] = _install_skills(checkout, environ, webhook, state_dir,
+                                                  install, clock)
+        return Outcome(UP_TO_DATE, old=old, new=new), extra
     if not git.ok("merge-base", "--is-ancestor", old, new):
         return Outcome(REFUSED, f"local commits: HEAD {old[:12]} is not behind origin/main",
                        old, new), {}
@@ -535,12 +543,31 @@ def _apply(
         code = install([str(checkout / "deploy" / "install.sh"), "--update"], env,
                        state_dir / INSTALL_LOG)
         extra["install"] = (code, clock() - install_started)
-    if git.names("diff", "--name-only", "-z", old, new, "--", *SKILLS_PATHS):
-        skills_started = clock()
-        code = install([sys.executable, str(checkout / "bin" / "orch"), "install-skills"], env,
-                       state_dir / INSTALL_LOG)
-        extra["skills"] = (code, clock() - skills_started)
+    if (git.names("diff", "--name-only", "-z", old, new, "--", *SKILLS_PATHS)
+            or _skills_stale(checkout, environ)):
+        extra["skills"] = _install_skills(checkout, environ, webhook, state_dir, install, clock)
     return Outcome(DEPLOYED, f"{old[:12]}..{new[:12]}", old, new), extra
+
+
+def _skills_stale(checkout: Path, environ: Mapping[str, str]) -> bool:
+    home = environ.get("HOME")
+    if not home:
+        return False
+    try:
+        return bool(pstack_pin.installed_errors(checkout, Path(home)))
+    except (OSError, ValueError, UnicodeError):
+        return False
+
+
+def _install_skills(
+    checkout: Path, environ: Mapping[str, str], webhook: Webhook, state_dir: Path,
+    install: Runner, clock: Callable[[], float],
+) -> tuple[int, float]:
+    env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
+    started = clock()
+    code = install([sys.executable, str(checkout / "bin" / "orch"), "install-skills"], env,
+                   state_dir / INSTALL_LOG)
+    return code, clock() - started
 
 
 def deploy(
@@ -594,7 +621,7 @@ def deploy(
     if outcome.kind == DEPLOYED and "install" in extra and extra["install"][0] != 0:
         key = f"install:{outcome.new}"
         escalation = f"deploy/install.sh --update exited {extra['install'][0]}"
-    elif outcome.kind == DEPLOYED and "skills" in extra and extra["skills"][0] != 0:
+    elif outcome.kind in (DEPLOYED, UP_TO_DATE) and "skills" in extra and extra["skills"][0] != 0:
         key = f"install-skills:{outcome.new}"
         escalation = f"orch install-skills exited {extra['skills'][0]}"
 
@@ -617,6 +644,9 @@ def deploy(
         if outcome.kind == ROLLED_BACK or state.get("last") != note:
             log(note)
         state["last"] = note
+        if "skills" in extra:
+            code, seconds = extra["skills"]
+            log(f"install-skills exit={code} {seconds:.1f}s")
     if outcome.kind in (UP_TO_DATE, DEPLOYED) and key is None:
         state.pop("escalated", None)
     if key is not None and state.get("escalated") != key and not dry_run:

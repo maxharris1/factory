@@ -29,15 +29,22 @@ start fails with CheckoutLagging (`preflight-lagging: ...` or
 the cause. The waiter requeues such a job without charging a round and
 marks the target lagging, so placement skips that device until
 `orch heal devices` brings it up to date. The check is skipped when the box
-HEAD cannot be read. On the box the checkout's HEAD is compared with its
-own fetched origin/main instead: a box HEAD behind it (self-deploy has not
-moved it yet, say a job was running) fails the same way, until it deploys.
+HEAD cannot be read. A remote start is also refused while the box checkout
+itself is behind its fetched origin/main (`preflight-lagging: box ...`), so
+a busy or refused box deploy never lets a remote run the old commit. On the
+box the checkout's HEAD is compared with its own fetched origin/main
+instead: a box HEAD behind it (self-deploy has not moved it yet, say a job
+was running) fails the same way, until it deploys.
 A box HEAD with commits origin/main lacks is not refused here; self-deploy
 escalates it and health flags it.
 
-On the box the files are read in place. On a remote device one ssh call
-sends the paths on stdin (relative to $HOME, or absolute) and reads back one
-`<sha256> <path>` line per file, or `- <path>` for a file that is not there.
+On the box the files are read in place. When an installed file is missing
+or changed, the waiter first runs install-skills from the checkout into its
+own home and hashes again, so every bot account on the box picks up a newly
+pinned skill at its next start, and a failed install is retried. On a
+remote device one ssh call sends the paths on stdin (relative to $HOME, or
+absolute) and reads back one `<sha256> <path>` line per file, or
+`- <path>` for a file that is not there.
 The first problem in path order fails the job before launch:
 `preflight-missing: <path>` or `preflight-hash: <path>`. Either way the
 job's detail gets a `skill_preflight` entry: the device, the skills
@@ -59,7 +66,10 @@ from lib.device_monitor import remote_target
 from lib.health import checkout_sha
 from lib.device_pool import Placement
 from lib.machines_yml import Device
-from lib.pstack_pin import DIR_HARNESS, FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, load_pin
+from lib.pstack_models import rules_text
+from lib.pstack_pin import (
+    DIR_HARNESS, FACTORY_DIR, KIT_DIR, PSTACK_DIR, ROOT, install_skills, load_pin,
+)
 from lib.queue import Job, SQLiteJobQueue
 from lib.remote import SSH_UNREACHABLE, CaptureTransport, RemoteTarget, SshTransport, ssh_argv
 from lib.wait import OWNING_BOTS, retry_locked
@@ -284,6 +294,19 @@ def box_behind_origin(device: str, bot: str, checkout: str) -> str | None:
             f"origin/main at {upstream[:12]}")
 
 
+def home_install_stale(expected: dict[str, str], found: dict[str, str]) -> bool:
+    return any(found.get(path) != digest for path, digest in expected.items()
+               if path.startswith(HOME_PREFIX))
+
+
+def install_into_home(checkout: Path, home: Path) -> list[str]:
+    try:
+        rules: str | None = rules_text(checkout)
+    except (OSError, ValueError):
+        rules = None
+    return install_skills(checkout, home, "local", rules=rules)
+
+
 def compare(pinned: dict[str, str], found: dict[str, str]) -> str | None:
     for path in sorted(pinned):
         if path not in found:
@@ -313,20 +336,30 @@ def check(
         raise PreflightError(f"preflight: {name} has no factory_root for {OWNING_BOTS[bot]}")
     expected = wanted(skills, checkout, pinned)
     paths = sorted(expected)
+    install_errors: list[str] = []
     if device is None or device.local or placement is None:
         name = device.name if device is not None else "box"
         lagging = box_behind_origin(name, bot, checkout)
         if lagging is not None:
             raise CheckoutLagging(lagging)
         found = local_hashes(home, paths)
+        if home_install_stale(expected, found):
+            install_errors = install_into_home(Path(checkout), home)
+            found = local_hashes(home, paths)
     else:
         name = device.name
+        lagging = box_behind_origin("box", bot, str(root.resolve()))
+        if lagging is not None:
+            raise CheckoutLagging(lagging)
         seen = remote_hashes(transport, device, placement, paths, checkout)
         lagging = lag(name, bot, checkout, seen.head, checkout_sha(root))
         if lagging is not None:
             raise CheckoutLagging(lagging)
         found = seen.found
-    return Report(name, skills, checkout, pinned.commit, found, compare(expected, found))
+    error = compare(expected, found)
+    if error is not None and install_errors:
+        error = f"{error} (install-skills: {install_errors[0]})"
+    return Report(name, skills, checkout, pinned.commit, found, error)
 
 
 def record(queue: SQLiteJobQueue, job: Job, entry: dict[str, object]) -> None:
