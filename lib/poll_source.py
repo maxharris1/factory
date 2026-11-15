@@ -1243,6 +1243,7 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
+            intake_label=project.intake.label if project.intake else None,
             source_issue=github_source(pull, project.repo, number),
             pr_title=_open_title(pull),
             **_pull_facts(pull, fresh=fresh),

@@ -1688,3 +1688,82 @@ def test_ci_status_says_whether_anything_reported(
     result = actions.ci_status("owner/repo", HEAD)
     assert result.status == "pending"
     assert result.reported is reported
+
+
+FOLLOWUP_MARKER = "<!-- orch-followup verdict=99 -->"
+# 2026-11-14T12:00:00Z; the lookup starts an hour earlier for clock skew.
+FOLLOWUP_SINCE = 1794657600.0
+ISSUES = ("--paginate", f"{REPO}/issues?state=all&since=2026-11-14T11:00:00Z&per_page=100")
+CREATE_ISSUE = (
+    "-X",
+    "POST",
+    f"{REPO}/issues",
+    "-f",
+    "title=Follow-ups from #42 r4",
+    "-f",
+    f"body=findings\n\n{FOLLOWUP_MARKER}",
+    "-f",
+    "labels[]=factory:ready",
+    "-f",
+    "labels[]=urgent",
+)
+
+
+def issues_page(*bodies: str) -> GhResult:
+    items = [{"number": 100 + index, "body": body} for index, body in enumerate(bodies)]
+    return GhResult(0, json.dumps(items), "")
+
+
+def file_followup(actions: GitHubReviewActions) -> int:
+    return actions.file_issue(
+        pr(),
+        "Follow-ups from #42 r4",
+        f"findings\n\n{FOLLOWUP_MARKER}",
+        ("factory:ready", "urgent"),
+        FOLLOWUP_MARKER,
+        FOLLOWUP_SINCE,
+    )
+
+
+def test_file_issue_creates_the_issue_when_no_issue_carries_the_marker() -> None:
+    actions, gh = adapter()
+    gh.route(ISSUES, issues_page("unrelated", f"> {FOLLOWUP_MARKER}", None))
+    gh.route(CREATE_ISSUE, GhResult(0, json.dumps({"number": 307}), ""))
+
+    assert file_followup(actions) == 307
+    assert gh.keys() == [ISSUES, CREATE_ISSUE]
+
+
+def test_file_issue_returns_the_issue_an_earlier_try_created() -> None:
+    actions, gh = adapter()
+    gh.route(ISSUES, issues_page("unrelated", f"findings\n\n{FOLLOWUP_MARKER}"))
+
+    assert file_followup(actions) == 101
+    assert gh.keys() == [ISSUES]
+
+
+def pr_comment(comment_id: int, body: str) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "user": {"login": "maxharris1"},
+        "body": body,
+        "created_at": "2026-11-14T12:00:00Z",
+    }
+
+
+LINK_MARKER = "<!-- orch-followup-link verdict=99 -->"
+LINK_BODY = f"Follow-ups are filed as #307.\n\n{LINK_MARKER}"
+POST_LINK = ("-X", "POST", f"{REPO}/issues/42/comments", "-f", f"body={LINK_BODY}")
+
+
+def test_comment_once_posts_only_when_no_comment_carries_the_marker() -> None:
+    actions, gh = adapter()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, f"quoted\n> {LINK_MARKER}")]), ""))
+    gh.route(POST_LINK, GhResult(0, "{}", ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.keys() == [COMMENTS, POST_LINK]
+
+    actions, gh = adapter()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, LINK_BODY)]), ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.keys() == [COMMENTS]

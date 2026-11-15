@@ -223,6 +223,26 @@ class SchemaMixin:
                 )
                 """
             )
+            # #259: one follow-up filing per trusted verdict comment. title and
+            # body are rendered when the verdict is accepted, so the drain never
+            # re-reads a comment. status: pending -> filed -> commented.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS followup_filings (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    round INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    labels TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    issue_number INTEGER,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS poll_errors (

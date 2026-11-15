@@ -42,6 +42,11 @@ clone and no cache.
   the fresh read shows it still before review; an unknown state fails
   before any write.
 - stable_patch_id is not built here and raises, so T4 queues a re-review.
+- file_issue and comment_once (issue #259): GET issues?state=all&since=
+  (the row's time less an hour, for clock skew) or the PR's comments, and
+  return the earlier write when a body carries the marker line; only then
+  POST. The lookup is a REST list, not the lagging search index, so a
+  retry after a crash between the write and its record finds the write.
 
 A GitHub ticket_id is the PR number. Every error is a GitHubAdapterError,
 which is a ShipError. Its safe_detail never holds gh's stdout or stderr,
@@ -55,7 +60,7 @@ import re
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -71,6 +76,7 @@ from lib.dispatcher import (
     TicketRef,
     TrackedTicket,
 )
+from lib.followups import has_marker
 from lib.handoff import STATES
 from lib.hold import LabelEvent
 from lib.pr_title import TITLE_LIMIT
@@ -392,6 +398,39 @@ class GitHubReviewActions:
             f"{_repo_path(ticket.repo)}/pulls/{_pr_number(ticket)}",
             "-f",
             f"title={title}",
+        )
+
+    def file_issue(
+        self,
+        ticket: TrackedTicket,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+        since: float,
+    ) -> int:
+        issues = _repo_path(ticket.repo) + "/issues"
+        after = datetime.fromtimestamp(since - 3600, tz=timezone.utc)
+        listing = f"{issues}?state=all&since={after:%Y-%m-%dT%H:%M:%SZ}&per_page=100"
+        for page in self._pages(listing):
+            if not isinstance(page, list):
+                raise GitHubAdapterError("issue page is not a list")
+            for item in page:
+                raw = _object(item)
+                body_text = raw.get("body")
+                if isinstance(body_text, str) and has_marker(body_text, marker):
+                    return _issue_number(raw.get("number"))
+        args = ["-X", "POST", issues, "-f", f"title={title}", "-f", f"body={body}"]
+        for label in labels:
+            args.extend(("-f", f"labels[]={label}"))
+        return _issue_number(_object(self._json(*args)).get("number"))
+
+    def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
+        number = _pr_number(ticket)
+        if any(has_marker(comment.body, marker) for comment in self.list_comments(ticket.repo, number)):
+            return
+        self._call(
+            "-X", "POST", f"{_repo_path(ticket.repo)}/issues/{number}/comments", "-f", f"body={body}"
         )
 
     def list_comments(self, repo: str, number: str) -> tuple[Comment, ...]:
@@ -946,6 +985,12 @@ def _comment_id(value: object) -> int:
     if isinstance(value, str) and _NUMBER.fullmatch(value):
         return int(value)
     raise GitHubAdapterError(f"comment id {value!r} is not a positive integer")
+
+
+def _issue_number(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise GitHubAdapterError(f"issue number {value!r} is not a positive integer")
+    return value
 
 
 def _created_at(value: object) -> float:

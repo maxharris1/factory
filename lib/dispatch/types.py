@@ -100,6 +100,8 @@ class TrackedTicket:
     mergeable: bool | None = None
     mergeable_state: str | None = None
     closed: bool = False
+    # #259: the project's GitHub intake label, put on a filed follow-up ticket.
+    intake_label: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repo or not self.ticket_id:
@@ -202,6 +204,27 @@ class ReviewActions(Protocol):
 
     def set_title(self, ticket: TrackedTicket, title: str) -> None:
         """Rename the ticket's PR (issue #115)."""
+        ...
+
+    def file_issue(
+        self,
+        ticket: TrackedTicket,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+        since: float,
+    ) -> int:
+        """Open an issue in the ticket's repo once (issue #259).
+
+        Returns the number of an issue created since `since` (epoch seconds)
+        whose body has `marker` on a line of its own, else creates one and
+        returns its number. The lookup is a consistent read, not search.
+        """
+        ...
+
+    def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
+        """Post body on the PR unless a comment carrying marker exists."""
         ...
 
 
