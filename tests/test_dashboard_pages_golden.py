@@ -20,30 +20,31 @@ import pytest
 import lib.dashboard_page as page
 import lib.health
 from lib.dashboard import collect_snapshot
+from lib.dashboard_flow import load_chart
 from tests.test_dashboard import NOW, make_db, seeded
 
 FACADE = Path(__file__).resolve().parent.parent / "lib" / "dashboard_page.py"
 
 GOLDEN = {
     "CSS": "19a0b1f9f72d20351073fe719ac4971cdef5c2bff041dad108a8a8133b636237",
-    "SCRIPT": "19c15ec27fb236d640d048344c8846549a5c55de8c247a6e939f9ceb13161190",
+    "SCRIPT": "d52ab72896b7b64a6108b5c3a0dbc37e050a7697b9787558cdde6b844342c14a",
     "PX_SCRIPT": "777ae1a8b65aa0d735a696c3e6ba885f3e5e086f61c26784d9e5efcb5bc5bef5",
-    "page_script": "49bc6d39ccbd7714af3f03ac9e2cc78ae4a6829fb9ce738dff0446f86b2518ef",
-    "seeded/index.html": "a1f6a4158bfa2d909527aba10ce9e974d8695a53820ebf73a946cc603baf7752",
-    "seeded/job.html": "643ba73df565f52171b0bb7f6df6dddccefbd3f3554adff21ac21427d83aede1",
-    "seeded/activity.html": "0681fb5e12a7c2951bcbc02d99c8be259a5b255bb62f1d0d06db6512840e161d",
-    "seeded/efficiency.html": "944804c1ab3613e30adce5f80ad3dd322c44e019805b676d9afb5320a011909c",
-    "seeded/health.html": "b97530084d28818af0621c37adcd413e085f382abbecdf73da74361a70277f88",
-    "hostile/index.html": "383998537942bdc52f152889b73f69b03724ccd78b66bb703c1fe7dbed26810c",
-    "hostile/job.html": "0e9cba899e180c92737898f091992ecf16183fc9bf075ffd1367197b3bb7db81",
-    "hostile/activity.html": "a924ca6ba832d777d7857b8527cbc2573e08606d4a50ee77b2b6e8cf91e113e8",
-    "hostile/efficiency.html": "c1e85d61594eb1f5f5bb6de1962d3b2d4b829d6476c5223bf02cdfadc6297765",
-    "hostile/health.html": "3c986709c17fd4b7af1f6cc17e39312d4e6a7255c558612a646b88aa60acbf23",
-    "empty/index.html": "10428b9208648a65b1efbe2ae0016ca339d44a68ceb1198daf87450e8a64f7b4",
-    "empty/job.html": "44a4c6a9222664b980c674f1713140f4fca51cbb6eb5ad2ceb0b7cf6e25c398c",
-    "empty/activity.html": "0824a38da6174131b038c2fafefbe9c6f6bd86637a26ee5332436e18b024f53c",
-    "empty/efficiency.html": "eee83e967b880a7bf6bd9064878fa23852562f7458c42636572c928ec9ace80b",
-    "empty/health.html": "be24b887b1ead47fbaba4e73ae36fef0c543d00e5026ebe609ea93b94b531f9b",
+    "page_script": "6aa34b812836b1b3b604d6988e932b0e8481463e25d866ffe3fe2705d3edb6f8",
+    "seeded/index.html": "006c641c59fd4190bfc69b4a87281eac00554b8b65896a7444f991718a68ad91",
+    "seeded/job.html": "6cf21a43b0cdd8b902798dae88b77c47a154aea07c3f4de22324d54c86ef4a8b",
+    "seeded/activity.html": "9f5632d96cd3b2db2f640de9c8451457750dc2b241943b9f2f738f74be555b57",
+    "seeded/efficiency.html": "9de5ca16d84018cacc14171cd7420fcdf66f7a9e5bd7845772fa587e6f2db9ba",
+    "seeded/health.html": "afe32d8f8070c26f4b4c0817baa2da4670d32651c6a7d97dd2d53b76f478aae5",
+    "hostile/index.html": "b7e9716fc1710ae165b11db744dd3da6a0003458b904307a212c7c2046312e14",
+    "hostile/job.html": "aeed3a30e0cb1d2027fc4012bd7564d26f110fc40971b9dee849732fc4bbf88e",
+    "hostile/activity.html": "a852c0b27ef0b93bde5345f49fb820521c83bb0ed28609866816ff1eb75225fb",
+    "hostile/efficiency.html": "f4d3ab5a8861afeb6e2fb3dd8a6f4b78de920e1a72e586f46e2cf10da21fae21",
+    "hostile/health.html": "632b1209cfa55917d0642c72bb4bfebc92a668fb912259e87071194ea9301d09",
+    "empty/index.html": "9d361bba608619ba97b504f6fc582b8d37f22c085eef27d6cf0887172750f0d8",
+    "empty/job.html": "0bce1598162e16c9cb71e0aae60119a5d972a053340344bd2d817100d129a2bd",
+    "empty/activity.html": "ae19457595184cbf74eed27ae75383794f208e944dd2f2ea8873a2f7a26460d3",
+    "empty/efficiency.html": "fd91589debbe7bc2d350cb9d654e71bd3e9fee5c7495a2aef1c25cae54f09053",
+    "empty/health.html": "f83dd4ea7f26ec6169efb411e8c50f96c510523758976c399cf43646189d068b",
 }
 
 NAMES = (
@@ -102,7 +103,7 @@ def _digests(root: Path) -> dict[str, str]:
         "CSS": _sha(page.CSS),
         "SCRIPT": _sha(page.SCRIPT),
         "PX_SCRIPT": _sha(page.PX_SCRIPT),
-        "page_script": _sha(page.page_script()),
+        "page_script": _sha(page.page_script(load_chart())),
     }
     for case, snapshot in _snapshots(root).items():
         for name, text in page.render_pages(snapshot).items():

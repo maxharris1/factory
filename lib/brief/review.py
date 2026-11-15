@@ -16,8 +16,13 @@ def task_lines(facts: dict) -> list[str]:
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
         "shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
         "other PRs' state.",
-        "Read the whole diff and the CI result on that head. A merge conflict with the base is "
-        "`mergeable: no` in the verdict, not a finding.",
+        (
+            "Read the whole diff. CI may still be running on that head. Read its result if it has finished. "
+            "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
+            if facts["start_before_ci"]
+            else "Read the whole diff and the CI result on that head."
+        )
+        + " A merge conflict with the base is `mergeable: no` in the verdict, not a finding.",
         *(
             [
                 "Close the earlier rounds first: for each earlier finding by its `f-<n>` id, and each earlier unmet "

@@ -1,0 +1,7 @@
+decision	choice	why
+chart source	page_script takes the chart; render_pages passes snapshot.get("statechart")	the summary and the flowmap now read the same chart, so the MINI fixture draws 5 states, not the default 22
+cache	drop the lru_cache on _flowmap_json	a dict chart cannot key the cache, and flowmap_layout costs about 0.34 ms per render on the 22-state chart
+golden	the golden test hashes page_script(load_chart())	the default chart keeps every page and asset hash byte-identical, so the golden table is unchanged
+rail overflow (f-1)	stop states wrap into more rail rows below the first; grid.h grows 16 cells a row; the JS canvas takes its height from FLOWMAP.grid	a fixed six-slot rail raised StopIteration and lost all five pages; wrapping keeps every node inside the canvas, and the default chart's layout stays byte-identical (h 88, label y 314)
+grid overflow	non-stop states that fill the 30 grid spots also take the overflow rows	the same next() exhausted past 30 states; one candidate stream covers both
+golden	re-record SCRIPT, page_script and the 15 page digests	only the canvas height line in the job script changed; CSS and PX_SCRIPT digests are unchanged
