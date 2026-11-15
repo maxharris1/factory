@@ -258,12 +258,14 @@ def test_an_edited_trigger_carries_no_prose():
     assert bundle.url == edited.url
 
 
-def test_an_approvers_go_counts_only_for_an_extra_round():
+def test_an_approvers_go_counts_for_an_extra_round_or_a_resumed_review():
     max_go = _comment("go", "One more round.", cid="70", at=1.0, author="maxharris1")
     assert _bundle((max_go,), "70", approvers=frozenset({"maxharris1"})).prose == "One more round."
     assert _bundle((max_go,), "70").prose is None
     build = _bundle((max_go,), "70", action="build", detail={}, approvers=frozenset({"maxharris1"}))
     assert build.prose is None
+    review = _bundle((max_go,), "70", action="review", detail={}, approvers=frozenset({"maxharris1"}))
+    assert (review.cause, review.prose) == ("go", "One more round.")
 
 
 @pytest.mark.parametrize("configured", ["maxharris1", "MaxHarris1", "MAXHARRIS1"])

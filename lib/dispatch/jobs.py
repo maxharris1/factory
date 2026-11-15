@@ -20,7 +20,6 @@ from lib.dispatch.helpers import (
     _append_detail,
     _asks_questions,
     _comment_order,
-    _detail_plan_round,
     _detail_project_bot,
     _detail_round,
     _detail_round_number,
@@ -67,6 +66,7 @@ from lib.queue import (
     Job,
     JobRequest,
     _job,
+    plan_round,
     restored_claim,
     retire_requeued,
 )
@@ -961,6 +961,7 @@ class JobsMixin:
             queued_at=self._first_queued_at(job),
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
+            plan_round=plan_round(job.request.detail),
         )
         if answer is None:
             return False
@@ -1104,10 +1105,6 @@ class JobsMixin:
                 continue
             if not self._trusted(ticket, item, fields, bot, role=role):
                 continue
-            if kind == "plan" and _round_number(fields.get("round")) != _detail_plan_round(
-                job.request.detail
-            ):
-                continue
             outcome = self._handled_outcome(ticket, item.id)
             if kind == "questions":
                 if (
@@ -1123,6 +1120,12 @@ class JobsMixin:
                 if _matching_head(head, job.request.head) is None:
                     continue
                 if fields.get("round") != round_field:
+                    continue
+            elif kind == "plan":
+                reported = _round_number(fields.get("round"))
+                if reported != plan_round(job.request.detail) or not self._t1p_accepted_or_accepts_plan(
+                    ticket, item, reported
+                ):
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue

@@ -110,7 +110,7 @@ def test_next_steps_are_the_charts_direct_successors_of_the_current_state(tmp_pa
     snapshot = _snapshot(tmp_path)
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     expected = _successors(CHART, "review")
-    assert expected == {"blocked", "ship", "stuck", "fixing", "capped"}
+    assert expected == {"blocked", "ship", "stuck", "fixing", "capped", "waiting-max"}
     assert set(job["flow"]["next"]) == expected
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
     assert set(_next_cards(article)) == expected

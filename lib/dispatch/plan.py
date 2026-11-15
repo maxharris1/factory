@@ -156,6 +156,7 @@ class PlanMixin:
                                 "round=2/2; previous plan "
                                 f"{_comment_link(comment)}"
                             ),
+                            plan_round=2,
                         ),
                     ),
                     dedupe_key=(
@@ -218,6 +219,39 @@ class PlanMixin:
             connection.commit()
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _t1p_accepted_or_accepts_plan(
+        self, ticket: TrackedTicket, comment: Comment, reported_round: int | None
+    ) -> bool:
+        with self._connect() as connection:
+            if connection.execute(
+                """
+                SELECT 1 FROM plan_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone() is not None:
+                return True
+            state = connection.execute(
+                """
+                SELECT workflow_state, plan_gap_count, plan_check_comment_id
+                FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+        return (
+            self._handled_outcome(ticket, comment.id) is None
+            and state is not None
+            and (
+                state["workflow_state"] == "planning"
+                or (
+                    state["workflow_state"] == "plan-check"
+                    and state["plan_check_comment_id"] == comment.id
+                )
+            )
+            and reported_round == int(state["plan_gap_count"]) + 1
+        )
 
     def _latest_plan_step(self, ticket: TrackedTicket) -> tuple[str, int] | None:
         with self._connect() as connection:

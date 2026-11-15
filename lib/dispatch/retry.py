@@ -296,6 +296,7 @@ class RetryMixin:
                     else None
                 ),
                 resume=True,
+                plan_round=2 if gaps else None,
             )
         else:
             action = "build"

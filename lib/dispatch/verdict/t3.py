@@ -35,6 +35,8 @@ class T3Mixin:
         verdict_head = fields.get("head")
         if _matching_head(verdict_head or "", ticket.current_head) is None:
             return True, "stale-revise"
+        if "unsat" in fields:
+            return self._t3_unsat(ticket, comment, fields["unsat"], reported_round)
         instruction = _comment_link(comment)
         if ticket.factory.start_before_ci:
             gate = self._revise_ci_gate(ticket, comment, reported_round)
@@ -167,6 +169,106 @@ class T3Mixin:
             self._wake_capped(ticket, comment)
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _t3_unsat(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        criterion_id: str,
+        reported_round: int | None,
+    ) -> tuple[bool, str]:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT outcome FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (*key, comment.id),
+            ).fetchone()
+            if prior is not None:
+                connection.commit()
+                self._write_state_label(ticket, "waiting-max")
+                return True, str(prior["outcome"])
+            state = connection.execute(
+                """
+                SELECT workflow_state, review_round, generation FROM ticket_state
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                key,
+            ).fetchone()
+            if (
+                state is None
+                or state["workflow_state"] not in ("review", "awaiting-ok")
+                or reported_round != int(state["review_round"]) + 1
+            ):
+                connection.commit()
+                self._wake_comment_problem(ticket, comment, "stale", "stale-revise")
+                return True, "stale-revise"
+            generation = int(state["generation"])
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "waiting-max",
+                source="t3-unsat",
+                at=self.queue.now(),
+                also={
+                    "paused_action": "review",
+                    "paused_recipient": ticket.factory.reviewer_harness,
+                    "paused_head": ticket.current_head,
+                    "paused_generation": generation,
+                    "paused_question_id": comment.id,
+                },
+            )
+            connection.execute(
+                """
+                INSERT INTO review_events (repo, ticket_id, comment_id, outcome)
+                VALUES (?, ?, ?, 'waiting-max-unsat')
+                """,
+                (*key, comment.id),
+            )
+            self.queue.enqueue_in_transaction(
+                connection,
+                self._grok_request(
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="clarify",
+                        recipient="grok",
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        head=ticket.current_head,
+                        detail=self._project_wake_detail(
+                            ticket,
+                            f"criterion-unsatisfiable: {self._criterion_text(ticket, criterion_id)}, "
+                            f"{_comment_link(comment)}",
+                        ),
+                    )
+                ),
+                dedupe_key=f"t3-unsat:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",
+            )
+            connection.commit()
+        self._write_state_label(ticket, "waiting-max")
+        return True, "waiting-max-unsat"
+
+    def _criterion_text(self, ticket: TrackedTicket, criterion_id: str) -> str:
+        from lib.evidence.criteria import criteria_evidence
+
+        criteria = criteria_evidence(
+            issue_key=ticket.source_issue or ticket.ticket_id,
+            issue_url=ticket.ticket_url,
+            comments=ticket.comments,
+            trusted_logins=self.trusted_logins,
+            issue_body=None,
+            pr_body=None,
+            ready_starts_review=ticket.ready_starts_review,
+            pr_url=ticket.ticket_url,
+        ).criteria
+        text = next((item.text for item in criteria if item.id == criterion_id), None)
+        return f"{criterion_id} (not in the brief)" if text is None else f"{criterion_id}: {text}"
 
     def _revise_ci_gate(
         self,
