@@ -327,6 +327,7 @@ PX_SCRIPT = r"""
   var FPS = 20;
   var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst'];
   var STRIPS = new Map();
+  var HOOKS = [];
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   var sysStill = !!(mq && mq.matches);
   var io = typeof IntersectionObserver === 'function' ? new IntersectionObserver(seen) : null;
@@ -695,7 +696,13 @@ PX_SCRIPT = r"""
       paint(s, now);
       if (!s._dead && s._sig === null) live = true;
     });
+    HOOKS.forEach(function (fn) { if (fn(now)) live = true; });
     if (live) start();
+  }
+
+  function onFrame(fn) {
+    if (HOOKS.indexOf(fn) < 0) HOOKS.push(fn);
+    start();
   }
 
   function seen(entries) {
@@ -810,7 +817,7 @@ PX_SCRIPT = r"""
     else if (mq.addListener) mq.addListener(onMotion);
   }
 
-  return {bind: bind, state: state, strip: strip, jobStrip: jobStrip, frame: frame, strips: function () { return STRIPS; }, Strip: Strip, table: TABLE};
+  return {bind: bind, onFrame: onFrame, state: state, strip: strip, jobStrip: jobStrip, frame: frame, strips: function () { return STRIPS; }, Strip: Strip, table: TABLE};
 })()
 """
 

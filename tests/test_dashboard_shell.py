@@ -534,7 +534,7 @@ def test_current_item_style_is_the_artboards() -> None:
 
 def test_anchors_stay_and_shell_links_only_name_the_five_files(base: dict) -> None:
     pages = render_pages(base)
-    assert re.search(r'<article class="panel jobpage" id="job-r-codex-">', pages["job.html"])
+    assert re.search(r'<article class="jobpage" id="job-r-codex-">', pages["job.html"])
     assert 'href="job.html#job-r-codex-"' in pages["index.html"]
     for name, html in pages.items():
         shell = html[html.index('<header class="topbar"') : html.index("</header>")] + _footer(html)

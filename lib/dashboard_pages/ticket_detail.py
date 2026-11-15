@@ -8,7 +8,7 @@ import json
 
 from lib.dashboard_flow import FLOWMAP_SCRIPT, ticket_phases
 from lib.dashboard_telemetry import job_block
-from lib.dashboard_pages.common import anchor, _bot, duration, _e, _job_kind, _job_label, _span
+from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
 from lib.dashboard_pages.tickets import WAITING, _active_jobs
@@ -218,7 +218,7 @@ def _hero(row: dict, model: dict, running: bool) -> str:
 
     action = str(row.get("action") or "")
     strip = shell.px_strip(
-        row["job"], effect=EFFECTS.get(action, "static") if running else "static",
+        f"job-hero-{row['job']}", effect=EFFECTS.get(action, "static") if running else "static",
         tint="bot", bot=row.get("recipient"), cell=4, height=40, seed=2,
     )
     kind = _job_kind(row)
@@ -227,6 +227,9 @@ def _hero(row: dict, model: dict, running: bool) -> str:
         f'<div class="title"><h1>{_e(_job_label(row))}</h1>{_bot(row.get("recipient"))}'
         + (_span("kind", kind) if kind else "")
         + (_span("device", device) if device else "")
+        + _state_chip(row)
+        + (_chip("OVERDUE", "bad") if row.get("overdue") else "")
+        + (_chip(f"retried {row['retries']}x") if row.get("retries") else "")
         + "</div>"
     )
     return (
@@ -448,7 +451,7 @@ _SCRIPT = r"""
   function hero(r, m, running) {
     var sec = el('section', 'jd-hero');
     var action = String(r.action || '');
-    add(sec, PX.strip(r.job, {effect: running ? (DETAIL.effects[action] || 'static') : 'static', tint: 'bot',
+    add(sec, PX.strip('job-hero-' + r.job, {effect: running ? (DETAIL.effects[action] || 'static') : 'static', tint: 'bot',
                               bot: r.recipient, cell: 4, height: 40, seed: 2}));
     var body = add(sec, el('div', 'body'));
     var who = add(body, el('div', 'who'));
@@ -459,6 +462,10 @@ _SCRIPT = r"""
     if (kind) span(title, 'kind', kind);
     var device = running ? (r.device ? 'on ' + r.device : '') : 'queued';
     if (device) span(title, 'device', device);
+    var jobState = stateChip(r);
+    if (jobState) add(title, jobState);
+    if (r.overdue) add(title, chip('OVERDUE', 'bad'));
+    if (r.retries) add(title, chip('retried ' + r.retries + 'x'));
     var line = add(who, el('p', 'line'));
     var parts = 0;
     function sep() { if (parts++) line.appendChild(document.createTextNode(' · ')); }
@@ -685,13 +692,11 @@ _SCRIPT = r"""
                             {t: reducedMotion ? 0 : now / 1000, reduced: reducedMotion});
     }
   }
-  var journeyRaf = null;
-  function journeyLoop() {
-    journeyRaf = null;
-    if (!journeys.length || document.hidden) return;
+  function journeyFrame() {
+    if (!journeys.length) return false;
     var now = Date.now();
     journeys.forEach(function (j) { drawOne(j, now); });
-    if (!reducedMotion && window.requestAnimationFrame) journeyRaf = window.requestAnimationFrame(journeyLoop);
+    return !reducedMotion;
   }
 
   function jobArticle(r, state, d) {
@@ -754,7 +759,7 @@ _SCRIPT = r"""
     if (!jobs.length) { add(root, el('p', 'empty', 'no running or queued jobs')); return; }
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
     journeys.forEach(placeHits);
-    if (journeyRaf === null) journeyLoop();
+    PX.onFrame(journeyFrame);
   }
 """.replace("__VERBS__", json.dumps(VERBS)).replace("__EFFECTS__", json.dumps(EFFECTS)).replace(
     "__CHARTSUB__", json.dumps(CHART_SUB)

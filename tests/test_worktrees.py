@@ -525,3 +525,14 @@ def test_retry_does_not_adopt_a_clean_or_live_worktree(
     assert messages == []
     if first is not None:
         assert first.path.is_dir() and first.record.is_file()
+
+
+def test_an_exited_unreaped_process_is_not_alive() -> None:
+    child = subprocess.Popen(["true"])
+    try:
+        start = worktrees.process_start(child.pid)
+        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        assert worktrees.pid_alive(child.pid, start) is False
+        assert worktrees.pid_alive(child.pid, None) is False
+    finally:
+        child.wait()

@@ -11,6 +11,7 @@ import io
 import json
 import os
 import socket
+import tempfile
 import time
 from pathlib import Path
 
@@ -308,9 +309,13 @@ def test_a_refused_session_falls_back_to_one_login(ssh: Ssh, tmp_path: Path) -> 
     assert len(ssh.calls()) == 3
 
 
+@pytest.mark.parametrize("control_prefix", [None, "orch-ssh-iF"])
 def test_prepared_argv_adds_only_the_mux_options_and_names_no_key(
-    ssh: Ssh, tmp_path: Path
+    ssh: Ssh, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, control_prefix: str | None
 ) -> None:
+    if control_prefix is not None:
+        nested = tempfile.mkdtemp(prefix=control_prefix, dir=os.environ["ORCH_SSH_CONTROL_DIR"])
+        monkeypatch.setenv("ORCH_SSH_CONTROL_DIR", nested)
     t = target(tmp_path)
     argv = remote.ssh_argv(t, remote.PROBE_SCRIPT)
     mux = ssh_mux.Multiplexer(binary=remote.SSH_BINARY, options=remote.SSH_OPTIONS)
@@ -318,8 +323,9 @@ def test_prepared_argv_adds_only_the_mux_options_and_names_no_key(
     assert prepared.argv == [
         argv[0], "-o", "ControlMaster=no", "-o", f"ControlPath={socket_of()}", *argv[1:]
     ]
-    added = " ".join(prepared.argv[1:5])
-    assert not any(word in added for word in ("-i", "-F", ".ssh", "@", "Identity"))
+    added = prepared.argv[1:5]
+    assert not {"-i", "-F"} & set(added)
+    assert not any(word in option for option in added for word in (".ssh", "@", "Identity"))
     assert ALIAS not in str(socket_of()) and USER not in str(socket_of())
 
 
