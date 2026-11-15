@@ -10,7 +10,7 @@ import yaml
 
 from lib.dispatcher import CIResult
 from lib.factory_md import load_factory_md, parse_factory_md
-from tests.merge_queue_support import APPROVE, PR, Board, sha
+from tests.merge_queue_support import APPROVE, PR, VERDICT, Board, sha
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID = {
@@ -513,3 +513,86 @@ def test_on_a_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
     assert fix is not None, "the ready back at the older head left no runnable CI fix"
     assert fix.request.head == older
     assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+
+
+def test_each_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    for cycle in (1, 2, 3):
+        pr.push(older, ci="pending")
+        board.ready(pr, older, f"pending-review-{cycle}")
+        board.poll()
+        board.finish("codex")
+        pr.push(sha(2), ci="failure")
+        board.post(
+            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
+        )
+        board.poll()
+        board.finish("claude")
+
+        pr.push(older, ci="failure")
+        ready = board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
+        board.poll()
+
+        assert board.outcome(ready) == "queued-ci-fix"
+        fix = board.queue.claim("claude")
+        assert fix is not None, f"return {cycle} left no runnable CI fix"
+        assert fix.request.head == older
+        assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+        board.queue.finish(fix.id, owner="claude", handoff_comment_id=f"ci-fix-{cycle}")
+
+
+def test_a_reposted_red_ready_after_a_finished_ci_fix_queues_no_second_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    pr.push(sha(1), ci="failure")
+    board.ready(pr, sha(1), "red-ready")
+    board.poll()
+    board.finish("claude")
+
+    board.ready(pr, sha(1), "red-ready-again")
+    board.poll()
+
+    assert [job["state"] for job in board.jobs("fix")] == ["done"]
+    assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_before_a_finished_reviews_verdict_is_read_waits_for_one_combined_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    board.ready(pr, older)
+    board.poll()
+    older_review = board.claim("codex")
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, sha(2))
+    board.poll()
+    board.post(
+        pr,
+        "revise-older",
+        VERDICT.format(round="1/3", head=older, verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+    unread_verdict = pr.comments.pop()
+    board.queue.finish(older_review.id, owner="codex", handoff_comment_id="revise-older")
+
+    pr.push(older, ci="failure")
+    ready = board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+    assert board.outcome(ready) == "ci-red-in-flight"
+
+    pr.comments.append(unread_verdict)
+    board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
+    assert fix["source_comment_id"] == "revise-older"
+    assert CI_LOG in instruction(fix)
+    board.queue.finish(board.claim("claude").id, owner="claude", handoff_comment_id="fix")
+    assert board.queue.claim("claude") is None

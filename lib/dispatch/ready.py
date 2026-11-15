@@ -150,7 +150,7 @@ class ReadyMixin:
             result,
             review_round,
             generation,
-            dedupe_key=f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}",
+            dedupe_key=self._ci_fix_dedupe_key(ticket, head, generation),
         )
         if rereview:
             self._leave_merge_queue(ticket, "update-ci-red")
@@ -490,22 +490,75 @@ class ReadyMixin:
             ).fetchone()
         return key if fix is None else f"{key}:after-{fix['id']}"
 
+    def _ci_fix_dedupe_key(self, ticket: TrackedTicket, head: str, generation: int) -> str:
+        key = f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}"
+        repeat = f"{key}:after-"
+        with self._connect() as connection:
+            later = connection.execute(
+                """
+                SELECT later.id FROM jobs AS keyed
+                JOIN jobs AS later
+                  ON lower(later.repo) = lower(keyed.repo)
+                 AND later.ticket_id = keyed.ticket_id
+                 AND later.action IN ('review', 'fix') AND later.state != 'cancelled'
+                 AND later.rowid > keyed.rowid
+                WHERE keyed.dedupe_key = ? OR substr(keyed.dedupe_key, 1, ?) = ?
+                ORDER BY keyed.rowid DESC, later.rowid DESC LIMIT 1
+                """,
+                (key, len(repeat), repeat),
+            ).fetchone()
+        return key if later is None else f"{repeat}{later['id']}"
+
     def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state, head FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ?
+                SELECT action, state, source_comment_id, detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
-                ORDER BY head = ? AND state IN ('queued', 'running') DESC, rowid DESC
+                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
                 LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
-        return row is not None and row["head"] == head and (
-            row["state"] in ("queued", "running")
-            or (row["action"], row["state"]) == ("review", "done")
+        if row is None:
+            return False
+        if row["state"] in ("queued", "running"):
+            return True
+        return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
+            ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])
         )
+
+    def _verdict_handled(
+        self, ticket: TrackedTicket, head: str, review_round: int | None, ready_id: str
+    ) -> bool:
+        reviewer = f"{ticket.factory.reviewer_harness}-bot"
+        ready = next((item for item in ticket.comments if item.id == ready_id), None)
+        with self._connect() as connection:
+            handled = {
+                str(row["comment_id"])
+                for row in connection.execute(
+                    "SELECT comment_id FROM handled_comments WHERE repo = ? AND ticket_id = ?",
+                    (ticket.repo.lower(), ticket.ticket_id),
+                )
+            }
+        for item in ticket.comments:
+            if item.id not in handled or (
+                ready is not None and _comment_order(item) <= _comment_order(ready)
+            ):
+                continue
+            try:
+                fields = parse_comment(item.body).as_dict()
+            except HandoffError:
+                continue
+            if (
+                fields.get("kind") == "verdict"
+                and _round_number(fields.get("round")) == review_round
+                and _matching_head(fields.get("head") or "", head) is not None
+                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+            ):
+                return True
+        return False
 
     def _flag_ready_after_cap(
         self,

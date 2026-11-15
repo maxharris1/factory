@@ -1,4 +1,5 @@
 decision	choice	why
-carried rule	a done review carries the CI failure only while it is the ticket's latest review or fix job	a later fix or review at any head means the review's verdict already acted, so a ready back at that head must queue its own CI fix
-active jobs	a queued or running review or fix at the ready's head still carries the failure	keeps the existing ready-during-review and reposted-ready cases at one combined fix
-no verdict link	match on job order, not on handoff_comment_id against handled_comments	job order already records whether the verdict acted; linking handoffs to verdict comments would add a join the tests do not model
+carried rule	a head's latest review or fix carries the CI failure while it is queued or running, or while it is a finished review whose verdict is still due	SPEC T2 says a finished review carries the failure only while its verdict is still due; a verdict that already acted on another head must not hold back a ready at this head
+verdict due	due until a trusted verdict naming the review's head and round, posted after the review's ready, is in handled_comments	job order cannot prove a verdict acted (r1 f-2): a poll snapshot can hide an already-posted verdict, and the newer job then let T2 split the fix
+any handled outcome	a handled verdict counts whatever its outcome	approve-ci-red-fix, stale and over-cap verdicts never act again, so waiting on them would strand CI recovery
+repeat CI fix key	the T2 fix key gains :after-<id> of the newest review or fix queued after the last fix at that head and generation	a second return to the same red head deduped onto the first finished fix and left nothing runnable (r1 f-1); a reposted ready with nothing in between still dedupes as before
