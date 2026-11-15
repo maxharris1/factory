@@ -394,10 +394,11 @@ def test_a_waiter_installs_into_its_home_while_it_runs_a_box_job(
     assert run.running() == {"job-1"}
 
 
-def test_a_waiter_does_not_clear_a_lagging_mark_on_its_own_box_row(
+def test_a_waiter_does_not_clear_a_lagging_mark_while_the_box_lags_its_origin_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
 ) -> None:
     upstream, box = box_behind_new_pin
+    git(box, "fetch", "-q", "origin")
     home = tmp_path / "codex-bot"
     assert pstack_pin.install_skills(box, home, "local") == []
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
@@ -523,13 +524,11 @@ def test_an_account_checkout_that_cannot_reach_the_deployed_commit_is_refused_no
                             "checkout: HEAD has commits not on origin/main")]
 
 
-def test_a_claim_after_a_box_deploy_starts_while_the_bots_earlier_box_job_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
-    _skill_preflight: None,
-) -> None:
-    from tests.test_waiter import enqueue, state
+def account_waiter_with_a_box_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box: Path,
+) -> tuple[Path, SQLiteJobQueue, waiter.Waiter, list[str], str]:
+    from tests.test_waiter import enqueue
 
-    upstream, box = box_behind_new_pin
     account = tmp_path / "codex-bot" / "factory"
     account.parent.mkdir()
     subprocess.run(["git", "clone", "-q", "--branch", "main", str(tmp_path / "origin.git"),
@@ -545,16 +544,80 @@ def test_a_claim_after_a_box_deploy_starts_while_the_bots_earlier_box_job_runs(
     monkeypatch.setattr(skill_preflight, "ROOT", box)
     active = enqueue(queue, "active", recipient="codex")
     assert run.pool.claim("codex") is not None
+    return account, queue, run, log, active
 
+
+def deploy_box(tmp_path: Path, box: Path, queue: SQLiteJobQueue) -> None:
     outcome = self_deploy.deploy(
         box, tmp_path / "deploy-state", device="box",
         environ={"PATH": os.environ["PATH"], "HOME": str(tmp_path / "owner-home"),
                  "ORCH_DB": str(queue.path)},
         webhook=Webhook(), now=1000, owner=lambda _: True, homes=())
+    assert outcome.kind == self_deploy.DEPLOYED
+
+
+def test_a_claim_after_a_box_deploy_starts_while_the_bots_earlier_box_job_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    _skill_preflight: None,
+) -> None:
+    from tests.test_waiter import enqueue, state
+
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, active = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+
+    deploy_box(tmp_path, box, queue)
     later = enqueue(queue, "later", recipient="codex")
 
-    assert outcome.kind == self_deploy.DEPLOYED
     assert run.step() == later, log
     assert state(queue.path, active) == "running"
     assert git(account, "rev-parse", "HEAD") == git(upstream, "rev-parse", "HEAD")
     assert ("box", "codex-bot", device_sync.SYNCED, "") in rows(queue)
+
+
+def test_a_box_deploy_landing_after_the_waiter_reads_the_box_head_never_fails_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    _skill_preflight: None,
+) -> None:
+    from tests.test_waiter import enqueue, state
+
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, active = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+    later = enqueue(queue, "later", recipient="codex")
+    sync = run._sync_checkout
+    deploys: list[str] = []
+
+    def deploy_then_sync(checkout: str, target: str | None) -> str:
+        if not deploys:
+            deploys.append(target or "")
+            deploy_box(tmp_path, box, queue)
+        return sync(checkout, target)
+
+    monkeypatch.setattr(run, "_sync_checkout", deploy_then_sync)
+
+    assert run.step() == later, (log, state(queue.path, later), detail_of(queue.path, later))
+    assert deploys and deploys[0] != git(box, "rev-parse", "HEAD")
+    following = enqueue(queue, "following", recipient="codex")
+    assert run.step() == following, log
+    assert state(queue.path, active) == "running"
+    assert git(account, "rev-parse", "HEAD") == git(upstream, "rev-parse", "HEAD")
+    assert ("box", "codex-bot", device_sync.SYNCED, "") in rows(queue)
+
+
+def test_a_waiter_clears_its_lagging_row_once_its_checkout_reaches_the_deployed_box_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    _skill_preflight: None,
+) -> None:
+    from tests.test_waiter import enqueue
+
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, _ = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+    deploy_box(tmp_path, box, queue)
+    with queue.connect() as connection:
+        device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
+                           checkout=str(account), target=None, sha=None,
+                           state=device_sync.LAGGING, detail="preflight-lagging: box", now=1000)
+        connection.commit()
+    later = enqueue(queue, "later", recipient="codex")
+
+    assert run.step() == later, log
+    assert rows(queue) == [("box", "codex-bot", device_sync.SYNCED, "")]

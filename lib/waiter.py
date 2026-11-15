@@ -32,8 +32,11 @@ runs as the owning bot's own user and login, starts the job itself:
   git steps, then its home's installed skills to that pin with the preflight's
   own hash and install code (#345). It records the result as its (box, bot)
   device_sync row: synced, or refused
-  with the reason (retried after HOME_RETRY_SECONDS). It runs as this
-  bot's account, so no other account writes into this checkout or home.
+  with the reason (retried after HOME_RETRY_SECONDS). A sync that reaches the
+  box HEAD while the box is not behind its origin/main clears this bot's
+  lagging row. It syncs the checkout again after a box claim commits and
+  before the preflight. It runs as this bot's account, so no other account
+  writes into this checkout or home.
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
@@ -628,13 +631,17 @@ class Waiter:
         if not detail:
             detail = self._install_home(root, checkout)
         state = device_sync.REFUSED if detail else device_sync.SYNCED
+        clears_lagging = (head == checkout_sha(FACTORY_CHECKOUT)
+                          and skill_preflight.box_behind_origin(
+                              name, self.bot, str(FACTORY_CHECKOUT)) is None)
 
         def write() -> None:
             with self.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 current = next((row.state for row in device_sync.read(connection)
                                 if (row.device, row.bot) == (name, self.bot)), None)
-                if not (state == device_sync.SYNCED and current == device_sync.LAGGING):
+                if not (state == device_sync.SYNCED and current == device_sync.LAGGING
+                        and not clears_lagging):
                     device_sync.upsert(
                         connection, device=name, bot=self.bot, harness=self.recipient,
                         checkout=checkout, target=target, sha=head, state=state,
@@ -674,6 +681,13 @@ class Waiter:
             sha=target, environ=git_env(self.environ, Webhook()),
         )
         return f"checkout: {refused}" if refused else ""
+
+    def _sync_checkout_to_box_head(self, checkout: str | None, label: str) -> None:
+        if self.home is None or checkout is None:
+            return
+        refused = self._sync_checkout(checkout, checkout_sha(FACTORY_CHECKOUT))
+        if refused:
+            self.log(f"{label}: {checkout} not at the box HEAD ({refused}); the preflight decides")
 
     def _install_home(self, root: Path, checkout: str) -> str:
         try:
@@ -747,6 +761,8 @@ class Waiter:
         )
         remote = device is not None and not device.local
         factory_root = self._factory_root(device)
+        if not remote:
+            self._sync_checkout_to_box_head(factory_root, label)
         try:
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
