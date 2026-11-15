@@ -511,6 +511,9 @@ def _run_poll(tmp_path: Path, monkeypatch, *flags: str) -> tuple[dict, list[str]
         def __init__(self, dispatcher, source, **_kwargs) -> None:
             pass
 
+        def cycle_state(self):
+            return None, None
+
         def run(self, **kwargs) -> None:
             events.append("run")
             seen.update(kwargs)
