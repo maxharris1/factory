@@ -29,6 +29,7 @@ from lib.dispatch.types import Comment, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
+    LAGGING_WAIT_SECONDS,
     LINK_DROP_BACKOFF_SECONDS,
     MAX_LINK_DROP_REQUEUES,
     RELEASED_UNSTARTED,
@@ -37,12 +38,14 @@ from lib.job_state import (
     Liveness,
     claimed_too_long,
     derive,
+    lagging_end,
     last_run_end,
     link_drop_end,
     link_drop_requeues,
     link_drop_settled_at,
     read_placements,
     release_link_dropped,
+    requeue_lagging,
     requeue_link_drop,
     requeue_unstarted,
     unstarted_too_long,
@@ -635,6 +638,8 @@ class JobsMixin:
             and _merge_only(job.request.detail)
             and self._queue_owns_base_updates(job.request.repo, job.request.ticket_id)
         )
+        if not queue_owned and self._lagging_handled(job):
+            return
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -710,6 +715,54 @@ class JobsMixin:
             ),
         )
         self.queue.mark_failure_handled(job.id)
+
+    def _lagging_handled(self, job: Job) -> bool:
+        """#357: a start refused because a checkout lags requeues the same row
+        after a backoff, and sticks the ticket device-lagging once the first
+        refusal is LAGGING_WAIT_SECONDS old. True when T6 handled the job."""
+        with self._connect() as connection:
+            lagging = lagging_end(connection, job.id)
+        if lagging is None:
+            return False
+        now = self.queue.now()
+        if now - lagging.first_refused_at >= LAGGING_WAIT_SECONDS:
+            self._mark_stuck_and_wake(
+                repo=job.request.repo,
+                ticket_id=job.request.ticket_id,
+                source_comment_id=job.request.source_comment_id,
+                timeout_seconds=job.request.timeout_seconds,
+                reason="device-lagging",
+                detail=json.dumps(
+                    {
+                        "project_bot": _detail_project_bot(job.request.detail),
+                        "detail": (
+                            f"{job.request.action} job not started: device still lagging "
+                            f"after {int(LAGGING_WAIT_SECONDS // 60)} min; last refusal "
+                            f"{lagging.detail}"
+                        ),
+                        "job_id": job.id,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+            self.queue.mark_failure_handled(job.id)
+            return True
+        backoff = lagging.backoff()
+        if now < (job.finished_at or now) + backoff:
+            self._record_job_event_once(
+                job, "requeue-deferred", f"preflight lagging; T6 requeues it after a {backoff} s backoff"
+            )
+            return True
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = requeue_lagging(
+                connection, job.id, now=now, reason=f"preflight lagging: {lagging.detail}"
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+        return True
 
     def _link_drop(self, job: Job) -> _LinkDrop | None:
         """#218: the job's latest run ended in a link drop, unless it is a
