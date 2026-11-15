@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 
 from lib.approver_commands import parse_slash_go
@@ -331,14 +332,19 @@ class CommentsMixin:
             ).fetchone()
         return None if row is None else str(row["outcome"])
 
-    def _handled_before(self, ticket: TrackedTicket, comment_id: str, when: float) -> bool:
+    def _predates(self, ticket: TrackedTicket, comment: Comment, queued_at: float) -> bool:
+        """True when comment came before work first queued at queued_at:
+        GitHub dates it to an earlier second, or the dispatcher handled it
+        first. GitHub stamps comments in whole seconds."""
+        if comment.created_at < math.floor(queued_at):
+            return True
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM handled_times
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ? AND handled_at < ?
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment_id, when),
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, queued_at),
             ).fetchone()
         return row is not None
 

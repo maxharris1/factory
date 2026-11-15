@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -960,11 +959,12 @@ class JobsMixin:
         """The handoff a failed review, build, fix or update job already posted.
 
         Read from the ticket this poll fetched (None when it fetched none),
-        posted no earlier than its first attempt was queued, from a login trusted for
-        its `from` and `role`, and not already rejected when it was handled
-        (stale, superseded, ...). A ready stale only because its review
-        already answered (#71 stale-ready-verdict) still counts. An update
-        job's ready is matched by TU's attribution, not by time.
+        posted no earlier than its first attempt was queued and not handled
+        before then, from a login trusted for its `from` and `role`, and not
+        already rejected when it was handled (stale, superseded, ...). A
+        ready stale only because its review already answered (#71
+        stale-ready-verdict) still counts. An update job's ready is matched
+        by TU's attribution, not by time.
 
         A review's is a verdict from the job's recipient for the job's head
         (as a prefix, like every head compare) and round; a review job with
@@ -1000,9 +1000,9 @@ class JobsMixin:
         ids = [item.id for item in comments]
         if update and job.request.source_comment_id in ids:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
-        queued_at = math.floor(self._first_queued_at(job))
+        queued_at = self._first_queued_at(job)
         for item in comments:
-            if not update and item.created_at < queued_at:
+            if not update and self._predates(ticket, item, queued_at):
                 continue
             try:
                 fields = parse_comment(item.body).as_dict()
