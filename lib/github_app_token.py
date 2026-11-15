@@ -596,9 +596,10 @@ def owner_from_args(args: Sequence[str]) -> str | None:
                 explicit = _owner_of_target(args[index + 1], slug=True) or ""
             index += 2
             continue
-        if arg.startswith("--repo="):
+        if arg.startswith("--repo=") or (arg.startswith("-R") and len(arg) > 2):
             if explicit is None:
-                explicit = _owner_of_target(arg.split("=", 1)[1], slug=True) or ""
+                value = arg.split("=", 1)[1] if arg.startswith("--") else arg[2:].removeprefix("=")
+                explicit = _owner_of_target(value, slug=True) or ""
             index += 1
             continue
         if api and (field := _field_value(args, index)) is not None:
@@ -646,9 +647,15 @@ def gh_env(
     directory: Path, args: Sequence[str], environ: Mapping[str, str], now: datetime
 ) -> dict[str, str]:
     """gh's environment: no inherited token variable; GH_TOKEN set to the
-    bot's App token for the repo's owner when there is one."""
+    bot's App token for the target's owner when there is one. The target
+    comes from the args, then GH_REPO, then the checkout's origin."""
     env = {key: value for key, value in environ.items() if key not in TOKEN_VARIABLES}
-    owner = owner_from_args(args) or owner_from_origin()
+    gh_repo = environ.get("GH_REPO", "")
+    owner = (
+        owner_from_args(args)
+        or _owner_of_target(gh_repo, slug=True, api_path=False)
+        or owner_from_origin()
+    )
     token = select_token(directory, owner, now)
     if token is not None:
         env["GH_TOKEN"] = token

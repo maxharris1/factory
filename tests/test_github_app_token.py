@@ -14,11 +14,12 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
 from lib import github_app_token as broker
+from lib.github_actions import GhResult, GitHubReviewActions
 from lib.github_app_token import Holder, Remote, Stored
 from lib.orch_yml import GitHubApp
 
@@ -331,6 +332,9 @@ def test_gh_finds_the_owner_from_the_checkouts_origin(tmp_path: Path, monkeypatc
         ["api", "https://api.github.com/repos/aut0-code/project"],
         ["pr", "list", "-R", "github.com/aut0-code/project"],
         ["pr", "list", "--repo", "https://github.com/aut0-code/project"],
+        ["pr", "list", "-Raut0-code/project"],
+        ["pr", "list", "-Rgithub.com/aut0-code/project"],
+        ["pr", "list", "-R=aut0-code/project"],
     ],
 )
 def test_gh_uses_the_installation_of_the_commands_target_over_the_checkouts(
@@ -348,6 +352,59 @@ def test_gh_uses_the_installation_of_the_commands_target_over_the_checkouts(
     subprocess.run(["git", "remote", "add", "origin", "https://github.com/maxharris1/factory"], check=True)
     assert broker.gh_env(tokens, args, {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_AUT0"
     assert broker.gh_env(tokens, ["pr", "view", "284"], {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_MAX"
+
+
+def _two_installations_in_a_maxharris1_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    broker.write_token(broker.token_path(tokens, "maxharris1"), issued(10, f"{SENTINEL}_MAX"), None)
+    broker.write_token(broker.token_path(tokens, "aut0-code"), issued(10, f"{SENTINEL}_AUT0"), None)
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "remote", "add", "origin", "https://github.com/maxharris1/factory"],
+        check=True,
+    )
+    monkeypatch.chdir(checkout)
+    return tokens
+
+
+@pytest.mark.parametrize("value", ["aut0-code/project", "github.com/aut0-code/project"])
+def test_gh_repo_in_the_environment_names_the_installation_when_the_args_do_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    tokens = _two_installations_in_a_maxharris1_checkout(tmp_path, monkeypatch)
+    environ = {"GH_REPO": value}
+    assert broker.gh_env(tokens, ["pr", "view", "7"], environ, NOW)["GH_TOKEN"] == f"{SENTINEL}_AUT0"
+    assert broker.gh_env(tokens, ["api", "graphql", "-f", "id=PR_x"], environ, NOW)["GH_TOKEN"] == f"{SENTINEL}_AUT0"
+    explicit = ["pr", "view", "7", "-R", "maxharris1/factory"]
+    assert broker.gh_env(tokens, explicit, environ, NOW)["GH_TOKEN"] == f"{SENTINEL}_MAX"
+
+
+def test_every_gh_call_of_a_cross_owner_handoff_gets_the_targets_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tokens = _two_installations_in_a_maxharris1_checkout(tmp_path, monkeypatch)
+    head = "a" * 40
+    calls: list[str] = []
+
+    def runner(argv: list[str], timeout: float) -> GhResult:
+        args = argv[argv.index("gh") + 1 :]
+        graphql = "graphql" in args
+        calls.append("graphql" if graphql else "rest")
+        if broker.gh_env(tokens, args, {}, NOW).get("GH_TOKEN") != f"{SENTINEL}_AUT0":
+            return GhResult(1, "", "installation token cannot reach aut0-code/project")
+        ready = {"isDraft": False, "headRefOid": head}
+        data = (
+            {"data": {"markPullRequestReadyForReview": {"pullRequest": ready}}}
+            if graphql
+            else {"head": {"sha": head}, "state": "open", "draft": True, "node_id": "PR_kwDOKfac0s6CiTKq"}
+        )
+        return GhResult(0, json.dumps(data), "")
+
+    ticket = SimpleNamespace(repo="aut0-code/project", pr_number="42")
+    GitHubReviewActions(runner=runner).handoff(ticket, head)
+    assert calls == ["rest", "graphql"]
 
 
 @pytest.mark.parametrize(
