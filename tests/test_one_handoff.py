@@ -71,7 +71,6 @@ def orch(
 
 
 def plain(*args: str) -> subprocess.CompletedProcess:
-    """orch, holding the plain claim's proof (#127)."""
     return orch(*args, extra_env={"ORCH_JOB_PROOF": CLAIM_PROOF})
 
 
@@ -83,7 +82,6 @@ def job_row(db: Path, job_id: str) -> tuple[str, str | None]:
 
 
 def claimed(tmp_path: Path) -> tuple[Path, SQLiteJobQueue, str]:
-    """A job a plain (non-autostart) claim took through the device pool; its proof is CLAIM_PROOF."""
     db, queue = make_queue(tmp_path)
     job_id = enqueue(queue, "a")
     taken = local_pool(queue).claim("claude", token_hash=CLAIM_HASH)

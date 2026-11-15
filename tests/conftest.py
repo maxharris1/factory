@@ -140,10 +140,7 @@ def _registration_gate(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
 
 @pytest.fixture(autouse=True)
 def _claim_proof(monkeypatch: pytest.MonkeyPatch):
-    """A test's plain claim is CLAIM_PROOF's, and the test holds that proof (#127).
-
-    An autostart claim keeps no default: only its run's token proves it (#96).
-    """
+    """An autostart claim gets no CLAIM_HASH: only its run's token proves it (#96)."""
     from lib.device_pool import DevicePool
     from lib.job_token import PROOF_ENV
     from lib.queue import SQLiteJobQueue

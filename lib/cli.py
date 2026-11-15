@@ -1658,7 +1658,7 @@ def _job_run_command(argv: list[str]) -> int:
         checked_autostart = placed_run.check_autostart(queue, job_id=args.job_id, bot=args.bot)
         # #96: an autostart run proves itself to `orch job done` with a
         # fresh secret token; only its hash goes on the slot (in prepare).
-        token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
+        run_token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
         refusal = None if checked_autostart is not None else _proof_refusal(queue, args.job_id)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
@@ -1669,8 +1669,7 @@ def _job_run_command(argv: list[str]) -> int:
     if refusal is not None:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return 2
-    if checked_autostart is None:
-        token = job_token.presented(os.environ)
+    proof = run_token if checked_autostart is not None else job_token.presented(os.environ)
     try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
     except (QueueError, sqlite3.Error, OSError) as exc:
@@ -1709,10 +1708,9 @@ def _job_run_command(argv: list[str]) -> int:
             **harness_env(owner),
         }
     )
-    if token is not None and not placed.remote:
+    if proof is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
-        # A plain claim's proof is passed on so its harness can finish the job.
-        environment[job_token.PROOF_ENV] = token
+        environment[job_token.PROOF_ENV] = proof
     # #100 r8: the summary's scrubber knows the harness's own environment,
     # the proof included.
     session = telemetry.start_session(
