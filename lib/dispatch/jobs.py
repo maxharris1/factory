@@ -18,7 +18,9 @@ from lib.dispatch.helpers import (
     _NO_READ_SINCE_FAILURE,
     _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
+    _asks_questions,
     _comment_order,
+    _detail_plan_round,
     _detail_project_bot,
     _detail_round,
     _detail_round_number,
@@ -26,6 +28,7 @@ from lib.dispatch.helpers import (
     _merge_only,
     _queue_state,
     _retry_detail,
+    _round_number,
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
@@ -1037,23 +1040,25 @@ class JobsMixin:
     def _posted_handoff(self, job: Job, ticket: TrackedTicket | None) -> Comment | object | None:
         """The result a failed harness job already posted (#91, #105, #193).
 
-        Read from `ticket`, posted no earlier than its first
-        attempt was queued, from a login trusted for its `from` and `role`, of a
-        kind in _SETTLING_KINDS for the job's action, and not already
-        rejected when it was handled (stale, superseded, ...). A ready stale
-        only because its review already answered (#71 stale-ready-verdict)
-        still counts. An update job's result follows its source comment, and
-        its ready is matched by TU's attribution, not by time.
+        Read from `ticket`, posted after the comment that queued the job and
+        no earlier than its first attempt was queued, from a login trusted for
+        its `from` and `role`, of a kind in _SETTLING_KINDS for the job's
+        action, and not already rejected when it was handled (stale,
+        superseded, ...). A ready stale only because its review already
+        answered (#71 stale-ready-verdict) still counts. An update job's ready
+        is matched by TU's attribution, not by time.
 
         A review's is a verdict from the job's recipient for the job's head
-        (as a prefix, like every head compare) and round; a review job with
-        no round or no head takes none. A builder's is from the job's
-        recipient; its questions count unless T5 found none in them. A build
+        (as a prefix, like every head compare) and round, or its questions; a
+        review job with no round or no head takes none. A builder's is from
+        the job's recipient. Questions count only when T5's _asks_questions
+        finds questions in them. A plan
+        counts only for the round the job posts, the one T1P accepts. A build
         or fix job's ready is at a new head: one other than the job's own, or
-        any head for a job that has none. That ready counts once T2 routed
-        it, or while it waits on CI at the polled PR head. One T2 left
-        unhandled at another head (its fresh PR read failed) may yet be
-        stale: _HANDOFF_UNREAD when no counted handoff comes first.
+        any head for a job that has none. That ready counts once T2 routed it,
+        or while it waits on CI at the polled PR head. One T2 left unhandled
+        at another head (its fresh PR read failed) may yet be stale:
+        _HANDOFF_UNREAD when no counted handoff comes first.
         """
         candidate = self._handoff_candidate(job, ticket)
         if candidate is None:
@@ -1083,25 +1088,33 @@ class JobsMixin:
         comments = sorted(ticket.comments, key=_comment_order)
         ids = [item.id for item in comments]
         after_source = job.request.source_comment_id in ids
-        if update and after_source:
+        if after_source:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
         queued_at = self._first_queued_at(job)
         for item in comments:
             if not update and self._predates(ticket, item, queued_at):
                 continue
             try:
-                fields = parse_comment(item.body).as_dict()
+                parsed = parse_comment(item.body)
             except HandoffError:
                 continue
+            fields = parsed.as_dict()
             kind = fields.get("kind")
             if kind not in kinds:
                 continue
             if not self._trusted(ticket, item, fields, bot, role=role):
                 continue
+            if kind == "plan" and _round_number(fields.get("round")) != _detail_plan_round(
+                job.request.detail
+            ):
+                continue
             outcome = self._handled_outcome(ticket, item.id)
             if kind == "questions":
-                if (update and not after_source) or outcome == "no-questions" or (
-                    outcome is not None and outcome.startswith(_REJECTED_OUTCOMES)
+                if (
+                    (update and not after_source)
+                    or outcome == "no-questions"
+                    or not _asks_questions(fields, parsed.body)
+                    or (outcome is not None and outcome.startswith(_REJECTED_OUTCOMES))
                 ):
                     continue
                 return HandoffCandidate(item, False)
