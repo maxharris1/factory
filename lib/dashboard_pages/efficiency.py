@@ -47,9 +47,9 @@ CSS = """\
 .ef-legend .claude{color:var(--claude)}.ef-legend .codex{color:var(--codex)}.ef-legend .cursor{color:var(--cursor)}
 .ef-legend .grok{color:var(--grok)}.ef-legend .held{color:var(--warn)}.ef-legend .idle{color:var(--muted)}
 .ef-devs{display:flex;flex-direction:column;gap:8px}
-.ef-dev{display:flex;align-items:center;gap:12px}
+.ef-dev{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px}
 .ef-dev b{flex:0 0 48px;font:600 13px/1.5 var(--mono);color:var(--text)}
-.ef-meter{display:block}.ef-meter .px{height:8px}
+.ef-meter{display:block;max-width:100%}.ef-meter .px{height:8px}
 .ef-u{font:12px/1.5 var(--mono);font-variant-numeric:tabular-nums;color:var(--muted)}
 .ef-lede{margin:0 0 12px;max-width:880px;font-size:13px;color:var(--text-2)}
 .ef-scroll{overflow-x:auto}
@@ -136,7 +136,11 @@ SCRIPT = r"""
   var WORKING_BOTS = ['claude', 'codex', 'cursor'];
   function renderWorking(d) {
     var lanes = laneDevices(d);
-    var devices = lanes.devices.filter(function (x) { return x.enabled && !x.placeholder; });
+    var devices = [];
+    lanes.devices.forEach(function (x) {
+      if (x.enabled && !x.placeholder) devices.push(x);
+      else if (x.used) devices.push(Object.assign({}, x, {slot_max: x.used}));
+    });
     var running = {claude: 0, codex: 0, cursor: 0, other: 0};
     var held = 0, idle = 0, used = 0, slots = 0, known = true;
     devices.forEach(function (x) {
@@ -349,7 +353,12 @@ def _meter(name: str, used: int, slots: int) -> str:
 
 def _working(snapshot: dict) -> str:
     lanes, wakes = lane_devices(snapshot)
-    devices = [d for d in lanes if d["enabled"] and not d["placeholder"]]
+    devices = []
+    for device in lanes:
+        if device["enabled"] and not device["placeholder"]:
+            devices.append(device)
+        elif device["used"]:
+            devices.append({**device, "slot_max": device["used"]})
     running = {kind: 0 for kind in (*WORKING_BOTS, "other")}
     held = idle = used = slots = 0
     known = True

@@ -10,7 +10,7 @@ from lib import usage_readings
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages import efficiency
 from lib.usage_readings import Reading
-from tests.test_dashboard import NOW, add_ticket, make_db, seeded
+from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 
 PANELS = ["savings", "jobs-lifetime", "rounds", "working", "headroom", "tokens", "health"]
@@ -207,6 +207,40 @@ def test_who_is_working_has_a_cell_per_slot_and_a_meter_per_device(tmp_path: Pat
     assert meters == [("2", "3"), ("0", "2")]
     assert "2 / 3 slots" in _text(panel) and "0 / 2 slots" in _text(panel)
     assert "2 of 5 slots used" in _text(panel)
+
+
+def _disabled_box(tmp_path: Path, state: str) -> dict:
+    db = tmp_path / "orch.db"
+    make_db(db)
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        "devices:\n  - name: box\n    local: true\n    enabled: false\n    slot_max: 3\n"
+        "    harnesses:\n      claude: claude-bot\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(db) as connection:
+        add_job(connection, "on-disabled", state=state)
+    return collect_snapshot(db, tmp_path / "poll.log", now=NOW, machines_path=machines)
+
+
+def test_a_disabled_device_keeps_its_running_job_but_offers_no_idle_slot(tmp_path: Path) -> None:
+    panel = _text(_inner(_page(_disabled_box(tmp_path, "running")), "working"))
+    assert "1 of 1 slots used" in panel
+    assert "claude 1" in panel and "idle 0" in panel
+    assert "box 1 / 1 slots" in panel
+
+
+def test_a_disabled_device_with_nothing_running_is_left_out(tmp_path: Path) -> None:
+    panel = _text(_inner(_page(_disabled_box(tmp_path, "done")), "working"))
+    assert "0 of 0 slots used" in panel and "box" not in panel
+
+
+@needs_node
+@pytest.mark.parametrize("state", ["running", "done"])
+def test_script_twin_matches_on_a_disabled_device(tmp_path: Path, state: str) -> None:
+    snapshot = _disabled_box(tmp_path, state)
+    out = _run_page(tmp_path, snapshot, "efficiency", ["working"])
+    assert out["html"]["working"] == _inner(_page(snapshot), "working")
 
 
 @needs_node
