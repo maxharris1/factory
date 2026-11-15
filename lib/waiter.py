@@ -382,7 +382,7 @@ class GhContextSource:
             text = base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
         except (ValueError, UnicodeError):
             return ContextResult(None, None, f"{repo} factory.md is not base64 content")
-        context, findings = parse_factory_context(text)
+        context, findings = parse_factory_context(text, strict=False)
         if context is None:
             errors = [item.message for item in findings if item.severity == "error"]
             return ContextResult(None, None, f"{repo} factory.md: {errors[0] if errors else 'invalid'}")

@@ -416,8 +416,9 @@ def test_untrusted_risk_comment_leaves_the_ticket_low(login: str, body: str) -> 
     assert _risk_after(("grok-login", GROK_LOW), (login, body)) == "low"
 
 
-def test_later_trusted_risk_still_applies() -> None:
-    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "high"
+def test_a_later_trusted_risk_does_not_move_the_intake_risk() -> None:
+    # #195: the first trusted orchestrator brief or go sets the risk.
+    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "low"
 
 
 def test_linear_risk_counts_only_from_trusted_linear_users() -> None:
@@ -557,6 +558,120 @@ def test_failing_project_does_not_stop_healthy_project() -> None:
         "repos/acme/widgets/issues?state=open&per_page=100" in call
         for call in gh.calls
     )
+
+
+def _factory_payload(text: str) -> dict:
+    return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+
+
+def _with_unknown_field(text: str) -> str:
+    return text.replace("skills: []\n", "skills: []\nnew_field: [docs/]\n")
+
+
+def test_unknown_factory_field_still_polls_and_feeds() -> None:
+    text = _with_unknown_field(FACTORY.format(tickets="github", ship="merge"))
+    assert "new_field" in text
+    gh = FakeGh(text)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.begin_cycle()
+
+    (ticket,) = source.github_candidates("orch:state/")
+    context = source.factory_context(source.config.projects[0])
+
+    assert ticket.repo == "acme/widgets"
+    assert context.config.ship == "merge"
+    assert errors == []
+
+
+def test_bad_factory_md_keeps_the_last_good_config_and_warns_once() -> None:
+    good = FACTORY.format(tickets="github", ship="merge")
+    gh = FakeGh(good)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    warnings: list[str] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.warning_sink = warnings.append
+    project = source.config.projects[0]
+    source.begin_cycle()
+    assert len(source.github_candidates("orch:state/")) == 1
+    source.factory_context(project)
+
+    gh.factory = _factory_payload(good.replace("ship: merge", "ship: yolo"))
+    for _cycle in range(3):
+        source.begin_cycle()
+        (ticket,) = source.github_candidates("orch:state/")
+        assert ticket.repo == "acme/widgets"
+        assert source.factory_context(project).config.ship == "merge"
+
+    assert errors == []
+    assert warnings == [
+        "acme/widgets factory.md: ship must be merge, handoff, or after:<approver>; "
+        "keeping the last good factory.md"
+    ]
+
+    gh.factory = _factory_payload(good)
+    source.begin_cycle()
+    source.github_candidates("orch:state/")
+    gh.factory = _factory_payload(good.replace("ship: merge", "ship: yolo"))
+    source.begin_cycle()
+    source.github_candidates("orch:state/")
+    assert len(warnings) == 2
+
+
+def test_a_rejected_base_branch_never_replaces_the_last_good_factory_md() -> None:
+    good = FACTORY.format(tickets="github", ship="merge")
+    gh = FakeGh(good)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    project = source.config.projects[0]
+    counts = []
+    contexts = []
+    for text in (
+        good,
+        good.replace("base_branch: main", "base_branch: dev"),
+        good.replace("ship: merge", "ship: yolo"),
+    ):
+        gh.factory = _factory_payload(text)
+        source.begin_cycle()
+        counts.append(len(source.github_candidates("orch:state/")))
+        try:
+            contexts.append(source.factory_context(project).config.base_branch)
+        except PollSourceError:
+            contexts.append(None)
+
+    assert counts == [1, 0, 1]
+    assert contexts == ["main", None, "main"]
+
+
+def test_bad_factory_md_with_no_last_good_config_is_still_an_error() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="yolo"))
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.begin_cycle()
+
+    assert source.github_candidates("orch:state/") == ()
+    assert [repo for repo, _ticket, _error in errors] == ["acme/widgets"]
+    with pytest.raises(PollSourceError):
+        source.factory_context(source.config.projects[0])
 
 
 def test_gh_timeout_is_retried_with_backoff_and_a_short_timeout() -> None:
@@ -1650,10 +1765,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 134_880),
-        (25, 5, 10, 1_020, 618_720),
-        (100, 20, 40, 1_080, 592_320),
-        (500, 20, 460, 1_080, 659_040),
+        (5, 1, 2, 300, 145_140),
+        (25, 5, 10, 1_020, 670_020),
+        (100, 20, 40, 1_080, 640_200),
+        (500, 20, 460, 1_080, 713_760),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(

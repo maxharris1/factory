@@ -6,12 +6,14 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import time
 from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -30,6 +32,7 @@ from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context,
 from lib.github_actions import (
     GhResult,
     GitHubReviewActions,
+    PULL_FILES_LIMIT,
     LinearReviewActions,
     Runner,
     _is_read,
@@ -95,6 +98,7 @@ query FactoryIssue($id: String!) {
       nodes { url }
       pageInfo { hasNextPage }
     }
+    labels(first: 50) { nodes { name } pageInfo { hasNextPage } }
   }
 }
 """.strip()
@@ -111,7 +115,12 @@ LINEAR_REQUESTS_PER_HOUR = 2_500
 LINEAR_COMPLEXITY_PER_HOUR = 3_000_000
 LINEAR_SHARE = 0.5
 LINEAR_SEARCH_COMPLEXITY = 116
-LINEAR_ISSUE_COMPLEXITY = 672  # +12 for the issue state and state order (#47)
+LINEAR_ISSUE_COMPLEXITY = 729  # +12 for the issue state and state order (#47), +57 for its labels (#195)
+ORCHESTRATOR = "grok-bot"
+RISKY_PATH = re.compile(r"migration|realtime")
+RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
+SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
+INTAKE_RISK_TABLE = "intake_risk"
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
@@ -124,6 +133,10 @@ _PR_URL = re.compile(
 
 class PollSourceError(RuntimeError):
     pass
+
+
+class FactoryParseError(PollSourceError):
+    """factory.md was fetched but does not validate."""
 
 
 class PollCycleError(PollSourceError):
@@ -143,6 +156,7 @@ class HTTPResult:
 
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 ErrorSink = Callable[[str, str, str], None]
+WarningSink = Callable[[str], None]
 DeferralSink = Callable[[str], None]
 TerminalSink = Callable[[str, str, str, "TrackedTicket | None"], None]
 
@@ -199,6 +213,44 @@ def post_json(
         ) from None
 
 
+class IntakeRisks:
+    """#195: each ticket's stored risk. Written once from intake and only
+    ever raised to high, in the dispatcher database so a restart keeps it."""
+
+    def __init__(self, path: Path | None = None):
+        self._connection = sqlite3.connect(
+            ":memory:" if path is None else str(path), timeout=30, isolation_level=None
+        )
+        self._connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {INTAKE_RISK_TABLE} (
+                repo TEXT NOT NULL,
+                ticket_id TEXT NOT NULL,
+                risk TEXT NOT NULL CHECK (risk IN ('low', 'high')),
+                PRIMARY KEY (repo, ticket_id)
+            )
+            """
+        )
+
+    def get(self, repo: str, ticket_id: str) -> str | None:
+        row = self._connection.execute(
+            f"SELECT risk FROM {INTAKE_RISK_TABLE} WHERE repo = ? AND ticket_id = ?",
+            (repo.lower(), ticket_id),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def keep(self, repo: str, ticket_id: str, risk: str) -> str:
+        self._connection.execute(
+            f"""
+            INSERT INTO {INTAKE_RISK_TABLE} (repo, ticket_id, risk) VALUES (?, ?, ?)
+            ON CONFLICT (repo, ticket_id) DO UPDATE SET risk = 'high'
+            WHERE excluded.risk = 'high'
+            """,
+            (repo.lower(), ticket_id, risk),
+        )
+        return self.get(repo, ticket_id) or "high"
+
+
 class LivePollSource:
     def __init__(
         self,
@@ -214,8 +266,10 @@ class LivePollSource:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         gh_call_timeout_seconds: float = GH_CALL_TIMEOUT_SECONDS,
+        risks: IntakeRisks | None = None,
     ):
         self.config = config
+        self.risks = IntakeRisks() if risks is None else risks
         self.environ = environ
         self.gh_runner = gh_runner
         self.linear_transport = linear_transport
@@ -230,7 +284,11 @@ class LivePollSource:
             "github": config.trusted_logins,
             "linear": config.trusted_linear_users,
         }
+        self.warning_sink: WarningSink | None = None
         self._factory_cache: dict[str, FactoryConfig] = {}
+        self._last_good_factory: dict[str, FactoryConfig] = {}
+        self._last_good_context: dict[str, FactoryContext] = {}
+        self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
@@ -1060,12 +1118,20 @@ class LivePollSource:
             raise PollSourceError(
                 f"{project.repo} has no projects[].factory_ref in orch.yml"
             )
-        factory = self._factory_at(project.repo, project.factory_ref)
+        try:
+            factory = self._factory_at(project.repo, project.factory_ref)
+            fresh = True
+        except FactoryParseError as exc:
+            factory = self._last_good(identity, exc, self._last_good_factory)
+            fresh = False
         if factory.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {factory.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if fresh:
+            self._last_good_factory[identity] = factory
+            self._factory_warned.pop(identity, None)
         self._factory_cache[identity] = factory
         return factory
 
@@ -1094,19 +1160,43 @@ class LivePollSource:
         """
         if project.factory_ref is None:
             raise PollSourceError(f"{project.repo} has no projects[].factory_ref in orch.yml")
+        identity = project.repo.lower()
         text = self._factory_text(project.repo, project.factory_ref)
-        context, findings = parse_factory_context(text)
-        if context is None:
+        parsed, findings = parse_factory_context(text, strict=False)
+        if parsed is None:
             errors = [item.message for item in findings if item.severity == "error"]
-            raise PollSourceError(
-                f"{project.repo} factory.md: {errors[0] if errors else 'invalid factory.md'}"
+            context = self._last_good(
+                identity,
+                FactoryParseError(
+                    f"{project.repo} factory.md: {errors[0] if errors else 'invalid factory.md'}"
+                ),
+                self._last_good_context,
             )
+        else:
+            context = parsed
         if context.config.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {context.config.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if parsed is not None:
+            self._last_good_context[identity] = parsed
+            self._factory_warned.pop(identity, None)
         return context
+
+    def _last_good(self, identity: str, exc: FactoryParseError, cache: dict):
+        """A factory.md parse failure falls back to the last good parse (#288).
+
+        With none, the failure stands. Each distinct failure warns once.
+        """
+        last = cache.get(identity)
+        if last is None:
+            raise exc
+        if self._factory_warned.get(identity) != str(exc):
+            self._factory_warned[identity] = str(exc)
+            if self.warning_sink is not None:
+                self.warning_sink(f"{exc}; keeping the last good factory.md")
+        return last
 
     def _factory_text(self, repo: str, branch: str) -> str:
         content = _json_object(
@@ -1146,11 +1236,11 @@ class LivePollSource:
             text = base64.b64decode(compact, validate=True).decode("utf-8")
         except (ValueError, UnicodeError) as exc:
             raise PollSourceError(f"{repo} factory.md content is invalid") from exc
-        factory, findings = parse_factory_md(text)
+        factory, findings = parse_factory_md(text, strict=False)
         errors = [item.message for item in findings if item.severity == "error"]
         if factory is None:
             detail = errors[0] if errors else "invalid factory.md"
-            raise PollSourceError(f"{repo} factory.md: {detail}")
+            raise FactoryParseError(f"{repo} factory.md: {detail}")
         return factory
 
     def _github_ticket(
@@ -1192,7 +1282,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci={head: self.github.ci_status(project.repo, head)},
-            risk=_risk(comments, self._trusted),
+            risk=self._intake_risk(project.repo, number, comments) or "high",
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(pull.get("html_url")),
             git_branch_name=_optional_string(
@@ -1338,19 +1428,20 @@ class LivePollSource:
                 PollSourceError("Linear issue has no linked GitHub PR"),
             )
         factory = self._factory(project)
+        hold = (
+            self._hold_inputs(project.repo, pr_number, factory)
+            if pr_number is not None
+            else {}
+        )
         ticket = TrackedTicket(
-            **(
-                self._hold_inputs(project.repo, pr_number, factory)
-                if pr_number is not None
-                else {}
-            ),
+            **hold,
             repo=project.repo,
             ticket_id=identifier,
             factory=factory,
             comments=comments,
             current_head=head,
             ci=ci,
-            risk=_risk(comments, self._trusted),
+            risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
@@ -1368,6 +1459,77 @@ class LivePollSource:
         )
         self._ticket_cache[cache_key] = ticket
         return ticket
+
+    def _intake_risk(
+        self, repo: str, ticket_id: str, comments: Sequence[Comment]
+    ) -> str | None:
+        """#195: the stored risk, else the intake header's, which is then
+        stored. None while no intake header has been read."""
+        stored = self.risks.get(repo, ticket_id)
+        if stored is not None:
+            return stored
+        header = _risk_header(comments, self._trusted)
+        return None if header is None else self.risks.keep(repo, ticket_id, header)
+
+    def _linear_risk(
+        self,
+        repo: str,
+        identifier: str,
+        issue: Mapping[str, Any],
+        comments: Sequence[Comment],
+        pr_number: str | None,
+    ) -> str:
+        """#195: the intake risk, raised to high for good by a `migrations`
+        label or a migration or realtime change in the linked PR. Labels or
+        changes that cannot be read count as high for this poll."""
+        intake = self._intake_risk(repo, identifier, comments)
+        if intake == "high":
+            return "high"
+        label = _linear_migrations_label(issue)
+        if label is True:
+            return self.risks.keep(repo, identifier, "high")
+        change = False if pr_number is None else self._risky_change(repo, identifier, pr_number)
+        if change is True:
+            return self.risks.keep(repo, identifier, "high")
+        return "low" if intake == "low" and label is False and change is False else "high"
+
+    def _risky_change(self, repo: str, identifier: str, number: str) -> bool | None:
+        """True when the PR touches a migration or realtime path, or its patch
+        changes a realtime table; None when that cannot be read or decided."""
+        try:
+            pages = self._gh_pages(f"repos/{repo}/pulls/{number}/files?per_page=100")
+            files = [
+                _object(item, "pull request file")
+                for page in pages
+                for item in _array(page, "pull request files page")
+            ]
+        except Exception as exc:
+            self._record(repo, identifier, exc)
+            return None
+        if len(files) >= PULL_FILES_LIMIT:
+            return None
+        undecided = False
+        for item in files:
+            paths = [item.get(key) for key in ("filename", "previous_filename") if key in item]
+            if not paths or not all(isinstance(path, str) and path for path in paths):
+                return None
+            if any(RISKY_PATH.search(path.lower()) for path in paths):
+                return True
+            patch = item.get("patch")
+            if isinstance(patch, str):
+                if any(
+                    line[:1] in "+-" and RISKY_CHANGE.search(line)
+                    for line in patch.splitlines()
+                ):
+                    return True
+                if paths[0].lower().endswith(SQL_SUFFIXES):
+                    statement = _sql_patch_risk(patch)
+                    if statement is True:
+                        return True
+                    undecided = undecided or statement is None
+            elif item.get("changes") != 0:
+                undecided = True
+        return None if undecided else False
 
     def _linear_merged(
         self, project: Project, identifier: str, allow_merged: bool
@@ -1864,20 +2026,156 @@ def _newest_comment_at(issue: Mapping[str, Any]) -> float | None:
     return newest
 
 
-def _risk(
+def _risk_header(
     comments: Sequence[Comment],
     trusted: Mapping[str, Mapping[str, frozenset[str]]],
-) -> str:
-    """The last risk= a trusted author wrote, else high (#68)."""
-    risk = "high"
+) -> str | None:
+    """#195: the risk= of the first brief or go the trusted orchestrator
+    wrote. None when there is none, or that comment was edited."""
     for comment in comments:
         try:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             continue
-        if "risk" in fields and fields.get("from") in trusted_bots(trusted, comment.author):
-            risk = fields["risk"]
-    return risk
+        if (
+            "risk" in fields
+            and fields["kind"] in ("brief", "go")
+            and fields.get("role") == "orchestrator"
+            and fields.get("from") == ORCHESTRATOR
+            and ORCHESTRATOR in trusted_bots(trusted, comment.author)
+        ):
+            return None if comment.edited_at is not None else fields["risk"]
+    return None
+
+
+def _risk(
+    comments: Sequence[Comment],
+    trusted: Mapping[str, Mapping[str, frozenset[str]]],
+) -> str:
+    """The intake header's risk, else high (#68)."""
+    return _risk_header(comments, trusted) or "high"
+
+
+def _sql_patch_risk(patch: str) -> bool | None:
+    """#195: True when a changed line falls in a SQL statement that changes a
+    realtime table, or a changed hunk shows a realtime word at all; None when
+    such a statement's start or end is outside the patch, or a changed hunk
+    shows a block comment, so it cannot be classified."""
+    decided: bool | None = False
+    hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*))$", patch, flags=re.MULTILINE)
+    for index in range(1, len(hunks) - 4, 5):
+        body = hunks[index + 4].splitlines()
+        if any(line[:1] in "+-" for line in body):
+            shown = [hunks[index + 3], *(line[1:] for line in body)]
+            if any(RISKY_CHANGE.search(text) for text in shown):
+                return True
+            if any(SQL_COMMENT.search(text) for text in shown):
+                decided = None
+        for start, mark in ((int(hunks[index + 1]), "-"), (int(hunks[index + 2]), "+")):
+            lines = [line for line in body if line[:1] in (" ", mark)]
+            verdict = _sql_statements_risk(lines, mark, headed=start <= 1)
+            if verdict is True:
+                return True
+            if verdict is None:
+                decided = None
+    return decided
+
+
+SQL_TOKEN = re.compile(
+    r"--|/\*|\*/|;|(?<![\w$])[eE]'|'|\"|(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$"
+)
+SQL_COMMENT = re.compile(r"/\*|\*/")
+
+
+def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
+    """The pattern that scans a quoted run, and the match that closes it."""
+    if opener in ("'", '"'):
+        return re.compile(re.escape(opener * 2) + "|" + re.escape(opener)), opener
+    if opener in ("e'", "E'"):
+        return re.compile(r"\\.|''|'", re.DOTALL), "'"
+    return re.compile(re.escape(opener)), opener
+
+
+def _sql_statements_risk(lines: Sequence[str], mark: str, *, headed: bool) -> bool | None:
+    """#195: lexes one side of a hunk as PostgreSQL. Comments are dropped;
+    quoted strings, identifiers and dollar-quoted bodies keep their words but
+    never end a statement. A hunk that starts past line 1 and shows it began
+    inside a comment or quote cannot be split into statements."""
+    decided: bool | None = False
+    from_top, touched, stray = headed, False, False
+    text, changed = "", False
+    depth, quote, close = 0, None, ""
+    for line in lines:
+        mine = line[:1] == mark
+        touched = touched or mine
+        code, at = line[1:] + "\n", 0
+        while at < len(code):
+            if depth:
+                found = SQL_COMMENT.search(code, at)
+                if found is None:
+                    break
+                at = found.end()
+                depth += 1 if found.group() == "/*" else -1
+                text += "" if depth else " "
+                continue
+            if quote is not None:
+                found = quote.search(code, at)
+                piece = code[at : len(code) if found is None else found.end()]
+                text += piece
+                changed = changed or (mine and bool(piece.strip()))
+                if found is None:
+                    break
+                at = found.end()
+                if found.group() == close:
+                    quote = None
+                continue
+            found = SQL_TOKEN.search(code, at)
+            piece = code[at : len(code) if found is None else found.start()]
+            text += piece
+            changed = changed or (mine and bool(piece.strip()))
+            if found is None:
+                break
+            token, at = found.group(), found.end()
+            if token == ";":
+                changed = changed or mine
+                if changed and RISKY_CHANGE.search(text):
+                    return True
+                if changed and not headed:
+                    decided = None
+                text, changed, headed = "", False, True
+            elif token == "--":
+                text, at = text + " ", len(code)
+            elif token == "/*":
+                depth = 1
+            elif token == "*/":
+                stray = True
+            else:
+                quote, close = _sql_quote(token)
+                text += token
+                changed = changed or mine
+    if changed and RISKY_CHANGE.search(text):
+        return True
+    if touched and not from_top and (stray or depth or quote is not None):
+        return None
+    return None if changed else decided
+
+
+def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
+    """Whether the issue has a `migrations` label; None when its labels
+    cannot be read."""
+    labels = issue.get("labels")
+    if not isinstance(labels, dict):
+        return None
+    page = labels.get("pageInfo")
+    nodes = labels.get("nodes")
+    if not isinstance(page, dict) or not isinstance(nodes, list):
+        return None
+    names = [node.get("name") if isinstance(node, dict) else None for node in nodes]
+    if not all(isinstance(name, str) for name in names):
+        return None
+    if any(name.strip().lower() == "migrations" for name in names):
+        return True
+    return None if page.get("hasNextPage") is not False else False
 
 
 def _brief(comments: Sequence[Comment]) -> str | None:

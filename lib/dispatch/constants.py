@@ -1,0 +1,73 @@
+"""Dispatcher constants shared across lib/dispatch modules."""
+
+from __future__ import annotations
+
+import re
+
+
+GITHUB_STATE_LABEL_PREFIX = "orch:state/"
+# merged and done are absorbing (#108): no later write moves a ticket out.
+FINISHED_STATES = ("merged", "done")
+ORCHESTRATOR = "grok-bot"
+# #170: the kinds a worker bot's App login may post once the switch is on.
+WORKER_KINDS = frozenset({"plan", "questions", "ready", "verdict", "stuck"})
+_NOT_FINISHED = "COALESCE(workflow_state, '') NOT IN ('merged', 'done')"
+# #108 (#42 N4): states where no bot is working and no person is waiting on
+# the factory. Their tickets are read once every STOPPED_POLL_SECONDS.
+STOPPED_STATES = ("handed-off", "capped", "blocked", "refused")
+# #130: an approved ticket on a finish_line: merge project stays watched,
+# polled every cycle, until its PR merges or closes.
+WATCHED_STATES = ("merge-queue", "updating")
+UPDATE_FAILURES_TO_STOP = 2
+UPDATE_READY_GRACE_SECONDS = 600.0
+# #255: how long a ready on a conflicting PR waits for any check run on its
+# head before the dispatcher queues a merge-only base update.
+BASE_UPDATE_GRACE_SECONDS = 120.0
+STOPPED_POLL_SECONDS = 300
+MERGED_BEFORE_HANDOFF = "merged before handoff"
+LINEAR_HANDOFF_QUERY = "orch:v1 kind=brief OR orch:v1 kind=go"
+GROK_WAKE_REASONS = (
+    "blocked",
+    "capped",
+    "refused",
+    "stuck",
+    "unparsed",
+    "ship-failed",
+    "rejected",
+    "stale",
+    "done",
+    "awaiting-ok",
+    "go-not-from-approver",
+)
+CORE_KINDS = ("go", "plan", "ready")
+SETTLE_FAILURES_TO_WAKE = 3
+STUCK_WAKE_FAILURE_LIMIT = 2
+_QUESTIONS_HEADING = re.compile(
+    r"(?:#{1,6}\s*)?(?:\*\*)?questions(?::\*\*|\*\*:?|:)?(?:\s+(?P<rest>.*))?",
+    re.IGNORECASE,
+)
+_LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_FENCE_OPEN = re.compile(r" {0,3}(?P<fence>`{3,}(?=[^`]*$)|~{3,})")
+_NO_QUESTIONS = frozenset({"none", "n/a", "no questions"})
+
+
+SHIP_ERROR_LIMIT = 240
+POLL_ERROR_LIMIT = 500
+POLL_ERROR_STREAK = 3
+_UNVERIFIED_HANDOFF = """
+    jobs.state = 'done' AND jobs.recipient != 'grok'
+    AND jobs.handoff_comment_id IS NOT NULL
+    AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?
+    AND NOT EXISTS (
+        SELECT 1 FROM job_events AS event
+        WHERE event.job_id = jobs.id
+          AND event.event IN ('handoff-verified', 'handoff-unverified')
+    )
+"""
+_ABANDONED_JOB_DETAIL = "the ticket is abandoned; nothing more starts for it"
+# #109: tickets out of the poll loop read per poll to verify a late handoff.
+OFF_LOOP_VERIFY_READS = 5
+
+
+POLL_ERROR_FRAMES = 10
+POLL_ERROR_DETAIL_LIMIT = 4000

@@ -130,6 +130,16 @@ def test_check_config_refuses_a_missing_field(tmp_path: Path) -> None:
     assert "ok" not in result.stdout
 
 
+def test_check_config_refuses_an_unknown_field(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["owner_bot"] = "grok"
+    path = write_factory(tmp_path, data)
+    result = run(["check-config", "--factory", str(path)])
+    assert result.returncode == 1
+    assert "unknown field 'owner_bot'" in result.stderr
+    assert "ok" not in result.stdout
+
+
 def test_check_config_refuses_a_same_family_reviewer(tmp_path: Path) -> None:
     data = copy.deepcopy(VALID)
     data["reviewer"]["harness"] = "claude"
