@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lib import telemetry
-from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
+from lib.dashboard import collect_snapshot, redact, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
 from tests.test_telemetry import readable
@@ -342,7 +342,7 @@ def test_live_run_values_are_validated_and_capped(tmp_path: Path) -> None:
     snapshot = collect_snapshot(db, log, now=NOW)
     item = _running(snapshot)["13"]["telemetry"]
     assert len(item["plan"]) == 12
-    assert item["plan"][0] == {"text": "odd line here", "status": "pending"}
+    assert item["plan"][0] == {"text": "odd linehere", "status": "pending"}
     assert item["plan"][1] == {"text": "x" * 119 + "…", "status": "pending"}
     assert item["plan"][2] == {"text": "step 4", "status": "done"}
     assert item["current_task"].startswith("a b c x") and len(item["current_task"]) == 120
@@ -399,11 +399,21 @@ def _across_cap(limit: int) -> str:
     return lead + "read " + token
 
 
-def test_a_secret_crossing_a_text_cap_is_redacted_before_the_cut(tmp_path: Path) -> None:
+def _split_by(control: str) -> object:
+    return lambda limit: "read ghp_" + "A1" * 5 + control + "B2" * 13
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [_across_cap, *(_split_by(c) for c in ("\x00", "\x07", "\r", "\x1b", "\x7f", "\x9f"))],
+    ids=["text-cap", "nul", "bel", "cr", "esc", "del", "c1"],
+)
+def test_a_secret_is_redacted_whole_before_any_later_transform(tmp_path: Path, secret) -> None:
+    assert "ghp_" not in redact(secret(telemetry.TASK_TEXT_LIMIT))
     db, log = seeded(tmp_path)
-    task = _across_cap(telemetry.TASK_TEXT_LIMIT)
-    kind = _across_cap(telemetry.LABEL_LIMIT)
-    repo = _across_cap(100)
+    task = secret(telemetry.TASK_TEXT_LIMIT)
+    kind = secret(telemetry.LABEL_LIMIT)
+    repo = secret(100)
     add_telemetry(
         db, "r-codex-review", repo=repo,
         plan=json.dumps([{"text": task, "status": "in_progress"}]),
@@ -425,9 +435,10 @@ def test_a_secret_crossing_a_text_cap_is_redacted_before_the_cut(tmp_path: Path)
         assert "ghp_" not in value and "[redacted" in value, (name, value)
     out = tmp_path / "out"
     write_snapshot_pages(out, snapshot)
-    for page in out.rglob("*"):
-        if page.is_file():
-            assert "ghp_A1" not in page.read_text(errors="replace"), page.name
+    pages = [page for page in out.rglob("*") if page.is_file()]
+    assert {"status.json", "efficiency.html"} <= {page.name for page in pages}
+    for page in pages:
+        assert "ghp_A1" not in page.read_text(errors="replace"), page.name
 
 
 # --- the page script draws the same ---------------------------------------------------------
