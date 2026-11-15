@@ -1,0 +1,8 @@
+decision	choice	why
+cadence clock	queue clock (self.queue.now()), last read per stopped ticket kept in Dispatcher memory	ticket allows memory or a column; memory needs no schema change, and a restart only re-staggers, bounded by STOPPED_POLL_SECONDS (AC 2)
+what counts as a read	a ticket the tracked read returned, or a poll error for it	same rule as the old _stopped_due set, so a deferred Linear read or a GitHub-only cycle keeps the ticket offered
+first read after a start	offset crc32(repo#ticket) % 300 from the first cycle that sees the ticket stopped	keeps the old spread so a restart does not burst 40 reads into one cycle, and caps the delay below 300 s
+dict growth	pruned to the current stopped tickets each cycle	read times of active tickets are kept only one cycle, so a ticket that stops this cycle starts from this read
+new-comment fast path	not built	ticket makes it conditional on a repo issue-comment listing already fetched each cycle; lib/poll_source.py fetches none
+old cycle tests	moved to tests/test_stopped_poll.py and driven by a fake clock; test_live_poll and test_lifecycle_replay advance their clocks 30 s per cycle	with a frozen clock a stopped ticket is never 300 s old
+verified	new tests fail on the old lib/ (6 of 9) and pass on the new one; 929 tests across 12 touched or neighbouring files pass	prove-it-works

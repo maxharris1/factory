@@ -12,6 +12,10 @@ from lib.handoff import HandoffError, parse_comment
 from lib.pr_title import SOURCES_TABLE, TITLE_LIMIT, prefixed
 
 
+def _staggered_first_read(now: float, key: tuple[str, str]) -> float:
+    return now + _spread(*key) % STOPPED_POLL_SECONDS - STOPPED_POLL_SECONDS
+
+
 class TrackingMixin:
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -271,20 +275,13 @@ class TrackingMixin:
             and _matching_head(fields["head"], ticket.current_head) is not None
         )
 
-    def _tracked_refs(self, cycle: int | None = None) -> tuple[TicketRef, ...]:
+    def _tracked_refs(self, now: float | None = None) -> tuple[TicketRef, ...]:
         """The tracked tickets poll_once reads (#108).
 
         Every ticket that is not merged, done or abandoned, plus a merged or
         handed-off one with a completed ship intent left to replay or an
         external ship left to settle. A handed-off ticket stays polled, so
         its merge is seen and a trusted ready may re-enter review.
-
-        With cycle, a ticket in a stopped state (handed-off, capped, blocked,
-        refused, or stuck) with nothing to replay is offered only once its
-        turn came: once every STOPPED_POLL_SECONDS, spread across cycles by a
-        hash of its identity. It stays offered until a read reaches it (a
-        ticket or a poll error), so a cycle that reads no Linear, or defers
-        the read, only delays it. Every other ticket is offered every cycle.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -325,19 +322,19 @@ class TrackingMixin:
                 ORDER BY repo, ticket_id
                 """
             ).fetchall()
-        every = max(1, STOPPED_POLL_SECONDS // max(1, self._poll_seconds))
         refs: list[TicketRef] = []
         stopped_keys: set[tuple[str, str]] = set()
         for row in rows:
             state = row["workflow_state"]
             catching_up = bool(row["replay"]) or bool(row["unsettled"])
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
-            if cycle is not None and stopped and not catching_up:
+            if now is not None and stopped and not catching_up:
                 key = (str(row["repo"]).lower(), str(row["ticket_id"]))
                 stopped_keys.add(key)
-                if (cycle + _spread(row["repo"], row["ticket_id"])) % every == 0:
-                    self._stopped_due.add(key)
-                if key not in self._stopped_due:
+                read_at = self._stopped_read_at.setdefault(
+                    key, _staggered_first_read(now, key)
+                )
+                if now - read_at < STOPPED_POLL_SECONDS:
                     continue
             refs.append(
                 TicketRef(
@@ -351,8 +348,12 @@ class TrackingMixin:
                     ),
                 )
             )
-        if cycle is not None:
-            self._stopped_due &= stopped_keys
+        if now is not None:
+            self._stopped_read_at = {
+                key: at
+                for key, at in self._stopped_read_at.items()
+                if key in stopped_keys
+            }
         return tuple(refs)
 
     def active_job_tickets(self) -> frozenset[tuple[str, str]]:

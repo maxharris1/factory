@@ -34,7 +34,7 @@ from lib.dispatch.types import (
     UpdateClassifier,
 )
 from lib.job_state import JobStateConfig
-from lib.orch_yml import POLL_SECONDS, Approvals
+from lib.orch_yml import Approvals
 from lib.queue import QueueError, SQLiteJobQueue
 
 
@@ -86,11 +86,7 @@ class DispatcherBase:
         self._source_errors: dict[tuple[str, str], str] = {}
         # #105: the source's uncached read, for a ready naming a newer head.
         self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
-        # #108: the poll cycle count and interval, for the stopped-state cadence.
-        self._cycle = 0
-        self._poll_seconds = POLL_SECONDS
-        # Stopped tickets whose turn came and that no read has reached yet.
-        self._stopped_due: set[tuple[str, str]] = set()
+        self._stopped_read_at: dict[tuple[str, str], float] = {}
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
         # #219: repos (lowercased) with a ticket that entered merged this

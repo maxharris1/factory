@@ -38,10 +38,6 @@ class PollMixin:
         self._merged_repos = set()
         self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
-        self._poll_seconds = getattr(
-            getattr(source, "config", None), "poll_seconds", POLL_SECONDS
-        )
-        self._cycle += 1
         read_from = self.queue.now()
         self._feed(source)
         try:
@@ -66,17 +62,16 @@ class PollMixin:
             self.record_poll_exception("linear", "-", exc)
             linear = ()
         self._discover(linear, tracker="linear")
-        refs = self._tracked_refs(self._cycle)
+        read_at = self.queue.now()
+        refs = self._tracked_refs(read_at)
         self._source_errors = {}
         try:
             tracked = source.tracked_tickets(refs)
         except Exception as exc:
             self.record_poll_exception("tracked", "-", exc)
             tracked = ()
-        self._stopped_due.difference_update(
-            (ticket.repo.lower(), ticket.ticket_id) for ticket in tracked
-        )
         read = {(ticket.repo.lower(), ticket.ticket_id) for ticket in tracked}
+        self._stopped_read_at.update(dict.fromkeys(read, read_at))
         for ref in refs:
             identity = (ref.repo.lower(), ref.ticket_id)
             error = self._source_errors.get(identity)
@@ -217,7 +212,7 @@ class PollMixin:
         *,
         prefix: str = "",
     ) -> None:
-        self._stopped_due.discard((repo.lower(), ticket_id))
+        self._stopped_read_at[(repo.lower(), ticket_id)] = self.queue.now()
         self._source_errors[(repo.lower(), ticket_id)] = poll_error_text(error)
         with self._connect() as connection:
             connection.execute(
