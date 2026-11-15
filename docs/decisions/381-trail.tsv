@@ -1,0 +1,3 @@
+decision	choice	why
+when a legacy first row takes every pre-row job of its state since the last other job	only when no attempt-1 job of that state follows the oldest one; otherwise the source check and the newest-attempt-1 opener decide, as on the other branch	two attempt-1 update-from-main jobs (133, 148) before a waiting-external -> updating row (149, update-queued) are two visits, but the early return gave both to the row (PR #376 r4 f-2)
+how to prove it	one test runs the repro through job_flow and through collect_snapshot on a seeded db	the AC names both paths; the test failed with [(claude, 149.0)] before the change
