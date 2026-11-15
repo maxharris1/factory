@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from lib.dispatch.constants import MERGED_BEFORE_HANDOFF, _NOT_FINISHED
 from lib.dispatch.helpers import (
@@ -19,6 +20,12 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
+
+
+@dataclass(frozen=True)
+class ReviseCIGate:
+    outcome: tuple[bool, str] | None = None
+    ci_failure: str = ""
 
 
 class VerdictMixin:
@@ -63,10 +70,10 @@ class VerdictMixin:
             return True, "stale-revise"
         instruction = _comment_link(comment)
         if ticket.factory.start_before_ci:
-            gated = self._revise_ci_gate(ticket, comment, reported_round)
-            if isinstance(gated, tuple):
-                return gated
-            instruction += gated
+            gate = self._revise_ci_gate(ticket, comment, reported_round)
+            if gate.outcome is not None:
+                return gate.outcome
+            instruction += gate.ci_failure
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -189,29 +196,27 @@ class VerdictMixin:
         ticket: TrackedTicket,
         comment: Comment,
         reported_round: int | None,
-    ) -> tuple[bool, str] | str:
-        """#262, review.start_before_ci: a REVISE that would queue a fix
-        waits for CI at the head and records its result. A red result goes
-        into the same fix job, after the verdict link, or marks the ticket
-        stuck on the third red head in a row."""
+    ) -> ReviseCIGate:
         state, completed = self._review_context(ticket)
         if (
             state not in ("review", "awaiting-ok")
             or reported_round != completed + 1
             or reported_round >= self._effective_cap(ticket)
         ):
-            return ""
+            return ReviseCIGate()
         head = ticket.current_head
         assert head is not None
         result = ticket.ci.get(head)
         if result is None or result.status == "pending":
-            return False, "revise-ci-pending"
+            return ReviseCIGate(outcome=(False, "revise-ci-pending"))
         _status, count = self._record_ci_result(ticket, head, result.status)
         if result.status == "success":
-            return ""
-        if self._ci_red_stuck(ticket, comment, head, count):
-            return True, "stuck-ci-red-3"
-        return f"\n\nCI failed on {head}:\n{result.log or ''}".rstrip()
+            return ReviseCIGate()
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
+            return ReviseCIGate(outcome=(True, "stuck-ci-red-3"))
+        return ReviseCIGate(
+            ci_failure=f"\n\nCI failed on {head}:\n{result.log or ''}".rstrip()
+        )
 
     def _t4(
         self,
@@ -377,11 +382,8 @@ class VerdictMixin:
         result: CIResult,
         review_round: int,
     ) -> tuple[bool, str]:
-        """#262, review.start_before_ci: an APPROVE on red CI ships nothing
-        and does not use up its round. The red result is a gate retry, as at
-        T2: the CI fix, or stuck on the third red head in a row."""
         _status, count = self._record_ci_result(ticket, head, "failure")
-        if self._ci_red_stuck(ticket, comment, head, count):
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
         self._queue_ci_fix(
             ticket,

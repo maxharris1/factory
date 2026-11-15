@@ -29,8 +29,8 @@ files a trusted verdict's [follow-up] findings as one new ticket. Absent,
 the policy is off. Refused with tickets: linear, which has no filer.
 
 review.start_before_ci is optional (issue #262): a boolean, default false.
-True queues the review as soon as a trusted ready lands, whatever CI is
-doing on that head. Ship still needs green CI on the approved head.
+True queues the review as soon as a trusted ready lands while CI is still
+running on that head. Ship still needs green CI on the approved head.
 
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list

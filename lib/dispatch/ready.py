@@ -137,7 +137,7 @@ class ReadyMixin:
             self._set_workflow_state(ticket, "review")
             return True, "answered-review" if answered else "queued-review"
         assert result is not None
-        if self._ci_red_stuck(ticket, comment, head, count):
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
         self._queue_ci_fix(ticket, comment, head, result, review_round, generation)
         if rereview:
@@ -146,11 +146,9 @@ class ReadyMixin:
             self._set_workflow_state(ticket, "fixing")
         return True, "queued-ci-fix"
 
-    def _ci_red_stuck(
+    def _mark_stuck_on_third_red(
         self, ticket: TrackedTicket, comment: Comment, head: str, count: int
     ) -> bool:
-        """On the third red head in a row (count from _record_ci_result),
-        mark the ticket stuck (ci-red-3) and wake Grok."""
         if count < 3:
             return False
         self._mark_stuck_and_wake(

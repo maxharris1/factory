@@ -1,6 +1,3 @@
-"""#262: review.start_before_ci starts the review when a ready lands and
-gates only the ship on CI."""
-
 from __future__ import annotations
 
 import copy
@@ -85,8 +82,7 @@ def board_with(tmp_path: Path, *, on: bool) -> Board:
     return board
 
 
-def built(board: Board, head: str) -> PR:
-    """An open PR whose build finished, with CI still running at head."""
+def built_with_ci_pending(board: Board, head: str) -> PR:
     pr = board.open("42", head)
     pr.ci[head] = "pending"
     board.go(pr, "go")
@@ -95,13 +91,11 @@ def built(board: Board, head: str) -> PR:
     return pr
 
 
-def reviewed(board: Board, pr: PR, head: str) -> str:
-    """Push head with CI pending, post ready, and finish the review it queues."""
+def reviewed_at_pending_ci(board: Board, pr: PR, head: str) -> None:
     pr.push(head, ci="pending")
-    ready = board.ready(pr, head)
+    board.ready(pr, head)
     board.poll()
     board.finish("codex")
-    return ready
 
 
 def instruction(job) -> str:
@@ -110,7 +104,7 @@ def instruction(job) -> str:
 
 def test_off_a_ready_with_pending_ci_waits(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=False)
-    pr = built(board, sha(1))
+    pr = built_with_ci_pending(board, sha(1))
     ready = board.ready(pr, pr.head)
     board.poll()
     board.poll()
@@ -121,7 +115,7 @@ def test_off_a_ready_with_pending_ci_waits(tmp_path: Path) -> None:
 
 def test_on_a_ready_with_pending_ci_queues_one_review(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
+    pr = built_with_ci_pending(board, sha(1))
     ready = board.ready(pr, pr.head)
     board.poll()
 
@@ -144,8 +138,8 @@ def test_on_an_approve_with_red_ci_queues_the_ci_fix_and_ships_nothing(
     tmp_path: Path,
 ) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, pr.head)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
     pr.ci[pr.head] = "failure"
     approve = board.approve(pr)
     board.poll()
@@ -167,8 +161,8 @@ def test_on_an_approve_with_red_ci_queues_the_ci_fix_and_ships_nothing(
 
 def test_on_an_approve_waits_for_pending_ci_then_ships_on_green(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, pr.head)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
     approve = board.approve(pr)
     board.poll()
     assert board.outcome(approve) is None
@@ -182,8 +176,8 @@ def test_on_an_approve_waits_for_pending_ci_then_ships_on_green(tmp_path: Path) 
 
 def test_on_an_approve_waits_for_pending_ci_then_fixes_on_red(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, pr.head)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
     approve = board.approve(pr)
     board.poll()
     pr.ci[pr.head] = "failure"
@@ -196,8 +190,8 @@ def test_on_an_approve_waits_for_pending_ci_then_fixes_on_red(tmp_path: Path) ->
 
 def test_on_a_revise_with_red_ci_queues_one_fix_carrying_both(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, pr.head)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
     pr.ci[pr.head] = "failure"
     board.revise(pr, "1/3")
     board.poll()
@@ -215,8 +209,8 @@ def test_on_a_revise_with_red_ci_queues_one_fix_carrying_both(tmp_path: Path) ->
 
 def test_on_a_revise_waits_for_pending_ci_then_queues_one_fix(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, pr.head)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
     board.revise(pr, "1/3")
     board.poll()
     assert board.outcome("revise-42-1/3") is None
@@ -232,21 +226,21 @@ def test_on_a_revise_waits_for_pending_ci_then_queues_one_fix(tmp_path: Path) ->
 
 def test_on_three_red_heads_in_a_row_mark_the_ticket_stuck(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, sha(1))
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, sha(1))
     pr.ci[sha(1)] = "failure"
     board.revise(pr, "1/3")
     board.poll()
     board.finish("claude")
 
-    reviewed(board, pr, sha(2))
+    reviewed_at_pending_ci(board, pr, sha(2))
     pr.ci[sha(2)] = "failure"
     board.approve(pr, "2/3")
     board.poll()
     board.finish("claude")
     assert board.state("42")["stuck"] == 0
 
-    reviewed(board, pr, sha(3))
+    reviewed_at_pending_ci(board, pr, sha(3))
     pr.ci[sha(3)] = "failure"
     board.revise(pr, "2/3")
     board.poll()
@@ -261,27 +255,27 @@ def test_on_three_red_heads_in_a_row_mark_the_ticket_stuck(tmp_path: Path) -> No
 
 def test_on_a_green_head_resets_the_red_count(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, sha(1))
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, sha(1))
     pr.ci[sha(1)] = "failure"
     board.revise(pr, "1/3")
     board.poll()
     board.finish("claude")
 
-    reviewed(board, pr, sha(2))
+    reviewed_at_pending_ci(board, pr, sha(2))
     pr.ci[sha(2)] = "failure"
     board.approve(pr, "2/3")
     board.poll()
     board.finish("claude")
 
-    reviewed(board, pr, sha(3))
+    reviewed_at_pending_ci(board, pr, sha(3))
     pr.ci[sha(3)] = "success"
     board.revise(pr, "2/3")
     board.poll()
     assert board.state("42")["gate_count"] == 0
     board.finish("claude")
 
-    reviewed(board, pr, sha(4))
+    reviewed_at_pending_ci(board, pr, sha(4))
     pr.ci[sha(4)] = "failure"
     board.approve(pr, "3/3")
     board.poll()
@@ -294,8 +288,8 @@ def test_on_a_green_head_resets_the_red_count(tmp_path: Path) -> None:
 
 def test_on_a_reentry_ready_with_pending_ci_queues_the_next_round(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
-    pr = built(board, sha(1))
-    reviewed(board, pr, sha(1))
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, sha(1))
     pr.ci[sha(1)] = "success"
     pr.mergeable, pr.mergeable_state = None, None
     board.approve(pr)
