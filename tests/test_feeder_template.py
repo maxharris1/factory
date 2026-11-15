@@ -328,6 +328,7 @@ def test_no_criteria_is_not_fed_and_wakes_once(tmp_path: Path, criteria) -> None
     assert jobs[0]["ticket_id"] == "7"
     assert detail["project_bot"] == "grok-bot"
     assert detail["defects"] == ["no-criteria"]
+    assert detail["link"] == github.issues[HOME][0].url
     assert flags(tmp_path) == {(HOME, "7", "intake-refused")}
 
 

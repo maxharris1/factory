@@ -11,7 +11,11 @@ runs as the owning bot's own user and login, starts the job itself:
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
 * before anything starts it checks every pinned skill file on the placed
   device against skills/skills.lock (lib/skill_preflight.py), and a missing
-  or changed file fails the job;
+  or changed file fails the job. A remote factory checkout that is not on
+  the box's commit, or missing, or a box checkout behind its fetched
+  origin/main (#297), instead marks that target lagging in device_sync and
+  requeues the job with no round charged (a free requeue from the shared
+  budget, then T6), so it goes to an up-to-date device;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -127,7 +131,9 @@ from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
 from lib import skill_preflight
-from lib.skill_preflight import PreflightError
+from lib.skill_preflight import CheckoutLagging, PreflightError
+from lib import device_sync
+from lib.job_state import RELEASED_UNSTARTED, requeue_unstarted
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -678,6 +684,9 @@ class Waiter:
             finally:
                 if lock >= 0:
                     os.close(lock)
+        except CheckoutLagging as exc:
+            self._requeue_lagging(job, placement, factory_root, str(exc), label)
+            return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
@@ -706,6 +715,57 @@ class Waiter:
         where = placement.device if placement is not None else "no device"
         self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
+
+    def _requeue_lagging(
+        self, job: Job, placement: Placement | None, checkout: str | None, reason: str, label: str
+    ) -> None:
+        if placement is None or checkout is None:
+            self.log(f"{label}: not started: {reason}; failed it for T6")
+            self._fail(job)
+            return
+        claimer, _ = self._claimer
+
+        def write() -> tuple[str, str] | None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                now = self.queue.now()
+                device_sync.upsert(
+                    connection,
+                    device=placement.device,
+                    bot=self.bot,
+                    harness=self.recipient,
+                    checkout=checkout,
+                    target=None,
+                    sha=None,
+                    state=device_sync.LAGGING,
+                    detail=reason,
+                    now=now,
+                )
+                result = requeue_unstarted(
+                    connection,
+                    job.id,
+                    now=now,
+                    event=RELEASED_UNSTARTED,
+                    reason=reason,
+                    slot_guard=(
+                        "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
+                        "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
+                    ),
+                    slot_params=(self.recipient, claimer),
+                )
+                connection.commit()
+                return result
+
+        try:
+            result = retry_locked(write)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"{label}: not started: {reason}; could not requeue it ({_one_line(exc)})")
+            self._fail(job)
+            return
+        if result is None:
+            self.log(f"{label}: not started: {reason}; its claim changed, left alone")
+            return
+        self.log(f"{label}: not started: {result[1]}")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.

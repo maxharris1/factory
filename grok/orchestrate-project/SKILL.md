@@ -47,7 +47,13 @@ F1-07 entry points: `choose_route(request, usage=None) -> RouteDecision`, `route
 Webhook wakes contain `action`, `attempt`, `detail`, `generation`, `head`,
 `job_id`, `logical_key`, `repo`, `source_comment_id`, `target_bot`, and
 `ticket_id`. Stop and terminal actions include `blocked`, `capped`, `stuck`,
-`unparsed`, `ship-failed`, `rejected`, `stale`, and `done`. A `done` wake's
+`unparsed`, `ship-failed`, `rejected`, `stale`, and `done`. Every wake's
+`detail` is a JSON object with a `link`: the comment that caused the wake (a
+verdict, a `stuck`, an unparsed comment, the merging APPROVE for `done`), else
+the ticket. A wake for a job that failed twice also carries that job's
+`job_id`, and its `link` is the comment that queued the job. A `done` wake
+carries `follow_up_owner`, the project bot that files the follow-up ticket for
+the leftover minors in the linked APPROVE. A `done` wake's
 `detail` may carry a `note`, for example that a Linear issue was not moved
 because its team has no Ready for Review state; act on it by hand. A `done`
 with `outcome: handed-off` on `maxharris1/factory` means Codex approved with

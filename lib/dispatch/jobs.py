@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.device_pool import free_slots, used_slots
+from lib.device_pool import free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _ANSWERS,
@@ -107,11 +107,12 @@ class JobsMixin:
         if config is None:
             return frozenset()
         used = used_slots(self.queue, config)
+        blocked = sync_blocks(self.queue)
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
-            and free_slots(config, harness, used) == 0
+            and free_slots(config, harness, used, blocked) == 0
         )
 
     def _restart_queue_wait(self, job: Job, now: float) -> None:
@@ -574,6 +575,7 @@ class JobsMixin:
                 detail=json.dumps(
                     {
                         "project_bot": _detail_project_bot(job.request.detail),
+                        "job_id": job.id,
                         "detail": (
                             f"device {device} offline {int(seconds // 60)} minutes "
                             f"during the {job.request.action} job"
@@ -688,6 +690,7 @@ class JobsMixin:
                     "project_bot": _detail_project_bot(job.request.detail),
                     "detail": f"{job.request.action} job failed twice"
                     + (f"; last failure {link_drop.spent}" if link_drop else ""),
+                    "job_id": job.id,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -1169,6 +1172,7 @@ class JobsMixin:
                 )
                 return
         generation = int(state["generation"]) + 1
+        source_comment_id = str(state["stuck_source_comment_id"] or "-")
         if detail is None and previous_detail is not None:
             reason = previous_detail
         else:
@@ -1178,6 +1182,7 @@ class JobsMixin:
                 ticket_id,
                 detail or str(state["stuck_reason"] or "ticket is stuck"),
             )
+        reason = self._linked_wake_detail(repo, ticket_id, source_comment_id, reason)
         queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -1185,7 +1190,7 @@ class JobsMixin:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                source_comment_id=source_comment_id,
                 timeout_seconds=int(
                     state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
                 ),

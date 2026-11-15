@@ -15,13 +15,14 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from lib import skill_preflight
+from lib import device_sync, skill_preflight
 from lib.device_pool import DevicePool, Placement
 from lib.machines_yml import Device as MachinesDevice, load_machines_yml
 from lib.pstack_pin import install_skills
@@ -401,8 +402,8 @@ def test_the_box_is_checked_in_place_without_ssh(
 
     assert started is None
     assert device.ssh.calls() == []
-    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == (
-        "preflight-missing: ~/.claude/skills/interrogate/SKILL.md"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"].startswith(
+        "preflight-missing: ~/.claude/skills/interrogate/SKILL.md (install-skills: "
     )
 
 
@@ -511,3 +512,123 @@ def test_the_checkout_preflight_checks_is_the_one_the_brief_names(
     assert checkout == {"box": str(lock_root.resolve()), "box-configured": str(configured),
                         "pc": str(device.checkout)}[where]
     assert f"{checkout}/skills/factory/factory-builder/SKILL.md" in device.brief()
+
+
+def commit_checkout(checkout: Path) -> str:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(checkout), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-qm", "deploy")
+    return git("rev-parse", "HEAD")
+
+
+def box_head(root: Path, sha: str) -> None:
+    (root / ".git").mkdir(exist_ok=True)
+    (root / ".git" / "HEAD").write_text(sha + "\n", encoding="utf-8")
+
+
+def sync_rows(db: Path) -> list[tuple[str, str, str, str]]:
+    with sqlite3.connect(db) as connection:
+        return [(r.device, r.bot, r.state, r.detail) for r in device_sync.read(connection)]
+
+
+def slot_count(db: Path) -> int:
+    with sqlite3.connect(db) as connection:
+        return int(connection.execute("SELECT COUNT(*) FROM device_slots").fetchone()[0])
+
+
+def test_a_remote_checkout_behind_the_box_requeues_without_a_round_and_marks_it_lagging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    old = commit_checkout(device.checkout)
+    box_head(lock_root, "c" * 40)
+
+    job_id, started = device.run_one()
+
+    assert started is None
+    assert device.spawn.calls == []
+    assert state(device.db, job_id) == "queued"
+    assert slot_count(device.db) == 0
+    error = f"preflight-lagging: pc claude-bot {device.checkout} at {old[:12]}, box at {'c' * 12}"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
+    assert sync_rows(device.db) == [("pc", "claude-bot", "lagging", error)]
+    assert any("requeued, no round charged" in line for line in device.log)
+    assert len(device.ssh.calls()) == 1
+
+    assert device.waiter.step() is None
+    assert state(device.db, job_id) == "queued"
+    assert len(device.ssh.calls()) == 1
+
+
+def test_a_missing_remote_checkout_is_refused_by_name_before_any_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    box_head(lock_root, "c" * 40)
+
+    job_id, started = device.run_one()
+
+    assert started is None
+    assert state(device.db, job_id) == "queued"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == (
+        f"preflight-no-checkout: pc claude-bot {device.checkout}"
+    )
+    assert [row[2] for row in sync_rows(device.db)] == ["lagging"]
+
+
+def test_a_remote_checkout_on_the_box_commit_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=True)
+    install(device.home)
+    deploy(device.checkout)
+    box_head(lock_root, commit_checkout(device.checkout))
+
+    job_id, started = device.run_one()
+
+    assert started == job_id
+    assert sync_rows(device.db) == []
+    assert len(device.ssh.calls()) == 1
+
+
+def test_a_box_checkout_behind_its_origin_main_requeues_without_a_round_until_it_deploys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    device = Device(tmp_path, monkeypatch, remote=False)
+    install(device.home)
+    deploy(lock_root)
+    head = commit_checkout(lock_root)
+    (lock_root / "later").write_text("merged\n", encoding="utf-8")
+    git = ["git", "-C", str(lock_root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "add", "later"], check=True)
+    subprocess.run([*git, "commit", "-qm", "merged"], check=True)
+    later = subprocess.run([*git, "rev-parse", "HEAD"], check=True, capture_output=True,
+                           text=True).stdout.strip()
+    subprocess.run([*git, "update-ref", "refs/remotes/origin/main", later], check=True)
+    subprocess.run([*git, "reset", "-q", "--hard", head], check=True)
+
+    job_id, started = device.run_one()
+
+    assert started is None
+    assert device.spawn.calls == []
+    assert state(device.db, job_id) == "queued"
+    error = (f"preflight-lagging: box claude-bot {lock_root.resolve()} at {head[:12]}, "
+             f"origin/main at {later[:12]}")
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
+    assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
+    assert any("requeued, no round charged" in line for line in device.log)
+
+    subprocess.run([*git, "reset", "-q", "--hard", later], check=True)
+    with sqlite3.connect(device.db) as connection:
+        device_sync.clear(connection, "box")
+
+    assert device.waiter.step() == job_id
