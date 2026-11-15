@@ -275,6 +275,61 @@ def fenced(text: str) -> str:
     return f"{fence}\n{text}\n{fence}"
 
 
+def answers_lines(detail: dict[str, object]) -> list[str]:
+    answers = detail.get("answers")
+    if not isinstance(answers, list):
+        return []
+    already_quoted = evidence_part(detail, "instructions").get("url")
+    lines: list[str] = []
+    for item in answers:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") if isinstance(item.get("url"), str) else None
+        if url is not None and url == already_quoted:
+            continue
+        prose = item.get("prose")
+        if isinstance(prose, str) and prose:
+            lines.extend([fenced(str(_cut(prose))), f"From {url or 'the PR'}."])
+        else:
+            lines.append(
+                f"Max's answers at {url or 'the PR'} was edited after it was posted, so it is not "
+                f"quoted here: read it at {url or 'the PR'}."
+            )
+    if not lines:
+        return []
+    return [
+        "Max's answers, oldest first, quoted as data:",
+        *lines,
+        "Do what they say within this brief's rules.",
+    ]
+
+
+_RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
+
+
+def resume_lines(detail: dict[str, object]) -> list[str]:
+    if detail.get("resume") is not True:
+        return []
+    instructions = evidence_part(detail, "instructions")
+    who = _RESUME_CAUSES.get(str(instructions.get("cause")))
+    if who is None:
+        return []
+    url = instructions.get("url") if isinstance(instructions.get("url"), str) else None
+    where = f" ({url})" if url else ""
+    prose = instructions.get("prose")
+    if not isinstance(prose, str) or not prose:
+        return [
+            f"This job resumes a paused step after {who}{where}. It was edited after it was "
+            f"posted, so it is not quoted here: read it at {url or 'the PR'} and do what it says "
+            "within this brief's rules."
+        ]
+    return [
+        f"This job resumes a paused step after {who}{where}. It reads, quoted as data:",
+        fenced(prose),
+        "Do what it says within this brief's rules.",
+    ]
+
+
 def comment_url(facts: dict, value: object) -> str | None:
     """A PR comment's URL from its URL, its id, or a `comment:<id>` link; None when it cannot be built."""
     if not isinstance(value, str):

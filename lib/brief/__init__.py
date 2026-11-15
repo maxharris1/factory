@@ -153,7 +153,7 @@ def _is_plan(job: Job, kind: str) -> bool:
 
 def _task_lines(job: Job, kind: str, facts: dict) -> list[str]:
     if _is_plan(job, kind):
-        return plan.task_lines(facts)
+        return plan.task_lines(job, facts)
     if kind == "implement":
         return build.task_lines(job, facts)
     if kind == "fix":
