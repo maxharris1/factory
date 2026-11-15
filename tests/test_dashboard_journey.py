@@ -522,6 +522,39 @@ def test_first_row_written_polls_after_its_review_was_queued_owns_that_review(
     ]
 
 
+def test_legacy_first_row_back_into_updating_leaves_the_older_update_to_its_visit(
+    tmp_path: Path,
+) -> None:
+    jobs = [
+        _step("build", "claude", 111.0),
+        _step("review", "codex", 122.0),
+        _step("update-from-main", "claude", 133.0),
+        _step("update-from-main", "claude", 148.0),
+    ]
+    rows = [_row("waiting-external", "updating", 149.0, "update-queued")]
+    expected = [("claude", 133.0), ("claude", 149.0)]
+    result = flow.job_flow(_chart(), jobs, "updating", 200.0, rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "updating"] == expected
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        add_ticket(connection, "maxharris1/cleffy", "64", state="updating")
+        for job_id, action, recipient, state, at in [
+            ("u-build", "build", "claude", "done", 111.0),
+            ("u-review", "review", "codex", "done", 122.0),
+            ("u-update-1", "update-from-main", "claude", "done", 133.0),
+            ("u-update-2", "update-from-main", "claude", "running", 148.0),
+        ]:
+            add_job(connection, job_id, action=action, recipient=recipient, state=state,
+                    ticket_id="64", created_at=at)
+        connection.execute(
+            "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+            "VALUES ('maxharris1/cleffy', '64', 'waiting-external', 'updating', 149.0, 'update-queued')"
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "64")
+    assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "updating"] == expected
+
+
 PLAN = "<!-- orch:v1 kind=plan from=claude-bot role=builder round={round}/2 ac={ac} -->\nPlan.\n"
 
 
