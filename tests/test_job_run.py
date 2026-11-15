@@ -447,6 +447,34 @@ def test_a_signal_while_the_command_is_spawning_is_forwarded(monkeypatch) -> Non
     assert time.monotonic() - started < 4
 
 
+@pytest.mark.parametrize("waiter_dir", [True, False])
+def test_cli_job_run_gives_the_command_a_job_tmpdir_and_removes_it(
+    tmp_path: Path, waiter_dir: bool
+) -> None:
+    queue = _queue(tmp_path)
+    job = _running_job(queue)
+    job_dir = (
+        tmp_path / "jobs" / job.id if waiter_dir else tmp_path / "telemetry-codex-bot" / job.id
+    )
+    seen = tmp_path / "seen.json"
+    script = (
+        "import json, os, pathlib; "
+        "pathlib.Path(os.environ['TMPDIR'], 'x').write_text('scratch'); "
+        f"json.dump({{k: os.environ.get(k) for k in ('TMPDIR', 'TMP', 'TEMP')}}, open({str(seen)!r}, 'w'))"
+    )
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--db", str(tmp_path / "orch.db"),
+        "--", sys.executable, "-c", script,
+        env={"ORCH_JOB_STATE_DIR": str(job_dir) if waiter_dir else ""},
+    )
+    _, stderr = proc.communicate(timeout=20)
+
+    assert proc.returncode == 0, stderr
+    scratch = str(job_dir / "tmp")
+    assert json.loads(seen.read_text()) == {"TMPDIR": scratch, "TMP": scratch, "TEMP": scratch}
+    assert not (job_dir / "tmp").exists()
+
+
 @pytest.mark.parametrize("state", ["queued", "done"])
 def test_cli_job_run_refuses_a_job_that_is_not_running(tmp_path: Path, state: str) -> None:
     queue = _queue(tmp_path)
