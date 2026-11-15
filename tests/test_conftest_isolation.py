@@ -267,6 +267,35 @@ def test_the_guard_fails_a_broader_fixture_that_leaves_its_loop(tmp_path: Path, 
     assert not alive(pid)
 
 
+FINALIZER_LOOP = '''
+import os
+import subprocess
+import pytest
+
+
+@pytest.fixture(scope="{scope}")
+def loop():
+    yield
+    child = subprocess.Popen(["sleep", "60"], env={{"PATH": os.environ["PATH"]}}, start_new_session=True)
+    open({record!r}, "w").write(str(child.pid))
+
+
+def test_one(loop):
+    pass
+'''
+
+
+@pytest.mark.parametrize("scope", ["module", "session"])
+def test_the_guard_fails_a_broader_fixture_that_starts_a_loop_in_its_finalizer(tmp_path: Path, scope: str) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, FINALIZER_LOOP.format(scope=scope, record=str(record)))
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert f"{scope}-scoped fixture 'loop' left processes running" in result.stdout
+    assert f"{pid} HOME= sleep 60" in result.stdout
+    assert not alive(pid)
+
+
 def test_the_guard_passes_a_broader_fixture_that_stops_its_loop(tmp_path: Path) -> None:
     record = tmp_path / "pid"
     stop = "child.kill(); child.wait()"

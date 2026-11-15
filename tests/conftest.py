@@ -198,7 +198,18 @@ def _fail_on_survivors(owner: str, before: set[int], survivors) -> None:
         pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
 
 
-_broad_fixture_processes: dict[pytest.FixtureDef, dict[int, str | None]] = {}
+_broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}
+
+
+def _started_since(before: set[int], request: pytest.FixtureRequest) -> set[int]:
+    from lib.worktrees import process_start
+    from tests import child_reaper
+    from tests.procs import alive
+
+    root = request.config._tmp_path_factory.getbasetemp()
+    claimed = {pid for _, started in _broad_fixtures.values() for pid, start in started.items()
+               if alive(pid) and process_start(pid) == start}
+    return child_reaper.leaked(before, os.environ.get(child_reaper.TAG, ""), root) - claimed
 
 
 @pytest.hookimpl(wrapper=True)
@@ -212,21 +223,16 @@ def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureR
     try:
         return (yield)
     finally:
-        root = request.config._tmp_path_factory.getbasetemp()
-        claimed = set().union(*_broad_fixture_processes.values())
-        started = child_reaper.leaked(before, os.environ.get(child_reaper.TAG, ""), root) - claimed
-        _broad_fixture_processes[fixturedef] = {pid: process_start(pid) for pid in started}
+        started = _started_since(before, request)
+        _broad_fixtures[fixturedef] = (before, {pid: process_start(pid) for pid in started})
 
 
 def pytest_fixture_post_finalizer(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest) -> None:
-    from lib.worktrees import process_start
-    from tests.procs import alive
-
-    started = _broad_fixture_processes.pop(fixturedef, {})
-    if started:
-        _fail_on_survivors(f"{fixturedef.scope}-scoped fixture {fixturedef.argname!r}", set(),
-                           lambda: {pid for pid, start in started.items()
-                                    if alive(pid) and process_start(pid) == start})
+    if fixturedef not in _broad_fixtures:
+        return
+    before, _ = _broad_fixtures.pop(fixturedef)
+    _fail_on_survivors(f"{fixturedef.scope}-scoped fixture {fixturedef.argname!r}", before,
+                       lambda: _started_since(before, request))
 
 
 @pytest.fixture(autouse=True)
