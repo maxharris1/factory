@@ -369,6 +369,15 @@ def _darwin_worker(
         if fence
         else f'[ -e "$f" ] || {unsure}; '
     )
+    list_group = (
+        f"{_DARWIN_LIST} || {blind}; "
+        'set -f; set -- $o; set +f; w=$(($# / 3)); '
+        f"r=$({_DARWIN_GROUP}) || {blind}; "
+        "set -f; set -- $r; set +f; "
+        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
+        f'[ "$1" = 1 ] || {gone}; '
+    )
+    relist_or_unsure = f"{{ {list_group}{unsure}; }}"
     return (
         f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
         'm="$d/.orch-worker-$t.members.pid"; '
@@ -383,17 +392,12 @@ def _darwin_worker(
         f'[ "$g" = "$t" ] || {unsure}; '
         f'case "$b" in {_UUID}) ;; *) {unsure};; esac; '
         f'[ "$b" = "$c" ] || {gone}; '
-        f"{_DARWIN_LIST} || {blind}; "
-        'set -f; set -- $o; set +f; w=$(($# / 3)); '
-        f"r=$({_DARWIN_GROUP}) || {blind}; "
-        "set -f; set -- $r; set +f; "
-        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
-        f'[ "$1" = 1 ] || {gone}; '
+        f"{list_group}"
         f'[ "$2" = 0 ] || {unsure}; '
         f'if [ "$3" = 1 ]; then '
-        f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
+        f'{_LSTART}; [ "$*" = "$s" ] || {relist_or_unsure}; '
         f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}"
-        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {unsure}; fi; "
+        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {relist_or_unsure}; fi; "
         f"{running}"
     )
 
