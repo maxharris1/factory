@@ -90,30 +90,13 @@ ACTED_VERDICT_OUTCOMES = frozenset(
 )
 
 
-READY_OUTCOMES = frozenset(
-    {
-        "capped-ready",
-        "ready-already-shipped",
-        "ready-after-cap",
-        "ready-on-merged-pr",
-        "ready-on-closed-pr",
-        "stale-ready-head",
-        "stale-ready-verdict",
-        "stale-ready",
-        "queued-review",
-        "answered-review",
-        "ci-red-in-flight",
-        "queued-ci-fix",
-    }
+QUESTIONS_OUTCOMES = frozenset(
+    {"no-questions", "waiting-max", "already-waiting-max", "rejected-questions-author"}
 )
 
 
-def _ready_outcome(outcome: str) -> bool:
-    return (
-        outcome in READY_OUTCOMES
-        or outcome.startswith("rejected-ready-")
-        or outcome.startswith("update-")
-    )
+def _questions_outcome(outcome: str) -> bool:
+    return outcome in QUESTIONS_OUTCOMES or outcome.startswith("failed-questions-")
 
 
 def _acted_verdict(outcome: str | None) -> bool:
@@ -138,7 +121,7 @@ _NO_READ_SINCE_FAILURE = object()
 
 # The result kinds that settle each failed harness job, so T6 never retries it (#193).
 _SETTLING_KINDS = {
-    "review": ("verdict",),
+    "review": ("verdict", "questions"),
     "plan": ("plan", "questions"),
     "build": ("ready", "questions"),
     "fix": ("ready", "questions"),
@@ -223,6 +206,23 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def plan_round(detail: Mapping[str, object]) -> int:
+    evidence = detail.get("evidence")
+    instructions = evidence.get("instructions") if isinstance(evidence, dict) else None
+    attempt = instructions.get("plan_attempt") if isinstance(instructions, dict) else None
+    if isinstance(attempt, int):
+        return attempt
+    return 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1
+
+
+def _detail_plan_round(detail: str | None) -> int:
+    try:
+        context = json.loads(detail) if detail else {}
+    except ValueError:
+        context = {}
+    return plan_round(context if isinstance(context, dict) else {})
 
 
 def _detail_round(detail: str | None) -> str | None:
@@ -334,6 +334,12 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
     if re.fullmatch(r"[0-9]+", comment.id):
         return comment.created_at, 0, int(comment.id)
     return comment.created_at, 1, comment.id
+
+
+def _asks_questions(fields: Mapping[str, str], body: str) -> bool:
+    return fields.get("state") == "waiting-max" or (
+        fields.get("role") != "orchestrator" and _has_questions(body)
+    )
 
 
 def _has_questions(body: str) -> bool:

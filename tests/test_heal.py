@@ -387,3 +387,62 @@ def test_health_help_names_only_subcommands_the_parser_accepts(capsys, tmp_path)
         err = capsys.readouterr().err
         assert f"unrecognized arguments: {verb}" not in err, line
         assert "invalid choice" not in err, line
+
+
+HELD_TUNNEL = component("tunnel", bot="", state="down",
+                        reason="port held by another owner: 8787 on pc-wsl-cursor-bot")
+
+
+def test_a_tunnel_whose_port_another_owner_holds_alerts_once_and_is_not_restarted(
+    tmp_path: Path,
+) -> None:
+    actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL))
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert runs.calls == [] and len(posts.calls) == 1
+    for later in (NOW + 120, NOW + 3 * heal.WINDOW_SECONDS):
+        actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=later)
+        assert kinds(actions) == [(SKIP, "tunnel @ box")]
+        assert runs.calls == [] and posts.calls == []
+
+
+def test_a_dry_run_leaves_the_port_held_alert_to_the_next_live_pass(tmp_path: Path) -> None:
+    actions, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), dry_run=True)
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert posts.calls == []
+    actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 120)
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert runs.calls == [] and len(posts.calls) == 1
+
+
+def test_a_port_held_again_after_it_was_freed_alerts_again(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL))
+    run_heal(tmp_path, report(component("tunnel", bot="")), now=NOW + 120)
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 240)
+    assert len(posts.calls) == 1
+
+
+def test_a_failed_port_held_alert_is_sent_again_on_the_next_pass(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL), posts=Posts(status=500))
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 120)
+    assert len(posts.calls) == 1
+
+
+def test_a_port_held_alert_skipped_for_a_missing_url_is_sent_once_configured(
+    tmp_path: Path,
+) -> None:
+    unconfigured = {"PATH": "/usr/bin", **SECRETS}
+    unconfigured.pop(WEBHOOK.url_env)
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), environ=unconfigured)
+    assert posts.calls == []
+    sent = [len(run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + later)[2].calls)
+            for later in (120, 3600)]
+    assert sent == [1, 0]
+
+
+def test_an_unknown_report_does_not_end_a_port_held_episode(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL))
+    run_heal(tmp_path, {"known": False, "error": "cannot read health: OperationalError"},
+             now=NOW + 60)
+    sent = [len(run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + later)[2].calls)
+            for later in (120, 3600)]
+    assert sent == [0, 0]

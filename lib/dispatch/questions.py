@@ -11,10 +11,10 @@ from lib.dispatch.helpers import (
     _ANSWERS,
     _REGISTERING_ACTIONS,
     _REJECTED_OUTCOMES,
+    _asks_questions,
     _comment_link,
     _comment_order,
     _detail_round_number,
-    _has_questions,
     _matching_head,
     _retry_of,
     _round_number,
@@ -46,10 +46,7 @@ class QuestionsMixin:
     ) -> tuple[bool, str]:
         if not self._trusted_session(ticket, comment, fields):
             return True, "rejected-questions-author"
-        if fields.get("state") != "waiting-max" and (
-            fields.get("role") == "orchestrator"
-            or not _has_questions(parse_comment(comment.body).body)
-        ):
+        if not _asks_questions(fields, parse_comment(comment.body).body):
             return True, "no-questions"
         step = self._latest_step(ticket)
         if step is None:
