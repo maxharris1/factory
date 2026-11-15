@@ -588,7 +588,7 @@ def _stale_homes(checkout: Path, homes: Sequence[Path]) -> list[Path]:
         try:
             if pstack_pin.installed_errors(checkout, home):
                 stale.append(home)
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, RuntimeError, ValueError, UnicodeError):
             stale.append(home)
     return stale
 

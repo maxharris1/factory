@@ -1,0 +1,2 @@
+decision	choice	why
+f-7: where a looping skill link is caught	every Path.resolve(strict=True) in pstack_pin (the installed check, the installer's ownership and skills-dir checks) catches RuntimeError beside OSError, and _stale_homes catches it per home	Python 3.12 raises RuntimeError on a symlink loop, so one home's loop escaped deploy() before any other home installed; catching it at the resolve calls reports the existing not-pinned or refusing-unowned error for that home only, while a broad catch around deploy() would hide real bugs

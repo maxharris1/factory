@@ -301,6 +301,40 @@ def test_an_unreadable_home_fails_the_box_pass_instead_of_reporting_up_to_date(
     assert pstack_pin.installed_errors(box, home) == []
 
 
+def test_a_looping_skill_link_in_one_home_leaves_the_other_homes_reconciled(
+    tmp_path: Path, box_behind_new_pin: tuple[Path, Path]
+) -> None:
+    upstream, box = box_behind_new_pin
+    git(box, "pull", "-q", "--ff-only", "origin", "main")
+    broken, healthy = tmp_path / "broken", tmp_path / "healthy"
+    healthy.mkdir()
+    loop = broken / ".agents/skills/poteto-mode"
+    loop.parent.mkdir(parents=True)
+    loop.symlink_to(loop.name)
+    temp = tmp_path / "elsewhere"
+    temp.mkdir()
+    homes: list[tuple[str, int]] = []
+
+    def installer(argv, env, path):
+        code = run_service(argv, env, path)
+        homes.append((env["HOME"], code))
+        return code
+
+    outcome = self_deploy.deploy(
+        box, tmp_path / "state", device="box",
+        environ={"PATH": os.environ["PATH"], "HOME": str(broken), "TMPDIR": str(temp)},
+        webhook=Webhook(), now=1000, owner=lambda _: True, install=installer,
+        homes=(broken, healthy))
+
+    assert (healthy / ".agents/skills/review-retry-skill/SKILL.md").exists()
+    assert pstack_pin.installed_errors(box, healthy) == []
+    assert homes == [(str(broken), 1), (str(healthy), 0)]
+    assert outcome.kind == self_deploy.INSTALL_FAILED
+    log = (tmp_path / "state" / self_deploy.INSTALL_LOG).read_text(encoding="utf-8")
+    assert f"refusing to replace unowned path {loop}" in log
+    assert "Traceback" not in log
+
+
 @needs_permissions
 def test_a_waiter_marks_its_unreadable_home_refused_and_retries_after_a_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
