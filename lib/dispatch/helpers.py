@@ -122,10 +122,11 @@ _REJECTED_OUTCOMES = (
     "ticket-abandoned",
 )
 
-_UPDATE_FAILED_OUTCOMES = (
+_UPDATE_NO_HANDOFF_OUTCOMES = (
     "update-failed-",
     "update-failure-counted",
     "update-superseded",
+    "update-unattributed",
     "stuck-update-failed-2",
 )
 

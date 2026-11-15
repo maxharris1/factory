@@ -10,13 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from lib.device_pool import DevicePool
+from lib.device_pool import DevicePool, link_drop_detail
 from lib.github_actions import _comment
 from lib.job_state import (
     CLAIMED,
     FAILED_UNSTARTED,
+    LINK_DROP,
     MAX_FREE_REQUEUES,
     REQUEUED_EARLY_EXIT,
+    RUN_DIED,
     derive,
     never_started,
     record_job_event,
@@ -344,3 +346,47 @@ def test_a_ready_no_started_job_produced_charges_no_update_failure(tmp_path: Pat
     assert board.outcome("orphan-dirty-ready") == "update-unattributed"
     row = board.state("42")
     assert (row["update_failures"], row["stuck"]) == (0, 0)
+
+
+@pytest.mark.parametrize("keep_orphan", [True, False])
+def test_an_unattributed_ready_is_no_later_workers_handoff(tmp_path: Path, keep_orphan: bool) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    pr.push(sha(2), state="dirty")
+    board.ready(pr, sha(2), "orphan")
+    board.poll()
+    assert board.outcome("orphan") == "update-unattributed"
+    if not keep_orphan:
+        pr.comments = [c for c in pr.comments if c.id != "orphan"]
+    pool = DevicePool(
+        board.queue,
+        MachinesConfig(
+            devices=(
+                Device(
+                    name="remote-test",
+                    tailscale_name="test-node",
+                    slot_max=4,
+                    harnesses={"claude": "claude-bot"},
+                    workdir_root="/tmp/factory/{bot}",
+                ),
+            )
+        ),
+    )
+    job, _ = pool.claim("claude")
+    tag = pool.attach_worker(job.id, owner="claude", remote=True)
+    with board.queue.connect() as connection:
+        record_job_event(connection, job.id, RUN_DIED, "remote follow exited", board.now[0])
+        record_job_event(
+            connection, job.id, LINK_DROP, link_drop_detail("remote-test", "10 minutes", tag), board.now[0]
+        )
+        connection.commit()
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+    board.now[0] += 61
+    board.poll()
+    board.poll()
+
+    jobs = [(r["id"] == job.id, r["state"], r["handoff_comment_id"]) for r in board.jobs("update-from-main")]
+    assert board.state("42")["update_failures"] == 0
+    assert jobs == [(True, "queued", None)]

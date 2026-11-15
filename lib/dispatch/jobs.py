@@ -13,7 +13,7 @@ from lib.dispatch.helpers import (
     _ANSWERS,
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
-    _UPDATE_FAILED_OUTCOMES,
+    _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
     _comment_order,
     _detail_project_bot,
@@ -843,7 +843,7 @@ class JobsMixin:
             ):
                 continue
             if update and (
-                (outcome is not None and outcome.startswith(_UPDATE_FAILED_OUTCOMES))
+                (outcome is not None and outcome.startswith(_UPDATE_NO_HANDOFF_OUTCOMES))
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
