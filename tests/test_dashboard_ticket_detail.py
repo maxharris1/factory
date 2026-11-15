@@ -223,30 +223,37 @@ PAINTED = r"""
   return n;
 })"""
 
-SIZES = "[...document.querySelectorAll('ol.journey button')].map(b => [b.offsetWidth, b.offsetHeight])"
+SIZES = r"""
+(sel => [...document.querySelectorAll(sel + ' ol.journey button')].map(b => [b.offsetWidth, b.offsetHeight]))"""
+
+
+def _drawn(chrome: _Chrome, article: str) -> dict:
+    _wait(chrome, f"document.querySelector('{article} canvas.jd-journey')")
+    time.sleep(0.4)
+    journey = chrome.run(f"{PAINTED}('{article} canvas.jd-journey')")
+    sizes = chrome.run(f"{SIZES}('{article}')")
+    chrome.run(f"document.querySelector('{article} details.jd-chart').open = true")
+    time.sleep(0.4)
+    chart = chrome.run(f"{PAINTED}('{article} canvas.jd-flowmap')")
+    return {"journey": journey > 0, "buttons": bool(sizes) and all(w > 0 and h > 0 for w, h in sizes), "chart": chart > 0}
 
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
-def test_the_lanes_modal_draws_the_journey_and_chart(tmp_path: Path) -> None:
+def test_every_way_onto_a_job_draws_the_journey_and_chart(tmp_path: Path) -> None:
     server = _serve(tmp_path, {"lanes": _snapshot(tmp_path)})
     chrome = _Chrome(tmp_path / "profile")
     try:
         base = f"http://127.0.0.1:{server.server_address[1]}/lanes/"
         _open(chrome, base + "index.html", "document.querySelector('a[href=\"job.html#job-h-review\"]')")
         chrome.run("document.querySelector('a[href=\"job.html#job-h-review\"]').click()")
-        _wait(chrome, "document.querySelector('#job-modal canvas.jd-journey')")
-        time.sleep(0.4)
-        journey = chrome.run(f"{PAINTED}('#job-modal canvas.jd-journey')")
-        sizes = chrome.run(SIZES.replace("document.", "document.getElementById('job-modal')."))
-        chrome.run("document.querySelector('#job-modal details.jd-chart').open = true")
-        time.sleep(0.4)
-        chart = chrome.run(f"{PAINTED}('#job-modal canvas.jd-flowmap')")
+        from_lanes = _drawn(chrome, "#job-h-review")
+        chrome.run("location.hash = '#job-r-cursor'")
+        after_hashchange = _drawn(chrome, "#job-r-cursor")
     finally:
         chrome.close()
         server.shutdown()
-    assert journey > 0, "the modal Journey is blank"
-    assert sizes and all(w > 0 and h > 0 for w, h in sizes), sizes
-    assert chart > 0, "the modal Full state chart is blank"
+    drawn = {"journey": True, "buttons": True, "chart": True}
+    assert {"lanes tile": from_lanes, "hash change": after_hashchange} == {"lanes tile": drawn, "hash change": drawn}
 
 
 STILL_PIXELS = r"""
