@@ -10,7 +10,6 @@ efficiency pages.
   diagram drawn from model/chart.mmd (the statechart's checked-in chart),
   with the job's path and current state highlighted, its round and its time
   in that state.
-- Activity page (activity.html): handoffs, verdicts, log, needs attention.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
 - #63 FU-1: a lane counts max(held, running) slots.
@@ -131,25 +130,6 @@ def _chart_source(path: Path) -> tuple[set[str], set[tuple[str, str]]]:
         for a, b in re.findall(r"^  (s\d+) --> (s\d+)", text, flags=re.M)
     }
     return set(names.values()), edges
-
-
-def _diagram(markup: str) -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
-    """{state: classes} and {(from, to): classes} from the first flow svg."""
-    svg = re.search(r'<svg class="flow".*?</svg>', markup, flags=re.S)
-    assert svg, "no flow diagram"
-    nodes = {
-        state: set(classes.split())
-        for classes, state in re.findall(
-            r'<g class="([^"]*)" data-state="([^"]+)"', svg.group(0)
-        )
-    }
-    edges = {
-        (a, b): set(classes.split())
-        for classes, a, b in re.findall(
-            r'<g class="([^"]*)" data-from="([^"]+)" data-to="([^"]+)"', svg.group(0)
-        )
-    }
-    return nodes, edges
 
 
 # --- the pages and how they are written ----------------------------------------------
@@ -319,7 +299,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
 # --- activity page -------------------------------------------------------------------------
 
 
-def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> None:
+def test_activity_page_has_attention_and_relay_only(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute(
@@ -328,15 +308,16 @@ def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> No
         )
         connection.execute("UPDATE jobs SET finished_at = ? WHERE id = 'd-codex-review-1'", (NOW - 100,))
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["activity.html"])
-    for panel in ("attention", "handoffs", "verdicts"):
+    for panel in ("attention", "relay"):
         assert f'id="{panel}"' in html, panel
-    assert "queued-review-fix" in _text(_section(html, "verdicts"))
-    assert "scripted" in _text(_section(html, "handoffs"))
+    relay = _text(_section(html, "relay"))
+    assert "queued-review-fix" in relay and "codex" in relay
     attention = _text(_section(html, "attention"))
     assert "AUT-7" in attention and "job-timeout" in attention
     assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
-    for panel in ("lanes", "queue", "health", "savings", "log", "tickets"):
+    for panel in ("lanes", "queue", "health", "savings", "tickets", "handoffs", "verdicts", "log"):
         assert f'id="{panel}"' not in html, panel
+    assert "poller.log" not in _text(html)
 
 
 def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
@@ -413,21 +394,24 @@ def test_missing_or_broken_chart_degrades(tmp_path: Path) -> None:
     assert "statechart unavailable" in job
 
 
+def _layout_of(chart_path: Path) -> tuple[set[str], set[tuple[str, str]]]:
+    layout = flow.flowmap_layout(flow.load_chart(chart_path))
+    return {n["name"] for n in layout["nodes"]}, {tuple(key.split(">")) for key in layout["edges"]}
+
+
 def test_job_page_diagram_is_the_real_statechart(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     assert snapshot["statechart"]["source"] == "chart.mmd"
-    html = render_pages(snapshot)["job.html"]
-    nodes, edges = _diagram(_section(html, "flow-template"))
     states, transitions = _chart_source(CHART)
-    assert set(nodes) == states
-    assert set(edges) == transitions
+    assert _layout_of(CHART) == (states, transitions)
     assert len(states) == 22  # section 4.1, with awaiting-ok (#86), merge-queue and updating (#130)
+    html = _no_script(render_pages(snapshot)["job.html"])
+    assert "Full state chart <span class=\"count\">· 22 states," in _section(html, "job-h-review")
 
 
 def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> None:
-    first = render_pages(_snapshot(tmp_path / "a", chart_path=MINI))["job.html"]
-    nodes, edges = _diagram(_section(first, "flow-template"))
-    assert set(nodes) == {"intake", "building", "review", "fixing", "handed-off"}
+    nodes, edges = _layout_of(MINI)
+    assert nodes == {"intake", "building", "review", "fixing", "handed-off"}
     assert ("review", "handed-off") in edges
     assert ("fixing", "waiting-max") not in edges
 
@@ -436,12 +420,11 @@ def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> 
     text = text.replace("  s4: handed-off\n", "  s4: handed-off\n  s5: waiting-max\n")
     text = text.replace("  s2 --> s4: ship = handoff\n", "  s3 --> s5: a product question\n")
     changed.write_text(text, encoding="utf-8")
-    second = render_pages(_snapshot(tmp_path / "b", chart_path=changed))["job.html"]
-    nodes, edges = _diagram(_section(second, "flow-template"))
-    assert set(nodes) == {"intake", "building", "review", "fixing", "handed-off", "waiting-max"}
+    nodes, edges = _layout_of(changed)
+    assert nodes == {"intake", "building", "review", "fixing", "handed-off", "waiting-max"}
     assert ("review", "handed-off") not in edges
-    assert ("fixing", "waiting-max") in edges
-    assert _chart_source(changed) == (set(nodes), set(edges))
+    html = _no_script(render_pages(_snapshot(tmp_path / "b", chart_path=changed))["job.html"])
+    assert "· 6 states," in _section(html, "job-h-review")
 
 
 def test_job_path_follows_its_history_through_the_chart() -> None:
@@ -493,26 +476,17 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     }
 
 
-def test_job_page_highlights_the_path_and_current_state(tmp_path: Path) -> None:
+def test_job_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
     html = _no_script(_pages(tmp_path)["job.html"])
     article = _section(html, "job-h-review")
-    nodes, edges = _diagram(article)
-    visited = {state for state, classes in nodes.items() if "visited" in classes}
-    current = {state for state, classes in nodes.items() if "current" in classes}
-    taken = {edge for edge, classes in edges.items() if "taken" in classes}
-    assert visited == {"intake", "questions", "building", "review", "fixing"}
-    assert current == {"review"}
-    assert taken == {
-        ("intake", "questions"),
-        ("questions", "building"),
-        ("building", "review"),
-        ("review", "fixing"),
-        ("fixing", "review"),
-    }
+    runlog = re.search(r'<ol class="runlog">(.*?)</ol>', article, re.S).group(1)
+    assert re.findall(r'data-state="([^"]+)"', runlog) == [
+        "intake", "questions", "building", "review", "fixing", "review"]
+    assert re.findall(r'data-state="([^"]+)"[^>]*class="now', runlog) == ["review"]
     text = _text(article)
-    assert "round 2/3" in text
+    assert "round 2 of 3" in text
     assert "33m 20s in review" in text
-    assert "intake → questions → building → review → fixing → review" in text
+    assert "intake → questions → building → review → fixing → review" in article
     assert "codex" in text and "cleffy#40" in text
 
 
@@ -531,7 +505,7 @@ def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
     assert 'href="job.html#job-h-review"' in board and 'href="job.html#job-r-codex-"' in board
 
 
-def test_a_job_with_no_ticket_state_still_gets_a_diagram(tmp_path: Path) -> None:
+def test_a_job_with_no_ticket_state_still_gets_a_run_log(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         add_job(connection, "orphan-build", state="queued", ticket_id="99")
@@ -540,8 +514,9 @@ def test_a_job_with_no_ticket_state_still_gets_a_diagram(tmp_path: Path) -> None
     assert job["round"] is None
     assert job["flow"]["state"] is None
     assert job["flow"]["path"] == ["intake", "questions", "building"]
-    nodes, _ = _diagram(_section(render_pages(snapshot)["job.html"], "job-orphan-b"))
-    assert not any("current" in classes for classes in nodes.values())
+    article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-orphan-b")
+    (runlog,) = re.findall(r'<ol class="runlog">.*?</ol>', article, re.S)
+    assert 'class="now' not in runlog
 
 
 # --- no-JS rendering ---------------------------------------------------------------------
@@ -563,7 +538,7 @@ def test_every_page_reads_without_script(tmp_path: Path) -> None:
     # Without script the job page shows every job; a slot link scrolls to its
     # own and :target marks it.
     assert ":target" in re.search(r"<style>(.*?)</style>", html, re.S).group(1)
-    assert '<div id="flow-template" hidden>' in job
+    assert 'id="job-h-review"' in job
 
 
 def test_pages_have_no_external_assets_or_markup_sinks(tmp_path: Path) -> None:
@@ -620,6 +595,8 @@ class Node {
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
   removeAttribute(k) { delete this.attrs[k]; }
+  hasAttribute(k) { return k in this.attrs; }
+  closest(tag) { let n = this; while (n && n.tagName !== tag) n = n.parentNode; return n || null; }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
   cloneNode(deep) { const n = new Node(this.tagName); n.className = this.className;
     n.attrs = Object.assign({}, this.attrs); n._text = this._text;
@@ -635,6 +612,11 @@ class Node {
       .filter(k => k in this.attrs).map(k => '[' + k + '=' + this.attrs[k] + ']').join('');
     return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') + attrs +
       (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
+}
+class Text extends Node {
+  constructor(text) { super('#text'); this._text = String(text); }
+  html() { return esc(this._text); }
+  dump(depth) { return ' '.repeat(depth || 0) + '"' + this._text + '"\n'; }
 }
 function esc(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
@@ -657,9 +639,14 @@ if (ids['flow-template'] && status.statechart) {
 global.window = global;
 global.addEventListener = () => {};
 const docListeners = {};
-global.document = {body, hidden: false, activeElement: null, getElementById: (id) => ids[id] || null,
+let focusedNode = null;
+global.document = {body, hidden: false,
+  get activeElement() { return focusedNode && focusedNode.isConnected ? focusedNode : null; },
+  set activeElement(node) { focusedNode = node; },
+  getElementById: (id) => ids[id] || null,
   createElement: (tag) => new Node(tag),
   createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
+  createTextNode: (text) => new Text(text),
   addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
 // Scripted user actions, run after the first render: click a node (by href,
 // id or class), press a key, advance the clock, or record what the body holds.
@@ -678,7 +665,8 @@ function fire(target, type, extra) {
 function pick(spec) {
   return find(body, n => (spec.href === undefined || n.attrs.href === spec.href) &&
     (spec.id === undefined || n.attrs.id === spec.id) &&
-    (spec.cls === undefined || n.className.split(' ').includes(spec.cls)));
+    (spec.cls === undefined || n.className.split(' ').includes(spec.cls)) &&
+    (spec.attr === undefined || Object.entries(spec.attr).every(([k, v]) => n.attrs[k] === v)));
 }
 const steps = [];
 function act(actions) {
@@ -786,8 +774,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
 @needs_node
 def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, last_cycle_at=NOW - 4)
-    activity = _run_page(tmp_path, snapshot, "activity",
-                         BAR + ["hud", "attention", "handoffs", "verdicts"])
+    activity = _run_page(tmp_path, snapshot, "activity", BAR + ["hud", "attention", "relay"])
     text = activity["text"]
     assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
     assert text["attention"].count("AUT-7") == 1
@@ -801,20 +788,17 @@ def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> Non
 
 
 @needs_node
-def test_script_highlights_the_selected_jobs_path(tmp_path: Path) -> None:
+def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
     view = out["dump"]["jobview"]
     assert "cleffy#40" in out["text"]["jobview"]
-    assert "round 2/3" in out["text"]["jobview"]
+    assert "round 2 of 3" in out["text"]["jobview"]
     assert "33m 2" in out["text"]["jobview"]  # time in state, ticking from 33m 20s
-    visited = set(re.findall(r"g\.node\.visited(?:\.current)?\[data-state=([^\]]+)\]", view))
-    current = set(re.findall(r"g\.node\.visited\.current\[data-state=([^\]]+)\]", view))
-    taken = set(re.findall(r"g\.edge\.taken\[data-from=([^\]]+)\]\[data-to=([^\]]+)\]", view))
-    assert visited == {"intake", "questions", "building", "review", "fixing"}
-    assert current == {"review"}
-    assert taken == {("intake", "questions"), ("questions", "building"), ("building", "review"),
-                     ("review", "fixing"), ("fixing", "review")}
+    runlog = view[view.index("ol.runlog"):view.index("ol.journey")]
+    assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == [
+        "intake", "questions", "building", "review", "fixing", "review"]
+    assert re.findall(r"button\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
     # Only the selected job is shown.
     assert "cleffy#13" not in out["text"]["jobview"]
     assert "a[href=job.html#job-r-codex-]" in out["dump"]["pipeline"]

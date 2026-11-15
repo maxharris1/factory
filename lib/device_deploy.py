@@ -35,6 +35,10 @@ One pass:
    A refusal is escalated once per (target, reason, commit) through
    lib/heal.py; device-deploy.state.json remembers what was escalated.
 
+A local account's own checkout (a box factory_root other than the box
+checkout) is moved by that bot's waiter with the same git steps
+(`sync_local`), since only that account may write it.
+
 deploy/self-heal.sh starts this pass detached after each box pass, so a
 slow clone never delays the box. A pass that finds device-deploy.lock held
 exits at once. Every pass converges from what it observes, so a crashed
@@ -49,6 +53,7 @@ import argparse
 import fcntl
 import os
 import sqlite3
+import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -92,7 +97,7 @@ PROBE_JOB = "device-sync"
 SYNC_MARK = "orch-sync:"
 _HARNESS_BOT = {harness: bot for bot, harness in OWNING_BOTS.items()}
 
-_DEPLOY = (
+_CHECKOUT = (
     'checkout=$1; url=$2; target=$3; '
     f"fail() {{ printf '{SYNC_MARK} %s\\n' \"$*\"; exit 3; }}; "
     "export GIT_TERMINAL_PROMPT=0; "
@@ -123,13 +128,17 @@ _DEPLOY = (
     'git checkout -q --no-overwrite-ignore -B main "$target" '
     '|| fail "git checkout exited $? (untracked or ignored files in the way?)"; '
     'git branch -q --set-upstream-to=origin/main main || fail "cannot set the upstream"; '
-    "py=python3; "
+)
+_SYNCED = f"printf '{SYNC_MARK} ok %s\\n' \"$(git rev-parse HEAD)\""
+_DEPLOY = (
+    _CHECKOUT
+    + "py=python3; "
     'if [ -f "$HOME/.local/bin/orch" ]; then '
     """w=$(sed -n 's/^exec "\\{0,1\\}\\([^" ]*\\)"\\{0,1\\} .*/\\1/p' "$HOME/.local/bin/orch" | head -n 1); """
     '[ -n "$w" ] && [ -x "$w" ] && py=$w; '
     "fi; "
-    '"$py" ./bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
-    f"printf '{SYNC_MARK} ok %s\\n' \"$(git rev-parse HEAD)\""
+    + '"$py" ./bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
+    + _SYNCED
 )
 
 
@@ -210,6 +219,26 @@ def run_deploy(transport: CaptureTransport, target: Target, *, url: str, sha: st
     if result.code == SSH_UNREACHABLE:
         return "ssh failed during the deploy"
     return said or f"deploy exited {result.code}"
+
+
+def sync_local(checkout: str, *, url: str, sha: str, environ: Mapping[str, str]) -> str | None:
+    """Bring a local bot account's own checkout to sha, as that account (#345).
+
+    The same git steps and refusals as a remote deploy, run in this
+    process's account; the caller installs the skills. None when it is at
+    sha, else our reason."""
+    try:
+        result = subprocess.run(
+            ["sh", "-c", _CHECKOUT + _SYNCED, "orch-sync", checkout, url, sha],
+            env=dict(environ), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            timeout=CHECKOUT_TIMEOUT_SECONDS, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"checkout sync did not run ({type(exc).__name__})"
+    said = _marked(result.stdout, SYNC_MARK)
+    if result.returncode == 0 and said == f"ok {sha}":
+        return None
+    return said or f"checkout sync exited {result.returncode}"
 
 
 def _why_not_synced(observed: Observed, sha: str) -> str:

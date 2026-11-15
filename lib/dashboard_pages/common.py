@@ -35,7 +35,6 @@ CSS_PANEL = """\
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
 #kpis,#ticket-filter,#pipeline,#shipped,#tickets,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
-#handoffs,#verdicts{grid-column:span 6}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
 .panel h2>span:first-child::before{content:"";display:inline-block;width:7px;height:7px;margin-right:9px;
@@ -98,15 +97,13 @@ CSS_MISC = """\
 CSS_TAIL = """\
 @keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
-@keyframes breathe{0%,100%{opacity:.18;stroke:var(--accent);stroke-width:3}50%{opacity:.8;stroke:var(--accent);stroke-width:7}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
-@media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts{grid-column:1/-1}}
+@media (max-width:1100px){.panel,#lanes,#queue{grid-column:1/-1}}
 @media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
 .topbar .meta{margin-left:0}}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
 .fresh{outline:2px solid var(--brand);outline-offset:-2px}
-.flow .visit.breathe .halo{animation:none;opacity:.45}
 .px-held::after{animation:none}}
 """
 
@@ -134,8 +131,7 @@ SCRIPT_HEAD = r"""
 (function () {
   'use strict';
   var POLL_MS = __POLL_MS__;
-  // The job view's simplified diagram (lib/dashboard_flow.py path_geometry).
-  var FLOW = __FLOW__;
+  var FLOWMAP = __FLOWMAP__;
   var PX = __PIXELSTRIP__;
   // The shell's link table and the components that carry a code version.
   var SHELL = __SHELL__;
@@ -269,7 +265,7 @@ SCRIPT_TAIL = r"""
   var PAGES = {
     main: [renderKpis, renderLanes, renderJustHappened, renderIntake],
     job: [renderBoard, renderTickets, renderJobView],
-    activity: [renderAttention, renderHandoffs, renderVerdicts],
+    activity: [renderAttention, renderRelay],
     efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens],
     health: [renderComponents, renderDrift, renderHealth, renderLog, renderRules, renderNoWaiter]
   };

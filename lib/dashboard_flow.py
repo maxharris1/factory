@@ -15,18 +15,16 @@ step and has no job of its own); longer gaps are kept as a jump with no
 edge drawn. Once the ticket has rows in ticket_transitions, those rows are
 the path from the first one on, with their times and no bridge.
 
-The job view draws that path as a left-to-right chain, one node per visit
-(a ticket revised twice shows review, fixing, review, fixing, review), the
-current step highlighted, and the chart's direct successors of the current
-state grayed (render_path_svg). The full chart (render_svg) stays behind a
-toggle. A state is finished (is_terminal) when the chart has no way back to
-work from it: no state reachable from it lies on a cycle (done, merged,
-handed-off, ...); a finished job's current step does not breathe.
+The job view draws the whole chart on a canvas (flowmap_layout places the
+nodes and routes the wires, FLOWMAP_SCRIPT's drawFlowMap paints a frame)
+with that path lit in the colour of who did each step. A state is finished
+(is_terminal) when the chart has no way back to work from it: no state
+reachable from it lies on a cycle (done, merged, handed-off, ...).
 """
 
 from __future__ import annotations
 
-import html
+import json
 import math
 import re
 from collections import deque
@@ -476,288 +474,387 @@ def job_flow(
 
 # --- drawing ------------------------------------------------------------------------
 
-NODE_W = 128
-NODE_H = 36
-COL_W = 172
-ROW_H = 60
-LEFT = 64
-TOP = 56
-BOTTOM = 24
-ARROW = 7.0
+GRID_W, GRID_H, CELL = 250, 88, 4
+FM_NODE_W, FM_NODE_H = 34, 9
+STOP_ROW = 4
+STOP_RED = "#f7768e"
+FLOWMAP_TINT = {
+    "script": "#a9b1d6",
+    "claude": "#e0af68",
+    "codex": "#7aa2f7",
+    "cursor": "#bb9af7",
+    "grok": "#73daca",
+    "human": "#ff9e64",
+}
+FLOWMAP_PLACES = {
+    "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
+    "planning": (1, 0), "plan-check": (1, 1),
+    "building": (2, 0), "fixing": (2, 1),
+    "review": (3, 0), "capped": (3, 1),
+    "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
+    "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
+    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4), "blocked": (3, 4),
+}
+FLOWMAP_COLUMNS = {"Ask": 0, "Plan": 1, "Build": 2, "Review": 3, "Ship": 4, "Shipped": 5}
+FLOWMAP_HEADS = (("Ask", 0, 1), ("Plan", 1, 1), ("Build", 2, 1), ("Review", 3, 1), ("Ship", 4, 2))
 
 
-def layout(chart: dict) -> dict[str, tuple[float, float, int]]:
-    """{state: (x, y, column)}: columns by distance from the start, stop
-    states (tan) at the bottom of their column."""
+def _col_x(column: int) -> int:
+    return 3 + column * 42
+
+
+def _row_y(row: int) -> int:
+    return 76 if row >= STOP_ROW else 9 + row * 16
+
+
+def _flowmap_places(chart: dict) -> dict[str, tuple[int, int]]:
+    phases = ticket_phases(chart)
     adjacency = _adjacency(chart)
-    depth = {chart["start"]: 0}
-    order = [chart["start"]]
-    queue = deque([chart["start"]])
-    while queue:
-        state = queue.popleft()
-        for nxt in adjacency[state]:
-            if nxt not in depth:
-                depth[nxt] = depth[state] + 1
-                order.append(nxt)
-                queue.append(nxt)
-    deepest = max(depth.values())
-    for state in chart["states"]:
-        if state["name"] not in depth:
-            depth[state["name"]] = deepest + 1
-            order.append(state["name"])
-    group = {state["name"]: state["group"] for state in chart["states"]}
-    columns: dict[int, list[str]] = {}
-    for state in sorted(order, key=lambda name: (group[name] == "tan", order.index(name))):
-        columns.setdefault(depth[state], []).append(state)
-    return {
-        state: (LEFT + column * COL_W, TOP + row * ROW_H, column)
-        for column, states in columns.items()
-        for row, state in enumerate(states)
-    }
+    places = {name: FLOWMAP_PLACES[name] for name in phases if name in FLOWMAP_PLACES}
+    taken = set(places.values())
+    columns = range(len(FLOWMAP_COLUMNS))
+    for name, phase in phases.items():
+        if name in places:
+            continue
+        exits = [nxt for nxt in adjacency[name] if nxt != name]
+        if phase == "Stop" and not exits:
+            candidates = [(column, STOP_ROW) for column in columns]
+        else:
+            home = FLOWMAP_COLUMNS.get(phase, FLOWMAP_COLUMNS["Review"])
+            order = [home, *(column for column in columns if column != home)]
+            candidates = [(column, row) for column in order for row in range(STOP_ROW + 1)]
+        place = next(spot for spot in candidates if spot not in taken)
+        places[name] = place
+        taken.add(place)
+    return places
 
 
-def _n(value: float) -> str:
-    return f"{value:.1f}".rstrip("0").rstrip(".")
+def _route(a: dict, b: dict, nodes: Sequence[dict]) -> list[list[int]]:
+    nw, nh = FM_NODE_W, FM_NODE_H
+    ax, ay0, bx, by0 = a["x"], a["y"], b["x"], b["y"]
+    if a is b:
+        g1 = min(GRID_W - 2, ax + 36)
+        return [[ax + nw, ay0 + 2], [g1, ay0 + 2], [g1, ay0 + 6], [ax + nw, ay0 + 6]]
+    if a["col"] == b["col"]:
+        lo, hi = sorted((a["row"], b["row"]))
+        blocked = any(n["col"] == a["col"] and lo < n["row"] < hi for n in nodes)
+        if not blocked:
+            if b["row"] > a["row"]:
+                return [[ax + 14, ay0 + nh], [ax + 14, by0 - 1]]
+            return [[ax + 20, ay0 - 1], [ax + 20, by0 + nh]]
+        g1 = min(GRID_W - 2, ax + 36)
+        return [[ax + nw, ay0 + 2], [g1, ay0 + 2], [g1, by0 + 6], [bx + nw, by0 + 6]]
+    below = b["row"] >= a["row"] and a["row"] < STOP_ROW
+    if b["col"] > a["col"]:
+        ay, by, g1 = ay0 + 2, by0 + 2, ax + 36
+        if b["col"] == a["col"] + 1:
+            return [[ax + nw, ay], [g1, ay], [g1, by], [bx - 1, by]]
+        ch = ay0 + 11 if below else _row_y(a["row"] - 1) + 11
+        g2 = _col_x(b["col"] - 1) + 36
+        return [[ax + nw, ay], [g1, ay], [g1, ch], [g2, ch], [g2, by], [bx - 1, by]]
+    ay, by, g1 = ay0 + 6, by0 + 6, _col_x(a["col"] - 1) + 39
+    if b["col"] == a["col"] - 1:
+        return [[ax - 1, ay], [g1, ay], [g1, by], [bx + nw, by]]
+    ch = ay0 + 14 if below else _row_y(a["row"] - 1) + 14
+    g2 = _col_x(b["col"]) + 39
+    return [[ax - 1, ay], [g1, ay], [g1, ch], [g2, ch], [g2, by], [bx + nw, by]]
 
 
-def _arrow(x: float, y: float, cx: float, cy: float) -> str:
-    """A filled triangle at (x, y) pointing away from (cx, cy)."""
-    dx, dy = x - cx, y - cy
-    length = (dx * dx + dy * dy) ** 0.5 or 1.0
-    ux, uy = dx / length, dy / length
-    bx, by = x - ux * ARROW * 1.6, y - uy * ARROW * 1.6
-    points = [(x, y), (bx - uy * ARROW * 0.7, by + ux * ARROW * 0.7),
-              (bx + uy * ARROW * 0.7, by - ux * ARROW * 0.7)]
-    return " ".join(f"{_n(px)},{_n(py)}" for px, py in points)
-
-
-def _edge_geometry(a: tuple[float, float, int], b: tuple[float, float, int], same: bool):
-    ax, ay, acol = a
-    bx, by, bcol = b
-    if same:
-        x, y = ax + NODE_W - 22, ay
-        c1, c2, end = (x, y - 30), (x + 34, y - 30), (ax + NODE_W, ay + 10)
-        return (x, y), c1, c2, end
-    if bcol > acol:
-        start = (ax + NODE_W, ay + NODE_H / 2)
-        end = (bx, by + NODE_H / 2)
-        bend = (end[0] - start[0]) / 2
-        return start, (start[0] + bend, start[1]), (end[0] - bend, end[1]), end
-    if bcol == acol:
-        start = (ax + NODE_W, ay + NODE_H / 2)
-        end = (bx + NODE_W, by + NODE_H / 2)
-        reach = 26 + 6 * abs(by - ay) / ROW_H
-        return start, (start[0] + reach, start[1]), (end[0] + reach, end[1]), end
-    # Backward: arch over the top of both boxes.
-    start = (ax + NODE_W / 2 - 10, ay)
-    end = (bx + NODE_W / 2 + 10, by)
-    lift = 26 + 7 * (acol - bcol)
-    top = min(ay, by) - lift
-    return start, (start[0], top), (end[0], top), end
-
-
-def render_svg(
-    chart: dict,
-    path: Sequence[str] = (),
-    current: str | None = None,
-    *,
-    label: str = "Ticket statechart",
-) -> str:
-    """The chart as inline SVG (no external assets, no url() references),
-    with `path` and `current` highlighted. Every state is a <g data-state>,
-    every transition a <g data-from data-to>, so the page script can move
-    the highlight without redrawing."""
-    places = layout(chart)
-    visited = set(path)
-    taken = set(path_edges(chart, path))
-    outgoing = {edge["from"] for edge in chart["edges"]}
-    columns = max(column for _, _, column in places.values()) + 1
-    rows = max(int((y - TOP) / ROW_H) for _, y, _ in places.values()) + 1
-    width = LEFT + columns * COL_W - (COL_W - NODE_W) + 24
-    height = TOP + rows * ROW_H + BOTTOM
-    e = lambda value: html.escape(str(value), quote=True)  # noqa: E731
-    parts = [
-        f'<svg class="flow" viewBox="0 0 {width} {height}" width="{width}" '
-        f'height="{height}" role="img" aria-label="{e(label)}">'
-    ]
-    sx, sy, _ = places[chart["start"]]
-    parts.append(
-        f'<g class="entry{" taken" if path else ""}"><title>ticket → {e(chart["start"])}</title>'
-        f'<circle cx="{_n(sx - 34)}" cy="{_n(sy + NODE_H / 2)}" r="7"/>'
-        f'<path d="M{_n(sx - 27)} {_n(sy + NODE_H / 2)} L{_n(sx - ARROW * 1.6)} {_n(sy + NODE_H / 2)}"/>'
-        f'<polygon points="{_arrow(sx, sy + NODE_H / 2, sx - 27, sy + NODE_H / 2)}"/></g>'
-    )
-    for edge in chart["edges"]:
-        a, b = edge["from"], edge["to"]
-        start, c1, c2, end = _edge_geometry(places[a], places[b], a == b)
-        classes = "edge taken" if (a, b) in taken else "edge"
-        title = f"{a} → {b}" + (f": {edge['label']}" if edge["label"] else "")
-        parts.append(
-            f'<g class="{classes}" data-from="{e(a)}" data-to="{e(b)}"><title>{e(title)}</title>'
-            f'<path d="M{_n(start[0])} {_n(start[1])} C{_n(c1[0])} {_n(c1[1])} '
-            f'{_n(c2[0])} {_n(c2[1])} {_n(end[0])} {_n(end[1])}"/>'
-            f'<polygon points="{_arrow(end[0], end[1], c2[0], c2[1])}"/></g>'
-        )
+def flowmap_layout(chart: dict) -> dict:
+    """The full state chart on FlowMap's 250 x 88 cell grid (4 px cells,
+    1000 x 352 px): phase columns (Ship two columns wide), stop states on
+    the bottom rail, and a wire route for every ordered pair of states so
+    an off-chart hop has one too. `edges` lists the chart's transitions."""
+    places = _flowmap_places(chart)
+    adjacency = _adjacency(chart)
+    nodes = []
     for state in chart["states"]:
         name = state["name"]
-        x, y, _ = places[name]
-        classes = ["node", f"g-{state['group']}"]
-        if name not in outgoing:
-            classes.append("end")
-        if name in visited:
-            classes.append("visited")
-        if name == current:
-            classes.append("current")
-        gloss = GLOSS.get(name)
-        text_y = y + (NODE_H / 2 - 2 if gloss else NODE_H / 2 + 4)
-        parts.append(
-            f'<g class="{" ".join(classes)}" data-state="{e(name)}"><title>{e(name)}</title>'
-            f'<rect x="{_n(x)}" y="{_n(y)}" width="{NODE_W}" height="{NODE_H}" rx="6"/>'
-            f'<text x="{_n(x + NODE_W / 2)}" y="{_n(text_y)}">{e(name)}</text>'
-            + (
-                f'<text class="gloss" x="{_n(x + NODE_W / 2)}" y="{_n(y + NODE_H - 6)}">{e(gloss)}</text>'
-                if gloss
-                else ""
-            )
-            + "</g>"
-        )
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-
-# --- the job view: the path taken, the current step, what can come next -------------
-
-VISIT_H = 50
-HOP = 44
-PATH_LEFT = 16
-PATH_TOP = 14
-NEXT_ROW = 60
-
-
-def path_geometry() -> dict:
-    """The simplified diagram's sizes, shared with the page script so the
-    live redraw matches the server's."""
+        column, row = places[name]
+        exits = [nxt for nxt in adjacency[name] if nxt != name]
+        nodes.append({
+            "name": name,
+            "gloss": GLOSS.get(name, ""),
+            "col": column,
+            "row": row,
+            "x": _col_x(column),
+            "y": _row_y(row),
+            "stop": row >= STOP_ROW and not exits,
+            "end": not exits,
+        })
+    loops = {edge["from"] for edge in chart["edges"] if edge["from"] == edge["to"]}
+    routes = {
+        f'{a["name"]}>{b["name"]}': _route(a, b, nodes)
+        for a in nodes
+        for b in nodes
+        if a is not b or a["name"] in loops
+    }
+    edges = [f'{edge["from"]}>{edge["to"]}' for edge in chart["edges"]]
+    rail = {node["col"] for node in nodes if node["row"] >= STOP_ROW}
+    free = [column for column in range(len(FLOWMAP_COLUMNS)) if column not in rail]
     return {
-        "w": NODE_W, "h": VISIT_H, "hop": HOP, "left": PATH_LEFT, "top": PATH_TOP,
-        "row": NEXT_ROW, "arrow": ARROW, "gloss": GLOSS,
+        "grid": {"w": GRID_W, "h": GRID_H, "cell": CELL},
+        "node": {"w": FM_NODE_W, "h": FM_NODE_H},
+        "nodes": nodes,
+        "edges": edges,
+        "routes": routes,
+        "heads": [
+            {"label": label, "x": _col_x(column) * CELL, "w": (span * 42 - 8) * CELL}
+            for label, column, span in FLOWMAP_HEADS
+        ],
+        "rail": {"y": 72, "x0": 3, "x1": 247},
+        "stop_label": {"x": _col_x(free[0]) * CELL if free else 700, "y": 314},
     }
 
 
-def _lines(y: float, texts: Sequence[tuple[str, str]]) -> list[tuple[float, str, str]]:
-    """Baselines for one to three lines of text in a node at `y`."""
-    baselines = {1: (VISIT_H / 2 + 4,), 2: (21, 36), 3: (17, 30, 43)}[len(texts)]
-    return [(y + base, cls, text) for base, (cls, text) in zip(baselines, texts)]
+FLOWMAP_SCRIPT = r"""
+var FM_TINT = __TINT__;
+var FM_RED = '__RED__';
+var FM_FONT = "'JetBrains Mono', ui-monospace, Menlo, monospace";
 
+function fmHex(s) {
+  var m = /^#?([0-9a-f]{6})/i.exec(String(s || ''));
+  if (!m) return [224, 175, 104];
+  return [parseInt(m[1].substr(0, 2), 16), parseInt(m[1].substr(2, 2), 16), parseInt(m[1].substr(4, 2), 16)];
+}
 
-def render_path_svg(
-    chart: dict,
-    path: Sequence[str],
-    current: str | None,
-    *,
-    next_steps: Sequence[str] | None = None,
-    terminal: bool | None = None,
-    meta: str = "",
-    label: str = "Path taken",
-) -> str:
-    """The path a ticket took as inline SVG: one node per visit, left to
-    right in the order the ticket went (a revisited state appears again),
-    arrows in that order, the current step (the last visit of `current`)
-    highlighted and, unless it is finished, breathing; then the chart's
-    direct successors of the current state, grayed with dashed arrows.
-    Nothing else from the chart. `meta` (round, time in state) goes on the
-    current step only."""
-    if next_steps is None:
-        next_steps = successors(chart, current)
-    if terminal is None:
-        terminal = is_terminal(chart, current)
-    at = max((i for i, state in enumerate(path) if state == current), default=-1)
-    nexts = list(next_steps) if at >= 0 else []
-    group = {state["name"]: state["group"] for state in chart["states"]}
-    labels = {(edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]}
-    step = NODE_W + HOP
-    rows = max(1, len(nexts))
-    y0 = PATH_TOP + (rows - 1) * NEXT_ROW / 2
-    mid = y0 + VISIT_H / 2
-    width = 2 * PATH_LEFT + max(1, len(path) + (1 if nexts else 0)) * step - HOP
-    height = 2 * PATH_TOP + (rows - 1) * NEXT_ROW + VISIT_H
-    e = lambda value: html.escape(str(value), quote=True)  # noqa: E731
+function fmMix(rgb, k) {
+  return fmRgb(14 + (rgb[0] - 14) * k, 14 + (rgb[1] - 14) * k, 20 + (rgb[2] - 20) * k);
+}
 
-    def title(a: str, b: str) -> str:
-        if (a, b) not in labels:
-            return f"{a} → {b} ({OFF_CHART})"
-        return f"{a} → {b}" + (f": {labels[(a, b)]}" if labels[(a, b)] else "")
+function fmRgb(r, g, b) {
+  return 'rgb(' + Math.round(r) + ',' + Math.round(g) + ',' + Math.round(b) + ')';
+}
 
-    def texts(name: str, extra: str = "") -> list[tuple[str, str]]:
-        lines = [("", name)]
-        if GLOSS.get(name):
-            lines.append(("gloss", GLOSS[name]))
-        if extra:
-            lines.append(("meta", extra))
-        return lines
+function fmCells(pts) {
+  var out = [], i, x = pts[0][0], y = pts[0][1], tx, ty;
+  out.push([x, y]);
+  for (i = 1; i < pts.length; i++) {
+    tx = pts[i][0];
+    ty = pts[i][1];
+    while (x !== tx || y !== ty) {
+      if (x !== tx) x += tx > x ? 1 : -1;
+      else y += ty > y ? 1 : -1;
+      out.push([x, y]);
+    }
+  }
+  return out;
+}
 
-    def node(x: float, y: float, lines: list[tuple[str, str]]) -> str:
-        out = []
-        for base, cls, text in _lines(y, lines):
-            attr = f' class="{cls}"' if cls else ""
-            out.append(f'<text{attr} x="{_n(x + NODE_W / 2)}" y="{_n(base)}">{e(text)}</text>')
-        return "".join(out)
+function fmHead(cells) {
+  var n = cells.length;
+  if (n < 2) return [];
+  var lx = cells[n - 1][0], ly = cells[n - 1][1];
+  var dx = lx - cells[n - 2][0], dy = ly - cells[n - 2][1];
+  return [[lx - dx + dy, ly - dy + dx], [lx - dx - dy, ly - dy - dx]];
+}
 
-    parts = [
-        f'<svg class="flow steps" viewBox="0 0 {_n(width)} {_n(height)}" width="{_n(width)}" '
-        f'height="{_n(height)}" role="img" aria-label="{e(label)}">'
-    ]
-    for i in range(1, len(path)):
-        a, b = path[i - 1], path[i]
-        x1, x2 = PATH_LEFT + (i - 1) * step + NODE_W, PATH_LEFT + i * step
-        classes = "hop" if (a, b) in labels else "hop jump"
-        parts.append(
-            f'<g class="{classes}" data-from="{e(a)}" data-to="{e(b)}" data-step="{i}">'
-            f"<title>{e(title(a, b))}</title>"
-            f'<path d="M{_n(x1)} {_n(mid)} L{_n(x2 - ARROW * 1.6)} {_n(mid)}"/>'
-            f'<polygon points="{_arrow(x2, mid, x1, mid)}"/></g>'
-        )
-    if nexts:
-        sx = PATH_LEFT + at * step + NODE_W
-        nx = PATH_LEFT + len(path) * step
-        for j, name in enumerate(nexts):
-            ny = PATH_TOP + j * NEXT_ROW + VISIT_H / 2
-            bend = (nx - sx) / 2
-            parts.append(
-                f'<g class="hop next" data-from="{e(current)}" data-to="{e(name)}">'
-                f"<title>{e(title(str(current), name))}</title>"
-                f'<path d="M{_n(sx)} {_n(mid)} C{_n(sx + bend)} {_n(mid)} {_n(nx - bend)} {_n(ny)} '
-                f'{_n(nx - ARROW * 1.6)} {_n(ny)}"/>'
-                f'<polygon points="{_arrow(nx, ny, nx - bend, ny)}"/></g>'
-            )
-    for i, name in enumerate(path):
-        x = PATH_LEFT + i * step
-        classes = ["visit"]
-        if i == at:
-            classes.append("current")
-            if not terminal:
-                classes.append("breathe")
-        halo = (
-            f'<rect class="halo" x="{_n(x - 4)}" y="{_n(y0 - 4)}" width="{NODE_W + 8}" '
-            f'height="{VISIT_H + 8}" rx="9"/>'
-            if i == at
-            else ""
-        )
-        parts.append(
-            f'<g class="{" ".join(classes)}" data-state="{e(name)}" data-step="{i}">'
-            f"<title>{e(name)}{' (now)' if i == at else ''}</title>"
-            f'<rect x="{_n(x)}" y="{_n(y0)}" width="{NODE_W}" height="{VISIT_H}" rx="6" '
-            f'class="box g-{e(group.get(name, "other"))}"/>{halo}'
-            + node(x, y0, texts(name, meta if i == at else ""))
-            + "</g>"
-        )
-    for j, name in enumerate(nexts):
-        x, y = PATH_LEFT + len(path) * step, PATH_TOP + j * NEXT_ROW
-        parts.append(
-            f'<g class="next" data-state="{e(name)}"><title>{e(name)} (can come next)</title>'
-            f'<rect x="{_n(x)}" y="{_n(y)}" width="{NODE_W}" height="{VISIT_H}" rx="6" class="box"/>'
-            + node(x, y, texts(name))
-            + "</g>"
-        )
-    parts.append("</svg>")
-    return "".join(parts)
+function fmPerim(n, NW, NH) {
+  var out = [], j;
+  for (j = 0; j < NW; j++) out.push([n.x + j, n.y]);
+  for (j = 1; j < NH; j++) out.push([n.x + NW - 1, n.y + j]);
+  for (j = NW - 2; j >= 0; j--) out.push([n.x + j, n.y + NH - 1]);
+  for (j = NH - 2; j >= 1; j--) out.push([n.x, n.y + j]);
+  return out;
+}
+
+function drawFlowMap(ctx, layout, model, opts) {
+  var reduced = !!(opts && opts.reduced);
+  var t = reduced ? 0 : ((opts && opts.t) || 0);
+  var NW = layout.node.w, NH = layout.node.h, px = layout.grid.cell;
+  var W = layout.grid.w * px, H = layout.grid.h * px;
+  var put = function (x, y) { ctx.fillRect(x * px, y * px, px, px); };
+  var byName = {}, i, j, k, n, c, d, w, name, v;
+  var nodes = layout.nodes;
+  for (i = 0; i < nodes.length; i++) {
+    byName[nodes[i].name] = { def: nodes[i], visits: 0, current: false, next: false };
+  }
+  var edgeSet = {};
+  for (i = 0; i < layout.edges.length; i++) edgeSet[layout.edges[i]] = true;
+
+  var visits = (model && model.visits) || [], path = [], curWho = null;
+  for (i = 0; i < visits.length; i++) {
+    v = visits[i];
+    if (!byName[v.state]) continue;
+    path.push(v);
+    byName[v.state].visits += 1;
+    if (v.current) curWho = v.who;
+  }
+  var curName = model && model.state && byName[model.state] ? model.state : null;
+  var cur = curName ? byName[curName] : null;
+  if (cur) cur.current = true;
+
+  var wire = [], heads = [], hops = [], cols = [], taken = {}, a, b, id, cells, jump, hex, rgb, mid;
+  for (i = 1; i < path.length; i++) {
+    a = path[i - 1].state;
+    b = path[i].state;
+    if (a === b) continue;
+    id = a + '>' + b;
+    if (!layout.routes[id]) continue;
+    jump = !edgeSet[id] || !!path[i].off_chart;
+    taken[id] = true;
+    cells = fmCells(layout.routes[id]);
+    hex = byName[b].def.stop ? FM_RED : (FM_TINT[path[i].who] || FM_TINT.script);
+    rgb = fmHex(hex);
+    cols.push({
+      lit: hex,
+      mid: fmMix(rgb, 0.66),
+      crest: fmRgb((rgb[0] + 255) / 2, (rgb[1] + 255) / 2, (rgb[2] + 255) / 2)
+    });
+    for (j = 0; j < cells.length; j++) {
+      wire.push([cells[j][0], cells[j][1], jump ? 1 : 0, j, cols.length - 1]);
+    }
+    heads.push(fmHead(cells));
+    mid = cells[Math.floor(cells.length / 2)];
+    hops.push({ label: String(hops.length + 1), x: mid[0] * px - 5, y: mid[1] * px - 5, color: hex });
+  }
+
+  var nextWires = [], nexts = (model && model.next) || [];
+  for (i = 0; i < nexts.length; i++) {
+    if (!cur || !byName[nexts[i]]) continue;
+    byName[nexts[i]].next = true;
+    id = curName + '>' + nexts[i];
+    if (nexts[i] === curName || taken[id] || !layout.routes[id]) continue;
+    cells = fmCells(layout.routes[id]);
+    nextWires.push({ cells: cells, head: fmHead(cells) });
+  }
+
+  ctx.fillStyle = '#0e0e14';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#24283b';
+  for (i = layout.rail.x0; i < layout.rail.x1; i += 2) put(i, layout.rail.y);
+
+  ctx.fillStyle = '#6b7399';
+  for (i = 0; i < nextWires.length; i++) {
+    w = nextWires[i].cells;
+    for (j = 0; j < w.length; j++) {
+      if (j % 3 !== 2) put(w[j][0], w[j][1]);
+    }
+    w = nextWires[i].head;
+    for (j = 0; j < w.length; j++) put(w[j][0], w[j][1]);
+  }
+
+  var total = wire.length;
+  var pulse = reduced ? -99 : (t * 30) % (total + 45);
+  for (i = 0; i < total; i++) {
+    c = wire[i];
+    if (c[2] === 1 && c[3] % 3 === 2) continue;
+    ctx.fillStyle = cols[c[4]].mid;
+    put(c[0], c[1]);
+  }
+  if (!reduced) {
+    for (i = 0; i < total; i++) {
+      c = wire[i];
+      d = pulse - i;
+      if (d < 0 || d >= 14) continue;
+      if (c[2] === 1 && c[3] % 3 === 2) continue;
+      ctx.fillStyle = d < 4 ? cols[c[4]].crest : cols[c[4]].lit;
+      put(c[0], c[1]);
+    }
+  }
+  for (i = 0; i < heads.length; i++) {
+    ctx.fillStyle = cols[i].lit;
+    for (j = 0; j < heads[i].length; j++) put(heads[i][j][0], heads[i][j][1]);
+  }
+
+  var tintRgb = fmHex(FM_TINT[curWho] || FM_TINT.script);
+  var tint = fmRgb(tintRgb[0], tintRgb[1], tintRgb[2]);
+  var tintDim = fmMix(tintRgb, 0.3);
+  var march = Math.floor(t * 14), band = Math.floor(t * 10), perim, edge, dashed;
+  for (i = 0; i < nodes.length; i++) {
+    n = byName[nodes[i].name];
+    d = n.def;
+    ctx.fillStyle = n.current ? '#292e42' : n.visits > 0 ? '#16222d' : '#13141c';
+    ctx.fillRect((d.x + 1) * px, (d.y + 1) * px, (NW - 2) * px, (NH - 2) * px);
+    perim = fmPerim(d, NW, NH);
+    edge = n.current ? '#7dcfff' : n.visits > 0 ? '#5386a6' : n.next ? '#8b93b8' : '#343a55';
+    dashed = !n.current && n.visits === 0 && n.next;
+    ctx.fillStyle = edge;
+    for (j = 0; j < perim.length; j++) {
+      if (dashed && j % 2 === 1) continue;
+      put(perim[j][0], perim[j][1]);
+    }
+    if (d.end) {
+      put(d.x + 1, d.y + 1);
+      put(d.x + NW - 2, d.y + 1);
+      put(d.x + 1, d.y + NH - 2);
+      put(d.x + NW - 2, d.y + NH - 2);
+    }
+    if (n.current) {
+      if (!reduced) {
+        ctx.fillStyle = '#b8e5ff';
+        for (j = 0; j < 8; j++) {
+          k = (((march - j) % perim.length) + perim.length) % perim.length;
+          put(perim[k][0], perim[k][1]);
+        }
+      }
+      for (j = 1; j < NW - 1; j++) {
+        k = (((j - band) % 12) + 12) % 12;
+        ctx.fillStyle = k < 3 ? tint : tintDim;
+        put(d.x + j, d.y + NH - 3);
+        put(d.x + j, d.y + NH - 2);
+      }
+    }
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '400 11px ' + FM_FONT;
+  ctx.letterSpacing = '0.88px';
+  ctx.fillStyle = '#8b93b8';
+  for (i = 0; i < layout.heads.length; i++) {
+    w = layout.heads[i];
+    ctx.fillText(w.label.toUpperCase(), w.x + w.w / 2, 17);
+  }
+  ctx.letterSpacing = '0px';
+  var left, top, height, cx, cy;
+  for (i = 0; i < nodes.length; i++) {
+    n = byName[nodes[i].name];
+    d = n.def;
+    left = d.x * px;
+    top = d.y * px;
+    height = n.current ? 26 : 36;
+    cx = left + 68;
+    cy = top + height / 2;
+    ctx.font = '500 11px ' + FM_FONT;
+    ctx.fillStyle = n.current ? '#7dcfff' : n.visits > 0 ? '#c0caf5' : n.next ? '#a9b1d6' : '#8b93b8';
+    ctx.fillText(d.name, cx, d.gloss ? cy - 5.5 : cy);
+    if (d.gloss) {
+      ctx.font = '400 9px ' + FM_FONT;
+      ctx.fillStyle = '#8b93b8';
+      ctx.fillText(d.gloss, cx, cy + 6.5);
+    }
+  }
+  ctx.font = '700 10px ' + FM_FONT;
+  for (i = 0; i < nodes.length; i++) {
+    n = byName[nodes[i].name];
+    if (n.visits < 2) continue;
+    d = n.def;
+    name = '×' + n.visits;
+    w = ctx.measureText(name).width + 8;
+    left = (d.x + NW) * px - 26;
+    top = d.y * px - 7;
+    ctx.fillStyle = '#7dcfff';
+    ctx.fillRect(left, top, w, 14);
+    ctx.fillStyle = '#0c0e10';
+    ctx.fillText(name, left + w / 2, top + 7);
+  }
+  ctx.font = '700 9px ' + FM_FONT;
+  ctx.lineWidth = 1;
+  for (i = 0; i < hops.length; i++) {
+    ctx.fillStyle = '#0e0e14';
+    ctx.fillRect(hops[i].x, hops[i].y, 14, 14);
+    ctx.strokeStyle = hops[i].color;
+    ctx.strokeRect(hops[i].x + 0.5, hops[i].y + 0.5, 13, 13);
+    ctx.fillStyle = hops[i].color;
+    ctx.fillText(hops[i].label, hops[i].x + 7, hops[i].y + 7);
+  }
+  ctx.textAlign = 'left';
+  ctx.font = '400 11px ' + FM_FONT;
+  ctx.letterSpacing = '0.88px';
+  ctx.fillStyle = '#8b93b8';
+  ctx.fillText('STOP STATES', layout.stop_label.x, layout.stop_label.y + 7);
+  ctx.letterSpacing = '0px';
+}
+""".replace("__TINT__", json.dumps(FLOWMAP_TINT)).replace("__RED__", STOP_RED)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from lib.dispatch.constants import WATCHED_STATES
 from lib.dispatch.helpers import (
     _acted_verdict,
     _comment_link,
@@ -112,7 +111,7 @@ class ReadyMixin:
             if (
                 (result is None or not result.reported)
                 and ticket.mergeable_state == "dirty"
-                and state not in WATCHED_STATES
+                and not self._queue_owns_base_updates(ticket.repo, ticket.ticket_id)
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
             return False, "ci-pending"

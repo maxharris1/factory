@@ -80,7 +80,7 @@ If the ticket lists a dependency that has not merged, post `questions` before an
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
 
-<!-- orch:v1 kind=ready from=claude-bot role=builder round=2/3 head=<pushed-head-sha> risk=high -->
+<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
 Then plain prose for people and agents: What changed, the tests and their results, and anything left open. The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 
@@ -239,7 +239,7 @@ If the ticket lists a dependency that has not merged, post `questions` before an
 ## Handoff comment
 Post exactly one handoff comment on PR #42 as a PR issue comment (not a review, not an inline comment). Its first line is this orch:v1 header, with each `<...>` replaced by one of its choices:
 
-<!-- orch:v1 kind=ready from=claude-bot role=builder round=2/3 head=<pushed-head-sha> risk=high -->
+<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->
 
 Then plain prose for people and agents: What changed, the tests and their results, and anything left open. The handoff ends with a `Skills read:` line listing every skill file you read, by absolute path. If a product question blocks the work, post a questions handoff instead (`<!-- orch:v1 kind=questions from=claude-bot role=builder -->`, then the question); it is this job's handoff.
 

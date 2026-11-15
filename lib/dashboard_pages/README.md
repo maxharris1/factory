@@ -21,9 +21,35 @@ Name the module in a ticket's `Touches:` line.
 | `index.html` (Lanes) | `lanes.py` | `_kpis`, `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `health.html` (System) | `system.py` | `_components` (matrix and process details), `_drift`, `_health`, `_log`, `_rules`, `_no_waiter`; `_drift_row` and `_log_row` wrap two panels each in a `sys-row` | none |
 | `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns, Shipped shelf and Stopped group, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
-| `activity.html` (Activity) | `activity.py` | `_attention`, `_handoffs`, `_verdicts`, `_health_link` | #143 |
+| `activity.html` (Activity) | `activity.py` | `_attention`, `_relay`, `relay_threads`, `_health_link`, `_VERDICT`; their CSS and script | none |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_savings` (tokens and cost: `rollup_panel` in `lib/dashboard_telemetry.py`) | #144 |
 | `job.html#job-<id>` (ticket detail) | `ticket_detail.py` | `_job_article`, `_jobview`, `_flow_template`, `_legend`, `_meta`; the job page and flow CSS and script | #146, #149 |
+
+## Relay threads
+
+The Relay panel on `activity.html` merges `handoff_savings.recent` and
+`poller.verdicts` into one thread per ticket (`relay_threads`, and
+`relayThreads` in the script). A verdict's `age_seconds` is the first time
+recorded for its comment: the job it queued (`jobs.created_at`), the job
+that posted it (`jobs.finished_at`), the approval it recorded
+(`ticket_state.approved_at`) or the ship hold it raised
+(`ship_holds.held_at`). It is null when none of these names the comment.
+A new shipped verdict plays the settle sweep once (`PX.strip` with
+`settle: true`), never on first paint or under reduced motion. The strip
+is keyed by the verdict (`repo#ticket:seq`), so each new shipped verdict
+on a ticket sweeps, not just the first. The rule:
+
+1. Each handoff and verdict is in exactly one thread, keyed by repo (any
+   case) and ticket id.
+2. In a thread, timed steps go oldest first. On a tie a handoff goes before
+   a verdict; two verdicts keep handled order (`seq`).
+3. A verdict with no time goes directly after the verdict handled just
+   before it in the thread, or first when it is the thread's first verdict.
+4. Threads go newest timed step first. Threads with no timed step go last,
+   newest handled verdict first.
+
+`tests/test_dashboard_activity.py` tests each case and holds the two
+derivations together.
 
 `_PANELS` in `shell.py` lists the panels each page draws, and `PAGES` in the
 script tail (`common.py`) lists each page's script renderers.

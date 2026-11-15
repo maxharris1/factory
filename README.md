@@ -1545,7 +1545,8 @@ Fields the live page adds, all from allowlisted columns or enumerations:
 each `running` job's `device` (its `device_slots` placement, else `box`;
 `null` for a Grok wake), `elapsed_seconds` and `elapsed_from` (`placed`
 from `device_slots.placed_at`, else `queued` from `created_at`, because
-`jobs` records no claim time); `handoff_savings.recent`, the newest 12
+`jobs` records no claim time), and `heartbeat_at`, the epoch of its last
+heartbeat, so the ticket page beats once per real heartbeat; `handoff_savings.recent`, the newest 12
 finished jobs with `kind` `scripted`, `bot_to_bot`, `failed` or `done` (the
 handoff comment id itself is never copied); `poller.verdicts`, the newest
 12 handled `orch:v1` comments (`handled_comments`, newest by insertion) as

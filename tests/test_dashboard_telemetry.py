@@ -84,7 +84,7 @@ def test_a_database_without_the_table_shows_no_telemetry(tmp_path: Path) -> None
     assert "Tokens and cost" in tokens and "no telemetry" in tokens
 
 
-def test_a_running_job_gets_its_counters_and_recent_steps(tmp_path: Path) -> None:
+def test_a_running_job_gets_its_counters_and_no_step_feed(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     add_telemetry(db, "r-codex-review")
     snapshot = collect_snapshot(db, log, now=NOW)
@@ -108,11 +108,10 @@ def test_a_running_job_gets_its_counters_and_recent_steps(tmp_path: Path) -> Non
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-r-codex-")
     for needle in ("codex · last activity 5s ago", "<b>3</b><span>turns</span>",
                    '<b class="bad">40 / 1</b><span>tests pass / fail</span>',
-                   "<b>24,763 / 1,220</b><span>tokens in / out</span>", "shell ×7",
-                   "mcp:github.get_pr", "4m 50s"):
+                   "<b>24,763 / 1,220</b><span>tokens in / out</span>", "4m 50s"):
         assert needle in article, needle
-    # The newest step first.
-    assert article.index("mcp:github.get_pr") < article.index("edit 2 files")
+    for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
+        assert gone not in article, gone
 
 
 def test_a_job_with_a_row_but_no_events_says_no_telemetry_yet(tmp_path: Path) -> None:
@@ -445,7 +444,7 @@ def test_a_secret_is_redacted_whole_before_any_later_transform(tmp_path: Path, s
 
 
 @needs_node
-def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) -> None:
+def test_script_draws_the_counters_on_the_job_page_and_the_rollup(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     add_telemetry(db, "r-codex-review")
     add_telemetry(
@@ -455,12 +454,12 @@ def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) ->
     snapshot = collect_snapshot(db, log, now=NOW)
     out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
     view = out["text"]["jobview"]
-    for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220",
-                   "shell ×7", "command", "mcp:github.get_pr"):
+    for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220"):
         assert needle in view, needle
-    dump = out["dump"]["jobview"]
-    assert re.search(r'section\.telemetry', dump) and "span.chip.bad" in dump
-    assert view.index("mcp:github.get_pr") < view.index("edit 2 files")
+    assert re.search(r'section\.telemetry', out["dump"]["jobview"])
+    html = out["html"]["jobview"]
+    for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
+        assert gone not in html, gone
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     tokens = eff["text"]["tokens"]
     for needle in ("Tokens and cost", "last 7 days", "per harness", "per repo", "recent jobs",

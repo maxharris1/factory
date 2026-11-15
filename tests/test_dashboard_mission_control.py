@@ -161,6 +161,8 @@ def test_recent_verdicts_newest_first_and_classified(tmp_path: Path) -> None:
         "ticket_id": "12",
         "outcome": "queued-review",
         "kind": "routed",
+        "seq": 1,
+        "age_seconds": None,
     }
 
 
@@ -309,7 +311,7 @@ def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
     where = {
         "index.html": ("kpis", "lanes", "queue", "just-happened", "intake"),
-        "activity.html": ("attention", "handoffs", "verdicts"),
+        "activity.html": ("attention", "relay"),
         "efficiency.html": ("savings",),
         "health.html": ("components", "drift", "health", "log", "rules", "no-waiter"),
         "job.html": ("ticket-filter", "pipeline", "shipped", "tickets", "jobview"),

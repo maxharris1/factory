@@ -12,12 +12,12 @@ import functools
 import json
 from pathlib import Path
 
-from lib.dashboard_flow import path_geometry, render_path_svg, render_svg  # noqa: F401
+from lib.dashboard_flow import flowmap_layout, load_chart
 from lib.dashboard_pages import (
     activity, common, efficiency, lanes, shell, system, ticket_detail, tickets,
 )
 from lib.dashboard_pages.activity import (  # noqa: F401
-    _ATTENTION, _HANDOFF, _HEALTH_LINK, _VERDICT, _attention, _handoffs, _health_link, _verdicts,
+    _ATTENTION, _HEALTH_LINK, _VERDICT, _attention, _health_link, _relay, relay_threads,
 )
 from lib.dashboard_pages.common import (  # noqa: F401
     _BOTS, _JOB_STATE, LIST_MAX, _b, _bot, _chip, _e, _feed, _job_kind, _job_label, _num, _panel,
@@ -40,7 +40,7 @@ from lib.dashboard_pages.system import (  # noqa: F401
     _drift, _drift_row, _health, _log, _log_row, _no_waiter, _rules, version_groups,
 )
 from lib.dashboard_pages.ticket_detail import (  # noqa: F401
-    _TRAIL_LEGEND, _flow_template, _job_article, _jobview, _legend, _meta,
+    _detail_model, _job_article, _jobview,
 )
 from lib.dashboard_pages.tickets import _active_jobs, _board, _tickets  # noqa: F401
 from lib.dashboard_telemetry import (  # noqa: F401
@@ -62,7 +62,7 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
+    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, activity.CSS, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((
@@ -92,13 +92,19 @@ def font_faces() -> str:
     return json.dumps(faces, separators=(",", ":"))
 
 
+@functools.lru_cache(maxsize=1)
+def _flowmap_json() -> str:
+    chart = load_chart()
+    return json.dumps(flowmap_layout(chart) if chart else None, separators=(",", ":")).replace("<", "\\u003c")
+
+
 def page_script() -> str:
     return (
         lanes_script(SCRIPT).replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())
         .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))
-        .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
+        .replace("__FLOWMAP__", _flowmap_json())
         .replace("__BOARD__", json.dumps(tickets.board_constants(), separators=(",", ":")).replace("<", "\\u003c"))
         .replace("__FONTS__", font_faces())
     )

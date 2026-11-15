@@ -12,7 +12,13 @@ from lib.dispatch.constants import (
     _NOT_FINISHED,
 )
 from lib.dispatch.errors_text import safe_ship_error
-from lib.dispatch.helpers import _comment_order, _matching_head, _queue_state, _scope
+from lib.dispatch.helpers import (
+    _comment_order,
+    _matching_head,
+    _merge_only,
+    _queue_state,
+    _scope,
+)
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RetryableStateError, ShipError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -28,6 +34,13 @@ from lib.job_state import (
 )
 from lib.queue import JobRequest
 from lib.update_check import UpdateClass
+
+
+_MEMBER = """
+    workflow_state IN ('merge-queue', 'updating', 'waiting-external')
+    AND approved_head IS NOT NULL
+    AND stuck = 0
+"""
 
 
 class MergeQueueMixin:
@@ -512,22 +525,16 @@ class MergeQueueMixin:
             self.record_poll_error(ticket.repo, ticket.ticket_id, "abandoned-label")
 
     def _base_update_out(self, ticket: TrackedTicket) -> bool:
-        """A #255 base update for the current head is queued or running, so
-        the merge queue must not queue a second update job for that head."""
         with self._connect() as connection:
-            return (
-                connection.execute(
-                    """
-                    SELECT 1 FROM jobs
-                    WHERE dedupe_key = ? AND state IN ('queued', 'running')
-                    """,
-                    (
-                        f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:"
-                        f"{ticket.current_head}",
-                    ),
-                ).fetchone()
-                is not None
-            )
+            rows = connection.execute(
+                """
+                SELECT detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'fix'
+                  AND head = ? AND state IN ('queued', 'running')
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, ticket.current_head),
+            ).fetchall()
+        return any(_merge_only(row["detail"]) for row in rows)
 
     def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
         """An update-from-main job for the conflicting queue head (#130)."""
@@ -709,6 +716,13 @@ class MergeQueueMixin:
         members = self._merge_queue_members(ticket.repo)
         return not members or members[0]["ticket_id"] == ticket.ticket_id
 
+    def _queue_owns_base_updates(self, repo: str, ticket_id: str) -> bool:
+        with self._connect() as connection:
+            return connection.execute(
+                f"SELECT 1 FROM ticket_state WHERE repo = ? AND ticket_id = ? AND {_MEMBER}",
+                (repo.lower(), ticket_id),
+            ).fetchone() is not None
+
     def _watched(self, ticket: TrackedTicket) -> bool:
         """An approved ticket the merge queue still watches (#130), an
         update paused on a builder's question included."""
@@ -732,14 +746,12 @@ class MergeQueueMixin:
         APPROVE recorded an approval (ship: after: with finish_line: merge).
         A stuck ticket leaves the queue, so the next one moves up.
         """
-        query = """
+        query = f"""
             SELECT repo, ticket_id, workflow_state, approved_head, approved_at,
                    approve_comment_id, update_failures, update_from_head,
                    generation, review_round
             FROM ticket_state
-            WHERE workflow_state IN ('merge-queue', 'updating', 'waiting-external')
-              AND approved_head IS NOT NULL
-              AND stuck = 0
+            WHERE {_MEMBER}
         """
         args: tuple[str, ...] = ()
         if repo is not None:

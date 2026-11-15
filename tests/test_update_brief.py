@@ -27,12 +27,11 @@ def test_update_brief_names_base_head_and_one_side_per_hunk() -> None:
     assert "Any other edit sends the PR back to review." in text
 
 
-def test_update_brief_ends_with_a_ready_carrying_the_job_round_and_risk() -> None:
+def test_update_brief_ends_with_a_ready_naming_only_the_head() -> None:
     text = render_brief(update_job(), bot="claude-bot", context=None)
     [header] = [line for line in text.splitlines() if line.startswith("<!-- orch:v1 kind=ready")]
     assert header == (
-        "<!-- orch:v1 kind=ready from=claude-bot role=builder round=2/3 "
-        "head=<pushed-head-sha> risk=high -->"
+        "<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->"
     )
     fields = parse_header_line(header.replace("<pushed-head-sha>", HEAD))
     assert fields["kind"] == "ready"

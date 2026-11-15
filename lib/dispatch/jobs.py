@@ -19,6 +19,7 @@ from lib.dispatch.helpers import (
     _detail_project_bot,
     _detail_round_number,
     _matching_head,
+    _merge_only,
     _queue_state,
     _retry_detail,
     _round_number,
@@ -629,6 +630,11 @@ class JobsMixin:
             return
         if self._restored_failure_waits(job):
             return
+        queue_owned = (
+            job.request.action == "fix"
+            and _merge_only(job.request.detail)
+            and self._queue_owns_base_updates(job.request.repo, job.request.ticket_id)
+        )
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -637,7 +643,7 @@ class JobsMixin:
                 connection.commit()
             if job.request.action == "review" and self._review_retry_waits(job):
                 return
-            if link_drop.used < MAX_LINK_DROP_REQUEUES:
+            if link_drop.used < MAX_LINK_DROP_REQUEUES and not queue_owned:
                 self._requeue_link_dropped(job, link_drop)
                 return
         if job.request.action == "update-from-main":
@@ -653,6 +659,12 @@ class JobsMixin:
                 back_to=_queue_state(polled.factory.ship if polled else "handoff"),
                 job_id=job.id,
                 why=f"job {job.id} failed",
+            )
+            self.queue.mark_failure_handled(job.id)
+            return
+        if queue_owned:
+            self._record_job_event_once(
+                job, "queue-owns-update", "the merge queue updates this head; no T6 retry"
             )
             self.queue.mark_failure_handled(job.id)
             return
