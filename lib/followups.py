@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import re
 
+from markdown_it import MarkdownIt
+
 ISSUE_BODY_LIMIT = 65536
-_ITEM = re.compile(r"^( *)\d+[.)]\s")
-_HEADING = re.compile(r"^#{1,6}\s")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+_MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
 
@@ -28,32 +28,19 @@ def followups_active(followup_from: int | None, round_number: int | None) -> boo
 
 
 def followup_findings(body: str) -> tuple[str, ...]:
-    items: list[list[str]] = []
-    current: list[str] | None = None
-    indent = 0
-    fenced = False
-    for line in (body or "").splitlines():
-        fence = _FENCE.match(line)
-        item = _ITEM.match(line)
-        if fenced or fence:
-            fenced = fenced != bool(fence)
-            if current is not None:
-                current.append(line)
-        elif item and (current is None or len(item.group(1)) <= indent):
-            current = [line]
-            indent = len(item.group(1))
-            items.append(current)
-        elif _HEADING.match(line):
-            current = None
-        elif current is not None:
-            current.append(line)
+    text = re.sub(r"\r\n?", "\n", body or "")
+    lines = text.split("\n")
     found: list[str] = []
-    for lines in items:
-        if _TAG not in lines[0].lower():
+    for token in _MARKDOWN.parse(text):
+        if token.type != "list_item_open" or token.level != 1 or token.markup not in (".", ")"):
             continue
-        while lines and not lines[-1].strip():
-            lines.pop()
-        found.append("\n".join(lines))
+        start, end = token.map
+        item = lines[start:end]
+        if _TAG not in item[0].lower():
+            continue
+        while not item[-1].strip():
+            item.pop()
+        found.append("\n".join(item))
     return tuple(found)
 
 

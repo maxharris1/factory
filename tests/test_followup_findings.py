@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from markdown_it import MarkdownIt
 
 from lib.brief import render_brief
 from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
@@ -389,8 +390,8 @@ NESTED = (
     "   1. Write a Windows path.\n"
     "   2. Run the parser.\n"
     "   ```\n"
-    "1. not a finding\n"
-    "## not a heading\n"
+    "   1. not a finding\n"
+    "   ## not a heading\n"
     "   ```\n"
     "   Expected: normalized path. Actual: ValueError."
 )
@@ -399,6 +400,31 @@ NESTED = (
 def test_nested_steps_and_fenced_lines_stay_in_their_finding() -> None:
     body = f"{NESTED}\n\n2. [minor] lib/b.py:3 naming.\n   1. [follow-up] nested, not its own.\n"
     assert followup_findings(body) == (NESTED,)
+
+
+FENCED_FINDING = "2. [follow-up] lib/a.py:10 repeats the round 2 path rule.\n   Repro: run parser with C:\\x."
+
+
+@pytest.mark.parametrize(
+    "minor",
+    [
+        "1. [minor] docs/example.md:1 spelling.\n\n   ````markdown\n   ```\n   ````",
+        "1. [minor] docs/example.md:1 spelling.\n\n   ~~~\n   ```\n   ~~~",
+        "1. [minor] docs/example.md:1 spelling.\n\n   ```\n   ~~~\n   ```",
+        "1. [minor] docs/example.md:1 spelling.\n\n   ```\n   ``` not a close\n   ```",
+        "1. [minor] docs/example.md:1 spelling.\n\n   ```\n   left open",
+        "1. [minor] docs/example.md:1 spelling.\n\n```\n```",
+    ],
+)
+def test_a_follow_up_after_any_valid_code_block_survives(minor: str) -> None:
+    body = f"{minor}\n\n{FENCED_FINDING}\n"
+    assert MarkdownIt("commonmark").render(body).count("<li>") == 2
+    assert followup_findings(body) == (FENCED_FINDING,)
+
+
+def test_a_follow_up_inside_a_code_block_is_not_a_finding() -> None:
+    body = f"1. [minor] spelling.\n\n````\n{FENCED_FINDING}\n```\n````\n"
+    assert followup_findings(body) == ()
 
 
 @pytest.mark.parametrize("fail_at", ["file", "link"])
@@ -460,3 +486,9 @@ def test_a_failed_filing_retries_after_the_ticket_leaves_the_loop(
     assert issues == [300]
     assert len(links) == 1
     assert board.last_refs == ()
+
+
+@pytest.mark.parametrize("separator", [" ", "\x0c", "\x1c", "\x85"])
+def test_a_follow_up_after_unusual_line_separators_survives(separator: str) -> None:
+    body = f"1. [minor] a{separator}b{separator}c\r\n\r\n{FENCED_FINDING}\r\n"
+    assert followup_findings(body) == (FENCED_FINDING,)
