@@ -95,7 +95,14 @@ _PROJECT_KEYS = {
     "ready_starts_review",
     "intake",
 }
-_INTAKE_KEYS = {"label", "linear_state", "trusted"}
+_INTAKE_KEYS = {
+    "label",
+    "linear_state",
+    "trusted",
+    "priority_labels",
+    "priority_from_linear",
+    "critical_path_order",
+}
 DEFAULT_INTAKE_LABEL = "factory:ready"
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
 _LINEAR_STATE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}$")
@@ -115,6 +122,9 @@ class Intake:
     label: str | None = None
     linear_state: str | None = None
     trusted: frozenset[str] | None = None
+    priority_labels: tuple[str, ...] = ()
+    priority_from_linear: bool = False
+    critical_path_order: bool = True
 
 
 @dataclass(frozen=True)
@@ -672,12 +682,40 @@ def _intake(
             ok = False
         else:
             trusted = frozenset(raw)
+    priority_labels: tuple[str, ...] = ()
+    if "priority_labels" in value:
+        raw = value["priority_labels"]
+        if not isinstance(raw, list) or not all(
+            isinstance(entry, str) and _LABEL.fullmatch(entry) for entry in raw
+        ):
+            findings.append(Finding("error", f"{where}.priority_labels must be a list of label names"))
+            ok = False
+        else:
+            seen: set[str] = set()
+            for entry in raw:
+                if entry.lower() in seen:
+                    findings.append(Finding("error", f"{where}.priority_labels names {entry.lower()} twice"))
+                    ok = False
+                seen.add(entry.lower())
+            priority_labels = tuple(raw)
+    from_linear = value.get("priority_from_linear", False)
+    critical_path = value.get("critical_path_order", True)
+    for key, setting in (("priority_from_linear", from_linear), ("critical_path_order", critical_path)):
+        if not isinstance(setting, bool):
+            findings.append(Finding("error", f"{where}.{key} must be true or false"))
+            ok = False
+    if from_linear is True and not linear:
+        findings.append(Finding("error", f"{where}.priority_from_linear requires linear_project_id"))
+        ok = False
     if not ok:
         return None
     return Intake(
         label=None if linear else label,
         linear_state=state if linear else None,
         trusted=trusted,
+        priority_labels=priority_labels,
+        priority_from_linear=from_linear,
+        critical_path_order=critical_path,
     )
 
 

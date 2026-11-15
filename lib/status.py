@@ -107,6 +107,7 @@ class FeederItem:
     state: str
     pr: str | None = None
     reason: str | None = None  # why a waiting-blocked ticket waits (#156)
+    tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,7 @@ class SQLiteStatusReader:
                     state=str(item["state"]),
                     pr=str(item["pr_number"]) if item["pr_number"] is not None else None,
                     reason=str(item["waiting_reason"]) if item["waiting_reason"] else None,
+                    tier=None if item["tier"] is None else int(item["tier"]),
                 )
                 for item in items
             ),
@@ -698,7 +700,8 @@ def render(status: Status) -> str:
                 "closed": "PR closed, not fed",
             }.get(item.state, item.state)
             where = f" -> PR #{item.pr}" if item.pr else ""
-            lines.append(f"  {item.repo}#{item.issue} {label}{where}")
+            tier = "" if item.tier is None else f"tier {item.tier} "
+            lines.append(f"  {item.repo}#{item.issue} {tier}{label}{where}")
     if status.webhook is not None:
         lines.extend(("", "Linear webhook"))
         lines.append(_webhook_line(status.webhook, status.observed_at))
