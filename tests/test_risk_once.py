@@ -786,3 +786,26 @@ def test_the_poller_runtime_keeps_risks_in_its_database(tmp_path) -> None:
     first.risks.keep("acme/widgets", "12", "low")
     _, restarted = cli._runtime(database, orch, create=False)
     assert restarted.risks.get("acme/widgets", "12") == "low"
+
+
+def dollar_quote_cases(tag: str) -> dict[str, tuple[str, str]]:
+    quoted = f"SELECT ${tag}$/*${tag}$;\n", f"SELECT ${tag}$*/${tag}$;\n"
+    active = f"{quoted[0]}{NOTE_LINES}{REALTIME}{NOTE_LINES}{quoted[1]}"
+    member = (
+        f"{quoted[0]}ALTER PUBLICATION supabase_realtime ADD TABLE /*\n{NOTE_LINES}"
+        f"  comment;\n -- */ public.messages,\n    public.events;\n{quoted[1]}"
+    )
+    return {
+        "activate": (f"/*\n{active}*/\n", active),
+        "deactivate": (active, f"/*\n{active}*/\n"),
+        "partial-comment": (member, member.replace("public.events;", "public.new_events;")),
+    }
+
+
+@pytest.mark.parametrize("case", ["activate", "deactivate", "partial-comment"])
+@pytest.mark.parametrize("tag", ["é", "aé", "名前", "_😀1", "x́", "ß_2"])
+def test_a_non_ascii_dollar_quote_tag_hides_no_comment_delimiter(tag: str, case: str) -> None:
+    item = sql_change(*dollar_quote_cases(tag)[case], source=True)
+    assert "supabase_realtime" not in item["patch"]
+    ticket, _ = linear_ticket(labels=[], files=[item])
+    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)

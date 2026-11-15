@@ -2175,8 +2175,10 @@ def _sql_side(body: Sequence[str], mark: str) -> list[str]:
     return [line if line.startswith((" ", mark)) else mark for line in body]
 
 
+SQL_IDENT_START = "A-Za-z_\x80-\U0010ffff"
 SQL_TOKEN = re.compile(
-    r"--|/\*|;|(?<![\w$])[eE]'|'|\"|(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$"
+    rf"--|/\*|;|(?<![{SQL_IDENT_START}0-9$])[eE]'|'|\""
+    rf"|(?<![{SQL_IDENT_START}0-9$])\$(?:[{SQL_IDENT_START}][{SQL_IDENT_START}0-9]*)?\$"
 )
 SQL_COMMENT = re.compile(r"/\*|\*/")
 
