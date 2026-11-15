@@ -11,7 +11,7 @@ from lib.dashboard import collect_snapshot, render_pages  # noqa: E402
 from tests.test_dashboard import NOW, add_ticket, seeded  # noqa: E402
 from tests.test_dashboard_efficiency import _machines, _readings  # noqa: E402
 
-CHROME = sys.argv[1] if len(sys.argv) > 1 else "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+CHROME = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / ".cache/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell")
 SHIPPED = {
     0: ["cleffy#96", "cleffy#97", "factory#65", "factory#72", "factory#81"],
     1: ["cleffy#98", "factory#95", "factory#97", "factory#104"],
@@ -39,7 +39,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         page = Path(tmp) / "efficiency.html"
         page.write_text(render_pages(snapshot(Path(tmp)))["efficiency.html"], encoding="utf-8")
-        for width, height in ((1440, 2200), (375, 5200)):
+        for width, height in ((1440, 1420), (375, 2500)):
             out = ROOT / "docs" / "screenshots" / f"issue-144-efficiency-{width}.png"
             subprocess.run(
                 [CHROME, "--headless", "--disable-gpu", "--hide-scrollbars",
