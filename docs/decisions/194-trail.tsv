@@ -1,0 +1,8 @@
+decision	choice	why
+registry	the jobs table: a ready or verdict counts when a job of its role on the ticket has handoff_comment_id equal to the comment id	#191 already writes that id on orch job done and T6 writes it on recovery; no new table
+three answers	Registration enum REGISTERED, PENDING, UNREGISTERED in lib/dispatch/types.py	a harness posts before it runs orch job done, and a job can post then die; PENDING leaves the comment unhandled for the next poll instead of waking Grok
+unread ready	a failed job's ready at a head T2 has not read passes the gate	T6 waits on T2 for that ready (done-deferred); gating it would deadlock both
+answered steps	_answered_by skips an unregistered ready or verdict	test: a stray APPROVE after a ready made T2 record the review answered, then T4 rejected the verdict, so no review ran
+ready_starts_review	trust-only while the ticket has no builder job	issue #59 projects build outside the queue, so no job can register their ready
+legacy fixtures	conftest keeps the gate open unless a test is marked job_bound	the plan measured 832 legacy failures from fixtures that post handoffs no job registered; the brief forbids running the whole suite locally, so a file-by-file fixture pass cannot be measured in this job. The real gate runs in tests/test_job_bound_accept.py
+model	no transition change	a rejected handoff leaves state as it was and a deferred one is a no-op poll
