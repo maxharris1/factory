@@ -5,12 +5,26 @@ import os
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from lib import queue as job_queue
 from lib import worktrees
 from tests.handoff_store import serve_job
 from tests.test_waiter import FakeSpawn, enqueue
 from tests.test_waiter_remote import make_waiter, remote_machines
+
+
+@pytest.fixture(autouse=True)
+def _job_id_holding_255(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(job_queue, "uuid", SimpleNamespace(uuid4=lambda: uuid.UUID(int=0x255)))
+
+
+def _exits(log: list[str]) -> list[str]:
+    return [line for line in log if "orch job run exited" in line]
 
 
 def _row(db: Path, job_id: str) -> tuple:
@@ -61,7 +75,7 @@ def test_an_adopted_run_holding_its_lock_outlives_a_pid_misread_and_a_silent_hea
     second.step()
     assert _row(db, job_id) == ("done", "4242")
     assert not second.running()
-    assert not any("255" in line for line in log)
+    assert _exits(log) == [f"job {job_id}: orch job run exited 0"]
     assert [line for line in log if "orch job done" in line] == [
         f"job {job_id}: ran orch job done on the box: done, handoff 4242"
     ]
@@ -115,7 +129,7 @@ def test_an_adopted_live_process_is_followed_until_it_exits_with_a_handoff(tmp_p
         run.kill()
         run.wait()
     assert _row(db, job_id) == ("done", "4242")
-    assert not any("255" in line for line in log)
+    assert _exits(log) == [f"job {job_id}: orch job run exited 0"]
 
 
 def test_an_adopted_run_whose_lock_is_free_without_a_status_is_failed(tmp_path: Path) -> None:
@@ -194,7 +208,7 @@ def test_a_live_run_from_before_the_lock_outlives_an_unreadable_start_time(
         run.kill()
         run.wait()
     assert _row(db, job_id) == ("done", "4242")
-    assert not any("255" in line for line in log)
+    assert _exits(log) == [f"job {job_id}: orch job run exited 0"]
     assert [line for line in log if "orch job done" in line] == [
         f"job {job_id}: ran orch job done on the box: done, handoff 4242"
     ]

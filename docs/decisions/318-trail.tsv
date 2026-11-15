@@ -10,3 +10,4 @@ lock already held at spawn	not started, failed for T6	another runner of the same
 heartbeat silence check	removed	the lock replaces it; it was a proxy for liveness that cleanup and DB locks defeat
 gone without a status file but with a marker	keep #87: failed, or left to the device check once a remote worker started	AC2 asks for --failed only when there is no handoff; a run that leaves a marker writes its status file in a finally, so this case is only a killed runner
 root cause of the pid misread	left open	no access to the box; the lock decides liveness without reading the pid, so the misread no longer matters for runs with a lock
+CI red on test (2/3): "no 255 logged" check	match the exact "orch job run exited" lines, and pin the job id to one holding 255	the old check matched any log line containing "255", so a random hex job id or pid holding it failed the test; pinning the id keeps that case under test every run
