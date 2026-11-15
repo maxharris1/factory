@@ -226,11 +226,9 @@ class CommentsMixin:
         if self._is_stuck(ticket):
             self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return "ticket-stuck"
-        release = {
-            "capped": self._resume_after_cap,
-            "waiting-max": self._resume_paused,
-        }.get(self._review_context(ticket)[0])
-        resumed = None if release is None else release(ticket, comment)
+        resumed = self._resume_after_cap(ticket, comment) or self._resume_paused(
+            ticket, comment
+        )
         return "slash-go-no-target" if resumed is None else resumed[1]
 
     def _after_finish(self, ticket: TrackedTicket, comment: Comment) -> bool:

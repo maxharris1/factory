@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from lib.approver_commands import SlashGo, parse_slash_go
-from lib.dispatcher import Comment
+from lib.dispatcher import Comment, RetryableStateError
 from tests.test_approver_credential import APP_BOT, MAX, AppFlow, grok_wakes
-from tests.test_dispatcher import QUESTIONS, VERDICT, job_count
+from tests.test_dispatcher import QUESTIONS, VERDICT, handled_outcome, job_count
 from tests.test_rounds_and_caps import HEADS
 
 
@@ -104,6 +104,34 @@ def test_slash_go_from_max_releases_a_waiting_max_ticket(tmp_path: Path) -> None
     before = jobs(flow)
     flow.dispatcher.process(flow.snapshot())
     assert jobs(flow) == before
+
+
+@pytest.mark.parametrize(
+    ("to_target", "label", "outcome", "action"),
+    [
+        (AppFlow.to_cap, "fixing", "queued-fix", "fix"),
+        (to_waiting_max, "building", "resumed-build", "build"),
+    ],
+)
+def test_slash_go_retries_a_failed_state_label_without_new_work(
+    tmp_path: Path, to_target, label: str, outcome: str, action: str
+) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_target(flow)
+    actions = flow.dispatcher.review_actions
+    actions.state_failures.add(("owner/repo", label))
+
+    with pytest.raises(RetryableStateError, match=label):
+        flow.post("slash-1", "/go", MAX)
+
+    queued = job_count(flow.queue, action)
+    actions.state_failures.clear()
+    before = len(actions.states)
+    flow.dispatcher.process(flow.snapshot())
+
+    assert actions.states[before:] == [label]
+    assert handled_outcome(flow.queue, "slash-1") == outcome
+    assert job_count(flow.queue, action) == queued
 
 
 def revise(flow: AppFlow, round_text: str, comment_id: str, extra: str = "") -> str:
