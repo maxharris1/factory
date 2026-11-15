@@ -1,8 +1,3 @@
-"""The Efficiency page (#144, SPEC 3.5, Efficiency.dc.html): handoff savings
-waffle, jobs lifetime, revise rounds before ship, who is working now,
-subscription headroom, then #100's tokens and cost. Each panel's server render
-and its page-script twin produce the same markup."""
-
 import html
 import re
 import sqlite3

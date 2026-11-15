@@ -1,7 +1,3 @@
-"""efficiency.html (#144, Efficiency.dc.html): handoff savings, jobs lifetime,
-revise rounds before ship, who is working now and subscription headroom
-(tokens and cost are lib/dashboard_telemetry.py)."""
-
 from __future__ import annotations
 
 import math
@@ -245,7 +241,6 @@ WINDOWS = ("five_hour", "seven_day")
 
 
 def _half_up(value: float) -> int:
-    """Half-up rounding, as the script's Math.floor(x + 0.5); round() rounds half to even."""
     return math.floor(value + 0.5)
 
 
@@ -346,9 +341,6 @@ def _rounds(snapshot: dict) -> str:
 
 
 def _meter(name: str, used: int, slots: int) -> str:
-    """PX.strip's canvas for the meter effect, with data-used and data-slots
-    added after it as the script does (shell.py imports this module, so
-    px_strip cannot be imported here)."""
     return (
         f'<canvas class="px" data-px="meter" data-tint="#9ece6a" data-px-key="meter-{_e(name)}" '
         f'aria-hidden="true" style="--px:#9ece6a;height:8px" data-used="{used}" data-slots="{slots}"></canvas>'
