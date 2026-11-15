@@ -73,7 +73,8 @@ on the poll after the round resumes (#270).
 Stacked branches (#205, lib/branch_stack.py): a ticket whose branch already
 exists and carries commits of another open PR is `waiting-blocked` until
 that PR merges, with one Grok `blocked` wake per set of such PRs. The branch
-is read only when it exists before the feed.
+is read at intake when it already exists, and again before a builder's
+ready queues review, so a branch stacked during its build waits there too.
 
 Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
 the project's `priority_labels` it carries, or its Linear priority when the
@@ -104,7 +105,7 @@ from markdown_it.token import Token
 from lib import attention
 from lib.branch_stack import stack_wait, stacked_pulls
 from lib.device_pool import free_slots, slots_in_use
-from lib.dispatcher import Comment, TicketRef, safe_ship_error
+from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_REASONS,
@@ -1200,20 +1201,28 @@ class Feeder:
             raise ValueError(f"branch name {branch!r} is not safe")
         repo = candidate.project.repo
         number: int | None = None
-        branch_found = False
-        if not row["pr_number"]:
+        if row["pr_number"]:
+            number = int(row["pr_number"])
+            pull = self.github.pull_state(repo, number)
+            if pull != "open":
+                self._set_state(candidate, "closed", error=f"PR #{number} is {pull}")
+                return None
+            branch_found = True
+        else:
             number = self.github.find_pull(repo, branch)
             if number is not None:
                 wait = holds.collision(candidate.ref, candidate.lines, (github_ref(repo, number),))
                 if wait is not None:
                     raise _Held(wait)
             branch_found = number is not None or self.github.branch_sha(repo, branch) is not None
-            if branch_found:
-                stacked = stacked_pulls(self.github, repo, config.base_branch, branch, number)
-                if stacked:
-                    wait = stack_wait(repo, branch, stacked)
-                    self._wake_stacked(candidate, wait, stacked)
-                    raise _Held(wait)
+        if branch_found:
+            wait = self._stack_hold(
+                repo, issue.key, config.base_branch, branch, number,
+                project_bot=candidate.project.grok_bot, ticket_url=issue.url,
+                held=f"{_ticket_name(issue)} was not fed", until="it feeds",
+            )
+            if wait is not None:
+                raise _Held(wait)
         self._set_state(candidate, "feeding")
         risk = str(row["risk"])
         if risk not in ("low", "high"):
@@ -1221,12 +1230,6 @@ class Feeder:
         template = candidate.template
         state = go_state_for(issue.body, template.plan_first)
         self._record(candidate, branch=branch)
-        if row["pr_number"]:
-            number = int(row["pr_number"])
-            pull = self.github.pull_state(repo, number)
-            if pull != "open":
-                self._set_state(candidate, "closed", error=f"PR #{number} is {pull}")
-                return None
         if number is None:
             if not branch_found:
                 base = self.github.branch_sha(repo, config.base_branch)
@@ -1279,31 +1282,67 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def _wake_stacked(self, candidate: _Candidate, wait: Wait, pulls: Sequence[int]) -> None:
-        issue = candidate.issue
-        repo = candidate.project.repo
+    def hold_stacked_review(self, ticket: TrackedTicket) -> bool:
+        branch = ticket.git_branch_name or self._fed_branch(ticket.repo, ticket.ticket_id)
+        if branch is None or not _BRANCH.fullmatch(branch):
+            return False
+        wait = self._stack_hold(
+            ticket.repo, ticket.ticket_id, ticket.factory.base_branch, branch,
+            int(ticket.pr_number) if ticket.pr_number else None,
+            project_bot=ticket.grok_bot, ticket_url=ticket.ticket_url,
+            held=f"{ticket.source_issue or '#' + ticket.ticket_id} was not sent to review",
+            until="review starts",
+        )
+        return wait is not None
+
+    def _fed_branch(self, repo: str, ticket_id: str) -> str | None:
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"SELECT branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
+                (repo.lower(), ticket_id),
+            ).fetchone()
+        return None if row is None else row[0]
+
+    def _stack_hold(
+        self,
+        repo: str,
+        ticket_id: str,
+        base: str,
+        branch: str,
+        own: int | None,
+        *,
+        project_bot: str,
+        ticket_url: str | None,
+        held: str,
+        until: str,
+    ) -> Wait | None:
+        pulls = stacked_pulls(self.github, repo, base, branch, own)
+        if not pulls:
+            return None
+        wait = stack_wait(repo, branch, pulls)
+        stack = ",".join(map(str, pulls))
         self.queue.enqueue(
             JobRequest(
                 repo=repo,
-                ticket_id=issue.key,
+                ticket_id=ticket_id,
                 action="blocked",
                 recipient="grok",
-                source_comment_id=f"feeder-stack:{issue.key}",
+                source_comment_id=f"feeder-stack:{ticket_id}:{stack}",
                 timeout_seconds=resolve_job_timeout(self.config, repo) * 60,
                 detail=json.dumps(
                     {
-                        "project_bot": candidate.project.grok_bot,
-                        "detail": f"{_ticket_name(issue)} was not fed: {wait.reason}; "
-                        "it feeds once that merges.",
-                        "ticket_url": issue.url,
+                        "project_bot": project_bot,
+                        "detail": f"{held}: {wait.reason}; {until} once that merges.",
+                        "ticket_url": ticket_url,
                         "pulls": list(pulls),
                     },
                     sort_keys=True,
                 ),
             ),
-            dedupe_key=f"feeder-stack:{repo.lower()}:{issue.key}:{','.join(map(str, pulls))}",
+            dedupe_key=f"feeder-stack:{repo.lower()}:{ticket_id}:{stack}",
         )
-        self.log(f"feeder: {issue.repo}#{issue.key} held: {wait.reason}")
+        self.log(f"feeder: {repo}#{ticket_id} held: {wait.reason}")
+        return wait
 
     def _orchestrator_authors(self, tracker: str) -> frozenset[str]:
         """Who may have posted the orchestrator's own brief or go (#87 F1.3).

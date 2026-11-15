@@ -6,14 +6,14 @@ Defaults the builder picked for issue #205, with no product question open. Each 
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/332
 
-- **Decision:** The stacked-branch hold checks a ticket's branch only when the branch already exists before the feed (a Linear gitBranchName someone pushed to, a branch made by hand). A branch the feeder creates holds only its own start commit, so it is not read. The hold does not cover a PR that gets stacked after its feed, as #131 did during its build. That needs the merge queue, which is outside this ticket's files. Max could ask for a follow-up there.
-- **When:** 2026-11-14 ET, by Factory decided (technical)
+- **Decision:** The stacked-branch hold checks a ticket's branch at intake when the branch already exists (a Linear gitBranchName someone pushed to, a branch made by hand) or a resumed intake reuses its recorded PR. A branch the feeder creates holds only its own start commit, so it is not read then. The check runs again before a builder's ready queues review, so a PR stacked during its build, as #131 was, waits there with the same one wake per set of PRs and is reviewed after the PR merges. The review-time check uses the PR's head branch, or the branch the feeder recorded. It runs only when the dispatcher has a feeder.
+- **When:** 2026-11-15 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/332
 
 - **Decision:** A branch carries another PR's commits when GitHub lists that PR as open for any commit the base branch lacks (`compare` plus `commits/<sha>/pulls`). The ticket's own PR on the branch never holds it. The hold ends when the PR is no longer open. A PR closed without merging also ends it, and its commits then show in the ticket's own diff for review.
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/332
 
-- **Decision:** One Grok `blocked` wake per ticket per set of stacked PRs, deduped in the job queue like the intake `refused` wake. A held ticket is `waiting-blocked` with a reason that names the PRs and the branch, and it raises no needs-attention flag, because it clears on its own when the PR merges.
+- **Decision:** One Grok `blocked` wake per ticket per set of stacked PRs, deduped in the job queue like the intake `refused` wake. The set is part of the wake's source id, so a changed set reaches Grok under a new delivery key. A held ticket is `waiting-blocked` with a reason that names the PRs and the branch, and it raises no needs-attention flag, because it clears on its own when the PR merges.
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/332

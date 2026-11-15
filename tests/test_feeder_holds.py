@@ -2,24 +2,30 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.branch_stack import stack_wait, stacked_pulls
+from lib.dispatcher import CIResult, Comment, Dispatcher
 from lib.feeder_gates import Progress, RefStatus, blocker_waits, github_ref, parse_gate_lines
 from lib.github_actions import GhResult, GitHubAdapterError
+from lib.handoff import Handoff, format_comment
 from lib.intake_live import GitHubIntakeClient
 from tests.test_feeder import (
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
     FakeGitHub,
     FakeLinear,
+    FeederSource,
+    dispatcher_for,
     issue,
     linear_issue,
     make_feeder,
     rows,
 )
+from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 from tests.test_github_actions import RecordedGh
 
 HOME = "owner/app"
@@ -243,3 +249,109 @@ def test_depends_on_waits_then_feeds_after_the_merge(tmp_path: Path) -> None:
 
     github.statuses[github_ref(HOME, 156)] = RefStatus(Progress.DONE)
     assert len(feeder.feed_once().fed) == 1
+
+
+def stack_onto(github: FakeGitHub, branch: str, number: int = 113) -> None:
+    github.branches[(HOME, STACKED)] = B
+    github.branch_commits[(HOME, STACKED)] = (B,)
+    github.pulls[(HOME, number)] = {"head": STACKED, "base": "main", "title": "t", "body": "",
+                                    "draft": True}
+    github.branch_commits[(HOME, branch)] = (B, C)
+
+
+def test_a_resumed_intake_rechecks_the_recorded_branch(tmp_path: Path) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(205)]
+    github.fail["labels"] = 1
+    assert feeder.feed_once().errors == 1
+    saved = rows(tmp_path / "orch.db")["205"]
+    assert (saved["state"], saved["pr_number"]) == ("error", "501")
+
+    stack_onto(github, BRANCH)
+    github.posted.clear()
+    report = feeder.feed_once()
+
+    assert report.fed == () and report.blocked == 1
+    assert rows(tmp_path / "orch.db")["205"]["state"] == "waiting-blocked"
+    assert github.posted == {}, "no brief or go while the branch carries #113"
+    assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
+
+
+class BranchSource(FeederSource):
+    branch_name: str | None = BRANCH
+
+    def _ticket(self, ref):
+        ticket = super()._ticket(ref)
+        if ticket is None:
+            return None
+        head = self.github_fake.branches[(HOME, BRANCH)]
+        return replace(ticket, current_head=head, ci={head: CIResult("success")},
+                       git_branch_name=self.branch_name)
+
+
+def build_ready(tmp_path: Path, branch_name: str | None):
+    feeder, queue, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(205)]
+    source = BranchSource(github)
+    source.branch_name = branch_name
+    dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher.poll_once(source)
+    build = queue.claim("claude")
+    assert build is not None and build.request.action == "build"
+    github.branches[(HOME, BRANCH)] = C
+    stack_onto(github, BRANCH)
+    ready = format_comment(Handoff(
+        fields=(("kind", "ready"), ("from", "claude-bot"), ("role", "builder"), ("head", C)),
+        body="Ready.",
+    ))
+    github.posted[(HOME, 501)].append(
+        Comment(id="10001", author="maxharris1", body=ready, created_at=10001.0)
+    )
+    queue.finish(build.id, owner="claude", handoff_comment_id="10001")
+    return dispatcher, queue, github, source
+
+
+def reviews(queue) -> list:
+    return [job for job in queue.outstanding() if job.request.action == "review"]
+
+
+@pytest.mark.parametrize("branch_name", [BRANCH, None], ids=["pr-head-ref", "fed-branch"])
+def test_a_branch_stacked_during_its_build_is_held_before_review(
+    tmp_path: Path, branch_name: str | None
+) -> None:
+    dispatcher, queue, github, source = build_ready(tmp_path, branch_name)
+
+    dispatcher.poll_once(source)
+    dispatcher.poll_once(source)
+
+    assert reviews(queue) == []
+    wakes = grok_wakes(tmp_path)
+    assert len(wakes) == 1, "one wake however many polls hold it"
+    assert json.loads(wakes[0]["detail"])["pulls"] == [113]
+
+    github.pulls[(HOME, 113)].update(merged=True, state="closed")
+    dispatcher.poll_once(source)
+
+    assert [job.request.head for job in reviews(queue)] == [C]
+
+
+def test_each_stacked_set_reaches_grok_under_its_own_identity(tmp_path: Path) -> None:
+    github = stacked_github()
+    feeder, queue, _, _ = make_feeder(tmp_path, github=github)
+    delivery = FakeGrokDelivery()
+    dispatcher = Dispatcher(
+        tmp_path / "orch.db", queue, trusted_logins=TRUSTED_LOGINS,
+        review_actions=FakeReviewActions(), grok_delivery=delivery,
+    )
+    feeder.feed_once()
+    dispatcher._deliver_grok_jobs(set())
+    github.branches[(HOME, "factory/issue-109")] = A
+    github.branch_commits[(HOME, "factory/issue-109")] = (A,)
+    github.pulls[(HOME, 114)] = {"head": "factory/issue-109", "base": "main", "title": "t",
+                                 "body": "", "draft": True}
+    feeder.feed_once()
+    feeder.feed_once()
+    dispatcher._deliver_grok_jobs(set())
+
+    assert [json.loads(job.request.detail)["pulls"] for job in delivery.jobs] == [[113], [113, 114]]
+    assert len(set(delivery.logical_keys)) == 2
