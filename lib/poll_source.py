@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -2128,7 +2128,14 @@ def _sql_patch_risk(patch: str, read_source: Callable[[], str | None]) -> bool |
             return None
     else:
         body = list(hunks[0].body)
-    verdicts = [_sql_statements_risk(_sql_side(body, mark), mark, whole=whole) for mark in "-+"]
+    sides = {mark: _sql_side(body, mark) for mark in "-+"}
+    before, after = (_sql_statements_risk(sides[mark], mark, whole=whole)[1] for mark in "-+")
+    also_changed = frozenset(
+        at for at, line in enumerate(body) if line.startswith(" ") and before[at] != after[at]
+    )
+    verdicts = [
+        _sql_statements_risk(sides[mark], mark, whole=whole, also_changed=also_changed)[0] for mark in "-+"
+    ]
     if True in verdicts:
         return True
     return None if None in verdicts else False
@@ -2174,6 +2181,11 @@ SQL_TOKEN = re.compile(
 SQL_COMMENT = re.compile(r"/\*|\*/")
 
 
+class SqlLexState(NamedTuple):
+    comment_depth: int
+    quote: str | None
+
+
 def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
     """The pattern that scans a quoted run, and the match that closes it."""
     if opener in ("'", '"'):
@@ -2183,16 +2195,20 @@ def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
     return re.compile(re.escape(opener)), opener
 
 
-def _sql_statements_risk(lines: Sequence[str], mark: str, *, whole: bool) -> bool | None:
+def _sql_statements_risk(
+    lines: Sequence[str], mark: str, *, whole: bool, also_changed: Collection[int] = ()
+) -> tuple[bool | None, list[SqlLexState]]:
     """#195: lexes one side of a diff body from line 1 as PostgreSQL. Comments
     are dropped; quoted strings, identifiers and dollar-quoted bodies keep
     their words but never end a statement. #292: a whole file that ends inside
     a comment or quote, or a lone hunk that ends inside a changed statement,
     cannot be classified."""
-    text, changed = "", False
+    text, changed, risky = "", False, False
     depth, quote, close = 0, None, ""
-    for line in lines:
-        mine = line.startswith(mark)
+    states: list[SqlLexState] = []
+    for index, line in enumerate(lines):
+        states.append(SqlLexState(depth, None if quote is None else quote.pattern))
+        mine = line.startswith(mark) or index in also_changed
         changed = changed or mine
         code, at = line[1:] + "\n", 0
         while at < len(code):
@@ -2223,8 +2239,7 @@ def _sql_statements_risk(lines: Sequence[str], mark: str, *, whole: bool) -> boo
                 break
             token, at = found.group(), found.end()
             if token == ";":
-                if changed and RISKY_CHANGE.search(text):
-                    return True
+                risky = risky or (changed and bool(RISKY_CHANGE.search(text)))
                 text, changed = "", False
             elif token == "--":
                 text, at = text + " ", len(code)
@@ -2233,11 +2248,11 @@ def _sql_statements_risk(lines: Sequence[str], mark: str, *, whole: bool) -> boo
             else:
                 quote, close = _sql_quote(token)
                 text += token
-    if changed and RISKY_CHANGE.search(text):
-        return True
+    if risky or (changed and RISKY_CHANGE.search(text)):
+        return True, states
     unfinished = bool(depth) or quote is not None
     begun = changed and (unfinished or bool(text.strip()))
-    return None if (unfinished if whole else begun) else False
+    return (None if (unfinished if whole else begun) else False), states
 
 
 def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:

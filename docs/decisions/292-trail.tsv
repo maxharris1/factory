@@ -8,3 +8,4 @@ fail high	unreadable blob, a blob that does not match the patch, or a whole file
 blanket comment rule	removed	exact lexing replaces it; ordinary edits near comments now stay low when the file is read
 stray */ in code	plain text, no longer undecided	both lexer callers start at line 1, and PostgreSQL lexes */ outside a comment as operator text; a committed low case needs it
 #195 tests	all kept with their expectations; two mid-file low cases now serve the file content	a mid-file hunk without content still fails high, as #195 asked
+round-1 ac-2 (delimiter edits)	lex both sides once, and count an unchanged line as changed when its comment depth or open quote differs between the sides	marking only the statement after a delimiter edit lost a publication behind an ordinary SELECT in the same comment; a context line whose start state matches on both sides lexes identically, so the state compare finds every statement the edit activates or deactivates

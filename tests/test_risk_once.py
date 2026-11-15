@@ -637,6 +637,18 @@ def test_codex_round_4_probe_is_high_from_the_whole_file(name: str) -> None:
             f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}"
             "    public.last /* x\n,    public.events; */ ;\n",
         ),
+        (
+            f"/*\nSELECT 1;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}*/\n",
+            f"SELECT 1;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}",
+        ),
+        (
+            f"SELECT 1;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}",
+            f"/*\nSELECT 1;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}*/\n",
+        ),
+        (
+            f"SELECT 1;\n{NOTE_LINES}SELECT 'a;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}';\n",
+            f"SELECT 1;\n{NOTE_LINES}SELECT a;\n{NOTE_LINES}{REALTIME}{NOTE_LINES}';\n",
+        ),
     ],
     ids=[
         "uncommented-publication-far-from-its-delimiters",
@@ -644,6 +656,9 @@ def test_codex_round_4_probe_is_high_from_the_whole_file(name: str) -> None:
         "hunk-starts-inside-a-block-comment-with-a-line-comment-closer",
         "hunk-starts-inside-a-row-filter-string",
         "moved-comment-closer-drops-a-member",
+        "uncommented-publication-after-an-ordinary-statement",
+        "commented-out-publication-after-an-ordinary-statement",
+        "removed-quote-exposes-a-publication-after-an-ordinary-statement",
     ],
 )
 def test_a_publication_change_outside_the_hunk_is_high_from_the_whole_file(
