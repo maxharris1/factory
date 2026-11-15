@@ -354,6 +354,14 @@ def _darwin_worker(
     anything but three fields of 0 or 1).
     """
     directory = shlex.quote(target.job_dir)
+    empty_group_is_gone = (
+        f"{_DARWIN_LIST} || {blind}; "
+        'set -f; set -- $o; set +f; w=$(($# / 3)); '
+        f"r=$({_DARWIN_GROUP}) || {blind}; "
+        "set -f; set -- $r; set +f; "
+        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
+        f'[ "$1" = 1 ] || {gone}; '
+    )
     no_record = (
         'if [ ! -e "$f" ]; then '
         'mkdir -p -- "$d" 2>/dev/null; '
@@ -377,18 +385,13 @@ def _darwin_worker(
         f'[ "$g" = "$t" ] || {unsure}; '
         f'case "$b" in {_UUID}) ;; *) {unsure};; esac; '
         f'[ "$b" = "$c" ] || {gone}; '
-        f"{_DARWIN_LIST} || {blind}; "
-        'set -f; set -- $o; set +f; w=$(($# / 3)); '
-        f"r=$({_DARWIN_GROUP}) || {blind}; "
-        "set -f; set -- $r; set +f; "
-        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
-        f'[ "$1" = 1 ] || {gone}; '
+        f"{empty_group_is_gone}"
         f'[ "$2" = 0 ] || {unsure}; '
-        f'if [ "$3" = 1 ]; then '
-        f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
-        f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}"
-        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {unsure}; fi; "
-        f"{running}"
+        f'if [ "$3" = 1 ]; then {_LSTART}; if [ "$*" = "$s" ]; then '
+        f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}{running}; fi; fi; "
+        f'{_DARWIN_MEMBER}; if [ -n "$v" ]; then {running}; fi; '
+        f"{empty_group_is_gone}"
+        f"{unsure}"
     )
 
 

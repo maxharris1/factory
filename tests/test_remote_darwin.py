@@ -891,6 +891,53 @@ def test_r2_darwin_snapshot_member_that_does_not_match_proves_nothing(
         other.wait()
 
 
+@pytest.mark.parametrize("last", ["leader", "member"])
+def test_darwin_worker_that_ends_between_the_listing_and_its_lookup_is_gone(
+    tmp_path: Path, mac_ssh, last: str
+) -> None:
+    ssh, mac = mac_ssh
+    t = target(tmp_path)
+    pid_file = tmp_path / "pid"
+    if last == "leader":
+        subprocess.run(
+            ["sh", "-c", f"setsid sleep 600 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}"],
+            check=True,
+        )
+        pid = group = int(wait_file(pid_file))
+        deadline = time.monotonic() + 20
+        while os.getpgid(pid) != pid:
+            assert time.monotonic() < deadline, "setsid never ran"
+            time.sleep(0.05)
+    else:
+        leader = subprocess.Popen(
+            leave_child_command(pid_file, stubborn=False), start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        leader.wait(timeout=30)
+        group, pid = leader.pid, int(wait_file(pid_file))
+    try:
+        assert os.getpgid(pid) == group
+        if last == "leader":
+            write_record(t, f"{group} {BOOT} {TAG} {lstart(pid)}\n")
+        else:
+            write_record(t, f"{group} {BOOT} {TAG} Mon Jan 1 00:00:00 2001\n")
+            members_of(t).write_text(f"{pid} {lstart(pid)}\n", encoding="utf-8")
+        real, ended = shlex.quote(shutil.which("ps")), tmp_path / "ended"
+        mac._tool(
+            "ps",
+            f'{real} "$@"; rc=$?\n'
+            f'if [ "$*" = "-A -o pgid= -o pid= -o uid=" ] && mkdir {shlex.quote(str(ended))} 2>/dev/null; then\n'
+            f"  kill -KILL {pid}\n"
+            f"  while {real} -o pid= -p {pid} >/dev/null; do sleep 0.05; done\n"
+            "fi\n"
+            "exit $rc\n",
+        )
+        assert remote.check_worker(remote.SshTransport(), t) == remote.GONE
+        assert ended.exists()
+    finally:
+        kill_quietly(pid)
+
+
 # F1.3: GONE from the process listing needs ps to have succeeded.
 
 
