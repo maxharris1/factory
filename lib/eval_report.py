@@ -35,11 +35,9 @@ the window or a dwell that overlaps it. Chart comparison uses the
 section 4.1 edges. post-merge is on the chart and is still reported,
 because Phase 1 configures no post_merge.
 
-A message line is one manual bot-to-bot message, written by
-`orch log-message` (append_message). It belongs to no run. The report
-counts messages in the window against scripted handoffs, the comment
-events in the window, per repo and ISO week. No input carries a
-per-message token count, so the report prints no token-savings figure.
+A message line is one manual bot-to-bot handoff and belongs to no run.
+Message lines in the window are counted against comment lines in the
+window, per repo and ISO week.
 
 A wake is wasted when wasted=yes, when reason=nobody, or when handled
 repeats for that ticket, including a first handling before the window.
@@ -307,7 +305,7 @@ class _Event:
 
 
 @dataclass(frozen=True)
-class _Message:
+class _Handoff:
     at: datetime
     repo: str
 
@@ -364,7 +362,7 @@ def build_report(
     runs = [run for run in _measure(root, events, window) if run.active]
 
     scripted = [
-        _Message(at=event.at, repo=event.repo)
+        _Handoff(at=event.at, repo=event.repo)
         for event in events
         if event.kind == "comment" and window.contains(event.at)
     ]
@@ -481,7 +479,7 @@ def _run_key(repo: str, ticket: str) -> tuple[str, tuple[int, int, str]]:
     return (repo, _ticket_key(ticket))
 
 
-def _handoffs(manual: list[_Message], scripted: list[_Message]) -> tuple[Handoffs, ...]:
+def _handoffs(manual: list[_Handoff], scripted: list[_Handoff]) -> tuple[Handoffs, ...]:
     counts: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     for column, items in ((0, manual), (1, scripted)):
         for item in items:
@@ -822,21 +820,21 @@ def _warning_lines(path: Path, findings: list[Finding]) -> list[str]:
     ]
 
 
-def _load_log(path: Path) -> tuple[list[_Event], list[_Message]]:
+def _load_log(path: Path) -> tuple[list[_Event], list[_Handoff]]:
     if not path.is_file():
         raise EvalError("dispatcher.log not found")
     events: list[_Event] = []
-    messages: list[_Message] = []
+    messages: list[_Handoff] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         parsed = _parse_log_line(raw, number)
         if isinstance(parsed, _Event):
             events.append(parsed)
-        elif isinstance(parsed, _Message):
+        elif isinstance(parsed, _Handoff):
             messages.append(parsed)
     return events, messages
 
 
-def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Message:
+def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Handoff:
     for key in fields:
         if key not in _MESSAGE_KEYS:
             raise EvalError(f"{where}: unknown key {key!r}")
@@ -850,10 +848,10 @@ def _parse_message(at: datetime, fields: dict[str, str], where: str) -> _Message
     for key in ("from", "to", "kind"):
         if key in fields and _TOKEN.fullmatch(fields[key]) is None:
             raise EvalError(f"{where}: bad {key}")
-    return _Message(at=at, repo=fields["repo"])
+    return _Handoff(at=at, repo=fields["repo"])
 
 
-def _parse_log_line(raw: str, number: int) -> _Event | _Message | None:
+def _parse_log_line(raw: str, number: int) -> _Event | _Handoff | None:
     if raw.strip() == "":
         return None
     parts = raw.split()
