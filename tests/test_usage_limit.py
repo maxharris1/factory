@@ -395,6 +395,30 @@ def test_a_healthy_window_never_clears_another_window_still_full(tmp_path: Path,
     assert queue.claim("claude").id == first
 
 
+@pytest.mark.parametrize("order", ["full_then_healthy", "healthy_then_full"])
+def test_a_newer_no_reading_on_the_same_device_never_hides_an_older_full_window(
+    tmp_path: Path, order: str
+) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    week = int(START) + 7 * 86400
+    updates = {
+        "full": [Reading("five_hour", 0.4, RESET, START + 30),
+                 Reading("seven_day", 1.0, week, START + 30)],
+        "healthy": [Reading("five_hour", 0.5, RESET, START + 60),
+                    Reading("seven_day", None, None, START + 60)],
+    }
+    sequence = ["full", "healthy"] if order == "full_then_healthy" else ["healthy", "full"]
+    with sqlite3.connect(db) as connection:
+        for name in sequence:
+            store(connection, harness="claude", bot="claude-bot", device="box",
+                  job_id=name, readings=updates[name])
+    now[0] = START + 61
+    assert queue.claim("claude") is None, "the weekly window is still full"
+    now[0] = week + 1
+    assert queue.claim("claude").id == first
+
+
 def test_the_first_poll_after_a_reset_missed_by_downtime_charges_nothing(tmp_path: Path) -> None:
     now, _, dispatcher, queue, db = _build(tmp_path)
     first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
