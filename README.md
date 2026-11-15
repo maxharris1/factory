@@ -371,7 +371,9 @@ the stable Linear user ID for Max to confirm. Max approved the GitHub map at
 comments on factory PRs". This approves the login map, not stronger identity:
 any session using that login can choose a marker. While any configured Linear
 project lacks `trusted_linear_users`, `orch poll` refuses to start at all,
-including for GitHub projects. Missing secrets fail by environment-variable
+including for GitHub projects. `approver_linear_users` names the Linear users
+whose `go` lifts a cap on a Linear ticket
+([docs/decisions/174-linear-approver.md](docs/decisions/174-linear-approver.md)). Missing secrets fail by environment-variable
 name; values are never printed or included in exceptions.
 
 Linear issues are searched by ID with comments included; each hit is then
