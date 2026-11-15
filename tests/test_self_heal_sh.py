@@ -35,8 +35,15 @@ with (home / "orch-order").open("a") as handle:
 if sys.argv[1:3] == ["heal", "deploy"]:
     with (home / "deploy-calls").open("a") as handle:
         handle.write(json.dumps({{"argv": sys.argv[1:], "db": os.environ.get("ORCH_DB")}}) + "\\n")
+    if os.environ.get("FAKE_DEPLOY_MOVES"):
+        (home / "head").write_text("b" * 40)
     print("deploy output")
     raise SystemExit(int(os.environ.get("FAKE_DEPLOY_EXIT", "0")))
+if sys.argv[1:3] in (["heal", "devices"], ["dashboard", "push"]):
+    with (home / "detached-calls").open("a") as handle:
+        handle.write(json.dumps({{"argv": sys.argv[1:], "sid": os.getsid(0) == os.getpid(),
+                                  "db": os.environ.get("ORCH_DB")}}) + "\\n")
+    raise SystemExit(0)
 if sys.argv[1:] == ["health", "--json"]:
     print({json.dumps(json.dumps(REPORT))})
     raise SystemExit(int(os.environ.get("FAKE_HEALTH_EXIT", "3")))
@@ -48,6 +55,11 @@ if sys.argv[1] == "heal":
     subprocess.run([str(home / "deploy" / "waiter-service.sh"), "codex-bot", "restart"], check=True)
     raise SystemExit(int(os.environ.get("FAKE_HEAL_EXIT", "0")))
 raise SystemExit(f"unexpected {{sys.argv[1:]}}")
+"""
+
+FAKE_GIT = """#!/bin/sh
+[ -f "$HOME/head" ] || exit 1
+cat "$HOME/head"
 """
 
 FAKE_SERVICE = """#!/bin/sh
@@ -95,6 +107,7 @@ def _executable(path: Path, text: str) -> Path:
 def home(tmp_path: Path):
     home = tmp_path / "home"
     _executable(home / ".local" / "bin" / "orch", FAKE_ORCH)
+    _executable(home / ".local" / "bin" / "git", FAKE_GIT)
     _executable(home / "deploy" / "waiter-service.sh", FAKE_SERVICE)
     (home / ".config" / "factory").mkdir(parents=True)
     yield home
@@ -290,3 +303,47 @@ def test_the_repo_units_run_once_every_two_minutes() -> None:
     assert "ExecStart=%h/factory/deploy/self-heal.sh once" in service
     assert "Unit=factory-self-heal.service" in timer
     assert "WantedBy=timers.target" in timer
+
+
+def _detached(home: Path, count: int) -> list[dict]:
+    path = home / "detached-calls"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if path.exists():
+            calls = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            if len(calls) >= count:
+                return calls
+        time.sleep(0.05)
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_once_starts_the_device_deploy_detached_after_the_heal_pass(home: Path) -> None:
+    (home / "head").write_text("a" * 40 + "\n")
+
+    result = _run(home, "once")
+
+    assert result.returncode == 0, result.stderr
+    (call,) = _detached(home, 1)
+    assert call["argv"] == ["heal", "devices", "--state", str(home / STATE)]
+    assert call["sid"] and call["db"] == str(home / STATE / "orch.db")
+    order = (home / "orch-order").read_text().splitlines()
+    assert order.index("heal --health-json") < order.index("heal devices")
+    time.sleep(0.3)
+    assert len(_detached(home, 1)) == 1
+
+
+def test_once_pushes_the_dashboard_only_after_the_box_deploy_moved_head(home: Path) -> None:
+    (home / "head").write_text("a" * 40 + "\n")
+
+    assert _run(home, "once", FAKE_DEPLOY_MOVES="1").returncode == 0
+
+    argvs = sorted(call["argv"][:2] for call in _detached(home, 2))
+    assert argvs == [["dashboard", "push"], ["heal", "devices"]]
+    assert ["dashboard", "push", "--once"] in [call["argv"] for call in _detached(home, 2)]
+
+
+def test_a_failed_health_pass_still_starts_the_device_deploy(home: Path) -> None:
+    result = _run(home, "once", FAKE_HEALTH_EXIT="2")
+
+    assert result.returncode == 1
+    assert [call["argv"][:2] for call in _detached(home, 1)] == [["heal", "devices"]]
