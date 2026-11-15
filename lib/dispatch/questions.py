@@ -90,19 +90,21 @@ class QuestionsMixin:
             )
             self.queue.enqueue_in_transaction(
                 connection,
-                JobRequest(
-                    repo=ticket.repo,
-                    ticket_id=ticket.ticket_id,
-                    action="clarify",
-                    recipient="grok",
-                    source_comment_id=comment.id,
-                    timeout_seconds=ticket.job_timeout_minutes * 60,
-                    generation=generation,
-                    head=head,
-                    detail=self._project_wake_detail(
-                        ticket,
-                        _comment_link(comment),
-                    ),
+                self._grok_request(
+                    JobRequest(
+                        repo=ticket.repo,
+                        ticket_id=ticket.ticket_id,
+                        action="clarify",
+                        recipient="grok",
+                        source_comment_id=comment.id,
+                        timeout_seconds=ticket.job_timeout_minutes * 60,
+                        generation=generation,
+                        head=head,
+                        detail=self._project_wake_detail(
+                            ticket,
+                            _comment_link(comment),
+                        ),
+                    )
                 ),
                 dedupe_key=(
                     f"t5-wait:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
@@ -122,6 +124,14 @@ class QuestionsMixin:
             ticket, comment, fields, "grok-bot", role="orchestrator"
         ):
             return True, "rejected-answers-author"
+        resumed = self._resume_paused(ticket, comment)
+        return (True, "rejected-answers-without-question") if resumed is None else resumed
+
+    def _resume_paused(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[bool, str] | None:
         with self._connect() as connection:
             paused = connection.execute(
                 """
@@ -153,7 +163,7 @@ class QuestionsMixin:
             or paused["workflow_state"] != "waiting-max"
             or paused["paused_action"] is None
         ):
-            return True, "rejected-answers-without-question"
+            return None
         action = str(paused["paused_action"])
         recipient = str(paused["paused_recipient"])
         generation = int(paused["paused_generation"])

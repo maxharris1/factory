@@ -256,18 +256,19 @@ def test_the_dashboard_shows_the_tier_in_the_feeder_and_the_queue(tmp_path: Path
     assert [(item["issue"], item["tier"]) for item in snapshot["feeder"]["items"]] == [("1", 2), ("2", None)]
     assert [(row["ticket_id"], row["tier"]) for row in snapshot["queued"]] == [("501", 2)]
     index = _no_script(render_pages(snapshot)["index.html"])
-    assert _section(index, "feeder").count("tier") == 1
-    assert f"<li>owner/app#1 fed → PR #501 {CHIP}</li>" in _section(index, "feeder")
+    intake = _section(index, "intake")
+    assert intake.count("tier") == 1
+    assert f'<li><span class="ticket">app#1</span>{CHIP}<span class="what">fed</span>' in intake
     assert _section(index, "queue").count(CHIP) == 1
 
 
 @needs_node
 def test_the_script_draws_the_same_tier_chips(tmp_path: Path) -> None:
     snapshot = collect_snapshot(_fed_tier_two(tmp_path), tmp_path / "none.log", now=20_000.0)
-    out = _run_page(tmp_path, snapshot, "main", ["kpis", "queue"])
-    server = _section(_no_script(render_pages(snapshot)["index.html"]), "feeder")
-    assert out["html"]["kpis"].endswith(server)
-    assert out["html"]["queue"].count(CHIP) == 1
+    out = _run_page(tmp_path, snapshot, "main", ["intake", "lanes"])
+    server = _no_script(render_pages(snapshot)["index.html"])
+    assert out["html"]["intake"].count(CHIP) == _section(server, "intake").count(CHIP) == 1
+    assert out["html"]["lanes"].count(CHIP) == _section(server, "queue").count(CHIP) == 1
 
 
 # The two tables exactly as they were before issue #258.

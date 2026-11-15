@@ -33,7 +33,10 @@ same process that runs the command:
 * on Linux, run is the command's child subreaper while it runs (#199 r2),
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
-  killed with the rest.
+  killed with the rest;
+* on macOS the command runs as its own responsible process (#329), which
+  every descendant inherits, so a descendant reparented to launchd before
+  any look saw its parent is killed with the rest.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
@@ -41,6 +44,7 @@ same process that runs the command:
 from __future__ import annotations
 
 import ctypes
+import errno
 import math
 import os
 import secrets
@@ -56,7 +60,7 @@ from pathlib import Path
 from types import FrameType
 from typing import IO
 
-from lib.job_state import HEARTBEAT_SECONDS, MAX_HEARTBEAT_SECONDS
+from lib.job_state import HEARTBEAT_SECONDS, KILL_GRACE_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.queue import QueueError
 
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
@@ -65,7 +69,6 @@ FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 OUTPUT_GRACE_SECONDS = 5.0
 TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 # #199: how long a command past its budget has between SIGTERM and SIGKILL.
-KILL_GRACE_SECONDS = 30.0
 WALL_CLOCK = "wall-clock"
 # #199 r1: every process of a local run carries this tag in its environment.
 RUN_TAG_ENV = "ORCH_RUN_TAG"
@@ -86,6 +89,9 @@ Log = Callable[[str], None]
 # Python changed at its own start-up, as Popen does for a direct command.
 # argv[2] is a close-on-exec report pipe: EOF with no byte means the exec
 # happened (#99 A2), a byte means the command could not be exec'd.
+# On macOS the gate execs the command disclaimed (#329): the command becomes
+# its own responsible process, an identity each descendant inherits and
+# cannot shed.
 _GATE = """\
 import os, signal, sys
 if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
@@ -99,9 +105,29 @@ for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
 os.set_inheritable(report, False)
+
+def disclaimed_exec(argv):
+    import ctypes
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    def check(err, what):
+        if err:
+            raise OSError(err, f"{what}: {os.strerror(err)}")
+    attr = ctypes.c_void_p()
+    check(libc.posix_spawnattr_init(ctypes.byref(attr)), "posix_spawnattr_init")
+    POSIX_SPAWN_SETEXEC = 0x40
+    check(libc.posix_spawnattr_setflags(ctypes.byref(attr), ctypes.c_short(POSIX_SPAWN_SETEXEC)), "setexec")
+    check(libc.responsibility_spawnattrs_setdisclaim(ctypes.byref(attr), 1), "disclaim")
+    args = (ctypes.c_char_p * (len(argv) + 1))(*map(os.fsencode, argv), None)
+    env = [key + b"=" + value for key, value in os.environb.items()]
+    envp = (ctypes.c_char_p * (len(env) + 1))(*env, None)
+    err = libc.posix_spawnp(None, args[0], None, ctypes.byref(attr), args, envp)
+    raise OSError(err, f"posix_spawnp: {os.strerror(err)}")
+
 try:
+    if sys.platform == "darwin":
+        disclaimed_exec(sys.argv[3:])
     os.execvp(sys.argv[3], sys.argv[3:])
-except OSError as exc:
+except (OSError, AttributeError) as exc:
     os.write(report, b"x")
     print(f"orch job run: cannot start {sys.argv[3]}: {exc}", file=sys.stderr)
     sys.exit(127)
@@ -264,13 +290,8 @@ def run(
             log(f"not starting {argv[0]}: got signal {pending[0]}")
             return 128 + pending[0]
         tag = secrets.token_hex(16)
-        me = os.getpid()
         try:
-            others = frozenset({
-                (pid, process.start)
-                for pid, process in processes(tag).items()
-                if process.ppid == me
-            })
+            others = frozenset({(pid, process.start) for pid, process in processes(tag).items()})
         except ProcessesUnknown as exc:
             log(f"not starting {argv[0]}: {exc}")
             return 127
@@ -278,7 +299,8 @@ def run(
         tagged = {**(dict(env) if env is not None else os.environ), RUN_TAG_ENV: tag}
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
-        if started is not None:
+        gated = started is not None or sys.platform == "darwin"
+        if gated:
             read_end, write_end = os.pipe()
             report_read, report_write = os.pipe()
             spawn = [
@@ -289,14 +311,14 @@ def run(
                 spawn,
                 cwd=cwd,
                 env=tagged,
-                pass_fds=(read_end, report_write) if started is not None else (),
+                pass_fds=(read_end, report_write) if gated else (),
                 stdout=subprocess.PIPE if output is not None else None,
             )
         except OSError as exc:
             log(f"cannot start {argv[0]}: {_one_line(exc)}")
             return 127
         finally:
-            if started is not None:
+            if gated:
                 os.close(read_end)
                 os.close(report_write)
                 if child is None:
@@ -307,22 +329,23 @@ def run(
                 target=output, args=(child.stdout,), name="orch-output", daemon=True
             )
             reader.start()
-        if started is not None:
-            try:
-                started(child.pid)
-            except Exception as exc:
-                os.close(write_end)  # the gate reads EOF: the command never runs
-                os.close(report_read)
-                log(
-                    f"not starting {argv[0]}: could not record worker pid "
-                    f"{child.pid}: {_one_line(exc)}"
-                )
-                child.wait()
-                return 127
-            except BaseException:
-                os.close(write_end)
-                os.close(report_read)
-                raise
+        if gated:
+            if started is not None:
+                try:
+                    started(child.pid)
+                except Exception as exc:
+                    os.close(write_end)  # the gate reads EOF: the command never runs
+                    os.close(report_read)
+                    log(
+                        f"not starting {argv[0]}: could not record worker pid "
+                        f"{child.pid}: {_one_line(exc)}"
+                    )
+                    child.wait()
+                    return 127
+                except BaseException:
+                    os.close(write_end)
+                    os.close(report_read)
+                    raise
             try:
                 os.write(write_end, b"go\n")
             except BrokenPipeError:
@@ -340,7 +363,10 @@ def run(
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
-        tree = Tree(child.pid, tag, adopts=reaper is not None, others=others)
+        tree = Tree(
+            child.pid, tag, adopts=reaper is not None, others=others,
+            responsible=_responsible_pid if sys.platform == "darwin" else None,
+        )
         try:
             code = _wait(child, budget, argv[0], log, tree)
         finally:
@@ -373,6 +399,24 @@ def _subreaper(on: bool) -> bool | None:
     if prctl(PR_SET_CHILD_SUBREAPER, int(on), 0, 0, 0) != 0:
         return None
     return bool(was.value)
+
+
+def _responsible_pid(pid: int) -> int | None:
+    try:
+        call = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        responsible_for = call.responsibility_get_pid_responsible_for_pid
+    except (OSError, AttributeError) as exc:
+        raise ProcessesUnknown(f"cannot read responsible processes: {_one_line(exc)}") from exc
+    ctypes.set_errno(0)
+    found = responsible_for(pid)
+    if found > 0:
+        return found
+    err = ctypes.get_errno()
+    if err in (errno.ESRCH, errno.EPERM):
+        return None
+    raise ProcessesUnknown(
+        f"cannot read the responsible process of pid {pid}: {os.strerror(err) if err else found}"
+    )
 
 
 def _past_budget(code: int, budget: Budget | None) -> int:
@@ -504,9 +548,12 @@ class Tree:
 
     A process belongs to the run when it carries the run's tag, or its parent
     belongs to it; once seen it stays a member (by pid and start time) after
-    its parent exits. With `adopts` (run is the subreaper), a child of this
-    process belongs to it too, unless `others` (pid and start time) names it
-    as one this process had before the run.
+    its parent exits. `others` (pid and start time) names every process live
+    before the run, which is never adopted or disowned into it. With `adopts` (run
+    is the subreaper), a child of this process belongs to it too. With
+    `responsible` (macOS), an orphan whose responsible process is the root
+    belongs to it. `responsible` returns None for a process that is
+    gone or not this user's, and raises ProcessesUnknown when it cannot say.
     """
 
     def __init__(
@@ -518,8 +565,10 @@ class Tree:
         signal_pid: Callable[[int, int], None] = os.kill,
         adopts: bool = False,
         others: frozenset[tuple[int, str]] = frozenset(),
+        responsible: Callable[[int], int | None] | None = None,
     ):
         self.root = root
+        self.responsible = responsible
         self.tag = tag
         self.adopts = adopts
         self.others = others
@@ -546,7 +595,12 @@ class Tree:
             for process in listing.values():
                 if process.pid in members or process.pid == me or process.pid in self.foreign:
                     continue
-                if process.tagged or process.ppid in members or self._adopted(process, me):
+                if (
+                    process.tagged
+                    or process.ppid in members
+                    or self._adopted(process, me)
+                    or self._disowned(process)
+                ):
                     members[process.pid] = process
                     grown = True
         self.known = {pid: process.start for pid, process in members.items()}
@@ -561,6 +615,14 @@ class Tree:
     def _adopted(self, process: Process, me: int) -> bool:
         return (
             self.adopts and process.ppid == me and (process.pid, process.start) not in self.others
+        )
+
+    def _disowned(self, process: Process) -> bool:
+        return (
+            self.responsible is not None
+            and process.ppid == 1
+            and (process.pid, process.start) not in self.others
+            and self.responsible(process.pid) == self.root
         )
 
     def end(self, log: Log) -> None:

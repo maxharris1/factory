@@ -88,6 +88,7 @@ class DispatcherBase:
         self._fresh_reader: Callable[[TicketRef], TrackedTicket | None] | None = None
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
+        self._logged_queue_waits: dict[tuple[str, str], tuple[str | None, set[str]]] = {}
         # #219: repos (lowercased) with a ticket that entered merged this
         # poll, for the self-deploy kick after the cycle.
         self.merged_this_poll: set[str] = set()

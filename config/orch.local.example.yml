@@ -13,6 +13,8 @@ projects:
 trusted_linear_users:
   REPLACE_WITH_LINEAR_USER_ID:
     - grok-bot
+approver_linear_users:
+  - REPLACE_WITH_LINEAR_USER_ID
 linear_webhook:
   bind: 127.0.0.1:8787
   path: /linear-webhook

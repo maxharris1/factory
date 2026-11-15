@@ -291,27 +291,59 @@ class MergeQueueMixin:
             return
         if ticket.factory.finish_line != "merge":
             return
-        if ticket.mergeable_state in ("dirty", "behind"):
-            if not self._base_update_out(ticket):
-                self._queue_update(ticket, row)
+        if ticket.mergeable_state in ("dirty", "behind") and not self._base_update_out(ticket):
+            self._queue_update(ticket, row)
             return
         head = ticket.current_head
-        ci = ticket.ci.get(head) if head is not None else None
-        if (
-            head is None
-            or ticket.mergeable is not True
-            or ci is None
-            or ci.status != "success"
-            or not self._approval_covers(ticket, str(row["approved_head"]), head)
-        ):
+        wait = self._queue_head_wait_reason(ticket, row, head)
+        if wait is not None:
+            self._log_queue_wait(ticket, head, wait)
             return
+        self._merge_queue_head(ticket, row, head)
+
+    def _queue_head_wait_reason(
+        self, ticket: TrackedTicket, row: sqlite3.Row, head: str | None
+    ) -> str | None:
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return "base update out"
+        if head is None:
+            return "head unread"
+        if ticket.mergeable is not True:
+            return f"not mergeable ({ticket.mergeable_state or 'pending'})"
+        ci = ticket.ci.get(head)
+        if ci is None or ci.status != "success":
+            return f"CI {'missing' if ci is None else ci.status} at {head[:12]}"
+        approved = str(row["approved_head"])
+        if not self._approval_covers(ticket, approved, head):
+            return f"approval at {approved[:12]} does not cover {head[:12]}"
         ship = ticket.factory.ship
         if ship.startswith("after:"):
             # The approver's ok still ships it (ReviewShipper).
+            return f"ship {ship} waits for the approver's ok"
+        held = self._held(ticket, head)
+        if held is not None:
+            parts = [",".join(held.reasons)] if held.reasons else []
+            if held.paths:
+                parts.append("paths: " + ", ".join(held.paths[:3]))
+            if held.unread is not None:
+                parts.append(f"unread: {held.unread}")
+            return f"held ({', '.join(parts)})"
+        return None
+
+    def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
+        key = (ticket.repo.lower(), ticket.ticket_id)
+        logged_head, reasons = self._logged_queue_waits.get(key, (None, set()))
+        if logged_head != head:
+            reasons = set()
+        if reason in reasons:
             return
-        if ship == "merge" and self._held(ticket, head):
-            return
-        self._merge_queue_head(ticket, row, head)
+        reasons.add(reason)
+        self._logged_queue_waits[key] = (head, reasons)
+        if self.log is not None:
+            self.log(
+                f"merge-queue: {ticket.repo}#{ticket.ticket_id} waits at "
+                f"{(head or 'no head')[:12]}: {reason}"
+            )
 
     def _update_job_before(self, ticket: TrackedTicket, comment: Comment) -> str | None:
         """The update-from-main attempt a ready came from: the job that
@@ -406,6 +438,7 @@ class MergeQueueMixin:
             connection.execute("BEGIN IMMEDIATE")
             self._enter_merged(connection, ticket.repo, ticket.ticket_id, "merge-queue")
             connection.commit()
+        self._logged_queue_waits.pop((ticket.repo.lower(), ticket.ticket_id), None)
         if self.log is not None:
             self.log(f"merged: {ticket.repo}#{ticket.ticket_id} at {head[:12]} (merge queue)")
         try:
@@ -555,6 +588,18 @@ class MergeQueueMixin:
             if job_id is not None and row["update_failed_job"] == job_id:
                 connection.commit()
                 return "update-failure-counted"
+            newest = connection.execute(
+                """
+                SELECT id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                key,
+            ).fetchone()
+            if job_id is not None and str(newest["id"]) != job_id:
+                connection.commit()
+                return "update-superseded"
             failures = int(row["update_failures"]) + 1
             if failures < UPDATE_FAILURES_TO_STOP:
                 connection.execute(
@@ -600,6 +645,7 @@ class MergeQueueMixin:
                 detail=json.dumps(
                     {
                         "project_bot": project_bot,
+                        "job_id": job_id,
                         "detail": (
                             "update-from-main failed twice on "
                             f"{str(row['update_from_head'] or '')[:12]} ({why}): ask Max"

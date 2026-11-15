@@ -636,6 +636,10 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
     for name, html in _pages(tmp_path).items():
         keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
         assert keys[:3] == ["caret", "band", "attention"], name
+        if name == "index.html":
+            # #140: the Lanes page adds its own strips after the shell's three.
+            assert {"kpi-0", "queue", "meter-box"} <= set(keys[3:]), keys
+            continue
         board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
         rows = [key for key in keys[3:] if key.startswith("attention-")]
         assert keys[3:] == {"job.html": board, "activity.html": rows}.get(name, []), name

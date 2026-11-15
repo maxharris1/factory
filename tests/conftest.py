@@ -16,13 +16,67 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import site
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
+
+LIVE_STATE_ENV_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
+_live_state_env: dict[str, str] = {}
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    _live_state_env.update({name: os.environ.pop(name) for name in list(os.environ)
+                            if name.startswith(LIVE_STATE_ENV_PREFIXES)})
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    os.environ.update(_live_state_env)
+
+
+def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_RUNTIME_DIR": str(home / ".run"),
+        "ORCH_STATE_DIR": str(home / ".local/state/factory"),
+        **extra,
+    }
+
+
+def reap_home(home: Path) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        deadline = time.monotonic() + 2
+        while (pids := _homed(home)) and time.monotonic() < deadline:
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+
+
+def _homed(home: Path) -> list[int]:
+    needle = f"HOME={home}".encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                environ = (entry / "environ").read_bytes()
+            except OSError:
+                continue
+            if needle in environ.split(b"\0"):
+                found.append(int(entry.name))
+    return found
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -69,6 +123,14 @@ def _write_gh(directory: Path) -> Path:
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return script
+
+
+@pytest.fixture(autouse=True)
+def _end_fake_runners():
+    yield
+    from tests import fake_runner
+
+    fake_runner.end_all()
 
 
 @pytest.fixture(autouse=True)
