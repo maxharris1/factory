@@ -58,6 +58,24 @@ class MergeQueueMixin:
         ready it posts gets CI and review as usual. It charges no round."""
         if self.queue.now() - comment.created_at < BASE_UPDATE_GRACE_SECONDS:
             return "ci-pending"
+        self._enqueue_base_update(
+            ticket,
+            comment,
+            head,
+            review_round,
+            f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
+            f"ran no CI on {head}: merge {ticket.factory.base_branch} in.",
+        )
+        return "ci-pending-base-update"
+
+    def _enqueue_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+        instruction: str,
+    ) -> None:
         request = JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
@@ -72,10 +90,7 @@ class MergeQueueMixin:
                 action="fix",
                 head=head,
                 round_number=review_round + 1,
-                instruction=(
-                    f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
-                    f"ran no CI on {head}: merge {ticket.factory.base_branch} in."
-                ),
+                instruction=instruction,
                 kind="merge-only",
             ),
         )
@@ -85,7 +100,6 @@ class MergeQueueMixin:
             request,
             dedupe_key=f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
         )
-        return "ci-pending-base-update"
 
     def _settle_update(
         self,
