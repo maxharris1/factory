@@ -58,9 +58,9 @@ than it has free slots.
 
 Gates (#156, lib/feeder_gates.py): a ticket not started yet is fed only
 once every ticket or PR its `Blocked by` or `Depends on` lines (and, on
-Linear, its blocks relations) name is done, and nothing in flight shares a `Touches:` path or a
-`Conflicts with` edge with it (a `Touches:` path in the project's
-`shared_paths` never collides). In flight is a fed ticket whose PR is still
+Linear, its blocks relations) name is done, and nothing in flight shares a
+`Touches:` path or a `Conflicts with` edge with it (a `Touches:` path in the
+project's `shared_paths` never collides). In flight is a fed ticket whose PR is still
 open, or one selected earlier in this poll. A ticket that waits is
 `waiting-blocked` with its reason and takes no room; it is re-checked every
 poll. Blocker and holder statuses come from one batched, cached read per
@@ -1211,8 +1211,9 @@ class Feeder:
             if branch_found:
                 stacked = stacked_pulls(self.github, repo, config.base_branch, branch, number)
                 if stacked:
-                    self._wake_stacked(candidate, branch, stacked)
-                    raise _Held(stack_wait(repo, branch, stacked))
+                    wait = stack_wait(repo, branch, stacked)
+                    self._wake_stacked(candidate, wait, stacked)
+                    raise _Held(wait)
         self._set_state(candidate, "feeding")
         risk = str(row["risk"])
         if risk not in ("low", "high"):
@@ -1278,11 +1279,9 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def _wake_stacked(self, candidate: _Candidate, branch: str, pulls: Sequence[int]) -> None:
-        """Wake Grok once per ticket and set of PRs its branch carries."""
+    def _wake_stacked(self, candidate: _Candidate, wait: Wait, pulls: Sequence[int]) -> None:
         issue = candidate.issue
         repo = candidate.project.repo
-        wait = stack_wait(repo, branch, pulls)
         self.queue.enqueue(
             JobRequest(
                 repo=repo,

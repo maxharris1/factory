@@ -1,14 +1,3 @@
-"""Stacked-branch holds (issue #205, N-01, F-22).
-
-A ticket's branch can exist before the feeder feeds it: a Linear issue's
-gitBranchName someone already pushed to, or a branch made by hand. When that
-branch carries commits of another open PR (as PR #131 carried #113's), the
-ticket waits until that PR merges, so its review never covers another PR's
-unreviewed work. A PR counts as open while GitHub lists it for one of the
-branch's commits that the base branch lacks; the ticket's own PR never holds
-it.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence

@@ -1,11 +1,3 @@
-"""Stacked-branch holds and `Depends on:` gates (issue #205).
-
-A ticket whose branch already carries another open PR's commits waits until
-that PR merges, with one Grok wake (lib/branch_stack.py). `Depends on: #N`
-gates like `Blocked by` through the #156 parser. The feeder tests use the
-fakes from tests/test_feeder.py; nothing reaches a real tracker.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,7 +29,6 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 
 
 def stacked_github() -> FakeGitHub:
-    """Ticket #205's branch already exists and merged in open PR #113's branch."""
     github = FakeGitHub()
     github.issues[HOME] = [issue(205)]
     github.branches[(HOME, BRANCH)] = C
@@ -57,9 +48,6 @@ def grok_wakes(tmp_path: Path) -> list[dict]:
                 "SELECT * FROM jobs WHERE recipient = 'grok' AND action = 'blocked'"
             )
         ]
-
-
-# --- the stacked-branch hold ---------------------------------------------------
 
 
 def test_a_branch_carrying_an_open_prs_commits_waits_with_one_wake(tmp_path: Path) -> None:
@@ -176,8 +164,6 @@ def test_stack_wait_names_other_repos_in_full() -> None:
     assert stack_wait(HOME, BRANCH, (7, 8)).attention is None
 
 
-# --- the live reads ----------------------------------------------------------------
-
 REPO_PATH = "repos/owner/app"
 COMPARE = (f"{REPO_PATH}/compare/main...{BRANCH}",)
 
@@ -207,9 +193,6 @@ def test_commit_pulls_keeps_open_prs_only() -> None:
         {"number": True, "state": "open"},
     ]))
     assert GitHubIntakeClient(gh).commit_pulls(HOME, A) == frozenset({113})
-
-
-# --- Depends on ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

@@ -212,7 +212,6 @@ class FakeGitHub:
         return self._commits_on(repo, branch)
 
     def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
-        # Like GitHub's commits/<sha>/pulls for a commit not on the base: open PRs only.
         return frozenset(
             number
             for (pull_repo, number), pull in self.pulls.items()
