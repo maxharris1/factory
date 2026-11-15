@@ -178,9 +178,14 @@ COLUMNS = (
     "last_finished",
     "subagents",
     "tokens_unknown",
+    "slot_hours_lost",
 )
 LIVE_RUN_COLUMNS = ("plan", "current_task", "last_finished", "subagents")
-ADDED_COLUMNS = {**dict.fromkeys(LIVE_RUN_COLUMNS, "TEXT"), "tokens_unknown": "INTEGER"}
+ADDED_COLUMNS = {
+    **dict.fromkeys(LIVE_RUN_COLUMNS, "TEXT"),
+    "tokens_unknown": "INTEGER",
+    "slot_hours_lost": "REAL",
+}
 
 DDL = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -212,7 +217,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     current_task TEXT,
     last_finished TEXT,
     subagents TEXT,
-    tokens_unknown INTEGER
+    tokens_unknown INTEGER,
+    slot_hours_lost REAL
 )
 """
 INDEX = f"CREATE INDEX IF NOT EXISTS {TABLE}_updated ON {TABLE} (updated_at)"
@@ -1337,6 +1343,7 @@ class Session:
         self._started = monotonic()
         self._lock = threading.Lock()
         self._finished = False
+        self._slot_hours_lost: float | None = None
         self._warned: set[str] = set()
         self._final: str | None = None  # the run's last final message (#87 handoff line)
         self._final_sent = True
@@ -1425,6 +1432,10 @@ class Session:
             return
         self._write(None, finished=False)
 
+    def wall_clock(self, seconds: float) -> None:
+        """#199: the run was stopped past its budget after `seconds` holding its slot."""
+        self._slot_hours_lost = max(0.0, seconds) / 3600
+
     def finish(self, code: int | None) -> None:
         """Write the final summary with the exit status. Never raises."""
         if self._finished:
@@ -1440,6 +1451,9 @@ class Session:
         with self._lock:
             data = self.summary.row()
             cli_reason = self.summary.cli_reason
+        lost = self._slot_hours_lost
+        if lost is not None:
+            cli_reason = f"wall-clock ({lost:.2f} slot-hours lost)"
         now = self.clock()
         data.update(
             {
@@ -1453,6 +1467,7 @@ class Session:
                 "elapsed_seconds": max(0.0, self.monotonic() - self._started),
                 "exit_code": code if finished else None,
                 "exit_reason": exit_reason(code, cli_reason) if finished else None,
+                "slot_hours_lost": lost,
             }
         )
         return data
