@@ -94,8 +94,19 @@ QUESTIONS_OUTCOMES = frozenset(
 )
 
 
-def _questions_outcome(outcome: str) -> bool:
-    return outcome in QUESTIONS_OUTCOMES or outcome.startswith("failed-questions-")
+_REFUSED_VERDICT_OUTCOMES = (
+    "rejected-",
+    "stale-",
+    "superseded-",
+    "refused-",
+    "woke-grok-unparsed",
+)
+
+
+def _answering_outcome(outcome: str) -> bool:
+    return outcome not in QUESTIONS_OUTCOMES and not outcome.startswith(
+        ("failed-questions-", *_REFUSED_VERDICT_OUTCOMES)
+    )
 
 
 def _acted_verdict(outcome: str | None) -> bool:

@@ -446,3 +446,28 @@ def test_a_reviews_own_questions_handoff_never_answers_the_review(
     pr.push(pr.head, ci="failure")
 
     assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+
+
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+def test_a_reviews_own_unparsed_handoff_never_answers_the_review(
+    tmp_path: Path, missing: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head, "review-ready")
+    board.poll()
+    unparsed = "<!-- orch:v1 kind=questions from=codex-bot role=reviewer\nNo questions."
+    for handoff in ("first-handoff", "retry-handoff"):
+        board.post(pr, handoff, unparsed, "codex-login")
+        board.queue.finish(board.claim("codex").id, owner="codex", handoff_comment_id=handoff)
+        board.poll()
+        assert board.outcome(handoff) == "woke-grok-unparsed"
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+    pr.comments.remove(next(item for item in pr.comments if item.id == "retry-handoff"))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr.push(pr.head, ci="failure")
+
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True

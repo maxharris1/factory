@@ -10,6 +10,7 @@ from lib.dispatch.constants import FINISHED_STATES
 from lib.dispatch.helpers import (
     _ANSWERS,
     _REGISTERING_ACTIONS,
+    _REFUSED_VERDICT_OUTCOMES,
     _REJECTED_OUTCOMES,
     _comment_link,
     _comment_order,
@@ -27,14 +28,6 @@ from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.state_backup import RESTORED
 from lib.update_check import UpdateScope
-
-_REFUSED_VERDICT_OUTCOMES = (
-    "rejected-",
-    "stale-",
-    "superseded-",
-    "refused-",
-    "woke-grok-unparsed",
-)
 
 
 class QuestionsMixin:
