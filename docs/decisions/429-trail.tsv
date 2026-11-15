@@ -5,3 +5,7 @@ f-3 plan attribution	skip a plan whose round is not the job's plan_round	T1P rej
 f-3 alternative	rejected handled_at <= queued_at in _predates	it fixes repro D only, not repro C
 plan round rule	one plan_round helper shared by lib/brief/common.py and T6	the brief tells the builder its round with this rule, so the two cannot drift
 comment-sicko MUST KILL on plan_round	left open	giving plan jobs a structured round field changes plan.py and retry.py job detail, outside this ticket
+f-4 fresh no-questions comment	T6 applies T5's own _asks_questions rule to every questions comment, handled or not	T5 records no-questions only after the fresh T6 read; one shared predicate keeps the two from drifting
+f-4 alternative	rejected deferring T6 until T5 handles the comment	the body alone decides no-questions, so waiting for T5 adds a deferred state with nothing to wait for
+f-5 resumed plan round	plan_round reads evidence.instructions.plan_attempt before the round=2/2 prefix	T5 replaces the instruction with the answer link, but plan_attempt is plan_gap_count + 1 at enqueue, the round T1P accepts; the brief now tells a resumed round-two builder round 2 too
+f-6 resumed job attribution	every job's result must come after the comment that queued it, as update jobs and _answered_by already required	the answers that resumed a job always follow the question they answer, so that question is excluded even when its timestamps tie the resume

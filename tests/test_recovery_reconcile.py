@@ -7,6 +7,7 @@ a fake source. Nothing reaches GitHub or the live orch.db.
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -555,3 +556,100 @@ def test_the_gap_report_that_queued_round_two_does_not_settle_its_failure(tmp_pa
     board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
     assert board.rows("plan") == [("done", 1), ("failed", 1), ("queued", 2)], board.rows("plan")
     assert board.workflow_state() == "planning"
+
+
+def _claimed_review(board: Board) -> str:
+    build = board.start("building")
+    box = Device(
+        name="box", slot_max=2, harnesses={"claude": "claude-bot", "codex": "codex-bot"}, local=True
+    )
+    DevicePool(board.queue, MachinesConfig(devices=(box,)))
+    board.post("ready-1", READY.format(head=HEAD))
+    board.queue.finish(build, owner="claude", handoff_comment_id="ready-1")
+    board.dispatcher.poll_once(Source(_green(board), board.now))
+    review = board.queue.claim("codex")
+    assert review is not None
+    return review.id
+
+
+def _green(board: Board) -> TrackedTicket:
+    return replace(board.snapshot(), ci={HEAD: CIResult("success")})
+
+
+def test_a_fresh_no_questions_comment_does_not_settle_a_failed_review(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    review = _claimed_review(board)
+    before = _green(board)
+    board.post(
+        "review-q",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nNo questions.\n",
+        bot="codex",
+    )
+    after = _green(board)
+    board.queue.finish(review, owner="codex", handoff_comment_id=None)
+
+    class Fresh(Source):
+        def fresh_ticket(self, ref: TicketRef) -> TrackedTicket:
+            return after
+
+    board.dispatcher.poll_once(Fresh(before, board.now))
+    for _ in range(2):
+        board.dispatcher.poll_once(Source(after, board.now))
+    assert board.dispatcher._handled_outcome(after, "review-q") == "no-questions"
+    assert board.rows("review") == [("failed", 1), ("queued", 2)], board.rows("review")
+
+
+def test_a_resumed_round_two_plan_settles_its_failure_without_a_second_plan(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    first = board.start("planning")
+    board.post("plan-1", PLAN.format(round=1, ac="unmet"))
+    board.queue.finish(first, owner="claude", handoff_comment_id="plan-1")
+    board.poll()
+    second = board.queue.claim("claude")
+    assert second is not None
+    board.post(
+        "q-2",
+        "<!-- orch:v1 kind=questions from=claude-bot role=builder state=waiting-max -->\n"
+        "Questions.\n",
+    )
+    board.queue.finish(second.id, owner="claude", handoff_comment_id="q-2")
+    board.poll()
+    board.post("a-2", ANSWERS, bot="grok")
+    board.poll()
+    resumed = board.queue.claim("claude")
+    assert resumed is not None
+    assert not json.loads(resumed.request.detail)["instruction"].startswith("round=2/2")
+    board.post("plan-2", PLAN.format(round=2, ac="met"))
+    board.fail(resumed.id)
+    board.poll()
+    assert board.rows("plan") == [("done", 1)] * 3, board.rows("plan")
+    assert "done-from-plan" in board.events(resumed.id)
+    assert board.workflow_state() == "building"
+
+
+def test_the_question_its_answers_answered_does_not_settle_a_resumed_review(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    first = _claimed_review(board)
+    board.comments.extend(
+        [
+            comment("a-review-q", REVIEWER_QUESTIONS, author="codex-login", created_at=200.0),
+            comment("z-review-a", ANSWERS, author="grok-login", created_at=200.0),
+        ]
+    )
+    board.now[0] = 200.25
+    board.queue.finish(first, owner="codex", handoff_comment_id=None)
+    snapshot = _green(board)
+    board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+    resumed = board.queue.claim("codex")
+    assert resumed is not None and resumed.created_at == 200.25
+    board.now[0] = 200.5
+    board.queue.finish(resumed.id, owner="codex", handoff_comment_id=None)
+    for at in (201.0, 202.0):
+        board.now[0] = at
+        board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+    assert "done-from-questions" not in board.events(resumed.id)
+    assert board.rows("review") == [("done", 1), ("failed", 1), ("queued", 2)], board.rows("review")

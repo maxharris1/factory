@@ -225,6 +225,11 @@ def _detail_round_number(detail: str | None) -> int | None:
 
 
 def plan_round(detail: Mapping[str, object]) -> int:
+    evidence = detail.get("evidence")
+    instructions = evidence.get("instructions") if isinstance(evidence, dict) else None
+    attempt = instructions.get("plan_attempt") if isinstance(instructions, dict) else None
+    if isinstance(attempt, int):
+        return attempt
     return 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1
 
 
@@ -345,6 +350,12 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
     if re.fullmatch(r"[0-9]+", comment.id):
         return comment.created_at, 0, int(comment.id)
     return comment.created_at, 1, comment.id
+
+
+def _asks_questions(fields: Mapping[str, str], body: str) -> bool:
+    return fields.get("state") == "waiting-max" or (
+        fields.get("role") != "orchestrator" and _has_questions(body)
+    )
 
 
 def _has_questions(body: str) -> bool:
