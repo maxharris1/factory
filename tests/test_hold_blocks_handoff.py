@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from pathlib import Path
 
@@ -367,3 +368,43 @@ def test_a_ready_for_review_finish_line_holds_then_hands_off_on_the_ok(
     assert board.actions.handoffs == [sha(1)]
     assert board.actions.merges == []
     assert board.state("42")["workflow_state"] == "handed-off"
+
+
+def edited(item):
+    return dataclasses.replace(item, edited_at=item.created_at + 1)
+
+
+@pytest.mark.parametrize("ship", ["handoff", "merge"])
+def test_an_edited_ok_at_the_head_stays_held(tmp_path: Path, ship: str) -> None:
+    dispatcher, queue, actions = setup(tmp_path)
+    ready(dispatcher, queue)
+    config, _ = root_config()
+    factory = dataclasses.replace(config, ship=ship)
+    held = edited(ok(HEAD, author=MAX))
+
+    dispatcher.process(snapshot(approve(), held, factory=factory, files=("orch.yml",)))
+
+    assert actions.handoffs == []
+    assert actions.merges == []
+    assert workflow_state(queue) == "awaiting-ok"
+
+    clean = ok(HEAD, author=MAX, comment_id="ok-2")
+    dispatcher.process(snapshot(approve(), held, clean, factory=factory, files=("orch.yml",)))
+
+    assert workflow_state(queue) != "awaiting-ok"
+
+
+def test_the_queue_does_not_merge_on_a_stale_ok_edited_to_the_head(tmp_path: Path) -> None:
+    board = Board(tmp_path, trusted_logins=TRUSTED)
+    board.factory, _ = root_config()
+    pr = board.open("42", sha(1))
+    pr.changed_files = ("orch.yml",)
+    board.build_and_approve(pr)
+    board.post(pr, "ok-1", OK.format(head=sha(1)), MAX)
+    pr.comments[-1] = edited(pr.comments[-1])
+    board.poll()
+
+    assert board.actions.handoffs == []
+    assert board.actions.merges == []
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert not board.wakes("done")

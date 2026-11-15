@@ -162,7 +162,7 @@ def decide(
 ) -> HoldDecision:
     """Whether the hold blocks a merge of the current head.
 
-    comments are dispatcher Comments (id, author, body). covers(head) says
+    comments are dispatcher Comments; an edited one never clears. covers(head) says
     whether an ok naming head covers the current head by the ship rule.
     """
     if labels is None:
@@ -211,6 +211,8 @@ def _approver_ok(
     )
     for item in newest_first:
         if str(getattr(item, "author", "")).casefold() != approver:
+            continue
+        if getattr(item, "edited_at", None) is not None:
             continue
         try:
             fields = parse_comment(str(getattr(item, "body", ""))).as_dict()
