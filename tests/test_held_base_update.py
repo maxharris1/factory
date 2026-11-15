@@ -160,3 +160,90 @@ def test_a_merge_only_job_already_out_at_the_head_is_not_queued_again(
     assert job["dedupe_key"] == "earlier"
     assert board.outcome(approve) == "held-base-update"
     assert board.state("42")["workflow_state"] == "fixing"
+
+
+@pytest.mark.parametrize("ci", ["pending", "failure", None])
+@pytest.mark.parametrize("mergeable_state", ["dirty", "behind"])
+def test_a_held_pr_queues_its_base_update_whatever_the_old_head_ci_says(
+    tmp_path: Path, mergeable_state: str, ci: str | None
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    pr.mergeable = mergeable_state != "dirty"
+    pr.mergeable_state = mergeable_state
+    pr.ci = {} if ci is None else {sha(1): ci}
+
+    for _ in range(4):
+        board.poll()
+
+    [job] = _merge_only_jobs(board)
+    assert job["source_comment_id"] == approve
+    assert board.outcome(approve) == "held-base-update"
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.wakes("stale") == []
+    assert board.actions.merges == []
+
+
+def _crash_before_handled(board: Board, approve: str):
+    mark = board.dispatcher._mark_handled
+
+    def crash(ticket, comment_id, outcome):
+        if comment_id == approve:
+            raise SystemExit("crash before the handled row")
+        return mark(ticket, comment_id, outcome)
+
+    board.dispatcher._mark_handled = crash
+    with pytest.raises(SystemExit):
+        board.poll()
+    board.dispatcher._mark_handled = mark
+
+
+@pytest.mark.parametrize("reused", [False, True])
+def test_a_crash_after_the_transition_replays_the_approve_as_held_not_stale(
+    tmp_path: Path, reused: bool
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    if reused:
+        board.queue.enqueue(
+            JobRequest(
+                repo="owner/repo",
+                ticket_id="42",
+                action="fix",
+                recipient="claude",
+                source_comment_id="restart",
+                timeout_seconds=60,
+                head=sha(1),
+                detail=json.dumps({"kind": "merge-only"}),
+            ),
+            dedupe_key="earlier",
+        )
+    pr.conflict()
+    _crash_before_handled(board, approve)
+
+    board.poll()
+
+    assert board.outcome(approve) == "held-base-update"
+    assert len(_merge_only_jobs(board)) == 1
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.wakes("stale") == []
+
+
+def test_a_failed_fixing_label_is_written_again_on_the_next_poll(tmp_path: Path) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    pr.conflict()
+    board.actions.state_failures.add(("owner/repo", "fixing"))
+
+    board.poll()
+
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.outcome(approve) is None
+    board.actions.state_failures.clear()
+
+    board.poll()
+
+    assert board.outcome(approve) == "held-base-update"
+    assert board.actions.states[-1] == "fixing"
+    assert len(_merge_only_jobs(board)) == 1
+    assert board.wakes("stale") == []

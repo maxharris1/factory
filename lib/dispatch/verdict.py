@@ -246,8 +246,9 @@ class VerdictMixin:
                 ship,
                 intent,
             )
-        if self._base_update_from(ticket, comment):
-            return True, "held-base-update"
+        replayed = self._replay_held_base_update(ticket, comment)
+        if replayed is not None:
+            return replayed
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
         reported_round = _round_number(fields.get("round"))
@@ -265,6 +266,12 @@ class VerdictMixin:
             return True, "stale-approve"
         if review_head is None or _matching_head(approved_head, review_head) is None:
             return True, "stale-approve"
+        if (
+            state == "awaiting-ok"
+            and ticket.mergeable_state in ("dirty", "behind")
+            and self._held_at(ticket, current_head)
+        ):
+            return self._hold_base_update(ticket, comment, current_head)
         if not _is_full_sha(current_head):
             self._wake_ship_failed(
                 ticket,

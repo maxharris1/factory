@@ -13,6 +13,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
+    _base_update_key,
     _comment_order,
     _matching_head,
     _merge_only,
@@ -76,7 +77,22 @@ class MergeQueueMixin:
         review_round: int,
         instruction: str,
     ) -> None:
-        request = JobRequest(
+        self._enqueue_or_flag(
+            ticket,
+            comment,
+            self._base_update_request(ticket, comment, head, review_round, instruction),
+            dedupe_key=_base_update_key(ticket, head),
+        )
+
+    def _base_update_request(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+        instruction: str,
+    ) -> JobRequest:
+        return JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
             action="fix",
@@ -93,12 +109,6 @@ class MergeQueueMixin:
                 instruction=instruction,
                 kind="merge-only",
             ),
-        )
-        self._enqueue_or_flag(
-            ticket,
-            comment,
-            request,
-            dedupe_key=f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
         )
 
     def _settle_update(
@@ -550,18 +560,6 @@ class MergeQueueMixin:
                   AND head = ? AND state IN ('queued', 'running')
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, ticket.current_head),
-            ).fetchall()
-        return any(_merge_only(row["detail"]) for row in rows)
-
-    def _base_update_from(self, ticket: TrackedTicket, comment: Comment) -> bool:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT detail FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'fix'
-                  AND source_comment_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
             ).fetchall()
         return any(_merge_only(row["detail"]) for row in rows)
 

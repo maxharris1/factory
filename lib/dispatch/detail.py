@@ -180,8 +180,11 @@ class DetailMixin:
                 connection, ticket, comment, request, dedupe_key=dedupe_key
             )
             connection.commit()
-        if answered is not None:
-            return job, answered
+        if answered is None:
+            self._flag_dropped(ticket, request, job)
+        return job, answered
+
+    def _flag_dropped(self, ticket: TrackedTicket, request: JobRequest, job: Job) -> None:
         if job.request.source_comment_id == request.source_comment_id:
             self.clear_attention(ticket.repo, ticket.ticket_id, "dedupe-dropped")
         elif job.state not in ("queued", "running"):
@@ -192,7 +195,6 @@ class DetailMixin:
                 f"{request.action} for comment {request.source_comment_id} matched "
                 f"finished job {job.id} ({job.state}); nothing was queued",
             )
-        return job, None
 
     def _enqueue_step(
         self,
