@@ -4,6 +4,42 @@ from __future__ import annotations
 
 from lib.followups import followups_active
 
+MAX_LISTED_COMMITS = 50
+_CI_WHILE_RUNNING = (
+    "CI may still be running on that head. Read its result if it has finished. "
+    "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
+)
+_MERGEABLE = " A merge conflict with the base is `mergeable: no` in the verdict, not a finding."
+
+
+def _update_steps(
+    update: dict, base: str, head: str, start_before_ci: bool, followup: bool
+) -> list[str]:
+    last = update["last_reviewed_head"]
+    merge = update["merge"]
+    commits = update["commits"]
+    steps = [
+        f"The code at `{last}` was already reviewed and approved. This head brings `{base}` in by merge commit "
+        f"`{merge}`. Review only how that merge resolved conflicts (`git show --remerge-diff {merge}`) and "
+        "whether the base changes break this PR: read the CI result on this head, and use `git range-diff` "
+        f"where useful. A finding in code unchanged since `{last}` is not blocking: tag it "
+        + ("`[minor]`, or `[follow-up]`." if followup else "`[minor]`.")
+        + (" " + _CI_WHILE_RUNNING if start_before_ci else "")
+        + _MERGEABLE
+    ]
+    if commits:
+        listed = " ".join(f"`{sha}`" for sha in commits[:MAX_LISTED_COMMITS])
+        more = (
+            f" ({len(commits)} commits in all; the list shows the first {MAX_LISTED_COMMITS})"
+            if len(commits) > MAX_LISTED_COMMITS
+            else ""
+        )
+        steps.append(
+            f"These commits came after the merge and get a normal review: {listed}{more}. "
+            f"Read their diff (`git diff {merge} {head}`)."
+        )
+    return steps
+
 
 def task_lines(facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
@@ -16,23 +52,28 @@ def task_lines(facts: dict) -> list[str]:
         "`met`, `unmet`, `unverified` or `unsatisfiable`, with its evidence (the file:line, test or run that "
         "shows it). `unsatisfiable` means no change to this PR can meet it, for example a criterion about "
         "other PRs' state.",
-        (
-            "Read the whole diff. CI may still be running on that head. Read its result if it has finished. "
-            "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
-            if facts["start_before_ci"]
-            else "Read the whole diff and the CI result on that head."
-        )
-        + " A merge conflict with the base is `mergeable: no` in the verdict, not a finding.",
         *(
-            [
-                "Close the earlier rounds first: for each earlier finding by its `f-<n>` id, and each earlier unmet "
-                "`ac-<n>`, say whether this head closes it. List each finding it closes as a `[closed]` item in the "
-                "form below. Then review the delta from the last reviewed head "
-                "(`git range-diff` when the branch was rebased). A new finding in code the delta did not change "
-                "is `[minor]` unless it fails a criterion."
+            _update_steps(facts["update"], base, head, facts["start_before_ci"], followup)
+            if facts["update"]
+            else [
+                (
+                    "Read the whole diff. " + _CI_WHILE_RUNNING
+                    if facts["start_before_ci"]
+                    else "Read the whole diff and the CI result on that head."
+                )
+                + _MERGEABLE,
+                *(
+                    [
+                        "Close the earlier rounds first: for each earlier finding by its `f-<n>` id, and each "
+                        "earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a "
+                        "`[closed]` item in the form below. Then review the delta from the last reviewed head "
+                        "(`git range-diff` when the branch was rebased). A new finding in code the delta did not "
+                        "change is `[minor]` unless it fails a criterion."
+                    ]
+                    if later_round
+                    else []
+                ),
             ]
-            if later_round
-            else []
         ),
         f"Run the verify skill `{verify}` (UI and database checks), plus interrogate and blast-radius. "
         "A verify result you cannot read (unknown) is `verdict=BLOCKED`."

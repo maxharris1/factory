@@ -17,6 +17,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.queue import Job, JobRequest
+from lib.update_check import UpdateScope
 
 
 class DetailMixin:
@@ -371,6 +372,7 @@ class DetailMixin:
         resume: bool = False,
         cap: int | None = None,
         kind: str | None = None,
+        update: UpdateScope | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -407,6 +409,13 @@ class DetailMixin:
             }
         if kind is not None:
             context["kind"] = kind
+        if update is not None:
+            context.update(
+                kind="update",
+                last_reviewed_head=update.last_reviewed_head,
+                update_merge=update.merge,
+                update_commits=list(update.commits),
+            )
         if resume:
             # Claim order (lib/queue.py): a resumed paused step goes before
             # bug and ordinary work, after urgent (issue #85).

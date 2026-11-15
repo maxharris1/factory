@@ -35,7 +35,7 @@ from lib.job_state import (
     read_placements,
 )
 from lib.queue import JobRequest
-from lib.update_check import UpdateClass
+from lib.update_check import UpdateClass, UpdateScope
 
 
 _MEMBER = """
@@ -116,7 +116,7 @@ class MergeQueueMixin:
         ticket: TrackedTicket,
         comment: Comment,
         reported_head: str,
-    ) -> tuple[bool, str] | None:
+    ) -> tuple[bool, str] | UpdateScope | None:
         """The builder's ready after an update-from-main job (#130).
 
         A trivial update keeps the approval: the ticket goes back to the
@@ -124,7 +124,8 @@ class MergeQueueMixin:
         approval-carried:<old>-><new>. A PR that still conflicts counts as
         a failed update. None sends the ready on through T2 to review (a
         non-trivial update) or to a CI fix (red CI), with the fresh ticket
-        in _polled.
+        in _polled. A non-trivial update shaped as a merge of base returns
+        its UpdateScope instead, so the review covers only that (#260).
         """
         key = (ticket.repo.lower(), ticket.ticket_id)
         row = self._queue_row(ticket)
@@ -183,7 +184,7 @@ class MergeQueueMixin:
                     f"update re-review: {ticket.repo}#{ticket.ticket_id} at "
                     f"{head[:12]}: {verdict.reason}"
                 )
-            return None
+            return verdict.scope
         self._write_state_label(fresh, back_to)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
