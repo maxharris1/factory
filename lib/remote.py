@@ -109,9 +109,12 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   fences the start it follows.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
-password prompt), a connect timeout and server keepalives. Tests replace
-it, or put a fake `ssh` first on PATH; nothing here contacts a real host
-on its own.
+password prompt), a connect timeout and server keepalives. `SshTransport`
+sends each call through one ControlMaster per alias and bot user (#222,
+lib/ssh_mux.py): a stale master is rebuilt inside the call, a device that
+cannot be reached still ends 255, and `ORCH_SSH_MUX=off` turns reuse off.
+Tests replace it, or put a fake `ssh` first on PATH; nothing here contacts
+a real host on its own.
 """
 
 from __future__ import annotations
@@ -124,6 +127,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
+from lib.ssh_mux import Multiplexer
 
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
@@ -363,6 +369,15 @@ def _darwin_worker(
         if fence
         else f'[ -e "$f" ] || {unsure}; '
     )
+    list_group = (
+        f"{_DARWIN_LIST} || {blind}; "
+        'set -f; set -- $o; set +f; w=$(($# / 3)); '
+        f"r=$({_DARWIN_GROUP}) || {blind}; "
+        "set -f; set -- $r; set +f; "
+        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
+        f'[ "$1" = 1 ] || {gone}; '
+    )
+    relist_or_unsure = f"{{ {list_group}{unsure}; }}"
     return (
         f"d={directory}; f=\"$d/.orch-worker-$t.pid\"; "
         'm="$d/.orch-worker-$t.members.pid"; '
@@ -377,17 +392,12 @@ def _darwin_worker(
         f'[ "$g" = "$t" ] || {unsure}; '
         f'case "$b" in {_UUID}) ;; *) {unsure};; esac; '
         f'[ "$b" = "$c" ] || {gone}; '
-        f"{_DARWIN_LIST} || {blind}; "
-        'set -f; set -- $o; set +f; w=$(($# / 3)); '
-        f"r=$({_DARWIN_GROUP}) || {blind}; "
-        "set -f; set -- $r; set +f; "
-        f'case "$#:$*" in "3:"[01]" "[01]" "[01]) ;; *) {blind};; esac; '
-        f'[ "$1" = 1 ] || {gone}; '
+        f"{list_group}"
         f'[ "$2" = 0 ] || {unsure}; '
         f'if [ "$3" = 1 ]; then '
-        f'{_LSTART}; [ "$*" = "$s" ] || {unsure}; '
+        f'{_LSTART}; [ "$*" = "$s" ] || {relist_or_unsure}; '
         f"{_DARWIN_SNAPSHOT + '; ' if snapshot else ''}"
-        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {unsure}; fi; "
+        f"else {_DARWIN_MEMBER}; [ -n \"$v\" ] || {relist_or_unsure}; fi; "
         f"{running}"
     )
 
@@ -621,11 +631,14 @@ ENV_FILE = "env"
 
 # The run's handoff, by the box's rule for what it relays: a line that is a
 # JSON object is a stream event (lib/telemetry.py), whose final message
-# (`result`, or a completed `agent_message`) gives its ORCH-HANDOFF line
-# (telemetry.handoff_line) at the next end event (`result`,
-# `turn.completed`) or the end of the log; any other non-blank line is
-# relayed as is. Prints the last line relayed when it is an ORCH-HANDOFF line.
-HANDOFF_AWK = r"""
+# (`result`, or a completed `agent_message`) gives its deciding marker line
+# at the next end event (`result`, `turn.completed`) or the end of the log;
+# any other line is relayed as is. Prints the marker line that decides the
+# relayed lines.
+HANDOFF_AWK = (
+    f'BEGIN {{ lines = {MARKER_SEARCH_LINES}; limit = {MARKER_LINE_LIMIT}; '
+    f'runner = "{RUNNER_LOG_PREFIX}"; prefix = "{MARKER_PREFIX}" }}'
+) + r"""
 function value(line, key,    i, n, c, h, out) {
     found = 0
     if (!match(line, "\"" key "\"[ \t]*:[ \t]*\"")) return ""
@@ -647,28 +660,33 @@ function value(line, key,    i, n, c, h, out) {
     }
     return ""
 }
-function handoff(text,    parts, k, line) {
+function strip(line) { sub(/^[ \t\r]+/, "", line); sub(/[ \t\r]+$/, "", line); return line }
+function kept(line) { return line != "" && index(line, runner) != 1 && line !~ /^```[A-Za-z0-9_-]*$/ }
+function candidate(line) { sub(/^`+/, "", line); return index(line, prefix) == 1 }
+function handoff(text,    parts, k, n, line) {
     gsub(/\r/, "\n", text)
-    for (k = split(text, parts, "\n"); k > 0; k--) {
-        line = parts[k]
-        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
-        if (line != "") break
+    n = 0
+    for (k = split(text, parts, "\n"); k > 0 && n < lines; k--) {
+        line = strip(parts[k])
+        if (!kept(line)) continue
+        n++
+        if (candidate(line)) return substr(line, 1, limit)
     }
-    return (k > 0 && line ~ /^ORCH-HANDOFF:/ && length(line) <= 113) ? line : ""
+    return ""
 }
-function emit(line) { if (line != "") { last = line; ok = 1 } }
+function relay(line) { line = strip(line); if (kept(line)) seen[count++ % lines] = line }
 /^[ \t]*\{.*\}[ \t\r]*$/ {
     if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
     else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
     else found = 0
     if (found) { final = text; pending = 1 }
-    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { emit(handoff(final)); pending = 0 }
+    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { relay(handoff(final)); pending = 0 }
     next
 }
-NF { last = $0; ok = 0 }
+{ relay($0) }
 END {
-    if (pending) emit(handoff(final))
-    if (ok || last ~ /^[ \t]*ORCH-HANDOFF: /) print last
+    if (pending) relay(handoff(final))
+    for (k = count - 1; k >= 0 && k >= count - lines; k--) if (candidate(seen[k % lines])) { print seen[k % lines]; exit }
 }
 """
 
@@ -680,23 +698,57 @@ _DETACH = (
     'exec env "ORCH_WORKER_TAG=$t" perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@"; }; '
 )
 
+# #199 r1: the run's deadline on the device, so it holds when the box's
+# runner dies. $1 the wrapper's pid, $2 the budget and $3 the grace (whole
+# seconds), $4 and $5 the stop and kill scripts (stop_script), $6 the check
+# script (check_script). It runs in a session of its own, without the tag
+# (no check counts it, no stop of the start's groups reaches it). The run
+# lives while the wrapper does or (#199 r2) the check finds a process of it,
+# so a worker the wrapper left behind keeps the deadline going. Past the
+# budget it runs the stop script; past the grace after that, the kill
+# script, again each second until the run is gone.
+_DEADLINE = (
+    'W=$1; B=$2; G=$3; C=$6; trap "" TERM INT HUP; '
+    'late() { [ "$(date +%s)" -ge "$1" ]; }; '
+    'live() { kill -0 "$W" 2>/dev/null && return 0; sh -c "$C" > /dev/null 2>&1; [ $? -eq 1 ]; }; '
+    'e=$(( $(date +%s) + B )); '
+    'while live; do late "$e" && break; sleep 1; done; '
+    'live || exit 0; '
+    'sh -c "$4"; e=$(( $(date +%s) + G )); '
+    'while live; do late "$e" && break; sleep 1; done; '
+    'while live; do sh -c "$5"; sleep 1; done'
+)
+
+_WRITE_RESULT_PAST_STOPS = (
+    'trap "" TERM INT; '
+    f"awk {shlex.quote(HANDOFF_AWK)} "
+    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
+    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+)
+
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
-# directory, $2 the detacher, $3 the start script. It starts the start
-# (lib/remote.py start_script, which records the worker and execs the
-# harness) in a session of its own with the brief as its stdin and its
-# output in `log`, records both pids, waits for it (again after a SIGTERM,
-# which it catches so the start keeps default handling), then writes
-# `handoff` and `exit`, each through a temporary file.
+# directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
+# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
+# and kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
+# records the worker and execs the harness) in a session of its own with
+# the brief as its stdin and its output in `log`, records both pids, starts
+# its deadline (_DEADLINE) when it has a budget, waits for the start (again
+# after a SIGTERM, which it catches so the start keeps default handling),
+# then writes `handoff` and `exit`, each through a temporary file.
 _WRAPPER = (
     'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
+    'if [ -n "$4" ]; then '
+    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
+    'if [ "$S" = setsid ]; then env -u ORCH_WORKER_TAG setsid "$@" '
+    '< /dev/null > /dev/null 2>&1 & '
+    'else env -u ORCH_WORKER_TAG perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@" '
+    '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    f"awk {shlex.quote(HANDOFF_AWK)} "
-    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
-    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+    + _WRITE_RESULT_PAST_STOPS
 )
 
 
@@ -715,7 +767,15 @@ def env_clear_script(target: RemoteTarget) -> str:
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
 
 
-def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int) -> str:
+def launch_script(
+    target: RemoteTarget,
+    start: str,
+    *,
+    size: int,
+    not_after: int,
+    budget: int | None = None,
+    grace: int = 30,
+) -> str:
     """The short call that starts `start` detached, once per tag.
 
     The brief (exactly `size` bytes) comes on stdin. Prints one
@@ -727,10 +787,22 @@ def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int
     ran). A launch that reaches the device after not_after (the box's epoch
     seconds) is refused unless its tag already ran. Like the start, it runs
     under `exec env ORCH_WORKER_TAG=<tag>`, so a check finds it running.
+
+    #199 r1: with a budget (whole seconds), the device stops the run once it
+    is past it (stop_script), and kills it `grace` seconds later
+    (stop_script with kill), whether or not the box still follows it.
     """
     tag = target.require_tag()
     if size < 0 or not_after <= 0:
         raise RemoteError("a launch needs the brief's size and a deadline")
+    if (budget is not None and budget <= 0) or grace < 0:
+        raise RemoteError("a launch's budget must be above 0 and its grace not below 0")
+    limits = (
+        f"{budget} {grace} {shlex.quote(stop_script(target))} "
+        f"{shlex.quote(stop_script(target, kill=True))} {shlex.quote(check_script(target))}"
+        if budget is not None
+        else "''"
+    )
     mark = LAUNCH_MARK
     launcher = (
         f"t={tag}; R={shlex.quote(run_dir(target))}; T=\"$R/$t\"; "
@@ -757,7 +829,7 @@ def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
         + _DETACH
         + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
-        "< /dev/null > /dev/null 2>&1 & "
+        f"{limits} < /dev/null > /dev/null 2>&1 & "
         "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
         "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "
         'if [ -e "$T/pid" ]; then say started; '
@@ -1032,16 +1104,43 @@ class ByteTransport(Transport, Protocol):
 
 
 class SshTransport:
-    """The real transport: the `ssh` on PATH, argv only, never a shell."""
+    """The real transport: the `ssh` on PATH, argv only, never a shell.
+
+    Calls built by `ssh_argv` go through one ControlMaster per alias and
+    bot user (`lib/ssh_mux.py`, issue #222); any other argv runs as given.
+    """
+
+    def __init__(self, mux: Multiplexer | None = None):
+        self.mux = mux or Multiplexer(binary=SSH_BINARY, options=SSH_OPTIONS)
+
+    def _spawn(
+        self, argv: Sequence[str], *, timeout: float, input: bytes | None, capture: bool
+    ) -> subprocess.CompletedProcess:
+        """Run argv; a timeout or a failed spawn raises, after the mux is told."""
+        prepared = self.mux.prepare(argv)
+        code: int | None = None
+        try:
+            if capture:
+                completed = subprocess.run(
+                    prepared.argv, input=input or b"", capture_output=True,
+                    timeout=timeout, check=False,
+                )
+            else:
+                completed = subprocess.run(
+                    prepared.argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=timeout, check=False,
+                )
+            code = completed.returncode
+            return completed
+        finally:
+            self.mux.settle(prepared, code)
 
     def exchange(
         self, argv: Sequence[str], *, timeout: float, input: bytes = b""
     ) -> Exchanged:
         """Run argv with input on stdin; a timeout or a failed spawn is unreachable."""
         try:
-            completed = subprocess.run(
-                list(argv), input=input, capture_output=True, timeout=timeout, check=False
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
         except OSError as exc:
@@ -1052,14 +1151,7 @@ class SshTransport:
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         try:
-            completed = subprocess.run(
-                list(argv),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=None, capture=False)
         except subprocess.TimeoutExpired:
             return SSH_UNREACHABLE
         except OSError:
@@ -1071,13 +1163,7 @@ class SshTransport:
     ) -> Called:
         """Run argv, feeding input (else /dev/null) and capturing its output."""
         try:
-            completed = subprocess.run(
-                list(argv),
-                input=input if input is not None else b"",
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Called(124, "", f"{_CHECKOUT_MARK} timed out after {timeout:g} seconds")
         except OSError as exc:

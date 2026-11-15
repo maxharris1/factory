@@ -90,9 +90,12 @@ def _dispatcher(tmp_path: Path, actions: FakeReviewActions, now: list[float]):
     return dispatcher, queue
 
 
-def _run(dispatcher: Dispatcher, source: Thread, cycles: int = 10) -> None:
-    for _ in range(cycles):  # one STOPPED_POLL_SECONDS at 30 s
+def _run(
+    dispatcher: Dispatcher, source: Thread, now: list[float], cycles: int = 11
+) -> None:
+    for _ in range(cycles):
         dispatcher.poll_once(source)
+        now[0] += 30
 
 
 def _rows(queue: SQLiteJobQueue, sql: str) -> list[tuple]:
@@ -118,16 +121,16 @@ def test_pr_89_is_flagged_after_the_cap_then_ends_merged(tmp_path: Path) -> None
     source = Thread(dispatcher, base, comments)
 
     source.shown = 1  # ready 1/3: tracking starts and round 1 is queued
-    _run(dispatcher, source, 1)
+    _run(dispatcher, source, now, 1)
     review = queue.claim("codex")
     assert review is not None
     queue.finish(review.id, owner="codex", handoff_comment_id=comments[1].id)
     for shown in range(2, len(comments) + 1):
         source.shown = shown
-        _run(dispatcher, source)
+        _run(dispatcher, source, now)
     after_cap = _rows(queue, "SELECT reason FROM needs_attention")
     source.merged = True
-    _run(dispatcher, source)
+    _run(dispatcher, source, now)
 
     outcomes = dict(_rows(queue, "SELECT comment_id, outcome FROM handled_comments"))
     assert [outcomes.get(item.id) for item in comments] == [
@@ -146,7 +149,7 @@ def test_pr_89_is_flagged_after_the_cap_then_ends_merged(tmp_path: Path) -> None
         ("done", "grok"),
     ]
     assert actions.handoffs == [comments[0].body.split("head=")[1].split()[0]]
-    assert all(dispatcher._tracked_refs(cycle=c) == () for c in range(10))  # never read again
+    assert dispatcher._tracked_refs(now[0] + 300) == ()
 
 
 def test_aut_2284_on_an_empty_db_queues_no_build(tmp_path: Path) -> None:
@@ -166,7 +169,7 @@ def test_aut_2284_on_an_empty_db_queues_no_build(tmp_path: Path) -> None:
     source = Thread(dispatcher, base, comments)
     source.shown = len(comments)  # the whole finished thread, at once
 
-    _run(dispatcher, source, 1)
+    _run(dispatcher, source, now, 1)
 
     outcomes = dict(_rows(queue, "SELECT comment_id, outcome FROM handled_comments"))
     assert [outcomes.get(item.id) for item in comments] == [

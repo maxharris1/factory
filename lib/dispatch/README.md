@@ -11,6 +11,14 @@ No module here imports `lib.dispatcher` at run time, and no mixin imports
 another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 `types.py` and `errors_text.py`.
 
+The caps rules live in the `caps/` package, one module per rule. For a change
+to one rule, name its module in `Touches:`, for example
+`lib/dispatch/caps/effective.py`. Never name the directory `lib/dispatch/caps/`:
+the feeder treats a directory as overlapping every file under it, so tickets
+would queue one at a time again. A ticket that changes how `CapsMixin` is
+composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
+`__init__.py` imports the rule modules.
+
 | Area | Module | Main contents |
 |---|---|---|
 | Data types | `types.py` | `Comment`, `CIResult`, `TrackedTicket`, `TicketRef`, the Protocols (`PollSource`, `ReviewActions`, `GrokDelivery`, `Hook`, `DeviceChecks`, `Feeder`), ship errors, `ShipRequest`, `LINEAR_STATE_PHASES` |
@@ -21,9 +29,13 @@ another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_after_finish`, `_reject_edited`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
 | Verdicts (T3, T4) | `verdict.py` (`VerdictMixin`) | `_t3`, `_t4`, `_record_approval`, `_approval_covers` |
-| Caps (T1) | `caps.py` (`CapsMixin`) | `_t1`, `_resume_after_cap`, `_over_cap`, `_effective_cap`, `_wake_capped` |
+| Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the four rule mixins below and re-exports the old `caps.py` names |
+| Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build |
+| Caps: resume after a cap | `caps/resume.py` (`ResumeAfterCapMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix |
+| Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
+| Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
 | Merge queue | `merge_queue.py` (`MergeQueueMixin`) | `_enter_merge_queue`, `_advance_merge_queue(s)`, base updates, `_settle_update`, `_classify_update`, `_update_failed` |
-| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_may_approve*`, `_approver_go`, `_ship_head` |
+| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_hold_in_play`, `_may_approve*`, `_approver_go`, `_ship_head` |
 | Ship | `ship.py` (`ShipMixin`, `ReviewShipper`) | ship intents, handoff redrive, external ships |
 | Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_answered_by`, cancel and requeue of answered jobs |
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |

@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lib.dispatcher import CIResult, Comment, Dispatcher, TicketRef, TrackedTicket
+from lib.dispatcher import CIResult, Comment, Dispatcher, LabelEvent, TicketRef, TrackedTicket
 from lib.factory_md import FactoryConfig, HoldConfig
 from lib.queue import Job, SQLiteJobQueue
 from lib.update_check import UpdateClass
@@ -49,6 +49,8 @@ class PR:
     merged: bool = False
     closed: bool = False
     labels: tuple[str, ...] = ()
+    changed_files: tuple[str, ...] = ()
+    label_events: tuple[LabelEvent, ...] = ()
 
     def push(self, head: str, *, ci: str = "success", state: str = "clean") -> None:
         self.head = head
@@ -89,6 +91,7 @@ class Board:
         self.classified: list[tuple[str, str, str, str]] = []
         self.classified_shared: list[tuple[str, ...]] = []
         self.verdict = UpdateClass(True, "each hunk took one side")
+        self.log: list[str] = []
 
         def default_classifier(
             repo: str, base: str, approved: str, head: str, shared_paths: tuple[str, ...]
@@ -104,6 +107,7 @@ class Board:
             review_actions=self.actions,
             grok_delivery=self.grok,
             update_classifier=default_classifier if classifier is None else classifier,
+            log=self.log.append,
         )
         if classifier is False:
             self.dispatcher.update_classifier = None
@@ -153,7 +157,11 @@ class Board:
     def snapshot(self, pr: PR, *, fresh: bool = False) -> TrackedTicket:
         hold = {}
         if self.factory.hold is not None:
-            hold = {"labels": pr.labels, "changed_files": (), "label_events": ()}
+            hold = {
+                "labels": pr.labels,
+                "changed_files": pr.changed_files,
+                "label_events": pr.label_events,
+            }
         return TrackedTicket(
             repo=pr.repo,
             ticket_id=pr.number,
