@@ -351,11 +351,11 @@ def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
 # --- efficiency page --------------------------------------------------------------------------
 
 
-def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path, last_cycle_at=NOW - 4)["efficiency.html"])
-    for panel in ("health", "savings"):
-        assert f'id="{panel}"' in html, panel
-    health = _text(_section(html, "health"))
+def test_efficiency_page_has_savings_and_a_one_line_definition(tmp_path: Path) -> None:
+    pages = _pages(tmp_path, last_cycle_at=NOW - 4)
+    html = _no_script(pages["efficiency.html"])
+    assert 'id="savings"' in html
+    health = _text(_section(_no_script(pages["health.html"]), "health"))
     assert "OK" in health and "1,250 req/h" in health
     savings = _section(html, "savings")
     line = re.search(r'<p class="definition" id="share-definition">(.*?)</p>', savings, re.S)
@@ -366,7 +366,7 @@ def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: 
     assert definition.lower().startswith("scripted share")
     assert len(definition) <= 200
     assert "50%" in _text(savings)
-    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log"):
+    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log", "health"):
         assert f'id="{panel}"' not in html, panel
 
 
@@ -467,6 +467,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     assert job["round"] == "2/3"
     assert job["tracker"] == "github"
+    keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
+            "reason", "current")
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "questions", "building", "review", "fixing", "review"],
@@ -474,6 +476,18 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         # #78: the chart's direct successors of review, and review is not finished.
         "next": ["blocked", "ship", "stuck", "fixing", "capped"],
         "terminal": False,
+        "visits": [dict(zip(keys, row)) for row in (
+            ("intake", "script", None, None, False, False, None, False),
+            ("questions", "script", None, None, False, False,
+             "brief and acceptance criteria posted", False),
+            ("building", "claude", NOW - 5000, 1000, True, False, "kind=go, queue build", False),
+            ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False),
+            ("fixing", "claude", NOW - 3000, 1000, True, False, "REVISE, under the round cap",
+             False),
+            ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True),
+        )],
+        "hops_to_shipped": 2,
+        "all_durations_known": False,
     }
 
 
@@ -599,6 +613,7 @@ class Node {
     this.children = kids; kids.forEach(c => { c.parentNode = this; }); this._text = ''; }
   get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === body; }
   focus() { global.document.activeElement = this; }
+  scrollIntoView() {}
   setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
@@ -772,11 +787,11 @@ def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> Non
     text = activity["text"]
     assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
     assert text["attention"].count("AUT-7") == 1
-    health = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "components", "no-waiter", "log"])
-    assert "cycle line 79" in health["text"]["log"]
-    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings"])
+    system = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "health", "log"])
+    assert "cycle line 79" in system["text"]["log"]
+    assert "OK" in system["text"]["health"]
+    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "savings"])
     text = efficiency["text"]
-    assert "OK" in text["health"]
     assert dashboard.SCRIPTED_SHARE_DEFINITION in text["savings"]
     assert "50%" in text["savings"]
 

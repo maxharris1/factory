@@ -323,8 +323,8 @@ def read_telemetry(connection: sqlite3.Connection, now: float) -> dict:
         place = _text(row["repo"], 100)
         _add(repo.setdefault(place, _bucket(place)), row)
     finished = sorted(
-        (row for row in rows if row["finished_at"] is not None),
-        key=lambda row: float(row["finished_at"]),
+        (row for row in rows if _number(row["finished_at"]) is not None),
+        key=lambda row: _number(row["finished_at"]),
         reverse=True,
     )
     order = lambda item: (-item["tokens_in"] - item["tokens_out"], item["name"])  # noqa: E731
