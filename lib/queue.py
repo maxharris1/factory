@@ -11,6 +11,11 @@ bug marks (the backlog feeder writes them from the issue's labels or Linear
 priority); a database without that table orders on resume and age alone.
 A queued job on a ticket whose `ticket_state` is abandoned is never claimed
 (issue #109).
+
+A handoff that `orch job done` finds does not fit its job (lib/handoff_check.py,
+#191) is recorded by record_invalid_handoff: a `submitted-invalid` job event
+each time, one `submitted-invalid` needs_attention flag per ticket, and the
+MAX_INVALID_HANDOFFS-th one fails the job for T6.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from lib import attention
 from lib.state_backup import RESTORED, RESTORED_CLAIM
 
 ACTIONS = (
@@ -51,6 +57,8 @@ STATES = ("queued", "running", "done", "failed", "cancelled")
 SLOTS_TABLE = "device_slots"
 # Urgent and bug marks per ticket for the claim order (issue #85).
 PRIORITY_TABLE = "ticket_priority"
+SUBMITTED_INVALID = "submitted-invalid"
+MAX_INVALID_HANDOFFS = 3
 
 
 class QueueError(ValueError):
@@ -392,6 +400,86 @@ class SQLiteJobQueue:
                 raise QueueError("finish requires a running job")
             connection.commit()
         return _job(updated)
+
+    def record_invalid_handoff(
+        self, job_id: str, *, owner: str, comment_id: str, detail: str
+    ) -> tuple[int, Job]:
+        """A running job's handoff did not fit it (#191): how many invalid
+        handoffs it has now, and the job, failed once that is
+        MAX_INVALID_HANDOFFS. The ticket's needs_attention flag is raised
+        once and keeps its first detail."""
+        if owner not in RECIPIENTS:
+            raise QueueError(f"unknown owner {owner!r}")
+        now = self.now()
+        text = f"handoff {comment_id}: {detail}"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise QueueError(f"unknown job {job_id!r}")
+            if row["recipient"] != owner:
+                raise QueueError(f"job {job_id} belongs to {row['recipient']}, not {owner}")
+            if row["state"] != "running":
+                raise QueueError("an invalid handoff can only be recorded on a running job")
+            _ensure_job_events(connection)
+            connection.execute(
+                """
+                INSERT INTO job_events (
+                    job_id, repo, ticket_id, action, recipient, event, detail, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id, str(row["repo"]).lower(), row["ticket_id"], row["action"],
+                    owner, SUBMITTED_INVALID, text, now,
+                ),
+            )
+            attention.ensure_table(connection)
+            connection.execute(
+                """
+                INSERT INTO needs_attention (repo, ticket_id, reason, detail, raised_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(repo, ticket_id, reason) DO NOTHING
+                """,
+                (
+                    str(row["repo"]).lower(), row["ticket_id"], SUBMITTED_INVALID,
+                    text[: attention.DETAIL_LIMIT], now,
+                ),
+            )
+            count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM job_events WHERE job_id = ? AND event = ?",
+                    (job_id, SUBMITTED_INVALID),
+                ).fetchone()[0]
+            )
+            if count >= MAX_INVALID_HANDOFFS:
+                connection.execute(
+                    """
+                    UPDATE jobs SET state = 'failed', finished_at = ?, last_activity_at = ?,
+                        handoff_comment_id = NULL
+                    WHERE id = ?
+                    """,
+                    (now, now, job_id),
+                )
+            updated = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            connection.commit()
+        return count, _job(updated)
+
+    def clear_invalid_handoff(self, job_id: str) -> None:
+        """Drop the ticket's submitted-invalid flag once its job is done."""
+        with self._connect() as connection:
+            if not _has_table(connection, "needs_attention"):
+                return
+            connection.execute(
+                """
+                DELETE FROM needs_attention
+                WHERE reason = ? AND EXISTS (
+                    SELECT 1 FROM jobs
+                    WHERE jobs.id = ? AND lower(jobs.repo) = needs_attention.repo
+                      AND jobs.ticket_id = needs_attention.ticket_id
+                )
+                """,
+                (SUBMITTED_INVALID, job_id),
+            )
 
     def cancel(
         self,
@@ -795,6 +883,26 @@ def restored_claim(connection: sqlite3.Connection, job_id: str) -> bool:
     ).fetchone() is not None
 
 
+def _ensure_job_events(connection: sqlite3.Connection) -> None:
+    """The dispatcher's job_events table (lib/dispatcher.py), for a database
+    `orch job done` reaches before any poll made it."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            ticket_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            recipient TEXT NOT NULL,
+            event TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            recorded_at REAL NOT NULL
+        )
+        """
+    )
+
+
 def _has_table(connection: sqlite3.Connection, name: str) -> bool:
     return (
         connection.execute(
@@ -818,6 +926,10 @@ def _validate_request(request: JobRequest) -> None:
         raise QueueError("generation must be positive")
     if request.attempt not in (1, 2):
         raise QueueError("attempt must be 1 or 2")
+
+
+def job_from_row(row: sqlite3.Row) -> Job:
+    return _job(row)
 
 
 def _job(row: sqlite3.Row) -> Job:

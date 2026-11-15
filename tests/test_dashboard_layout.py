@@ -3,8 +3,8 @@ efficiency pages.
 
 - Main page (index.html): factory status on top, lanes and slots as the
   centerpiece with each slot's job (ticket or PR, bot, step, round, elapsed),
-  the queue in a side rail, and a "needs attention" badge that links to the
-  Activity page. No poll/Linear budget, handoffs, verdicts, tickets, log or
+  the queue in a side rail. The attention strip under the header band (#139)
+  links to the Activity page. No poll/Linear budget, handoffs, verdicts, tickets, log or
   savings.
 - Job page (job.html): a flow diagram drawn from model/chart.mmd (the
   statechart's checked-in chart), with the job's path and current state
@@ -247,25 +247,27 @@ def test_attention_items_are_listed_once_each(tmp_path: Path) -> None:
     assert attention["count"] == 3
 
 
-def test_needs_attention_badge_counts_and_links_to_activity(tmp_path: Path) -> None:
+def test_attention_strip_counts_and_links_to_activity(tmp_path: Path) -> None:
+    """#139: the strip under the band replaces the badge."""
     pages = _pages(tmp_path)
     for name, html in pages.items():
-        badge = _section(_no_script(html), "attention-badge")
-        assert 'href="activity.html#attention"' in badge, name
-        assert re.search(r'<b id="attention-count">3</b>', badge), (name, badge)
-        assert "needs attention" in _text(badge)
+        strip = _section(_no_script(html), "attention-strip")
+        assert 'href="activity.html#attention"' in strip, name
+        assert re.search(r'<b id="attention-count">3</b>', strip), (name, strip)
+        assert "3 need attention" in _text(strip)
+        assert "attention-badge" not in html
 
 
-def test_badge_count_is_zero_and_calm_when_all_clear(tmp_path: Path) -> None:
+def test_attention_strip_is_absent_when_all_clear(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute("DELETE FROM ticket_state")
         connection.execute("UPDATE jobs SET last_activity_at = ?", (NOW - 5,))
     snapshot = collect_snapshot(db, log, now=NOW)
     assert snapshot["attention"] == {"count": 0, "items": []}
-    badge = _section(render_pages(snapshot)["index.html"], "attention-badge")
-    assert '<b id="attention-count">0</b>' in badge
-    assert "badge clear" in badge
+    for name, html in render_pages(snapshot).items():
+        assert '<div class="attn" id="attention-strip" hidden></div>' in html, name
+        assert "attention-count" not in _no_script(html), name
 
 
 # --- #63 FU-1: a lane counts max(held, running) ----------------------------------------
@@ -592,12 +594,18 @@ class Node {
     if (deep) this.children.forEach(c => n.appendChild(c.cloneNode(true))); return n; }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
+  html() { const attrs = (this.className ? ' class="' + esc(this.className) + '"' : '') +
+      Object.keys(this.attrs).map(k => ' ' + k + '="' + esc(this.attrs[k]) + '"').join('') + (this.hidden ? ' hidden' : '');
+    return '<' + this.tagName + attrs + '>' + esc(this._text) + this.children.map(c => c.html()).join('') +
+      '</' + this.tagName + '>'; }
   dump(depth) { const pad = ' '.repeat(depth || 0);
     const attrs = ['href', 'data-device', 'data-state', 'data-from', 'data-to', 'data-step', 'role']
       .filter(k => k in this.attrs).map(k => '[' + k + '=' + this.attrs[k] + ']').join('');
     return pad + this.tagName + (this.className ? '.' + this.className.split(' ').join('.') : '') + attrs +
       (this._text ? ' "' + this._text + '"' : '') + '\n' + this.children.map(c => c.dump((depth || 0) + 1)).join(''); }
 }
+function esc(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#x27;'); }
 const body = new Node('body');
 body.attrs['data-generated'] = '1800000000.000';
 body.attrs['data-refresh'] = '20';
@@ -676,8 +684,9 @@ setTimeout(() => {
   act(JSON.parse(actionsText || '[]'));
   process.stdout.write(JSON.stringify({fetches, steps,
     text: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.textContent])),
-    dump: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.dump(0)]))}));
-  process.exit(0);
+    html: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.children.map(c => c.html()).join('')])),
+    hidden: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, !!v.hidden])),
+    dump: Object.fromEntries(Object.entries(ids).map(([k, v]) => [k, v.dump(0)]))}), () => process.exit(0));
 }, 200);
 """
 
@@ -707,7 +716,18 @@ def _run_page(
     return out
 
 
-BAR = ["link", "link-text", "age", "clock", "attention-badge", "attention-count"]
+# The shell on every page (#139): the TopBar's link state and caret, the band,
+# the attention strip and the status line.
+BAR = ["link", "link-text", "age", "clock", "caret", "band", "attention-strip", "statusline"]
+
+
+def attention_count(out: dict) -> str:
+    """The attention strip's count as the script drew it; "0" only when the
+    strip is hidden and empty, as it is when nothing needs attention."""
+    if out["hidden"]["attention-strip"]:
+        assert out["html"]["attention-strip"] == "", out["html"]["attention-strip"]
+        return "0"
+    return out["text"]["attention-count"]
 
 
 @needs_node
@@ -715,7 +735,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
     out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "queue"])
     assert "LIVE" in out["text"]["link-text"]
-    assert out["text"]["attention-count"] == "3"
+    assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
     assert "a.slot.job[href=job.html#job-r-codex-]" in lanes
     for needle in ("cleffy#13", "codex", "review", "round 3/3", "T+ ", "OVERDUE", "DISABLED",

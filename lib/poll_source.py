@@ -126,6 +126,10 @@ class PollSourceError(RuntimeError):
     pass
 
 
+class FactoryParseError(PollSourceError):
+    """factory.md was fetched but does not validate."""
+
+
 class PollCycleError(PollSourceError):
     pass
 
@@ -143,6 +147,7 @@ class HTTPResult:
 
 LinearTransport = Callable[[str, Mapping[str, str], bytes, float], HTTPResult]
 ErrorSink = Callable[[str, str, str], None]
+WarningSink = Callable[[str], None]
 DeferralSink = Callable[[str], None]
 TerminalSink = Callable[[str, str, str, "TrackedTicket | None"], None]
 
@@ -230,7 +235,11 @@ class LivePollSource:
             "github": config.trusted_logins,
             "linear": config.trusted_linear_users,
         }
+        self.warning_sink: WarningSink | None = None
         self._factory_cache: dict[str, FactoryConfig] = {}
+        self._last_good_factory: dict[str, FactoryConfig] = {}
+        self._last_good_context: dict[str, FactoryContext] = {}
+        self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
@@ -1060,12 +1069,20 @@ class LivePollSource:
             raise PollSourceError(
                 f"{project.repo} has no projects[].factory_ref in orch.yml"
             )
-        factory = self._factory_at(project.repo, project.factory_ref)
+        try:
+            factory = self._factory_at(project.repo, project.factory_ref)
+            fresh = True
+        except FactoryParseError as exc:
+            factory = self._last_good(identity, exc, self._last_good_factory)
+            fresh = False
         if factory.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {factory.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if fresh:
+            self._last_good_factory[identity] = factory
+            self._factory_warned.pop(identity, None)
         self._factory_cache[identity] = factory
         return factory
 
@@ -1094,19 +1111,43 @@ class LivePollSource:
         """
         if project.factory_ref is None:
             raise PollSourceError(f"{project.repo} has no projects[].factory_ref in orch.yml")
+        identity = project.repo.lower()
         text = self._factory_text(project.repo, project.factory_ref)
-        context, findings = parse_factory_context(text)
-        if context is None:
+        parsed, findings = parse_factory_context(text, strict=False)
+        if parsed is None:
             errors = [item.message for item in findings if item.severity == "error"]
-            raise PollSourceError(
-                f"{project.repo} factory.md: {errors[0] if errors else 'invalid factory.md'}"
+            context = self._last_good(
+                identity,
+                FactoryParseError(
+                    f"{project.repo} factory.md: {errors[0] if errors else 'invalid factory.md'}"
+                ),
+                self._last_good_context,
             )
+        else:
+            context = parsed
         if context.config.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {context.config.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if parsed is not None:
+            self._last_good_context[identity] = parsed
+            self._factory_warned.pop(identity, None)
         return context
+
+    def _last_good(self, identity: str, exc: FactoryParseError, cache: dict):
+        """A factory.md parse failure falls back to the last good parse (#288).
+
+        With none, the failure stands. Each distinct failure warns once.
+        """
+        last = cache.get(identity)
+        if last is None:
+            raise exc
+        if self._factory_warned.get(identity) != str(exc):
+            self._factory_warned[identity] = str(exc)
+            if self.warning_sink is not None:
+                self.warning_sink(f"{exc}; keeping the last good factory.md")
+        return last
 
     def _factory_text(self, repo: str, branch: str) -> str:
         content = _json_object(
@@ -1146,11 +1187,11 @@ class LivePollSource:
             text = base64.b64decode(compact, validate=True).decode("utf-8")
         except (ValueError, UnicodeError) as exc:
             raise PollSourceError(f"{repo} factory.md content is invalid") from exc
-        factory, findings = parse_factory_md(text)
+        factory, findings = parse_factory_md(text, strict=False)
         errors = [item.message for item in findings if item.severity == "error"]
         if factory is None:
             detail = errors[0] if errors else "invalid factory.md"
-            raise PollSourceError(f"{repo} factory.md: {detail}")
+            raise FactoryParseError(f"{repo} factory.md: {detail}")
         return factory
 
     def _github_ticket(

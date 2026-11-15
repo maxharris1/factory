@@ -13,6 +13,7 @@ import pytest
 from lib import job_run
 from lib.job_state import JobStateConfig
 from lib.queue import JobRequest, QueueError, SQLiteJobQueue
+from tests.handoff_store import serve_job
 from tests.pool_helpers import pool_claim
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -280,6 +281,7 @@ def test_cli_job_run_stops_heartbeating_when_the_command_finishes_the_job(
     queue = _queue(tmp_path)
     job = _running_job(queue)
     database = tmp_path / "orch.db"
+    serve_job(database, job.id, "99")
     script = (
         "import subprocess, sys, time; "
         f"subprocess.run([sys.executable, {str(ORCH)!r}, 'job', 'done', 'codex-bot', "

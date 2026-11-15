@@ -574,6 +574,15 @@ def test_factory_md_lookup_is_case_insensitive_on_the_repo(tmp_path: Path) -> No
     assert result.context is not None
 
 
+def test_an_unknown_factory_md_field_still_reaches_the_brief(tmp_path: Path) -> None:
+    text = FACTORY_MD.replace("base_branch: dev", "base_branch: dev\nnew_field: [x]")
+    assert "new_field" in text
+    run = FakeRun(stdout=contents(text))
+    result = GhContextSource(orch_config(tmp_path), run=run, environ={}).load("owner/repo")
+    assert result.context is not None and result.note is None
+    assert "Never apply migrations" in result.context.body
+
+
 @pytest.mark.parametrize(
     ("run", "repo", "note"),
     [
@@ -701,11 +710,13 @@ while not go.exists() and not crash.exists() and time.time() < deadline:
 if crash.exists():
     sys.exit(1)  # a harness that dies before `orch job done`
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
-                os.environ["ORCH_JOB_BOT"], job, "--handoff", "c-" + job[:6]], check=True)
+                os.environ["ORCH_JOB_BOT"], job, "--handoff", subprocess.check_output([sys.executable, os.environ["FAKE_POST_HANDOFF"], os.environ["ORCH_DB"], job], text=True).strip()], check=True)
 """
 
 FAKE_GH = f"#!{sys.executable}\n" + """import base64, json, os, sys
 from pathlib import Path
+if not any(part.endswith("/contents/factory.md") for part in sys.argv[1:]):
+    os.execv(sys.executable, [sys.executable, os.environ["FAKE_GH_HANDOFFS"], *sys.argv[1:]])
 log = Path(os.environ["FAKE_GH_LOG"])
 with log.open("a") as handle:
     handle.write(json.dumps({"argv": sys.argv[1:],

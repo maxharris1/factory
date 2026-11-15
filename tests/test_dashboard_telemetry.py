@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lib import telemetry
-from lib.dashboard import collect_snapshot, render_pages, write_snapshot_pages
+from lib.dashboard import collect_snapshot, redact, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
 from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
 from tests.test_telemetry import readable
@@ -176,6 +176,8 @@ def test_nonfinite_numbers_in_the_table_never_reach_published_json(tmp_path: Pat
         db, "d-claude-build-1", harness="claude", cost_usd=bad,
         finished_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
         steps=json.dumps([{"at": bad, "kind": "tool", "label": "x", "status": "ok"}]),
+        subagents=json.dumps([{"kind": "Explore", "description": "d", "status": "finished",
+                               "started_at": bad, "finished_at": bad}]),
     )
     snapshot = collect_snapshot(db, log, now=NOW)
     status = write_snapshot_pages(tmp_path / "out", snapshot)[0]
@@ -185,6 +187,8 @@ def test_nonfinite_numbers_in_the_table_never_reach_published_json(tmp_path: Pat
     assert rollup["totals"]["tokens_in"] == 24763
     item = _running(data)["13"]["telemetry"]
     assert item["cost_usd"] is None and item["tokens_in"] == 0
+    agent = rollup["recent"][0]["subagents"][0]
+    assert agent["started_age_seconds"] is None and agent["finished_age_seconds"] is None
 
 
 def test_efficiency_rolls_up_tokens_and_cost_per_harness_repo_and_job(tmp_path: Path) -> None:
@@ -232,6 +236,209 @@ def test_an_older_or_odd_table_reads_as_unreadable_not_an_error(tmp_path: Path) 
     snapshot = collect_snapshot(db, log, now=NOW)
     assert snapshot["telemetry"]["state"] == "unreadable"
     assert _running(snapshot)["13"]["telemetry"] is None
+
+
+
+# --- the live run: plan, current task, last finished, sub-agents (#148) ------------------------
+
+LIVE = ("plan", "current_task", "last_finished", "subagents")
+PLAN = [
+    {"text": "Read the ticket", "status": "done"},
+    {"text": "Write the failing test", "status": "in_progress"},
+    {"text": "Push and hand off", "status": "pending"},
+]
+AGENTS = [
+    {"kind": "Explore", "description": "Find the reader", "status": "finished",
+     "started_at": NOW - 90, "finished_at": NOW - 30},
+    {"kind": "general-purpose", "description": "Run the suite", "status": "running",
+     "started_at": NOW - 20, "finished_at": None},
+]
+
+
+def test_an_old_table_without_live_columns_reads_counters_and_no_live_run(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    old = telemetry.DDL
+    for name in LIVE:
+        old = re.sub(rf",\s*{name} TEXT", "", old)
+    assert not any(name in old for name in LIVE)
+    row = {"job_id": "r-codex-review", "bot": "codex-bot", "harness": "codex", "repo": "maxharris1/cleffy",
+           "started_at": NOW - 300, "updated_at": NOW - 10, "last_event_at": NOW - 5,
+           "elapsed_seconds": 290, "events": 42, "turns": 3, "tool_calls": "{}", "files_touched": 2,
+           "commands": 7, "test_runs": 0, "tokens_in": 100, "tokens_cached": 0, "tokens_out": 10,
+           "steps": json.dumps(STEPS)}
+    with sqlite3.connect(db) as connection:
+        connection.execute(old)
+        connection.execute(
+            f"INSERT INTO job_telemetry ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+            tuple(row.values()),
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert snapshot["telemetry"]["state"] == "ok"
+    item = _running(snapshot)["13"]["telemetry"]
+    assert (item["turns"], item["commands"], item["tokens_in"], len(item["steps"])) == (3, 7, 100, 3)
+    assert {name: item[name] for name in LIVE} == dict.fromkeys(LIVE)
+
+
+def test_a_counters_only_row_has_no_live_run(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review", **dict.fromkeys(LIVE))
+    item = _running(collect_snapshot(db, log, now=NOW))["13"]["telemetry"]
+    assert (item["turns"], item["tokens_in"]) == (3, 24763)
+    assert {name: item[name] for name in LIVE} == dict.fromkeys(LIVE)
+
+
+def test_a_full_row_gives_plan_current_task_last_finished_and_subagents(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(
+        db, "r-codex-review", plan=json.dumps(PLAN), current_task="Write the failing test",
+        last_finished="Read the ticket", subagents=json.dumps(AGENTS),
+    )
+    item = _running(collect_snapshot(db, log, now=NOW))["13"]["telemetry"]
+    assert item["plan"] == PLAN
+    assert item["current_task"] == "Write the failing test"
+    assert item["last_finished"] == "Read the ticket"
+    assert item["subagents"] == [
+        {"kind": "Explore", "description": "Find the reader", "status": "finished",
+         "started_age_seconds": 90, "finished_age_seconds": 30},
+        {"kind": "general-purpose", "description": "Run the suite", "status": "running",
+         "started_age_seconds": 20, "finished_age_seconds": None},
+    ]
+
+
+def test_an_empty_live_run_reads_as_empty_lists_and_no_task(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "r-codex-review", plan="[]", current_task="", last_finished="", subagents="[]")
+    item = _running(collect_snapshot(db, log, now=NOW))["13"]["telemetry"]
+    assert (item["plan"], item["current_task"], item["last_finished"], item["subagents"]) == ([], None, None, [])
+
+
+def test_a_finished_job_keeps_its_live_run_in_the_rollup(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    add_telemetry(db, "d-claude-build-1", harness="claude", finished_at=NOW - 100, exit_code=0,
+                  exit_reason="success; exit 0", plan=json.dumps(PLAN), last_finished="Read the ticket")
+    recent = collect_snapshot(db, log, now=NOW)["telemetry"]["recent"]
+    assert recent[0]["plan"] == PLAN and recent[0]["last_finished"] == "Read the ticket"
+
+
+def test_live_run_values_are_validated_and_capped(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    long = "x" * 300
+    plan = [{"text": f"step {n}", "status": "done"} for n in range(20)]
+    plan[0] = {"text": "odd\nline\x07here", "status": "completed"}
+    plan[1] = {"text": "", "status": "done"}
+    plan[2] = "not an item"
+    plan[3] = {"text": long, "status": "pending"}
+    agents = [{"kind": "Explore", "description": f"agent {n}", "status": "finished",
+               "started_at": NOW - 10, "finished_at": NOW - 5} for n in range(12)]
+    agents[0] = {"kind": "", "description": "two\nlines", "status": "exploded",
+                 "started_at": True, "finished_at": NOW - 1}
+    agents[1] = ["not", "an", "agent"]
+    agents[2] = {"kind": "k" * 99, "description": long, "status": "failed",
+                 "started_at": "soon", "finished_at": None}
+    add_telemetry(db, "r-codex-review", plan=json.dumps(plan), current_task=f"a\nb\tc {long}",
+                  last_finished="   ", subagents=json.dumps(agents))
+    add_telemetry(db, "d-claude-build-1", harness="claude", plan="{not json", finished_at=NOW - 100,
+                  subagents=json.dumps({"kind": "Explore"}), current_task=b"\x00blob")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    item = _running(snapshot)["13"]["telemetry"]
+    assert len(item["plan"]) == 12
+    assert item["plan"][0] == {"text": "odd linehere", "status": "pending"}
+    assert item["plan"][1] == {"text": "x" * 119 + "…", "status": "pending"}
+    assert item["plan"][2] == {"text": "step 4", "status": "done"}
+    assert item["current_task"].startswith("a b c x") and len(item["current_task"]) == 120
+    assert item["current_task"].endswith("…")
+    assert item["last_finished"] is None
+    assert len(item["subagents"]) == 8
+    assert item["subagents"][0] == {"kind": "agent", "description": "two lines", "status": "running",
+                                    "started_age_seconds": None, "finished_age_seconds": None}
+    assert item["subagents"][1] == {"kind": "k" * 39 + "…", "description": "x" * 119 + "…",
+                                    "status": "failed", "started_age_seconds": None,
+                                    "finished_age_seconds": None}
+    assert item["subagents"][2]["finished_age_seconds"] == 5
+    other = snapshot["telemetry"]["recent"][0]
+    assert other["job"] == "d-claude"
+    assert (other["plan"], other["subagents"], other["current_task"]) == (None, None, None)
+
+
+def test_secrets_in_live_run_text_never_reach_the_snapshot_or_pages(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    url = "https://deploy:hunter2pass@example.com/hook"
+    email = "someone.private@example.org"
+    add_telemetry(
+        db, "r-codex-review",
+        plan=json.dumps([{"text": f"push with {GH_CLASSIC}\n<script>", "status": "in_progress"}]),
+        current_task=f"post to {url}",
+        last_finished=f"mail {email} <script>alert(1)</script>",
+        subagents=json.dumps([{"kind": GH_CLASSIC, "description": f"fetch {url} for {email}",
+                               "status": "running", "started_at": NOW - 3, "finished_at": None}]),
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    text = json.dumps(snapshot)
+    for secret in (GH_CLASSIC, "hunter2pass", email, "example.com/hook"):
+        assert secret not in text, secret
+    item = _running(snapshot)["13"]["telemetry"]
+    assert item["plan"][0]["text"].startswith("push with [redacted")
+    assert item["current_task"].startswith("post to [redacted")
+    assert "[redacted-email]" in item["last_finished"]
+    assert "[redacted" in item["subagents"][0]["kind"]
+    assert "[redacted" in item["subagents"][0]["description"]
+    out = tmp_path / "out"
+    write_snapshot_pages(out, snapshot)
+    for page in out.rglob("*"):
+        if page.is_file():
+            body = page.read_text(errors="replace")
+            for secret in (GH_CLASSIC, "hunter2pass", email):
+                assert secret not in body, (page.name, secret)
+            if page.suffix == ".html":
+                assert "<script>alert" not in _no_script(body)
+
+
+def _across_cap(limit: int) -> str:
+    token = "ghp_" + "A1" * 18
+    lead = "work " * ((limit - 12) // 5)
+    return lead + "read " + token
+
+
+def _split_by(control: str) -> object:
+    return lambda limit: "read ghp_" + "A1" * 5 + control + "B2" * 13
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [_across_cap, *(_split_by(c) for c in ("\x00", "\x07", "\r", "\x1b", "\x7f", "\x9f"))],
+    ids=["text-cap", "nul", "bel", "cr", "esc", "del", "c1"],
+)
+def test_a_secret_is_redacted_whole_before_any_later_transform(tmp_path: Path, secret) -> None:
+    assert "ghp_" not in redact(secret(telemetry.TASK_TEXT_LIMIT))
+    db, log = seeded(tmp_path)
+    task = secret(telemetry.TASK_TEXT_LIMIT)
+    kind = secret(telemetry.LABEL_LIMIT)
+    repo = secret(100)
+    add_telemetry(
+        db, "r-codex-review", repo=repo,
+        plan=json.dumps([{"text": task, "status": "in_progress"}]),
+        current_task=task, last_finished=task,
+        subagents=json.dumps([{"kind": kind, "description": task, "status": "running",
+                               "started_at": NOW - 3, "finished_at": None}]),
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    item = _running(snapshot)["13"]["telemetry"]
+    fields = {
+        "plan": item["plan"][0]["text"],
+        "current_task": item["current_task"],
+        "last_finished": item["last_finished"],
+        "kind": item["subagents"][0]["kind"],
+        "description": item["subagents"][0]["description"],
+        "repo": item["repo"],
+    }
+    for name, value in fields.items():
+        assert "ghp_" not in value and "[redacted" in value, (name, value)
+    out = tmp_path / "out"
+    write_snapshot_pages(out, snapshot)
+    pages = [page for page in out.rglob("*") if page.is_file()]
+    assert {"status.json", "efficiency.html"} <= {page.name for page in pages}
+    for page in pages:
+        assert "ghp_A1" not in page.read_text(errors="replace"), page.name
 
 
 # --- the page script draws the same ---------------------------------------------------------

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lib.factory_md import EXAMPLE_PATHS, load_factory_md, parse_factory_md
+from lib.factory_md import EXAMPLE_PATHS, load_factory_md, parse_factory_context, parse_factory_md
 from lib.schema import AUT0_REPO, HARNESSES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -503,6 +503,73 @@ def test_unknown_field_is_refused(tmp_path: Path) -> None:
     config, findings = load_factory_md(write_factory(tmp_path, data))
     assert config is None
     assert any("unknown field 'owner_bot'" in finding.message for finding in findings)
+
+
+def test_unknown_fields_warn_when_read_leniently(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["owner_bot"] = "grok"
+    data["builder"]["temperature"] = 1
+    text = write_factory(tmp_path, data).read_text(encoding="utf-8")
+
+    config, findings = parse_factory_md(text, strict=False)
+
+    assert config is not None
+    assert config.builder_harness == "claude"
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", "unknown field 'owner_bot'"),
+        ("warning", "unknown field 'builder.temperature'"),
+    ]
+    context, context_findings = parse_factory_context(text, strict=False)
+    assert context is not None
+    assert context_findings == findings
+
+
+@pytest.mark.parametrize(
+    ("section", "extra"),
+    [
+        ("builder", {"model": "claude-opus"}),
+        ("reviewer", {"model": "gpt-5"}),
+        ("review", {}),
+        ("review.rounds", {}),
+        ("hold", {"approver": "max-login", "paths": ["src/**"], "label": "qa:hold"}),
+    ],
+)
+def test_lenient_read_drops_only_an_unknown_nested_key(
+    tmp_path: Path, section: str, extra: dict
+) -> None:
+    data = copy.deepcopy(VALID)
+    data.setdefault("hold", {})
+    parts = section.split(".")
+    cursor = data
+    for part in parts:
+        cursor = cursor[part]
+    cursor.update(extra)
+    known, known_findings = parse_factory_md(
+        write_factory(tmp_path, data).read_text(encoding="utf-8")
+    )
+    assert known is not None and known_findings == []
+    cursor["future_field"] = True
+    text = write_factory(tmp_path, data).read_text(encoding="utf-8")
+
+    config, findings = parse_factory_md(text, strict=False)
+
+    assert config == known
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", f"unknown field '{section}.future_field'")
+    ]
+
+
+def test_lenient_read_still_refuses_a_bad_known_field(tmp_path: Path) -> None:
+    data = copy.deepcopy(VALID)
+    data["owner_bot"] = "grok"
+    data["ship"] = "yolo"
+    text = write_factory(tmp_path, data).read_text(encoding="utf-8")
+
+    config, findings = parse_factory_md(text, strict=False)
+
+    assert config is None
+    assert [f.severity for f in findings if "owner_bot" in f.message] == ["warning"]
+    assert any(f.severity == "error" and "ship" in f.message for f in findings)
 
 
 def test_ci_runner_is_optional(tmp_path: Path) -> None:
