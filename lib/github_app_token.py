@@ -457,7 +457,7 @@ def _command_refresh(args: argparse.Namespace) -> int:
         return 1
     if config.github_app is None:
         return 0
-    machines, machine_findings = load_machines_yml(Path(args.machines))
+    machines, machine_findings = load_machines_yml(Path(args.machines), allow_placeholders=True)
     devices = machines.devices if machines is not None else ()
     if machines is None:
         for finding in machine_findings:
@@ -532,19 +532,52 @@ def credential(directory: Path, operation: str, stdin: TextIO, stdout: TextIO, n
     return 0
 
 
+_REPO_FLAGS = ("-R", "--repo")
+_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+_GITHUB_TARGET = re.compile(
+    r"^(?:https?://)?(?:www\.|api\.)?github\.com/(?:repos/|orgs/|users/)?([^/\s]+)/"
+)
+_API_PATH = re.compile(r"^/?(?:repos|orgs|users)/([^/?\s]+)")
+_REPO_SLUG = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)/[A-Za-z0-9._-]+$")
+
+
+def _owner_of_target(value: str, slug: bool) -> str | None:
+    match = _GITHUB_TARGET.match(value) or _API_PATH.match(value)
+    if match is None and slug:
+        match = _REPO_SLUG.match(value)
+    return match.group(1) if match else None
+
+
+def _field_value(args: Sequence[str], index: int) -> str | None:
+    arg = args[index]
+    if arg in _FIELD_FLAGS:
+        return args[index + 1] if index + 1 < len(args) else None
+    for flag in _FIELD_FLAGS:
+        if flag.startswith("--") and arg.startswith(flag + "="):
+            return arg[len(flag) + 1 :]
+        if not flag.startswith("--") and arg.startswith(flag) and len(arg) > len(flag):
+            return arg[len(flag) :]
+    return None
+
+
 def owner_from_args(args: Sequence[str]) -> str | None:
+    """The owner of the repo or org a gh command targets: -R/--repo, a
+    github.com URL, a REST path, an `owner=` GraphQL field, or the
+    OWNER/REPO positional of `gh repo <command>`."""
+    positional_repo = args[:1] == ["repo"]
     for index, arg in enumerate(args):
-        repo = None
-        if arg in ("-R", "--repo") and index + 1 < len(args):
-            repo = args[index + 1]
+        owner = None
+        if arg in _REPO_FLAGS and index + 1 < len(args):
+            owner = _owner_of_target(args[index + 1], slug=True)
         elif arg.startswith("--repo="):
-            repo = arg.split("=", 1)[1]
-        elif arg.startswith(("repos/", "/repos/")):
-            repo = arg.lstrip("/").split("/", 1)[1]
-        if repo:
-            repo = repo.removeprefix("https://github.com/").removeprefix("github.com/")
-            if "/" in repo:
-                return repo.split("/", 1)[0]
+            owner = _owner_of_target(arg.split("=", 1)[1], slug=True)
+        elif (field := _field_value(args, index)) is not None:
+            if field.startswith("owner="):
+                owner = field.split("=", 1)[1] or None
+        elif not arg.startswith("-"):
+            owner = _owner_of_target(arg, slug=positional_repo and index > 1)
+        if owner:
+            return owner
     return None
 
 

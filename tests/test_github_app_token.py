@@ -292,6 +292,50 @@ def test_gh_finds_the_owner_from_the_checkouts_origin(tmp_path: Path, monkeypatc
     assert broker.owner_from_args(["pr", "view", "284"]) is None
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["repo", "clone", "aut0-code/project"],
+        ["repo", "clone", "aut0-code/project", "work/dir"],
+        ["repo", "view", "https://github.com/aut0-code/project"],
+        ["pr", "view", "https://github.com/aut0-code/project/pull/7"],
+        ["pr", "checkout", "github.com/aut0-code/project/pull/7"],
+        ["issue", "view", "https://github.com/aut0-code/project/issues/3", "--json", "state"],
+        ["api", "graphql", "-f", "query=q", "-f", "owner=aut0-code", "-f", "name=project"],
+        ["api", "graphql", "-F", "owner=aut0-code", "-F", "name=project"],
+        ["api", "graphql", "--raw-field", "owner=aut0-code"],
+        ["api", "graphql", "--field=owner=aut0-code"],
+        ["api", "graphql", "-fowner=aut0-code"],
+        ["api", "/repos/aut0-code/project/pulls"],
+        ["api", "orgs/aut0-code/repos"],
+        ["api", "https://api.github.com/repos/aut0-code/project"],
+        ["pr", "list", "-R", "github.com/aut0-code/project"],
+        ["pr", "list", "--repo", "https://github.com/aut0-code/project"],
+    ],
+)
+def test_gh_uses_the_installation_of_the_commands_target_over_the_checkouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    broker.write_token(broker.token_path(tokens, "maxharris1"), issued(10, f"{SENTINEL}_MAX"), None)
+    broker.write_token(broker.token_path(tokens, "aut0-code"), issued(10, f"{SENTINEL}_AUT0"), None)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    assert broker.gh_env(tokens, args, {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_AUT0"
+    subprocess.run(["git", "init", "-q"], check=True)
+    subprocess.run(["git", "remote", "add", "origin", "https://github.com/maxharris1/factory"], check=True)
+    assert broker.gh_env(tokens, args, {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_AUT0"
+    assert broker.gh_env(tokens, ["pr", "view", "284"], {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_MAX"
+
+
+def test_gh_reads_no_owner_from_values_that_name_no_repo() -> None:
+    assert broker.owner_from_args(["pr", "create", "--body-file", "notes/x.md"]) is None
+    assert broker.owner_from_args(["api", "graphql", "-f", "query=a/b"]) is None
+    assert broker.owner_from_args(["pr", "view", "284", "--json", "url"]) is None
+
+
 def test_the_gh_wrapper_runs_gh_with_the_token_in_its_environment_only(tmp_path: Path) -> None:
     tokens = tmp_path / "tokens"
     tokens.mkdir()
@@ -433,6 +477,40 @@ def test_refresh_reads_orch_and_machines_and_sends_to_enabled_remote_devices(
     printed = capsys.readouterr().out
     assert "claude-bot maxharris1: minted" in printed
     assert SENTINEL not in printed
+
+
+def test_refresh_reads_an_inventory_whose_disabled_devices_hold_placeholders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_github_apps_config import orch_text
+
+    orch = tmp_path / "orch.yml"
+    orch.write_text(orch_text(enabled=False), encoding="utf-8")
+    shipped = (ROOT / "machines.yml").read_text(encoding="utf-8")
+    assert "REPLACE_WITH_" in shipped
+    machines = tmp_path / "machines.yml"
+    machines.write_text(
+        shipped.replace("name: pc\n    enabled: false", "name: pc\n    enabled: true")
+        + "  - name: half\n    tailscale_name: REPLACE_WITH_HALF_TAILSCALE\n    slot_max: 1\n"
+        "    harnesses: {claude: claude-bot}\n    workdir_root: /home/{bot}/w\n"
+        "    ssh_alias: half-{bot}\n    factory_root: /home/{bot}/factory\n",
+        encoding="utf-8",
+    )
+    readers: list[dict[str, str]] = []
+    pushes: list[tuple[Remote, str]] = []
+    monkeypatch.setattr(broker, "github_mint", FakeMint())
+    monkeypatch.setattr(broker, "box_holders", lambda bots, users: readers.append(dict(users)) or {})
+    monkeypatch.setattr(broker, "ssh_push", lambda remote, owner, payload: pushes.append((remote, owner)) or True)
+
+    status = broker.main(["refresh", "--orch", str(orch), "--machines", str(machines),
+                          "--token-root", str(tmp_path / "tokens")])
+
+    assert status == 0
+    assert readers == [{"claude-bot": "claude-bot", "codex-bot": "codex-bot", "cursor-bot": "cursor-bot"}]
+    assert {remote.device for remote, _ in pushes} == {"pc"}
+    assert sorted((remote.alias, owner) for remote, owner in pushes) == sorted(
+        (f"pc-wsl-{bot}", owner) for bot in ("claude-bot", "codex-bot", "cursor-bot") for owner in ("maxharris1", "owner")
+    )
 
 
 def test_refresh_still_mints_on_the_box_when_machines_yml_is_broken(
