@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from lib.dispatch.helpers import _non_verdict_outcome
 from lib.dispatcher import Dispatcher
 from tests.merge_queue_support import APPROVE, GO, READY, TRUSTED_LOGINS, VERDICT, sha
 from tests.test_dispatcher import ANSWERS, PLAN, RETRY
@@ -24,7 +23,7 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    reviewed_at_pending_ci(board, pr, older)
+    reviewed_at_pending_ci(board, pr, older, "approve-older")
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
     if mode in ("interrupt", "existing-table"):
@@ -282,31 +281,3 @@ def test_a_hidden_handled_non_verdict_comment_never_answers_the_review(
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
     assert CI_LOG in instruction(fixes[0])
-    assert _non_verdict_outcome(outcome)
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        "ticket-stuck",
-        "ticket-abandoned",
-        "after-merge",
-        "after-handoff",
-        "duplicate-verdict",
-        "failed-verdict-RuntimeError",
-        "ship-failed",
-        "woke-grok-blocked",
-        "rejected-blocked-author",
-        "approve-ci-red-fix",
-        "answered-fix",
-        "queued-review-fix",
-        "capped-review",
-        "stale-revise",
-        "stale-approve",
-        "held-base-update",
-        "merge-queue",
-        "ship-already-completed-merge",
-    ],
-)
-def test_an_outcome_a_verdict_can_store_is_never_a_non_verdict_outcome(outcome: str) -> None:
-    assert not _non_verdict_outcome(outcome)

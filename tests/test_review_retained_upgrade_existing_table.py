@@ -46,7 +46,7 @@ def test_an_upgrade_over_an_interrupted_old_process_leaves_runnable_recovery(
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    reviewed_at_pending_ci(board, pr, older)
+    reviewed_at_pending_ci(board, pr, older, "approve-older")
     with board.queue.connect() as connection:
         connection.execute("ALTER TABLE verdict_heads DROP COLUMN posted_at")
         connection.execute("DROP TABLE verdict_heads_floor")
