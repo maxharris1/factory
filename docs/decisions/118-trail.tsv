@@ -7,3 +7,4 @@ U3 extra path	route-same-family stuck wake also gets _project_wake_detail	the ne
 U2 verify	verify read failures also fail the cycle	the ticket's problem statement lists it
 U2 old tests	five tests that assumed a silent source failure now expect PollCycleFailed	ac-1 changes exactly that behavior
 out of scope	poll_deferrals growth	not in the ticket
+f-1 model	MaxOkAfterHandoff adds 1 to round, guarded to extra = 0; property HandoffCountsApprovedRound checks both handoff exits	resume.py records the approved round as completed; TLC needs extra bounded, so a second at-cap go after handoff is left out
