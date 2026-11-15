@@ -267,6 +267,27 @@ def ticket_phases(chart: dict | None) -> dict[str, str]:
     return phases
 
 
+def hops_to_shipped(chart: dict | None, state: str | None) -> int | None:
+    """The fewest transitions from `state` to a SHIPPED state, or None when
+    no shipped state is reachable."""
+    if chart is None or state is None:
+        return None
+    adjacency = _adjacency(chart)
+    if state not in adjacency:
+        return None
+    hops = {state: 0}
+    queue = deque([state])
+    while queue:
+        name = queue.popleft()
+        if name in SHIPPED:
+            return hops[name]
+        for nxt in adjacency[name]:
+            if nxt not in hops:
+                hops[nxt] = hops[name] + 1
+                queue.append(nxt)
+    return None
+
+
 def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
     return "Stop" if stuck else phases.get(state, "Stop")
 
