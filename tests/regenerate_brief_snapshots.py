@@ -70,6 +70,11 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "merge-only": ("fix", "claude", 1, HEAD, {"kind": "merge-only", "round": "1/3"}),
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
+    "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
+}
+
+FACTORY_MDS = {
+    "review-before-ci": FACTORY_MD.replace("  verify: verify-cleffy\n", "  verify: verify-cleffy\n  start_before_ci: true\n"),
 }
 
 
@@ -117,7 +122,7 @@ def _job(action: str, recipient: str, attempt: int, head: str | None, extra: dic
 def render_snapshot(kind: str) -> str:
     action, recipient, attempt, head, extra = CASES[kind]
     job = _job(action, recipient, attempt, head, extra)
-    context, findings = parse_factory_context(FACTORY_MD)
+    context, findings = parse_factory_context(FACTORY_MDS.get(kind, FACTORY_MD))
     assert context is not None, findings
     box = render_brief(
         job, bot=f"{recipient}-bot", context=context, context_ref="dev", factory_root=BOX_FACTORY_ROOT
