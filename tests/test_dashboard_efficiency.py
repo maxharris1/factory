@@ -13,7 +13,7 @@ from lib.usage_readings import Reading
 from tests.test_dashboard import NOW, add_job, add_ticket, make_db, seeded
 from tests.test_dashboard_layout import _run_page, _section, _text, needs_node
 
-PANELS = ["savings", "jobs-lifetime", "rounds", "working", "headroom", "tokens", "health"]
+PANELS = ["savings", "jobs-lifetime", "rounds", "working", "headroom", "tokens"]
 
 
 def _machines(tmp_path: Path) -> Path:

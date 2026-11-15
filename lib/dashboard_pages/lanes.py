@@ -1,472 +1,558 @@
-"""index.html (Lanes): factory status (with Linear webhook health when a listener has run),
-lanes and slots, the queue rail, and the job modal script."""
+"""index.html (Lanes, #140): Factory status tiles, the lanes (queue lane, then one row of slot
+tiles per device), Just happened and Intake. Copied from Lanes.dc.html, SlotTile.dc.html and
+the KPI and queue studies in Bits.dc.html."""
 
 from __future__ import annotations
 
-from lib.pr_title import label
+import json
+import math
+
 from lib.dashboard_pages.activity import _health_link
 from lib.dashboard_pages.common import (
-    anchor, _bot, _chip, duration, _e, _feed, _job_kind, _job_label, _num, _panel, _span,
-    _state_chip, _ticket, _when,
+    anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _num, _panel, _short, _span,
+    _ticket, _when,
 )
 
 
 CSS = """\
+#hud #lanes{grid-column:1/-1}
 .kpis{display:flex;flex-wrap:wrap;gap:12px}
-.kpi{flex:1 1 140px;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
-.kpi b{display:block;font:600 30px/1.15 var(--mono);letter-spacing:-.03em;color:var(--text);font-variant-numeric:tabular-nums}
-.kpi span{font:500 12px/1.3 var(--mono);color:var(--muted)}
-.kpi.accent b{color:var(--accent)}.kpi.ok b{color:var(--ok)}.kpi.warn b{color:var(--warn)}.kpi.bad b{color:var(--bad)}
-.devices{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
-.device{padding:12px;background:var(--bg);box-shadow:var(--elev)}
-.device.disabled{color:var(--muted);box-shadow:none;outline:1px dashed var(--line-hi);outline-offset:-1px;
+.kpi{position:relative;flex:1 1 140px;min-width:0;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
+.kpi b{display:block;font:600 30px/1.15 var(--mono);letter-spacing:-.03em;color:var(--text);font-variant-numeric:tabular-nums;white-space:pre}
+.kpi span{display:block;font:500 12px/1.3 var(--mono);color:var(--muted)}
+.kpi .px{position:absolute;top:0;left:0;width:100%;height:8px}
+.kpi.ok b{color:var(--ok)}.kpi.bad b{color:var(--bad)}
+.lanes{display:flex;flex-direction:column;gap:10px}
+.lane{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:flex-start;padding:12px;background:var(--bg);box-shadow:var(--elev)}
+.lane.disabled{color:var(--muted);box-shadow:none;outline:1px dashed var(--line-hi);outline-offset:-1px;
 background:repeating-linear-gradient(135deg,var(--dim) 0 8px,var(--bg) 8px 16px)}
-.device.disabled .name{color:var(--muted)}
-.device header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.device .name{font:600 14px/1 var(--mono);letter-spacing:-.01em;color:var(--text)}
-.device .cap{margin-left:auto;font:12px/1 var(--mono);color:var(--muted)}
-.device .harness{margin:0 0 10px;font-size:12px;color:var(--muted)}
-.slots{display:grid;gap:6px}
-.slot{min-height:54px;padding:8px 10px;border:1px solid transparent;background:var(--panel-hi)}
-.slot.idle{display:flex;align-items:center;justify-content:center;border:1px dashed var(--line-hi);background:transparent;
-font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:lowercase;color:var(--muted)}
-.job .top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
-.job .ticket{font:600 13px/1.25 var(--mono);color:var(--text);overflow-wrap:anywhere}
-.job .action{font-size:12px;color:var(--text-2)}
-.job .times{display:flex;justify-content:space-between;gap:8px;margin:5px 0 6px;font:12px/1.2 var(--mono);color:var(--muted)}
-.job .times b{font-weight:600;color:var(--text)}
-.job.overdue{border-color:var(--bad);box-shadow:inset 0 0 0 1px var(--bad)}
-.hb{height:3px;background:var(--line-hi);overflow:hidden}
-.hb i{display:block;height:100%;width:0;background-color:var(--ok);
-background-image:linear-gradient(90deg,transparent 0,rgba(255,255,255,.35) 50%,transparent 100%);
-background-size:200% 100%;animation:shimmer 2.4s linear infinite;transition:width .9s linear}
-.hb.warn i{background-color:var(--warn)}.hb.bad i{background-color:var(--bad)}
-"""
-
-
-CSS_LINKS = """\
-a.slot,a.queue-item,.jobs a{color:inherit;text-decoration:none}
-a.slot{display:block}
-a.slot:hover,a.slot:focus-visible{border-color:var(--brand)}
-#lanes .devices{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-#lanes .slot{min-height:84px}
-.slot.held{display:flex;align-items:center;justify-content:center;border:1px dashed var(--warn);background:transparent;
-font:500 11px/1 var(--mono);letter-spacing:.12em;text-transform:lowercase;color:var(--warn)}
-.job .step{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:3px;font-size:12px;color:var(--muted)}
-.job .step b{font-weight:600;color:var(--text)}
+.lane-head{flex:0 0 168px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.lane-head .name{font:600 14px/1.2 var(--mono);letter-spacing:-.01em;color:var(--text)}
+.lane.disabled .name{color:var(--muted)}
+.lane-head .sub,.lane-body .sub{font:12px/1.3 var(--mono);color:var(--muted)}
+.lane-head .harness{font-size:12px;line-height:1.3;color:var(--muted)}
+.lane-meter{display:block}
+.lane-meter .px{height:8px}
+.lane-body{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:6px}
+.lane-body .px{height:12px}
+.qrail{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.qrail li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;font:12px/1.3 var(--mono)}
+.qrail a{display:flex;align-items:baseline;gap:8px;color:inherit;text-decoration:none}
+.qrail .ticket{font:600 13px/1.25 var(--mono);color:var(--text)}
+.qrail a:hover .ticket{color:var(--brand)}
+.qrail .what{color:var(--text-2)}.qrail .when{color:var(--muted)}
+.qrail .belt{display:block;flex:1 1 120px;min-width:0}
+.tiles{flex:1 1 400px;min-width:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.tile{display:block;min-width:0;min-height:124px;background:var(--panel-hi);border:1px solid transparent;color:var(--text);
+text-decoration:none;font:12px/1.3 var(--mono)}
+a.tile:hover,a.tile:focus-visible{border-color:var(--brand)}
+.tile.bad{border-color:var(--bad)}
+.tile.claude{--bt:var(--claude)}.tile.codex{--bt:var(--codex)}.tile.cursor{--bt:var(--cursor)}.tile.grok{--bt:var(--grok)}
+.tile-body{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;container-type:inline-size}
+.tile-l1{display:flex;align-items:baseline;gap:6px;min-width:0}
+.tile-l1 .ticket{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 13px/1.25 var(--mono);color:var(--text)}
 .kind{padding:0 4px;color:var(--muted);font-size:10px}
-.queue-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;width:100%}
-.queue-item:hover .ticket,.jobs a:hover .ticket{color:var(--brand)}
+.tile-l2{display:flex;align-items:center;gap:7px;min-height:18px}
+.glyph{display:grid;grid-template-columns:5px 5px;grid-template-rows:5px 5px;gap:1px}
+.glyph i{background:var(--line-hi)}.glyph i.on{background:var(--bt,var(--ok))}
+.verb{display:flex;white-space:pre;font:500 14px/1.25 var(--mono);color:var(--muted)}
+.verb.live{color:var(--text)}.verb.warn{color:var(--warn)}.verb.bad{color:var(--bad)}
+.verb .h{color:#ffffff}.verb .n{color:var(--bt,var(--ok))}
+.tile-l3{display:flex;align-items:center;gap:8px;color:var(--muted)}
+.tile-l3 .action{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+.round{flex:none;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.pips{display:flex;gap:2px}
+.pips i{width:6px;height:6px;background:var(--line-hi)}.pips i.done{background:var(--text)}.pips i.cur{background:var(--accent)}
+.tile-l3 .t{flex:none;margin-left:auto;white-space:nowrap}.tile-l3 .t b{font-weight:600;color:var(--text)}
+@container (max-width:175px){.tile-l3{gap:6px}.tile-l3 .action,.tile-l3 .t{font-size:11px}}
+.tile-l4{display:flex;align-items:center;gap:8px}
+.hbar{flex:1 1 0;height:3px;background:var(--line-hi)}
+.hbar i{display:block;height:3px;background:var(--ok)}
+.hbar.warn i{background:var(--warn)}.hbar.bad i{background:var(--bad)}
+.tile-l4 .hbt{white-space:nowrap;color:var(--muted)}
+.tile-l4 .hbt.warn{color:var(--warn)}.tile-l4 .hbt.bad{color:var(--bad)}
+.tile.empty{position:relative;display:flex;margin:0;flex-direction:column;background:transparent;border:1px dashed var(--line-hi)}
+.tile.empty.px-held{border-color:transparent}
+.tile.empty .lbl{flex:1 0 auto;display:flex;align-items:center;justify-content:center;
+font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--muted)}
+.tile.empty.px-held .lbl{color:var(--warn)}
+.pair{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.pair>.panel{min-width:0}
+#just-happened{flex:3 1 560px}#intake{flex:2 1 380px}
+.wake{padding:0 4px;font-size:10px;color:var(--grok)}
+.intake{display:flex;flex-direction:column;gap:10px}
+.irow{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.irow p{flex:1 0 100%;margin:0;font-size:12px}
+.ilabel{min-width:108px;font:500 12px/1.3 var(--mono);color:var(--muted)}
+.itext{font-size:12px;color:var(--text-2)}
+.imeter{display:block;width:176px}.imeter .px{height:8px}
+#intake .feed{margin-top:10px}
+#intake details{margin-top:4px}
+.fed-more{margin:4px 0 0;padding:0;list-style:none;font:12px/1.5 var(--mono);color:var(--text-2)}
+.fed-more li{display:flex;gap:8px;padding:4px 6px;border-bottom:1px solid var(--line)}
+.fed-more li:last-child{border-bottom:0}
+.fed-more .ticket{color:var(--text)}.fed-more .when{margin-left:auto;color:var(--muted)}
 """
 
 
-CSS_MODAL = """\
-.modal{position:fixed;inset:0;z-index:10;display:flex;align-items:flex-start;justify-content:center;
-padding:6vh 16px;overflow-y:auto;background:color-mix(in srgb,var(--ink) 78%,transparent)}
-.modal-box{position:relative;width:min(1300px,100%);background:var(--panel);box-shadow:var(--elev-hi)}
-.modal-box .jobpage{box-shadow:none}
-.modal-box .jobpage h2{padding-right:92px}
-.modal-box .more{padding:0 16px 14px}
-.modal-close{position:absolute;top:10px;right:12px;z-index:1;padding:2px 10px;border:1px solid var(--line-hi);
-background:var(--panel-hi);color:var(--text-2);font:500 12px/1.6 var(--mono);cursor:pointer}
-.modal-close:hover{color:var(--text);border-color:var(--brand)}
-.modal-close:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
-body.modal-open{overflow:hidden}
-"""
+# --- tables shared with the script (LANES) -------------------------------------------------
+
+# A job tile per PX state (shell.PX_STATE carries the strip). `verbs` rotate while the job
+# works; `text` is the fixed line 2 otherwise; `tone` colours it; `chip` is the state chip
+# (none on healthy work); `hb` is the heartbeat bar's rule; `bad` gives the red border.
+TILE_STATE: dict[str, dict] = {
+    "plan": {"verbs": ["Pondering", "Sketching", "Scheming"], "tone": "live", "hb": "live"},
+    "build": {"verbs": ["Assembling", "Stacking", "Forging"], "tone": "live", "hb": "live"},
+    "review": {"verbs": ["Scrutinizing", "Combing", "Squinting"], "tone": "live", "hb": "live"},
+    "fix": {"verbs": ["Patching", "Mending", "Tinkering"], "tone": "live", "hb": "live"},
+    "claimed": {"text": "waiting to start", "tone": "", "chip": ["claimed", "warn"], "hb": "none"},
+    "stale": {"text": "no heartbeat", "tone": "warn", "chip": ["stale", "warn"], "hb": "warn"},
+    "dead": {"text": "runner dead", "tone": "bad", "chip": ["dead", "bad"], "hb": "bad", "bad": True},
+    "overdue": {"text": "overdue", "tone": "bad", "hb": "bad", "bad": True},
+    "stuck": {"text": "ticket stuck", "tone": "bad", "chip": ["stuck", "bad"], "hb": "bad", "bad": True},
+    "unknown": {"text": None, "tone": "", "hb": "live"},
+}
+
+GLYPH_ORDER = [2, 0, 1, 3]
+
+# Queue speed by wait age, through the Bits rail's anchors (0:40 → 1, 6:10 → 2.5, 22:05 → 5).
+QUEUE_SPEED = [[40, 1.0], [370, 2.5], [1325, 5.0]]
+
+QUEUE_TINT = "#8b93b8"
+BELT_TINT = "#9ece6a"
+_BAD = "#f7768e"
+
+
+def lanes_table() -> dict:
+    return {"tiles": TILE_STATE, "glyph": GLYPH_ORDER, "speed": QUEUE_SPEED,
+            "queue_tint": QUEUE_TINT, "belt_tint": BELT_TINT}
+
+
+def queue_speed(age: object) -> float:
+    """Conveyor speed for a wait of `age` seconds: linear between the anchors, flat
+    before the first, and on past the last at the last segment's slope (the engine caps 6)."""
+    a = float(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else 0.0
+    pts = QUEUE_SPEED
+    if a <= pts[0][0]:
+        return pts[0][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if a <= x1:
+            return round(y0 + (y1 - y0) * (a - x0) / (x1 - x0), 3)
+    (x0, y0), (x1, y1) = pts[-2], pts[-1]
+    return round(min(6.0, y1 + (y1 - y0) * (a - x1) / (x1 - x0)), 3)
+
+
+def verb_at(state: str, secs: int, seed: int) -> str:
+    verbs = TILE_STATE[state]["verbs"]
+    return verbs[math.floor((secs + seed * 1.7) / 4) % len(verbs)] + "…"
 
 
 SCRIPT = r"""
-  // --- main page: status, lanes and slots, the queue rail ------------------
+  // --- main page (#140): status tiles, lanes and slot tiles, Just happened, Intake -------
+
+  var LANES = __LANES__;
+  var LANES_MQ = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  function lanesStill() { return !!(LANES_MQ && LANES_MQ.matches); }
+
+  function kpiTiles(d) {
+    var t = d.queue.totals;
+    var stuck = d.stuck.tickets.length + d.stuck.overdue_jobs.length;
+    return [
+      ['running', t.running, 'ok', '#9ece6a'],
+      ['queued', t.queued, '', '#c0caf5'],
+      ['done', t.done, '', '#c0caf5'],
+      ['failed', t.failed, '', '#c0caf5'],
+      ['stuck / overdue', stuck, stuck ? 'bad' : '', stuck ? '#f7768e' : '#c0caf5']
+    ];
+  }
+
+  var kpiSeen = null;
+  var kpiBursts = {};
+  // Bits KPI decrypt: scrambled digits resolve left to right over three 160 ms steps.
+  function decrypt(node, txt) {
+    var glyphs = '0123456789#%=+';
+    var half = Math.floor(txt.length / 2);
+    [0, 1, 2].forEach(function (fr) {
+      setTimeout(function () {
+        var keep = fr === 0 ? 0 : fr === 1 ? half : Math.max(txt.length - 1, half);
+        if (txt.length === 1) keep = 0;
+        var out = '';
+        for (var j = 0; j < txt.length; j++) {
+          out += j < keep ? txt.charAt(j) : glyphs.charAt(Math.floor(Math.random() * glyphs.length));
+        }
+        node.textContent = out;
+      }, fr * 160);
+    });
+    setTimeout(function () { node.textContent = txt; }, 480);
+  }
 
   function renderKpis(d) {
     var root = panel('kpis', 'Factory status');
     if (!root) return;
-    var t = d.queue.totals;
-    var stuck = d.stuck.tickets.length + d.stuck.overdue_jobs.length;
     var row = add(root, el('div', 'kpis'));
-    [
-      ['running', t.running, 'accent'],
-      ['queued', t.queued, t.queued ? 'warn' : ''],
-      ['done', t.done, 'ok'],
-      ['failed', t.failed, t.failed ? 'bad' : ''],
-      ['stuck / overdue', stuck, stuck ? 'bad' : 'ok']
-    ].forEach(function (k) {
-      var tile = add(row, el('div', 'kpi ' + k[2]));
-      add(tile, el('b', null, num(k[1])));
+    var next = {};
+    var moving = kpiSeen !== null && !lanesStill();
+    kpiTiles(d).forEach(function (k, i) {
+      var tile = add(row, el('div', 'kpi' + (k[2] ? ' ' + k[2] : '')));
+      tile.setAttribute('data-kpi', k[0]);
+      var b = add(tile, el('b', null, num(k[1])));
       add(tile, el('span', null, k[0]));
+      if (moving && kpiSeen[k[0]] !== k[1]) {
+        kpiBursts[k[0]] = (kpiBursts[k[0]] || 0) + 1;
+        decrypt(b, num(k[1]));
+      }
+      add(tile, PX.strip('kpi-' + i, {effect: 'off', tint: k[3], height: 8, burst: kpiBursts[k[0]] || 0}));
+      next[k[0]] = k[1];
+    });
+    kpiSeen = next;
+  }
+
+  function queueSpeed(age) {
+    var pts = LANES.speed;
+    var a = Number(age) || 0;
+    if (a <= pts[0][0]) return pts[0][1];
+    for (var i = 1; i < pts.length; i++) {
+      if (a <= pts[i][0]) return Math.round((pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * (a - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0])) * 1000) / 1000;
+    }
+    var p0 = pts[pts.length - 2], p1 = pts[pts.length - 1];
+    return Math.round(Math.min(6, p1[1] + (p1[1] - p0[1]) * (a - p1[0]) / (p1[0] - p0[0])) * 1000) / 1000;
+  }
+
+  function probeDown(d, name) {
+    return agedHealth(d).rows.some(function (c) {
+      return c.component === 'device-probe' && c.device === name && c.state === 'down';
     });
   }
 
-  // Webhook health (#56): a small block appended to the Factory status
-  // panel that renderKpis has just rebuilt, so it is redrawn from
-  // status.json on every poll; absent when no listener has run. The heading
-  // is split so a page without a listener never contains the phrase
-  // (tests/test_linear_webhook_health.py).
-  function renderLinearWebhook(d) {
-    var root = byId('kpis');
-    var w = d.poller && d.poller.linear_webhook;
-    if (!root || !w) return;
-    var received;
-    if (w.last_received_age_seconds !== null && w.last_received_age_seconds !== undefined) {
-      received = dur(w.last_received_age_seconds) + ' ago' + (w.last_event ? ' (' + w.last_event + ')' : '');
-    } else if (w.listener_age_seconds === null || w.listener_age_seconds === undefined) {
-      received = 'never (listener has not started)';
-    } else {
-      received = 'never';
-    }
-    var box = add(root, el('div'));
-    box.setAttribute('id', 'linear-webhook');
-    add(box, el('h2', null, 'Linear' + ' webhook'));
-    add(box, el('p', null, 'last received ' + received + ' · dirty queue ' + w.dirty));
-    if (w.warning !== null && w.warning !== undefined) add(box, el('p', 'bad', 'warning: ' + w.warning));
-    if (w.note !== null && w.note !== undefined) add(box, el('p', 'muted', 'note: ' + w.note));
+  function deviceChip(dev) {
+    if (!dev.enabled) return chip('DISABLED', 'muted');
+    if (dev.placeholder) return chip('PLACEHOLDER', 'warn');
+    if (!dev.listed) return chip('UNLISTED', 'warn');
+    return chip('ONLINE', 'ok');
   }
 
-  // Backlog feeder (#85): appended to Factory status like the webhook block.
+  function verbAt(name, secs, seed) {
+    var verbs = LANES.tiles[name].verbs;
+    return verbs[Math.floor((secs + seed * 1.7) / 4) % verbs.length] + '…';
+  }
+
+  function letters(node, text) {
+    node.replaceChildren();
+    node.setAttribute('aria-label', text);
+    for (var i = 0; i < text.length; i++) add(node, el('span', null, text.charAt(i)));
+  }
+
+  var tileAnims = [];
+  var tileTick = 0;
+  function tileFrame(a) {
+    var secs = Math.floor(tileTick / 8);
+    var lit = LANES.glyph[Math.floor(tileTick / 2) % 4];
+    a.cells.forEach(function (c, q) { c.className = q === lit ? 'on' : ''; });
+    var text = verbAt(a.state, secs, a.seed);
+    if (text !== a.verb.getAttribute('aria-label')) letters(a.verb, text);
+    var pos = (tileTick % (text.length + 10)) - 2;
+    Array.prototype.forEach.call(a.verb.children, function (s, i) {
+      var dist = Math.abs(i - pos);
+      s.className = dist === 0 ? 'h' : dist === 1 ? 'n' : '';
+    });
+  }
+  setInterval(function () {
+    if (lanesStill() || !tileAnims.length) return;
+    tileTick += 1;
+    tileAnims.forEach(function (a) { if (a.verb.isConnected !== false) tileFrame(a); });
+  }, 125);
+
+  function slotTile(r, seed) {
+    var name = PX.state(r);
+    var spec = LANES.tiles[name] || LANES.tiles.unknown;
+    var who = BOTS[r.recipient] ? r.recipient : 'other';
+    var tile = link('tile ' + who + (spec.bad ? ' bad' : ''), 'job.html#' + anchor(r.job));
+    tile.title = ticketIn(r.repo, r) + ' · ' + r.action + (r.round ? ' · round ' + r.round : '') + ' (job ' + r.job + ')';
+    add(tile, PX.jobStrip(r, 16));
+    var bodyEl = add(tile, el('div', 'tile-body'));
+    var l1 = add(bodyEl, el('div', 'tile-l1'));
+    add(l1, bot(r.recipient));
+    var kind = jobKind(r);
+    if (kind) add(l1, el('span', 'kind', kind));
+    add(l1, el('span', 'ticket', jobLabel(r)));
+    var badge = name === 'overdue' ? (LANES.tiles[r.job_state] || {}).chip : spec.chip;
+    if (badge) add(l1, chip(badge[0], badge[1]));
+    if (r.overdue) add(l1, chip('OVERDUE', 'bad'));
+    var l2 = add(bodyEl, el('div', 'tile-l2'));
+    var verb;
+    if (spec.verbs) {
+      var glyph = add(l2, el('span', 'glyph'));
+      glyph.setAttribute('aria-hidden', 'true');
+      var cells = [];
+      for (var q = 0; q < 4; q++) cells.push(add(glyph, el('i', q === LANES.glyph[0] ? 'on' : null)));
+      verb = add(l2, el('span', 'verb ' + spec.tone));
+      verb.setAttribute('role', 'img');
+      letters(verb, verbAt(name, 0, seed));
+      tileAnims.push({state: name, seed: seed, cells: cells, verb: verb});
+    } else {
+      verb = add(l2, el('span', 'verb' + (spec.tone ? ' ' + spec.tone : '')));
+      verb.setAttribute('role', 'img');
+      letters(verb, spec.text === null ? r.action : spec.text);
+    }
+    var l3 = add(bodyEl, el('div', 'tile-l3'));
+    add(l3, el('span', 'action', r.action));
+    var m = /^(\d+)\s*\/\s*(\d+)$/.exec(String(r.round === null || r.round === undefined ? '' : r.round));
+    if (m) {
+      var rnd = add(l3, el('span', 'round'));
+      rnd.title = 'round ' + r.round;
+      var pips = add(rnd, el('span', 'pips'));
+      pips.setAttribute('aria-hidden', 'true');
+      var cur = Number(m[1]), cap = Math.min(6, Number(m[2]));
+      for (var k = 1; k <= cap; k++) add(pips, el('i', k < cur ? 'done' : k === cur ? 'cur' : null));
+      add(rnd, el('span', null, String(r.round)));
+    }
+    var t = add(l3, el('span', 't', 'T+ '));
+    ticking(add(t, el('b')), r.elapsed_seconds);
+    var l4 = add(bodyEl, el('div', 'tile-l4'));
+    var bar = add(l4, el('div', 'hbar' + (spec.hb === 'warn' || spec.hb === 'bad' ? ' ' + spec.hb : '')));
+    bar.setAttribute('aria-hidden', 'true');
+    var fill = add(bar, el('i'));
+    var hbt = add(l4, el('span', 'hbt' + (spec.hb === 'warn' || spec.hb === 'bad' ? ' ' + spec.hb : '')));
+    if (spec.hb === 'none') {
+      fill.setAttribute('style', 'width:0%');
+      hbt.textContent = 'hb —';
+    } else if (spec.hb === 'live') {
+      var base = r.heartbeat_age_seconds;
+      var item = {run: function (dt) {
+        var age = Math.max(0, Math.floor((Number(base) || 0) + dt));
+        fill.setAttribute('style', 'width:' + Math.max(8, 100 - age * 6) + '%');
+        hbt.textContent = 'hb ' + dur(age);
+      }};
+      tickers.push(item);
+      item.run(since());
+    } else {
+      fill.setAttribute('style', 'width:100%');
+      ticking(hbt, r.heartbeat_age_seconds, 'hb ');
+    }
+    return mark('lanes', r.job, tile);
+  }
+
+  function emptyTile(key, kind, seed) {
+    var held = kind === 'held';
+    var tile = el('div', 'tile empty' + (held ? ' px-held' : ''));
+    add(tile, PX.strip(key, {state: kind === 'idle' ? 'idle' : 'held', seed: seed, height: 16}));
+    add(tile, el('div', 'lbl', kind));
+    return tile;
+  }
+
+  function queueLane(d) {
+    var rows = d.queued || [];
+    var lane = el('div', 'lane');
+    lane.setAttribute('id', 'queue');
+    lane.setAttribute('data-device', 'queue');
+    var head = add(lane, el('div', 'lane-head'));
+    add(head, el('div', 'name', 'queue'));
+    add(head, el('div', 'sub', rows.length + ' waiting'));
+    var laneBody = add(lane, el('div', 'lane-body'));
+    var oldest = rows.reduce(function (m, r) { return Math.max(m, Number(r.age_seconds) || 0); }, 0);
+    add(laneBody, PX.strip('queue', {effect: 'conveyor', tint: LANES.queue_tint, seed: 20, height: 12,
+                                     speed: queueSpeed(oldest), still: !rows.length}));
+    if (!rows.length) { add(laneBody, el('div', 'sub', 'queue empty')); return lane; }
+    var ul = add(laneBody, el('ul', 'qrail'));
+    rows.forEach(function (r, i) {
+      var li = add(ul, el('li'));
+      var a = add(li, link(null, 'job.html#' + anchor(r.job)));
+      add(a, bot(r.recipient));
+      add(a, el('span', 'ticket', jobLabel(r)));
+      tierChip(a, r.tier);
+      add(li, el('span', 'what', r.action));
+      ticking(add(li, el('span', 'when')), r.age_seconds, 'waiting ');
+      if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
+      var belt = add(li, el('span', 'belt'));
+      belt.setAttribute('aria-hidden', 'true');
+      if (r.no_waiter) add(belt, PX.strip('queue-' + r.job, {effect: 'static', tint: '#f7768e', seed: 41 + i, height: 12}));
+      else add(belt, PX.strip('queue-' + r.job, {effect: 'conveyor', tint: LANES.belt_tint, seed: 41 + i, height: 12,
+                                                 speed: queueSpeed(r.age_seconds)}));
+      mark('queue', r.job, li);
+    });
+    return lane;
+  }
+
+  function renderLanes(d) {
+    var running = d.running || [];
+    var lanes = laneDevices(d);
+    var used = 0, total = 0;
+    lanes.devices.forEach(function (dev) {
+      if (dev.enabled && !dev.placeholder && dev.slot_max) { used += dev.used; total += dev.slot_max; }
+    });
+    var root = panel('lanes', 'Lanes and slots', running.length + ' running · ' + used + ' of ' + total + ' slots used');
+    if (!root) return;
+    tileAnims = [];
+    var box = add(root, el('div', 'lanes'));
+    add(box, queueLane(d));
+    lanes.devices.forEach(function (dev, index) {
+      var row = add(box, el('div', 'lane' + (dev.enabled ? '' : ' disabled')));
+      row.setAttribute('data-device', dev.name);
+      var head = add(row, el('div', 'lane-head'));
+      add(head, el('div', 'name', dev.name));
+      add(head, deviceChip(dev));
+      var down = probeDown(d, dev.name);
+      var slots = dev.slot_max === null || dev.slot_max === undefined ? Math.max(1, dev.used) : Math.max(1, dev.slot_max);
+      var meter = add(head, el('div', 'lane-meter'));
+      meter.setAttribute('aria-hidden', 'true');
+      meter.setAttribute('style', 'width:' + (16 * slots) + 'px');
+      add(meter, PX.strip('meter-' + dev.name, {effect: 'meter', tint: down ? '#f7768e' : '#9ece6a', used: dev.used,
+                                                  slots: slots, seed: 21 + index, height: 8,
+                                                  still: down || !dev.enabled}));
+      add(head, el('div', 'sub', dev.used + ' / ' + (dev.slot_max === null || dev.slot_max === undefined ? '?' : dev.slot_max) + ' slots'));
+      if (dev.harnesses.length) add(head, el('div', 'harness', dev.harnesses.join(' · ')));
+      var grid = add(row, el('div', 'tiles'));
+      var seed = 0;
+      dev.jobs.forEach(function (r) { seed += 1; add(grid, slotTile(r, seed)); });
+      var held = dev.used - dev.jobs.length;
+      for (var h = 0; h < held; h++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, 'held', seed)); }
+      var free = Math.max(0, (dev.slot_max || 0) - dev.used);
+      if (!dev.used && !free) free = 1;
+      for (var i = 0; i < free; i++) { seed += 1; add(grid, emptyTile('slot-' + dev.name + '-' + seed, dev.enabled ? 'idle' : 'off', seed)); }
+    });
+    if (lanes.wakes.length) {
+      var row = add(box, el('div', 'lane'));
+      row.setAttribute('data-device', 'grok-wakes');
+      var head = add(row, el('div', 'lane-head'));
+      add(head, el('div', 'name', 'grok wakes'));
+      add(head, chip('BOT-TO-BOT', 'accent'));
+      var grid = add(row, el('div', 'tiles'));
+      lanes.wakes.forEach(function (r, i) { add(grid, slotTile(r, i + 1)); });
+    }
+  }
+
+  function renderJustHappened(d) {
+    var rows = ((d.handoff_savings || {}).recent || []).slice(0, 6);
+    var root = panel('just-happened', 'Just happened', rows.length + ' newest handoffs');
+    if (!root) return;
+    if (!rows.length) { add(root, el('p', 'empty', 'no finished jobs yet')); }
+    else {
+      var ul = add(root, el('ul', 'feed'));
+      rows.forEach(function (r) {
+        var li = add(ul, el('li'));
+        var wake = r.kind === 'bot_to_bot';
+        add(li, bot(r.recipient));
+        add(li, el('span', 'ticket', ticketOf(r)));
+        add(li, el('span', 'what', wake ? 'done' : r.action));
+        if (wake) add(li, chip('grok wake', 'wake'));
+        if (r.state === 'failed') add(li, chip('failed', 'bad'));
+        ticking(add(li, el('span', 'when')), r.age_seconds, '', ' ago');
+        mark('just-happened', r.job + ':' + r.state, li);
+      });
+    }
+    var more = add(root, el('p', 'more'));
+    add(more, link(null, 'activity.html')).textContent = 'all activity';
+  }
+
   var FEEDER_STATE = {'eligible': 'eligible', 'waiting-capacity': 'waiting for capacity',
     'waiting-blocked': 'waiting on a blocker', 'feeding': 'feeding', 'error': 'feed error, retrying',
     'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
-  function renderFeeder(d) {
-    var root = byId('kpis');
-    var f = d.feeder;
-    if (!root || !f) return;
-    var box = add(root, el('div'));
-    box.setAttribute('id', 'feeder');
-    add(box, el('h2', null, 'Feeder'));
-    add(box, el('p', null, 'eligible ' + f.eligible + ' · fed ' + f.fed +
-      ' · waiting for capacity ' + f.waiting_capacity +
-      ' · waiting on blockers or files ' + f.waiting_blocked));
-    var list = add(box, el('ul'));
-    (f.items || []).forEach(function (item) {
-      var tiered = item.tier !== null && item.tier !== undefined;
-      var li = add(list, el('li', null, item.repo + '#' + item.issue + ' ' +
-        (item.reason || FEEDER_STATE[item.state] || item.state) +
-        (item.pr ? ' → PR #' + item.pr : '') + (tiered ? ' ' : '')));
-      tierChip(li, item.tier);
-    });
-  }
 
   function tierChip(parent, tier) {
     if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
   }
 
-  function slotCard(r) {
-    var card = opensModal(link('slot job' + (r.overdue ? ' overdue' : ''), 'job.html#' + anchor(r.job)), r.job);
-    card.title = ticketIn(r.repo, r) + ' (job ' + r.job + ')';
-    var top = add(card, el('div', 'top'));
-    add(top, bot(r.recipient));
-    var kind = jobKind(r);
-    if (kind) add(top, el('span', 'kind', kind));
-    add(top, el('span', 'ticket', jobLabel(r)));
-    var state = stateChip(r);
-    if (state) add(top, state);
-    if (r.overdue) add(top, chip('OVERDUE', 'bad'));
-    var step = add(card, el('div', 'step'));
-    add(step, el('span', 'action', r.action));
-    add(step, el('span', 'round', 'round ' + (r.round === null || r.round === undefined ? '—' : r.round)));
-    var times = add(card, el('div', 'times'));
-    var elapsed = add(times, el('span'));
-    if (r.job_state === 'claimed') {
-      // Claimed and never started: no runner, so no T+ or heartbeat bar.
-      elapsed.title = 'no orch job run has started this job';
-      add(elapsed, el('span', null, 'claimed '));
-      ticking(add(elapsed, el('b')), r.elapsed_seconds, '', ' ago');
-      add(times, el('span', 'warn', 'not started'));
-      return mark('lanes', r.job, card);
-    }
-    elapsed.title = r.elapsed_from === 'placed' ? 'since it was placed on this device' : 'since it was queued';
-    add(elapsed, el('span', null, 'T+ '));
-    ticking(add(elapsed, el('b')), r.elapsed_seconds);
-    var beat = add(times, el('span'));
-    beat.title = 'last heartbeat';
-    add(beat, el('span', null, 'hb '));
-    ticking(add(beat, el('b')), r.heartbeat_age_seconds, '', ' ago');
-    var bar = add(card, el('div', 'hb'));
-    var fill = add(bar, el('i'));
-    var base = r.heartbeat_age_seconds;
-    var timeout = r.timeout_seconds || 1;
-    var item = {run: function (dt) {
-      var frac = Math.min(1, (base + dt) / timeout);
-      fill.style.width = Math.max(2, Math.round(frac * 100)) + '%';
-      bar.className = 'hb' + (frac >= 1 ? ' bad' : frac >= 0.6 ? ' warn' : '');
-    }};
-    tickers.push(item);
-    item.run(since());
-    return mark('lanes', r.job, card);
+  function intakeSplit(items) {
+    var fed = items.filter(function (x) { return x.fed_age_seconds !== null && x.fed_age_seconds !== undefined; })
+      .sort(function (a, b) { return a.fed_age_seconds - b.fed_age_seconds; }).slice(0, 3);
+    return {top: fed, rest: items.filter(function (x) { return fed.indexOf(x) < 0; })};
   }
 
-  function renderLanes(d) {
-    var running = d.running || [];
-    var root = panel('lanes', 'Lanes and slots', running.length + ' running');
+  function renderIntake(d) {
+    var w = d.poller && d.poller.linear_webhook;
+    var f = d.feeder;
+    var root = panel('intake', 'Intake', f ? f.fed + ' fed · ' + (f.waiting_capacity + (f.waiting_blocked || 0)) + ' waiting' : null);
     if (!root) return;
-    var lanes = laneDevices(d);
-    var grid = add(root, el('div', 'devices'));
-    lanes.devices.forEach(function (dev) {
-      var jobs = dev.jobs;
-      var used = dev.used;
-      var card = add(grid, el('section', 'device' + (dev.enabled ? '' : ' disabled')));
-      card.setAttribute('data-device', dev.name);
-      var head = add(card, el('header'));
-      add(head, el('span', 'name', dev.name));
-      if (!dev.enabled) add(head, chip('DISABLED', 'muted'));
-      else if (dev.placeholder) add(head, chip('PLACEHOLDER', 'warn'));
-      else if (!dev.listed) add(head, chip('UNLISTED', 'warn'));
-      else add(head, chip('ONLINE', 'ok'));
-      add(head, el('span', 'cap', used + ' / ' + (dev.slot_max === null || dev.slot_max === undefined ? '?' : dev.slot_max) + ' slots'));
-      if (dev.harnesses.length) add(card, el('p', 'harness', dev.harnesses.join(' · ')));
-      var slots = add(card, el('div', 'slots'));
-      jobs.forEach(function (r) { add(slots, slotCard(r)); });
-      var held = used - jobs.length;
-      for (var h = 0; h < held; h++) add(slots, el('div', 'slot held', 'held'));
-      var free = Math.max(0, (dev.slot_max || 0) - used);
-      if (!used && !free) free = 1;
-      for (var i = 0; i < free; i++) add(slots, el('div', 'slot idle', dev.enabled ? 'idle' : 'off'));
-    });
-    var wakes = lanes.wakes;
-    if (wakes.length) {
-      var card = add(grid, el('section', 'device'));
-      card.setAttribute('data-device', 'grok-wakes');
-      var head = add(card, el('header'));
-      add(head, el('span', 'name', 'grok wakes'));
-      add(head, chip('BOT-TO-BOT', 'accent'));
-      var slots = add(card, el('div', 'slots'));
-      wakes.forEach(function (r) { add(slots, slotCard(r)); });
+    var box = add(root, el('div', 'intake'));
+    if (w) {
+      var received;
+      if (w.last_received_age_seconds !== null && w.last_received_age_seconds !== undefined) {
+        received = dur(w.last_received_age_seconds) + ' ago' + (w.last_event ? ' (' + w.last_event + ')' : '');
+      } else if (w.listener_age_seconds === null || w.listener_age_seconds === undefined) {
+        received = 'never (listener has not started)';
+      } else {
+        received = 'never';
+      }
+      var hook = add(box, el('div', 'irow'));
+      hook.setAttribute('id', 'linear-webhook');
+      add(hook, el('span', 'ilabel', 'Linear' + ' webhook'));
+      add(hook, el('span', 'itext', 'last received ' + received + ' · dirty queue ' + w.dirty));
+      if (w.warning !== null && w.warning !== undefined) add(hook, el('p', 'bad', 'warning: ' + w.warning));
+      if (w.note !== null && w.note !== undefined) add(hook, el('p', 'muted', 'note: ' + w.note));
     }
-  }
-
-  function renderQueue(d) {
-    var rows = d.queued || [];
-    var root = panel('queue', 'Queue', rows.length + ' waiting');
-    if (!root) return;
-    list(root, rows, 'queue empty', function (r) {
-      var li = el('li');
-      var a = add(li, opensModal(link('queue-item', 'job.html#' + anchor(r.job)), r.job));
-      add(a, bot(r.recipient));
-      add(a, el('span', 'ticket', jobLabel(r)));
-      tierChip(a, r.tier);
-      add(a, el('span', 'what', r.action));
-      ticking(add(a, el('span', 'when')), r.age_seconds, 'waiting ');
-      if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
-      return mark('queue', r.job, li);
-    });
+    if (f) {
+      var feed = add(box, el('div', 'irow'));
+      feed.setAttribute('id', 'feeder');
+      add(feed, el('span', 'ilabel', 'Feeder'));
+      add(feed, el('span', 'itext', 'eligible ' + f.eligible + ' · fed ' + f.fed +
+        ' · waiting for capacity ' + f.waiting_capacity +
+        ' · waiting on blockers or files ' + (f.waiting_blocked || 0)));
+      var meter = add(box, el('div', 'imeter'));
+      meter.setAttribute('aria-hidden', 'true');
+      add(meter, PX.strip('intake-meter', {effect: 'meter', tint: '#9ece6a', used: f.fed,
+                                           slots: Math.max(1, f.eligible), seed: 24, height: 8, still: true}));
+    }
+    if (!w && !f) { add(box, el('p', 'empty', 'no listener or feeder has run')); return; }
+    if (!f || !(f.items || []).length) return;
+    var split = intakeSplit(f.items);
+    var state = function (x) { return x.reason || FEEDER_STATE[x.state] || x.state; };
+    if (split.top.length) {
+      var ul = add(root, el('ul', 'feed'));
+      split.top.forEach(function (x) {
+        var li = add(ul, el('li'));
+        add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
+        tierChip(li, x.tier);
+        add(li, el('span', 'what', state(x)));
+        add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
+      });
+    }
+    if (split.rest.length) {
+      var more = details(root, 'intake-more', split.rest.length + ' more');
+      var list2 = add(more, el('ul', 'fed-more'));
+      split.rest.forEach(function (x) {
+        var li = add(list2, el('li'));
+        add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
+        tierChip(li, x.tier);
+        add(li, el('span', 'what', state(x)));
+        add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
+      });
+    }
   }
 """
 
 
-SCRIPT_MODAL = r"""
-  // --- the job modal on the lanes page (#78) ----------------------------------
-
-  // A slot or queue link opens its job's flow in a modal; without script (or
-  // with a modifier key) the link still goes to job.html#job-<id>.
-  function opensModal(a, job) {
-    if (PAGE !== 'main') return a;
-    a.addEventListener('click', function (ev) {
-      if (ev.defaultPrevented || ev.button || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-      ev.preventDefault();
-      openModal(job, a);
-    });
-    if (modal && modal.job === job) modal.opener = a;
-    return a;
-  }
-
-  function fillModal() {
-    if (!modal || !latest) return;
-    var box = modal.box;
-    box.replaceChildren();
-    var close = add(box, el('button', 'modal-close', '✕ close'));
-    close.setAttribute('type', 'button');
-    close.setAttribute('aria-label', 'Close');
-    close.addEventListener('click', function () { closeModal(); });
-    modal.close = close;
-    var found = activeJobs(latest).filter(function (j) { return j.row.job === modal.job; })[0];
-    if (found) {
-      add(box, jobArticle(found.row, found.state, latest));
-      modal.node.setAttribute('aria-label', jobLabel(found.row) + ' flow');
-    } else {
-      var gone = add(box, el('section', 'panel jobpage'));
-      add(add(gone, el('h2')), el('span', null, anchor(modal.job)));
-      add(gone, el('p', 'empty', 'That job is no longer running or queued.'));
-      var ended = finishedTelemetry(latest, modal.job);
-      if (ended) add(gone, telemetryBlock(ended));
-    }
-    var more = add(box, el('p', 'more'));
-    add(more, link(null, 'job.html#' + anchor(modal.job))).textContent = 'open on the job page';
-  }
-
-  function openModal(job, opener) {
-    if (modal && modal.node.parentNode) modal.node.parentNode.removeChild(modal.node);
-    var node = el('div', 'modal');
-    node.setAttribute('id', 'job-modal');
-    node.setAttribute('role', 'dialog');
-    node.setAttribute('aria-modal', 'true');
-    // A click on the backdrop (outside the box) closes it.
-    node.addEventListener('click', function (ev) { if (ev.target === node) closeModal(); });
-    modal = {job: job, node: node, box: add(node, el('div', 'modal-box')), opener: opener, close: null};
-    fillModal();
-    add(body, node);
-    body.classList.add('modal-open');
-    scrollTrails();
-    if (modal.close && modal.close.focus) modal.close.focus();
-  }
-
-  function closeModal() {
-    if (!modal) return;
-    var m = modal;
-    modal = null;
-    if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
-    body.classList.remove('modal-open');
-    if (m.opener && m.opener.isConnected && m.opener.focus) m.opener.focus();
-  }
-
-  document.addEventListener('keydown', function (ev) {
-    if (modal && (ev.key === 'Escape' || ev.key === 'Esc')) { ev.preventDefault(); closeModal(); }
-  });
-
-  // Long paths scroll; keep the current step (at the right end) in view.
-  function scrollTrails() {
-    trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
-    trails = [];
-  }
-"""
+# --- Factory status ---------------------------------------------------------------------
 
 
-# --- main page -------------------------------------------------------------------------
+def kpi_tiles(snapshot: dict) -> list[tuple[str, object, str, str]]:
+    totals = snapshot["queue"]["totals"]
+    stuck = len(snapshot["stuck"]["tickets"]) + len(snapshot["stuck"]["overdue_jobs"])
+    return [
+        ("running", totals["running"], "ok", "#9ece6a"),
+        ("queued", totals["queued"], "", "#c0caf5"),
+        ("done", totals["done"], "", "#c0caf5"),
+        ("failed", totals["failed"], "", "#c0caf5"),
+        ("stuck / overdue", stuck, "bad" if stuck else "", _BAD if stuck else "#c0caf5"),
+    ]
 
 
 def _kpis(snapshot: dict) -> str:
-    totals = snapshot["queue"]["totals"]
-    stuck = len(snapshot["stuck"]["tickets"]) + len(snapshot["stuck"]["overdue_jobs"])
-    tiles = [
-        ("running", totals["running"], "accent"),
-        ("queued", totals["queued"], "warn" if totals["queued"] else ""),
-        ("done", totals["done"], "ok"),
-        ("failed", totals["failed"], "bad" if totals["failed"] else ""),
-        ("stuck / overdue", stuck, "bad" if stuck else "ok"),
-    ]
+    from lib.dashboard_pages.shell import px_strip
+
     inner = "".join(
-        f'<div class="kpi {cls}"><b>{_num(value)}</b>{_span(None, label)}</div>'
-        for label, value, cls in tiles
+        f'<div class="kpi{" " + cls if cls else ""}" data-kpi="{_e(name)}"><b>{_num(value)}</b>'
+        f'{_span(None, name)}{px_strip(f"kpi-{i}", effect="off", tint=tint, height=8, burst=0)}</div>'
+        for i, (name, value, cls, tint) in enumerate(kpi_tiles(snapshot))
     )
-    return _panel(
-        "kpis",
-        "Factory status",
-        f'<div class="kpis">{inner}</div>' + _linear_webhook(snapshot) + _feeder(snapshot),
-    )
+    return _panel("kpis", "Factory status", f'<div class="kpis">{inner}</div>')
 
 
-_FEEDER_STATE = {
-    "eligible": "eligible",
-    "waiting-capacity": "waiting for capacity",
-    "waiting-blocked": "waiting on a blocker",
-    "feeding": "feeding",
-    "error": "feed error, retrying",
-    "fed": "fed",
-    "done": "fed, job queued",
-    "closed": "PR closed, not fed",
-}
-
-
-def _feeder(snapshot: dict) -> str:
-    """The backlog feeder (#85), a small block inside Factory status; only
-    once a feeder has run. The script's renderFeeder builds the same markup."""
-    feeder = snapshot.get("feeder")
-    if not feeder:
-        return ""
-    rows = "".join(
-        f"<li>{_e(item['repo'])}#{_e(item['issue'])} "
-        f"{_e(item.get('reason') or _FEEDER_STATE.get(item['state'], item['state']))}"
-        + (f" → PR #{_e(item['pr'])}" if item.get("pr") else "")
-        + ("" if item.get("tier") is None else " " + _tier_chip(item["tier"]))
-        + "</li>"
-        for item in feeder["items"]
-    )
-    return (
-        '<div id="feeder"><h2>Feeder</h2>'
-        f"<p>eligible {_e(feeder['eligible'])} · fed {_e(feeder['fed'])} · "
-        f"waiting for capacity {_e(feeder['waiting_capacity'])} · "
-        f"waiting on blockers or files {_e(feeder.get('waiting_blocked', 0))}</p>"
-        f"<ul>{rows}</ul></div>"
-    )
-
-
-def _tier_chip(tier: object) -> str:
-    return "" if tier is None else _chip(f"tier {tier}", "accent")
-
-
-def _linear_webhook(snapshot: dict) -> str:
-    """Linear webhook health (#56), a small block inside Factory status; only
-    when a listener or webhook-mode poller has run on this database. The
-    script's renderLinearWebhook builds the same markup from status.json."""
-    webhook = snapshot["poller"].get("linear_webhook")
-    if webhook is None:
-        return ""
-    if webhook["last_received_age_seconds"] is not None:
-        received = f'{duration(webhook["last_received_age_seconds"])} ago' + (
-            f' ({webhook["last_event"]})' if webhook["last_event"] else ""
-        )
-    elif webhook["listener_age_seconds"] is None:
-        received = "never (listener has not started)"
-    else:
-        received = "never"
-    warning = (
-        f'<p class="bad">warning: {_e(webhook["warning"])}</p>'
-        if webhook["warning"] is not None
-        else ""
-    )
-    if webhook.get("note") is not None:
-        warning += f'<p class="muted">note: {_e(webhook["note"])}</p>'
-    return (
-        '<div id="linear-webhook"><h2>Linear webhook</h2>'
-        f"<p>last received {_e(received)} · dirty queue {_e(webhook['dirty'])}</p>"
-        f"{warning}</div>"
-    )
-
-
-def _slot(row: dict) -> str:
-    kind = _job_kind(row)
-    rnd = "—" if row.get("round") is None else row["round"]
-    age = row["heartbeat_age_seconds"]
-    frac = min(1.0, age / (row["timeout_seconds"] or 1))
-    level = " bad" if frac >= 1 else " warn" if frac >= 0.6 else ""
-    since = (
-        "since it was placed on this device"
-        if row.get("elapsed_from") == "placed"
-        else "since it was queued"
-    )
-    if row.get("job_state") == "claimed":
-        # Claimed and never started: no runner, so no T+ or heartbeat bar.
-        times = (
-            '<div class="times"><span title="no orch job run has started this job">'
-            f'<span>claimed </span><b>{duration(row["elapsed_seconds"])} ago</b></span>'
-            + _span("warn", "not started")
-            + "</div>"
-        )
-    else:
-        times = (
-            f'<div class="times"><span title="{since}"><span>T+ </span>'
-            f'<b>{duration(row["elapsed_seconds"])}</b></span>'
-            f'<span title="last heartbeat"><span>hb </span><b>{duration(age)} ago</b></span></div>'
-            f'<div class="hb{level}"><i style="width:{max(2, round(frac * 100))}%"></i></div>'
-        )
-    return (
-        f'<a class="slot job{" overdue" if row["overdue"] else ""}" '
-        f'href="job.html#{anchor(row["job"])}" '
-        f'title="{_e(_ticket(row, full=True))} (job {_e(row["job"])})">'
-        f'<div class="top">{_bot(row["recipient"])}'
-        + (_span("kind", kind) if kind else "")
-        + _span("ticket", _job_label(row))
-        + _state_chip(row)
-        + (_chip("OVERDUE", "bad") if row["overdue"] else "")
-        + "</div>"
-        f'<div class="step">{_span("action", row["action"])}{_span("round", f"round {rnd}")}</div>'
-        + times
-        + "</a>"
-    )
+# --- lanes --------------------------------------------------------------------------------
 
 
 def lane_devices(snapshot: dict) -> tuple[list[dict], list[dict]]:
     """The lanes the script draws: (devices with their running jobs, grok
-    wakes). Mirrors renderLanes in the page script."""
+    wakes). Mirrors laneDevices in the page script."""
     slots = snapshot["slots"]
     devices = [
         {
@@ -513,70 +599,320 @@ def lane_devices(snapshot: dict) -> tuple[list[dict], list[dict]]:
     return devices, wakes
 
 
-def _lanes(snapshot: dict) -> str:
-    devices, wakes = lane_devices(snapshot)
-    cards = []
-    for device in devices:
-        if not device["enabled"]:
-            state = _chip("DISABLED", "muted")
-        elif device["placeholder"]:
-            state = _chip("PLACEHOLDER", "warn")
-        elif not device["listed"]:
-            state = _chip("UNLISTED", "warn")
-        else:
-            state = _chip("ONLINE", "ok")
-        cap = "?" if device["slot_max"] is None else device["slot_max"]
-        used = device["used"]
-        held = used - len(device["jobs"])
-        free = max(0, (device["slot_max"] or 0) - used)
-        if not used and not free:
-            free = 1
-        slots = "".join(_slot(row) for row in device["jobs"])
-        slots += '<div class="slot held">held</div>' * held
-        slots += f'<div class="slot idle">{"idle" if device["enabled"] else "off"}</div>' * free
-        harness = (
-            f'<p class="harness">{_e(" · ".join(device["harnesses"]))}</p>'
-            if device["harnesses"]
-            else ""
+def probe_down(snapshot: dict, name: str) -> bool:
+    health = snapshot.get("health") or {}
+    return any(
+        c.get("component") == "device-probe" and c.get("device") == name and c.get("state") == "down"
+        for c in health.get("components") or []
+    )
+
+
+def _device_chip(device: dict) -> str:
+    if not device["enabled"]:
+        return _chip("DISABLED", "muted")
+    if device["placeholder"]:
+        return _chip("PLACEHOLDER", "warn")
+    if not device["listed"]:
+        return _chip("UNLISTED", "warn")
+    return _chip("ONLINE", "ok")
+
+
+def _letters(text: str) -> str:
+    return "".join(f"<span>{_e(ch)}</span>" for ch in text)
+
+
+def _tone(cls: str) -> str:
+    return f" {cls}" if cls else ""
+
+
+def _slot(row: dict, seed: int = 1) -> str:
+    from lib.dashboard_pages.shell import px_job_strip, px_state
+
+    name = px_state(row)
+    spec = TILE_STATE.get(name, TILE_STATE["unknown"])
+    who = row["recipient"] if row["recipient"] in ("claude", "codex", "cursor", "grok") else "other"
+    kind = _job_kind(row)
+    title = (
+        f"{_ticket(row, full=True)} · {row['action']}"
+        + (f" · round {row['round']}" if row.get("round") else "")
+        + f" (job {row['job']})"
+    )
+    badge = TILE_STATE.get(str(row.get("job_state")), {}).get("chip") if name == "overdue" else spec.get("chip")
+    line1 = (
+        _bot(row["recipient"]) + (_span("kind", kind) if kind else "") + _span("ticket", _job_label(row))
+        + (_chip(badge[0], badge[1]) if badge else "")
+        + (_chip("OVERDUE", "bad") if row["overdue"] else "")
+    )
+    if spec.get("verbs"):
+        text = verb_at(name, 0, seed)
+        cells = "".join(f'<i class="on"></i>' if q == GLYPH_ORDER[0] else "<i></i>" for q in range(4))
+        line2 = (
+            f'<span class="glyph" aria-hidden="true">{cells}</span>'
+            f'<span class="verb{_tone(spec["tone"])}" role="img" aria-label="{_e(text)}">{_letters(text)}</span>'
         )
-        cards.append(
-            f'<section class="device{"" if device["enabled"] else " disabled"}" '
-            f'data-device="{_e(device["name"])}">'
-            f'<header>{_span("name", device["name"])}{state}'
-            f'{_span("cap", f"{used} / {cap} slots")}</header>'
-            f'{harness}<div class="slots">{slots}</div></section>'
+    else:
+        text = row["action"] if spec["text"] is None else spec["text"]
+        line2 = f'<span class="verb{_tone(spec["tone"])}" role="img" aria-label="{_e(text)}">{_letters(str(text))}</span>'
+    rnd = str(row.get("round") or "")
+    pips = ""
+    parts = rnd.split("/")
+    if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+        cur, cap = int(parts[0]), min(6, int(parts[1]))
+        cells = "".join(
+            f'<i class="{"done" if k < cur else "cur"}"></i>' if k <= cur else "<i></i>"
+            for k in range(1, cap + 1)
+        )
+        pips = (
+            f'<span class="round" title="round {_e(rnd)}"><span class="pips" aria-hidden="true">{cells}</span>'
+            f"{_span(None, rnd)}</span>"
+        )
+    line3 = (
+        _span("action", row["action"]) + pips
+        + f'<span class="t">T+ <b>{duration(row["elapsed_seconds"])}</b></span>'
+    )
+    hb = spec["hb"]
+    level = _tone(hb if hb in ("warn", "bad") else "")
+    age = row.get("heartbeat_age_seconds")
+    if hb == "none":
+        width, hb_text = 0, "hb —"
+    elif hb == "live":
+        safe = max(0, int(age or 0))
+        width, hb_text = max(8, 100 - safe * 6), f"hb {duration(safe)}"
+    else:
+        width, hb_text = 100, f"hb {duration(age)}"
+    line4 = (
+        f'<div class="hbar{level}" aria-hidden="true"><i style="width:{width}%"></i></div>'
+        f'<span class="hbt{level}">{_e(hb_text)}</span>'
+    )
+    return (
+        f'<a class="tile {who}{" bad" if spec.get("bad") else ""}" href="job.html#{anchor(row["job"])}" '
+        f'title="{_e(title)}">{px_job_strip(row, 16)}<div class="tile-body">'
+        f'<div class="tile-l1">{line1}</div><div class="tile-l2">{line2}</div>'
+        f'<div class="tile-l3">{line3}</div><div class="tile-l4">{line4}</div></div></a>'
+    )
+
+
+def _empty_tile(key: str, kind: str, seed: int) -> str:
+    from lib.dashboard_pages.shell import px_strip
+
+    held = kind == "held"
+    strip = px_strip(key, state="idle" if kind == "idle" else "held", seed=seed, height=16)
+    return f'<div class="tile empty{" px-held" if held else ""}">{strip}<div class="lbl">{_e(kind)}</div></div>'
+
+
+def _queue_lane(snapshot: dict) -> str:
+    from lib.dashboard_pages.shell import px_strip
+
+    rows = snapshot["queued"]
+    oldest = max([row["age_seconds"] or 0 for row in rows], default=0)
+    belt = px_strip("queue", effect="conveyor", tint=QUEUE_TINT, seed=20, height=12,
+                    speed=queue_speed(oldest), still=not rows)
+    if not rows:
+        inner = belt + '<div class="sub">queue empty</div>'
+    else:
+        items = []
+        for i, row in enumerate(rows):
+            if row.get("no_waiter"):
+                strip = px_strip(f"queue-{row['job']}", effect="static", tint=_BAD, seed=41 + i, height=12)
+                chip = (
+                    f'<a class="chip bad" href="{_e(_health_link(row.get("no_waiter_link")))}">'
+                    f'no waiter for {_e(row["no_waiter"])}</a>'
+                )
+            else:
+                strip = px_strip(f"queue-{row['job']}", effect="conveyor", tint=BELT_TINT, seed=41 + i,
+                                 height=12, speed=queue_speed(row["age_seconds"]))
+                chip = ""
+            items.append(
+                f'<li><a href="job.html#{anchor(row["job"])}">{_bot(row["recipient"])}'
+                f'{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}</a>'
+                f'{_span("what", row["action"])}'
+                f'{_when(row["age_seconds"], "waiting ")}{chip}'
+                f'<span class="belt" aria-hidden="true">{strip}</span></li>'
+            )
+        inner = belt + f'<ul class="qrail">{"".join(items)}</ul>'
+    return (
+        '<div class="lane" id="queue" data-device="queue"><div class="lane-head">'
+        f'<div class="name">queue</div><div class="sub">{len(rows)} waiting</div></div>'
+        f'<div class="lane-body">{inner}</div></div>'
+    )
+
+
+def _lanes(snapshot: dict) -> str:
+    from lib.dashboard_pages.shell import px_strip
+
+    devices, wakes = lane_devices(snapshot)
+    used = sum(d["used"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
+    total = sum(d["slot_max"] for d in devices if d["enabled"] and not d["placeholder"] and d["slot_max"])
+    rows = [_queue_lane(snapshot)]
+    for index, device in enumerate(devices):
+        down = probe_down(snapshot, device["name"])
+        cap = device["slot_max"]
+        slots = max(1, device["used"]) if cap is None else max(1, cap)
+        meter = px_strip(
+            f"meter-{device['name']}", effect="meter", tint=_BAD if down else "#9ece6a",
+            used=device["used"], slots=slots, seed=21 + index, height=8,
+            still=down or not device["enabled"],
+        )
+        harness = (
+            f'<div class="harness">{_e(" · ".join(device["harnesses"]))}</div>'
+            if device["harnesses"] else ""
+        )
+        tiles = []
+        seed = 0
+        for row in device["jobs"]:
+            seed += 1
+            tiles.append(_slot(row, seed))
+        for _ in range(device["used"] - len(device["jobs"])):
+            seed += 1
+            tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "held", seed))
+        free = max(0, (cap or 0) - device["used"])
+        if not device["used"] and not free:
+            free = 1
+        for _ in range(free):
+            seed += 1
+            tiles.append(_empty_tile(f"slot-{device['name']}-{seed}", "idle" if device["enabled"] else "off", seed))
+        rows.append(
+            f'<div class="lane{"" if device["enabled"] else " disabled"}" data-device="{_e(device["name"])}">'
+            f'<div class="lane-head"><div class="name">{_e(device["name"])}</div>{_device_chip(device)}'
+            f'<div class="lane-meter" aria-hidden="true" style="width:{16 * slots}px">{meter}</div>'
+            f'<div class="sub">{device["used"]} / {"?" if cap is None else cap} slots</div>{harness}</div>'
+            f'<div class="tiles">{"".join(tiles)}</div></div>'
         )
     if wakes:
-        cards.append(
-            '<section class="device" data-device="grok-wakes"><header>'
-            f'{_span("name", "grok wakes")}{_chip("BOT-TO-BOT", "accent")}</header>'
-            f'<div class="slots">{"".join(_slot(row) for row in wakes)}</div></section>'
+        rows.append(
+            '<div class="lane" data-device="grok-wakes"><div class="lane-head">'
+            f'<div class="name">grok wakes</div>{_chip("BOT-TO-BOT", "accent")}</div>'
+            f'<div class="tiles">{"".join(_slot(row, i + 1) for i, row in enumerate(wakes))}</div></div>'
         )
     return _panel(
         "lanes",
         "Lanes and slots",
-        f'<div class="devices">{"".join(cards)}</div>',
-        count=f"{len(snapshot['running'])} running",
+        f'<div class="lanes">{"".join(rows)}</div>',
+        count=f"{len(snapshot['running'])} running · {used} of {total} slots used",
     )
 
 
-def _queue(snapshot: dict) -> str:
-    rows = snapshot["queued"]
+# --- Just happened and Intake -------------------------------------------------------------
 
-    def draw(row: dict) -> str:
-        return (
-            f'<a class="queue-item" href="job.html#{anchor(row["job"])}">'
-            f'{_bot(row["recipient"])}{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}'
-            f'{_span("what", row["action"])}{_when(row["age_seconds"], "waiting ")}</a>'
-            + (
-                f'<a class="chip bad" href="{_e(_health_link(row.get("no_waiter_link")))}">'
-                f'no waiter for {_e(row["no_waiter"])}</a>'
-                if row.get("no_waiter")
-                else ""
-            )
+
+def _just_happened(snapshot: dict) -> str:
+    rows = (snapshot.get("handoff_savings") or {}).get("recent", [])[:6]
+    items = []
+    for row in rows:
+        wake = row["kind"] == "bot_to_bot"
+        items.append(
+            "<li>" + _bot(row["recipient"]) + _span("ticket", _ticket(row))
+            + _span("what", "done" if wake else row["action"])
+            + (_chip("grok wake", "wake") if wake else "")
+            + (_chip("failed", "bad") if row["state"] == "failed" else "")
+            + _when(row["age_seconds"], suffix=" ago") + "</li>"
         )
+    inner = f'<ul class="feed">{"".join(items)}</ul>' if items else '<p class="empty">no finished jobs yet</p>'
+    inner += '<p class="more"><a href="activity.html">all activity</a></p>'
+    return _panel("just-happened", "Just happened", inner, count=f"{len(rows)} newest handoffs")
 
-    return _panel(
-        "queue", "Queue", _feed(rows, "queue empty", draw),
-        count=f"{len(rows)} waiting", extra="rail",
+
+_FEEDER_STATE = {
+    "eligible": "eligible",
+    "waiting-capacity": "waiting for capacity",
+    "waiting-blocked": "waiting on a blocker",
+    "feeding": "feeding",
+    "error": "feed error, retrying",
+    "fed": "fed",
+    "done": "fed, job queued",
+    "closed": "PR closed, not fed",
+}
+
+
+def _linear_webhook(snapshot: dict) -> str:
+    """Linear webhook health (#56), Intake's first line; only when a listener or
+    webhook-mode poller has run on this database."""
+    webhook = snapshot["poller"].get("linear_webhook")
+    if webhook is None:
+        return ""
+    if webhook["last_received_age_seconds"] is not None:
+        received = f'{duration(webhook["last_received_age_seconds"])} ago' + (
+            f' ({webhook["last_event"]})' if webhook["last_event"] else ""
+        )
+    elif webhook["listener_age_seconds"] is None:
+        received = "never (listener has not started)"
+    else:
+        received = "never"
+    extra = f'<p class="bad">warning: {_e(webhook["warning"])}</p>' if webhook["warning"] is not None else ""
+    if webhook.get("note") is not None:
+        extra += f'<p class="muted">note: {_e(webhook["note"])}</p>'
+    return (
+        '<div class="irow" id="linear-webhook"><span class="ilabel">Linear webhook</span>'
+        f'<span class="itext">last received {_e(received)} · dirty queue {_e(webhook["dirty"])}</span>'
+        f"{extra}</div>"
     )
+
+
+def intake_split(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    """The three newest fed items, then every other item in feeder order."""
+    fed = sorted(
+        (x for x in items if x.get("fed_age_seconds") is not None), key=lambda x: x["fed_age_seconds"]
+    )[:3]
+    return fed, [x for x in items if not any(x is y for y in fed)]
+
+
+def _feeder(snapshot: dict) -> str:
+    """The backlog feeder (#85), Intake's second line and its meter; only once a feeder has run."""
+    from lib.dashboard_pages.shell import px_strip
+
+    feeder = snapshot.get("feeder")
+    if not feeder:
+        return ""
+    meter = px_strip("intake-meter", effect="meter", tint="#9ece6a", used=feeder["fed"],
+                     slots=max(1, feeder["eligible"]), seed=24, height=8, still=True)
+    return (
+        '<div class="irow" id="feeder"><span class="ilabel">Feeder</span>'
+        f'<span class="itext">eligible {_e(feeder["eligible"])} · fed {_e(feeder["fed"])} · '
+        f'waiting for capacity {_e(feeder["waiting_capacity"])} · '
+        f'waiting on blockers or files {_e(feeder.get("waiting_blocked", 0))}</span></div>'
+        f'<div class="imeter" aria-hidden="true">{meter}</div>'
+    )
+
+
+def _tier_chip(tier: object) -> str:
+    return "" if tier is None else _chip(f"tier {tier}", "accent")
+
+
+def _fed_line(item: dict) -> str:
+    state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
+    pr = f"→ PR #{item['pr']}" if item.get("pr") else ""
+    return (
+        f'<li>{_span("ticket", f"{_short(item["repo"])}#{item["issue"]}")}{_tier_chip(item.get("tier"))}'
+        f'{_span("what", state)}'
+        f'<span class="when">{_e(pr)}</span></li>'
+    )
+
+
+def _intake(snapshot: dict) -> str:
+    feeder = snapshot.get("feeder")
+    lines = _linear_webhook(snapshot) + _feeder(snapshot)
+    count = None
+    if feeder:
+        waiting = feeder["waiting_capacity"] + (feeder.get("waiting_blocked") or 0)
+        count = f"{feeder['fed']} fed · {waiting} waiting"
+    if not lines:
+        return _panel("intake", "Intake", '<div class="intake"><p class="empty">no listener or feeder has run</p></div>')
+    inner = f'<div class="intake">{lines}</div>'
+    if feeder and feeder["items"]:
+        top, rest = intake_split(feeder["items"])
+        if top:
+            inner += f'<ul class="feed">{"".join(_fed_line(x) for x in top)}</ul>'
+        if rest:
+            inner += (
+                f"<details><summary>{len(rest)} more</summary>"
+                f'<ul class="fed-more">{"".join(_fed_line(x) for x in rest)}</ul></details>'
+            )
+    return _panel("intake", "Intake", inner, count=count)
+
+
+def _just_happened_and_intake(snapshot: dict) -> str:
+    return f'<div class="pair">{_just_happened(snapshot)}{_intake(snapshot)}</div>'
+
+
+def lanes_script(script: str) -> str:
+    return script.replace("__LANES__", json.dumps(lanes_table(), separators=(",", ":")))

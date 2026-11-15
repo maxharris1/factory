@@ -105,6 +105,7 @@ from markdown_it.token import Token
 from lib import attention
 from lib.branch_stack import stack_wait, stacked_pulls
 from lib.device_pool import free_slots, slots_in_use
+from lib.device_sync import blocked as sync_blocked
 from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -624,7 +625,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0"}
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
     optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""
@@ -826,6 +827,7 @@ class Feeder:
                         "project_bot": candidate.project.grok_bot,
                         "detail": detail,
                         "ticket_url": issue.url,
+                        "link": issue.url,
                         "defects": codes,
                     },
                     sort_keys=True,
@@ -1028,8 +1030,9 @@ class Feeder:
         with self.queue.connect() as connection:
             # Held slots, plus running jobs with no placement on the box (#90).
             used = slots_in_use(connection, self.machines)
+            blocked = sync_blocked(connection)
             for harness in harnesses:
-                free = free_slots(self.machines, harness, used) if self.machines else 0
+                free = free_slots(self.machines, harness, used, blocked) if self.machines else 0
                 queued = connection.execute(
                     "SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND recipient = ?",
                     (harness,),

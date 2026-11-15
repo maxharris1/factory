@@ -11,7 +11,11 @@ runs as the owning bot's own user and login, starts the job itself:
   run` (lib/placed_run.py, lib/remote.py), without `--worktree`;
 * before anything starts it checks every pinned skill file on the placed
   device against skills/skills.lock (lib/skill_preflight.py), and a missing
-  or changed file fails the job;
+  or changed file fails the job. A remote factory checkout that is not on
+  the box's commit, or missing, or a box checkout behind its fetched
+  origin/main (#297), instead marks that target lagging in device_sync and
+  requeues the job with no round charged (a free requeue from the shared
+  budget, then T6), so it goes to an up-to-date device;
 * it renders the standard brief for the job (lib/brief/), with the target
   repo's factory.md prose as additional context, read from the repo's
   trusted `factory_ref` in orch.yml (never a PR head) with `gh api` and every
@@ -42,7 +46,10 @@ left alone.
 A remote run is recorded in `<job-dir>/remote.json` (pid, process start,
 run.log offset) and started with `--status-file <job-dir>/exit`, so a
 restarted waiter adopts every remote run still running for its bot and
-finishes it from the status file when it ends (gone without one: failed).
+finishes it from the status file when it ends. The waiter locks
+`<job-dir>/run.lock` and passes the locked fd to `orch job run`, which holds
+it until it exits: an adopted run ends only once its status file exists or
+that lock is free (free without a status file: failed) (#318).
 The record is removed once the job is finished, so no run is finished twice.
 
 `orch job run` sends the first heartbeat before the harness starts and
@@ -123,7 +130,9 @@ from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
 from lib import skill_preflight
-from lib.skill_preflight import PreflightError
+from lib.skill_preflight import CheckoutLagging, PreflightError
+from lib import device_sync
+from lib.job_state import RELEASED_UNSTARTED, requeue_unstarted
 from lib.telemetry import STATE_DIR_ENV
 from lib.wait import (
     OWNING_BOTS,
@@ -133,7 +142,7 @@ from lib.wait import (
     lock_backoff,
     retry_locked,
 )
-from lib.worktrees import pid_alive, process_start
+from lib.worktrees import pid_alive, pid_gone, process_start
 
 GH_ARGV_PREFIX = ("gh", "api", "-X", "GET")
 GH_TIMEOUT_SECONDS = 30.0
@@ -156,6 +165,7 @@ MARKER_TAIL_BYTES = 64 * 1024
 # finish the run (#87 F1.4), and the exit status `orch job run` leaves.
 REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
+RUN_LOCK = "run.lock"
 
 Log = Callable[[str], None]
 
@@ -442,22 +452,48 @@ class AdoptedRun:
         self,
         pid: int,
         start: str | None,
-        status_path: Path,
-        alive: Callable[[int, str | None], bool],
+        job_dir: Path,
+        gone: Callable[[int, str | None], bool],
     ):
         self.pid = pid
         self.start = start
-        self.status_path = status_path
-        self.alive = alive
+        self.status_path = job_dir / STATUS_FILE
+        self.lock_path = job_dir / RUN_LOCK
+        self.gone = gone
 
     def poll(self) -> int | None:
         code = read_status(self.status_path)
         if code is not None:
             return code
-        if self.alive(self.pid, self.start):
+        if self._running():
             return None
         code = read_status(self.status_path)  # it may have ended just now
         return 255 if code is None else code
+
+    def _running(self) -> bool:
+        try:
+            fd = os.open(self.lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return not self.gone(self.pid, self.start)
+        except OSError:
+            return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        finally:
+            os.close(fd)
+        return False
+
+
+def _lock_for_runner(path: Path) -> int:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        raise WaiterError(f"{path} is held by an earlier run of this job") from exc
+    return fd
 
 
 def read_status(path: Path) -> int | None:
@@ -489,6 +525,7 @@ class Waiter:
         log: Log = lambda line: print(line, file=sys.stderr, flush=True),
         environ: Mapping[str, str] | None = None,
         alive: Callable[[int | None, str | None], bool] = pid_alive,
+        gone: Callable[[int, str | None], bool] = pid_gone,
         approvals: Approvals | None = None,
         drain: Path | None = None,
         version: str = LOADED_VERSION,
@@ -517,6 +554,7 @@ class Waiter:
         except ApproverProfileExposed as exc:
             raise WaiterError(str(exc)) from exc
         self.alive = alive
+        self.gone = gone
         self._children: dict[str, Child] = {}
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
@@ -632,13 +670,22 @@ class Waiter:
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
             offset = 0
+            lock = -1
             if remote:
                 # Only this run's output counts: whatever run.log already
                 # holds is an earlier run's (#87 F1.5).
                 (job_dir / STATUS_FILE).unlink(missing_ok=True)
                 (job_dir / REMOTE_RECORD).unlink(missing_ok=True)
                 offset = _size(job_dir / "run.log")
-            child = self._spawn(argv, job_dir, brief_path)
+                lock = _lock_for_runner(job_dir / RUN_LOCK)
+            try:
+                child = self._spawn(argv, job_dir, brief_path, lock)
+            finally:
+                if lock >= 0:
+                    os.close(lock)
+        except CheckoutLagging as exc:
+            self._requeue_lagging(job, placement, factory_root, str(exc), label)
+            return None
         except (WaiterError, BriefError, PreflightError, OSError, ValueError) as exc:
             self.log(f"{label}: not started: {_one_line(exc)}; failed it for T6")
             self._fail(job)
@@ -667,6 +714,57 @@ class Waiter:
         where = placement.device if placement is not None else "no device"
         self.log(f"{label}: started orch job run (pid {child.pid}) on {where}")
         return job.id
+
+    def _requeue_lagging(
+        self, job: Job, placement: Placement | None, checkout: str | None, reason: str, label: str
+    ) -> None:
+        if placement is None or checkout is None:
+            self.log(f"{label}: not started: {reason}; failed it for T6")
+            self._fail(job)
+            return
+        claimer, _ = self._claimer
+
+        def write() -> tuple[str, str] | None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                now = self.queue.now()
+                device_sync.upsert(
+                    connection,
+                    device=placement.device,
+                    bot=self.bot,
+                    harness=self.recipient,
+                    checkout=checkout,
+                    target=None,
+                    sha=None,
+                    state=device_sync.LAGGING,
+                    detail=reason,
+                    now=now,
+                )
+                result = requeue_unstarted(
+                    connection,
+                    job.id,
+                    now=now,
+                    event=RELEASED_UNSTARTED,
+                    reason=reason,
+                    slot_guard=(
+                        "harness = ? AND autostart_pid = ? AND runner_pid IS NULL "
+                        "AND worker_pid IS NULL AND COALESCE(remote_started, 0) = 0"
+                    ),
+                    slot_params=(self.recipient, claimer),
+                )
+                connection.commit()
+                return result
+
+        try:
+            result = retry_locked(write)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"{label}: not started: {reason}; could not requeue it ({_one_line(exc)})")
+            self._fail(job)
+            return
+        if result is None:
+            self.log(f"{label}: not started: {reason}; its claim changed, left alone")
+            return
+        self.log(f"{label}: not started: {result[1]}")
 
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.
@@ -700,7 +798,7 @@ class Waiter:
         os.chmod(path, 0o700)
         return path
 
-    def _spawn(self, argv: list[str], job_dir: Path, brief_path: Path) -> Child:
+    def _spawn(self, argv: list[str], job_dir: Path, brief_path: Path, lock: int) -> Child:
         env = dict(self.environ)
         env[BRIEF_ENV] = str(brief_path)
         env[STATE_DIR_ENV] = str(job_dir)  # the run's raw telemetry log goes here (#93)
@@ -721,6 +819,7 @@ class Waiter:
                     cwd=str(job_dir),
                     start_new_session=True,
                     close_fds=True,
+                    pass_fds=(lock,) if lock >= 0 else (),
                     shell=False,
                 )
         finally:
@@ -785,9 +884,7 @@ class Waiter:
             if state != ("running", self.recipient):
                 path.unlink(missing_ok=True)
                 continue
-            self._children[job_id] = AdoptedRun(
-                pid, start, job_dir / STATUS_FILE, self.alive
-            )
+            self._children[job_id] = AdoptedRun(pid, start, job_dir, self.gone)
             self._remote[job_id] = (job_dir, offset)
             self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
         self._recovered = True

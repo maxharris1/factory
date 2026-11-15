@@ -25,7 +25,8 @@ from lib.dashboard_pages.common import (  # noqa: F401
 )
 from lib.dashboard_pages.efficiency import _savings  # noqa: F401
 from lib.dashboard_pages.lanes import (  # noqa: F401
-    _FEEDER_STATE, _feeder, _kpis, _lanes, _linear_webhook, _queue, _slot, lane_devices,
+    _FEEDER_STATE, TILE_STATE, _feeder, _intake, _just_happened, _kpis, _lanes, _linear_webhook,
+    _queue_lane, _slot, intake_split, lane_devices, lanes_script, probe_down, queue_speed,
 )
 from lib.dashboard_pages.shell import (  # noqa: F401
     _PAGE_NAMES, _PANELS, _PX_BAD, _PX_HEX, _PX_LINK, PAGES, PX_ACTIONS, PX_BOT_TINTS, PX_BROKEN,
@@ -35,8 +36,8 @@ from lib.dashboard_pages.shell import (  # noqa: F401
     shell_table, status_segments, version_drift,
 )
 from lib.dashboard_pages.system import (  # noqa: F401
-    _ANCHOR, _BUDGET_STATE, _HEALTH_STATE, _POLL_STATE, _anchor_attr, _components, _health, _log,
-    _no_waiter,
+    _ANCHOR, _BUDGET_STATE, _HEALTH_STATE, _LOG_KINDS, _POLL_STATE, _anchor_attr, _components,
+    _drift, _drift_row, _health, _log, _log_row, _no_waiter, _rules, version_groups,
 )
 from lib.dashboard_pages.ticket_detail import (  # noqa: F401
     _TRAIL_LEGEND, _flow_template, _job_article, _jobview, _legend, _meta,
@@ -61,13 +62,13 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    lanes.CSS_LINKS, ticket_detail.CSS, tickets.CSS, lanes.CSS_MODAL, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
+    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((
     common.SCRIPT_HEAD, shell.SCRIPT, lanes.SCRIPT, activity.SCRIPT, tickets.SCRIPT_TICKETS,
     system.SCRIPT_LOG, system.SCRIPT_HEALTH, efficiency.SCRIPT,
-    ticket_detail.SCRIPT, lanes.SCRIPT_MODAL, common.SCRIPT_TELEMETRY, system.SCRIPT_COMPONENTS,
+    ticket_detail.SCRIPT, common.SCRIPT_TELEMETRY, system.SCRIPT_COMPONENTS,
     common.SCRIPT_TAIL,
 ))
 
@@ -93,7 +94,7 @@ def font_faces() -> str:
 
 def page_script() -> str:
     return (
-        SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
+        lanes_script(SCRIPT).replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())
         .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))

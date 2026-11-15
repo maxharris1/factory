@@ -439,6 +439,10 @@ def doctor(
     return 0, prompt, []
 
 
+def installed_errors(root: Path, anchor: Path) -> list[str]:
+    return _check_installed(root, anchor, "local")
+
+
 def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
     skills = _skills(root)
     loaded = load_pin(root)

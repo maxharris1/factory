@@ -12,6 +12,10 @@ from lib.handoff import HandoffError, parse_comment
 from lib.pr_title import SOURCES_TABLE, TITLE_LIMIT, prefixed
 
 
+def _staggered_first_read(now: float, key: tuple[str, str]) -> float:
+    return now + _spread(*key) % STOPPED_POLL_SECONDS - STOPPED_POLL_SECONDS
+
+
 class TrackingMixin:
     def _feed(self, source: PollSource) -> None:
         """Run the backlog feeder, then start tracking what it fed.
@@ -271,29 +275,15 @@ class TrackingMixin:
             and _matching_head(fields["head"], ticket.current_head) is not None
         )
 
-    def _tracked_refs(self, cycle: int | None = None) -> tuple[TicketRef, ...]:
-        """The tracked tickets poll_once reads (#108).
-
-        Every ticket that is not merged, done or abandoned, plus a merged or
-        handed-off one with a completed ship intent left to replay or an
-        external ship left to settle. A handed-off ticket stays polled, so
-        its merge is seen and a trusted ready may re-enter review.
-
-        With cycle, a ticket in a stopped state (handed-off, capped, blocked,
-        refused, or stuck) with nothing to replay is offered only once its
-        turn came: once every STOPPED_POLL_SECONDS, spread across cycles by a
-        hash of its identity. It stays offered until a read reaches it (a
-        ticket or a poll error), so a cycle that reads no Linear, or defers
-        the read, only delays it. Every other ticket is offered every cycle.
-        """
+    def _tracked_refs(self, now: float | None = None) -> tuple[TicketRef, ...]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled
+                       unsettled, unlinked, read_at
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
-                           state.workflow_state,
+                           state.workflow_state, reads.read_at,
                            COALESCE(state.stuck, 0) AS stuck,
                            EXISTS (
                                SELECT 1
@@ -313,31 +303,44 @@ class TrackingMixin:
                                WHERE external.repo = tracked.repo
                                  AND external.ticket_id = tracked.ticket_id
                                  AND external.settled = 0
-                           ) AS unsettled
+                           ) AS unsettled,
+                           EXISTS (
+                               SELECT 1
+                               FROM followup_filings AS filing
+                               WHERE filing.repo = tracked.repo
+                                 AND filing.ticket_id = tracked.ticket_id
+                                 AND filing.status IN ('pending', 'filed')
+                           ) AS unlinked
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
                      AND state.ticket_id = tracked.ticket_id
+                    LEFT JOIN ticket_reads AS reads
+                      ON reads.repo = LOWER(tracked.repo)
+                     AND reads.ticket_id = tracked.ticket_id
                 )
                 WHERE workflow_state IS NULL
                    OR workflow_state NOT IN ('merged', 'done', 'abandoned')
                    OR (workflow_state = 'merged' AND (replay OR unsettled))
+                   OR unlinked
                 ORDER BY repo, ticket_id
                 """
             ).fetchall()
-        every = max(1, STOPPED_POLL_SECONDS // max(1, self._poll_seconds))
         refs: list[TicketRef] = []
-        stopped_keys: set[tuple[str, str]] = set()
+        first_reads: list[tuple[str, str, float]] = []
         for row in rows:
             state = row["workflow_state"]
-            catching_up = bool(row["replay"]) or bool(row["unsettled"])
+            catching_up = (
+                bool(row["replay"]) or bool(row["unsettled"]) or bool(row["unlinked"])
+            )
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
-            if cycle is not None and stopped and not catching_up:
-                key = (str(row["repo"]).lower(), str(row["ticket_id"]))
-                stopped_keys.add(key)
-                if (cycle + _spread(row["repo"], row["ticket_id"])) % every == 0:
-                    self._stopped_due.add(key)
-                if key not in self._stopped_due:
+            if now is not None and stopped and not catching_up:
+                read_at = row["read_at"]
+                if read_at is None:
+                    key = (str(row["repo"]).lower(), str(row["ticket_id"]))
+                    read_at = _staggered_first_read(now, key)
+                    first_reads.append((*key, read_at))
+                if now - read_at < STOPPED_POLL_SECONDS:
                     continue
             refs.append(
                 TicketRef(
@@ -345,14 +348,18 @@ class TrackingMixin:
                     ticket_id=str(row["ticket_id"]),
                     tracker=str(row["tracker"]),
                     allow_merged=state == "merged"
+                    or bool(row["unlinked"])
                     or (
                         state in ("handed-off", *WATCHED_STATES)
                         and bool(row["replay"])
                     ),
                 )
             )
-        if cycle is not None:
-            self._stopped_due &= stopped_keys
+        if first_reads:
+            with self._connect() as connection:
+                connection.executemany(
+                    "INSERT OR IGNORE INTO ticket_reads VALUES (?, ?, ?)", first_reads
+                )
         return tuple(refs)
 
     def active_job_tickets(self) -> frozenset[tuple[str, str]]:

@@ -29,6 +29,7 @@ KINDS = (
     "decline",
     "done",
     "stuck",
+    "retry",
 )
 
 # state and builder are how Aut0 keeps orch:state and orch:builder in the header.
@@ -88,6 +89,7 @@ REQUIRED_BY_KIND = {
     "decline": frozenset(),
     "done": frozenset(),
     "stuck": frozenset(),
+    "retry": frozenset(),
 }
 
 _HTML_LINE = re.compile(r"^<!--\s*orch:v1\b\s*(.*?)\s*-->$")

@@ -71,10 +71,10 @@ def test_kick_without_the_timer_runs_a_detached_pass(home: Path) -> None:
     result = _run(home, "kick")
     assert result.returncode == 0, result.stderr
     deadline = time.monotonic() + 30
-    while len(_order(home)) < 3 and time.monotonic() < deadline:
+    while len(_order(home)) < 4 and time.monotonic() < deadline:
         time.sleep(0.1)
     assert _order(home)[0] == "heal deploy"
-    assert sorted(_order(home)[1:]) == ["heal --health-json", "health --json"]
+    assert sorted(_order(home)[1:]) == ["heal --health-json", "heal devices", "health --json"]
     assert time.monotonic() - started < 30
     assert "kick: started a detached pass" in _service_log(home)
 

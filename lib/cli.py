@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -35,7 +36,9 @@ from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
+from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
+from lib.handoff import format_header
 from lib.harness_env import harness_env
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
@@ -50,6 +53,7 @@ from lib.orch_yml import (
     OrchConfig,
     approvals,
     hold_approver_findings,
+    linear_approver_findings,
     load_approvals,
     load_orch_yml,
     parse_bind,
@@ -102,6 +106,7 @@ commands:
   health           component heartbeats: report or forget (issue #92)
   heal             restart down or stale-code components (issue #107)
   status           read-only snapshot of the queue, devices and paused tickets
+  retry            ask the dispatcher to restart a stuck ticket (kind=retry)
 
 check-config [--orch PATH] [--machines PATH] [--factory PATH ...]
              [--allow-placeholders]
@@ -328,8 +333,18 @@ heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
   edits to machines.yml, orch.yml and deploy/install.sh. Only the
   checkout's owner pulls. A conflict, local commits or other local edits
   leave the checkout unchanged and escalate once. Runs
-  `deploy/install.sh --update` when deploy/ or requirements.txt changed.
+  `deploy/install.sh --update` when deploy/ or requirements.txt changed,
+  and `orch install-skills` when skills/ changed. A box holding a job is
+  left on its old HEAD and retried next pass (issue #297).
   deploy/self-heal.sh runs it before each heal pass.
+heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
+             [--orch PATH] [--dry-run]
+  Bring each enabled remote device's factory checkout (machines.yml
+  factory_root) to this checkout's HEAD on main and run install-skills
+  there (issue #297). A device with a job on it is skipped and retried next
+  pass; local edits on a device are never discarded (refused, escalated
+  once). --dry-run prints each target's state and writes nothing.
+  deploy/self-heal.sh starts it detached after each heal pass.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
@@ -337,6 +352,18 @@ status [--db PATH] [--machines PATH] [--orch PATH]
   read-only. A database without the dispatcher tables shows the empty
   state. --db defaults to ORCH_DB. Exits 1 when the database or a given
   config file cannot be read, else 0.
+
+retry <owner/repo>#<n> --reason TEXT [--force] [--db PATH]
+  Post a grok-bot kind=retry comment ("Retry requested: TEXT") on a GitHub
+  ticket (owner/repo#n or its PR or issue URL) through gh with the token
+  variables unset; the dispatcher then resumes the step that got stuck for
+  one more attempt (docs/SPEC.md 4.2 TR). The gh login must be a
+  trusted_logins login for grok-bot. With --db or $ORCH_DB readable, it
+  first refuses (exit 1, nothing posted) a ticket that is not stuck or has
+  a queued or running harness job; --force skips that check, and the
+  dispatcher still refuses either case. Linear tickets are out of scope.
+  Prints the new comment id. Exits 2 on a bad ticket or empty reason, 1
+  when refused or the post fails.
 """
 
 
@@ -382,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
         return heal.main(argv[1:])
     if argv[0] == "status":
         return _call(status_main, argv[1:])
+    if argv[0] == "retry":
+        return _call(_retry, argv[1:])
     print(f"unknown command: {argv[0]}", file=sys.stderr)
     print(USAGE, end="", file=sys.stderr)
     return 2
@@ -418,6 +447,8 @@ def _check_config(argv: list[str]) -> int:
         orch_path,
         allow_placeholders=args.allow_placeholders,
     )
+    if orch_config is not None:
+        orch_findings = orch_findings + linear_approver_findings(orch_config)
     failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:
@@ -1229,6 +1260,108 @@ def _job_cancel(argv: list[str]) -> int:
         f"{request.action} -> {request.recipient})"
     )
     return 0
+
+
+RETRY_HEADER = {"kind": "retry", "from": "grok-bot", "role": "orchestrator"}
+_REPO = r"(?P<repo>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)"
+_TICKET_REF = re.compile(_REPO + r"#(?P<ticket>\S+)")
+_TICKET_URL = re.compile(
+    r"https://github\.com/" + _REPO + r"/(?:pull|issues)/(?P<ticket>[0-9]+)(?:[/?#]\S*)?"
+)
+
+
+def _retry(argv: list[str]) -> int:
+    prog = "orch retry"
+    parser = _Parser(prog=prog, add_help=True)
+    parser.add_argument("ticket")
+    parser.add_argument("--reason", required=True)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--db", type=Path)
+    args = parser.parse_args(argv)
+    reason = args.reason.strip()
+    if not reason:
+        print(f"{prog}: --reason must say why (Max's words)", file=sys.stderr)
+        return 2
+    match = _TICKET_REF.fullmatch(args.ticket) or _TICKET_URL.fullmatch(args.ticket)
+    if match is None or not match["ticket"].isdigit():
+        linear = "linear.app/" in args.ticket or match is not None
+        print(
+            f"{prog}: {args.ticket!r} is not owner/repo#<n> or a GitHub PR or issue URL"
+            + ("; Linear tickets are out of scope, Grok posts kind=retry there" if linear else ""),
+            file=sys.stderr,
+        )
+        return 2
+    repo, number = match["repo"], int(match["ticket"])
+    if not args.force:
+        refusal = _retry_refusal(args.db or os.environ.get(DB_ENV), repo, number, prog)
+        if refusal is not None:
+            print(f"{prog}: {repo}#{number} {refusal}", file=sys.stderr)
+            return 1
+    body = f"{format_header(RETRY_HEADER)}\n\nRetry requested: {reason}\n"
+    try:
+        comment_id = GitHubIntakeClient().post_comment(repo, number, body)
+    except GitHubAdapterError as exc:
+        print(f"{prog}: {exc.safe_detail}", file=sys.stderr)
+        if gh_status(exc) in (401, 403):
+            print(
+                f"{prog}: the gh login must be a trusted_logins login for grok-bot "
+                "in orch.yml",
+                file=sys.stderr,
+            )
+        return 1
+    print(f"posted kind=retry comment {comment_id} on {repo}#{number}")
+    return 0
+
+
+def _retry_refusal(db: Path | str | None, repo: str, number: int, prog: str) -> str | None:
+    path = Path(db) if db else None
+    if path is None or not path.is_file():
+        print(
+            f"{prog}: warning: no dispatcher database (pass --db or set {DB_ENV}); "
+            "posting without the stuck check",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            state = (
+                connection.execute(
+                    "SELECT stuck, COALESCE(workflow_state, 'intake') FROM ticket_state "
+                    "WHERE repo = ? AND ticket_id = ?",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if "ticket_state" in tables
+                else None
+            )
+            job = (
+                connection.execute(
+                    "SELECT id, action, recipient, state FROM jobs "
+                    "WHERE lower(repo) = ? AND ticket_id = ? "
+                    "AND state IN ('queued', 'running') AND recipient != 'grok' "
+                    "ORDER BY created_at LIMIT 1",
+                    (repo.lower(), str(number)),
+                ).fetchone()
+                if "jobs" in tables
+                else None
+            )
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        print(
+            f"{prog}: warning: cannot read {path} ({exc}); posting without the stuck check",
+            file=sys.stderr,
+        )
+        return None
+    if state is None or not state[0]:
+        return f"not stuck (state {state[1] if state else 'untracked'}); nothing to retry"
+    if job is not None:
+        return f"has job {job[0]} {job[1]} -> {job[2]} {job[3]}; nothing to retry until it ends"
+    return None
 
 
 def _done_settled(

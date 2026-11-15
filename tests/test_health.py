@@ -608,9 +608,10 @@ def test_without_heartbeats_the_dashboard_attention_is_unchanged(tmp_path: Path)
 # --- orch status and orch health -----------------------------------------------------------
 
 
-def test_orch_status_has_a_health_section(tmp_path: Path) -> None:
+def test_orch_status_has_a_health_section(tmp_path: Path, monkeypatch) -> None:
     from tests.test_wait import dispatcher_for
 
+    monkeypatch.setattr(health, "ROOT", tmp_path / "no-checkout")
     db, queue = make_db(tmp_path)
     dispatcher_for(db)  # the tracker tables orch status reads
     queue.enqueue(request("codex"), dedupe_key="a")
@@ -1213,7 +1214,7 @@ def _published(tmp_path: Path, monkeypatch, *, every: int | None = None, live: b
 
 
 def _states(text: str) -> list[str]:
-    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text)
+    return re.findall(r"UNKNOWN|STALE|DOWN|UP", text.partition("process details")[2])
 
 
 @pytest.mark.parametrize("every, live, seconds", [(5, False, 300), (1440, False, 86400),
@@ -1516,3 +1517,140 @@ def test_a_restarted_pollers_failure_outranks_the_old_pollers_success(tmp_path: 
     store(db, NOW - 5).checked("dashboard-push", "box", pid=8, interval=30)  # after a restart
     (item,) = pushes(health.load_report(db, NOW))
     assert (item.state, item.reason) == ("stale", "push failing, last pushed 20s ago")
+
+
+
+HEAD_SHA = "1a2b3c4d5e6f" + "0" * 28
+MAIN_SHA = "9f8e7d6c5b4a" + "1" * 28
+
+
+def write_sync(db: Path, *, device: str = "mac", bot: str = "claude-bot", state: str = "lagging",
+               sha: str | None = HEAD_SHA, detail: str = "", since: float = NOW) -> None:
+    from lib import device_sync
+
+    connection = sqlite3.connect(db)
+    try:
+        with connection:
+            device_sync.upsert(connection, device=device, bot=bot, harness="claude",
+                               checkout=f"/Users/{bot}/factory", target=MAIN_SHA, sha=sha,
+                               state=state, detail=detail, now=since)
+    finally:
+        connection.close()
+
+
+def fake_checkout(root: Path, head: str, origin_main: str | None) -> Path:
+    git = root / ".git"
+    (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (git / "refs" / "remotes" / "origin").mkdir(parents=True, exist_ok=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git / "refs" / "heads" / "main").write_text(head + "\n", encoding="utf-8")
+    if origin_main is not None:
+        (git / "refs" / "remotes" / "origin" / "main").write_text(origin_main + "\n", encoding="utf-8")
+    return root
+
+
+def device_report(tmp_path: Path, now: float = NOW, *, head: str = MAIN_SHA,
+                  origin_main: str | None = MAIN_SHA) -> health.HealthReport:
+    db = tmp_path / "orch.db"
+    root = fake_checkout(tmp_path / "factory", head, origin_main)
+    return health.load_report(db, now, machines=machines_config(tmp_path), root=root)
+
+
+def device_json(tmp_path: Path, now: float = NOW, **checkout) -> dict:
+    return health.report_json(device_report(tmp_path, now, **checkout), now)
+
+
+def remote(data: dict) -> list[dict]:
+    return [d for d in data["devices"] if d["device"] != "box"]
+
+
+def test_the_report_lists_each_checkouts_sync_state(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    write_sync(db, state="lagging", detail="waiting for 1 job", since=NOW - 60)
+    data = device_json(tmp_path)
+    box, mac = data["devices"]
+    assert box == {"device": "box", "bot": "", "checkout": str(tmp_path / "factory"),
+                   "sha": MAIN_SHA, "target": MAIN_SHA, "state": "synced", "since": None,
+                   "detail": "", "needs_attention": False}
+    assert mac == {"device": "mac", "bot": "claude-bot", "checkout": "/Users/claude-bot/factory",
+                   "sha": HEAD_SHA, "target": MAIN_SHA, "state": "lagging", "since": NOW - 60,
+                   "detail": "waiting for 1 job", "needs_attention": False}
+    assert data["devices_out_of_sync"] == 0
+
+
+@pytest.mark.parametrize("state, sha", [("missing", None), ("refused", HEAD_SHA)])
+def test_a_missing_or_refused_checkout_needs_attention_at_once(
+    tmp_path: Path, state: str, sha: str | None
+) -> None:
+    db, _ = make_db(tmp_path)
+    write_sync(db, state=state, sha=sha, since=NOW)
+    data = device_json(tmp_path)
+    (mac,) = remote(data)
+    assert mac["needs_attention"] is True
+    assert data["devices_out_of_sync"] == 1
+
+
+@pytest.mark.parametrize("state", ["lagging", "deploying"])
+def test_a_lagging_checkout_needs_attention_only_after_the_grace(tmp_path: Path, state: str) -> None:
+    db, _ = make_db(tmp_path)
+    write_sync(db, state=state, since=NOW)
+    grace = 15 * 60
+    early = device_json(tmp_path, NOW + grace - 1)
+    late = device_json(tmp_path, NOW + grace)
+    (shown,) = remote(early)
+    assert shown["state"] == state
+    assert early["devices_out_of_sync"] == 0
+    assert late["devices_out_of_sync"] == 1
+
+
+def test_a_box_behind_origin_main_is_lagging_and_needs_attention(tmp_path: Path) -> None:
+    make_db(tmp_path)
+    report = device_report(tmp_path, head=HEAD_SHA, origin_main=MAIN_SHA)
+    (box,) = health.report_json(report, NOW)["devices"]
+    assert (box["device"], box["state"], box["needs_attention"]) == ("box", "lagging", True)
+    assert report.devices_out_of_sync == report.devices
+    assert "  device box lagging at 1a2b3c4d5e6f, target 9f8e7d6c5b4a" in health.render_lines(report, NOW)
+
+
+def test_a_box_with_no_origin_main_is_not_listed(tmp_path: Path) -> None:
+    make_db(tmp_path)
+    assert device_json(tmp_path, origin_main=None)["devices"] == []
+
+
+def test_an_out_of_sync_device_is_one_status_line(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db).beat("poller", "box", pid=7)
+    write_sync(db, state="refused", detail="local commits")
+    write_sync(db, device="pc", bot="codex-bot", state="synced", sha=MAIN_SHA)
+    lines = health.render_lines(device_report(tmp_path), NOW)
+    assert lines[0].endswith(", 1 devices out of sync)")
+    device_lines = [line for line in lines if line.startswith("  device ")]
+    assert device_lines == [
+        "  device mac claude-bot refused at 1a2b3c4d5e6f, target 9f8e7d6c5b4a (local commits)"
+    ]
+
+
+def test_no_device_sync_table_lists_only_the_box(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db).beat("poller", "box", pid=7)
+    data = device_json(tmp_path)
+    assert [d["device"] for d in data["devices"]] == ["box"]
+    assert data["devices_out_of_sync"] == 0
+    assert data["known"] is True
+
+
+def test_an_unreadable_orch_db_lists_no_remote_devices(tmp_path: Path) -> None:
+    (tmp_path / "orch.db").write_bytes(b"not a database")
+    assert remote(device_json(tmp_path)) == []
+
+
+def test_devices_out_of_sync_leave_orch_health_exit_alone(tmp_path: Path, capsys) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 5).beat("poller", "box", pid=7)
+    argv = ["--db", str(db), "--machines", str(machines_file(tmp_path)), "--json"]
+    before = health.main(argv, clock=lambda: NOW)
+    write_sync(db, state="missing", sha=None)
+    capsys.readouterr()
+    after = health.main(argv, clock=lambda: NOW)
+    assert json.loads(capsys.readouterr().out)["devices_out_of_sync"] >= 1
+    assert after == before

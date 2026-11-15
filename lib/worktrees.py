@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import NamedTuple
 
 WORK_ROOT_ENV = "ORCH_WORK_ROOT"
 URL_TEMPLATE_ENV = "ORCH_GIT_URL_TEMPLATE"
@@ -503,8 +504,11 @@ def _live_owner(data: dict) -> int | None:
         pass
     except OSError:
         return None
+    stat = _proc_stat(pid)
+    if stat is not None and stat.zombie:
+        return None
     recorded = data.get("pid_start")
-    if recorded is not None and _process_start(pid) != recorded:
+    if recorded is not None and (stat is None or stat.start != recorded):
         return None  # the pid was reused by an unrelated process
     return pid
 
@@ -524,14 +528,23 @@ def pid_alive(pid: int | None, start: str | None) -> bool:
     return _live_owner(data) is not None
 
 
+def pid_gone(pid: int, start: str | None) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    if start is None:
+        return False
+    current = _process_start(pid)
+    return current is not None and current != start
+
+
 def parent_pid(pid: int) -> int | None:
     """A pid's parent, from /proc/<pid>/stat (field 4); None if unknown."""
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    fields = text.rpartition(")")[2].split()
-    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None
+    stat = _proc_stat(pid)
+    return stat.ppid if stat is not None else None
 
 
 def descends_from(pid: int, ancestor: int, *, parent=parent_pid, limit: int = 64) -> bool:
@@ -548,12 +561,27 @@ def descends_from(pid: int, ancestor: int, *, parent=parent_pid, limit: int = 64
 
 def _process_start(pid: int) -> str | None:
     """Field 22 of /proc/<pid>/stat, so a reused pid is not mistaken for the owner."""
+    stat = _proc_stat(pid)
+    return stat.start if stat is not None else None
+
+
+class _ProcStat(NamedTuple):
+    zombie: bool
+    ppid: int | None
+    start: str | None
+
+
+def _proc_stat(pid: int) -> _ProcStat | None:
     try:
         text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
     fields = text.rpartition(")")[2].split()
-    return fields[19] if len(fields) > 19 else None
+    return _ProcStat(
+        zombie=fields[:1] == ["Z"],
+        ppid=int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else None,
+        start=fields[19] if len(fields) > 19 else None,
+    )
 
 
 @contextmanager

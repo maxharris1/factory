@@ -10,11 +10,11 @@ import sqlite3
 import subprocess
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -120,6 +120,7 @@ ORCHESTRATOR = "grok-bot"
 RISKY_PATH = re.compile(r"migration|realtime")
 RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGNORECASE)
 SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
+BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 INTAKE_RISK_TABLE = "intake_risk"
 LINEAR_PROCESS_HEADROOM = 2
 LINEAR_SEARCH_MAX_PAGES = 2
@@ -1292,6 +1293,7 @@ class LivePollSource:
             brief=_brief(comments),
             grok_bot=project.grok_bot,
             ready_starts_review=project.ready_starts_review,
+            intake_label=project.intake.label if project.intake else None,
             source_issue=github_source(pull, project.repo, number),
             pr_title=_open_title(pull),
             **_pull_facts(pull, fresh=fresh),
@@ -1525,13 +1527,28 @@ class LivePollSource:
                 ):
                     return True
                 if paths[0].lower().endswith(SQL_SUFFIXES):
-                    statement = _sql_patch_risk(patch)
+                    statement = _sql_patch_risk(
+                        patch, lambda: self._blob_text(repo, identifier, item.get("sha"))
+                    )
                     if statement is True:
                         return True
                     undecided = undecided or statement is None
             elif item.get("changes") != 0:
                 undecided = True
         return None if undecided else False
+
+    def _blob_text(self, repo: str, identifier: str, sha: object) -> str | None:
+        if not isinstance(sha, str) or not BLOB_SHA.fullmatch(sha):
+            return None
+        try:
+            content = _json_object(self._gh_call(f"repos/{repo}/git/blobs/{sha}"), "GitHub blob")
+            encoded = content.get("content")
+            if content.get("encoding") != "base64" or not isinstance(encoded, str):
+                raise PollSourceError(f"{repo} blob {sha} is not base64 content")
+            return base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
+        except Exception as exc:
+            self._record(repo, identifier, exc)
+            return None
 
     def _linear_merged(
         self, project: Project, identifier: str, allow_merged: bool
@@ -2058,35 +2075,120 @@ def _risk(
     return _risk_header(comments, trusted) or "high"
 
 
-def _sql_patch_risk(patch: str) -> bool | None:
+class Hunk(NamedTuple):
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    header: str
+    body: tuple[str, ...]
+
+
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", re.MULTILINE)
+
+
+def _hunks(patch: str) -> list[Hunk]:
+    matches = list(HUNK_HEADER.finditer(patch))
+    hunks = []
+    for match, end in zip(matches, [*(found.start() for found in matches[1:]), len(patch)]):
+        lines = patch[match.end() : end].split("\n")[1:]
+        if lines and lines[-1] == "":
+            lines.pop()
+        old_start, old_count, new_start, new_count, header = match.groups()
+        body = tuple(line or " " for line in lines if not line.startswith("\\"))
+        hunks.append(
+            Hunk(
+                int(old_start),
+                1 if old_count is None else int(old_count),
+                int(new_start),
+                1 if new_count is None else int(new_count),
+                header,
+                body,
+            )
+        )
+    return hunks
+
+
+def _sql_patch_risk(patch: str, read_source: Callable[[], str | None]) -> bool | None:
     """#195: True when a changed line falls in a SQL statement that changes a
-    realtime table, or a changed hunk shows a realtime word at all; None when
-    such a statement's start or end is outside the patch, or a changed hunk
-    shows a block comment, so it cannot be classified."""
-    decided: bool | None = False
-    hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*))$", patch, flags=re.MULTILINE)
-    for index in range(1, len(hunks) - 4, 5):
-        body = hunks[index + 4].splitlines()
-        if any(line[:1] in "+-" for line in body):
-            shown = [hunks[index + 3], *(line[1:] for line in body)]
-            if any(RISKY_CHANGE.search(text) for text in shown):
-                return True
-            if any(SQL_COMMENT.search(text) for text in shown):
-                decided = None
-        for start, mark in ((int(hunks[index + 1]), "-"), (int(hunks[index + 2]), "+")):
-            lines = [line for line in body if line[:1] in (" ", mark)]
-            verdict = _sql_statements_risk(lines, mark, headed=start <= 1)
-            if verdict is True:
-                return True
-            if verdict is None:
-                decided = None
-    return decided
+    realtime table, or a changed hunk shows a realtime word at all. #292: a
+    patch that does not start at line 1 is lexed over the whole head file
+    from `read_source`; None when that file cannot be read or does not match
+    the patch."""
+    hunks = _hunks(patch)
+    for hunk in hunks:
+        if any(line.startswith(("+", "-")) for line in hunk.body) and any(
+            RISKY_CHANGE.search(text) for text in (hunk.header, *hunk.body)
+        ):
+            return True
+    if not hunks:
+        return False
+    whole = not (len(hunks) == 1 and hunks[0].old_start <= 1 and hunks[0].new_start <= 1)
+    if whole:
+        source = read_source()
+        body = None if source is None else _patch_over_source(source, hunks)
+        if body is None:
+            return None
+    else:
+        body = list(hunks[0].body)
+    sides = {mark: _sql_side(body, mark) for mark in "-+"}
+    before, after = (_sql_statements_risk(sides[mark], mark, whole=whole)[1] for mark in "-+")
+    also_changed = frozenset(
+        at for at, line in enumerate(body) if line.startswith(" ") and before[at] != after[at]
+    )
+    verdicts = [
+        _sql_statements_risk(sides[mark], mark, whole=whole, also_changed=also_changed)[0] for mark in "-+"
+    ]
+    if True in verdicts:
+        return True
+    return None if None in verdicts else False
 
 
+def _patch_over_source(source: str, hunks: Sequence[Hunk]) -> list[str] | None:
+    lines = source.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    body: list[str] = []
+    old = new = 0
+    for hunk in hunks:
+        old_first = hunk.old_start - 1 if hunk.old_count else hunk.old_start
+        new_first = hunk.new_start - 1 if hunk.new_count else hunk.new_start
+        if not new <= new_first <= len(lines) or old_first - new_first != old - new:
+            return None
+        body += [" " + line for line in lines[new:new_first]]
+        old, new = old_first, new_first
+        for line in hunk.body:
+            if line.startswith("-"):
+                old += 1
+            elif line.startswith((" ", "+")) and new < len(lines) and line[1:] == lines[new]:
+                old += line.startswith(" ")
+                new += 1
+            else:
+                return None
+            body.append(line)
+        if (old - old_first, new - new_first) != (hunk.old_count, hunk.new_count):
+            return None
+    return body + [" " + line for line in lines[new:]]
+
+
+def _sql_side(body: Sequence[str], mark: str) -> list[str]:
+    """#292: one side of a diff body. The other side's lines become empty
+    changed lines, so a change that leaves nothing on this side still marks
+    the statement it falls in."""
+    return [line if line.startswith((" ", mark)) else mark for line in body]
+
+
+SQL_IDENT_START = "A-Za-z_\x80-\U0010ffff"
 SQL_TOKEN = re.compile(
-    r"--|/\*|\*/|;|(?<![\w$])[eE]'|'|\"|(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$"
+    rf"--|/\*|;|(?<![{SQL_IDENT_START}0-9$])[eE]'|'|\""
+    rf"|(?<![{SQL_IDENT_START}0-9$])\$(?:[{SQL_IDENT_START}][{SQL_IDENT_START}0-9]*)?\$"
 )
 SQL_COMMENT = re.compile(r"/\*|\*/")
+
+
+class SqlLexState(NamedTuple):
+    comment_depth: int
+    quote: str | None
 
 
 def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
@@ -2098,18 +2200,22 @@ def _sql_quote(opener: str) -> tuple[re.Pattern[str], str]:
     return re.compile(re.escape(opener)), opener
 
 
-def _sql_statements_risk(lines: Sequence[str], mark: str, *, headed: bool) -> bool | None:
-    """#195: lexes one side of a hunk as PostgreSQL. Comments are dropped;
-    quoted strings, identifiers and dollar-quoted bodies keep their words but
-    never end a statement. A hunk that starts past line 1 and shows it began
-    inside a comment or quote cannot be split into statements."""
-    decided: bool | None = False
-    from_top, touched, stray = headed, False, False
-    text, changed = "", False
+def _sql_statements_risk(
+    lines: Sequence[str], mark: str, *, whole: bool, also_changed: Collection[int] = ()
+) -> tuple[bool | None, list[SqlLexState]]:
+    """#195: lexes one side of a diff body from line 1 as PostgreSQL. Comments
+    are dropped; quoted strings, identifiers and dollar-quoted bodies keep
+    their words but never end a statement. #292: a whole file that ends inside
+    a comment or quote, or a lone hunk that ends inside a changed statement,
+    cannot be classified."""
+    text, changed, risky, bare_cr_or_escape_string = "", False, False, False
     depth, quote, close = 0, None, ""
-    for line in lines:
-        mine = line[:1] == mark
-        touched = touched or mine
+    states: list[SqlLexState] = []
+    for index, line in enumerate(lines):
+        states.append(SqlLexState(depth, None if quote is None else quote.pattern))
+        mine = line.startswith(mark) or index in also_changed
+        changed = changed or mine
+        bare_cr_or_escape_string = bare_cr_or_escape_string or "\r" in line.removesuffix("\r")
         code, at = line[1:] + "\n", 0
         while at < len(code):
             if depth:
@@ -2139,27 +2245,24 @@ def _sql_statements_risk(lines: Sequence[str], mark: str, *, headed: bool) -> bo
                 break
             token, at = found.group(), found.end()
             if token == ";":
-                changed = changed or mine
-                if changed and RISKY_CHANGE.search(text):
-                    return True
-                if changed and not headed:
-                    decided = None
-                text, changed, headed = "", False, True
+                risky = risky or (changed and bool(RISKY_CHANGE.search(text)))
+                text, changed = "", False
             elif token == "--":
                 text, at = text + " ", len(code)
             elif token == "/*":
                 depth = 1
-            elif token == "*/":
-                stray = True
             else:
+                bare_cr_or_escape_string = bare_cr_or_escape_string or token in ("e'", "E'")
                 quote, close = _sql_quote(token)
                 text += token
-                changed = changed or mine
-    if changed and RISKY_CHANGE.search(text):
-        return True
-    if touched and not from_top and (stray or depth or quote is not None):
-        return None
-    return None if changed else decided
+    if risky or (changed and RISKY_CHANGE.search(text)):
+        return True, states
+    realtime_possible = not whole or any(RISKY_CHANGE.search(line) for line in lines)
+    if bare_cr_or_escape_string and realtime_possible:
+        return None, states
+    unfinished = bool(depth) or quote is not None
+    begun = changed and (unfinished or bool(text.strip()))
+    return (None if (unfinished if whole else begun) else False), states
 
 
 def _linear_migrations_label(issue: Mapping[str, Any]) -> bool | None:
