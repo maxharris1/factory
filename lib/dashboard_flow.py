@@ -38,7 +38,6 @@ CHART_PATH = ROOT / "model" / "chart.mmd"
 CHART_MAX_BYTES = 256 * 1024
 MAX_BRIDGE = 2
 OFF_CHART = "no direct transition on the chart"
-ENQUEUED_WITH_ROW_SECONDS = 60.0
 GROUPS = ("blue", "purple", "orange", "yellow", "teal", "tan")
 # The step a job works in, by job action (lib/dispatcher.py _state_for_action,
 # plus the Grok Bot wakes that are themselves a state).
@@ -165,6 +164,7 @@ class JobStep(NamedTuple):
     created_at: float
     started_at: float | None
     finished_at: float | None
+    attempt: int = 1
 
 
 class Visit(NamedTuple):
@@ -343,13 +343,11 @@ def _first_row_floor(
     )
     if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
         return last_other_job
-    *kept_by_old_visit, newest = sorted(
-        step.created_at for state, step in steps
+    kept_by_old_visit, *later = sorted(
+        (step.created_at, step.attempt) for state, step in steps
         if state == first.to_state and last_other_job < step.created_at < first.at
-    ) or [first.at]
-    if kept_by_old_visit and first.at - newest <= ENQUEUED_WITH_ROW_SECONDS:
-        return newest
-    return first.at
+    ) or [None]
+    return max((at for at, attempt in later if attempt == 1), default=first.at)
 
 
 def _recorded_walk(

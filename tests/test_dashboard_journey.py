@@ -400,7 +400,9 @@ def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path
     assert board.outcome("new-ready") == "queued-review"
     with board.queue.connect() as connection:
         jobs = [
-            flow.JobStep(row["action"], row["recipient"], row["created_at"], None, None)
+            flow.JobStep(
+                row["action"], row["recipient"], row["created_at"], None, None, row["attempt"]
+            )
             for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
         rows = [
@@ -416,7 +418,10 @@ def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path
     ]
 
 
-def test_script_only_first_row_leaves_the_old_visit_its_retried_review(tmp_path: Path) -> None:
+@pytest.mark.parametrize("delay", [1, 100])
+def test_script_only_first_row_leaves_the_old_visit_its_retried_review(
+    tmp_path: Path, delay: int
+) -> None:
     board = Board(tmp_path, finish_line=None)
     pr = board.open("42", sha(1))
     board.go(pr, "go")
@@ -433,11 +438,13 @@ def test_script_only_first_row_leaves_the_old_visit_its_retried_review(tmp_path:
     board.dispatcher._prepare_ship_intent(ticket, "approval", pr.head, "handoff")
     with board.queue.connect() as connection:
         connection.execute("DELETE FROM ticket_transitions")
-    board.now[0] += 100
+    board.now[0] += delay
     board.dispatcher._discard_pending_ship_intent(ticket, "approval")
     with board.queue.connect() as connection:
         jobs = [
-            flow.JobStep(row["action"], row["recipient"], row["created_at"], None, None)
+            flow.JobStep(
+                row["action"], row["recipient"], row["created_at"], None, None, row["attempt"]
+            )
             for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
         rows = [
@@ -453,6 +460,40 @@ def test_script_only_first_row_leaves_the_old_visit_its_retried_review(tmp_path:
     assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"] == [
         ("codex", failed.created_at),
         ("script", rows[0].at),
+    ]
+
+
+def test_first_row_written_polls_after_its_review_was_queued_owns_that_review(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 1000
+    pr.push(sha(2))
+    board.ready(pr, pr.head, "new-ready")
+    board.actions.state_failures.add((pr.repo, "review"))
+    board.poll()
+    board.now[0] += 1000
+    board.actions.state_failures.clear()
+    board.poll()
+    assert board.outcome("new-ready") == "queued-review"
+    with board.queue.connect() as connection:
+        old, new = [
+            row["created_at"]
+            for row in connection.execute(
+                "SELECT created_at FROM jobs WHERE action = 'review' ORDER BY created_at"
+            )
+        ]
+        (at,) = [row["at"] for row in connection.execute("SELECT at FROM ticket_transitions")]
+    assert new < at - 60
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "missing.log", now=board.now[0])
+    job = next(job for job in snapshot["queued"] if job["ticket_id"] == "42")
+    assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "review"] == [
+        ("codex", old),
+        ("codex", at),
     ]
 
 
