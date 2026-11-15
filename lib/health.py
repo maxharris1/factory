@@ -1300,7 +1300,7 @@ def box_storage(device: str, paths: Iterable[Path],
 
 def df_script(directory: str) -> str:
     path = shlex.quote(directory)
-    return f"exec sh -c {shlex.quote(f'df -Pk {path} && df -i {path}')}"
+    return f"exec env LC_ALL=C sh -c {shlex.quote(f'df -Pk {path} && df -i {path}')}"
 
 
 def parse_df(text: str) -> tuple[int | None, int | None]:
@@ -1391,10 +1391,11 @@ def age_text(seconds: float) -> str:
 def render_lines(report: HealthReport, now: float) -> list[str]:
     """The Health section of `orch status` and `orch health`."""
     devices = [_device_line(d) for d in report.devices if d.state != device_sync.SYNCED]
+    storage = [_storage_line(s) for s in report.storage]
     if report.error is not None:
-        return ["Health", f"  unknown: {report.error}", *devices]
+        return ["Health", f"  unknown: {report.error}", *storage, *devices]
     if not report.known:
-        return ["Health", "  no heartbeats recorded yet", *devices]
+        return ["Health", "  no heartbeats recorded yet", *storage, *devices]
     header = f"{len(report.components)} components, {len(report.down)} down"
     if report.stale_code:
         header += f", {len(report.stale_code)} stale code"
@@ -1418,7 +1419,7 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
     for flag in report.no_waiter:
         count = len(flag.jobs)
         lines.append(f"  no waiter for {flag.harness}: {count} queued job{'' if count == 1 else 's'}")
-    return lines + [_storage_line(s) for s in report.storage] + devices
+    return lines + storage + devices
 
 
 def _storage_line(s: Storage) -> str:

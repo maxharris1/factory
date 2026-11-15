@@ -12,10 +12,13 @@ import io
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat
+import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -831,6 +834,54 @@ def test_orch_health_alerts_when_the_box_reaches_85_percent_inodes(tmp_path: Pat
                        stdout=out, transport=DfTransport({}))
     assert code == 3
     assert f"  storage box {health._mount(health.ROOT)}: disk 30%, inodes 90% (inode alert" in out.getvalue()
+
+
+def test_orch_health_shows_storage_alerts_before_any_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=900)))
+    db, _ = make_db(tmp_path)
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, GNU_DF_OVERFULL.encode(), "")})
+    out = io.StringIO()
+    code = health.main(["--db", str(db), "--machines", str(machines_file(tmp_path))],
+                       stdout=out, transport=transport)
+    text = out.getvalue()
+    assert code == 3
+    assert "no heartbeats recorded yet" in text
+    assert f"  storage box {health._mount(health.ROOT)}: disk 30%, inodes 90% (inode alert" in text
+    assert "  storage pc /home/codex-bot/factory-work: disk 102%, inodes 90% (inode alert" in text
+
+
+@pytest.mark.parametrize("report", [
+    health.HealthReport(known=False),
+    health.HealthReport(known=False, error="health table unreadable"),
+])
+def test_every_health_text_lists_storage(report) -> None:
+    storage = (health.Storage("pc", "/work", 40, 90),)
+    lines = health.render_lines(replace(report, storage=storage), NOW)
+    assert "  storage pc /work: disk 40%, inodes 90% (inode alert: at or over 85%)" in lines
+
+
+GERMAN_DF = """\
+Dateisystem 1024-Blöcke Benutzt Verfügbar Kapazität Eingehängt auf
+/dev/sdf 1000 120 880 12% /
+Dateisystem Inodes IBenutzt IFrei IUse% Eingehängt auf
+/dev/sdf 1000 70 930 7% /
+"""
+
+
+def test_df_reads_english_headers_whatever_the_devices_locale(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_df = bin_dir / "df"
+    fake_df.write_text(
+        "#!/bin/sh\n"
+        f"[ \"$LC_ALL\" = C ] && printf '%s' {shlex.quote(GNU_DF)} && exit 0\n"
+        f"printf '%s' {shlex.quote(GERMAN_DF)}\n")
+    fake_df.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "LANG": "de_DE.UTF-8", "LC_ALL": "de_DE.UTF-8"}
+    run = subprocess.run(["sh", "-c", health.df_script("/work")], env=env, capture_output=True,
+                         text=True, check=True)
+    assert health.parse_df(run.stdout) == (48, 85)
 
 
 # --- the components wire their heartbeats in ------------------------------------------------
