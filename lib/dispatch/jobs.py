@@ -786,9 +786,7 @@ class JobsMixin:
         its `from` and `role`, and not already rejected when it was handled
         (stale, superseded, ...). A ready stale only because its review
         already answered (#71 stale-ready-verdict) still counts. An update
-        job's ready is instead one after the comment that queued the job,
-        that TU attributes to the job (_update_job_before) and that was not
-        handled as an update failure.
+        job's ready is matched by TU's attribution, not by time.
 
         A review's is a reviewer verdict for the job's head (as a prefix,
         like every head compare) and round; a review job with no round or no

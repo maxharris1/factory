@@ -18,6 +18,7 @@ from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     FAILED_UNSTARTED,
     JOB_EVENTS_TABLE,
+    Placement,
     has_job_events,
     never_started,
     read_placements,
@@ -353,14 +354,9 @@ class MergeQueueMixin:
             )
 
     def _update_job_before(self, ticket: TrackedTicket, comment: Comment) -> str | None:
-        """The update-from-main attempt a ready came from (TU attribution).
-
-        The job whose recorded handoff is this comment. Failing that, the
-        one fallback: the newest update job that started. A job with a
-        device slot started once a worker was recorded on it; a job with no
-        slot started once claimed, unless it failed unstarted. A job still
-        queued, or claimed with no worker yet, never ran, so it posted
-        nothing. Job times are never compared with the comment's."""
+        """The update-from-main job that recorded this ready as its handoff,
+        else the newest one that started (docs/SPEC.md, TU). Never by time:
+        GitHub stamps comments in whole seconds."""
         with self._connect() as connection:
             jobs = connection.execute(
                 """
@@ -375,16 +371,10 @@ class MergeQueueMixin:
                     return str(job["id"])
             placements = read_placements(connection)
             unstarted = _failed_unstarted(connection, [str(job["id"]) for job in jobs])
-        for job in jobs:
-            job_id = str(job["id"])
-            placement = placements.get(job_id)
-            if placement is not None:
-                started = not never_started(placement)
-            else:
-                started = job["state"] in ("running", "done", "failed") and job_id not in unstarted
-            if started:
-                return job_id
-        return None
+        return next(
+            (str(job["id"]) for job in jobs if _started(job, placements, unstarted)),
+            None,
+        )
 
     def _update_unanswered(self, ticket: TrackedTicket) -> tuple[str, str] | None:
         """Why the latest update-from-main job counts as failed though it
@@ -760,6 +750,15 @@ class MergeQueueMixin:
             ):
                 return True
         return False
+
+
+def _started(
+    job: sqlite3.Row, placements: dict[str, Placement], unstarted: set[str]
+) -> bool:
+    placement = placements.get(str(job["id"]))
+    if placement is not None:
+        return not never_started(placement)
+    return job["state"] in ("running", "done", "failed") and str(job["id"]) not in unstarted
 
 
 def _failed_unstarted(connection: sqlite3.Connection, job_ids: list[str]) -> set[str]:
