@@ -1,0 +1,7 @@
+decision	choice	why
+where to measure	orch health measures live: statvfs on the box, one df over SSH per probed device	the ticket names orch health; no new heartbeat table or poller thread, and self-heal already runs orch health every 2 minutes
+what to alert on	inode use at 85% or more, rounded up as df shows it; disk is reported, not alerted	the ticket asks for an inode alert; matching df's rounding means the alert agrees with what an operator sees in df
+remote path	the device's workdir_root; a missing one reads as unknown storage	job worktrees fill that filesystem, and the report names only a path df measured
+unreachable device	storage shows unknown with the df exit, no alert	reachability already has its own device-probe row; one failure should not be counted twice
+orch status and dashboard	unchanged: no SSH in load_report	the dashboard and orch status read the report often; an SSH round trip per device there would slow every refresh
+proof	real orch health on the box: storage box / inodes 85% alert, pc 7%, exit 3, 0.5 s	matches df -i / (85%) at the same moment
