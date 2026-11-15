@@ -56,6 +56,22 @@ class QuestionsMixin:
             generation = self._generation(ticket.repo, ticket.ticket_id)
         else:
             action, recipient, head, generation = step
+        outcome = self._pause_for_questions(
+            ticket, comment, action, recipient, head, generation
+        )
+        if outcome == "waiting-max":
+            self._write_state_label(ticket, "waiting-max")
+        return True, outcome
+
+    def _pause_for_questions(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+        recipient: str,
+        head: str | None,
+        generation: int,
+    ) -> str:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             waiting = connection.execute(
@@ -67,13 +83,12 @@ class QuestionsMixin:
             ).fetchone()
             if waiting is not None and waiting["workflow_state"] == "blocked":
                 connection.commit()
-                return True, "questions-while-blocked"
+                return "questions-while-blocked"
             if waiting is not None and waiting["workflow_state"] == "waiting-max":
                 connection.commit()
                 if waiting["paused_question_id"] == comment.id:
-                    self._write_state_label(ticket, "waiting-max")
-                    return True, "waiting-max"
-                return True, "already-waiting-max"
+                    return "waiting-max"
+                return "already-waiting-max"
             paused = {
                 "paused_action": action,
                 "paused_recipient": recipient,
@@ -119,8 +134,7 @@ class QuestionsMixin:
                 ),
             )
             connection.commit()
-        self._write_state_label(ticket, "waiting-max")
-        return True, "waiting-max"
+        return "waiting-max"
 
     def _t5_answers(
         self,

@@ -20,7 +20,9 @@ NAMES_BEFORE_SPLIT = (
 RULE_MODULE = {
     "_t1": "t1",
     "_resume_after_cap": "resume",
+    "_lift_cap": "resume",
     "_resume_after_blocked": "resume",
+    "_queue_blocked_review": "resume",
     "_over_cap": "effective",
     "_config_cap": "effective",
     "_effective_cap": "effective",
