@@ -126,6 +126,33 @@ def test_no_repeat_id_or_reused_id_takes_the_fix_path(tmp_path: Path, bodies: tu
     assert repeat_wakes(flow) == []
 
 
+def test_marked_up_criterion_prefix_does_not_repeat(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+
+    assert rounds(flow, AC2, "- [blocking] **ac-2**-other: a different identifier.\n" + F2) == "queued-review-fix"
+
+    assert flow.state()["workflow_state"] == "fixing"
+    assert repeat_wakes(flow) == []
+
+
+@pytest.mark.parametrize(
+    "bodies",
+    [
+        (F1, "- [blocking] **f-1**-other: a different identifier.\n" + F2),
+        (F1, "- [blocking] __f-1__-other: a different identifier.\n" + F2),
+        (F1, "- [blocking] f-1-other: a different identifier.\n" + F2),
+        (AC2, "- [blocking] **ac-2**_other: a different identifier.\n" + F2),
+    ],
+    ids=["bold-finding", "underscore-finding", "bare-finding", "criterion-underscore"],
+)
+def test_a_suffix_after_id_markup_does_not_repeat(tmp_path: Path, bodies: tuple[str, ...]) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+
+    assert rounds(flow, *bodies) == "queued-review-fix"
+
+    assert repeat_wakes(flow) == []
+
+
 def test_a_repeat_at_the_cap_parks_instead_of_capping(tmp_path: Path) -> None:
     flow = AppFlow(tmp_path, enabled=True)
     flow.factory = replace(flow.factory, auto_extra_rounds=2)
@@ -295,6 +322,9 @@ def test_maxs_go_at_the_cap_also_grants_the_next_round(tmp_path: Path) -> None:
         ("# | ac-2 | unmet |\n", set()),
         ("- [blocking] ac-2suffix: other.\n- ac-3-b: unmet\n- **ac-4**x: unmet\n", set()),
         ("- [blocking] **ac-2**: x.\n- __ac-3__: unmet\n", {"ac-2", "ac-3"}),
+        ("- [blocking] **ac-2**-other: x.\n- **ac-3**_b: unmet\n- `ac-4`-b: unmet\n", set()),
+        ("- [blocking] **f-1**-other: x.\n- [blocking] __f-2__-b: x.\n- [blocking] f-3-b: x.\n", set()),
+        ("- [blocking] **f-1**: x.\n- [blocking] **f-2** - x.\n- **ac-3** - unmet\n", {"f-1", "f-2", "ac-3"}),
     ],
 )
 def test_blocking_ids(body: str, expected: set[str]) -> None:

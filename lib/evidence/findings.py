@@ -35,12 +35,13 @@ from markdown_it.token import Token
 from lib.dispatcher import Comment, trusted_bots
 from lib.handoff import HandoffError, parse_comment
 
-_TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?=[*_`]*(?:\W|$)).*)$", re.IGNORECASE)
+_ID_END = r"[*_`]*+(?![^\W_]|-[^\W_])"
+_TAGGED = re.compile(rf"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?={_ID_END}).*)$", re.IGNORECASE)
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
 _MARKDOWN = MarkdownIt("commonmark").enable("table")
 _CRITERION = re.compile(
-    r"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*)(?![0-9A-Za-z]|-[0-9A-Za-z])[*_`]*+(?![0-9A-Za-z])\s*"
+    rf"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*){_ID_END}\s*"
     r"(?:[:,|\u2013\u2014-]\s*)?[*_`]*(?P<status>unmet\b)?",
     re.IGNORECASE,
 )
