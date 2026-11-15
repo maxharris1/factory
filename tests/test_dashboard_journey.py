@@ -364,6 +364,20 @@ def test_first_row_back_through_a_script_only_state_leaves_the_old_visit_its_job
     ]
 
 
+@pytest.mark.parametrize("from_state", ["handed-off", "merge-queue", "updating"])
+def test_first_row_back_from_beyond_the_bridge_leaves_the_old_visit_its_job(from_state) -> None:
+    jobs = [
+        _step("build", "claude", NOW - 5000),
+        _step("review", "codex", NOW - 4000),
+        _step("review", "codex", NOW - 2000),
+    ]
+    rows = [_row(from_state, "review", NOW - 2000)]
+    result = flow.job_flow(_chart(), jobs, "review", NOW, rows, None)
+    reviews = [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"]
+    assert reviews == [("codex", NOW - 4000), ("codex", NOW - 2000)]
+    assert result["path"][-2] == from_state
+
+
 @pytest.mark.parametrize(
     ("jobs", "from_state", "to_state", "visits"),
     [

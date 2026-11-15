@@ -31,7 +31,6 @@ import math
 import re
 from collections import deque
 from collections.abc import Iterable, Sequence
-from itertools import takewhile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -321,22 +320,30 @@ def _owning_row(
     return None
 
 
+def _every_path_visits(chart: dict | None, origin: str | None, target: str, via: str) -> bool:
+    if via in (origin, target):
+        return True
+    if chart is None or origin is None or origin == target:
+        return False
+    adjacency = _adjacency(chart)
+    avoiding = {name: [nxt for nxt in nexts if nxt != via] for name, nexts in adjacency.items()}
+    return target in _reach(adjacency, origin) and target not in _reach(avoiding, origin)
+
+
 def _first_row_floor(
     chart: dict | None, steps: Sequence[tuple[str, JobStep]], first: Transition
 ) -> float:
     if first.from_state is None:
         return -math.inf
-    last_other_job = max(
-        (step.created_at for state, step in steps
-         if step.created_at < first.at and state != first.to_state),
-        default=-math.inf,
-    )
     start = None if chart is None else chart["start"]
-    prior = [(state, step) for state, step in steps if step.created_at <= last_other_job]
-    walk = chart_visits(chart, [(start, None), *prior, (first.from_state, None)])
-    jobless_since = takewhile(lambda visit: not visit.steps, reversed(walk))
-    passed_through_state = any(visit.state == first.to_state for visit in jobless_since)
-    return first.at if passed_through_state else last_other_job
+    last_other_job, last_state = max(
+        ((step.created_at, state) for state, step in steps
+         if step.created_at < first.at and state != first.to_state),
+        default=(-math.inf, start),
+    )
+    if _every_path_visits(chart, last_state, first.from_state, first.to_state):
+        return first.at
+    return last_other_job
 
 
 def _recorded_walk(
