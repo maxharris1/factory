@@ -143,15 +143,15 @@ class DetailMixin:
                 if comment.id == source_comment_id and comment.url:
                     return comment.url
         with self._connect() as connection:
-            handled = connection.execute(
+            remembered = connection.execute(
                 """
-                SELECT link FROM handled_comments
+                SELECT link FROM comment_links
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
                 """,
                 (repo.lower(), ticket_id, source_comment_id),
             ).fetchone()
-        if handled is not None and handled["link"]:
-            return str(handled["link"])
+        if remembered is not None and remembered["link"]:
+            return str(remembered["link"])
         if ticket is not None and ticket.ticket_url:
             return ticket.ticket_url
         return f"comment:{source_comment_id}"

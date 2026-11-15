@@ -12,6 +12,7 @@ from tests.test_hooks import (
     VERDICT,
     FakeBot,
     FakeGrokDelivery,
+    FakeReviewActions,
     FakeSource,
     approve,
     in_review,
@@ -178,11 +179,16 @@ def test_clarify_wakes_for_questions_and_answers_link_their_comment(
     assert detail(wake)["link"] == cause.url
 
 
+@pytest.mark.parametrize("failing_state_label", [None, "building"])
 def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
     tmp_path: Path,
+    failing_state_label: str | None,
 ) -> None:
     now = [100.0]
-    dispatcher, queue = setup(tmp_path, now=now)
+    actions = FakeReviewActions()
+    if failing_state_label is not None:
+        actions.state_failures.add(failing_state_label)
+    dispatcher, queue = setup(tmp_path, now=now, actions=actions)
     go = linked(say("909", GO.format(state=" state=building"), "grok-login", 1))
     dispatcher.poll_once(FakeSource(on_pr(go)))
     for at in (110.0, 130.0):

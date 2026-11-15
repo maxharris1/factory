@@ -2503,7 +2503,7 @@ def test_edited_older_verdict_does_not_override_a_newer_approve(
     _dispatcher, queue, shipper, source, fresh = accepted(tmp_path, actions)
     with queue.connect() as connection:
         connection.execute(
-            "INSERT INTO handled_comments (repo, ticket_id, comment_id, outcome) VALUES ('owner/repo', '42', 'verdict-0', 'waiting')"
+            "INSERT INTO handled_comments VALUES ('owner/repo', '42', 'verdict-0', 'waiting')"
         )
     edited = say(
         "verdict-0", VERDICT.format(head=HEAD_A, verdict="REVISE"), "codex-login", 0.5

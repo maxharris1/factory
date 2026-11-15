@@ -77,6 +77,8 @@ class CommentsMixin:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 fields = None
+            if fields is not None:
+                self._remember_link(ticket, comment)
             if self._after_finish(ticket, comment):
                 continue
             if (
@@ -298,17 +300,28 @@ class CommentsMixin:
         comment_id: str,
         outcome: str,
     ) -> None:
-        link = next(
-            (comment.url for comment in ticket.comments
-             if comment.id == comment_id and comment.url),
-            ticket.ticket_url,
-        )
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO handled_comments (
-                    repo, ticket_id, comment_id, outcome, link
-                ) VALUES (?, ?, ?, ?, ?)
+                    repo, ticket_id, comment_id, outcome
+                ) VALUES (?, ?, ?, ?)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome, link),
+                (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
+            )
+
+    def _remember_link(self, ticket: TrackedTicket, comment: Comment) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO comment_links (
+                    repo, ticket_id, comment_id, link
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    ticket.repo.lower(),
+                    ticket.ticket_id,
+                    comment.id,
+                    comment.url or ticket.ticket_url,
+                ),
             )

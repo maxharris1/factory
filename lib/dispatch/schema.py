@@ -88,7 +88,17 @@ class SchemaMixin:
                 )
                 """
             )
-            _add_missing_columns(connection, "handled_comments", {"link": "TEXT"})
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS comment_links (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    link TEXT,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             _add_missing_columns(
                 connection,
                 "ticket_state",
