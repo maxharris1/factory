@@ -15,6 +15,12 @@ def task_lines(facts: dict) -> list[str]:
         else "2. factory.md names no verify skill (`none`): run interrogate and blast-radius, "
         "and say which checks did not run."
     )
+    read_line = (
+        "1. Read the whole diff. CI may still be running on that head. Read its result if it has finished. "
+        "Do not wait for it, and do not block or REVISE on its status alone. The poller ships only on green CI."
+        if facts["start_before_ci"]
+        else "1. Read the whole diff and the CI result on that head."
+    )
     followup = followups_active(facts["followup_from"], facts["round_number"])
     followup_lines = (
         [
@@ -29,7 +35,7 @@ def task_lines(facts: dict) -> list[str]:
     return [
         f"Review the PR at head {head} against `{base}`. You are the one cross-family reviewer. "
         "Follow the router in Skills above.",
-        "1. Read the whole diff and the CI result on that head.",
+        read_line,
         verify_line,
         "3. You may run code in a throwaway copy. Mark a finding `[blocking]` only when you have run it "
         "and seen it fail, and give the repro.",

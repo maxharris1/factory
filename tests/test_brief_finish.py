@@ -9,7 +9,7 @@ import pytest
 from lib.github_actions import TOKEN_VARIABLES
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
-BUILDER_KINDS = sorted(kind for kind in CASES if kind != "review")
+BUILDER_KINDS = sorted(kind for kind, case in CASES.items() if case[0] != "review")
 QUESTIONS_LINES = (
     "If something left open needs a decision, post a `questions` handoff.",
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
