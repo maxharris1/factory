@@ -958,6 +958,19 @@ def test_factory_md_hold_reads_the_cleffy_paths() -> None:
     )
 
 
+def test_an_unknown_hold_field_read_leniently_still_holds(tmp_path: Path) -> None:
+    text = f"---\n{yaml.safe_dump({**VALID, 'hold': {'approver': APPROVER, 'paths': ['src/**'], 'future_field': True}}, sort_keys=False)}---\n"
+    factory, findings = parse_factory_md(text, strict=False)
+    assert factory is not None
+    assert [(item.severity, item.message) for item in findings] == [
+        ("warning", "unknown field 'hold.future_field'")
+    ]
+    assert factory.hold == HoldConfig(approver=APPROVER, paths=("src/**",))
+    dispatcher, _queue, _actions = setup(tmp_path)
+
+    assert dispatcher._held(snapshot(factory=factory, files=("src/secrets.py",)), HEAD)
+
+
 @pytest.mark.parametrize(
     ("hold", "message"),
     [

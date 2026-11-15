@@ -569,7 +569,7 @@ TELEMETRY_CSS = (
 
 
 # The page script's renderers for the same markup. Spliced into the script's
-# scope (lib/dashboard_page.py, __TELEMETRY__), so el, add, chip, num and dur
+# scope (lib/dashboard_pages/common.py, __TELEMETRY__), so el, add, chip, num and dur
 # are the script's own helpers. textContent only.
 TELEMETRY_SCRIPT = r"""
   // --- job telemetry (#93): the modal's feed and the Efficiency rollup -------
