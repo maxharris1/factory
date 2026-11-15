@@ -837,7 +837,7 @@ def _attention(
     will not be retried, a job dedupe dropped: #83, #84), paused tickets
     that are not already listed, then (#92) down components, an unreadable
     orch.health.db and harnesses whose queued jobs have no live waiter, each
-    linked to the Health tab. `count` is the badge on every page."""
+    linked to the Health tab. `count` heads the attention strip on every page."""
     items: list[dict] = []
     for row in stuck:
         detail = row["state"] + (f": {row['reason']}" if row["reason"] else "")

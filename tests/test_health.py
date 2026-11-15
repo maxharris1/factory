@@ -528,7 +528,7 @@ def test_health_is_the_tab_after_efficiency(tmp_path: Path) -> None:
     html = render_pages(snapshot(tmp_path, db))["index.html"]
     nav = html[html.index('id="nav"'):html.index("</nav>")]
     assert nav.index("efficiency.html") < nav.index('href="health.html"')
-    assert ">Health</a>" in nav
+    assert ">System</a>" in nav  # #139
 
 
 def test_the_health_page_lists_components_with_state_et_pid_and_device(tmp_path: Path) -> None:
@@ -726,7 +726,7 @@ def test_the_dashboard_push_records_the_dashboard_writer(tmp_path: Path, monkeyp
 
 
 def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Path) -> None:
-    from tests.test_dashboard_layout import BAR, NODE, _run_page
+    from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
@@ -744,7 +744,7 @@ def test_the_page_script_renders_the_health_tab_and_the_queue_flag(tmp_path: Pat
     assert health.et(PAGE_NOW - 5) in text["components"]
     assert "no waiter for codex: 1 queued job" in text["no-waiter"]
     # Down: the listener and the codex waiter; codex has no waiter.
-    assert text["attention-count"] == "3"
+    assert attention_count(page) == "3"
     (tmp_path / "main").mkdir()
     main = _run_page(tmp_path / "main", data, "main", BAR + ["hud", "kpis", "lanes", "queue"])
     assert "no waiter for codex" in main["text"]["queue"]
@@ -850,7 +850,7 @@ def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Pat
     snapshot (no writer, no publication interval) vouches for nothing: a
     component past its thresholds is unknown, and the old snapshot is one
     needs-attention item."""
-    from tests.test_dashboard_layout import BAR, NODE, _run_page
+    from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
@@ -858,17 +858,19 @@ def test_the_page_ages_component_states_with_an_unchanged_snapshot(tmp_path: Pat
     assert data["health"]["publish_seconds"] is None
     ids = BAR + ["hud", "components", "no-waiter"]
     (tmp_path / "now").mkdir()
-    fresh = _run_page(tmp_path / "now", data, "health", ids)["text"]
+    fresh_out = _run_page(tmp_path / "now", data, "health", ids)
+    fresh = fresh_out["text"]
     assert _states(fresh["components"]) == ["UP", "UP"]
-    assert fresh["attention-count"] == "0"
+    assert attention_count(fresh_out) == "0"
 
     for advance in (50, 121):
         (tmp_path / str(advance)).mkdir()
-        later = _run_page(tmp_path / str(advance), data, "health", ids, actions=[["advance", advance]])["text"]
+        later_out = _run_page(tmp_path / str(advance), data, "health", ids, actions=[["advance", advance]])
+        later = later_out["text"]
         assert _states(later["components"]) == ["UNKNOWN", "UNKNOWN"]
         assert "no snapshot for " in later["components"]
         assert "2 components · 0 down" in later["components"]
-        assert later["attention-count"] == "1"
+        assert attention_count(later_out) == "1"
 
 
 def test_the_activity_page_lists_an_old_snapshot_once(tmp_path: Path) -> None:
@@ -1234,16 +1236,17 @@ def test_a_push_publishes_its_own_cadence_and_its_own_heartbeat(
 def test_healthy_components_stay_up_between_scheduled_pushes(tmp_path: Path, monkeypatch, advance) -> None:
     """R2-1/R2-2: within its publication window a snapshot keeps every
     state it observed, and the no-waiter panel agrees with them."""
-    from tests.test_dashboard_layout import BAR, NODE, _run_page
+    from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _published(tmp_path / "push", monkeypatch, every=5)
     (tmp_path / "page").mkdir()
-    page = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
-                     actions=[["advance", advance]])["text"]
+    out = _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
+                    actions=[["advance", advance]])
+    page = out["text"]
     assert _states(page["components"]) == ["UP", "UP", "UP"]
-    assert page["attention-count"] == "0"
+    assert attention_count(out) == "0"
     assert "every queued job has a live waiter" in page["no-waiter"]
 
 
@@ -1252,24 +1255,25 @@ def test_an_overdue_snapshot_shows_unknown_and_only_its_writer_alerts(tmp_path: 
     components, so they are unknown, not down; the writer itself ages to
     stale and then down, which is the one needs-attention item, and the
     no-waiter panel no longer claims every queued job has a waiter."""
-    from tests.test_dashboard_layout import BAR, NODE, _run_page
+    from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
     data = _published(tmp_path / "push", monkeypatch, every=5)
     ids = BAR + ["hud", "components", "no-waiter"]
     (tmp_path / "stale").mkdir()
-    stale = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])["text"]
+    stale_out = _run_page(tmp_path / "stale", data, "health", ids, actions=[["advance", 901]])
+    stale = stale_out["text"]
     assert _states(stale["components"]) == ["UNKNOWN", "UNKNOWN", "STALE"]
     assert "DOWN" not in stale["components"]
-    assert stale["attention-count"] == "0"
+    assert attention_count(stale_out) == "0"
     assert "every queued job has a live waiter" not in stale["no-waiter"]
     assert "unknown" in stale["no-waiter"]
 
     (tmp_path / "down").mkdir()
     down = _run_page(tmp_path / "down", data, "activity", BAR + ["hud", "attention"],
                      actions=[["advance", 8 * 300 + 1]])
-    assert down["text"]["attention-count"] == "1"
+    assert attention_count(down) == "1"
     assert "dashboard @ box" in down["text"]["attention"]
     assert "poller" not in down["text"]["attention"] and "waiter" not in down["text"]["attention"]
 
@@ -1288,7 +1292,7 @@ def _overdue_page(tmp_path: Path, *, waiter_seen: float, writer_interval: int,
                             orch=orch(push=push), publish_seconds=publish_seconds)
     (tmp_path / "page").mkdir()
     return _run_page(tmp_path / "page", data, "health", BAR + ["hud", "components", "no-waiter"],
-                     actions=[["advance", advance]])["text"]
+                     actions=[["advance", advance]])
 
 
 @pytest.mark.parametrize("waiter_seen, expected", [
@@ -1307,7 +1311,7 @@ def test_an_overdue_snapshot_vouches_for_no_state_past_its_up_window(
     if NODE is None:
         pytest.skip("node is not installed")
     page = _overdue_page(tmp_path, waiter_seen=waiter_seen, writer_interval=15,
-                         publish_seconds=15, push=True, advance=46)
+                         publish_seconds=15, push=True, advance=46)["text"]
     assert _states(page["components"]) == expected
     assert "every queued job has a live waiter" not in page["no-waiter"]
     assert "unknown: no snapshot for " in page["no-waiter"]
@@ -1317,14 +1321,14 @@ def test_a_retired_writer_row_does_not_hide_an_old_one_off_snapshot(tmp_path: Pa
     """R3-3: only a dashboard row that can alert stands in for the old
     snapshot; a retired (not configured) one still leaves the one
     needs-attention item."""
-    from tests.test_dashboard_layout import NODE
+    from tests.test_dashboard_layout import NODE, attention_count
 
     if NODE is None:
         pytest.skip("node is not installed")
-    page = _overdue_page(tmp_path, waiter_seen=0, writer_interval=300,
-                         publish_seconds=None, push=False, advance=3000)
-    assert _states(page["components"]) == ["UNKNOWN", "UNKNOWN", "DOWN"]
-    assert page["attention-count"] == "1"
+    out = _overdue_page(tmp_path, waiter_seen=0, writer_interval=300,
+                        publish_seconds=None, push=False, advance=3000)
+    assert _states(out["text"]["components"]) == ["UNKNOWN", "UNKNOWN", "DOWN"]
+    assert attention_count(out) == "1"
 
 
 @pytest.mark.parametrize(
@@ -1441,7 +1445,7 @@ def test_orch_status_shows_stale_code(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_the_health_tab_marks_stale_code_without_raising_attention(tmp_path: Path, monkeypatch) -> None:
-    from tests.test_dashboard_layout import BAR, NODE, _run_page
+    from tests.test_dashboard_layout import BAR, NODE, _run_page, attention_count
 
     monkeypatch.setattr(health, "factory_version", lambda root=health.ROOT: "ba9876543210")
     db, _ = make_db(tmp_path, PAGE_NOW)
@@ -1461,7 +1465,7 @@ def test_the_health_tab_marks_stale_code_without_raising_attention(tmp_path: Pat
     (tmp_path / "health").mkdir()
     rendered = _run_page(tmp_path / "health", data, "health", BAR + ["hud", "components"])
     assert "0123456789ab stale code" in rendered["text"]["components"]
-    assert rendered["text"]["attention-count"] == "0"
+    assert attention_count(rendered) == "0"
 # --- #106: dashboard push failures -------------------------------------------------------
 
 
