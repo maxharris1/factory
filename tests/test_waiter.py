@@ -44,6 +44,7 @@ from lib.waiter import (
     load_harness_command,
     local_only,
 )
+from tests import fake_runner
 from tests.test_brief import FACTORY_MD, detail
 from tests.test_wait import GO, dispatcher_for, tracked
 
@@ -184,15 +185,21 @@ class FakeSpawn:
         self.stdin: list[bytes] = []
         self.children: list[FakeChild] = []
         self.error = error
+        self.locks: list[int] = []
 
     def __call__(self, argv, **kwargs):
         if self.error is not None:
             raise self.error
         self.calls.append((list(argv), kwargs))
         self.stdin.append(kwargs["stdin"].read())
+        self.locks.extend(fake_runner.hold(kwargs.get("pass_fds", ())))
         child = FakeChild(10_000 + len(self.children))
         self.children.append(child)
         return child
+
+    def end_runners(self) -> None:
+        fake_runner.end(self.locks)
+        self.locks.clear()
 
 
 class FakeContext:
