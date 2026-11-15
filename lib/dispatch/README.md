@@ -35,7 +35,7 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 | Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
 | Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
 | Merge queue | `merge_queue.py` (`MergeQueueMixin`) | `_enter_merge_queue`, `_advance_merge_queue(s)`, base updates, `_settle_update`, `_classify_update`, `_update_failed` |
-| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_may_approve*`, `_approver_go`, `_ship_head` |
+| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_hold_in_play`, `_may_approve*`, `_approver_go`, `_ship_head` |
 | Ship | `ship.py` (`ShipMixin`, `ReviewShipper`) | ship intents, handoff redrive, external ships |
 | Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_answered_by`, cancel and requeue of answered jobs |
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |
