@@ -39,6 +39,7 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 | Ship | `ship.py` (`ShipMixin`, `ReviewShipper`) | ship intents, handoff redrive, external ships |
 | Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_answered_by`, cancel and requeue of answered jobs |
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |
+| Retry (TR) | `retry.py` (`RetryMixin`) | `_t_retry`, `_retry_step` (the resume table), `ticket_retries` rows |
 | Jobs (T6) | `jobs.py` (`JobsMixin`) | `_t6`, `reconcile_jobs`, abandoned and dead jobs, devices, failure waits, stuck wakes |
 | Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_deliver_grok_jobs` |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |

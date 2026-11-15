@@ -39,7 +39,18 @@ GROK_WAKE_REASONS = (
     "awaiting-ok",
     "go-not-from-approver",
 )
-CORE_KINDS = ("go", "plan", "ready")
+CORE_KINDS = ("go", "plan", "ready", "retry")
+RETRY_REJECTION_NOTES = {
+    "rejected-retry-author": (
+        "a retry must come from grok-bot as orchestrator"
+        " (with the GitHub App switch on, from an approver)"
+    ),
+    "rejected-retry-no-reason": "a retry needs Max's reason in the comment body",
+    "rejected-retry-not-stuck": "the ticket is not stuck; nothing to retry",
+    "rejected-retry-job-active": (
+        "a job is already queued or running for the ticket; nothing to retry"
+    ),
+}
 SETTLE_FAILURES_TO_WAKE = 3
 STUCK_WAKE_FAILURE_LIMIT = 2
 _QUESTIONS_HEADING = re.compile(

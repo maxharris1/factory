@@ -6,7 +6,7 @@ import json
 import sqlite3
 from dataclasses import asdict, replace
 
-from lib.dispatch.constants import GROK_WAKE_REASONS
+from lib.dispatch.constants import GROK_WAKE_REASONS, RETRY_REJECTION_NOTES
 from lib.dispatch.helpers import (
     _ANSWERS,
     _comment_link,
@@ -369,21 +369,20 @@ class DetailMixin:
     ) -> None:
         if not self._trusted_bots(comment):
             return
+        detail = {
+            "project_bot": ticket.grok_bot,
+            "outcome": outcome,
+            "comment": _comment_link(comment),
+        }
+        if outcome in RETRY_REJECTION_NOTES:
+            detail["note"] = RETRY_REJECTION_NOTES[outcome]
         self.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
             reason=reason,
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=json.dumps(
-                {
-                    "project_bot": ticket.grok_bot,
-                    "outcome": outcome,
-                    "comment": _comment_link(comment),
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
+            detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
             head=ticket.current_head,
         )
 

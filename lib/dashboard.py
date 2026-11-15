@@ -953,7 +953,7 @@ def _poll_health(
 
 def _verdict_kind(outcome: str) -> str:
     """Group a handled comment's outcome for the feed."""
-    if outcome.startswith("queued-"):
+    if outcome.startswith(("queued-", "retried-")):
         return "routed"
     if outcome.startswith("stale-"):
         return "stale"
@@ -1211,9 +1211,7 @@ def _read_db(
                         **waiting,
                     }
                 )
-    _add_job_tickets(
-        connection, active, ticket_info, chart, now, telemetry="job_telemetry" in tables
-    )
+    _add_job_tickets(connection, active, ticket_info, chart, now, tables)
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1475,8 +1473,7 @@ def _add_job_tickets(
     ticket_info: dict[tuple[str, str], tuple[str, int, str]],
     chart: dict | None,
     now: float,
-    *,
-    telemetry: bool,
+    tables: set[str],
 ) -> None:
     """Give each running or queued job its ticket's tracker and flow (current
     statechart state, the path its jobs took, time in state). The job's
@@ -1490,7 +1487,7 @@ def _add_job_tickets(
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
     columns = (
         {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
-        if telemetry
+        if "job_telemetry" in tables
         else set()
     )
     joined = "job_id" in columns
@@ -1515,11 +1512,23 @@ def _add_job_tickets(
                 _telemetry_time(row["started_at"]),
                 _telemetry_time(row["finished_at"]),
             ))
+    retries: dict[tuple[str, str], int] = {}
+    if "ticket_retries" in tables:
+        for row in connection.execute(
+            "SELECT repo, ticket_id, count(*) AS n FROM ticket_retries "
+            f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
+            "AND outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id",
+            ids,
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            retries[key] = retries.get(key, 0) + int(row["n"])
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
         tracker, _review_round, state = ticket_info.get(key, (None, None, None))
         item["tracker"] = tracker
         item["flow"] = job_flow(chart, histories[key], state, now)
+        if key in retries:
+            item["retries"] = retries[key]
 
 
 def _has_placeholder(value: object) -> bool:
