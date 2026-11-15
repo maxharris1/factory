@@ -1,0 +1,10 @@
+decision	choice	why
+pause record	reuse T5's paused_* columns with paused_action=review; reason is the review_events outcome waiting-max-unsat	_resume_paused already rebuilds a paused review at review_round + 1, which is the round the verdict reported; no schema change
+where the branch sits	after author, registration, over-cap and stale-head checks, before the CI gate	no fix is queued, so a pending CI must not hold Max's question as revise-ci-pending (test_an_unsat_revise_parks_while_ci_is_pending)
+wake	one Grok clarify in the same transaction, dedupe t3-unsat:<scope>:<comment>	a crash cannot leave a park with no wake; a replay adds no job (test re-processes the snapshot)
+kind=go release	_resume_unsatisfiable in caps/resume.py, gated on _may_lift_cap	without it T1 queued a fresh build (deduped-build) on the parked ticket; another agent's go never stands in for Max's
+auto_extra unsat check	deleted, and its unsat test case dropped	T3 now returns before the cap logic for unsat, so the check was unreachable and the old test asserted capped-review, which this ticket changes
+ACTED_VERDICT_OUTCOMES	waiting-max-unsat stays out, with a guard test	the re-review posts a verdict with the same author, head, round and verdict; it must not be suppressed as a duplicate
+ready while parked	T2 handles it as ready-while-unsat and changes nothing, at any head	Codex r1 f-1: the ready otherwise queued a review that could APPROVE and merge with no word from Max
+replayed resuming go	_resume_unsatisfiable also hands a go that already sourced a t5 job to _resume_paused	Codex r1 f-2: with the pause cleared, the replay fell through to T1's build path
+approver go evidence	an approver's structured go counts for review as well as fix	Codex r1 f-3: the dispatcher now accepts that go to resume a review, and the evidence must carry its rewrite

@@ -164,7 +164,7 @@ HOPS = {
     "fixing": 3,
     "review": 2,
     "capped": 4,
-    "waiting-max": 4,
+    "waiting-max": 3,
     "ship": 1,
     "updating": 2,
     "merge-queue": 1,
