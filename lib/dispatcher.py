@@ -4018,6 +4018,7 @@ class Dispatcher:
                   AND action IN (
                       'plan', 'build', 'review', 'fix', 'update-from-main', 'clarify'
                   )
+                  AND attempt = 1
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
@@ -5293,6 +5294,7 @@ class Dispatcher:
                 """
                 SELECT recipient, generation FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'plan'
+                  AND attempt = 1
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,

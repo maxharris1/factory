@@ -432,3 +432,120 @@ def test_closed_routed_pr_with_drift_still_ends_watch(tmp_path: Path) -> None:
     assert board.state("42")["workflow_state"] == "abandoned"
     assert board.jobs("update-from-main")[0]["state"] == "cancelled"
     assert board.queue.claim("claude") is None
+
+
+def _plan(builder: str) -> str:
+    return (
+        f"<!-- orch:v1 kind=plan from={builder}-bot role=builder round=1/2 ac=met -->\n"
+        "Good.\n"
+    )
+
+
+def test_late_plan_retry_does_not_take_over_the_current_plan(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    pr.mergeable = pr.mergeable_state = None
+    planning = "state=planning"
+    board.post(
+        pr,
+        "old-go",
+        _go("builder=claude reviewer=codex ").replace("state=building", planning),
+        "grok-login",
+    )
+    board.poll()
+    old = board.claim("claude")
+    board.post(pr, "build-go", _go("builder=codex reviewer=claude "), "grok-login")
+    board.poll()
+    board.finish("codex")
+    board.post(pr, "current-ready", _ready("codex", pr.head), "codex-login")
+    board.poll()
+    board.finish("claude")
+    board.post(
+        pr,
+        "approve",
+        "<!-- orch:v1 kind=verdict from=claude-bot role=reviewer round=1/3 "
+        f"head={pr.head} ac=met verdict=APPROVE risk=high -->\nApproved.",
+        "claude-login",
+    )
+    board.poll()
+    assert board.state("42")["workflow_state"] == "merge-queue"
+    board.post(
+        pr,
+        "new-go",
+        _go("builder=codex reviewer=claude ").replace("state=building", planning),
+        "grok-login",
+    )
+    board.poll()
+    current = board.claim("codex")
+    assert current.request.action == "plan"
+    board.queue.finish(old.id, owner="claude", handoff_comment_id=None)
+    board.poll()
+    board.queue.finish(current.id, owner="codex", handoff_comment_id="current-plan")
+    board.post(pr, "current-plan", _plan("codex"), "codex-login")
+    board.poll()
+
+    assert board.outcome("current-plan") == "queued-plan-build"
+    build = next(
+        row for row in board.jobs("build") if row["source_comment_id"] == "current-plan"
+    )
+    assert build["recipient"] == "codex"
+    assert json.loads(build["detail"])["reviewer_harness"] == "claude"
+
+    retry = board.claim("claude")
+    assert retry.request.action == "plan" and retry.request.attempt == 2
+    board.queue.finish(retry.id, owner="claude", handoff_comment_id="obsolete-plan")
+    board.post(pr, "obsolete-plan", _plan("claude"), "claude-login")
+    board.poll()
+
+    assert board.outcome("obsolete-plan") == "rejected-plan-author"
+    assert not any(
+        row["source_comment_id"] == "obsolete-plan" for row in board.jobs("build")
+    )
+
+
+def test_answer_after_a_late_retry_resumes_the_current_step(tmp_path: Path) -> None:
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
+    old_go = comment(
+        "old-go", _go("builder=claude reviewer=codex "), author="grok-login", created_at=100
+    )
+    dispatcher.process(ticket(old_go))
+    old = queue.claim("claude")
+    now[0] = 110
+    new_go = comment(
+        "new-go",
+        _go("builder=codex reviewer=claude ").replace("state=building", "state=planning"),
+        author="grok-login",
+        created_at=110,
+    )
+    dispatcher.process(ticket(old_go, new_go))
+    assert queue.claim("codex").request.action == "plan"
+    now[0] = 120
+    queue.finish(old.id, owner="claude", handoff_comment_id=None)
+    dispatcher.reconcile_jobs()
+    now[0] = 130
+    question = comment(
+        "question",
+        "<!-- orch:v1 kind=questions from=codex-bot role=builder -->\n"
+        "Which option should I use?",
+        author="codex-login",
+        created_at=130,
+    )
+    dispatcher.process(ticket(old_go, new_go, question))
+    now[0] = 140
+    answer = comment(
+        "answer",
+        "<!-- orch:v1 kind=answers from=grok-bot role=orchestrator -->\nUse A.",
+        author="grok-login",
+        created_at=140,
+    )
+    dispatcher.process(ticket(old_go, new_go, question, answer))
+
+    with queue.connect() as connection:
+        row = connection.execute(
+            "SELECT action, recipient, detail FROM jobs WHERE source_comment_id = 'answer'"
+        ).fetchone()
+    assert (row["action"], row["recipient"]) == ("plan", "codex")
+    detail = json.loads(row["detail"])
+    assert detail["reviewer_harness"] == "claude"
+    assert detail["routing"] == {"builder": "codex", "reviewer": "claude"}
