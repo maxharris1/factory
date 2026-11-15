@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from lib.dispatch.constants import MERGED_BEFORE_HANDOFF, _NOT_FINISHED
 from lib.dispatch.helpers import (
@@ -16,9 +17,15 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import AlreadyMergedShip, Comment, TrackedTicket
+from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
+
+
+@dataclass(frozen=True)
+class ReviseCIGate:
+    outcome: tuple[bool, str] | None = None
+    ci_failure: str = ""
 
 
 class VerdictMixin:
@@ -61,6 +68,12 @@ class VerdictMixin:
         verdict_head = fields.get("head")
         if _matching_head(verdict_head or "", ticket.current_head) is None:
             return True, "stale-revise"
+        instruction = _comment_link(comment)
+        if ticket.factory.start_before_ci:
+            gate = self._revise_ci_gate(ticket, comment, reported_round)
+            if gate.outcome is not None:
+                return gate.outcome
+            instruction += gate.ci_failure
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -126,7 +139,7 @@ class VerdictMixin:
                         head=ticket.current_head,
                         round_number=round_number + 1,
                         cap=cap,
-                        instruction=_comment_link(comment),
+                        instruction=instruction,
                     ),
                 )
                 _, answered = self._enqueue_step(
@@ -177,6 +190,29 @@ class VerdictMixin:
             self._wake_capped(ticket, comment)
         self._write_state_label(ticket, next_state)
         return True, outcome
+
+    def _revise_ci_gate(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        reported_round: int | None,
+    ) -> ReviseCIGate:
+        state, completed = self._review_context(ticket)
+        if state not in ("review", "awaiting-ok") or reported_round != completed + 1:
+            return ReviseCIGate()
+        head = ticket.current_head
+        assert head is not None
+        result = ticket.ci.get(head)
+        if result is None or result.status == "pending":
+            return ReviseCIGate(outcome=(False, "revise-ci-pending"))
+        _status, count = self._record_ci_result(ticket, head, result.status)
+        if result.status == "success":
+            return ReviseCIGate()
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
+            return ReviseCIGate(outcome=(True, "stuck-ci-red-3"))
+        return ReviseCIGate(
+            ci_failure=f"\n\nCI failed on {head}:\n{result.log or ''}".rstrip()
+        )
 
     def _t4(
         self,
@@ -229,6 +265,10 @@ class VerdictMixin:
         if result.status == "failure":
             if state == "awaiting-ok" or self._hold_in_play(ticket, current_head):
                 return False, "approve-ci-red"
+            if ticket.factory.start_before_ci:
+                return self._approve_ci_red_fix(
+                    ticket, comment, current_head, result, review_round
+                )
             self.wake_grok_once(
                 repo=ticket.repo,
                 ticket_id=ticket.ticket_id,
@@ -243,6 +283,8 @@ class VerdictMixin:
                 head=current_head,
             )
             return True, "approve-ci-red"
+        if ticket.factory.start_before_ci:
+            self._record_ci_result(ticket, current_head, "success")
         covered = _matching_head(approved_head, current_head) is not None
         if not covered:
             try:
@@ -327,6 +369,29 @@ class VerdictMixin:
         )
         self._write_state_label(ticket, "waiting-external")
         return True, "waiting-external"
+
+    def _approve_ci_red_fix(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult,
+        review_round: int,
+    ) -> tuple[bool, str]:
+        _status, count = self._record_ci_result(ticket, head, "failure")
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
+            return True, "stuck-ci-red-3"
+        self._queue_ci_fix(
+            ticket,
+            comment,
+            head,
+            result,
+            review_round,
+            self._generation(ticket.repo, ticket.ticket_id),
+            dedupe_key=f"t4:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}",
+        )
+        self._set_workflow_state(ticket, "fixing")
+        return True, "approve-ci-red-fix"
 
     def _record_approval(
         self,

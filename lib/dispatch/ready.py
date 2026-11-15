@@ -14,7 +14,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 
@@ -107,25 +107,28 @@ class ReadyMixin:
         ):
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
-        if result is None or result.status == "pending":
+        pending = result is None or result.status == "pending"
+        if pending:
             if (
                 (result is None or not result.reported)
                 and ticket.mergeable_state == "dirty"
                 and not self._queue_owns_base_updates(ticket.repo, ticket.ticket_id)
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
-            return False, "ci-pending"
-        if result.status == "success" and self.feeder is not None:
+            if not ticket.factory.start_before_ci:
+                return False, "ci-pending"
+        elif result.status == "success" and self.feeder is not None:
             if self.feeder.hold_stacked_review(ticket, head):
                 return False, "stacked-held"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
                 return True, "stale-ready"
             review_round = reentry
-        timeout_seconds = ticket.job_timeout_minutes * 60
-        recorded_status, count = self._record_ci_result(ticket, head, result.status)
+        recorded_status, count = (
+            ("pending", 0) if pending else self._record_ci_result(ticket, head, result.status)
+        )
         generation = self._generation(ticket.repo, ticket.ticket_id)
-        if recorded_status == "success":
+        if recorded_status in ("pending", "success"):
             queued, answered = self._queue_review(
                 ticket, comment, head=head, generation=generation
             )
@@ -135,19 +138,55 @@ class ReadyMixin:
                 self._leave_merge_queue(ticket, "update-rereview")
             self._set_workflow_state(ticket, "review")
             return True, "answered-review" if answered else "queued-review"
-        if count >= 3:
-            self._mark_stuck_and_wake(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
-                source_comment_id=comment.id,
-                timeout_seconds=timeout_seconds,
-                reason="ci-red-3",
-                detail=self._project_wake_detail(
-                    ticket,
-                    f"CI failed three times in a row; latest head {head}",
-                ),
-            )
+        assert result is not None
+        if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
+        if ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head):
+            return True, "ci-red-in-flight"
+        self._queue_ci_fix(
+            ticket,
+            comment,
+            head,
+            result,
+            review_round,
+            generation,
+            dedupe_key=f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}",
+        )
+        if rereview:
+            self._leave_merge_queue(ticket, "update-ci-red")
+        if reentry is not None or rereview:
+            self._set_workflow_state(ticket, "fixing")
+        return True, "queued-ci-fix"
+
+    def _mark_stuck_on_third_red(
+        self, ticket: TrackedTicket, comment: Comment, head: str, count: int
+    ) -> bool:
+        if count < 3:
+            return False
+        self._mark_stuck_and_wake(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            reason="ci-red-3",
+            detail=self._project_wake_detail(
+                ticket,
+                f"CI failed three times in a row; latest head {head}",
+            ),
+        )
+        return True
+
+    def _queue_ci_fix(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult,
+        review_round: int,
+        generation: int,
+        *,
+        dedupe_key: str,
+    ) -> None:
         self._enqueue_or_flag(
             ticket,
             comment,
@@ -157,7 +196,7 @@ class ReadyMixin:
                 action="fix",
                 recipient=ticket.factory.builder_harness,
                 source_comment_id=comment.id,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
                 head=head,
                 detail=self._job_detail(
@@ -168,16 +207,8 @@ class ReadyMixin:
                     instruction=result.log or f"CI failed on {head}",
                 ),
             ),
-            dedupe_key=(
-                f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:"
-                f"g{generation}"
-            ),
+            dedupe_key=dedupe_key,
         )
-        if rereview:
-            self._leave_merge_queue(ticket, "update-ci-red")
-        if reentry is not None or rereview:
-            self._set_workflow_state(ticket, "fixing")
-        return True, "queued-ci-fix"
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved
@@ -432,12 +463,49 @@ class ReadyMixin:
                     instruction=detail,
                 ),
             ),
-            dedupe_key=(
-                f"review:{_scope(ticket.repo, ticket.ticket_id)}:"
-                f"{head}:r{review_round}"
-            ),
+            dedupe_key=self._review_dedupe_key(ticket, head, review_round),
         )
         return True, answered
+
+    def _review_dedupe_key(
+        self, ticket: TrackedTicket, head: str, review_round: int
+    ) -> str:
+        key = f"review:{_scope(ticket.repo, ticket.ticket_id)}:{head}:r{review_round}"
+        with self._connect() as connection:
+            fix = connection.execute(
+                """
+                SELECT fix.id FROM jobs AS keyed
+                JOIN jobs AS review
+                  ON review.id = keyed.id
+                  OR review.dedupe_key LIKE 't6-retry:' || keyed.id || ':%'
+                JOIN jobs AS fix
+                  ON lower(fix.repo) = lower(review.repo)
+                 AND fix.ticket_id = review.ticket_id
+                 AND fix.action = 'fix' AND fix.head = review.head
+                 AND fix.rowid > review.rowid
+                WHERE keyed.dedupe_key = ? AND review.state = 'done'
+                ORDER BY fix.rowid DESC LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        return key if fix is None else f"{key}:after-{fix['id']}"
+
+    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT action, state FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
+                  AND action IN ('review', 'fix') AND state != 'cancelled'
+                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        return row is not None and (
+            row["state"] in ("queued", "running")
+            or (row["action"], row["state"]) == ("review", "done")
+        )
 
     def _flag_ready_after_cap(
         self,

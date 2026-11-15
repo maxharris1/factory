@@ -555,7 +555,7 @@ def test_script_resolver_matches_the_server_resolver(tmp_path: Path) -> None:
 
 
 def test_page_script_carries_the_server_table() -> None:
-    script = page.page_script()
+    script = page.page_script(None)
     assert page.px_script() in script
     (blob,) = re.findall(r"var TABLE = (\{.*?\});\n", page.px_script())
     assert json.loads(blob) == page.px_table()
@@ -662,7 +662,7 @@ def test_reduced_motion_stills_the_held_border_and_the_script_reads_it() -> None
 
 
 def test_one_animation_frame_call_site_with_the_fps_cap_and_hidden_check() -> None:
-    script = page.page_script()
+    script = page.page_script(None)
     assert script.count("requestAnimationFrame(") == 1
     assert "var FPS = 20;" in script
     assert "if (now - last < 1000 / FPS - 3)" in script

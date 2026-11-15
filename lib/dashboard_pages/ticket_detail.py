@@ -952,7 +952,7 @@ _SCRIPT = r"""
     var wrap = add(box, el('div', 'jd-box'));
     var canvas = add(wrap, el('canvas', 'jd-flowmap'));
     canvas.setAttribute('width', '1000');
-    canvas.setAttribute('height', '352');
+    canvas.setAttribute('height', String(FLOWMAP ? FLOWMAP.grid.h * FLOWMAP.grid.cell : 352));
     canvas.setAttribute('role', 'img');
     canvas.setAttribute('aria-label', 'Full state chart; path: ' + m.visits.map(function (v) { return v.state; }).join(' → '));
     var legend = add(box, el('div', 'jd-legend'));
