@@ -471,7 +471,7 @@ class ReadyMixin:
                  AND fix.ticket_id = review.ticket_id
                  AND fix.action = 'fix' AND fix.head = review.head
                  AND fix.rowid > review.rowid
-                WHERE review.dedupe_key = ?
+                WHERE review.dedupe_key = ? AND review.state = 'done'
                 ORDER BY fix.rowid DESC LIMIT 1
                 """,
                 (key,),
