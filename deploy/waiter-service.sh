@@ -102,16 +102,35 @@ is_supervisor_argv() {
     return 1
 }
 
-is_stateless_supervisor_of_this_script() {
-    (($# == 3)) && [[ "$1" == "$SELF" ]]
+stateless_supervisor_is_own() {
+    local pid="$1" script="$2" kv home="" state=""
+    local -a environ=()
+    if [[ -d "$PROC" ]]; then
+        mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
+        for kv in "${environ[@]}"; do
+            case "$kv" in
+                ORCH_STATE_DIR=?*) state="${kv#*=}" ;;
+                HOME=*) home="${kv#*=}" ;;
+            esac
+        done
+        [[ -n "$state" || -n "$home" ]] || return 1
+        [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
+    else
+        [[ "$script" == "$SELF" ]]
+    fi
 }
 
 is_own_supervisor_argv() {
-    local i
+    local pid="$1" i
+    shift
     for i in 0 1; do
         if (($# > i + 2)) && [[ "${@:i+1:1}" =~ (^|/)waiter-service\.sh$ &&
             "${@:i+2:1}" == "$BOT" && "${@:i+3:1}" == _supervise ]]; then
-            [[ "${@:i+4:1}" == "$STATE" ]] || is_stateless_supervisor_of_this_script "${@:i+1}"
+            if (($# > i + 3)); then
+                [[ "${@:i+4:1}" == "$STATE" ]]
+            else
+                stateless_supervisor_is_own "$pid" "${@:i+1:1}"
+            fi
             return
         fi
     done
@@ -125,14 +144,14 @@ own_supervisors() {
         for dir in "$PROC"/[0-9]*; do
             [[ -O "$dir" ]] || continue
             mapfile -d '' -t argv 2>/dev/null <"${dir}/cmdline" || continue
-            if is_own_supervisor_argv "${argv[@]}"; then
+            if is_own_supervisor_argv "${dir##*/}" "${argv[@]}"; then
                 printf '%s\n' "${dir##*/}"
             fi
         done
     else
         while read -r pid command; do
             read -r -a argv <<<"$command"
-            if is_own_supervisor_argv "${argv[@]}"; then
+            if is_own_supervisor_argv "$pid" "${argv[@]}"; then
                 printf '%s\n' "$pid"
             fi
         done < <(ps -U "$(id -u)" -o pid= -o command=)
@@ -252,6 +271,7 @@ supervise() {
         say "starting orch wait ${BOT} --autostart"
         "$ORCH" wait "$BOT" --autostart 9>&- &
         child=$!
+        [[ -z "$stopping" ]] || kill -TERM "$child" 2>/dev/null || true
         status=0
         wait "$child" || status=$?
         # A trapped signal interrupts `wait`; wait again until the waiter is gone.

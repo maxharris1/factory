@@ -245,11 +245,13 @@ def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) 
 def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
     tag = f"waiter-service.sh {bot} _supervise {home / '.local/state/factory'}"
     listing = subprocess.run(
-        ["ps", "-A", "-o", "pid=", "-o", "command="],
+        ["ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "command="],
         text=True, capture_output=True, check=True,
     ).stdout
-    pids = [int(line.split(None, 1)[0]) for line in listing.splitlines() if tag in line]
-    return [pid for pid in pids if alive(pid)]
+    rows = [line.split(None, 2) for line in listing.splitlines() if tag in line]
+    pids = {int(pid) for pid, _, _ in rows}
+    forks = {int(pid) for pid, ppid, _ in rows if int(ppid) in pids}
+    return sorted(pid for pid in pids - forks if alive(pid))
 
 
 def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False) -> int:
