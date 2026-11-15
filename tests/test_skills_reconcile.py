@@ -3,9 +3,9 @@
 A box pass reruns install-skills for its own home when the installed copy
 misses the pin, and an install that fails, or a home it cannot read, is a
 failed pass retried later, never `up-to-date`. It never installs into
-another account's home (#345). Each bot's waiter brings its own home up to
-the pin while it has no box run, and again before a box start. A remote start is refused while the box
-checkout itself is behind its fetched origin/main.
+another account's home (#345). Each bot's waiter brings its own checkout
+and home up to the pin before each claim, box job or not (#366). A remote start is refused while the box checkout itself is behind its
+fetched origin/main.
 """
 
 from __future__ import annotations
@@ -372,7 +372,7 @@ def test_a_waiter_marks_its_unreadable_home_refused_and_retries_after_a_backoff(
     assert any("retry in 60s" in line for line in log)
 
 
-def test_a_waiter_leaves_its_home_alone_while_it_runs_a_box_job(
+def test_a_waiter_installs_into_its_home_while_it_runs_a_box_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
 ) -> None:
     upstream, box = box_behind_new_pin
@@ -388,21 +388,17 @@ def test_a_waiter_leaves_its_home_alone_while_it_runs_a_box_job(
 
     run.step()
 
-    assert installs == []
-    assert not (home / ".agents/skills/review-retry-skill/SKILL.md").exists()
-    assert rows(queue) == []
-
-    child.returncode = 0
-    run.step()
-
     assert installs == [home]
     assert (home / ".agents/skills/review-retry-skill/SKILL.md").is_file()
+    assert rows(queue) == [("box", "codex-bot", device_sync.SYNCED, "")]
+    assert run.running() == {"job-1"}
 
 
-def test_a_waiter_does_not_clear_a_lagging_mark_on_its_own_box_row(
+def test_a_waiter_does_not_clear_a_lagging_mark_while_the_box_lags_its_origin_main(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
 ) -> None:
     upstream, box = box_behind_new_pin
+    git(box, "fetch", "-q", "origin")
     home = tmp_path / "codex-bot"
     assert pstack_pin.install_skills(box, home, "local") == []
     queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
@@ -418,7 +414,7 @@ def test_a_waiter_does_not_clear_a_lagging_mark_on_its_own_box_row(
     assert rows(queue) == [("box", "codex-bot", "lagging", "preflight-lagging: box")]
 
 
-def test_an_install_skills_retry_waits_while_the_box_runs_a_job(
+def test_an_install_skills_retry_runs_while_the_box_runs_a_job(
     tmp_path: Path, box_behind_new_pin: tuple[Path, Path]
 ) -> None:
     from lib.device_pool import slots_in_use
@@ -460,26 +456,15 @@ def test_an_install_skills_retry_waits_while_the_box_runs_a_job(
     shutil.rmtree(conflict)
     enqueue(queue, "1")
     assert pool.claim("codex") is not None
-    before = installed.read_bytes()
 
-    busy = self_deploy.deploy(box, tmp_path / "state", **kw)
+    retry = self_deploy.deploy(box, tmp_path / "state", **kw)
 
-    assert busy.kind == self_deploy.BUSY
-    assert installed.read_bytes() == before
-    assert not (home / ".agents/skills/review-retry-skill").exists()
-    assert calls == [({}, 1)]
-    with queue.connect() as connection:
-        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "running"
-        connection.execute("UPDATE jobs SET state = 'done'")
-        connection.execute("DELETE FROM device_slots")
-        connection.commit()
-
-    idle = self_deploy.deploy(box, tmp_path / "state", **kw)
-
-    assert idle.kind == self_deploy.UP_TO_DATE
-    assert calls == [({}, 1), ({}, 0)]
+    assert retry.kind == self_deploy.UP_TO_DATE
+    assert calls == [({}, 1), ({"box": 1}, 0)]
     assert b"Merged content." in installed.read_bytes()
     assert pstack_pin.installed_errors(box, home) == []
+    with queue.connect() as connection:
+        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "running"
 
 
 def account_checkout_config(tmp_path: Path) -> MachinesConfig:
@@ -539,41 +524,100 @@ def test_an_account_checkout_that_cannot_reach_the_deployed_commit_is_refused_no
                             "checkout: HEAD has commits not on origin/main")]
 
 
-@pytest.mark.parametrize("placed", [True, False], ids=["placed", "unplaced"])
-def test_a_restarted_waiter_leaves_a_home_alone_while_an_earlier_box_run_is_live(
+def account_waiter_with_a_box_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box: Path,
+) -> tuple[Path, SQLiteJobQueue, waiter.Waiter, list[str], str]:
+    from tests.test_waiter import enqueue
+
+    account = tmp_path / "codex-bot" / "factory"
+    account.parent.mkdir()
+    subprocess.run(["git", "clone", "-q", "--branch", "main", str(tmp_path / "origin.git"),
+                    str(account)], check=True)
+    old = git(box, "rev-parse", "HEAD")
+    git(account, "reset", "-q", "--hard", old)
+    git(account, "update-ref", "refs/remotes/origin/main", old)
+    home = tmp_path / "account-home"
+    assert pstack_pin.install_skills(account, home, "local") == []
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
+    run, log = bot_waiter(tmp_path, monkeypatch, box, home, queue)
+    run.pool.config = account_checkout_config(tmp_path)
+    monkeypatch.setattr(skill_preflight, "ROOT", box)
+    active = enqueue(queue, "active", recipient="codex")
+    assert run.pool.claim("codex") is not None
+    return account, queue, run, log, active
+
+
+def deploy_box(tmp_path: Path, box: Path, queue: SQLiteJobQueue) -> None:
+    outcome = self_deploy.deploy(
+        box, tmp_path / "deploy-state", device="box",
+        environ={"PATH": os.environ["PATH"], "HOME": str(tmp_path / "owner-home"),
+                 "ORCH_DB": str(queue.path)},
+        webhook=Webhook(), now=1000, owner=lambda _: True, homes=())
+    assert outcome.kind == self_deploy.DEPLOYED
+
+
+def test_a_claim_after_a_box_deploy_starts_while_the_bots_earlier_box_job_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
-    placed: bool,
+    _skill_preflight: None,
+) -> None:
+    from tests.test_waiter import enqueue, state
+
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, active = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+
+    deploy_box(tmp_path, box, queue)
+    later = enqueue(queue, "later", recipient="codex")
+
+    assert run.step() == later, log
+    assert state(queue.path, active) == "running"
+    assert git(account, "rev-parse", "HEAD") == git(upstream, "rev-parse", "HEAD")
+    assert ("box", "codex-bot", device_sync.SYNCED, "") in rows(queue)
+
+
+def test_a_box_deploy_landing_after_the_waiter_reads_the_box_head_never_fails_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    _skill_preflight: None,
+) -> None:
+    from tests.test_waiter import enqueue, state
+
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, active = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+    later = enqueue(queue, "later", recipient="codex")
+    sync = run._sync_checkout
+    deploys: list[str] = []
+
+    def deploy_then_sync(checkout: str, target: str | None) -> str:
+        if not deploys:
+            deploys.append(target or "")
+            deploy_box(tmp_path, box, queue)
+        return sync(checkout, target)
+
+    monkeypatch.setattr(run, "_sync_checkout", deploy_then_sync)
+
+    assert run.step() == later, (log, state(queue.path, later), detail_of(queue.path, later))
+    assert deploys and deploys[0] != git(box, "rev-parse", "HEAD")
+    following = enqueue(queue, "following", recipient="codex")
+    assert run.step() == following, log
+    assert state(queue.path, active) == "running"
+    assert git(account, "rev-parse", "HEAD") == git(upstream, "rev-parse", "HEAD")
+    assert ("box", "codex-bot", device_sync.SYNCED, "") in rows(queue)
+
+
+def test_a_waiter_clears_its_lagging_row_once_its_checkout_reaches_the_deployed_box_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    _skill_preflight: None,
 ) -> None:
     from tests.test_waiter import enqueue
 
-    _, box = box_behind_new_pin
-    git(box, "pull", "-q", "--ff-only", "origin", "main")
-    home = tmp_path / "codex-home"
-    assert pstack_pin.install_skills(box, home, "local") == []
-    missing = home / ".agents/skills/review-retry-skill"
-    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
-    earlier, _ = bot_waiter(tmp_path, monkeypatch, box, home, queue)
-    job_id = enqueue(queue, "local-job", recipient="codex")
-    assert earlier.pool.claim("codex") is not None
-    if not placed:
-        with queue.connect() as connection:
-            connection.execute("DELETE FROM device_slots")
-            connection.commit()
-    missing.unlink()
-    restarted, _ = bot_waiter(tmp_path, monkeypatch, box, home, queue)
-    installs = count_installs(monkeypatch)
-
-    restarted.step()
-
-    assert restarted.running() == set()
-    assert installs == []
-    assert not missing.exists()
+    upstream, box = box_behind_new_pin
+    account, queue, run, log, _ = account_waiter_with_a_box_job(tmp_path, monkeypatch, box)
+    deploy_box(tmp_path, box, queue)
     with queue.connect() as connection:
-        connection.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job_id,))
-        connection.execute("DELETE FROM device_slots")
+        device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
+                           checkout=str(account), target=None, sha=None,
+                           state=device_sync.LAGGING, detail="preflight-lagging: box", now=1000)
         connection.commit()
+    later = enqueue(queue, "later", recipient="codex")
 
-    restarted.step()
-
-    assert installs == [home]
-    assert missing.exists()
+    assert run.step() == later, log
+    assert rows(queue) == [("box", "codex-bot", device_sync.SYNCED, "")]

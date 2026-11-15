@@ -417,6 +417,14 @@ T4HoldPatchDiffers ==
   /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = counts
 
+T4HoldBaseUpdate ==
+  /\ "T4" \notin Omit
+  /\ state = "awaiting-ok"
+  /\ state' = "fixing"
+  /\ keep
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ counts' = counts
+
 \* T8. ok head=<sha> on the previewed SHA ships. Decline fixes.
 \* The third decline is WaitingExternal --> Stuck.
 T8Ok ==
@@ -613,7 +621,7 @@ Next ==
   \/ T3Revise \/ T7Blocked
   \/ T4Approve \/ T4HeadMoves \/ T4PatchDiffers
   \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
-  \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers
+  \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers \/ T4HoldBaseUpdate
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved
