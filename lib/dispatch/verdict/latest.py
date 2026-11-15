@@ -10,7 +10,6 @@ class LatestVerdictMixin:
         self,
         ticket: TrackedTicket,
     ) -> tuple[Comment, dict[str, str]] | None:
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         latest: tuple[Comment, dict[str, str]] | None = None
         for item in sorted(ticket.comments, key=_comment_order):
             try:
@@ -19,9 +18,7 @@ class LatestVerdictMixin:
                 continue
             if fields["kind"] != "verdict":
                 continue
-            if not self._trusted(
-                ticket, item, fields, reviewer, role="reviewer"
-            ):
+            if not self._counted_verdict(ticket, item, fields):
                 continue
             latest = (item, fields)
         return latest

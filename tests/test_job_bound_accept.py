@@ -3,7 +3,9 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.types import ShipError
 from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
+from lib.factory_md import HoldConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from tests.test_dispatcher import (
     FakeReviewActions,
@@ -212,3 +214,93 @@ def test_stray_verdict_after_a_ready_leaves_the_ready_routed(tmp_path: Path) -> 
 
     assert handled_outcome(queue, "ready-1") == "queued-review"
     assert handled_outcome(queue, "verdict-stray") == "rejected-unregistered-verdict"
+
+
+def _registered_approval(tmp_path: Path):
+    dispatcher, queue, actions = _reviewing(tmp_path)
+    review = _claim(queue, "codex")
+    queue.finish(review.id, owner="codex", handoff_comment_id="approve-1")
+    return dispatcher, queue, actions, _verdict_ticket("approve-1", "APPROVE")
+
+
+def _with_stray_revise(snapshot: TrackedTicket) -> TrackedTicket:
+    body = VERDICT.format(round="1/3", head=HEAD, verdict="REVISE", risk="high")
+    stray = comment("stray", body, author="codex-login", created_at=400)
+    return replace(snapshot, comments=(*snapshot.comments, stray))
+
+
+def test_stray_revise_does_not_supersede_a_held_registered_approve(tmp_path: Path) -> None:
+    dispatcher, queue, actions, snapshot = _registered_approval(tmp_path)
+    snapshot = replace(
+        snapshot,
+        factory=replace(snapshot.factory, hold=HoldConfig()),
+        labels=("factory:hold",),
+        changed_files=(),
+        label_events=(),
+    )
+    dispatcher.process(snapshot)
+    snapshot = _with_stray_revise(snapshot)
+    dispatcher.process(snapshot)
+    dispatcher.process(replace(snapshot, labels=()))
+
+    assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    assert handled_outcome(queue, "approve-1") == "merged"
+    assert actions.merges == [(True, HEAD)]
+
+
+def test_stray_revise_does_not_spend_a_registered_approves_retry(tmp_path: Path) -> None:
+    dispatcher, queue, actions, snapshot = _registered_approval(tmp_path)
+    snapshot = replace(snapshot, factory=replace(snapshot.factory, ship="handoff"))
+    handoff = actions.handoff
+    error = ShipError("temporary failure")
+    error.write_confirmed = False
+
+    def fail(*args):
+        raise error
+
+    actions.handoff = fail
+    dispatcher.process(snapshot)
+    actions.handoff = handoff
+    dispatcher.process(_with_stray_revise(snapshot))
+
+    with queue.connect() as connection:
+        intent = tuple(connection.execute("SELECT status, redrive FROM ship_intents").fetchone())
+    assert intent == ("completed", "spent")
+    assert actions.handoffs == [HEAD]
+
+
+def test_review_at_another_head_leaves_a_stray_verdict_unregistered(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    _enqueue(queue, "review", "codex", OLD_HEAD)
+    _claim(queue, "codex")
+    _enqueue(queue, "build", "claude")
+    build = _claim(queue, "claude")
+    queue.finish(build.id, owner="claude", handoff_comment_id="ready-1")
+    dispatcher.process(_ready("ready-1"))
+    snapshot = _verdict_ticket("stray", "APPROVE")
+    dispatcher.process(snapshot)
+    dispatcher.process(snapshot)
+
+    with queue.connect() as connection:
+        reviews = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT state, head FROM jobs WHERE action = 'review' ORDER BY rowid"
+            )
+        ]
+    assert reviews == [("running", OLD_HEAD), ("queued", HEAD)]
+    assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    assert len(_wakes(queue)) == 1
+
+
+def test_stray_revise_does_not_stale_a_registered_fix_ready(tmp_path: Path) -> None:
+    dispatcher, queue, _, _ = _registered_approval(tmp_path)
+    snapshot = _verdict_ticket("approve-1", "BLOCKED")
+    _enqueue(queue, "fix", "claude", HEAD)
+    fix = _claim(queue, "claude")
+    queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
+    ready = comment("ready-2", READY.format(head=HEAD), author="claude-login", created_at=350)
+    dispatcher.process(_with_stray_revise(replace(snapshot, comments=(*snapshot.comments, ready))))
+
+    assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    assert handled_outcome(queue, "ready-2") == "queued-review"

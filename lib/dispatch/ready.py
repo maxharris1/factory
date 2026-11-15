@@ -285,7 +285,6 @@ class ReadyMixin:
         records as answered (answered-review, no claimable job) so that
         verdict can then act.
         """
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         next_round = review_round + 1
         last_round = min(
             self._effective_cap(ticket),
@@ -343,7 +342,7 @@ class ReadyMixin:
                 )
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
-                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and self._counted_verdict(ticket, item, fields)
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
                 if _comment_order(item) <= _comment_order(ready):
@@ -381,7 +380,6 @@ class ReadyMixin:
             or _matching_head(str(paused["paused_head"] or ""), head) is None
         ):
             return False
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         for item in ticket.comments:
             if _comment_order(item) <= _comment_order(ready):
                 continue
@@ -395,7 +393,7 @@ class ReadyMixin:
                 and round_number > review_round
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
-                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and self._counted_verdict(ticket, item, fields)
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
                 return True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -14,9 +15,12 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.helpers import (
     _REGISTERING_ACTIONS,
+    _detail_round_number,
     _detail_routing,
     _family_errors,
+    _matching_head,
     _normalize_trusted_logins,
+    _round_number,
     _route,
     trusted_bots,
 )
@@ -36,6 +40,7 @@ from lib.dispatch.types import (
     TrackedTicket,
     UpdateClassifier,
 )
+from lib.handoff import HandoffError, parse_comment
 from lib.job_state import JobStateConfig
 from lib.orch_yml import Approvals
 from lib.queue import QueueError, SQLiteJobQueue
@@ -145,6 +150,17 @@ class DispatcherBase:
             role="reviewer",
         )
 
+    def _counted_verdict(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+    ) -> bool:
+        return (
+            self._trusted_reviewer(ticket, comment, fields)
+            and self._registration(ticket, comment, "verdict") is not Registration.UNREGISTERED
+        )
+
     def _registration(
         self, ticket: TrackedTicket, comment: Comment, kind: str
     ) -> Registration:
@@ -153,14 +169,16 @@ class DispatcherBase:
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, state, failure_handled, handoff_comment_id FROM jobs
+                SELECT id, state, failure_handled, handoff_comment_id, head, detail FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action IN ({marks})
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, *actions),
             ).fetchall()
         if any(row["handoff_comment_id"] == comment.id for row in rows):
             return Registration.REGISTERED
-        if any(row["state"] == "running" for row in rows):
+        if any(
+            row["state"] == "running" and self._can_register(row, comment, kind) for row in rows
+        ):
             return Registration.PENDING
         failed = {
             row["id"] for row in rows if row["state"] == "failed" and not row["failure_handled"]
@@ -172,6 +190,19 @@ class DispatcherBase:
             if candidate is not None and candidate.comment.id == comment.id:
                 return Registration.REGISTERED if candidate.unread else Registration.PENDING
         return Registration.UNREGISTERED
+
+    @staticmethod
+    def _can_register(job: sqlite3.Row, comment: Comment, kind: str) -> bool:
+        if kind != "verdict":
+            return True
+        try:
+            fields = parse_comment(comment.body).as_dict()
+        except HandoffError:
+            return False
+        job_round = _detail_round_number(job["detail"])
+        return _matching_head(fields.get("head") or "", job["head"]) is not None and (
+            job_round is None or job_round == _round_number(fields.get("round"))
+        )
 
     def _trusted_session(
         self,
