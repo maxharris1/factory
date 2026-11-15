@@ -20,7 +20,7 @@ class AutoExtraMixin:
         fields: Mapping[str, str],
         state: sqlite3.Row,
     ) -> int | None:
-        if "repeat" in fields or "unsat" in fields or state["stuck"]:
+        if "repeat" in fields or state["stuck"]:
             return None
         already = int(state["cap_extra"])
         if already >= ticket.factory.auto_extra_rounds:

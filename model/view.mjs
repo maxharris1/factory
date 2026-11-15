@@ -55,6 +55,7 @@ export const step = (action, from, to) => {
   if (action === "T6DeviceOffline") return "device offline 60 minutes";
   if (action === "T3Revise" && to.state === "fixing") return "REVISE, under the round cap";
   if (action === "T3Revise") return "REVISE at the cap";
+  if (action === "T3Unsat") return "REVISE with unsat=, the criterion goes to Max";
   if (action === "T7Blocked") return "BLOCKED";
   if (action === "T4Approve") return "APPROVE on the current head";
   if (action === "T4HeadMoves") return "a new head is pushed";

@@ -60,6 +60,7 @@ stateDiagram-v2
   s9 --> s14: APPROVE on the current head
   s9 --> s10: device offline 60 minutes or job dies twice (T6)
   s9 --> s15: REVISE, under the round cap
+  s9 --> s5: REVISE with unsat=, the criterion goes to Max
   s13 --> s12: post-merge fails, follow-up filed or post-merge passes
   s14 --> s9: head changed and the patch differs
   s14 --> s16: ship = merge or handoff and the PR is held
@@ -70,9 +71,11 @@ stateDiagram-v2
   s15 --> s5: a product question
   s15 --> s9: ready, CI green
   s15 --> s10: device offline 60 minutes or job dies twice (T6) or CI red three times
+  s5 --> s9: answer, same step resumes
   s5 --> s15: answer, same step resumes
   s16 --> s9: head changed and the patch differs
   s16 --> s15: REVISE, under the round cap or PR dirty or behind, base update
+  s16 --> s5: REVISE with unsat=, the criterion goes to Max
   s16 --> s17: approver's OK at the head, ship = handoff, finish_line ready-for-review
   s16 --> s18: approver's OK at the head, finish_line merge
   s16 --> s7: approver's OK at the head, or approver removes a label-only hold

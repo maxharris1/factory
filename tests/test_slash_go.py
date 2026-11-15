@@ -158,7 +158,6 @@ def test_slash_go_releases_a_repeat_block(tmp_path: Path) -> None:
     assert flow.state()["workflow_state"] != "waiting-max"
 
 
-@pytest.mark.xfail(strict=True, reason="#190: T16d records an unsatisfiable criterion as waiting-max")
 def test_slash_go_releases_an_unsatisfiable_criterion(tmp_path: Path) -> None:
     flow = AppFlow(tmp_path, enabled=True)
     assert flow.go("go-1") == "queued-build"

@@ -66,7 +66,7 @@ ASSUME Omit \subseteq Decided \cup Guards
 
 TypeOK ==
   /\ state \in States
-  /\ paused \in {"none", "questions", "building", "fixing"}
+  /\ paused \in {"none", "questions", "building", "fixing", "review"}
   /\ cap \in {0, 1, 3}
   /\ configOk \in BOOLEAN
   /\ flags \in [
@@ -312,6 +312,16 @@ T3Revise ==
         /\ counts.round + 1 >= cap + counts.extra
         /\ state' = "capped"
         /\ counts' = [counts EXCEPT !.acUnmet = 1, !.round = cap + counts.extra, !.deaths = 0]
+
+T3Unsat ==
+  /\ "T3" \notin Omit
+  /\ state \in {"review", "awaiting-ok"}
+  /\ state' = "waiting-max"
+  /\ paused' = "review"
+  /\ cap' = cap
+  /\ configOk' = configOk
+  /\ flags' = [flags EXCEPT !.covered = FALSE]
+  /\ counts' = counts
 
 \* T7. BLOCKED. No known answer. Wake Grok Bot once.
 T7Blocked ==
@@ -638,7 +648,7 @@ Next ==
   \/ T1PPlanPosted \/ T1PPlanGapOnce \/ T1PPlanGapStuck \/ T1PPlanMapped
   \/ T2ReadyGreen \/ T2CiRed \/ T2CiRedStuck
   \/ T6JobRetry \/ T6JobStuck \/ T6DeviceOffline
-  \/ T3Revise \/ T7Blocked
+  \/ T3Revise \/ T3Unsat \/ T7Blocked
   \/ T4Approve \/ T4HeadMoves \/ T4PatchDiffers
   \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
   \/ T4Hold \/ T4HoldOk \/ T4HoldOkQueue \/ T4HoldOkHandoff
@@ -657,11 +667,12 @@ QuestionsBeforeBuilding ==
   state \in AfterGo => flags.questionsDone
 
 QuestionResumes ==
-  /\ state = "waiting-max" => paused \in {"questions", "building", "fixing"}
+  /\ state = "waiting-max" => paused \in {"questions", "building", "fixing", "review"}
   /\ state # "waiting-max" => paused = "none"
   /\ paused = "questions" => ~flags.questionsDone /\ cap = 0
   /\ paused = "building" => flags.questionsDone /\ cap = 0
   /\ paused = "fixing" => flags.questionsDone /\ cap \in {1, 3}
+  /\ paused = "review" => flags.questionsDone /\ cap \in {1, 3}
 
 MappedBeforeBuilding ==
   /\ state \in {"planning", "plan-check"} => flags.questionsDone /\ ~flags.planOk
@@ -712,7 +723,7 @@ T2Decided ==
   /\ state \in {"building", "fixing"} /\ counts.gate = 2 => ENABLED T2CiRedStuck
 
 T3Decided ==
-  state \in {"review", "awaiting-ok"} => ENABLED T3Revise
+  state \in {"review", "awaiting-ok"} => ENABLED T3Revise /\ ENABLED T3Unsat
 
 T4Decided ==
   /\ state = "review" => ENABLED T4Approve
