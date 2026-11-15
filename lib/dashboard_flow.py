@@ -14,6 +14,11 @@ filled in (intake -> questions -> building, since questions is Grok Bot's
 step and has no job of its own); longer gaps are kept as a jump with no
 edge drawn.
 
+Each path entry is a visit: the state, who worked it (the recipient of the
+first job behind it, or script), when it started and how long it took
+where the database knows, and the chart edge it came in by (job_flow's
+`visits`). The ticket page's run log and journey render from that list.
+
 The job view draws that path as a left-to-right chain, one node per visit
 (a ticket revised twice shows review, fixing, review, fixing, review), the
 current step highlighted, and the chart's direct successors of the current
@@ -36,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CHART_PATH = ROOT / "model" / "chart.mmd"
 CHART_MAX_BYTES = 256 * 1024
 MAX_BRIDGE = 2
+OFF_CHART = "no direct transition on the chart"
 GROUPS = ("blue", "purple", "orange", "yellow", "teal", "tan")
 # The step a job works in, by job action (lib/dispatcher.py _state_for_action,
 # plus the Grok Bot wakes that are themselves a state).
@@ -292,19 +298,33 @@ def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
     return "Stop" if stuck else phases.get(state, "Stop")
 
 
+def _started_at(visit: Visit) -> float | None:
+    """When a visit began: its first job's telemetry start, else when that
+    job was queued; None for a visit no job backs."""
+    if not visit.steps:
+        return None
+    step = visit.steps[0]
+    return step.created_at if step.started_at is None else step.started_at
+
+
 def job_flow(
     chart: dict | None,
-    history: Sequence[tuple[str, float]],
+    history: Sequence[JobStep],
     current: str | None,
     now: float,
 ) -> dict:
-    """{state, path, state_age_seconds, next, terminal} for a ticket whose
-    jobs, oldest first, are `history` as (action, created_at). `next` is the
-    chart's direct successors of the current state; `terminal` says the
-    current state is finished (is_terminal)."""
-    steps = [(JOB_STATES[action], at) for action, at in history if action in JOB_STATES]
+    """{state, path, state_age_seconds, next, terminal, visits,
+    hops_to_shipped, all_durations_known} for a ticket whose jobs, oldest
+    first, are `history`. `next` is the chart's direct successors of the
+    current state; `terminal` says the current state is finished
+    (is_terminal). `visits` holds one entry per `path` state: {state, who,
+    started_at, duration_seconds, time_known, off_chart, reason, current}.
+    A visit ends when the next one starts, else when its last job finished;
+    the current visit counts up to `now`. Unknown times are None."""
+    steps = [(JOB_STATES[step.action], step) for step in history if step.action in JOB_STATES]
     start = chart["start"] if chart is not None else None
-    path = chart_path(chart, [start, *(state for state, _ in steps), current])
+    walk = chart_visits(chart, [(start, None), *steps, (current, None)])
+    path = [visit.state for visit in walk]
     if chart is not None and current is not None and current not in {
         state["name"] for state in chart["states"]
     }:
@@ -316,13 +336,48 @@ def job_flow(
         index = len(steps) - 1
         while index > 0 and steps[index - 1][0] == current:
             index -= 1
-        age = int(max(0.0, now - float(steps[index][1])))
+        age = int(max(0.0, now - float(steps[index][1].created_at)))
+    at = max((i for i, state in enumerate(path) if state == current), default=-1)
+    phases = ticket_phases(chart)
+    labels = {} if chart is None else {
+        (edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]
+    }
+    starts = [_started_at(visit) for visit in walk]
+    visits = []
+    for i, visit in enumerate(walk):
+        began = starts[i]
+        end = starts[i + 1] if i + 1 < len(walk) else None
+        if i == at and began is not None:
+            end = now
+        elif end is None and visit.steps:
+            end = visit.steps[-1].finished_at
+        duration = None if began is None or end is None else int(max(0.0, end - began))
+        hop = (path[i - 1], visit.state) if i else None
+        visits.append({
+            "state": visit.state,
+            "who": (
+                "script"
+                if not visit.steps or phases.get(visit.state) == "Stop"
+                else visit.steps[0].recipient
+            ),
+            "started_at": began,
+            "duration_seconds": duration,
+            "time_known": duration is not None,
+            "off_chart": hop is not None and hop not in labels,
+            "reason": None if hop is None else labels.get(hop, OFF_CHART),
+            "current": i == at,
+        })
     return {
         "state": current,
         "path": path,
         "state_age_seconds": age,
         "next": successors(chart, current),
         "terminal": is_terminal(chart, current),
+        "visits": visits,
+        "hops_to_shipped": hops_to_shipped(chart, current),
+        "all_durations_known": bool(visits) and all(
+            visit["duration_seconds"] is not None for visit in visits
+        ),
     }
 
 
@@ -537,7 +592,7 @@ def render_path_svg(
 
     def title(a: str, b: str) -> str:
         if (a, b) not in labels:
-            return f"{a} → {b} (no direct transition on the chart)"
+            return f"{a} → {b} ({OFF_CHART})"
         return f"{a} → {b}" + (f": {labels[(a, b)]}" if labels[(a, b)] else "")
 
     def texts(name: str, extra: str = "") -> list[tuple[str, str]]:
