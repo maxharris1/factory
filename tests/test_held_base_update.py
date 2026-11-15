@@ -340,6 +340,40 @@ def test_a_ready_accepted_before_the_update_was_needed_does_not_cancel_it(
     assert board.state("42")["workflow_state"] == "fixing"
 
 
+def test_a_ready_accepted_in_the_updates_own_second_does_not_cancel_it(
+    tmp_path: Path,
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    board.now[0] += 10
+    second = int(board.now[0])
+    pr.comments.append(
+        Comment(
+            id="ready-repost",
+            author="claude-login",
+            body=READY.format(head=sha(1)),
+            created_at=float(second),
+        )
+    )
+    board.now[0] = second + 0.1
+    board.dispatcher.poll_once(board)
+    board.now[0] = second + 0.2
+    board.dispatcher.poll_once(board)
+    assert board.outcome("ready-repost") == "queued-review"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    for offset in (0.3, 0.4, 1.4, 2.4):
+        board.now[0] = second + offset
+        board.dispatcher.poll_once(board)
+
+    assert board.outcome(approve) == "held-base-update"
+    assert [(job["head"], job["state"]) for job in _merge_only_jobs(board)] == [
+        (sha(2), "queued")
+    ]
+
+
 def _red_fix(tmp_path: Path, fraction: float = 0.0):
     board = Board(tmp_path / "state", finish_line=None)
     board.factory = replace(board.factory, start_before_ci=True)

@@ -286,8 +286,11 @@ class QuestionsMixin:
             elif head is not None and (
                 _matching_head(reported, head) is not None
                 or (
-                    item.created_at < queued_at
-                    and _matching_head(reported, source_head) is not None
+                    _matching_head(reported, source_head) is not None
+                    and (
+                        item.created_at < math.floor(queued_at)
+                        or self._handled_before(ticket, item.id, queued_at)
+                    )
                 )
             ):
                 continue
@@ -297,8 +300,7 @@ class QuestionsMixin:
             return item
         return None
 
-    def _first_queued_second(self, job: Job) -> float:
-        """GitHub dates comments to the whole second."""
+    def _first_queued_at(self, job: Job) -> float:
         queued_at = job.created_at
         retry_of = _retry_of(job.request.detail)
         with self._connect() as connection:
@@ -310,7 +312,7 @@ class QuestionsMixin:
                     break
                 queued_at = min(queued_at, float(row["created_at"]))
                 retry_of = _retry_of(row["detail"])
-        return math.floor(queued_at)
+        return queued_at
 
     def _cancel_answered_jobs(self, ticket: TrackedTicket) -> None:
         """Cancel this ticket's queued steps that a later trusted comment
@@ -344,7 +346,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
-                queued_at=self._first_queued_second(job),
+                queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             )
@@ -415,7 +417,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
-                queued_at=self._first_queued_second(job),
+                queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             ) is None:
@@ -482,7 +484,7 @@ class QuestionsMixin:
                     source,
                     job.request.action,
                     job.request.recipient,
-                    queued_at=self._first_queued_second(job),
+                    queued_at=self._first_queued_at(job),
                     head=job.request.head,
                     round_number=review_round + 1,
                 )
@@ -525,4 +527,3 @@ class QuestionsMixin:
                 f"skipped {request.action}: answered by {answered.id} "
                 f"({request.repo}#{request.ticket_id})"
             )
-

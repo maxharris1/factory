@@ -223,7 +223,7 @@ class DetailMixin:
             comment,
             request.action,
             request.recipient,
-            queued_at=self._first_queued_second(job),
+            queued_at=self._first_queued_at(job),
             head=request.head,
             round_number=_detail_round_number(request.detail),
         )
