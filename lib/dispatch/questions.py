@@ -247,6 +247,7 @@ class QuestionsMixin:
         head: str | None = None,
         round_number: int | None = None,
         plan_round: int | None = None,
+        unhandled_plan_by_round: bool = False,
     ) -> Comment | None:
         """The first later trusted orch:v1 comment that already answered the
         action job comment queues for recipient, or None (#108, #66).
@@ -295,7 +296,10 @@ class QuestionsMixin:
                 continue
             if action == "plan" and (
                 _round_number(fields.get("round")) != plan_round
-                or not self._t1p_accepted_or_accepts_plan(ticket, item, plan_round)
+                or not (
+                    (unhandled_plan_by_round and handled is None)
+                    or self._t1p_accepted_or_accepts_plan(ticket, item, plan_round)
+                )
             ):
                 continue
             if (

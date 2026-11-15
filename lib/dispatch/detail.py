@@ -228,6 +228,7 @@ class DetailMixin:
             head=request.head,
             round_number=_detail_round_number(request.detail),
             plan_round=_plan_round(request.detail),
+            unhandled_plan_by_round=True,
         )
         if answered is not None:
             self._cancel_answered(connection, job, request, answered)
