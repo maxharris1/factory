@@ -15,12 +15,11 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.helpers import (
     _REGISTERING_ACTIONS,
-    _detail_round_number,
+    _detail_round,
     _detail_routing,
     _family_errors,
     _matching_head,
     _normalize_trusted_logins,
-    _round_number,
     _route,
     trusted_bots,
 )
@@ -199,9 +198,9 @@ class DispatcherBase:
             fields = parse_comment(comment.body).as_dict()
         except HandoffError:
             return False
-        job_round = _detail_round_number(job["detail"])
+        job_round = _detail_round(job["detail"])
         return _matching_head(fields.get("head") or "", job["head"]) is not None and (
-            job_round is None or job_round == _round_number(fields.get("round"))
+            job_round is None or fields.get("round") == job_round
         )
 
     def _trusted_session(

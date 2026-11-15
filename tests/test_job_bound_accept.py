@@ -304,3 +304,94 @@ def test_stray_revise_does_not_stale_a_registered_fix_ready(tmp_path: Path) -> N
 
     assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
     assert handled_outcome(queue, "ready-2") == "queued-review"
+
+
+def _with_round(snapshot: TrackedTicket, round_field: str) -> TrackedTicket:
+    last = snapshot.comments[-1]
+    stray = replace(last, body=last.body.replace("round=1/3", f"round={round_field}"))
+    return replace(snapshot, comments=(*snapshot.comments[:-1], stray))
+
+
+def test_running_review_leaves_a_verdict_for_another_round_cap_unregistered(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions = _reviewing(tmp_path)
+    _claim(queue, "codex")
+    snapshot = _with_round(_verdict_ticket("stray", "APPROVE"), "1/9")
+
+    dispatcher.process(snapshot)
+    dispatcher.process(snapshot)
+
+    assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    assert actions.merges == []
+    assert len([detail for detail in _wakes(queue) if "stray" in detail]) == 1
+
+
+def test_failed_review_does_not_take_a_verdict_for_another_round_cap(tmp_path: Path) -> None:
+    dispatcher, queue, actions = _reviewing(tmp_path)
+    review = _claim(queue, "codex")
+    queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    snapshot = _with_round(_verdict_ticket("stray", "APPROVE"), "1/9")
+
+    dispatcher.process(snapshot)
+    dispatcher.reconcile_jobs()
+    dispatcher.process(snapshot)
+
+    with queue.connect() as connection:
+        assert connection.execute(
+            "SELECT handoff_comment_id FROM jobs WHERE id = ?", (review.id,)
+        ).fetchone()[0] is None
+    assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    assert actions.merges == []
+
+
+def _ci_fixes_after(tmp_path: Path, stray: bool) -> list[tuple[str, str]]:
+    dispatcher, queue = setup(tmp_path)
+
+    def snapshot(comments: list, status: str) -> TrackedTicket:
+        value = ticket(*comments, head=HEAD, ci={HEAD: CIResult(status)})
+        return replace(value, factory=replace(value.factory, start_before_ci=True))
+
+    def revise(comment_id: str, created_at: float):
+        body = VERDICT.format(round="1/3", head=HEAD, verdict="REVISE", risk="high")
+        return comment(comment_id, body, author="codex-login", created_at=created_at)
+
+    _enqueue(queue, "build", "claude")
+    queue.finish(_claim(queue, "claude").id, owner="claude", handoff_comment_id="ready-1")
+    comments = [comment("ready-1", READY.format(head=HEAD), author="claude-login", created_at=200)]
+    dispatcher.process(snapshot(comments, "pending"))
+    queue.finish(_claim(queue, "codex").id, owner="codex", handoff_comment_id="verdict-real")
+    if stray:
+        comments.append(revise("stray", 300))
+        dispatcher.process(snapshot(comments, "pending"))
+        assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
+    queue.enqueue(
+        JobRequest(
+            repo="owner/repo",
+            ticket_id="42",
+            action="build",
+            recipient="claude",
+            source_comment_id="ready-2-source",
+            timeout_seconds=5400,
+        ),
+        dedupe_key="build-2",
+    )
+    queue.finish(_claim(queue, "claude").id, owner="claude", handoff_comment_id="ready-2")
+    comments.append(comment("ready-2", READY.format(head=HEAD), author="claude-login", created_at=400))
+    dispatcher.process(snapshot(comments, "failure"))
+    comments.append(revise("verdict-real", 250))
+    dispatcher.process(snapshot(comments, "failure"))
+    with queue.connect() as connection:
+        return [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT state, source_comment_id FROM jobs WHERE action = 'fix' ORDER BY rowid"
+            )
+        ]
+
+
+def test_rejected_stray_verdict_does_not_change_ci_fix_routing(tmp_path: Path) -> None:
+    control = _ci_fixes_after(tmp_path / "control", stray=False)
+
+    assert control == [("queued", "verdict-real")]
+    assert _ci_fixes_after(tmp_path / "stray", stray=True) == control

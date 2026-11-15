@@ -569,7 +569,8 @@ class ReadyMixin:
                 SELECT recorded.head FROM handled_comments AS verdict
                 JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
-                  AND verdict.outcome != 'rejected-edited' AND recorded.review_round = ?
+                  AND verdict.outcome NOT IN ('rejected-edited', 'rejected-unregistered-verdict')
+                  AND recorded.review_round = ?
                   AND verdict.rowid > COALESCE((
                       SELECT ready.rowid FROM handled_comments AS ready
                       WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id

@@ -19,12 +19,12 @@ from lib.dispatch.helpers import (
     _append_detail,
     _comment_order,
     _detail_project_bot,
+    _detail_round,
     _detail_round_number,
     _matching_head,
     _merge_only,
     _queue_state,
     _retry_detail,
-    _round_number,
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
@@ -984,12 +984,12 @@ class JobsMixin:
             return None
         action = job.request.action
         if action == "review":
-            round_number = _detail_round_number(job.request.detail)
-            if job.request.head is None or round_number is None:
+            round_field = _detail_round(job.request.detail)
+            if job.request.head is None or round_field is None:
                 return None
             kind, bot, role = "verdict", f"{ticket.factory.reviewer_harness}-bot", "reviewer"
         elif action in ("build", "fix", "update-from-main"):
-            round_number = None
+            round_field = None
             kind, bot, role = "ready", f"{job.request.recipient}-bot", "builder"
         else:
             return None
@@ -1013,7 +1013,7 @@ class JobsMixin:
             if kind == "verdict":
                 if _matching_head(head, job.request.head) is None:
                     continue
-                if _round_number(fields.get("round")) != round_number:
+                if fields.get("round") != round_field:
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
