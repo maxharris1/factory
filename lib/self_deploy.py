@@ -47,12 +47,14 @@ One pass, in order; the first guard that fails ends it:
    dropped when the apply ends, and every box row once HEAD is origin/main.
 7. When the merge changed deploy/ or requirements.txt, it runs
    `deploy/install.sh --update` (output in self-deploy-install.log). When
-   it changed skills/ (the pin and the pinned files), or this account's
-   installed skills (under HOME) miss the checkout's pin, it then runs
-   `orch install-skills` from the checkout. An up-to-date pass makes the
-   same check, so an install that failed is rerun once its cause is gone.
-   Every other bot account's waiter installs into its own home before a
-   box start (lib/skill_preflight.py).
+   it changed skills/ (the pin and the pinned files), it then runs
+   `orch install-skills` from the checkout into every bot home, and
+   otherwise into each bot home whose installed skills miss the pin. The
+   bot homes are HOME and the home of each harness user that machines.yml
+   names on this device and that exists here. An up-to-date pass makes the
+   same check, so an install that failed is rerun once its cause is gone;
+   that install takes the same `deploying` mark as step 6 and waits
+   (`busy`) while the box has a job.
 
 Escalation goes through lib/heal.py's webhook POST (URL and auth from the
 environment, never logged), once per reason: self-deploy.state.json keeps
@@ -65,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -433,6 +436,7 @@ def run_pass(
     queue: SQLiteJobQueue | None = None,
     device: str = "box",
     machines: MachinesConfig | None = None,
+    homes: Sequence[Path] = (),
 ) -> tuple[Outcome, dict]:
     """Decide and do one deploy pass; the outcome and what to log about it."""
     git = Git(checkout, git_env(environ, webhook))
@@ -452,14 +456,27 @@ def run_pass(
     except GitError as exc:
         return Outcome(REFUSED, f"git unreadable ({exc})"), {}
     if old == new:
-        extra: dict = {}
-        if not dry_run:
-            if queue is not None:
-                _release(queue, device, device_sync.STATES)
-            if _skills_stale(checkout, environ):
-                extra["skills"] = _install_skills(checkout, environ, webhook, state_dir,
-                                                  install, clock)
-        return Outcome(UP_TO_DATE, old=old, new=new), extra
+        if dry_run:
+            return Outcome(UP_TO_DATE, old=old, new=new), {}
+        if queue is not None:
+            _release(queue, device, device_sync.STATES)
+        stale = _stale_homes(checkout, homes)
+        if not stale:
+            return Outcome(UP_TO_DATE, old=old, new=new), {}
+        if queue is None:
+            return Outcome(UP_TO_DATE, old=old, new=new), {
+                "skills": _install_skills(checkout, stale, environ, webhook, state_dir,
+                                          install, clock)}
+        jobs = _mark_deploying_unless_busy(queue, device, machines, checkout, old, new, now)
+        if jobs:
+            return Outcome(BUSY, f"{jobs} jobs on {device}, install-skills next pass",
+                           old, new), {}
+        try:
+            skills = _install_skills(checkout, stale, environ, webhook, state_dir,
+                                     install, clock)
+        finally:
+            _release(queue, device, (device_sync.DEPLOYING,))
+        return Outcome(UP_TO_DATE, old=old, new=new), {"skills": skills}
     if not git.ok("merge-base", "--is-ancestor", old, new):
         return Outcome(REFUSED, f"local commits: HEAD {old[:12]} is not behind origin/main",
                        old, new), {}
@@ -489,14 +506,15 @@ def run_pass(
                        old, new), {}
     if queue is None:
         return _apply(git, state_dir, dirty, changed, merged, old, new, environ=environ,
-                      webhook=webhook, now=now, install=install, clock=clock, started=started)
+                      webhook=webhook, now=now, install=install, clock=clock, started=started,
+                      homes=homes)
     jobs = _mark_deploying_unless_busy(queue, device, machines, checkout, old, new, now)
     if jobs:
         return Outcome(BUSY, f"{jobs} jobs on {device}, retry next pass", old, new), {}
     try:
         outcome, extra = _apply(git, state_dir, dirty, changed, merged, old, new,
                                 environ=environ, webhook=webhook, now=now, install=install,
-                                clock=clock, started=started)
+                                clock=clock, started=started, homes=homes)
     except BaseException:
         _release(queue, device, (device_sync.DEPLOYING,))
         raise
@@ -520,6 +538,7 @@ def _apply(
     install: Runner,
     clock: Callable[[], float],
     started: float,
+    homes: Sequence[Path],
 ) -> tuple[Outcome, dict]:
     checkout = git.checkout
     folder = _backup(git, state_dir, dirty, now)
@@ -543,31 +562,49 @@ def _apply(
         code = install([str(checkout / "deploy" / "install.sh"), "--update"], env,
                        state_dir / INSTALL_LOG)
         extra["install"] = (code, clock() - install_started)
-    if (git.names("diff", "--name-only", "-z", old, new, "--", *SKILLS_PATHS)
-            or _skills_stale(checkout, environ)):
-        extra["skills"] = _install_skills(checkout, environ, webhook, state_dir, install, clock)
+    targets = (homes if git.names("diff", "--name-only", "-z", old, new, "--", *SKILLS_PATHS)
+               else _stale_homes(checkout, homes))
+    if targets:
+        extra["skills"] = _install_skills(checkout, targets, environ, webhook, state_dir,
+                                          install, clock)
     return Outcome(DEPLOYED, f"{old[:12]}..{new[:12]}", old, new), extra
 
 
-def _skills_stale(checkout: Path, environ: Mapping[str, str]) -> bool:
-    home = environ.get("HOME")
-    if not home:
-        return False
-    try:
-        return bool(pstack_pin.installed_errors(checkout, Path(home)))
-    except (OSError, ValueError, UnicodeError):
-        return False
+def bot_homes(machines: MachinesConfig | None, device: str,
+              environ: Mapping[str, str]) -> tuple[Path, ...]:
+    homes = [Path(environ["HOME"])] if environ.get("HOME") else []
+    entry = next((d for d in machines.devices if d.name == device), None) if machines else None
+    for user in sorted(set(entry.harnesses.values())) if entry else ():
+        try:
+            homes.append(Path(pwd.getpwnam(user).pw_dir))
+        except KeyError:
+            continue
+    return tuple(dict.fromkeys(homes))
+
+
+def _stale_homes(checkout: Path, homes: Sequence[Path]) -> list[Path]:
+    stale = []
+    for home in homes:
+        try:
+            if pstack_pin.installed_errors(checkout, home):
+                stale.append(home)
+        except (OSError, ValueError, UnicodeError):
+            continue
+    return stale
 
 
 def _install_skills(
-    checkout: Path, environ: Mapping[str, str], webhook: Webhook, state_dir: Path,
-    install: Runner, clock: Callable[[], float],
+    checkout: Path, homes: Sequence[Path], environ: Mapping[str, str], webhook: Webhook,
+    state_dir: Path, install: Runner, clock: Callable[[], float],
 ) -> tuple[int, float]:
     env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
     started = clock()
-    code = install([sys.executable, str(checkout / "bin" / "orch"), "install-skills"], env,
-                   state_dir / INSTALL_LOG)
-    return code, clock() - started
+    first_failure = 0
+    for home in homes:
+        code = install([sys.executable, str(checkout / "bin" / "orch"), "install-skills"],
+                       {**env, "HOME": str(home)}, state_dir / INSTALL_LOG)
+        first_failure = first_failure or code
+    return first_failure, clock() - started
 
 
 def deploy(
@@ -584,6 +621,7 @@ def deploy(
     clock: Callable[[], float] = time.monotonic,
     dry_run: bool = False,
     machines: MachinesConfig | None = None,
+    homes: Sequence[Path] | None = None,
 ) -> Outcome:
     """One pass: run it, log it, escalate once per reason, save the state."""
     if not owner(checkout):
@@ -600,7 +638,9 @@ def deploy(
     queue = SQLiteJobQueue(Path(db), clock=lambda: now) if db and Path(db).is_file() else None
     outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
                               install=install, clock=clock, dry_run=dry_run, queue=queue,
-                              device=device, machines=machines)
+                              device=device, machines=machines,
+                              homes=bot_homes(machines, device, environ) if homes is None
+                              else homes)
     escalation: str | None = None
     key: str | None = None
     if outcome.kind == FETCH_FAILED:
