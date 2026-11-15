@@ -11,7 +11,7 @@ from lib.dashboard_telemetry import job_block
 from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
-from lib.dashboard_pages.tickets import WAITING, _active_jobs
+from lib.dashboard_pages.tickets import _WAIT_TINT, WAITING, _active_jobs, _px
 
 
 VERBS = {
@@ -20,7 +20,6 @@ VERBS = {
     "review": ("Scrutinizing", "Combing", "Squinting"),
     "fix": ("Patching", "Mending", "Tinkering"),
 }
-EFFECTS = {"plan": "dither", "build": "bricks", "review": "scanner", "fix": "patch"}
 NEXT_ORDER = {"normal": 0, "human": 1, "stop": 2}
 FIRST_REASON = "ticket arrives"
 STOP_TINT = journey_canvas.STOP
@@ -178,11 +177,16 @@ def _hero_line(row: dict, model: dict) -> str:
     return f'<p class="line">{" · ".join(parts) or "state not recorded"}</p>'
 
 
-def _verb(row: dict, running: bool) -> str:
+def _motion(row: dict, model: dict) -> str:
+    """The PX_STATE key the hero strip shows, or "waiting" when the ticket
+    waits on a human. The Journey and chart move only when that strip does."""
+    return "waiting" if model["state"] in WAITING else _px().px_state(row)
+
+
+def _verb(row: dict, motion: str) -> str:
     action = str(row.get("action") or "")
-    verbs = VERBS.get(action)
     glyph = '<span class="glyph" aria-hidden="true"><span></span><span></span><span class="lit"></span><span></span></span>'
-    word = _span("verb", verbs[0] + "…") if verbs and running else ""
+    word = _span("verb", VERBS[motion][0] + "…") if motion in _px().PX_ACTIONS else ""
     return f'<div class="jd-verb">{glyph}{word}{_span("phase", action.upper())}</div>'
 
 
@@ -213,13 +217,12 @@ def _tiles(row: dict, model: dict, running: bool) -> str:
 
 
 def _hero(row: dict, model: dict, running: bool) -> str:
-    from lib.dashboard_pages import shell
-
-    action = str(row.get("action") or "")
-    strip = shell.px_strip(
-        f"job-hero-{row['job']}", effect=EFFECTS.get(action, "static") if running else "static",
-        tint="bot", bot=row.get("recipient"), cell=4, height=40, seed=2,
-    )
+    motion = _motion(row, model)
+    key = f"job-hero-{row['job']}"
+    if motion == "waiting":
+        strip = _px().px_strip(key, effect="static", tint=_WAIT_TINT, cell=4, height=40, seed=2)
+    else:
+        strip = _px().px_strip(key, state=motion, bot=row.get("recipient"), cell=4, height=40, seed=2)
     kind = _job_kind(row)
     device = f"on {row['device']}" if running and row.get("device") else "queued" if not running else ""
     title = (
@@ -233,7 +236,7 @@ def _hero(row: dict, model: dict, running: bool) -> str:
     )
     return (
         f'<section class="jd-hero">{strip}<div class="body"><div class="who">{title}'
-        f"{_hero_line(row, model)}{_verb(row, running)}</div>{_tiles(row, model, running)}</div></section>"
+        f"{_hero_line(row, model)}{_verb(row, motion)}</div>{_tiles(row, model, running)}</div></section>"
     )
 
 
@@ -390,7 +393,7 @@ def _jobview(snapshot: dict) -> str:
 
 
 _SCRIPT = r"""
-  var DETAIL = {verbs: __VERBS__, effects: __EFFECTS__, order: {normal: 0, human: 1, stop: 2},
+  var DETAIL = {verbs: __VERBS__, waitTint: __WAITTINT__, order: {normal: 0, human: 1, stop: 2},
                 first: 'ticket arrives', stop: '#f7768e', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__};
   var SEL = {};
@@ -447,11 +450,13 @@ _SCRIPT = r"""
     span(t, null, label);
     return b;
   }
-  function hero(r, m, running) {
+  function motionOf(r, m) { return WAITING[m.state] ? 'waiting' : PX.state(r); }
+  function hero(r, m, running, motion) {
     var sec = el('section', 'jd-hero');
     var action = String(r.action || '');
-    add(sec, PX.strip('job-hero-' + r.job, {effect: running ? (DETAIL.effects[action] || 'static') : 'static', tint: 'bot',
-                              bot: r.recipient, cell: 4, height: 40, seed: 2}));
+    add(sec, PX.strip('job-hero-' + r.job, motion === 'waiting'
+      ? {effect: 'static', tint: DETAIL.waitTint, cell: 4, height: 40, seed: 2}
+      : {state: motion, bot: r.recipient, cell: 4, height: 40, seed: 2}));
     var body = add(sec, el('div', 'body'));
     var who = add(body, el('div', 'who'));
     var title = add(who, el('div', 'title'));
@@ -477,8 +482,8 @@ _SCRIPT = r"""
     var glyph = span(verb, 'glyph');
     glyph.setAttribute('aria-hidden', 'true');
     [0, 1, 2, 3].forEach(function (i) { span(glyph, i === 2 ? 'lit' : null); });
-    var verbs = DETAIL.verbs[action];
-    if (verbs && running) span(verb, 'verb', verbs[Math.floor(Date.now() / 4000) % verbs.length] + '…');
+    var verbs = PX.table.actions.hasOwnProperty(motion) ? DETAIL.verbs[motion] : null;
+    if (verbs) span(verb, 'verb', verbs[Math.floor(Date.now() / 4000) % verbs.length] + '…');
     span(verb, 'phase', action.toUpperCase());
     var tiles = add(body, el('div', 'jd-tiles'));
     if (running) {
@@ -680,17 +685,18 @@ _SCRIPT = r"""
         var flash = s.flashAt === null || reducedMotion ? 0 : Math.max(0, 1 - (now - s.flashAt) / 260);
         var beat = s.beatStart === null || reducedMotion ? -1 : (now - s.beatStart) / 1000;
         drawJourney(ctx, j.m, {t: reducedMotion ? 1e6 : (now - s.tPlay) / 1000, scale: s.scale, selected: s.selected,
-          flash: flash, beat: beat >= 0 && beat <= 1 ? beat : -1, reduced: reducedMotion, calm: false,
+          flash: flash, beat: beat >= 0 && beat <= 1 ? beat : -1, reduced: reducedMotion, still: j.still,
           startClock: j.startClock, nowClock: j.nowClock});
       }
     }
     if (j.flowCanvas && j.flow.open && j.flowCanvas.getContext && FLOWMAP) {
       var fctx = j.flowCanvas.getContext('2d');
       if (fctx) drawFlowMap(fctx, FLOWMAP, {visits: j.m.visits, state: j.m.state, next: j.m.next.map(function (n) { return n.to; })},
-                            {t: reducedMotion ? 0 : now / 1000, reduced: reducedMotion});
+                            {t: now / 1000, reduced: reducedMotion || j.still});
     }
   }
   function journeyFrame() {
+    journeys = journeys.filter(function (j) { return j.canvas.isConnected; });
     if (!journeys.length) return false;
     var now = Date.now();
     journeys.forEach(function (j) { drawOne(j, now); });
@@ -701,13 +707,14 @@ _SCRIPT = r"""
     var chart = d.statechart || null;
     var m = detailModel(r, chart);
     var running = state === 'running';
+    var motion = motionOf(r, m);
     var generated = Number(d.generated_at_epoch) || Date.now() / 1000;
     var s = selection(r, m, generated);
     m.selected = s.selected;
     var art = el('article', 'jobpage');
     art.setAttribute('id', anchor(r.job));
     add(art, crumb(r));
-    add(art, hero(r, m, running));
+    add(art, hero(r, m, running, motion));
     var cols = add(art, el('div', 'jd-cols'));
     var logButtons = [], hitButtons = [], scales = [];
     add(cols, runlog(r, m, logButtons));
@@ -719,7 +726,7 @@ _SCRIPT = r"""
     var cp = chartPanel(r, m, chart);
     add(right, cp.sec);
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
-    var j = {r: r, m: m, logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
+    var j = {r: r, m: m, still: motion === 'waiting' || !PX.table.effects[(PX.table.states[motion] || PX.table.states.unknown).effect], logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: starts.length ? clock(Math.min.apply(null, starts)) : '', nowClock: clock(generated)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');
@@ -732,7 +739,9 @@ _SCRIPT = r"""
         placeHits(j);
       } else if (t.hasAttribute('data-replay')) s.tPlay = Date.now();
     });
+    placeHits(j);
     journeys.push(j);
+    PX.onFrame(journeyFrame);
     return art;
   }
 
@@ -740,7 +749,6 @@ _SCRIPT = r"""
     var root = byId('jobview');
     if (!root) return;
     root.replaceChildren();
-    journeys = [];
     var jobs = activeJobs(d);
     var hash = String(location.hash || '');
     if (hash.indexOf('#job-') === 0) {
@@ -754,10 +762,8 @@ _SCRIPT = r"""
     }
     if (!jobs.length) { add(root, el('p', 'empty', 'no running or queued jobs')); return; }
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
-    journeys.forEach(placeHits);
-    PX.onFrame(journeyFrame);
   }
-""".replace("__VERBS__", json.dumps(VERBS)).replace("__EFFECTS__", json.dumps(EFFECTS)).replace(
+""".replace("__VERBS__", json.dumps(VERBS)).replace("__WAITTINT__", json.dumps(_WAIT_TINT)).replace(
     "__CHARTSUB__", json.dumps(CHART_SUB)
 )
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

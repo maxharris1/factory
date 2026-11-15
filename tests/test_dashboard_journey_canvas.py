@@ -83,13 +83,13 @@ def _model(path=PATH, hops=len(FUTURE)) -> dict:
 
 
 FRAME = {"scale": "even", "selected": 3, "flash": 0, "beat": -1, "reduced": False,
-         "calm": False, "startClock": "1:47 PM", "nowClock": "3:48 PM"}
+         "still": False, "startClock": "1:47 PM", "nowClock": "3:48 PM"}
 FRAMES = {
     "t0": dict(FRAME, t=0),
     "t1_5": dict(FRAME, t=1.5, flash=0.5),
     "t10": dict(FRAME, t=10, beat=0.4),
     "t10_scale": dict(FRAME, t=10, scale="scale"),
-    "calm": dict(FRAME, t=10, calm=True),
+    "still": dict(FRAME, t=10, still=True),
     "reduced": dict(FRAME, t=0, reduced=True, flash=1),
 }
 

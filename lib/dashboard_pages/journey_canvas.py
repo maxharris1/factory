@@ -146,8 +146,8 @@ function drawJourney(ctx, model, opts) {
   var L = journeyLayout(model, opts.scale);
   var bars = L.bars, n = bars.length, cur = L.cur, bay = JOURNEY_BAYER;
   var reduced = !!opts.reduced;
-  var still = reduced || !!model.terminal || (n > 0 && bars[cur].stop);
-  var lively = !still && !opts.calm;
+  var still = reduced || !!opts.still || !!model.terminal || (n > 0 && bars[cur].stop);
+  var lively = !still;
   var t = Math.max(0, Number(opts.t) || 0);
   var frac = reduced ? 1 : Math.min(1, t / 3);
   var arrived = frac >= 1;
