@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
-from lib.handoff import HandoffError, parse_comment, repeat_id
+from lib.handoff import parse_comment, repeat_id
 from lib.queue import JobRequest
 
 _ACCEPTED_REVISE = ("queued-review-fix", "answered-fix", "capped-review")
@@ -69,10 +69,7 @@ class RepeatBlockMixin:
         for item in ticket.comments:
             if item.id not in accepted:
                 continue
-            try:
-                number = _round_number(parse_comment(item.body).as_dict().get("round"))
-            except HandoffError:
-                continue
+            number = _round_number(parse_comment(item.body).as_dict().get("round"))
             if number is not None and number < (reported_round or 0):
                 found.append((number, item))
         return sorted(found, key=lambda pair: (pair[0], pair[1].created_at), reverse=True)
