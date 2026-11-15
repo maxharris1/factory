@@ -212,7 +212,6 @@ class CommentsMixin:
                 self._mark_handled(ticket, comment.id, outcome)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
-        """#173: an approver's plain /go releases a capped or waiting-max ticket."""
         if comment.edited_at is not None:
             self._reject_edited(ticket, comment)
             return "rejected-edited"
