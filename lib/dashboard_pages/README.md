@@ -61,5 +61,8 @@ page module that draws a PixelStrip reaches `px_strip` through a
 function-local import (`tickets._px`).
 
 The board's phases come from the chart (`lib/dashboard_flow.py`
-`ticket_phases`). `page_script(chart)` hands the same table to the script as
-`PHASES` (`tickets.phase_table`), so the script never derives it.
+`ticket_phases`). The script derives the same table from each snapshot's
+`statechart` (`phaseTable`, fed the constants from `tickets.board_constants`),
+so a page built while the chart was missing recovers when it returns. The
+server/script parity tests in `tests/test_dashboard_tickets_board.py` hold the
+two derivations together.

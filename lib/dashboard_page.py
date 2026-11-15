@@ -91,19 +91,19 @@ def font_faces() -> str:
     return json.dumps(faces, separators=(",", ":"))
 
 
-def page_script(chart: dict | None = None) -> str:
+def page_script() -> str:
     return (
         SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())
         .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))
         .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
-        .replace("__PHASES__", json.dumps(tickets.phase_table(chart), separators=(",", ":")).replace("<", "\\u003c"))
+        .replace("__BOARD__", json.dumps(tickets.board_constants(), separators=(",", ":")).replace("<", "\\u003c"))
         .replace("__FONTS__", font_faces())
     )
 
 
 def render_pages(snapshot: dict) -> dict[str, str]:
     """Every page, by file name. Every value is escaped and already redacted."""
-    script = page_script(snapshot.get("statechart"))
+    script = page_script()
     return {name: _page(snapshot, name, css=CSS, script=script) for name in PAGES}

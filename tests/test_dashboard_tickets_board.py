@@ -148,13 +148,25 @@ HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", f"let nowMs = {in
     "    } else if (kind === 'snap') {\n"
     "      steps.push({snap: Object.fromEntries(arg.map(id => [id, ids[id].children.map(c => c.html()).join('')])),\n"
     "        hidden: Object.fromEntries(arg.map(id => [id, !!ids[id].hidden]))});\n"
+    "    } else if (kind === 'focus') {\n"
+    "      find(body, n => n.attrs[arg[0]] === arg[1]).focus();\n"
+    "    } else if (kind === 'hashchange') {\n"
+    "      windowListeners.hashchange.forEach(fn => fn());\n"
+    "    } else if (kind === 'focused') {\n"
+    "      const node = document.activeElement;\n"
+    "      steps.push({focused: node && node.isConnected ? [node.tagName, node.attrs[arg]] : 'BODY'});\n"
     "    } else if (kind === 'record') {",
+).replace(
+    "global.addEventListener = () => {};",
+    "const windowListeners = {hashchange: []};\n"
+    "global.addEventListener = (type, fn) => { if (windowListeners[type]) windowListeners[type].push(fn); };",
 )
 
 
-def _script(tmp_path: Path, snapshot: dict, actions: list | None = None) -> dict:
+def _script(tmp_path: Path, snapshot: dict, actions: list | None = None, page_from: dict | None = None) -> dict:
     assert "kind === 'press'" in HARNESS and f"nowMs = {int(NOW * 1000)};" in HARNESS
-    html = render_pages(snapshot)["job.html"]
+    assert "windowListeners[type].push" in HARNESS
+    html = render_pages(page_from or snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     (tmp_path / "page.js").write_text(script, encoding="utf-8")
     (tmp_path / "status.json").write_text(json.dumps(snapshot), encoding="utf-8")
@@ -430,6 +442,53 @@ def test_script_without_a_chart_matches_the_server(tmp_path: Path) -> None:
     server = _server(snapshot)
     for ident in BOARD:
         assert out["html"][ident] == server[ident], ident
+
+
+@layout.needs_node
+def test_script_board_recovers_when_the_chart_returns(tmp_path: Path, snapshot: dict) -> None:
+    chartless = {**snapshot, "statechart": None}
+    out = _script(tmp_path, snapshot, page_from=chartless)
+    server = _server(snapshot)
+    for ident in BOARD:
+        assert out["html"][ident] == server[ident], ident
+
+
+def _recased(snapshot: dict) -> dict:
+    def upper(rows: list) -> list:
+        return [{**row, "repo": row["repo"].upper()} for row in rows]
+
+    return {
+        **snapshot,
+        "running": upper(snapshot["running"]),
+        "queued": upper(snapshot["queued"]),
+        "poller": {**snapshot["poller"], "verdicts": upper(snapshot["poller"]["verdicts"])},
+        "stuck": {**snapshot["stuck"], "tickets": upper(snapshot["stuck"]["tickets"])},
+    }
+
+
+def test_server_cards_join_jobs_whatever_the_repo_case(snapshot: dict) -> None:
+    recased, server = _server(_recased(snapshot)), _server(snapshot)
+    assert "no job running" not in _text(_card(server["pipeline"], _key(snapshot["running"][0])))
+    for ident in ("pipeline", "shipped"):
+        assert recased[ident] == server[ident], ident
+
+
+@layout.needs_node
+def test_script_cards_join_jobs_whatever_the_repo_case(tmp_path: Path, snapshot: dict) -> None:
+    out, server = _script(tmp_path, _recased(snapshot)), _server(snapshot)
+    for ident in ("pipeline", "shipped"):
+        assert out["html"][ident] == server[ident], ident
+
+
+@layout.needs_node
+def test_filter_buttons_keep_focus_across_renders(tmp_path: Path, snapshot: dict) -> None:
+    repo = snapshot["tickets"][0]["repo"]
+    actions = [["focus", ["data-project", repo]], ["press", ["data-project", repo]], ["focused", "data-project"],
+               ["focus", ["data-view", "table"]], ["hashchange", None], ["focused", "data-view"],
+               ["snap", ["pipeline"]]]
+    steps = _script(tmp_path, snapshot, actions)["steps"]
+    assert [step["focused"] for step in steps if "focused" in step] == [["button", repo], ["button", "table"]]
+    assert steps[-1]["hidden"] == {"pipeline": False}
 
 
 def _strip_attrs(markup: str) -> list[dict]:

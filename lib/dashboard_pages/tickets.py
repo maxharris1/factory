@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from lib.dashboard_flow import GLOSS, PIPELINE, SHIPPED, ticket_phase, ticket_phases
+from lib.dashboard_flow import GLOSS, PHASE_OVERRIDES, PHASES, PIPELINE, SHIPPED, ticket_phase, ticket_phases
 from lib.dashboard_pages.activity import _VERDICT
 from lib.dashboard_pages.common import (
     anchor, _bot, _chip, duration, _e, _panel, _short, _span, _td, _ticket,
@@ -67,7 +67,7 @@ font-family:var(--mono)}
 
 SCRIPT_TICKETS = r"""
 
-  var PHASES = __PHASES__;
+  var BOARD = __BOARD__;
   var WAITING = {'awaiting-ok': 1, 'waiting-max': 1};
   var WAIT_TINT = '#ff9e64';
   var BOARD_EMPTY = {Ask: 'nothing waiting on questions'};
@@ -80,13 +80,45 @@ SCRIPT_TICKETS = r"""
   }
 
   function ticketKey(r) { return r.repo + '#' + r.ticket_id; }
+  function joinKey(r) { return ticketKey(r).toLowerCase(); }
   function cmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
   function listed(names) {
     if (!names.length) return 'stopped';
     return names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' or ' + names[names.length - 1];
   }
 
+  function phaseTable(chart) {
+    var phases = {}, order = [];
+    if (chart) {
+      var legend = {}, groups = {}, next = {};
+      chart.legend.forEach(function (k) { legend[k.group] = k.name; });
+      chart.states.forEach(function (st) { groups[st.name] = st.group; next[st.name] = []; });
+      chart.edges.forEach(function (e) { next[e.from].push(e.to); });
+      order = [chart.start];
+      for (var i = 0; i < order.length; i++) {
+        next[order[i]].forEach(function (n) { if (order.indexOf(n) < 0) order.push(n); });
+      }
+      Object.keys(groups).forEach(function (n) { if (order.indexOf(n) < 0) order.push(n); });
+      order.forEach(function (n) {
+        var phase = BOARD.overrides[n] || legend[groups[n]];
+        phases[n] = BOARD.phases.indexOf(phase) >= 0 ? phase : 'Stop';
+      });
+    }
+    function states(phase) { return order.filter(function (n) { return phases[n] === phase; }); }
+    return {
+      states: phases,
+      columns: order.length ? BOARD.pipeline.map(function (phase) {
+        return {phase: phase, states: states(phase), glyph: BOARD.glyphs[phase]};
+      }) : [],
+      shelf: BOARD.shipped.filter(function (n) { return phases[n] === 'Shipped'; }).map(function (n) {
+        return {state: n, label: BOARD.gloss.hasOwnProperty(n) ? n + ' · ' + BOARD.gloss[n] : n};
+      }),
+      stop: {states: states('Stop'), glyph: BOARD.glyphs.Stop}
+    };
+  }
+
   function boardOf(d, project) {
+    var table = phaseTable(d.statechart);
     var rows = d.tickets || [];
     var counts = new Map();
     rows.forEach(function (r) { counts.set(r.repo, (counts.get(r.repo) || 0) + 1); });
@@ -95,45 +127,46 @@ SCRIPT_TICKETS = r"""
     projects.sort(function (a, b) { return b.count - a.count || cmp(a.short, b.short) || cmp(a.repo, b.repo); });
     var live = new Map(), queued = new Map(), verdicts = new Map(), reasons = new Map();
     (d.running || []).forEach(function (r) {
-      var best = live.get(ticketKey(r));
-      if (!best || (r.elapsed_seconds || 0) < (best.elapsed_seconds || 0)) live.set(ticketKey(r), r);
+      var best = live.get(joinKey(r));
+      if (!best || (r.elapsed_seconds || 0) < (best.elapsed_seconds || 0)) live.set(joinKey(r), r);
     });
     function first(map, list, value) {
-      (list || []).forEach(function (r) { if (!map.has(ticketKey(r))) map.set(ticketKey(r), value(r)); });
+      (list || []).forEach(function (r) { if (!map.has(joinKey(r))) map.set(joinKey(r), value(r)); });
     }
     first(queued, d.queued, function (r) { return r; });
     first(verdicts, d.poller ? d.poller.verdicts : null, function (r) { return r; });
     first(reasons, d.stuck ? d.stuck.tickets : null, function (r) { return r.reason; });
     var cards = rows.filter(function (r) { return !project || r.repo === project; }).map(function (t) {
-      var key = ticketKey(t);
-      var known = Object.prototype.hasOwnProperty.call(PHASES.states, t.state);
-      return {ticket: t, phase: t.stuck || !known ? 'Stop' : PHASES.states[t.state],
+      var key = joinKey(t);
+      var known = Object.prototype.hasOwnProperty.call(table.states, t.state);
+      return {ticket: t, phase: t.stuck || !known ? 'Stop' : table.states[t.state],
               live: live.get(key) || null, queued: queued.get(key) || null,
               verdict: verdicts.get(key) || null, reason: reasons.get(key) || null};
     });
-    var columns = PHASES.columns.map(function (col) {
+    var columns = table.columns.map(function (col) {
       return {phase: col.phase, glyph: col.glyph, states: col.states,
               cards: cards.filter(function (c) { return c.phase === col.phase; })};
     });
     return {
-      projects: projects, total: rows.length, tracked: cards.length, available: PHASES.columns.length > 0,
+      projects: projects, total: rows.length, tracked: cards.length, available: table.columns.length > 0,
       inFlight: columns.reduce(function (n, col) { return n + col.cards.length; }, 0),
       columns: columns,
-      shelf: PHASES.shelf.map(function (g) {
+      shelf: table.shelf.map(function (g) {
         return {state: g.state, label: g.label,
                 tiles: cards.filter(function (c) { return c.phase === 'Shipped' && c.ticket.state === g.state; })};
       }),
-      stopped: cards.filter(function (c) { return c.phase === 'Stop'; })
+      stopped: cards.filter(function (c) { return c.phase === 'Stop'; }),
+      stop: table.stop
     };
   }
 
-  function tkButton(text, attr, value, on, pick) {
-    var b = el('button', 'tk-btn', text);
+  function tkButton(parent, focused, text, attr, value, on, pick) {
+    var b = add(parent, el('button', 'tk-btn', text));
     b.setAttribute('type', 'button');
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
     b.setAttribute(attr, value);
     b.addEventListener('click', function () { pick(); if (latest) render(latest); });
-    return b;
+    if (focused && focused.getAttribute(attr) === value) b.focus();
   }
 
   function tkGroup(root, cls, label) {
@@ -229,17 +262,19 @@ SCRIPT_TICKETS = r"""
 
     var filter = byId('ticket-filter');
     if (filter) {
+      var focused = document.activeElement;
+      if (!focused || focused.className !== 'tk-btn') focused = null;
       filter.replaceChildren();
       var group = tkGroup(filter, 'tk-group', 'Project');
-      add(group, tkButton('all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; }));
+      tkButton(group, focused, 'all ' + b.total, 'data-project', '', !tkProject, function () { tkProject = ''; });
       b.projects.forEach(function (p) {
-        add(group, tkButton(p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
-                            function () { tkProject = p.repo; }));
+        tkButton(group, focused, p.short + ' ' + p.count, 'data-project', p.repo, tkProject === p.repo,
+                 function () { tkProject = p.repo; });
       });
       add(filter, el('span', 'tk-grow'));
       var view = tkGroup(filter, 'tk-group tk-view', 'View');
       ['board', 'table'].forEach(function (name) {
-        add(view, tkButton(name, 'data-view', name, tkView === name, function () { tkView = name; }));
+        tkButton(view, focused, name, 'data-view', name, tkView === name, function () { tkView = name; });
       });
     }
 
@@ -277,9 +312,9 @@ SCRIPT_TICKETS = r"""
     var stop = add(shelf, el('div', 'tk-sub'));
     stop.setAttribute('data-phase', 'Stop');
     var label = add(stop, el('div', 'tk-label'));
-    add(label, tkGlyph('phase-Stop', PHASES.stop.glyph));
+    add(label, tkGlyph('phase-Stop', b.stop.glyph));
     add(label, el('span', null, 'stopped (' + b.stopped.length + ')'));
-    if (!b.stopped.length) { add(stop, el('div', 'tk-none', 'nothing ' + listed(PHASES.stop.states))); return; }
+    if (!b.stopped.length) { add(stop, el('div', 'tk-none', 'nothing ' + listed(b.stop.states))); return; }
     var cards = add(stop, el('div', 'tk-stops'));
     b.stopped.forEach(function (c) { add(cards, tkCard(c)); });
   }
@@ -322,25 +357,33 @@ _EMPTY = {"Ask": "nothing waiting on questions"}
 _ROUND = re.compile(r"([0-9]+)/([0-9]+)")
 
 
+def _phase_glyph(phase: str) -> dict:
+    return {"tint": GLYPH_TINT, **PHASE_GLYPH[phase], "cell": 2, "height": 16}
+
+
+def board_constants() -> dict:
+    return {
+        "pipeline": PIPELINE, "phases": PHASES, "overrides": PHASE_OVERRIDES, "shipped": SHIPPED, "gloss": GLOSS,
+        "glyphs": {phase: _phase_glyph(phase) for phase in PHASE_GLYPH},
+    }
+
+
 def phase_table(chart: dict | None) -> dict:
     phases = ticket_phases(chart)
 
     def states(phase: str) -> list[str]:
         return [name for name, found in phases.items() if found == phase]
 
-    def glyph(phase: str) -> dict:
-        return {"tint": GLYPH_TINT, **PHASE_GLYPH[phase], "cell": 2, "height": 16}
-
     return {
         "states": phases,
         "columns": [
-            {"phase": phase, "states": states(phase), "glyph": glyph(phase)} for phase in PIPELINE
+            {"phase": phase, "states": states(phase), "glyph": _phase_glyph(phase)} for phase in PIPELINE
         ] if phases else [],
         "shelf": [
             {"state": name, "label": f"{name} · {GLOSS[name]}" if name in GLOSS else name}
             for name in SHIPPED if phases.get(name) == "Shipped"
         ],
-        "stop": {"states": states("Stop"), "glyph": glyph("Stop")},
+        "stop": {"states": states("Stop"), "glyph": _phase_glyph("Stop")},
     }
 
 
@@ -348,10 +391,14 @@ def _key(row: dict) -> str:
     return f"{row['repo']}#{row['ticket_id']}"
 
 
+def _join(row: dict) -> str:
+    return _key(row).casefold()
+
+
 def _first(rows: list | None) -> dict[str, dict]:
     found: dict[str, dict] = {}
     for row in rows or ():
-        found.setdefault(_key(row), row)
+        found.setdefault(_join(row), row)
     return found
 
 
@@ -361,9 +408,9 @@ def board(snapshot: dict, project: str | None = None) -> dict:
     counts = Counter(row["repo"] for row in rows)
     live: dict[str, dict] = {}
     for row in snapshot["running"]:
-        best = live.get(_key(row))
+        best = live.get(_join(row))
         if best is None or (row.get("elapsed_seconds") or 0) < (best.get("elapsed_seconds") or 0):
-            live[_key(row)] = row
+            live[_join(row)] = row
     queued = _first(snapshot["queued"])
     verdicts = _first(snapshot["poller"].get("verdicts"))
     reasons = {key: row.get("reason") for key, row in _first(snapshot["stuck"]["tickets"]).items()}
@@ -371,10 +418,10 @@ def board(snapshot: dict, project: str | None = None) -> dict:
         {
             "ticket": row,
             "phase": ticket_phase(table["states"], row["state"], row["stuck"]),
-            "live": live.get(_key(row)),
-            "queued": queued.get(_key(row)),
-            "verdict": verdicts.get(_key(row)),
-            "reason": reasons.get(_key(row)),
+            "live": live.get(_join(row)),
+            "queued": queued.get(_join(row)),
+            "verdict": verdicts.get(_join(row)),
+            "reason": reasons.get(_join(row)),
         }
         for row in rows
         if project in (None, row["repo"])
