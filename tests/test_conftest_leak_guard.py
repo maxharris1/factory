@@ -133,3 +133,25 @@ def test_a_hook_object_a_module_registers_is_named_by_that_module(tmp_path: Path
     assert result.returncode != 0, result.stdout + result.stderr
     assert "collection hooks in test_leak.py left processes running" in result.stdout
     assert not alive(pid)
+
+
+def test_a_module_that_leaks_at_import_and_exits_zero_at_session_finish_fails_the_run(tmp_path: Path) -> None:
+    exit_zero = "import pytest\npytest_plugins = [__name__]\n\n\ndef pytest_sessionfinish(session):\n    pytest.exit('done', returncode=0)"
+    result, pid = _import_loop(tmp_path, exit_zero)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
+
+
+UNREGISTERING_HOOK = OBJECT_HOOK.replace(
+    "str(child.pid))\n", "str(child.pid))\n        session.config.pluginmanager.unregister(self)\n"
+)
+
+
+def test_a_hook_object_that_unregisters_itself_is_named_by_its_module(tmp_path: Path) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, UNREGISTERING_HOOK.format(record=str(record)))
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "collection hooks in test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
