@@ -394,8 +394,12 @@ def append_message(
             raise EvalError(f"bad {name} {value!r}")
     pr_field = "" if pr is None else f" pr={pr}"
     line = f"{_format_time(at)} repo={repo}{pr_field} message from={sender} to={recipient} kind={kind}\n"
-    with log.open("a", encoding="utf-8") as handle:
-        handle.write(line)
+    with log.open("a+b") as handle:
+        if handle.tell() > 0:
+            handle.seek(handle.tell() - 1)
+            if handle.read(1) != b"\n":
+                line = "\n" + line
+        handle.write(line.encode("utf-8"))
 
 
 def render_json(report: Report) -> str:

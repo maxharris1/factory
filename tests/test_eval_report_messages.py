@@ -77,14 +77,17 @@ def test_log_message_refuses_bad_input_and_writes_nothing(tmp_path: Path, bad: l
     assert not log.exists()
 
 
-def test_logged_messages_are_counted_by_the_report(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ending", [b"\n", b""])
+def test_logged_messages_are_counted_by_the_report(tmp_path: Path, ending: bytes) -> None:
     root = tmp_path / "bundle"
     shutil.copytree(MESSAGES, root)
+    log = root / "dispatcher.log"
+    log.write_bytes(log.read_bytes().rstrip(b"\n") + ending)
     result = orch(
         [
             "log-message",
             "--log",
-            str(root / "dispatcher.log"),
+            str(log),
             "--repo",
             "maxharris1/Cleffy",
             "--from",
