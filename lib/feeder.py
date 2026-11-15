@@ -90,6 +90,8 @@ from lib.feeder_gates import (
     github_ref,
     linear_status,
     parse_gate_lines,
+    paths_collide,
+    shared_path_matches,
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
@@ -467,7 +469,10 @@ class Feeder:
         self._record_seen(candidates, now)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
-        waits, holds, capped, gate_read = self._gates(candidates, states)
+        waits, holds, capped, gate_read, unblocks = self._gates(candidates, states)
+        for candidate in candidates:
+            candidate.unblocks = unblocks[candidate.ref]
+        self._record_priority(candidates, now)
         if gate_read:
             self._sync_attention(waits, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
@@ -565,10 +570,10 @@ class Feeder:
 
     def _gates(
         self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
-    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool]:
+    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int]]:
         """Blocker waits, the holds of tickets in flight, the holders that
-        hold as capped, and whether the status read (when one was needed)
-        succeeded."""
+        hold as capped, whether the status read (when one was needed)
+        succeeded, and how many tickets each candidate unblocks."""
         rows = self._feeder_rows()
         unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
         linear_refs = {ref.key: ref for ref in rows if ref.tracker == "linear"}
@@ -642,7 +647,8 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        return blocker_waits(gated, statuses), holds, capped_refs, ok
+        unblocks = critical_path_counts(candidates, {c.ref for c in unstarted}, pull_of, holds.shared)
+        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
@@ -801,15 +807,6 @@ class Feeder:
                         ),
                     ),
                 )
-                ticket = connection.execute(
-                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
-                    (issue.repo.lower(), issue.key),
-                ).fetchone()[0]
-                if ticket is not None:
-                    set_ticket_priority(
-                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
-                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
-                    )
             connection.execute(
                 f"INSERT INTO {POLL_TABLE} (id, at) VALUES (1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
@@ -824,6 +821,29 @@ class Feeder:
                 """,
                 (now,),
             )
+            connection.commit()
+
+    def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
+        """Each ticket's unblocks count, and the claim order of every ticket
+        with a ticket id, so a label or blocker change after the feed still
+        moves its queued job."""
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                issue = candidate.issue
+                where = (issue.repo.lower(), issue.key)
+                connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET unblocks = ? WHERE repo = ? AND issue = ?",
+                    (candidate.unblocks, *where),
+                )
+                ticket = connection.execute(
+                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?", where
+                ).fetchone()[0]
+                if ticket is not None:
+                    set_ticket_priority(
+                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
+                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
+                    )
             connection.commit()
 
     def _mark_done(self) -> None:
@@ -984,6 +1004,59 @@ class Feeder:
                 return issue.branch
             return f"factory/{issue.key.lower()}"
         return f"factory/issue-{issue.key}"
+
+
+def critical_path_counts(
+    candidates: Sequence[_Candidate],
+    unstarted: Collection[Ref],
+    pull_of: Mapping[Ref, Ref],
+    shared: Mapping[str, Collection[str]],
+) -> dict[Ref, int]:
+    """How many of this poll's candidates each one unblocks (#258): those
+    whose Blocked by names it or its PR, the unstarted ones in its repo that
+    share a Touches: path with it, and every candidate blocked by one of
+    those, transitively. 0 for each ticket of a project that turns
+    critical_path_order off. Reads only gate lines and feeder rows."""
+    owner = {c.ref: c.ref for c in candidates}
+    owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
+    blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
+    for c in candidates:
+        for blocker in c.lines.blocked_by:
+            if owner.get(blocker, c.ref) != c.ref:
+                blocks[owner[blocker]].add(c.ref)
+    counts: dict[Ref, int] = {}
+    for c in candidates:
+        assert c.project.intake is not None
+        if not c.project.intake.critical_path_order:
+            counts[c.ref] = 0
+            continue
+        own = shared.get(c.ref.repo, ())
+        found = blocks[c.ref] | {
+            other.ref
+            for other in candidates
+            if other.ref in unstarted
+            and other.ref.repo == c.ref.repo
+            and _paths_meet(c.lines.touches, other.lines.touches, own)
+        }
+        pending = list(found)
+        while pending:
+            for dependent in blocks[pending.pop()] - found:
+                found.add(dependent)
+                pending.append(dependent)
+        found.discard(c.ref)
+        counts[c.ref] = len(found)
+    return counts
+
+
+def _paths_meet(first: Collection[str], second: Collection[str], shared: Collection[str]) -> bool:
+    """Two Touches: sets collide on a path outside shared_paths."""
+    return any(
+        paths_collide(path, other)
+        for path in first
+        if not shared_path_matches(shared, path)
+        for other in second
+        if not shared_path_matches(shared, other)
+    )
 
 
 def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:

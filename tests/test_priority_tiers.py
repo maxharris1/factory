@@ -26,7 +26,7 @@ from tests.test_feeder import (
     orch_config,
     rows,
 )
-from tests.test_feeder_gates import HOME, MERGED, OPEN_PULL, fed_heads, ref, states
+from tests.test_feeder_gates import HOME, MERGED, OPEN, OPEN_PULL, fed_heads, ref, states
 
 TIERS = "      priority_labels: [priority:p0, priority:p1, priority:p2, priority:p3]\n"
 READY = "factory:ready"
@@ -138,6 +138,53 @@ def test_linear_priority_sets_the_tier_only_when_the_project_opts_in(
                                   factory_text=LINEAR_FACTORY_MD)
     assert [item.ticket_id for item in feeder.feed_once().fed] == [first]
 
+
+
+def _feed_chain(tmp_path: Path, lines: str):
+    """A lone ticket #1, then a chain: #3 is blocked by #2, #4 by #3."""
+    tmp_path.mkdir()
+    feeder, queue, github, _ = make_feeder(tmp_path, orch=_with(GITHUB_ORCH, lines), box=1)
+    github.statuses = {ref(2): OPEN, ref(3): OPEN}
+    github.issues[HOME] = [
+        issue(1, created_at=1.0),
+        issue(2, created_at=2.0),
+        issue(3, created_at=3.0, body="Blocked by #2"),
+        issue(4, created_at=4.0, body="Blocked by #3"),
+    ]
+    fed = fed_heads(github, feeder.feed_once())
+    with queue.connect() as connection:
+        order = [(item["issue"], item["unblocks"]) for item in feeder_items(connection)]
+    return fed, order, github
+
+
+def test_inside_a_tier_the_ticket_that_unblocks_most_goes_first(tmp_path: Path) -> None:
+    fed, order, github = _feed_chain(tmp_path / "on", "")
+    assert fed == ["factory/issue-2"]
+    assert order == [("2", 2), ("3", 1), ("1", 0), ("4", 0)]
+    fed, order, without = _feed_chain(tmp_path / "off", "      critical_path_order: false\n")
+    assert fed == ["factory/issue-1"]
+    assert order == [("1", 0), ("2", 0), ("3", 0), ("4", 0)]
+    assert github.status_reads == without.status_reads
+    assert github.calls == [call.replace("issue-1", "issue-2") for call in without.calls]
+
+
+def test_tickets_waiting_on_a_path_count_toward_its_holder(tmp_path: Path) -> None:
+    now = [10_000.0]
+    feeder, queue, github, _ = make_feeder(tmp_path, box=3, now=now)
+    github.issues[HOME] = [issue(1, created_at=1.0), issue(2, created_at=2.0, body="Touches: lib/x.py")]
+    feeder.feed_once()
+    pull = {key: row["ticket_id"] for key, row in rows(tmp_path / "orch.db").items()}
+    github.statuses = {ref(int(pull["2"])): OPEN_PULL}
+    github.issues[HOME] += [issue(3, created_at=3.0, body="Touches: lib/x.py"),
+                            issue(4, created_at=4.0, body="Touches: lib/x.py\nBlocked by #5"),
+                            issue(5, created_at=5.0, body="Touches: docs/y.md")]
+    now[0] += 60
+    feeder.feed_once()
+    with queue.connect() as connection:
+        unblocks = {item["issue"]: item["unblocks"] for item in feeder_items(connection)}
+    assert unblocks == {"1": 0, "2": 2, "3": 1, "4": 1, "5": 1}
+    _enqueue(queue, now, pull["1"], pull["2"])
+    assert _claim_tickets(queue) == [pull["2"], pull["1"]]
 
 # The two tables exactly as they were before issue #258.
 OLD_PRIORITY = """
