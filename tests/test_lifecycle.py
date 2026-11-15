@@ -1030,6 +1030,58 @@ def test_a_replayed_answers_resume_is_never_claimable_once_answered(
     assert {state for action, state in _harness_jobs(flow.queue)} == {"cancelled"}
 
 
+def _claimed_steps(flow: Flow, recipient: str) -> list[tuple[str, str]]:
+    claimed = []
+    while (job := flow.queue.claim(recipient)) is not None:
+        claimed.append((job.request.action, job.request.source_comment_id))
+    return claimed
+
+
+def test_a_replayed_plan_rejected_while_waiting_leaves_one_plan_after_answers(
+    tmp_path: Path,
+) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="planning"), "grok-login")
+    flow.add("questions-1", QUESTIONS, "claude-login")
+    flow.add("stale-plan", PLAN.format(round=1, ac="met"), "claude-login")
+    flow.add("answers-1", ANSWERS, "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-plan"
+    assert _claimed_steps(flow, "claude") == [("plan", "answers-1")]
+
+
+def test_a_restored_review_paused_by_questions_resumes_once_after_answers(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    flow = Flow(state)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[0][:6]}")
+    assert flow.ready(HEADS[0]) == "queued-review"
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.finish("codex", "review-q")
+    flow.add(
+        "review-q",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer "
+        "state=waiting-max -->\nWhich head should I review?\n",
+        "codex-login",
+    )
+    flow.add("answers-1", ANSWERS, "grok-login")
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-review"
+    assert _claimed_steps(flow, "codex") == [("review", "answers-1")]
+
+
 def _restored_claim(tmp_path: Path, release: str):
     """A cycle backup holds the build claimed (#108 round 5); the builder
     then finished it, and the state directory was lost and restored."""

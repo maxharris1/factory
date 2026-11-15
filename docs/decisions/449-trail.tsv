@@ -1,0 +1,6 @@
+decision	choice	why
+root cause	both repros revive a step through _requeue_unanswered_jobs after answers queued its t5 replacement	the restored review is cancelled as restored, then requeued after the answers pass; the replayed plan is cancelled as answered by the stale plan, then requeued when that plan is handled stale-plan
+fix site	skip the requeue when _resumed_by_answers(job) is true	the helper already encodes 'answers resumed this step' for T6 retries; reusing it keeps one definition of a resumed step
+later-than test	order by rowid, not created_at	the go-1 plan and its t5 replacement are queued in one pass at the same clock reading, so created_at > missed it; ready.py already orders jobs by rowid, and backup/restore copy pages so rowids survive
+alternative	rejected counting a recipient's questions comment as the step's answer in _answered_by	it widens every _answered_by caller, including T6 recovery's _done_from_handoff, for a case the requeue skip already covers
+alternative	rejected cancelling queued originals inside _resume_paused	the restored review is not queued when answers resume it (restore holds it cancelled); only the later requeue revives it

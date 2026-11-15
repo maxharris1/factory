@@ -982,13 +982,13 @@ class JobsMixin:
                 """
                 SELECT 1 FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
-                  AND dedupe_key LIKE 't5:%' AND created_at > ? AND id != ?
+                  AND dedupe_key LIKE 't5:%'
+                  AND rowid > (SELECT rowid FROM jobs WHERE id = ?)
                 """,
                 (
                     job.request.repo.lower(),
                     job.request.ticket_id,
                     job.request.action,
-                    job.created_at,
                     job.id,
                 ),
             ).fetchone() is not None

@@ -440,6 +440,8 @@ class QuestionsMixin:
             job = _job(row)
             if job.request.action == "review" and self._open_fix_for_head(job):
                 continue
+            if self._resumed_by_answers(job):
+                continue
             if source is None or self._answered_by(
                 ticket,
                 source,
