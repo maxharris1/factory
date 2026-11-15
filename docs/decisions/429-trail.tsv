@@ -1,0 +1,7 @@
+decision	choice	why
+f-2 result kind for a failed review	count reviewer questions in _SETTLING_KINDS["review"]	the review brief allows a questions handoff; the existing questions branch already checks trust, no-questions and timing, so T5 resumes the review once when answers land
+f-2 alternative	rejected running T5 inside the fresh read of T6	it would duplicate comment handling in the retry path
+f-3 plan attribution	skip a plan whose round is not the job's plan_round	T1P rejects any other round as stale-plan; the round check closes both repro C (wrong round) and repro D (tied floored timestamp)
+f-3 alternative	rejected handled_at <= queued_at in _predates	it fixes repro D only, not repro C
+plan round rule	one plan_round helper shared by lib/brief/common.py and T6	the brief tells the builder its round with this rule, so the two cannot drift
+comment-sicko MUST KILL on plan_round	left open	giving plan jobs a structured round field changes plan.py and retry.py job detail, outside this ticket
