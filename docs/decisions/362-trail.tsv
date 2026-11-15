@@ -1,0 +1,4 @@
+decision	choice	why
+chart source	page_script takes the chart; render_pages passes snapshot.get("statechart")	the summary and the flowmap now read the same chart, so the MINI fixture draws 5 states, not the default 22
+cache	drop the lru_cache on _flowmap_json	a dict chart cannot key the cache, and flowmap_layout costs about 0.34 ms per render on the 22-state chart
+golden	the golden test hashes page_script(load_chart())	the default chart keeps every page and asset hash byte-identical, so the golden table is unchanged

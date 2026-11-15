@@ -20,6 +20,7 @@ import pytest
 import lib.dashboard_page as page
 import lib.health
 from lib.dashboard import collect_snapshot
+from lib.dashboard_flow import load_chart
 from tests.test_dashboard import NOW, make_db, seeded
 
 FACADE = Path(__file__).resolve().parent.parent / "lib" / "dashboard_page.py"
@@ -102,7 +103,7 @@ def _digests(root: Path) -> dict[str, str]:
         "CSS": _sha(page.CSS),
         "SCRIPT": _sha(page.SCRIPT),
         "PX_SCRIPT": _sha(page.PX_SCRIPT),
-        "page_script": _sha(page.page_script()),
+        "page_script": _sha(page.page_script(load_chart())),
     }
     for case, snapshot in _snapshots(root).items():
         for name, text in page.render_pages(snapshot).items():

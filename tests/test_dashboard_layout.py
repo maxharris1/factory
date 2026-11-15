@@ -427,6 +427,22 @@ def test_changing_the_fixture_statechart_changes_the_diagram(tmp_path: Path) -> 
     assert "· 6 states," in _section(html, "job-h-review")
 
 
+def _flowmap_names(html: str) -> set[str]:
+    layout = json.loads(re.search(r"var FLOWMAP = (.*);", html).group(1))
+    return {node["name"] for node in layout["nodes"]}
+
+
+def test_the_flowmap_draws_the_snapshots_chart(tmp_path: Path) -> None:
+    snapshot = _snapshot(tmp_path / "mini", chart_path=MINI)
+    expected = {state["name"] for state in snapshot["statechart"]["states"]}
+    assert len(expected) == 5
+    assert _flowmap_names(render_pages(snapshot)["job.html"]) == expected
+    default = _snapshot(tmp_path / "default")
+    assert len(_flowmap_names(render_pages(default)["job.html"])) == 22
+    broken = dict(snapshot, statechart=None)
+    assert "var FLOWMAP = null;" in render_pages(broken)["job.html"]
+
+
 def test_job_path_follows_its_history_through_the_chart() -> None:
     chart = flow.load_chart(CHART)
     # intake has no edge to building: the chart's one-step bridge (questions)
