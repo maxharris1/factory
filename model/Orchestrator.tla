@@ -388,9 +388,11 @@ T4HeadMoves ==
   /\ flags' = [flags EXCEPT !.covered = FALSE]
   /\ counts' = counts
 
-\* T4H (issue #86). ship = merge and the PR is held (hold label or hold.paths):
-\* no merge until the approver's OK at the covered head, or the approver
-\* removes a label-only hold. A head whose patch differs goes back to review.
+\* T4H (issues #86, #183). ship = merge or handoff and the PR is held (hold
+\* label or hold.paths): no ship until the approver's OK at the covered head,
+\* or the approver removes a label-only hold. The OK then ships as T4 would:
+\* merged, merge-queue (finish_line merge) or handed-off. A head whose patch
+\* differs goes back to review.
 T4Hold ==
   /\ "T4" \notin Omit
   /\ state = "ship"
@@ -405,6 +407,24 @@ T4HoldOk ==
   /\ state = "awaiting-ok"
   /\ flags.covered
   /\ state' = "merged"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+T4HoldOkQueue ==
+  /\ "T4" \notin Omit
+  /\ state = "awaiting-ok"
+  /\ flags.covered
+  /\ state' = "merge-queue"
+  /\ keep
+  /\ flags' = flags
+  /\ counts' = counts
+
+T4HoldOkHandoff ==
+  /\ "T4" \notin Omit
+  /\ state = "awaiting-ok"
+  /\ flags.covered
+  /\ state' = "handed-off"
   /\ keep
   /\ flags' = flags
   /\ counts' = counts
@@ -621,7 +641,8 @@ Next ==
   \/ T3Revise \/ T7Blocked
   \/ T4Approve \/ T4HeadMoves \/ T4PatchDiffers
   \/ T4ShipMerge \/ T4ShipHandoff \/ T4ShipAfter
-  \/ T4Hold \/ T4HoldOk \/ T4HoldPatchDiffers \/ T4HoldBaseUpdate
+  \/ T4Hold \/ T4HoldOk \/ T4HoldOkQueue \/ T4HoldOkHandoff
+  \/ T4HoldPatchDiffers \/ T4HoldBaseUpdate
   \/ T8Ok \/ T8Decline \/ T8DeclineStuck
   \/ T9PostMerge \/ MergedDone \/ T9Pass \/ T9Fail
   \/ MaxOkAnotherRound \/ ReenterAfterHandoff \/ MergeObserved
@@ -700,7 +721,8 @@ T4Decided ==
        ENABLED T4ShipMerge /\ ENABLED T4ShipHandoff /\ ENABLED T4ShipAfter
          /\ ENABLED T4Hold /\ ENABLED T4ShipQueue
   /\ state = "awaiting-ok" => ENABLED T4HoldPatchDiffers
-  /\ state = "awaiting-ok" /\ flags.covered => ENABLED T4HoldOk
+  /\ state = "awaiting-ok" /\ flags.covered =>
+       ENABLED T4HoldOk /\ ENABLED T4HoldOkQueue /\ ENABLED T4HoldOkHandoff
 
 T5Decided ==
   /\ state \in {"questions", "building", "fixing"} => ENABLED T5Ask

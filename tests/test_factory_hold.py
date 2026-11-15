@@ -2,8 +2,7 @@
 
 The root factory.md names hold.approver maxharris1 (the default max is no
 login and could never clear a hold) and holds the trust paths. The factory
-repo is ship: handoff, and _holds only acts on ship: merge, so until T05c
-the hold is recorded but not applied.
+repo is ship: handoff, and since T05c (#183) the hold applies there too.
 """
 
 from pathlib import Path
@@ -15,7 +14,6 @@ from lib import cli
 from lib.dispatcher import _holds
 from lib.factory_md import HoldConfig, load_factory_md
 from lib.hold import decide, held_paths
-from lib.load import Finding
 from lib.orch_yml import hold_approver_findings, load_orch_yml
 from tests.test_ship_hold import (
     HEAD,
@@ -153,15 +151,12 @@ def test_orch_yml_has_no_hold_block() -> None:
         assert "hold" not in project
 
 
-def test_until_t05c_a_handoff_repo_records_the_hold_but_does_not_apply_it(
-    tmp_path: Path,
-) -> None:
-    """T05c makes _holds apply on ship: handoff; flip these assertions there."""
+def test_the_factory_repo_applies_its_hold_on_ship_handoff(tmp_path: Path) -> None:
     config, findings = root_config()
 
     assert config.ship == "handoff"
     assert config.hold is not None
-    assert Finding("warning", "hold has no effect unless ship is merge") in findings
+    assert not any("hold has no effect" in item.message for item in findings)
 
     would_block = decide(
         config.hold,
@@ -180,7 +175,7 @@ def test_until_t05c_a_handoff_repo_records_the_hold_but_does_not_apply_it(
         labels=("factory:hold",),
         files=("orch.yml",),
     )
-    assert _holds(held) is False
+    assert _holds(held) is True
 
     dispatcher, queue, actions = setup(tmp_path)
     ready(dispatcher, queue, HEAD)
@@ -188,7 +183,7 @@ def test_until_t05c_a_handoff_repo_records_the_hold_but_does_not_apply_it(
 
     dispatcher.process(held)
 
-    assert actions.handoffs == [HEAD]
-    assert actions.states == ["merge-queue"]
-    assert not any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
+    assert actions.handoffs == []
+    assert actions.states == ["awaiting-ok"]
+    assert any(row["action"] == "awaiting-ok" for row in grok_jobs(queue))
     assert actions.merges == []
