@@ -67,6 +67,10 @@ class CommentsMixin:
             self._drain_followups(ticket)
         except Exception as exc:
             self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
+        try:
+            self._drain_auto_extra(ticket)
+        except Exception as exc:
+            self.record_poll_exception(ticket.repo, ticket.ticket_id, exc)
 
     def _process_comments(
         self,

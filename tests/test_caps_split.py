@@ -24,6 +24,9 @@ RULE_MODULE = {
     "_config_cap": "effective",
     "_effective_cap": "effective",
     "_wake_capped": "wake",
+    "_auto_granted_cap_extra": "auto_extra",
+    "_record_auto_extra": "auto_extra",
+    "_drain_auto_extra": "auto_extra",
 }
 
 DISPATCH_MIXIN_MODULES = {

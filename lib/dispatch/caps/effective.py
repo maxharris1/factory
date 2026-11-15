@@ -24,7 +24,8 @@ class EffectiveCapMixin:
         connection: sqlite3.Connection | None = None,
     ) -> int:
         """The ticket's review round cap: factory.md's for its risk, plus
-        one per extra round Max approved (ticket_state.cap_extra)."""
+        one per extra round Max approved or the poller auto-granted
+        (ticket_state.cap_extra)."""
         if connection is None:
             with self._connect() as own:
                 return self._effective_cap(ticket, own)

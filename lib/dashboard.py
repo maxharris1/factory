@@ -613,6 +613,7 @@ _VERDICT_TIMES = (
     ("ship_holds", "MAX", "held_at", "approve_comment_id"),
     ("ticket_retries", "MAX", "recorded_at", "comment_id"),
     ("followup_filings", "MAX", "created_at", "comment_id"),
+    ("auto_extra_comments", "MAX", "created_at", "comment_id"),
 )
 
 
