@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -36,7 +37,15 @@ from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatch.helpers import _retry_of
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
-from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
+from lib.eval_report import (
+    EvalError,
+    append_message,
+    build_metrics,
+    build_report,
+    render,
+    render_json,
+    render_metrics,
+)
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
@@ -97,6 +106,7 @@ commands:
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
+  log-message      log one manual bot-to-bot message to dispatcher.log
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
@@ -135,12 +145,20 @@ doctor [--home PATH] [--project PATH] [--cloud]
   write. Exit 1 if any harness did not load that version.
   --print-canary prints the prompt and does not read replies.
 
-eval-report --input PATH [--since TIME] [--until TIME]
+eval-report --input PATH [--since TIME] [--until TIME] [--json]
 eval-report --db PATH --baseline PATH
   Print the weekly eval report for one directory of fixtures or
-  collected logs. It does not contact GitHub or Linear.
+  collected logs. It does not contact GitHub or Linear. --json prints
+  the --input report as JSON.
   --db prints the #209 metrics of a backed-up orch.db, opened read-only,
   beside those of the --baseline snapshot (O4's).
+
+log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
+            [--log PATH]
+  Append one line to dispatcher.log for a bot-to-bot message sent by hand
+  instead of a scripted handoff. eval-report counts these lines. --log
+  defaults to dispatcher.log beside $ORCH_DB; --kind defaults to handoff.
+  Exits 2 and writes nothing on a bad repo, pr, bot or kind.
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -389,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_doctor_runtime, argv[1:])
     if argv[0] == "eval-report":
         return _call(_eval_report, argv[1:])
+    if argv[0] == "log-message":
+        return _call(_log_message, argv[1:])
     if argv[0] == "poll":
         return _call(_poll, argv[1:])
     if argv[0] == "init-db":
@@ -508,12 +528,13 @@ def _eval_report(argv: list[str]) -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--since")
     parser.add_argument("--until")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.db is not None:
         if args.baseline is None:
             parser.error("--db needs --baseline")
-        if args.since is not None or args.until is not None:
-            parser.error("--since and --until read --input only")
+        if args.since is not None or args.until is not None or args.json:
+            parser.error("--since, --until and --json read --input only")
         try:
             current, baseline = build_metrics(args.db), build_metrics(args.baseline)
         except EvalError as exc:
@@ -530,7 +551,38 @@ def _eval_report(argv: list[str]) -> int:
         return 1
     for warning in built.warnings:
         print(warning, file=sys.stderr)
-    print(render(built.report), end="")
+    print((render_json if args.json else render)(built.report), end="")
+    return 0
+
+
+def _log_message(argv: list[str]) -> int:
+    parser = _Parser(prog="orch log-message", add_help=True)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--pr")
+    parser.add_argument("--from", dest="sender", required=True)
+    parser.add_argument("--to", dest="recipient", required=True)
+    parser.add_argument("--kind", default="handoff")
+    parser.add_argument("--log", type=Path)
+    args = parser.parse_args(argv)
+    log = args.log
+    if log is None:
+        database = os.environ.get(DB_ENV)
+        if not database:
+            parser.error(f"pass --log or set {DB_ENV}")
+        log = Path(database).with_name("dispatcher.log")
+    try:
+        append_message(
+            log,
+            repo=args.repo,
+            pr=args.pr,
+            sender=args.sender,
+            recipient=args.recipient,
+            kind=args.kind,
+            at=datetime.now(timezone.utc),
+        )
+    except EvalError as exc:
+        print(f"orch log-message: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
