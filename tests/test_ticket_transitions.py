@@ -33,7 +33,7 @@ WRITERS = {
     "update-failed": "lib/dispatch/merge_queue.py",
     "plan-check": "lib/dispatch/plan.py",
     "plan-gap": "lib/dispatch/plan.py",
-    "t3": "lib/dispatch/verdict.py",
+    "t3": "lib/dispatch/verdict/t3.py",
     "cap-resume": "lib/dispatch/caps/resume.py",
     "retry": "lib/dispatch/retry.py",
 }
