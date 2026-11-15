@@ -115,7 +115,6 @@ import fcntl
 import json
 import os
 import re
-import shutil
 import sqlite3
 import stat
 import subprocess
@@ -143,6 +142,7 @@ from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
+from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, PreflightError
@@ -577,6 +577,7 @@ class Waiter:
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
         self._remote: dict[str, tuple[Path, int]] = {}
+        self._scratch_awaiting_exit: set[str] = set()
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -1025,12 +1026,34 @@ class Waiter:
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
-                shutil.rmtree(self.state_dir / "jobs" / job_id / "tmp", ignore_errors=True)
+                self._scratch_awaiting_exit.add(job_id)
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
                     self._finish_remote(job_id, remote[0], code, offset=remote[1])
                 else:
                     self._settle(job_id, child.pid, code)
+        self._remove_scratch_once_workers_exit()
+
+    def _remove_scratch_once_workers_exit(self) -> None:
+        for job_id in sorted(self._scratch_awaiting_exit):
+            if job_id in self._children:
+                self._scratch_awaiting_exit.discard(job_id)
+                continue
+            try:
+                placement = self.pool.placement(job_id)
+            except (QueueError, sqlite3.Error, OSError) as exc:
+                self.log(f"job {job_id}: scratch kept, its placement is unreadable ({_one_line(exc)})")
+                continue
+            if placement is not None and not placement.remote_started and any(
+                pid is not None and self.alive(pid, start)
+                for pid, start in ((placement.runner_pid, placement.runner_start),
+                                   (placement.worker_pid, placement.worker_start))
+            ):
+                continue
+            self._scratch_awaiting_exit.discard(job_id)
+            failure = remove_scratch(self.state_dir / "jobs" / job_id / "tmp")
+            if failure is not None:
+                self.log(f"job {job_id}: {failure}")
 
     def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
         """`orch job done` on the box for a remote run, from its marker line.

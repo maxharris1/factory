@@ -18,6 +18,7 @@ import os
 import sqlite3
 import stat
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -361,6 +362,74 @@ def test_reaping_a_killed_run_removes_its_job_tmpdir(tmp_path: Path) -> None:
     assert waiter.running() == set()
     assert not scratch.exists()
     assert (scratch.parent / "brief.md").is_file()
+
+
+def test_reaping_a_run_removes_a_job_tmpdir_its_harness_locked(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    waiter.step()
+    locked = tmp_path / "state" / "jobs" / job_id / "tmp" / "locked"
+    (locked / "deep").mkdir(parents=True)
+    (locked / "deep" / "x").write_text("scratch")
+    (locked / "deep").chmod(0)
+    locked.chmod(0)
+    spawn.children[0].returncode = 0
+    try:
+        waiter.step()
+        assert not locked.parent.exists()
+    finally:
+        if locked.exists():
+            locked.chmod(0o700)
+            (locked / "deep").chmod(0o700)
+
+
+def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
+    tmp_path: Path,
+) -> None:
+    from tests.test_job_run import _orch
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "live-scratch", head=None)
+    waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+    assert waiter.pool.claim("claude")[0].id == job_id
+    job_dir = tmp_path / "state" / "jobs" / job_id
+    ready, release, result = (tmp_path / name for name in ("ready", "release", "result"))
+    harness = (
+        "import os, pathlib, time\n"
+        "scratch = pathlib.Path(os.environ['TMPDIR'])\n"
+        "(scratch / 'needed').write_text('scratch')\n"
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+        f"while not pathlib.Path({str(release)!r}).exists(): time.sleep(0.02)\n"
+        f"pathlib.Path({str(result)!r}).write_text((scratch / 'needed').read_text())\n"
+    )
+    runner = _orch("job", "run", "claude-bot", job_id, "--db", str(db), "--machines", str(MACHINES),
+                   "--", sys.executable, "-c", harness,
+                   env={"ORCH_JOB_STATE_DIR": str(job_dir), "ORCH_TELEMETRY": "off"})
+    worker = None
+    try:
+        _wait_for(ready.exists, 10, runner)
+        worker = int(ready.read_text())
+        waiter._children[job_id] = runner
+        runner.kill()
+        runner.wait(5)
+        waiter._reap()
+        assert alive(worker)
+        assert state(db, job_id) == "running"
+        assert (job_dir / "tmp" / "needed").is_file()
+        release.touch()
+        _wait_for(lambda: result.exists() and not alive(worker), 10)
+        waiter._reap()
+        assert result.read_text() == "scratch"
+        assert not (job_dir / "tmp").exists()
+    finally:
+        release.touch()
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(5)
+        if worker and alive(worker):
+            os.kill(worker, signal.SIGKILL)
 
 
 def test_a_job_with_no_standard_brief_is_failed_for_t6_and_its_slot_freed(
