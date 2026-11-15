@@ -230,8 +230,10 @@ def test_snapshot_reads_job_telemetry_times(tmp_path: Path) -> None:
                 created_at=NOW - 900)
         connection.execute(
             "INSERT INTO job_telemetry (job_id, bot, harness, repo, started_at, updated_at, "
-            "elapsed_seconds, events, turns, tool_calls, files_touched, commands) "
-            "VALUES ('t-build', 'claude-bot', 'claude', 'maxharris1/cleffy', ?, ?, 0, 0, 0, '{}', 0, 0)",
+            "elapsed_seconds, events, turns, tool_calls, files_touched, commands, test_runs, "
+            "tokens_in, tokens_cached, tokens_out, steps) "
+            "VALUES ('t-build', 'claude-bot', 'claude', 'maxharris1/cleffy', ?, ?, 0, 0, 0, '{}', "
+            "0, 0, 0, 0, 0, 0, '[]')",
             (NOW - 700, NOW - 10),
         )
     snapshot = collect_snapshot(db, log, now=NOW)
