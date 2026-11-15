@@ -571,8 +571,8 @@ class LaggingEnd:
     def backoff(self) -> int:
         return LAGGING_BACKOFF_SECONDS[min(self.requeues, len(LAGGING_BACKOFF_SECONDS) - 1)]
 
-    def past_wait(self, at: float) -> bool:
-        return at - self.first_refused_at >= LAGGING_WAIT_SECONDS
+    def past_wait(self, at: float, *, since: float = 0.0) -> bool:
+        return at - max(self.first_refused_at, since) >= LAGGING_WAIT_SECONDS
 
 
 def fail_lagging(

@@ -22,7 +22,7 @@ from lib.job_state import REQUEUED_USAGE_LIMIT, USAGE_LIMIT, link_drop_requeues,
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.status import JobRow, SQLiteStatusReader, Status, render
 from lib.telemetry import EventLog, Scrubber, Session
-from lib.usage_readings import Reading, store
+from lib.usage_readings import Reading, parse_get_usage, store
 from tests.pool_helpers import ROOT
 from tests.test_hooks import FakeGrokDelivery, say, setup, ticket
 from tests.test_job_state import Poller
@@ -366,6 +366,74 @@ def test_a_newer_full_reading_keeps_the_lane_paused(tmp_path: Path) -> None:
               readings=[Reading("five_hour", 1.0, RESET, START + 60)])
     now[0] = START + 61
     assert queue.claim("claude") is None
+
+
+def test_the_first_poll_after_a_reset_missed_by_downtime_charges_nothing(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    original = next(job for job in queue.outstanding() if job.id == first)
+    now[0] = RESET + 1
+    dispatcher.reconcile_jobs()
+    assert _job(db, first) == ("queued", 1)
+    now[0] = RESET + original.request.timeout_seconds - 2
+    dispatcher.reconcile_jobs()
+    assert _job(db, first) == ("queued", 1)
+    assert queue.claim("claude").id == first
+
+
+def test_the_first_poll_after_a_reading_lift_missed_by_downtime_charges_nothing(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    original = next(job for job in queue.outstanding() if job.id == first)
+    lift = START + 2 * original.request.timeout_seconds
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[Reading("five_hour", 0.4, RESET, lift)])
+    now[0] = lift + 10
+    dispatcher.reconcile_jobs()
+    assert _job(db, first) == ("queued", 1)
+    with sqlite3.connect(db) as connection:
+        stuck = connection.execute("SELECT stuck FROM ticket_state WHERE ticket_id = '42'").fetchall()
+    assert stuck == [(0,)]
+
+
+def _unavailable_usage(at: float) -> list[Reading]:
+    reply = {"type": "control_response", "response": {
+        "request_id": "orch-usage", "subtype": "success",
+        "response": {"rate_limits_available": False}}}
+    return parse_get_usage(json.dumps(reply).encode(), at)
+
+
+def test_a_no_reading_never_restores_a_lifted_limit(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    now[0] = START + 60
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe",
+              readings=[Reading("five_hour", 0.4, RESET, now[0])])
+    resumed = queue.claim("claude")
+    assert resumed is not None and resumed.id == first
+    queue.release(first, owner="claude")
+    now[0] = START + 120
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="probe2",
+              readings=_unavailable_usage(now[0]))
+        assert lane_limit.active(connection, "claude", now[0]) is None
+    assert queue.claim("claude").id == first
+
+
+def test_an_older_full_reading_on_another_device_never_restores_a_lifted_limit(tmp_path: Path) -> None:
+    now, _, dispatcher, queue, db = _build(tmp_path)
+    first = _die_on_limit(tmp_path, now, queue, dispatcher, db)
+    with sqlite3.connect(db) as connection:
+        store(connection, harness="claude", bot="claude-bot", device="remote", job_id="older",
+              readings=[Reading("five_hour", 1.0, RESET, START + 30)])
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="newer",
+              readings=[Reading("five_hour", 0.4, RESET, START + 60)])
+        store(connection, harness="claude", bot="claude-bot", device="box", job_id="missing",
+              readings=_unavailable_usage(START + 90))
+    now[0] = START + 91
+    assert queue.claim("claude").id == first
 
 
 def _feed_codex(poller, job_id: str, event: dict) -> None:

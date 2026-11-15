@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_sync, skill_preflight
+from lib import device_sync, lane_limit, skill_preflight
 from lib.device_pool import Placement, choose_device
 from lib.device_monitor import DeviceMonitor
 from lib.dispatcher import Dispatcher
@@ -228,6 +228,30 @@ def test_a_job_queued_behind_a_lagging_box_sticks_device_lagging_once_past_the_b
     [wake] = factory.wakes()
     assert f"origin/main at {factory.later[:12]}" in wake["detail"]
     assert not any("job-failed-2" in line for line in factory.lines)
+
+
+def test_time_in_a_usage_limited_lane_never_counts_toward_the_lagging_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    ended = int(START) + LAGGING_WAIT_SECONDS + 600
+    with sqlite3.connect(factory.device.db) as connection:
+        lane_limit.record(connection, job_id=job_id, harness="claude", bot="claude-bot",
+                          limit=lane_limit.UsageLimit(ended), now=START + 1)
+    at = START
+    while at < ended + LAGGING_WAIT_SECONDS - 60:
+        at += 30
+        factory.poll(at)
+        assert factory.device.waiter.step() is None, "the lagging box takes no job"
+        assert factory.stuck() == (0, None), "waiting in the limited lane spends no lag bound"
+    while at < ended + LAGGING_WAIT_SECONDS + 300:
+        at += 30
+        factory.poll(at)
+        factory.device.waiter.step()
+    assert factory.stuck() == (1, "device-lagging")
+    assert [job[1:] for job in factory.jobs()] == [("failed", 1)], "no attempt 2"
 
 
 def test_a_checkout_that_recovers_during_the_last_backoff_starts_the_job_unstuck(

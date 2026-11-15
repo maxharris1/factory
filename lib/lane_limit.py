@@ -6,11 +6,14 @@ nothing for that recipient while the limit is active, on every device,
 because every claim reads the box's orch.db. T6 requeues the dead job as
 itself with nothing charged.
 
-A limit lifts when it is read: at `until`, or once the newest reading of
-every window observed after the limit, on any device, shows room. It stays
-lifted as those readings age out, and a later limit replaces the row with
-its own reset. Nothing deletes a row, so recording and reading are
-idempotent.
+A limit lifts at `until`. Storing readings (usage_readings.store) moves
+`until` to what the readings observed since the row's last evidence say, on
+any device: the newest reading of each window that has one, at its
+observation when it shows room, else at its own reset. Each evaluation
+advances `evidence_at`, so a reading that later replaces that evidence,
+such as a no-reading, never restores a lifted limit, and an older reading
+never overrides a newer one. A later limit replaces the row with its own
+reset. Nothing deletes a row, so recording and reading are idempotent.
 
 Only a fixed source label and a reset time are stored, never the message
 (SPEC section 10).
@@ -18,14 +21,14 @@ Only a fixed source label and a reset time are stored, never the message
 
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from lib.usage_readings import TABLE as READINGS_TABLE
-from lib.usage_readings import Reading, from_row, reset_time
+from lib import usage_readings
 
 TABLE = "lane_limits"
 DEFAULT_LIMIT_SECONDS = 3600
@@ -39,7 +42,8 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     limited_at REAL NOT NULL,
     until INTEGER NOT NULL,
     source TEXT NOT NULL,
-    job_id TEXT NOT NULL
+    job_id TEXT NOT NULL,
+    evidence_at REAL NOT NULL
 )
 """
 
@@ -108,7 +112,7 @@ def _limit_text(harness: str, event: dict) -> str | None:
 def _parse_reset(text: str, now: float) -> int | None:
     epoch = _EPOCH.search(text)
     if epoch is not None:
-        return reset_time(int(epoch.group(1)), now)
+        return usage_readings.reset_time(int(epoch.group(1)), now)
     local = datetime.fromtimestamp(now).astimezone()
     match = _TRY_AGAIN.search(text)
     if match is not None:
@@ -130,7 +134,7 @@ def _parse_reset(text: str, now: float) -> int | None:
             return None
         if not match["year"] and at.timestamp() <= now:
             at = at.replace(year=year + 1)
-        return reset_time(int(at.timestamp()), now)
+        return usage_readings.reset_time(int(at.timestamp()), now)
     match = _RESETS.search(text)
     if match is not None:
         zone = local.tzinfo
@@ -148,7 +152,7 @@ def _parse_reset(text: str, now: float) -> int | None:
         )
         if at.timestamp() <= now:
             at += timedelta(days=1)
-        return reset_time(int(at.timestamp()), now)
+        return usage_readings.reset_time(int(at.timestamp()), now)
     return None
 
 
@@ -159,7 +163,7 @@ def _hour(hour: str | None, half: str | None) -> int:
     return value + 12 if half and half.lower() == "pm" else value
 
 
-def until(limit: UsageLimit, readings: list[Reading], now: float) -> tuple[int, str]:
+def until(limit: UsageLimit, readings: list[usage_readings.Reading], now: float) -> tuple[int, str]:
     """When the lane may claim again, and the fixed label of where that came from."""
     if limit.resets_at is not None and limit.resets_at > now:
         return limit.resets_at, "message"
@@ -173,17 +177,17 @@ def until(limit: UsageLimit, readings: list[Reading], now: float) -> tuple[int, 
     return int(now) + DEFAULT_LIMIT_SECONDS, "default"
 
 
-def readings(connection: sqlite3.Connection, harness: str, bot: str) -> list[Reading]:
-    if not _has_table(connection, READINGS_TABLE):
+def readings(connection: sqlite3.Connection, harness: str, bot: str) -> list[usage_readings.Reading]:
+    if not _has_table(connection, usage_readings.TABLE):
         return []
     rows = connection.execute(
         f"""
-        SELECT window, used, resets_at, observed_at FROM {READINGS_TABLE}
+        SELECT window, used, resets_at, observed_at FROM {usage_readings.TABLE}
         WHERE harness = ? AND bot = ?
         """,
         (harness, bot),
     ).fetchall()
-    return [r for r in (from_row(*row) for row in rows) if r is not None]
+    return [r for r in (usage_readings.from_row(*row) for row in rows) if r is not None]
 
 
 def record(
@@ -210,12 +214,41 @@ def record(
     connection.execute(
         f"""
         INSERT OR REPLACE INTO {TABLE}
-            (recipient, harness, bot, limited_at, until, source, job_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (recipient, harness, bot, limited_at, until, source, job_id, evidence_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (recipient, harness, bot, now, reset, source, job_id),
+        (recipient, harness, bot, now, reset, source, job_id, now),
     )
     return active(connection, recipient, now)
+
+
+def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
+    """Move each of the account's limits to what the readings observed
+    since its last evidence say, in the caller's transaction."""
+    if not _has_table(connection, TABLE):
+        return
+    rows = connection.execute(
+        f"SELECT recipient, evidence_at FROM {TABLE} WHERE harness = ? AND bot = ?",
+        (harness, bot),
+    ).fetchall()
+    stored = readings(connection, harness, bot)
+    for recipient, evidence_at in rows:
+        newest: dict[str, usage_readings.Reading] = {}
+        for r in stored:
+            if r.used is not None and r.observed_at > evidence_at and (
+                r.window not in newest or r.observed_at > newest[r.window].observed_at
+            ):
+                newest[r.window] = r
+        if not newest:
+            continue
+        free = max(
+            r.observed_at if r.used < 1.0 or r.resets_at is None else r.resets_at
+            for r in newest.values()
+        )
+        connection.execute(
+            f"UPDATE {TABLE} SET until = ?, evidence_at = ? WHERE recipient = ?",
+            (math.ceil(free), max(r.observed_at for r in newest.values()), recipient),
+        )
 
 
 def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLimit | None:
@@ -231,20 +264,7 @@ def active(connection: sqlite3.Connection, recipient: str, now: float) -> LaneLi
     ).fetchone()
     if row is None:
         return None
-    limit = LaneLimit(str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]))
-    newest: dict[str, Reading] = {}
-    for r in readings(connection, limit.harness, limit.bot):
-        if r.used is not None and r.observed_at > limit.limited_at and (
-            r.window not in newest or r.observed_at > newest[r.window].observed_at
-        ):
-            newest[r.window] = r
-    full = [
-        r for r in newest.values()
-        if r.used is not None and r.used >= 1.0 and (r.resets_at is None or r.resets_at > now)
-    ]
-    if newest and not full:
-        return None
-    return limit
+    return LaneLimit(str(row[0]), str(row[1]), str(row[2]), float(row[3]), int(row[4]), str(row[5]))
 
 
 def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
@@ -252,6 +272,16 @@ def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
         return []
     rows = connection.execute(f"SELECT recipient FROM {TABLE} ORDER BY recipient").fetchall()
     return [limit for limit in (active(connection, str(r[0]), now) for r in rows) if limit]
+
+
+def lifted(connection: sqlite3.Connection, now: float) -> dict[str, float]:
+    """When each recipient's latest limit ended, for lanes no longer limited."""
+    if not _has_table(connection, TABLE):
+        return {}
+    rows = connection.execute(
+        f"SELECT recipient, until FROM {TABLE} WHERE until <= ?", (now,)
+    ).fetchall()
+    return {str(recipient): float(until) for recipient, until in rows}
 
 
 def label(limit: LaneLimit) -> str:
