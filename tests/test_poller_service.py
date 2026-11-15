@@ -746,7 +746,7 @@ def _deploy_copy(tmp_path: Path, calls: Path) -> Path:
     records each call."""
     deploy = tmp_path / "deploy"
     deploy.mkdir()
-    for name in ("poller-service.sh", "run-poller.sh", "poller-ensure-loop.sh"):
+    for name in ("poller-service.sh", "run-poller.sh", "poller-ensure-loop.sh", "host-pidns.sh"):
         shutil.copy(ROOT / "deploy" / name, deploy)
     fake = deploy / "waiter-service.sh"
     fake.write_text(f'#!/bin/sh\necho "$1 $2" >>{calls}\n', encoding="utf-8")
