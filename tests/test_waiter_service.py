@@ -243,7 +243,6 @@ def test_stop_never_signals_a_lock_pid_that_is_not_this_bots_waiter(home: Path) 
 
 
 def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
-    """Live supervisors for this bot under this HOME's state directory."""
     tag = f"waiter-service.sh {bot} _supervise {home / '.local/state/factory'}"
     listing = subprocess.run(
         ["ps", "-A", "-o", "pid=", "-o", "command="],
@@ -253,16 +252,32 @@ def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
     return [pid for pid in pids if alive(pid)]
 
 
-def _stray(home: Path, bot: str = "claude-bot") -> int:
-    """A second supervisor for the bot, the way the box grew them (#295),
-    detached so that init reaps it."""
+def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False) -> int:
+    """Detached so that init reaps it."""
     state = home / ".local/state/factory"
+    state.mkdir(parents=True, exist_ok=True)
+    tail = "" if legacy else ' "$2"'
     started = subprocess.run(
-        ["bash", "-c", 'nohup bash "$0" "$1" _supervise "$2" >>"$3" 2>&1 </dev/null & echo $!',
+        ["bash", "-c", f'nohup bash "$0" "$1" _supervise{tail} >>"$3" 2>&1 </dev/null & echo $!',
          str(SERVICE), bot, str(state), str(state / f"waiter-{bot}.log")],
         env=_env(home), text=True, capture_output=True, check=True,
     )
     return int(started.stdout)
+
+
+def test_stop_reaches_a_supervisor_started_before_the_state_argv(home: Path) -> None:
+    legacy = _stray(home, legacy=True)
+    waiter = _wait_for(lambda: _starts(home))[0]
+    named = _stray(home)
+    _wait_for(lambda: _supervisor(home) == named)
+    _wait_for(lambda: (home / "refused-claude-bot").exists())
+    assert alive(legacy) and alive(waiter)
+
+    stopped = _service(home, "claude-bot", "stop")
+    assert stopped.returncode == 0, stopped.stderr
+    assert f"stopped stray waiter supervisor (pid {legacy})" in stopped.stdout
+    assert not alive(legacy) and not alive(named)
+    _wait_for(lambda: not alive(waiter))
 
 
 def test_concurrent_ensures_leave_one_supervisor(home: Path) -> None:

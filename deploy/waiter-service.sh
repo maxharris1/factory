@@ -102,26 +102,22 @@ is_supervisor_argv() {
     return 1
 }
 
-# Is this argv a supervisor for this bot and state directory? One started
-# before the state directory joined its argv counts when it runs this script.
+is_stateless_supervisor_of_this_script() {
+    (($# == 3)) && [[ "$1" == "$SELF" ]]
+}
+
 is_own_supervisor_argv() {
     local i
     for i in 0 1; do
         if (($# > i + 2)) && [[ "${@:i+1:1}" =~ (^|/)waiter-service\.sh$ &&
             "${@:i+2:1}" == "$BOT" && "${@:i+3:1}" == _supervise ]]; then
-            if (($# > i + 3)); then
-                [[ "${@:i+4:1}" == "$STATE" ]]
-            else
-                [[ "${@:i+1:1}" == "$SELF" ]]
-            fi
+            [[ "${@:i+4:1}" == "$STATE" ]] || is_stateless_supervisor_of_this_script "${@:i+1}"
             return
         fi
     done
     return 1
 }
 
-# Print the pid of every supervisor for this bot and state directory that
-# this user owns, the pidfile's included.
 own_supervisors() {
     local dir pid command
     local -a argv=()
@@ -231,8 +227,6 @@ service_lock() {
     fi
 }
 
-# The supervisor loop. It owns the pidfile while its pid is there, and exits
-# once another supervisor's pid replaces it; SIGTERM stops the waiter and it.
 supervise() {
     local child="" status started delay="$RESTART_SEC" stopping=""
     trap 'stopping=1; [[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null || true' TERM INT HUP
