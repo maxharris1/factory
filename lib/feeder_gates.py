@@ -318,8 +318,6 @@ def _shortest_loop(start: Ref, edges: Mapping[Ref, list[Ref]]) -> list[Ref]:
 
 @dataclass(frozen=True)
 class PathPolicy:
-    """A project's factory.md settings for the `Touches:` gate."""
-
     shared: tuple[str, ...] = ()
     exclusive: tuple[str, ...] = ()
     max_holders: int = 1

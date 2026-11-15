@@ -1,10 +1,3 @@
-"""Issue #269: up to feeder.max_holders_per_path tickets in flight per Touches: path.
-
-Two tickets may hold one path at once (factory.md default 2), and the serial
-merge plus the base update resolve the overlap. A Conflicts with edge and a
-path in feeder.exclusive_paths keep one holder.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,9 +31,6 @@ def touches(*paths: str) -> GateLines:
 
 def feeder_md(body: str) -> str:
     return DEFAULT_MD.replace("skills: []\n", f"skills: []\n{body}")
-
-
-# --- factory.md ---------------------------------------------------------------
 
 
 def test_max_holders_defaults_to_two_and_exclusive_to_none() -> None:
@@ -102,9 +92,6 @@ def test_lax_reading_warns_and_falls_back_to_one_holder() -> None:
     ]
 
 
-# --- Holds --------------------------------------------------------------------
-
-
 def test_a_bare_holds_keeps_one_holder() -> None:
     holds = Holds()
     holds.take(ref(1), (), touches("lib/x.py"))
@@ -159,9 +146,6 @@ def test_co_holders_names_each_shared_path_and_its_other_holders() -> None:
     assert found == {"lib/x.py": (ref(1), ref(2))}
 
 
-# --- the feeder ---------------------------------------------------------------
-
-
 def logged_feeder(tmp_path: Path, factory_text: str = DEFAULT_MD, now: list[float] | None = None):
     feeder, _, github, _ = make_feeder(tmp_path, box=4, factory_text=factory_text, now=now)
     log: list[str] = []
@@ -183,7 +167,6 @@ def test_two_tickets_on_one_path_feed_and_a_third_waits_naming_both(tmp_path: Pa
 
 
 def fed_pair(tmp_path: Path):
-    """#1 and #2 fed on lib/x.py as open PRs 501 and 502, then #3 waits."""
     now = [10_000.0]
     feeder, github, log = logged_feeder(tmp_path, now=now)
     github.issues[HOME] = [
