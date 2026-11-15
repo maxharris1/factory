@@ -91,11 +91,15 @@ def built_with_ci_pending(board: Board, head: str) -> PR:
     return pr
 
 
-def reviewed_at_pending_ci(board: Board, pr: PR, head: str) -> None:
+def reviewed_at_pending_ci(board: Board, pr: PR, head: str, verdict_id: str | None = None) -> None:
     pr.push(head, ci="pending")
     board.ready(pr, head)
     board.poll()
-    board.finish("codex")
+    if verdict_id is None:
+        board.finish("codex")
+        return
+    review = board.claim("codex")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=verdict_id)
 
 
 def instruction(job) -> str:
