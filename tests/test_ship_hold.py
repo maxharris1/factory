@@ -23,7 +23,7 @@ from lib.dispatcher import (
     TrackedTicket,
 )
 from lib.factory_md import FactoryConfig, HoldConfig, parse_factory_md
-from lib.hold import glob_matches
+from lib.hold import decide, glob_matches
 from lib.hook_t8 import T8Hook
 from lib.queue import SQLiteJobQueue
 from lib.status import SQLiteStatusReader, build_status, render
@@ -740,10 +740,30 @@ def unlabeled(actor: str, event_id: str = "e2", label: str = "factory:hold") -> 
     )
 
 
-def labeled(actor: str, event_id: str = "e1", label: str = "factory:hold") -> LabelEvent:
+def labeled(
+    actor: str, event_id: str = "e1", label: str = "factory:hold", created_at: float = 5
+) -> LabelEvent:
     return LabelEvent(
-        id=event_id, action="labeled", label=label, actor=actor, created_at=5
+        id=event_id, action="labeled", label=label, actor=actor, created_at=created_at
     )
+
+
+@pytest.mark.parametrize(("labeled_at", "blocks"), [(19, False), (20, True), (21, True)])
+def test_an_ok_clears_a_label_put_back_before_it_but_not_one_put_back_at_or_after_it(
+    labeled_at: float, blocks: bool
+) -> None:
+    decision = decide(
+        HoldConfig(approver=APPROVER),
+        labels=("factory:hold",),
+        changed_files=(),
+        label_events=(labeled("grok-login", created_at=labeled_at),),
+        comments=(ok(HEAD),),
+        approver_allowed=True,
+        covers=lambda head: head == HEAD,
+    )
+
+    assert decision.reasons == ("label",)
+    assert decision.blocks is blocks
 
 
 def test_the_approver_removing_the_label_clears_a_label_only_hold(
@@ -1221,7 +1241,7 @@ def test_a_merge_re_drive_waits_while_the_hold_applies_again(tmp_path: Path) -> 
     assert (row["status"], row["redrive"]) == ("failed", "eligible")
 
     actions.merge_error = None
-    relabeled = (labeled("grok-login", "e5"),)
+    relabeled = (labeled("grok-login", "e5", created_at=30),)
     for _ in range(2):
         dispatcher.process(snapshot(*cleared, labels=("factory:hold",), events=relabeled))
     assert actions.merges == []

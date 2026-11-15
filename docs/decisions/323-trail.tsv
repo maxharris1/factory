@@ -1,0 +1,10 @@
+decision	choice	why
+queue hold check	_held returns the blocking HoldDecision via HoldDecision.blocks	one rule for whether a hold blocks; the old _held ignored decision.cleared, so an ok never released a queued PR (Cleffy #110)
+red-CI APPROVE branch	keeps the old predicate as _hold_in_play	red CI on a PR with any hold in play must leave the APPROVE unconsumed; switching it to .blocks failed test_red_ci_before_the_hold_is_entered_does_not_consume_the_approve
+label put back after the ok	decide() blocks when the label is on the PR and its latest labeled event is at or after the newest covering ok; a tie blocks	the one-line fix broke test_a_merge_re_drive_waits_while_the_hold_applies_again, a real safety rule; a tie fails closed
+fixture restamp	relabel event in the re-drive test moved from t=5 to t=30	the test's docstring says the label came back after the ok at t=20; t=5 contradicted it
+draft queue head	no merge-code change; test drives the real GitHubReviewActions.merge from the queue	the adapter already marks a draft ready and merges with sha=<head>; Cleffy #110's draft error came from a manual gh pr merge
+wait log dedupe	once per (head, reason): the set of reasons logged at the current head, kept on the long-lived Dispatcher, reset on a new head, dropped on merge	strict once-per-head would hide the reason that matters now; a poller restart logs one extra line
+verification	4 of 5 new tests fail on old lib/, all pass now; 424 hold/queue/ship tests pass; check-config x4 ok	prove the tests catch the bug, not just pass
+round 2 f-1	the relabeled-after-ok check reads label_hold, not on_pr	a label put back after the ok, then removed by a non-approver, still holds; SPEC 8 says only the approver's removal clears
+round 2 ac-3	remember every reason logged at the head, not just the last	pending, held, pending at one head logged pending twice
