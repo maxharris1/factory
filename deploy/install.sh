@@ -24,6 +24,8 @@ done
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${HOME}/.local/share/factory/venv"
 LINEAR_SERVICE="${HOME}/.local/share/factory/linear-webhook-service.sh"
+HOST_PIDNS="${HOME}/.local/share/factory/host-pidns.sh"
+HOST_PIDNS_RECORD="${HOME}/.config/factory/host-pidns"
 DB="${HOME}/.local/state/factory/orch.db"
 STATE="$(dirname "$DB")"
 ORCH_CONFIG="${ORCH_CONFIG:-${ROOT}/orch.yml}"
@@ -128,6 +130,16 @@ if [[ -e "$WRAPPER" ]] && ! grep -q '^# factory-orch-wrapper$' "$WRAPPER"; then
     echo "refusing to overwrite non-factory wrapper at ${WRAPPER}" >&2
     exit 1
 fi
+record_host_pidns() {
+    # shellcheck source=deploy/host-pidns.sh
+    . "${ROOT}/deploy/host-pidns.sh"
+    [[ -r "${PROC}/self/status" ]] || return 0
+    if ! factory_may_autostart /dev/null; then
+        echo "warning: not recording the host PID namespace from here; kept ${HOST_PIDNS_RECORD}" >&2
+        return 0
+    fi
+    readlink "${PROC}/self/ns/pid" >"$HOST_PIDNS_RECORD"
+}
 KEEP_VENV=0
 [[ "$UPDATE" == 1 && -x "${VENV}/bin/python" ]] && KEEP_VENV=1
 if command -v uv >/dev/null 2>&1; then
@@ -149,6 +161,8 @@ retire_legacy
 # A copy, not the checkout's file: a git pull must not rewrite a script that
 # a running loop is still reading.
 install -m 0755 "${ROOT}/deploy/linear-webhook-service.sh" "$LINEAR_SERVICE"
+install -m 0644 "${ROOT}/deploy/host-pidns.sh" "$HOST_PIDNS"
+record_host_pidns
 install -m 0600 "${ROOT}/deploy/webhook.env.example" "${HOME}/.config/factory/webhook.env.example"
 cat >"${HOME}/.config/factory/profile.sh" <<EOF
 # Sourced once per shell: a second source (.profile and .bashrc) is a no-op.
@@ -161,6 +175,7 @@ mkdir -p "${STATE}"
 # systemd user session, each bot shell makes sure the poller is up.
 # The state directory can be lost (#66); make it before logging into it.
 mkdir -p "$(dirname "$DB")"
+if [ -r "${HOST_PIDNS}" ] && . "${HOST_PIDNS}" && factory_may_autostart 2>/dev/null; then
 if [ -f "\${HOME}/.config/factory/poller-autostart" ] && [ -x "${ROOT}/deploy/poller-service.sh" ]; then
     ("${ROOT}/deploy/poller-service.sh" ensure >>"${STATE}/poller-service.log" 2>&1 &)
 fi
@@ -183,6 +198,7 @@ fi
 # systemd user timer runs it.
 if [ -f "\${HOME}/.config/factory/self-heal-autostart" ] && [ -x "${ROOT}/deploy/self-heal.sh" ]; then
     ("${ROOT}/deploy/self-heal.sh" ensure >>"${STATE}/self-heal-service.log" 2>&1 &)
+fi
 fi
 fi
 EOF

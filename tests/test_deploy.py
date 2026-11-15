@@ -843,3 +843,103 @@ def test_install_update_keeps_the_venv_running_processes_use(
     plain = _install(environment)
     assert plain.returncode == 0, plain.stderr
     assert not witness.exists()
+
+
+# --- #308: no hook or pidfile from a foreign PID namespace ----------------------------------
+
+
+def _fake_proc(tmp_path: Path, nspid: str, ns: str) -> Path:
+    proc = tmp_path / "fake-proc"
+    (proc / "self/ns").mkdir(parents=True)
+    (proc / "self/status").write_text(f"Name:\tsh\nNSpid:\t{nspid}\n", encoding="utf-8")
+    (proc / "self/ns/pid").symlink_to(ns)
+    return proc
+
+
+def test_install_records_the_host_pid_namespace(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+
+    result = _install(environment)
+
+    assert result.returncode == 0, result.stderr
+    record = tmp_path / ".config/factory/host-pidns"
+    assert record.read_text(encoding="utf-8").strip() == os.readlink("/proc/self/ns/pid")
+    helper = tmp_path / ".local/share/factory/host-pidns.sh"
+    assert helper.read_bytes() == (ROOT / "deploy/host-pidns.sh").read_bytes()
+
+    environment["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "1728748\t61", "pid:[1]"))
+    again = _install(environment)
+
+    assert again.returncode == 0, again.stderr
+    assert "not recording the host PID namespace" in again.stderr
+    assert record.read_text(encoding="utf-8").strip() == os.readlink("/proc/self/ns/pid")
+
+
+@pytest.mark.parametrize(
+    ("nspid", "ns", "extra"),
+    [
+        ("1728748\t61", None, {}),
+        ("61", "pid:[4026532782]", {}),
+        (None, None, {"ORCH_JOB_PROOF": "x"}),
+        (None, None, {"CODEX_SANDBOX": "seatbelt"}),
+    ],
+    ids=["two-field-nspid", "recorded-namespace-differs", "job", "codex-sandbox"],
+)
+def test_profile_hook_starts_nothing_outside_the_host_pid_namespace(
+    tmp_path: Path, nspid: str | None, ns: str | None, extra: dict[str, str],
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    ran = tmp_path / "ran"
+    (tmp_path / ".local/bin/orch").write_text(
+        f"#!/bin/sh\ntouch {ran}\nsleep 30\n", encoding="utf-8",
+    )
+    config = tmp_path / ".config/factory"
+    for flag in ["poller-autostart", "waiter-autostart-claude-bot", "self-heal-autostart",
+                 "linear-webhook-autostart"]:
+        (config / flag).touch()
+    state = tmp_path / ".local/state/factory"
+    pidfiles = {state / "poller.pid": "1599489\n", state / "waiter-claude-bot.pid": "1667506\n"}
+    for path, text in pidfiles.items():
+        path.write_text(text, encoding="utf-8")
+    stamps = {path: path.stat().st_mtime_ns for path in pidfiles}
+    logs_before = sorted(state.glob("*.log"))
+    env = _profile_env(tmp_path) | extra
+    if nspid is not None:
+        host = os.readlink("/proc/self/ns/pid")
+        env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, nspid, ns or host))
+
+    sourced = subprocess.run(
+        ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+        text=True, capture_output=True, timeout=30, check=False,
+    )
+
+    assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+    assert sourced.stderr == ""
+    time.sleep(2)
+    assert not ran.exists()
+    for path, text in pidfiles.items():
+        assert path.read_text(encoding="utf-8") == text
+        assert path.stat().st_mtime_ns == stamps[path]
+    assert sorted(state.glob("*.log")) == logs_before
+
+
+def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
+    (tmp_path / ".config/factory/poller-autostart").touch()
+    env = _profile_env(tmp_path)
+    env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "4484", os.readlink("/proc/self/ns/pid")))
+
+    sourced = subprocess.run(
+        ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+        text=True, capture_output=True, timeout=30, check=False,
+    )
+
+    assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+    log = tmp_path / ".local/state/factory/poller-service.log"
+    deadline = time.monotonic() + 10
+    while not log.exists():
+        assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
+        time.sleep(0.1)
