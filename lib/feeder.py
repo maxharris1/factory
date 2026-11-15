@@ -397,10 +397,11 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
     reason = "waiting_reason" if "waiting_reason" in present else "NULL AS waiting_reason"
+    fed_at = "fed_at" if "fed_at" in present else "NULL AS fed_at"
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error, {reason}
+               pr_number, issue_created_at, error, {reason}, {fed_at}
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),

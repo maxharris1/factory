@@ -171,7 +171,6 @@ SCRIPT_HEAD = r"""
   var prevKeys = {};
   var nextKeys = {};
   var openDetails = {};
-  var modal = null;
   var trails = [];
   var caretState = 'boot';
 
@@ -269,8 +268,14 @@ __TELEMETRY__
 
 
 SCRIPT_TAIL = r"""
+  // Long paths scroll; keep the current step (at the right end) in view.
+  function scrollTrails() {
+    trails.forEach(function (box) { if (box.scrollWidth) box.scrollLeft = box.scrollWidth; });
+    trails = [];
+  }
+
   var PAGES = {
-    main: [renderKpis, renderLinearWebhook, renderFeeder, renderLanes, renderQueue],
+    main: [renderKpis, renderLanes, renderJustHappened, renderIntake],
     job: [renderJobs, renderJobView],
     activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
     efficiency: [renderHealth, renderSavings, renderTokens],
@@ -285,9 +290,6 @@ SCRIPT_TAIL = r"""
     RENDERERS.forEach(function (draw) {
       try { draw(d); } catch (err) { if (window.console) console.error('dashboard panel', err); }
     });
-    if (modal) {
-      try { fillModal(); } catch (err) { if (window.console) console.error('dashboard modal', err); }
-    }
     scrollTrails();
     PX.bind();
     prevKeys = nextKeys;

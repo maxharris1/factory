@@ -188,9 +188,9 @@ def test_static_server_serves_every_page() -> None:
 # --- main page --------------------------------------------------------------------------
 
 
-def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
+def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> None:
     html = _pages(tmp_path)["index.html"]
-    for panel in ("kpis", "lanes", "queue"):
+    for panel in ("kpis", "lanes", "queue", "just-happened", "intake"):
         assert f'id="{panel}"' in html, panel
     # Moved to the Activity and Efficiency pages.
     for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
@@ -198,21 +198,23 @@ def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    # Status first, then the lanes, then the queue rail beside them.
+    # #140: status, then the lanes with the queue lane first, then Just happened beside Intake.
     assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
-    assert _section(html, "queue").startswith('<section class="panel rail" id="queue"')
+    assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
+    assert html.index('id="just-happened"') < html.index('id="intake"')
+    assert 'id="queue" data-device="queue"' in _section(html, "lanes")
 
 
 def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
     html = _no_script(_pages(tmp_path)["index.html"])
     lanes = _section(html, "lanes")
-    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
+    card = re.search(r'<a class="tile [^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
     assert card, lanes
     text = _text(card.group(0))
     assert "PR" in text and "cleffy#40" in text  # a GitHub ticket is a PR
     assert "codex" in text  # bot
     assert "review" in text  # step
-    assert "round 2/3" in text  # the job's detail.round, not the ticket's count
+    assert "2/3" in text  # the job's detail.round, not the ticket's count
     assert "T+ 33m 20s" in text  # elapsed since it was queued
 
 
@@ -222,7 +224,7 @@ def test_a_linear_slot_shows_its_ticket_not_a_pr(tmp_path: Path) -> None:
         add_job(connection, "lin-build", state="running", repo="aut0-code/aut0",
                 ticket_id="AUT-7", created_at=NOW - 30)
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["index.html"])
-    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
+    card = re.search(r'<a class="tile [^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
     assert card
     text = _text(card.group(0))
     assert "AUT-7" in text and "ticket" in text and "PR" not in text.split()
@@ -295,7 +297,7 @@ def test_lane_uses_held_slots_when_more_than_running(tmp_path: Path) -> None:
     pc = next(row for row in snapshot["slots"]["devices"] if row["name"] == "pc")
     assert pc["held"] == 2
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
-    card = re.search(r'<section class="device[^"]*" data-device="pc">.*?</section>', lanes, re.S)
+    card = re.search(r'<div class="lane[^"]*" data-device="pc">.*?(?=<div class="lane[ "]|$)', lanes, re.S)
     assert card, lanes
     text = _text(card.group(0))
     assert "2 / 2 slots" in text
@@ -307,7 +309,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
-    card = re.search(r'<section class="device[^"]*" data-device="box">.*?</section>', lanes, re.S)
+    card = re.search(r'<div class="lane[^"]*" data-device="box">.*?(?=<div class="lane[ "]|$)', lanes, re.S)
     text = _text(card.group(0))
     # Two running box jobs, no device_slots rows: 2 used, 1 idle.
     assert "2 / 3 slots" in text
@@ -733,20 +735,21 @@ def attention_count(out: dict) -> str:
 @needs_node
 def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "queue"])
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "just-happened", "intake"])
     assert "LIVE" in out["text"]["link-text"]
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
-    assert "a.slot.job[href=job.html#job-r-codex-]" in lanes
-    for needle in ("cleffy#13", "codex", "review", "round 3/3", "T+ ", "OVERDUE", "DISABLED",
-                   "stale heartbeat"):
+    assert "a.tile.codex[href=job.html#job-r-codex-]" in lanes
+    for needle in ("cleffy#13", "codex", "review", "3/3", "T+ ", "OVERDUE", "DISABLED",
+                   "stale"):
         assert needle in out["text"]["lanes"], (needle, lanes)
     # #63 FU-1: pc holds 2 slots with 1 job running; the lane is full.
     pc = lanes[lanes.index("[data-device=pc]") :]
     pc = pc[: pc.index("[data-device=", 1)] if "[data-device=" in pc[1:] else pc
     assert '"2 / 2 slots"' in pc and '"held"' in pc and '"idle"' not in pc
-    assert "a.queue-item[href=job.html#job-q-claude]" in out["dump"]["queue"]
-    assert "cleffy#12" in out["text"]["queue"]
+    queue = lanes[lanes.index("[data-device=queue]") : lanes.index("[data-device=", lanes.index("[data-device=queue]") + 1)]
+    assert "a[href=job.html#job-q-claude]" in queue
+    assert "cleffy#12" in queue
 
 
 @needs_node
@@ -853,4 +856,4 @@ def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -
     assert job["flow"]["path"] == ["intake", "review"]
     pages = render_pages(snapshot)
     assert 'id="job-r-codex-"' in pages["job.html"]
-    assert "round 3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))
+    assert "3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))

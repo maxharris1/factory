@@ -257,61 +257,9 @@ def test_lanes_page_links_jobs_to_the_job_page_without_script(tmp_path: Path) ->
     html = _no_script(render_pages(_snapshot(tmp_path))["index.html"])
     assert 'href="job.html#job-h-review"' in _section(html, "lanes")
     assert 'href="job.html#job-q-claude"' in _section(html, "queue")
-    assert 'id="job-modal"' not in html
-    # The modal's full-chart toggle copies the same server-drawn chart.
-    assert '<div id="flow-template" hidden>' in html
-
-
-# --- 2. the job modal, against the page script ------------------------------------------
-
-MAIN_IDS = BAR + ["hud", "kpis", "lanes", "queue", "flow-template"]
-
-
-@needs_node
-def test_clicking_a_lane_slot_opens_the_job_modal_and_it_closes_cleanly(tmp_path: Path) -> None:
-    slot = {"href": "job.html#job-h-review"}
-    out = _run_page(tmp_path, _snapshot(tmp_path), "main", MAIN_IDS, actions=[
-        ["click", slot], ["record", "open"],
-        ["click", {"cls": "modal-box"}], ["record", "inside"],
-        ["key", "Escape"], ["record", "esc"],
-        ["click", slot], ["click", {"cls": "modal-close"}], ["record", "button"],
-        ["click", slot], ["click", {"id": "job-modal"}], ["record", "backdrop"],
-    ])
-    steps = out["steps"]
-    assert steps[0] == {"click": slot, "prevented": True}
-    opened = steps[1]
-    assert "job-modal" in opened["kids"]
-    modal = opened["modal"]
-    assert "[role=dialog]" in modal
-    assert "cleffy#40" in opened["text"] and "round 2/3" in opened["text"]
-    # The same simplified view as the job page.
-    visits = re.findall(r"g\.visit[.a-z]*\[data-state=([^\]]+)\]\[data-step=(\d+)\]", modal)
-    assert visits == [(state, str(i)) for i, state in enumerate(TICKET_40_PATH)]
-    assert re.search(r"g\.visit\.current\.breathe\[data-state=review\]\[data-step=5\]", modal)
-    assert set(re.findall(r"g\.next\[data-state=([^\]]+)\]", modal)) == _successors(CHART, "review")
-    assert "full chart" in opened["text"]
-    assert "button.modal-close" in modal
-    # A click inside the box leaves it open; Esc, the button and the backdrop close it.
-    assert "job-modal" in steps[3]["kids"]
-    assert steps[4]["key"] == "Escape"
-    for label in ("esc", "button", "backdrop"):
-        record = next(step for step in steps if step.get("record") == label)
-        assert "job-modal" not in record["kids"], label
-        assert record["modal"] is None, label
-    # Focus goes back to the job that was clicked.
-    assert next(step for step in steps if step.get("record") == "esc")["focus"] == slot["href"]
-
-
-@needs_node
-def test_clicking_a_queued_job_opens_its_modal(tmp_path: Path) -> None:
-    item = {"href": "job.html#job-q-claude"}
-    out = _run_page(tmp_path, _snapshot(tmp_path), "main", MAIN_IDS,
-                    actions=[["click", item], ["record", "open"], ["key", "Escape"], ["record", "closed"]])
-    assert out["steps"][0]["prevented"] is True
-    opened = out["steps"][1]
-    assert "job-modal" in opened["kids"] and "cleffy#12" in opened["text"]
-    assert "g.visit" in opened["modal"]
-    assert "job-modal" not in out["steps"][3]["kids"]
+    # #140: the Lanes job modal is dropped (STATUS.md decision 1), and with it the chart template.
+    for needle in ('id="job-modal"', "modal-box", 'role="dialog"', 'id="flow-template"'):
+        assert needle not in html, needle
 
 
 # --- 3, live: the job page script draws the same simplified flow -----------------------------

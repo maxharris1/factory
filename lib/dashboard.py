@@ -1232,6 +1232,7 @@ def _read_db(
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
+                    "fed_age_seconds": _age(now, item["fed_at"]),
                 }
                 for item in items
             ],

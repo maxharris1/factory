@@ -308,7 +308,7 @@ def test_page_keeps_a_no_script_fallback(tmp_path: Path) -> None:
 def test_pages_have_every_mission_control_panel(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))
     where = {
-        "index.html": ("kpis", "lanes", "queue"),
+        "index.html": ("kpis", "lanes", "queue", "just-happened", "intake"),
         "activity.html": ("attention", "handoffs", "verdicts", "tickets", "log"),
         "efficiency.html": ("health", "savings"),
         "health.html": ("components", "no-waiter"),
