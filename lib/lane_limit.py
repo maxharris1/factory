@@ -242,7 +242,7 @@ def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
         if not newest:
             continue
         free = max(
-            r.observed_at if r.used < 1.0 or r.resets_at is None else r.resets_at
+            r.observed_at if r.used < 1.0 else r.resets_at
             for r in newest.values()
         )
         connection.execute(

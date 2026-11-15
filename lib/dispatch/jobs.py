@@ -212,9 +212,7 @@ class JobsMixin:
             # A queued job's last_activity_at is its queue-wait start: when
             # it was queued, or when a claim that never started was released
             # (#77 F1.2), so a release never times out a job for the wait
-            # before its claim. A running job's is its last heartbeat. A
-            # queued job's wait restarts when its lane's usage limit ended
-            # (#367), even if no poll ran while the lane was limited.
+            # before its claim. A running job's is its last heartbeat.
             waited_since = job.last_activity_at
             if job.state == "queued" and lifted.get(job.request.recipient, 0.0) > waited_since:
                 waited_since = lifted[job.request.recipient]
