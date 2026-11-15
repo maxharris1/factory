@@ -882,7 +882,7 @@ def test_the_activity_page_lists_an_old_snapshot_once(tmp_path: Path) -> None:
     page = _run_page(tmp_path, data, "activity", BAR + ["hud", "attention"], actions=[["advance", 121]])
     assert "health snapshot" in page["text"]["attention"]
     assert "unknown: no snapshot for 2m" in page["text"]["attention"]
-    assert "a.ticket[href=health.html#components]" in page["dump"]["attention"]
+    assert 'a.at-go[href=health.html#components] "open in System"' in page["dump"]["attention"]
     assert "poller @ box" not in page["text"]["attention"]
 
 
