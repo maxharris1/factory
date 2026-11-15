@@ -10,7 +10,7 @@ import yaml
 
 from lib.dispatcher import CIResult
 from lib.factory_md import load_factory_md, parse_factory_md
-from tests.merge_queue_support import PR, Board, sha
+from tests.merge_queue_support import APPROVE, PR, Board, sha
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID = {
@@ -488,3 +488,28 @@ def test_on_each_red_approve_at_the_same_head_queues_a_runnable_ci_fix(
         review = board.finish("codex")
         assert json.loads(review.request.detail)["round"].startswith("1/")
     assert [job["state"] for job in board.jobs("fix")] == ["done", "done"]
+
+
+def test_on_a_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    [moved_fix] = board.jobs("fix")
+    assert moved_fix["head"] == sha(2)
+    board.finish("claude")
+
+    pr.push(older, ci="failure")
+    ready = board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    fix = board.queue.claim("claude")
+    assert fix is not None, "the ready back at the older head left no runnable CI fix"
+    assert fix.request.head == older
+    assert CI_LOG in json.loads(fix.request.detail)["instruction"]

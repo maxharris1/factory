@@ -1,0 +1,4 @@
+decision	choice	why
+carried rule	a done review carries the CI failure only while it is the ticket's latest review or fix job	a later fix or review at any head means the review's verdict already acted, so a ready back at that head must queue its own CI fix
+active jobs	a queued or running review or fix at the ready's head still carries the failure	keeps the existing ready-during-review and reposted-ready cases at one combined fix
+no verdict link	match on job order, not on handoff_comment_id against handled_comments	job order already records whether the verdict acted; linking handoffs to verdict comments would add a join the tests do not model

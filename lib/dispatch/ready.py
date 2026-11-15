@@ -494,15 +494,15 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state FROM jobs
-                WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
+                SELECT action, state, head FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
-                ORDER BY state IN ('queued', 'running') DESC, rowid DESC
+                ORDER BY head = ? AND state IN ('queued', 'running') DESC, rowid DESC
                 LIMIT 1
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
-        return row is not None and (
+        return row is not None and row["head"] == head and (
             row["state"] in ("queued", "running")
             or (row["action"], row["state"]) == ("review", "done")
         )
