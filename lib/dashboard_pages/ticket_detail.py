@@ -124,9 +124,9 @@ CSS = """\
 .lr-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
 .lr-spin{display:block;flex:0 0 16px}
 .lr-label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-.lr-task{flex:1 1 320px;min-width:0;font:600 18px/1.35 var(--sans);color:var(--text)}
+.lr-task{flex:1 1 320px;min-width:0;font:600 18px/1.35 var(--sans);color:var(--text);overflow-wrap:anywhere}
 .lr-task.ok{color:var(--ok)}.lr-task.muted{color:var(--muted);font-weight:400}
-.lr-last{color:var(--muted);white-space:nowrap}.lr-last span{color:var(--text-2)}
+.lr-last{min-width:0;color:var(--muted);overflow-wrap:anywhere}.lr-last span{color:var(--text-2)}
 .lr-cols{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 24px}
 .lr-col{flex:1 1 400px;min-width:0;display:flex;flex-direction:column;gap:8px}
 .lr-colhead{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
@@ -135,7 +135,7 @@ CSS = """\
 .lr-plan{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
 .lr-plan li{display:flex;align-items:baseline;gap:10px;padding:2px 6px}
 .lr-mark{flex:0 0 8px;height:8px;box-sizing:border-box;border:1px solid var(--line-hi)}
-.lr-text{flex:1 1 auto;min-width:0;font:400 13px var(--sans);color:var(--muted)}
+.lr-text{flex:1 1 auto;min-width:0;font:400 13px var(--sans);color:var(--muted);overflow-wrap:anywhere}
 .lr-tag{font-size:11px;white-space:nowrap;color:var(--muted)}
 .lr-plan .done .lr-mark{background:var(--ok);border-color:var(--ok)}.lr-plan .done .lr-text{color:var(--text-2)}
 .lr-plan .now{background:var(--panel)}
@@ -144,8 +144,8 @@ CSS = """\
 .lr-alone{padding:10px;border:1px dashed var(--line-hi);color:var(--muted)}
 .lr-agent{display:flex;flex-direction:column;background:var(--dim);box-shadow:var(--elev)}
 .lr-agent-body{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:6px 10px 8px}
-.lr-kind{padding:0 6px;border:1px solid var(--line-hi);color:var(--text-2);font-size:11px;line-height:1.6;white-space:nowrap}
-.lr-desc{flex:1 1 200px;min-width:0;font:13px var(--sans);color:var(--text)}
+.lr-kind{min-width:0;padding:0 6px;border:1px solid var(--line-hi);color:var(--text-2);font-size:11px;line-height:1.6;overflow-wrap:anywhere}
+.lr-desc{flex:1 1 200px;min-width:0;font:13px var(--sans);color:var(--text);overflow-wrap:anywhere}
 .lr-status{font-size:11px;white-space:nowrap}
 .lr-status.running{color:var(--accent)}.lr-status.finished{color:var(--ok)}.lr-status.failed{color:var(--bad)}
 .lr-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
@@ -372,7 +372,7 @@ def _lr_head(row: dict, t: dict, moving: bool) -> str:
     task, last = t.get("current_task"), t.get("last_finished")
     effect = "spin3" if moving and task and not finished else "off"
     strip = _px().px_strip(f"live-head-{row['job']}", effect=effect, tint="bot", bot=row.get("recipient"),
-                           seed=71, cell=4, done=finished, height=12)
+                           seed=71, still=not moving, cell=4, done=finished, height=12)
     if finished:
         label, text, cls = "finished", last or "nothing recorded", "lr-task ok" if last else "lr-task muted"
     else:
@@ -384,13 +384,13 @@ def _lr_head(row: dict, t: dict, moving: bool) -> str:
     )
 
 
-def _lr_plan(row: dict, plan: list[dict]) -> str:
+def _lr_plan(row: dict, plan: list[dict], moving: bool) -> str:
     head = '<div class="lr-colhead"><span class="lr-label">Its plan</span>'
     if not plan:
         return f'<div class="lr-col">{head}</div><p class="empty">no plan yet</p></div>'
     done = sum(1 for item in plan if item["status"] == "done")
     strip = _px().px_strip(f"live-plan-{row['job']}", effect="fill", tint="bot", bot=row.get("recipient"),
-                           progress=done / len(plan), seed=72, cell=4, done=done == len(plan), height=8)
+                           progress=done / len(plan), seed=72, still=not moving, cell=4, done=done == len(plan), height=8)
     items = "".join(
         f'<li class="{_PLAN_CLS[item["status"]]}"><span class="lr-mark" aria-hidden="true"></span>'
         f'{_span("lr-text", item["text"])}{_span("lr-tag", _PLAN_TAG[item["status"]])}</li>'
@@ -420,7 +420,7 @@ def _lr_agents(row: dict, agents: list[dict] | None, moving: bool) -> str:
         effect = {"running": "scan" if moving else "off", "finished": "off", "failed": "static"}[status]
         strip = _px().px_strip(f"live-agent-{row['job']}-{i}", effect=effect,
                                tint="#f7768e" if status == "failed" else "bot", bot=row.get("recipient"),
-                               seed=80 + i, cell=4, done=status == "finished", height=8)
+                               seed=80 + i, still=not moving, cell=4, done=status == "finished", height=8)
         cards.append(
             f'<div class="lr-agent">{strip}<div class="lr-agent-body">{_span("lr-kind", agent["kind"])}'
             f'{_span("lr-desc", agent["description"])}'
@@ -444,7 +444,7 @@ def live_run(row: dict) -> str:
     if mode == "counters":
         return f'<div class="lr"{style}>{_lr_tiles(t)}</div>'
     moving = _lr_moving(row)
-    plan = "" if t.get("plan") is None else _lr_plan(row, t["plan"])
+    plan = "" if t.get("plan") is None else _lr_plan(row, t["plan"], moving)
     return (
         f'<div class="lr"{style}>{_lr_head(row, t, moving)}'
         f'<div class="lr-cols">{plan}{_lr_agents(row, t.get("subagents"), moving)}</div>'
@@ -781,7 +781,7 @@ _SCRIPT = r"""
     var spin = span(head, 'lr-spin');
     spin.setAttribute('aria-hidden', 'true');
     add(spin, PX.strip('live-head-' + r.job, {effect: moving && task && !finished ? 'spin3' : 'off', tint: 'bot', bot: r.recipient,
-                                              seed: 71, cell: 4, done: finished, height: 12}));
+                                              seed: 71, still: !moving, cell: 4, done: finished, height: 12}));
     if (finished) {
       span(head, 'lr-label', 'finished');
       span(head, last ? 'lr-task ok' : 'lr-task muted', last || 'nothing recorded');
@@ -799,13 +799,13 @@ _SCRIPT = r"""
     span(head, 'lr-label', title);
     return {col: col, head: head};
   }
-  function lrPlan(r, plan) {
+  function lrPlan(r, plan, moving) {
     var c = lrCol('Its plan');
     if (!plan.length) { add(c.col, el('p', 'empty', 'no plan yet')); return c.col; }
     var done = plan.filter(function (p) { return p.status === 'done'; }).length;
     span(c.head, 'lr-count', done + ' of ' + plan.length + ' done');
     add(c.col, PX.strip('live-plan-' + r.job, {effect: 'fill', tint: 'bot', bot: r.recipient, progress: done / plan.length,
-                                               seed: 72, cell: 4, done: done === plan.length, height: 8}));
+                                               seed: 72, still: !moving, cell: 4, done: done === plan.length, height: 8}));
     var ol = add(c.col, el('ol', 'lr-plan'));
     plan.forEach(function (p) {
       var li = add(ol, el('li', LIVE.planCls[p.status]));
@@ -825,7 +825,7 @@ _SCRIPT = r"""
       var card = add(c.col, el('div', 'lr-agent'));
       var effect = {running: moving ? 'scan' : 'off', finished: 'off', failed: 'static'}[a.status];
       add(card, PX.strip('live-agent-' + r.job + '-' + i, {effect: effect, tint: a.status === 'failed' ? '#f7768e' : 'bot',
-                                                           bot: r.recipient, seed: 80 + i, cell: 4, done: a.status === 'finished', height: 8}));
+                                                           bot: r.recipient, seed: 80 + i, still: !moving, cell: 4, done: a.status === 'finished', height: 8}));
       var body = add(card, el('div', 'lr-agent-body'));
       span(body, 'lr-kind', a.kind);
       span(body, 'lr-desc', a.description);
@@ -843,7 +843,7 @@ _SCRIPT = r"""
       var moving = PX.table.actions.hasOwnProperty(PX.state(r));
       add(box, lrHead(r, t, moving));
       var cols = add(box, el('div', 'lr-cols'));
-      if (t.plan !== null && t.plan !== undefined) add(cols, lrPlan(r, t.plan));
+      if (t.plan !== null && t.plan !== undefined) add(cols, lrPlan(r, t.plan, moving));
       add(cols, lrAgents(r, t.subagents, moving));
     }
     add(box, lrTiles(t));

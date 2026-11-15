@@ -18,6 +18,7 @@ import pytest
 from lib.dashboard import collect_snapshot, render_pages
 from lib.dashboard_pages.ticket_detail import compact
 from tests.test_dashboard import NOW, seeded
+from tests.test_dashboard_lanes import Browser, _page_with_status_stub, needs_chrome
 from tests.test_dashboard_layout import JOB, _history, _no_script, _run_page, _section, needs_node
 from tests.test_dashboard_telemetry import add_telemetry
 
@@ -153,20 +154,62 @@ def test_hostile_live_text_is_escaped(tmp_path: Path) -> None:
     assert "<img" not in panel and panel.count("&lt;img onerror=alert(1)&gt;") == 4
 
 
-@pytest.mark.parametrize("change", ["dead", "stale", "overdue"])
-def test_broken_jobs_hold_the_head_and_agent_strips_still(tmp_path: Path, change: str) -> None:
-    snapshot = _snapshot(tmp_path, LIVE_ROW)
-    assert {k: v for v, k in re.findall(r'data-px="([a-z0-9]+)"[^>]*data-px-key="live-(head|agent)', _server(snapshot))} == {
-        "head": "spin3", "agent": "scan"}
+def _strips(panel: str) -> dict[str, tuple[str, bool]]:
+    return {key: (effect, 'data-still="true"' in tag)
+            for tag, effect, key in re.findall(r'(<canvas [^>]*data-px="([a-z0-9]+)"[^>]*data-px-key="live-([a-z]+)-[^"]*"[^>]*>)', panel)}
+
+
+def _break(snapshot: dict, change: str) -> None:
     row = next(r for r in snapshot["running"] if r["job"] == "h-review")
     if change == "overdue":
         row["overdue"] = True
     else:
         row["job_state"] = change
+
+
+@pytest.mark.parametrize("change", ["dead", "stale", "overdue"])
+def test_broken_jobs_hold_every_live_strip_still(tmp_path: Path, change: str) -> None:
+    snapshot = _snapshot(tmp_path, LIVE_ROW)
+    assert _strips(_server(snapshot)) == {"head": ("spin3", False), "plan": ("fill", False), "agent": ("scan", False)}
+    _break(snapshot, change)
     panel = _server(snapshot)
-    assert {k: v for v, k in re.findall(r'data-px="([a-z0-9]+)"[^>]*data-px-key="live-(head|agent)', panel)} == {
-        "head": "off", "agent": "off"}
+    assert _strips(panel) == {"head": ("off", True), "plan": ("fill", True), "agent": ("off", True)}
     assert re.search(r'data-px="fill"[^>]*data-progress="0.333"[^>]*data-px-key="live-plan-h-review"', panel)
+
+
+@needs_node
+@pytest.mark.parametrize("change", ["dead", "stale", "overdue"])
+def test_script_holds_broken_jobs_still_like_the_server(tmp_path: Path, change: str) -> None:
+    snapshot = _snapshot(tmp_path, LIVE_ROW)
+    _break(snapshot, change)
+    assert _script(tmp_path, snapshot) == _server(snapshot)
+
+
+LONG = "Verify every dashboard renderer against the current snapshot schema and record the results for the next review round."
+UNBROKEN = "x" * 120
+
+
+@needs_chrome
+def test_live_text_wraps_inside_the_panel_at_375px(tmp_path: Path) -> None:
+    assert len(LONG) <= 120
+    row = {**LIVE_ROW, "current_task": UNBROKEN, "last_finished": LONG,
+           "plan": json.dumps([{"text": UNBROKEN, "status": "in_progress"}, {"text": LONG, "status": "pending"}]),
+           "subagents": json.dumps([{**AGENTS[0], "kind": UNBROKEN, "description": UNBROKEN}])}
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(_snapshot(tmp_path, row), "job.html"), 375)
+        browser.eval("""new Promise(function (done) { location.hash = '#job-h-review'; (function wait() {
+          if (document.querySelector('#jobview .lr-last')) done(true); else setTimeout(wait, 50); })(); })""")
+        assert browser.eval("document.documentElement.scrollWidth") == 375
+        spill = browser.eval("""(function () {
+          var panel = document.querySelector('#jobview .lr'), box = panel.getBoundingClientRect();
+          return [].filter.call(panel.querySelectorAll('*'), function (e) {
+            var b = e.getBoundingClientRect(); return b.width && (b.left < box.left - 0.5 || b.right > box.right + 0.5);
+          }).map(function (e) { return e.className; });
+        })()""")
+        assert not spill, spill
+    finally:
+        browser.close()
 
 
 def test_compact_rounds_half_up_like_the_script() -> None:
