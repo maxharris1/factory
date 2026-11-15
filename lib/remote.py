@@ -125,6 +125,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
+
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
     "-o",
@@ -624,8 +626,11 @@ ENV_FILE = "env"
 # (`result`, or a completed `agent_message`) gives its deciding marker line
 # at the next end event (`result`, `turn.completed`) or the end of the log;
 # any other line is relayed as is. Prints the marker line that decides the
-# relayed lines. Both choices follow lib/handoff_marker.py's rule, in awk.
-HANDOFF_AWK = r"""
+# relayed lines.
+HANDOFF_AWK = (
+    f'BEGIN {{ lines = {MARKER_SEARCH_LINES}; limit = {MARKER_LINE_LIMIT}; '
+    f'runner = "{RUNNER_LOG_PREFIX}"; prefix = "{MARKER_PREFIX}" }}'
+) + r"""
 function value(line, key,    i, n, c, h, out) {
     found = 0
     if (!match(line, "\"" key "\"[ \t]*:[ \t]*\"")) return ""
@@ -648,20 +653,20 @@ function value(line, key,    i, n, c, h, out) {
     return ""
 }
 function strip(line) { sub(/^[ \t\r]+/, "", line); sub(/[ \t\r]+$/, "", line); return line }
-function kept(line) { return line != "" && index(line, "orch job run: ") != 1 && line !~ /^```[A-Za-z0-9_-]*$/ }
-function candidate(line) { return line ~ /^`*ORCH-HANDOFF:/ }
+function kept(line) { return line != "" && index(line, runner) != 1 && line !~ /^```[A-Za-z0-9_-]*$/ }
+function candidate(line) { sub(/^`+/, "", line); return index(line, prefix) == 1 }
 function handoff(text,    parts, k, n, line) {
     gsub(/\r/, "\n", text)
     n = 0
-    for (k = split(text, parts, "\n"); k > 0 && n < 20; k--) {
+    for (k = split(text, parts, "\n"); k > 0 && n < lines; k--) {
         line = strip(parts[k])
         if (!kept(line)) continue
         n++
-        if (candidate(line)) return substr(line, 1, 120)
+        if (candidate(line)) return substr(line, 1, limit)
     }
     return ""
 }
-function relay(line) { line = strip(line); if (kept(line)) seen[count++ % 20] = line }
+function relay(line) { line = strip(line); if (kept(line)) seen[count++ % lines] = line }
 /^[ \t]*\{.*\}[ \t\r]*$/ {
     if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
     else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
@@ -673,7 +678,7 @@ function relay(line) { line = strip(line); if (kept(line)) seen[count++ % 20] = 
 { relay($0) }
 END {
     if (pending) relay(handoff(final))
-    for (k = count - 1; k >= 0 && k >= count - 20; k--) if (candidate(seen[k % 20])) { print seen[k % 20]; exit }
+    for (k = count - 1; k >= 0 && k >= count - lines; k--) if (candidate(seen[k % lines])) { print seen[k % lines]; exit }
 }
 """
 

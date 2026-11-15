@@ -138,7 +138,6 @@ _RULE = [
 
 
 def _relayed(stream: bytes) -> str:
-    """What the box's telemetry relay writes to run.log for `stream`."""
     with tempfile.TemporaryDirectory() as directory:
         session, _, out, _ = _session(Path(directory))
         session.consume(io.BytesIO(stream))
@@ -146,8 +145,7 @@ def _relayed(stream: bytes) -> str:
         return out.getvalue().decode()
 
 
-def _device(log: bytes) -> str:
-    """What the device's HANDOFF_AWK writes to the run's handoff file."""
+def _handoff_awk(log: bytes) -> str:
     return subprocess.run(
         ["awk", remote.HANDOFF_AWK], input=log, capture_output=True, check=True
     ).stdout.decode()
@@ -167,11 +165,11 @@ def _events(harness: str, text: str) -> bytes:
 @pytest.mark.parametrize(("text", "expected"), _RULE)
 def test_every_reader_of_the_marker_follows_one_rule(text: str, expected: str | None) -> None:
     assert handoff_marker(text) == expected
-    assert handoff_marker(_device(text.encode())) == expected, "device, text mode"
+    assert handoff_marker(_handoff_awk(text.encode())) == expected, "device, text mode"
     for harness in ("claude", "codex"):
         stream = _events(harness, text)
         assert handoff_marker(_relayed(stream)) == expected, f"relay, {harness}"
-        assert handoff_marker(_device(stream)) == expected, f"device, {harness}"
+        assert handoff_marker(_handoff_awk(stream)) == expected, f"device, {harness}"
 
 
 @pytest.mark.parametrize(

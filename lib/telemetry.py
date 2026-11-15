@@ -22,7 +22,7 @@ stdout on a pipe and hands the pipe to a `Session` here:
   kept. The raw log never leaves the machine. Lines that are not JSON
   objects are also copied to this process's stdout (the waiter's run.log),
   as before; JSON events are not, so run.log stays small. One exception
-  keeps a remote run's handoff (#87, #192): the marker line that decides
+  keeps a remote run's handoff (#87): the marker line that decides
   the CLI's final message (Claude Code's `result`, Codex's last
   `agent_message`) by lib/handoff_marker.py's rule is copied there, so the
   waiter on the box reads the same marker text mode would have given it.
@@ -1269,11 +1269,6 @@ def exit_reason(code: int | None, cli_reason: str | None) -> str:
     return f"{cli_reason}; {status}" if cli_reason else status
 
 
-# A remote harness ends its final message with `ORCH-HANDOFF: <id|failed>`,
-# and the waiter on the box reads it from run.log (#87, lib/handoff_marker.py).
-# In stream mode that message is inside a JSON event, which is not copied to
-# run.log, so a session copies the message's deciding marker line there at the
-# end of the run, when it has one. No other assistant text reaches run.log.
 # The CLI's own end of a run: the line goes out then (and at the end of the
 # stream otherwise), so a process left holding the pipe cannot keep it back.
 _END_EVENTS = frozenset({"result", "turn.completed"})

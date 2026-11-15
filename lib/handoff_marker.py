@@ -1,10 +1,4 @@
-"""The remote harness's last word: `ORCH-HANDOFF: <id|failed>` (#87 F1.5, #192).
-
-One rule, read in three places: the waiter on the box parses run.log with
-it, the telemetry relay (lib/telemetry.py) uses it to pick the one line of a
-stream-mode final message that reaches run.log, and the device's HANDOFF_AWK
-(lib/remote.py) repeats it in awk. tests/test_marker_parser.py holds all
-three to the same table.
+"""The remote harness's last word: `ORCH-HANDOFF: <id|failed>`.
 
 The rule: skip blank lines, code fences and the box runner's own
 `orch job run: ...` lines; of the last MARKER_SEARCH_LINES lines left, the
@@ -20,9 +14,7 @@ import re
 
 MARKER_PREFIX = "ORCH-HANDOFF:"
 MARKER_SEARCH_LINES = 20
-# A candidate is relayed cut to this length; a good marker is at most 52.
 MARKER_LINE_LIMIT = 120
-# Lines `orch job run` itself writes to run.log (lib/cli.py _job_run log()).
 RUNNER_LOG_PREFIX = "orch job run: "
 _FENCE = re.compile(r"^```[A-Za-z0-9_-]*$")
 _MARKER = re.compile(
