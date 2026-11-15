@@ -41,7 +41,15 @@ understood. Control calls are logged to $FAKE_SSH_CONTROL_LOG (default
   alive while that marker is there) and exits 0, as `-f` does;
 * `-O check` exits 0 while both the socket and its marker exist, else 255
   with `Control socket connect(<path>): Connection refused`;
-* `-O stop` / `-O exit` remove the marker and the socket;
+* `-O stop` / `-O exit` remove the marker, the socket and `<path>.fake-stale`;
+* `<path>.fake-stale` makes that live master stale, as after a box VM
+  pause: `-O check` still exits 0 (the local master process answers) and
+  fresh logins still work, but a session through it hangs until the client
+  is killed, as on a TCP connection whose far end is gone;
+* a data call whose command is exactly `exit 0 # orch-ssh-mux-probe` is the
+  multiplexer's probe: it is logged to the control log as op `probe` (code
+  null while it hangs) and never to $FAKE_SSH_LOG, runs no script, ignores
+  link faults, and exits 0 through a fresh master or a login, else 255;
 * a data call with a ControlPath (not `none`) logs `"via": "master"` when
   that master is alive, else `"via": "login"`: ssh's own fallback to a
   plain login over a missing or stale socket. `<alias>.mux-refuse` makes a
@@ -100,6 +108,24 @@ def _refused(hosts: str, alias: str | None, user: str | None) -> str | None:
     return None
 
 
+def _log_control(op: str, alias, user, path: str, code) -> None:
+    log = os.environ.get("FAKE_SSH_CONTROL_LOG") or os.environ["FAKE_SSH_LOG"] + ".control"
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"op": op, "alias": alias, "user": user, "path": path, "code": code}) + "\n"
+        )
+
+
+def _probe(hosts: str, alias: str | None, user: str | None, path: str | None, via: str) -> int:
+    if via == "master" and path and os.path.exists(path + ".fake-stale"):
+        _log_control("probe", alias, user, path, None)
+        while True:
+            time.sleep(60)
+    code = 255 if _refused(hosts, alias, user) else 0
+    _log_control("probe", alias, user, path or "", code)
+    return code
+
+
 def _control(op: str, options: list[str], user: str | None, alias: str | None) -> int:
     path = _option(options, "ControlPath") or ""
     hosts = os.environ.get("FAKE_SSH_HOSTS", "")
@@ -127,17 +153,15 @@ def _control(op: str, options: list[str], user: str | None, alias: str | None) -
         if _live(path):
             os.unlink(path + ".fake-master")
             os.unlink(path)
+            if os.path.exists(path + ".fake-stale"):
+                os.unlink(path + ".fake-stale")
         else:
             print(f"Control socket connect({path}): Connection refused", file=sys.stderr)
             code = 255
     else:
         print(f"fake ssh: unknown -O {op}", file=sys.stderr)
         code = 255
-    log = os.environ.get("FAKE_SSH_CONTROL_LOG") or os.environ["FAKE_SSH_LOG"] + ".control"
-    with open(log, "a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps({"op": op, "alias": alias, "user": user, "path": path, "code": code}) + "\n"
-        )
+    _log_control(op, alias, user, path, code)
     return code
 
 
@@ -189,6 +213,8 @@ def main(argv: list[str]) -> int:
             )
             via = "login"
     script = " ".join(rest[1:]) if len(rest) > 1 else None
+    if script == "exit 0 # orch-ssh-mux-probe":
+        return _probe(hosts, alias, user, path, via)
     with open(os.environ["FAKE_SSH_LOG"], "a", encoding="utf-8") as log:
         log.write(
             json.dumps(
@@ -199,6 +225,9 @@ def main(argv: list[str]) -> int:
         )
     if alias is None or script is None:
         return 255
+    if via == "master" and os.path.exists(f"{path}.fake-stale"):
+        while True:
+            time.sleep(60)
     reason = _refused(hosts, alias, user)
     if reason:
         if "offline" not in reason:

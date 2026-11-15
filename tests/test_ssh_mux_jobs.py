@@ -66,4 +66,6 @@ def test_a_job_rides_out_stale_masters_without_a_failure(tmp_path: Path) -> None
     assert row["attempt"] == 1 and row["state"] != "failed"
     assert len(masters(ssh)) >= 3  # the stale one replaced, then each kill rebuilt
     assert all(entry["code"] == 0 for entry in masters(ssh))
-    assert {call["via"] for call in ssh.calls()} == {"master"}
+    vias = [call["via"] for call in ssh.calls()]
+    assert set(vias) <= {"master", "login"}
+    assert vias.count("login") <= 2, "a kill can only send the call already prepared to ssh's own login"

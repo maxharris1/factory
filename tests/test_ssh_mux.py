@@ -137,12 +137,76 @@ def test_a_stale_socket_left_from_before_a_reboot_is_replaced(ssh: Ssh, tmp_path
     assert vias(ssh) == ["master"]
 
 
+@pytest.fixture
+def quick_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ssh_mux, "PROBE_TIMEOUT_SECONDS", 1.0)
+
+
+def stale(alias: str = ALIAS, user: str = USER) -> Path:
+    """The fake master answers `-O check`, but its connection to the device is gone."""
+    flag = Path(f"{socket_of(alias, user)}.fake-stale")
+    flag.touch()
+    return flag
+
+
+@pytest.mark.parametrize("kind", ["call", "exchange", "run"])
+def test_a_stale_master_that_passes_check_is_rebuilt_before_the_call(
+    ssh: Ssh, tmp_path: Path, quick_probe: None, kind: str
+) -> None:
+    """A box VM pause: the master process lives, its TCP path does not, fresh logins work."""
+    t = target(tmp_path)
+    transport = remote.SshTransport()
+    assert remote.probe_device(transport, t)
+    flag = stale()
+    argv = remote.ssh_argv(t, "echo back")
+    if kind == "call":
+        result = transport.call(argv, timeout=5)
+        assert (result.code, result.stdout) == (0, "back\n")
+    elif kind == "exchange":
+        exchanged = transport.exchange(argv, timeout=5)
+        assert (exchanged.code, exchanged.stdout) == (0, b"back\n")
+    else:
+        assert transport.run(argv, timeout=5) == 0
+    assert not flag.exists()
+    assert ops(ssh)[-4:] == [("check", 0), ("probe", None), ("exit", 0), ("master", 0)]
+    assert vias(ssh) == ["master", "master"]
+
+
+def test_a_stale_master_on_an_unreachable_device_is_still_one_255(
+    ssh: Ssh, tmp_path: Path, quick_probe: None
+) -> None:
+    t = target(tmp_path)
+    transport = remote.SshTransport()
+    assert remote.probe_device(transport, t)
+    stale()
+    ssh.offline(ALIAS).touch()
+    assert remote.check_worker(transport, t) == remote.UNREACHABLE
+    assert ops(ssh)[-4:] == [("check", 0), ("probe", None), ("exit", 0), ("master", 255)]
+    assert vias(ssh) == ["master", "login"]
+    assert not socket_of().exists()
+
+
+def test_a_live_master_on_a_device_gone_offline_is_one_255(ssh: Ssh, tmp_path: Path) -> None:
+    t = target(tmp_path)
+    transport = remote.SshTransport()
+    assert remote.probe_device(transport, t)
+    ssh.offline(ALIAS).touch()
+    assert remote.check_worker(transport, t) == remote.UNREACHABLE
+    assert ops(ssh)[-4:] == [("check", 0), ("probe", 255), ("exit", 0), ("master", 255)]
+    assert vias(ssh) == ["master", "login"]
+    ssh.offline(ALIAS).unlink()
+    assert remote.check_worker(transport, t) == remote.GONE
+    assert ops(ssh)[-2:] == [("check", 255), ("master", 0)]
+
+
 def test_a_live_master_is_checked_not_rebuilt(ssh: Ssh, tmp_path: Path) -> None:
     t = target(tmp_path)
     transport = remote.SshTransport()
     for _ in range(3):
         assert remote.probe_device(transport, t)
-    assert ops(ssh) == [("check", 255), ("master", 0), ("check", 0), ("check", 0)]
+    assert ops(ssh) == [
+        ("check", 255), ("master", 0), ("check", 0), ("probe", 0), ("check", 0), ("probe", 0)
+    ]
 
 
 @pytest.mark.parametrize("mode", [0o755, 0o710, "symlink"])
@@ -207,12 +271,13 @@ def test_a_drop_under_a_live_master_is_255_and_resets_the_master(
     t = target(tmp_path)
     transport = remote.SshTransport()
     assert remote.probe_device(transport, t)
-    ssh.offline(ALIAS).touch()
-    assert remote.check_worker(transport, t) == remote.UNREACHABLE
+    ssh.fault(ALIAS, "drop-after", 0.5)
+    exchanged = transport.exchange(remote.ssh_argv(t, "sleep 3"), timeout=30)
+    assert exchanged.code == remote.SSH_UNREACHABLE
     assert vias(ssh) == ["master", "master"]  # the one call, not retried
-    assert ops(ssh)[-2:] == [("check", 0), ("stop", 0)]
+    assert ops(ssh)[-3:] == [("check", 0), ("probe", 0), ("stop", 0)]
     assert not socket_of().exists()
-    ssh.offline(ALIAS).unlink()
+    (ssh.hosts / f"{ALIAS}.drop-after").unlink()
     assert remote.check_worker(transport, t) == remote.GONE
     assert ops(ssh)[-2:] == [("check", 255), ("master", 0)]
 

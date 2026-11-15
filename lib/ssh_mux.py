@@ -14,10 +14,15 @@ new one each time.
   live master, and falls back to its own plain login when the socket is
   missing, stale or refuses the session, so a bad socket never fails a call.
 * Before each call, under an flock on `<socket>.lock`, `ssh -O check` asks
-  the master whether it is alive. When it is not (a box VM pause, a reboot,
-  a killed master, a deleted socket), a stale socket owned by this user is
-  removed and one master is started with `-N -f` and `ControlPersist`. That
-  rebuild happens inside the transport: callers see one ordinary call.
+  the master whether it is alive, then a no-op session (`PROBE_COMMAND`)
+  through it, bounded by `PROBE_TIMEOUT_SECONDS`, proves its connection to
+  the device still carries sessions: `-O check` only reaches the local
+  master process, which outlives a TCP path lost across a box VM pause.
+  When either fails (a pause, a reboot, a killed master, a deleted socket),
+  the master is told to exit, a stale socket owned by this user is removed
+  and one master is started with `-N -f` and `ControlPersist`. That rebuild
+  happens inside the transport, before the command is sent: callers see one
+  ordinary call, and the command itself runs at most once.
 * When the master cannot be started (the device is down), the call runs
   once as a plain login, exactly as it did before multiplexing, so a real
   drop still ends 255. When a call through a master ends 255 or times out,
@@ -34,12 +39,16 @@ import hashlib
 import os
 import stat
 import subprocess
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 CONTROL_PERSIST_SECONDS = 600
 CONTROL_TIMEOUT_SECONDS = 10.0
 MASTER_TIMEOUT_SECONDS = 30.0
+PROBE_TIMEOUT_SECONDS = 10.0
+RETIRE_WAIT_SECONDS = 2.0
+PROBE_COMMAND = "exit 0 # orch-ssh-mux-probe"
 UNREACHABLE = 255
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -139,7 +148,25 @@ class Multiplexer:
             os.close(fd)
 
     def _live(self, socket: str, alias: str, user: str) -> bool:
-        return self._control(socket, "check", alias, user) == 0
+        if self._control(socket, "check", alias, user) != 0:
+            return False
+        if self._probe(socket, alias, user) == 0:
+            return True
+        self._control(socket, "exit", alias, user)
+        deadline = time.monotonic() + RETIRE_WAIT_SECONDS
+        while os.path.lexists(socket) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return False
+
+    def _probe(self, socket: str, alias: str, user: str) -> int | None:
+        argv = [
+            self.binary,
+            *self.options,
+            "-o", "ControlMaster=no",
+            "-o", f"ControlPath={socket}",
+            "-l", user, "--", alias, PROBE_COMMAND,
+        ]
+        return self._quiet(argv, PROBE_TIMEOUT_SECONDS)
 
     def _rebuild(self, socket: str, alias: str, user: str) -> bool:
         try:
