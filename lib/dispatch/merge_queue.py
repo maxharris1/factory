@@ -813,7 +813,7 @@ class MergeQueueMixin:
                 and int(round_field.split("/", 1)[0]) == reported_round
                 and _matching_head(fields.get("head") or "", ticket.current_head)
                 is not None
-                and self._trusted_reviewer(ticket, item, fields)
+                and self._counted_verdict(ticket, item, fields)
             ):
                 return True
         return False

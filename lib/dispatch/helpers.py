@@ -118,6 +118,11 @@ _SETTLING_KINDS = {
     "update-from-main": ("ready", "questions"),
 }
 
+_REGISTERING_ACTIONS = {
+    "ready": ("build", "fix", "update-from-main"),
+    "verdict": ("review",),
+}
+
 # The handoff kind and role that answers each harness step (#108).
 _ANSWERS = {
     "plan": ("plan", "builder"),
@@ -191,6 +196,18 @@ def _detail_round_number(detail: str | None) -> int | None:
     except ValueError:
         return None
     return _round_number(context.get("round")) if isinstance(context, dict) else None
+
+
+def _detail_round(detail: str | None) -> str | None:
+    """The round field a job's detail JSON carries ("N/CAP")."""
+    if not detail:
+        return None
+    try:
+        context = json.loads(detail)
+    except ValueError:
+        return None
+    value = context.get("round") if isinstance(context, dict) else None
+    return value if isinstance(value, str) else None
 
 
 def _detail_routing(detail: str | None) -> tuple[str, str] | None:

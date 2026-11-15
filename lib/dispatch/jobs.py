@@ -21,16 +21,16 @@ from lib.dispatch.helpers import (
     _append_detail,
     _comment_order,
     _detail_project_bot,
+    _detail_round,
     _detail_round_number,
     _matching_head,
     _merge_only,
     _queue_state,
     _retry_detail,
-    _round_number,
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, RouteError, TicketRef, TrackedTicket
+from lib.dispatch.types import Comment, HandoffCandidate, RouteError, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
@@ -1046,16 +1046,26 @@ class JobsMixin:
         still counts. An update job's result follows its source comment, and
         its ready is matched by TU's attribution, not by time.
 
-        A review's is a reviewer verdict for the job's head (as a prefix,
-        like every head compare) and round; a review job with no round or no
-        head takes none. A builder's questions count unless T5 found none in
-        them. A build or fix job's ready is at a new head: one other than
-        the job's own, or any head for a job that has none. That ready
-        counts once T2 routed it, or while it waits on CI at the polled PR
-        head. One T2 left unhandled at another head (its fresh PR read
-        failed) may yet be stale: _HANDOFF_UNREAD when no counted handoff
-        comes first.
+        A review's is a verdict from the job's recipient for the job's head
+        (as a prefix, like every head compare) and round; a review job with
+        no round or no head takes none. A builder's is from the job's
+        recipient; its questions count unless T5 found none in them. A build
+        or fix job's ready is at a new head: one other than the job's own, or
+        any head for a job that has none. That ready counts once T2 routed
+        it, or while it waits on CI at the polled PR head. One T2 left
+        unhandled at another head (its fresh PR read failed) may yet be
+        stale: _HANDOFF_UNREAD when no counted handoff comes first.
         """
+        candidate = self._handoff_candidate(job, ticket)
+        if candidate is None:
+            return None
+        return _HANDOFF_UNREAD if candidate.unread else candidate.comment
+
+    def _handoff_candidate(
+        self, job: Job, ticket: TrackedTicket | None = None
+    ) -> HandoffCandidate | None:
+        if ticket is None:
+            ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
         if ticket is None:
             return None
         action = job.request.action
@@ -1063,12 +1073,12 @@ class JobsMixin:
         if kinds is None:
             return None
         if action == "review":
-            round_number = _detail_round_number(job.request.detail)
-            if job.request.head is None or round_number is None:
+            round_field = _detail_round(job.request.detail)
+            if job.request.head is None or round_field is None:
                 return None
-            bot, role = f"{ticket.factory.reviewer_harness}-bot", "reviewer"
+            bot, role = f"{job.request.recipient}-bot", "reviewer"
         else:
-            round_number = None
+            round_field = None
             bot, role = f"{job.request.recipient}-bot", "builder"
         update = action == "update-from-main"
         comments = sorted(ticket.comments, key=_comment_order)
@@ -1095,12 +1105,12 @@ class JobsMixin:
                     outcome is not None and outcome.startswith(_REJECTED_OUTCOMES)
                 ):
                     continue
-                return item
+                return HandoffCandidate(item, False)
             head = fields.get("head") or ""
             if kind == "verdict":
                 if _matching_head(head, job.request.head) is None:
                     continue
-                if _round_number(fields.get("round")) != round_number:
+                if fields.get("round") != round_field:
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
@@ -1115,13 +1125,12 @@ class JobsMixin:
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
-            if (
+            unread = (
                 kind == "ready"
                 and outcome is None
                 and _matching_head(head, ticket.current_head) is None
-            ):
-                return _HANDOFF_UNREAD
-            return item
+            )
+            return HandoffCandidate(item, unread)
         return None
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:

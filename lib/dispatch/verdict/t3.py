@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from lib.dispatch.helpers import _comment_link, _matching_head, _round_number, _scope
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.queue import JobRequest
 
 
@@ -24,6 +24,11 @@ class T3Mixin:
     ) -> tuple[bool, str]:
         if not self._trusted_reviewer(ticket, comment, fields):
             return True, "rejected-revise-author"
+        registration = self._registration(ticket, comment, "verdict")
+        if registration is Registration.UNREGISTERED:
+            return True, "rejected-unregistered-verdict"
+        if registration is Registration.PENDING:
+            return False, "verdict-awaiting-registration"
         reported_round = _round_number(fields.get("round"))
         if self._over_cap(ticket, reported_round):
             return True, "rejected-over-cap"
