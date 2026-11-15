@@ -1,0 +1,7 @@
+decision	choice	why
+where the writer lives	lib/dispatch/transitions.py write_workflow_state, called by all 19 writers	the ticket's lib/dispatcher.py code moved to lib/dispatch/; one helper per the ticket
+helper vs trigger	a Python helper plus a static AST guard, not an SQLite trigger	a trigger cannot know source and reads SQLite's wall clock instead of queue.now()
+same-state writes	no row when the state does not change	a re-held ship to ship is not a transition and would split one visit
+upserts	read the row, then UPDATE with the guard or INSERT with defaults, in one BEGIN IMMEDIATE	keeps each old ON CONFLICT's insert and update columns exactly
+terminal guard	record_terminal uses _NOT_FINISHED	same SQL as the old inline COALESCE(...) NOT IN ('merged','done')
+writer enumeration	AST test maps each source literal to its file; regex test fails on any raw workflow_state write; Board flows check the ledger chains	on origin/main the guard flags all 19 old sites; driving every writer one by one did not fit the job budget
