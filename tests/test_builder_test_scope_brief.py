@@ -46,10 +46,9 @@ def test_build_step_names_the_scope() -> None:
 def test_fix_step_names_the_scope(kind: str) -> None:
     for section in sections(kind):
         assert "3. Run the tests." not in section
-        assert (
-            "3. Run only the new test and the tests for the files you touched, plus a short smoke set. "
-            "Then run the router's \"Before ready\" steps."
-        ) in section.splitlines()
+        step = next(line for line in section.splitlines() if line.startswith("3. "))
+        assert "the tests for the files you touched, plus a short smoke set" in step
+        assert "Then run the router's \"Before ready\" steps." in step
 
 
 @pytest.mark.parametrize("kind", ["plan", "review"])

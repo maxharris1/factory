@@ -67,6 +67,10 @@ COMMAND="${2:-}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
+
+# shellcheck source=deploy/host-pidns.sh
+. "${HERE}/host-pidns.sh"
+
 STATE="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
 CONFIG="${HOME}/.config/factory"
 PIDFILE="${STATE}/waiter-${BOT}.pid"
@@ -469,12 +473,12 @@ remove_autostart() {
 }
 
 case "$COMMAND" in
-    _supervise) supervise ;;
-    start) service_lock && start ;;
-    stop) service_lock && stop ;;
-    restart) service_lock && restart ;;
+    _supervise) factory_host_pidns_or_refuse _supervise && supervise ;;
+    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
+    restart) factory_host_pidns_or_refuse restart && service_lock && restart ;;
     status) status ;;
-    ensure) service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

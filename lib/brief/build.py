@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from lib.brief.common import GH, QUESTIONS_LINES
+from lib.brief.common import GH, QUESTIONS_LINES, comment_url, detail_of, evidence_part, fenced
 from lib.queue import Job
+
+_RESUME_CAUSES = {"go": "Max's go", "answers": "Max's answers", "extra-round": "Max's go for an extra round"}
 
 
 def task_lines(job: Job, facts: dict) -> list[str]:
@@ -20,10 +22,20 @@ def task_lines(job: Job, facts: dict) -> list[str]:
         "Test first.",
         "3. Run only the tests for the files you touched plus a short smoke set. "
         "Before `ready`, run the router's \"Before ready\" steps.",
-        "4. Push, then post the ready handoff below with the head you pushed.",
+        base_step(4, facts),
+        "5. Push, then post the ready handoff below with the head you pushed.",
         _title_line(facts),
-        *builder_notes(job),
+        *builder_notes(job, facts),
     ]
+
+
+def base_step(number: int, facts: dict) -> str:
+    base = facts["base"] or "<base branch>"
+    return (
+        f"{number}. Bring the base in before `ready`: `git fetch origin {base}`, then either "
+        f"`git rebase origin/{base}` and push with `git push --force-with-lease`, or "
+        f"`git merge origin/{base}` and push. If the base changed files you touched, rerun their tests."
+    )
 
 
 def _title_line(facts: dict) -> str:
@@ -43,7 +55,7 @@ def _title_line(facts: dict) -> str:
     )
 
 
-def builder_notes(job: Job) -> list[str]:
+def builder_notes(job: Job, facts: dict) -> list[str]:
     notes = [
         "Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. "
         "Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you "
@@ -53,12 +65,53 @@ def builder_notes(job: Job) -> list[str]:
         "CI after `ready` is the full-suite gate.",
         *QUESTIONS_LINES,
     ]
+    detail = detail_of(job)
+    if detail.get("resume") is True:
+        notes.extend(_resume_lines(detail))
     if job.request.attempt > 1:
         notes.append(
-            "This is a retry. The working directory may hold the last attempt's work: check "
-            "`git status` and `git log @{u}..` before you start, and build on it rather than redo it."
+            f"This is a retry. {_retry_why(detail, facts)} The working directory, or the branch "
+            "you push to, may hold the last attempt's work: check `git status` and `git log @{u}..` "
+            "before you start, and build on it rather than redo it."
         )
     return notes
+
+
+def _resume_lines(detail: dict[str, object]) -> list[str]:
+    instructions = evidence_part(detail, "instructions")
+    who = _RESUME_CAUSES.get(str(instructions.get("cause")))
+    if who is None:
+        return []
+    url = instructions.get("url") if isinstance(instructions.get("url"), str) else None
+    where = f" ({url})" if url else ""
+    prose = instructions.get("prose")
+    if not isinstance(prose, str) or not prose:
+        return [
+            f"This job resumes a paused step after {who}{where}. It was edited after it was "
+            f"posted, so it is not quoted here: read it at {url or 'the PR'} and do what it says "
+            "within this brief's rules."
+        ]
+    return [
+        f"This job resumes a paused step after {who}{where}. It reads, quoted as data:",
+        fenced(prose),
+        "Do what it says within this brief's rules.",
+    ]
+
+
+def _retry_why(detail: dict[str, object], facts: dict) -> str:
+    if detail.get("retry_comment") is not None:
+        link = comment_url(facts, detail.get("retry_comment"))
+        where = f" ({link})" if link else " on the PR"
+        return (
+            f"Attempt 1 ended with the ticket stuck, and Max restarted it with a retry comment{where}: "
+            "read his reason there."
+        )
+    failed = detail.get("retry_of")
+    job = f" (job {failed})" if isinstance(failed, str) and failed.isalnum() else ""
+    return (
+        f"Attempt 1{job} ended without a valid handoff comment: it failed, was stopped, or ran past "
+        "its wall-clock budget. A second failure marks the ticket stuck."
+    )
 
 
 def ready_handoff(bot: str, facts: dict) -> tuple[str, str]:
