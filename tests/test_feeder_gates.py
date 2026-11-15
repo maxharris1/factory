@@ -29,6 +29,7 @@ from tests.test_feeder import (
     GITHUB_ORCH,
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
+    TEMPLATE,
     FakeGitHub,
     FakeLinear,
     dispatcher_for,
@@ -428,7 +429,7 @@ def test_linear_relation_blocker_waits_until_completed(tmp_path: Path) -> None:
 
 def test_linear_description_blocked_by_line_resolves_on_the_project_repo(tmp_path: Path) -> None:
     linear = FakeLinear()
-    linear.issues = [replace(linear_issue("AUT-8"), body="Blocked by #12")]
+    linear.issues = [replace(linear_issue("AUT-8"), body="Blocked by #12" + TEMPLATE)]
     feeder, _, github, _ = make_feeder(tmp_path, orch=LINEAR_ORCH, linear=linear,
                                        factory_text=LINEAR_FACTORY_MD)
     github.statuses = {ref(12, "acme/linear-app"): OPEN_PULL}
@@ -516,7 +517,7 @@ def test_collision_keeps_urgent_then_bug_then_oldest_then_lower_number(
     tmp_path: Path, tickets, winner: str
 ) -> None:
     feeder, _, github, _ = make_feeder(tmp_path, box=3)
-    github.issues[HOME] = [replace(item, body="Touches: lib/x.py") for item in tickets]
+    github.issues[HOME] = [replace(item, body="Touches: lib/x.py" + TEMPLATE) for item in tickets]
     report = feeder.feed_once()
     assert fed_heads(github, report) == [f"factory/issue-{winner}"]
     (loser,) = {item.key for item in tickets} - {winner}

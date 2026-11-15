@@ -14,7 +14,7 @@ from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _handoffs, _health_link, _verdicts
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
-from lib.dashboard_pages.efficiency import _savings
+from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _health, _log, _no_waiter, _POLL_STATE,
@@ -1232,7 +1232,7 @@ def _statusline(snapshot: dict) -> str:
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
     "activity.html": (_attention, _handoffs, _verdicts, _log),
-    "efficiency.html": (_health, _savings, rollup_panel),
+    "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel, _health),
     "health.html": (_components, _no_waiter),
     "job.html": (_board, _tickets, _jobview),
 }

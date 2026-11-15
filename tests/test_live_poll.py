@@ -416,8 +416,9 @@ def test_untrusted_risk_comment_leaves_the_ticket_low(login: str, body: str) -> 
     assert _risk_after(("grok-login", GROK_LOW), (login, body)) == "low"
 
 
-def test_later_trusted_risk_still_applies() -> None:
-    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "high"
+def test_a_later_trusted_risk_does_not_move_the_intake_risk() -> None:
+    # #195: the first trusted orchestrator brief or go sets the risk.
+    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "low"
 
 
 def test_linear_risk_counts_only_from_trusted_linear_users() -> None:
@@ -1764,10 +1765,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 134_880),
-        (25, 5, 10, 1_020, 618_720),
-        (100, 20, 40, 1_080, 592_320),
-        (500, 20, 460, 1_080, 659_040),
+        (5, 1, 2, 300, 145_140),
+        (25, 5, 10, 1_020, 670_020),
+        (100, 20, 40, 1_080, 640_200),
+        (500, 20, 460, 1_080, 713_760),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(

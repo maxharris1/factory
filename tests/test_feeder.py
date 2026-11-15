@@ -242,15 +242,19 @@ class FakeLinear:
         return item.id
 
 
+# A minimal intake template (#204): fixtures append it unless a test opts out.
+TEMPLATE = "\n\nRisk: low\nPlan first: no\nDepends on: none\n\n## Acceptance criteria\n\n- [ ] It works.\n"
+
+
 def issue(number: int, *, labels=("factory:ready",), applied_by="maxharris1",
           created_at: float = 1000.0, body: str = "Fix the thing in lib/x.py.",
-          title: str | None = None, repo: str = "owner/app") -> IntakeIssue:
+          title: str | None = None, repo: str = "owner/app", template: bool = True) -> IntakeIssue:
     return IntakeIssue(
         repo=repo,
         tracker="github",
         key=str(number),
         title=title or f"Issue {number}",
-        body=body,
+        body=body + TEMPLATE if template else body,
         labels=tuple(labels),
         created_at=created_at,
         applied_by=applied_by,
@@ -265,7 +269,7 @@ def linear_issue(identifier: str = "AUT-7", *, applied_by="max-linear-id",
         tracker="linear",
         key=identifier,
         title="Linear work",
-        body="Touch src/a.ts only.",
+        body="Touch src/a.ts only." + TEMPLATE,
         labels=tuple(labels),
         created_at=created_at,
         applied_by=applied_by,
