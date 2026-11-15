@@ -57,6 +57,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib.device_pool import LINK_DROP_TAG, Placement
+from lib.device_sync import SYNC_GRACE_SECONDS
 from lib.queue import SLOTS_TABLE, retire_requeued
 from lib.remote_follow import LAUNCH_TTL_SECONDS
 
@@ -352,6 +353,35 @@ def last_run_end(
     return None if row is None else (str(row[0]), str(row[1]))
 
 
+def _free_unstarted_slot(
+    connection: sqlite3.Connection,
+    job_id: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+    *,
+    last_activity_at: float | None = None,
+) -> bool:
+    """Delete the slot of a running job whose slot matches slot_guard. False,
+    with nothing changed, when either guard misses."""
+    activity = "" if last_activity_at is None else " AND last_activity_at = ?"
+    params: tuple[object, ...] = (job_id,) if last_activity_at is None else (
+        job_id, last_activity_at
+    )
+    running = connection.execute(
+        f"SELECT 1 FROM jobs WHERE id = ? AND state = 'running'{activity}", params
+    ).fetchone()
+    if running is None:
+        return False
+    slot = connection.execute(
+        f"SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ? AND {slot_guard}",
+        (job_id, *slot_params),
+    ).fetchone()
+    if slot is None:
+        return False
+    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
+    return True
+
+
 def requeue_unstarted(
     connection: sqlite3.Connection,
     job_id: str,
@@ -375,22 +405,10 @@ def requeue_unstarted(
     cancelled, not requeued (retire_requeued, #108). Returns (event,
     detail), or None when the guard did not match and nothing changed.
     """
-    activity = "" if last_activity_at is None else " AND last_activity_at = ?"
-    params: tuple[object, ...] = (job_id,) if last_activity_at is None else (
-        job_id, last_activity_at
-    )
-    running = connection.execute(
-        f"SELECT 1 FROM jobs WHERE id = ? AND state = 'running'{activity}", params
-    ).fetchone()
-    if running is None:
+    if not _free_unstarted_slot(
+        connection, job_id, slot_guard, slot_params, last_activity_at=last_activity_at
+    ):
         return None
-    slot = connection.execute(
-        f"SELECT 1 FROM {SLOTS_TABLE} WHERE job_id = ? AND {slot_guard}",
-        (job_id, *slot_params),
-    ).fetchone()
-    if slot is None:
-        return None
-    connection.execute(f"DELETE FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,))
     used = free_requeues(connection, job_id)
     if used < MAX_FREE_REQUEUES:
         connection.execute(
@@ -500,6 +518,24 @@ def requeue_link_drop(
     detail), or None when the guard did not match.
     """
     used = link_drop_requeues(connection, job_id)
+    return _requeue_failed(
+        connection,
+        job_id,
+        now=now,
+        reason=reason,
+        event=REQUEUED_LINK_DROP,
+        detail=(
+            f"{reason}; requeued, no round or attempt charged "
+            f"(link-drop requeue {used + 1} of {MAX_LINK_DROP_REQUEUES})"
+        ),
+    )
+
+
+def _requeue_failed(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str, event: str, detail: str
+) -> tuple[str, str] | None:
+    """Put a failed, unhandled row back to queued as itself and free its slot,
+    recording event; a finished ticket's job is cancelled instead."""
     changed = connection.execute(
         """
         UPDATE jobs SET state = 'queued', finished_at = NULL, last_activity_at = ?
@@ -513,9 +549,128 @@ def requeue_link_drop(
     retired = retire_requeued(connection, job_id, reason, now=now)
     if retired is not None:
         return "cancelled", retired
-    detail = (
-        f"{reason}; requeued, no round or attempt charged "
-        f"(link-drop requeue {used + 1} of {MAX_LINK_DROP_REQUEUES})"
+    record_job_event(connection, job_id, event, detail, now)
+    return event, detail
+
+
+# --- #357: a start refused because a factory checkout lags -------------------
+
+PREFLIGHT_LAGGING = "preflight-lagging"
+LAG_BLOCKED = "lag-blocked"
+REQUEUED_LAGGING = "requeued-lagging"
+LAGGING_BACKOFF_SECONDS = (30, 60, 120, 240)
+LAGGING_WAIT_SECONDS = SYNC_GRACE_SECONDS
+
+
+@dataclass(frozen=True)
+class LaggingEnd:
+    detail: str
+    first_refused_at: float
+    requeues: int
+
+    def backoff(self) -> int:
+        return LAGGING_BACKOFF_SECONDS[min(self.requeues, len(LAGGING_BACKOFF_SECONDS) - 1)]
+
+    def past_wait(self, at: float) -> bool:
+        return at - self.first_refused_at >= LAGGING_WAIT_SECONDS
+
+
+def fail_lagging(
+    connection: sqlite3.Connection,
+    job_id: str,
+    *,
+    now: float,
+    reason: str,
+    slot_guard: str,
+    slot_params: tuple[object, ...],
+) -> tuple[str, str] | None:
+    """Fail a running job the waiter's preflight refused for a lagging
+    checkout, unhandled, so T6 requeues it after a backoff; no free requeue
+    is charged. Guarded as requeue_unstarted; None when the guard missed."""
+    if not _free_unstarted_slot(connection, job_id, slot_guard, slot_params):
+        return None
+    connection.execute(
+        """
+        UPDATE jobs SET state = 'failed', finished_at = ?, last_activity_at = ?,
+            failure_handled = 0
+        WHERE id = ?
+        """,
+        (now, now, job_id),
     )
-    record_job_event(connection, job_id, REQUEUED_LINK_DROP, detail, now)
-    return REQUEUED_LINK_DROP, detail
+    record_job_event(connection, job_id, PREFLIGHT_LAGGING, reason, now)
+    return PREFLIGHT_LAGGING, reason
+
+
+def requeue_lagging(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str
+) -> tuple[str, str] | None:
+    """Requeue a failed, unhandled lagging-refused row as itself in the
+    caller's write transaction: no round, attempt or free requeue charged."""
+    return _requeue_failed(
+        connection,
+        job_id,
+        now=now,
+        reason=reason,
+        event=REQUEUED_LAGGING,
+        detail=f"{reason}; requeued, no round or attempt charged",
+    )
+
+
+def lagging_end(connection: sqlite3.Connection, job_id: str) -> LaggingEnd | None:
+    """The row's lag when its latest end is a refusal or lag-blocked, or None."""
+    return _lag_since_run(connection, job_id, (PREFLIGHT_LAGGING, LAG_BLOCKED))
+
+
+def lagging_requeue(connection: sqlite3.Connection, job_id: str) -> LaggingEnd | None:
+    return _lag_since_run(connection, job_id, (REQUEUED_LAGGING,))
+
+
+def fail_lag_blocked(
+    connection: sqlite3.Connection, job_id: str, *, now: float, detail: str
+) -> bool:
+    changed = connection.execute(
+        """
+        UPDATE jobs SET state = 'failed', finished_at = ?, last_activity_at = ?,
+            failure_handled = 0
+        WHERE id = ? AND state = 'queued'
+        """,
+        (now, now, job_id),
+    ).rowcount
+    if changed != 1:
+        return False
+    record_job_event(connection, job_id, LAG_BLOCKED, detail, now)
+    return True
+
+
+def _lag_since_run(
+    connection: sqlite3.Connection, job_id: str, latest: tuple[str, ...]
+) -> LaggingEnd | None:
+    if not has_job_events(connection):
+        return None
+    ends = (PREFLIGHT_LAGGING, LAG_BLOCKED, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
+            REQUEUED_LINK_DROP)
+    marks = ", ".join("?" for _ in ends)
+    rows = connection.execute(
+        f"""
+        SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
+        WHERE job_id = ? AND event IN ({marks}) ORDER BY id
+        """,
+        (job_id, *ends),
+    ).fetchall()
+    if not rows or rows[-1][0] not in latest:
+        return None
+    detail: str | None = None
+    first_refused_at: float | None = None
+    requeues = 0
+    for event, event_detail, recorded_at in reversed(rows):
+        if event in (RUN_DIED, RUN_EXITED):
+            break
+        if event == PREFLIGHT_LAGGING:
+            first_refused_at = float(recorded_at)
+            if detail is None:
+                detail = str(event_detail)
+        elif event == REQUEUED_LAGGING:
+            requeues += 1
+    if first_refused_at is None or detail is None:
+        return None
+    return LaggingEnd(detail, first_refused_at, requeues)

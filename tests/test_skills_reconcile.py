@@ -145,12 +145,12 @@ def test_a_remote_start_is_refused_while_the_box_lags_its_origin_main(
 
     assert started is None
     assert device.spawn.calls == []
-    assert state(device.db, job_id) == "queued"
+    assert state(device.db, job_id) == "failed"
     error = (f"preflight-lagging: box claude-bot {lock_root.resolve()} at {old[:12]}, "
              f"origin/main at {new[:12]}")
     assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
-    assert sync_rows(device.db) == [("pc", "claude-bot", "lagging", error)]
-    assert any("requeued, no round charged" in line for line in device.log)
+    assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
+    assert any("failed for T6 to requeue after a backoff" in line for line in device.log)
 
 
 class Installs:

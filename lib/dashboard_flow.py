@@ -12,7 +12,8 @@ then the ticket's current workflow state. Where two of those states have no
 direct transition, a bridge of at most MAX_BRIDGE steps through the chart is
 filled in (intake -> questions -> building, since questions is Grok Bot's
 step and has no job of its own); longer gaps are kept as a jump with no
-edge drawn.
+edge drawn. Once the ticket has rows in ticket_transitions, those rows are
+the path from the first one on, with their times and no bridge.
 
 The job view draws the whole chart on a canvas (flowmap_layout places the
 nodes and routes the wires, FLOWMAP_SCRIPT's drawFlowMap paints a frame)
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import re
 from collections import deque
 from collections.abc import Iterable, Sequence
@@ -169,6 +171,12 @@ class Visit(NamedTuple):
     steps: list[JobStep]
 
 
+class Transition(NamedTuple):
+    from_state: str | None
+    to_state: str
+    at: float
+
+
 def chart_visits(
     chart: dict | None, observed: Iterable[tuple[str | None, JobStep | None]]
 ) -> list[Visit]:
@@ -295,32 +303,129 @@ def _started_at(visit: Visit) -> float | None:
     return step.created_at if step.started_at is None else step.started_at
 
 
+def _owning_row(
+    transitions: Sequence[Transition],
+    floors: Sequence[float],
+    ends: Sequence[float],
+    state: str,
+    created_at: float,
+) -> int | None:
+    for i, row in enumerate(transitions):
+        if row.to_state == state and floors[i] <= created_at < ends[i]:
+            return i
+    for i, row in enumerate(transitions):
+        if row.at <= created_at < ends[i]:
+            return i
+    return None
+
+
+def _every_path_visits(chart: dict | None, origin: str | None, target: str, via: str) -> bool:
+    if via in (origin, target):
+        return True
+    if chart is None or origin is None or origin == target:
+        return False
+    adjacency = _adjacency(chart)
+    avoiding = {name: [nxt for nxt in nexts if nxt != via] for name, nexts in adjacency.items()}
+    return target in _reach(adjacency, origin) and target not in _reach(avoiding, origin)
+
+
+def _first_row_floor(
+    chart: dict | None, steps: Sequence[tuple[str, JobStep]], first: Transition
+) -> float:
+    if first.from_state is None:
+        return -math.inf
+    start = None if chart is None else chart["start"]
+    last_other_job, last_state = max(
+        ((step.created_at, state) for state, step in steps
+         if step.created_at < first.at and state != first.to_state),
+        default=(-math.inf, start),
+    )
+    if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
+        return last_other_job
+    *kept_by_old_visit, enqueued_with_first_row = sorted(
+        step.created_at for state, step in steps
+        if state == first.to_state and last_other_job < step.created_at < first.at
+    ) or [first.at]
+    return enqueued_with_first_row if kept_by_old_visit else first.at
+
+
+def _recorded_walk(
+    chart: dict | None,
+    steps: Sequence[tuple[str, JobStep]],
+    current: str | None,
+    transitions: Sequence[Transition],
+    tracked_at: float | None,
+) -> tuple[list[Visit], list[float | None]]:
+    known = None if chart is None else {state["name"] for state in chart["states"]}
+    start = None if chart is None else chart["start"]
+    first = transitions[0]
+    ends = [row.at for row in transitions[1:]] + [math.inf]
+    floors = [_first_row_floor(chart, steps, first), *(row.at for row in transitions[:-1])]
+    owned: list[list[JobStep]] = [[] for _ in transitions]
+    before = []
+    for state, step in steps:
+        index = _owning_row(transitions, floors, ends, state, step.created_at)
+        if index is None:
+            before.append((state, step))
+        else:
+            owned[index].append(step)
+    if first.from_state is None:
+        walk = [] if start is None else [Visit(start, [step for _, step in before])]
+        opened = tracked_at if tracked_at is not None and tracked_at <= first.at else None
+        starts = [opened] * len(walk)
+    else:
+        walk = chart_visits(chart, [(start, None), *before, (first.from_state, None)])
+        starts = [_started_at(visit) for visit in walk]
+    recorded = [(row.to_state, row.at, jobs) for row, jobs in zip(transitions, owned)]
+    if current is not None and current != transitions[-1].to_state:
+        recorded.append((current, None, []))
+    for state, began, jobs in recorded:
+        if known is not None and state not in known:
+            continue
+        if walk and walk[-1].state == state:
+            walk[-1].steps.extend(jobs)
+            continue
+        walk.append(Visit(state, jobs))
+        starts.append(began)
+    return walk, starts
+
+
 def job_flow(
     chart: dict | None,
     history: Sequence[JobStep],
     current: str | None,
     now: float,
+    transitions: Sequence[Transition] = (),
+    tracked_at: float | None = None,
 ) -> dict:
     """{state, path, state_age_seconds, next, terminal, visits,
     hops_to_shipped, all_durations_known} for a ticket whose jobs, oldest
-    first, are `history`. `next` is the chart's direct successors of the
-    current state; `terminal` says the current state is finished
-    (is_terminal). `visits` holds one entry per `path` state: {state, who,
-    started_at, duration_seconds, time_known, off_chart, reason, current}.
-    A visit ends when the next one starts, else when its last job finished;
-    the current visit counts up to `now`. Unknown times are None."""
+    first, are `history` and whose recorded state changes, oldest first,
+    are `transitions` (_recorded_walk). `next` is the chart's direct
+    successors of the current state; `terminal` says the current state is
+    finished (is_terminal). `visits` holds one entry per `path` state:
+    {state, who, started_at, duration_seconds, time_known, off_chart,
+    reason, current}. A visit ends when the next one starts, else when its
+    last job finished; the current visit counts up to `now`. Unknown times
+    are None."""
     steps = [(JOB_STATES[step.action], step) for step in history if step.action in JOB_STATES]
-    start = chart["start"] if chart is not None else None
-    walk = chart_visits(chart, [(start, None), *steps, (current, None)])
-    path = [visit.state for visit in walk]
     if chart is not None and current is not None and current not in {
         state["name"] for state in chart["states"]
     }:
         current = None
+    if transitions:
+        walk, starts = _recorded_walk(chart, steps, current, transitions, tracked_at)
+    else:
+        start = chart["start"] if chart is not None else None
+        walk = chart_visits(chart, [(start, None), *steps, (current, None)])
+        starts = [_started_at(visit) for visit in walk]
+    path = [visit.state for visit in walk]
     age = None
-    if current is not None and steps and steps[-1][0] == current:
+    if current is not None and transitions and transitions[-1].to_state == current:
+        age = int(max(0.0, now - transitions[-1].at))
+    elif current is not None and steps and steps[-1][0] == current:
         # Time in state counts from the first job of the run that is still
-        # in it (the database records no transition times).
+        # in it, when no recorded transition says when the state began.
         index = len(steps) - 1
         while index > 0 and steps[index - 1][0] == current:
             index -= 1
@@ -330,7 +435,6 @@ def job_flow(
     labels = {} if chart is None else {
         (edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]
     }
-    starts = [_started_at(visit) for visit in walk]
     visits = []
     for i, visit in enumerate(walk):
         began = starts[i]
