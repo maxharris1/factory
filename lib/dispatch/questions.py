@@ -275,8 +275,6 @@ class QuestionsMixin:
                 continue
             if not self._trusted(ticket, item, fields, f"{recipient}-bot", role=role):
                 continue
-            if plan_round is not None and _round_number(fields.get("round")) != plan_round:
-                continue
             reported = fields.get("head", "")
             if action == "review":
                 if (
@@ -297,6 +295,11 @@ class QuestionsMixin:
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
+                continue
+            if plan_round is not None and (
+                _round_number(fields.get("round")) != plan_round
+                or (handled is None and not self._t1p_accepts_plan(ticket, item, plan_round))
+            ):
                 continue
             if (
                 kind in _REGISTERING_ACTIONS

@@ -7,6 +7,7 @@ a fake source. Nothing reaches GitHub or the live orch.db.
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -559,6 +560,47 @@ def test_an_answer_resumed_round_2_plan_job_is_done_from_its_round_2_plan(
     assert board.workflow_state() == "building"
 
 
+def _drop_plan_round(board: Board, job_id: str) -> None:
+    with board.queue.connect() as connection:
+        (detail,) = connection.execute("SELECT detail FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        legacy = {key: value for key, value in json.loads(detail).items() if key != "plan_round"}
+        connection.execute("UPDATE jobs SET detail = ? WHERE id = ?", (json.dumps(legacy), job_id))
+        connection.commit()
+
+
+def test_a_resumed_round_2_plan_job_from_before_plan_round_is_not_settled_by_a_round_1_plan(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    resumed = _resumed_round_2_plan(board)
+    _drop_plan_round(board, resumed)
+    cached = board.snapshot()
+    board.post("stale-plan", PLAN.format(round=1, ac="met"))
+    board.fail(resumed)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    board.poll()
+    assert "done-from-plan" not in board.events(resumed)
+    assert board.rows("plan") == [("done", 1), ("done", 1), ("failed", 1), ("queued", 2)]
+
+
+def test_a_restored_resumed_plan_job_from_before_plan_round_is_not_settled_by_a_round_1_plan(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    resumed = _resumed_round_2_plan(board)
+    _drop_plan_round(board, resumed)
+    with board.queue.connect() as connection:
+        record_job_event(connection, resumed, "restored-claim", "restored", board.now[0])
+        connection.commit()
+    cached = board.snapshot()
+    board.post("stale-plan", PLAN.format(round=1, ac="met"))
+    board.fail(resumed)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    board.poll()
+    assert "done-from-plan" not in board.events(resumed)
+    assert board.rows("plan") == [("done", 1), ("done", 1), ("failed", 1), ("queued", 2)]
+
+
 REVIEWER_WAITING_MAX = (
     "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
     "Questions.\n"
@@ -575,7 +617,7 @@ class FreshSource(Source):
 
 
 def _failed_review(
-    tmp_path: Path, *, questions: bool, body: str = REVIEWER_WAITING_MAX
+    tmp_path: Path, *, questions: bool, body: str = REVIEWER_WAITING_MAX, finish: bool = True
 ) -> tuple[Board, str, TrackedTicket]:
     board = Board(tmp_path)
     build = board.start("building")
@@ -596,7 +638,8 @@ def _failed_review(
     before_questions = replace(board.snapshot(), ci={HEAD: CIResult("success")})
     if questions:
         board.post("review-q", body, bot="codex")
-    board.queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    if finish:
+        board.queue.finish(review.id, owner="codex", handoff_comment_id=None)
     return board, review.id, before_questions
 
 
@@ -697,3 +740,21 @@ def test_a_detached_step_failing_after_answers_resumed_it_is_not_requeued(tmp_pa
     board.poll(at=board.now[0] + 61)
     assert [row for row in board.rows("build") if row[0] == "queued"] == [("queued", 1)]
     assert "resumed-by-answers" in board.events(build)
+
+
+def test_reviewer_questions_handled_as_no_questions_then_edited_do_not_settle_the_review(
+    tmp_path: Path,
+) -> None:
+    board, review, _ = _failed_review(tmp_path, questions=True, body=REVIEWER_NO_QUESTIONS, finish=False)
+    green = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(Source(green, board.now))
+    assert board.rows("review") == [("running", 1)]
+    board.comments[-1] = replace(
+        board.comments[-1], body=REVIEWER_WAITING_MAX, edited_at=board.now[0]
+    )
+    board.queue.finish(review, owner="codex", handoff_comment_id=None)
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+    assert "done-from-questions" not in board.events(review)
+    assert board.rows("review") == [("failed", 1), ("queued", 2)]

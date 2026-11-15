@@ -1107,6 +1107,7 @@ class JobsMixin:
             if kind == "questions":
                 if (
                     (update and not after_source)
+                    or outcome == "no-questions"
                     or not _asks_questions(fields, parse_comment(item.body).body)
                     or (outcome is not None and outcome.startswith(_REJECTED_OUTCOMES))
                 ):
@@ -1119,7 +1120,10 @@ class JobsMixin:
                 if fields.get("round") != round_field:
                     continue
             elif kind == "plan":
-                if _round_number(fields.get("round")) != plan_round(job.request.detail):
+                reported = _round_number(fields.get("round"))
+                if reported != plan_round(job.request.detail) or (
+                    outcome is None and not self._t1p_accepts_plan(ticket, item, reported)
+                ):
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue
