@@ -163,8 +163,11 @@ def test_an_operator_step_is_an_ops_criterion(criterion: str) -> None:
         ("No conflicts with\n  any open pull request.", (0, 1, 0)),
         ("Pull request #157 is merged first.", (0, 1, 0)),
         ("Users can manually trigger the retry from the dashboard.", (1, 0, 1)),
+        ("**Pull request** #157 is merged first.", (0, 1, 0)),
+        ("PR **#157** is merged first.", (0, 1, 0)),
+        ("`PR` #157 is merged first.", (0, 1, 0)),
     ],
-    ids=["wrapped", "spelled-out", "user-manual"],
+    ids=["wrapped", "spelled-out", "user-manual", "bold-words", "bold-number", "code"],
 )
 def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, expected) -> None:
     feeder, _, github, _ = make_feeder(tmp_path)
@@ -175,6 +178,42 @@ def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, exp
 
 def test_a_plain_issue_reference_is_not_an_other_prs_criterion() -> None:
     assert codes(body(criteria=("- [ ] Fixes the crash in #120.",))) == set()
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "<b>PR</b> #157 is merged first.",
+        "PR \\#157 is merged first.",
+        "~~PR~~ #157 is merged first.",
+        "__Pull request__ #157 is merged first.",
+        "*PR* #157 is merged first.",
+        "[**PR** #157](https://example.com) is merged first.",
+        "PR&nbsp;#157 is merged first.",
+    ],
+)
+def test_a_formatted_other_prs_criterion_is_refused(criterion: str) -> None:
+    parsed = parse_intake(body(criteria=(f"- [ ] {criterion}",)), ())
+    assert {defect.code for defect in parsed.defects} == {"other-prs-criterion"}
+    assert repr(criterion) in parsed.defects[0].reason
+    assert parsed.criteria == (criterion,)
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    ["Keeps `pr_157` as one name.", "Fixes **#120**.", "Edits `lib/feeder.py` **only**."],
+)
+def test_formatting_alone_does_not_make_an_other_prs_criterion(criterion: str) -> None:
+    assert codes(body(criteria=(f"- [ ] {criterion}",))) == set()
+
+
+def test_the_brief_keeps_a_formatted_criterion_as_written(tmp_path: Path) -> None:
+    criterion = "Edits `lib/feeder.py` **only**."
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(criteria=(f"- [ ] {criterion}",)), template=False)]
+    feeder.feed_once()
+    _, brief = go_and_brief(github)
+    assert f"- {criterion}" in brief.split("### Acceptance criteria")[1].split("###")[0]
 
 
 def test_ops_criteria_are_flagged_apart_and_alone_are_no_criteria() -> None:
