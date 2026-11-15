@@ -162,9 +162,10 @@ def test_follow_up_ticket_passes_feeder_intake(risk: str) -> None:
         "factory.md",
     ],
 )
-def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str) -> None:
+@pytest.mark.parametrize("citation", ["{}:10", "[source]({}#L3)", "[source]({}#L3-L5)"])
+def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str, citation: str) -> None:
     finding = (
-        f"1. [follow-up] {path}:10 drops the exit status (round 4/5, owner/repo#7, "
+        f"1. [follow-up] {citation.format(path)} drops the exit status (round 4/5, owner/repo#7, "
         "https://github.com/owner/repo/pull/7, /home/bot/x.py, lib.followups)."
     )
     _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (finding,), "low")
