@@ -36,6 +36,7 @@ class PollMixin:
             begin()
         self._polled = {}
         self._merged_repos = set()
+        self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._poll_seconds = getattr(
             getattr(source, "config", None), "poll_seconds", POLL_SECONDS

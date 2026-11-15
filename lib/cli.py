@@ -309,7 +309,18 @@ heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
   component in 30 minutes. Logs to self-heal.log in the state directory
   and escalates to the Factory webhook when a component cannot be fixed or
   flaps. Never calls an LLM and never signals a job. deploy/self-heal.sh
-  runs it every 2 minutes.
+  runs it every 2 minutes. A stale-code waiter is drained first
+  (waiter-<bot>.drain: it claims nothing and confirms in
+  waiter-<bot>.drain.ack) and restarted only once it has confirmed and has
+  no running job.
+heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
+            [--device NAME] [--dry-run]
+  Fast-forward the checkout to origin/main (issue #219), keeping local
+  edits to machines.yml, orch.yml and deploy/install.sh. Only the
+  checkout's owner pulls. A conflict, local commits or other local edits
+  leave the checkout unchanged and escalate once. Runs
+  `deploy/install.sh --update` when deploy/ or requirements.txt changed.
+  deploy/self-heal.sh runs it before each heal pass.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
@@ -589,6 +600,7 @@ def _wait_autostart(
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
             approvals=policy,
+            drain=waiter.drain_marker(args.bot),
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -633,6 +645,7 @@ def _poll(argv: list[str]) -> int:
                     lambda *error: dispatcher.record_poll_error(*error),
                 ),
                 pusher,
+                _merge_kick(dispatcher, args.orch),
             )
             if args.once:
                 PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
@@ -677,16 +690,41 @@ def _poll(argv: list[str]) -> int:
 
 
 class _AfterPoll:
-    """The poll loop's after-cycle hook: the #66 backup, then the dashboard push."""
+    """The poll loop's after-cycle hook: the #66 backup, the dashboard push,
+    then the #219 self-deploy kick after a merge of the factory's own repo."""
 
-    def __init__(self, backup: Callable[[], None], pusher: PollPusher | None) -> None:
+    def __init__(
+        self,
+        backup: Callable[[], None],
+        pusher: PollPusher | None,
+        kick: Callable[[], None] | None = None,
+    ) -> None:
         self.backup = backup
         self.pusher = pusher
+        self.kick = kick
 
     def __call__(self) -> None:
         self.backup()
         if self.pusher is not None:
             self.pusher()
+        if self.kick is not None:
+            self.kick()
+
+
+def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
+    """#219: after a cycle that merged a PR of this checkout's own repo,
+    start `deploy/self-heal.sh kick`; the webhook and Linear secrets stay
+    out of its environment (self-heal.sh reads webhook.env itself)."""
+    from lib import heal, self_deploy
+
+    return self_deploy.MergeKick(
+        lambda: dispatcher.merged_this_poll,
+        repo=self_deploy.own_repo(ROOT),
+        on_error=lambda exc: dispatcher.record_poll_error(
+            "self-deploy", "-", f"kick:{type(exc).__name__}"
+        ),
+        secret_names=heal._webhook(orch_path).secret_names,
+    )
 
 
 def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:

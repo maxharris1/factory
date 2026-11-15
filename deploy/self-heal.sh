@@ -2,7 +2,10 @@
 # Self-heal (issue #107): every two minutes, restart factory components that
 # are down or run stale code, with no LLM and no tokens.
 #
-#   self-heal.sh once              one pass: `orch health --json | orch heal`
+#   self-heal.sh once              one pass: `orch heal deploy`, then
+#                                  `orch health --json | orch heal`
+#   self-heal.sh kick              start one pass now, detached, and return
+#                                  (the poller runs it after a merge, #219)
 #   self-heal.sh start             start the loop unless running; clears a stop
 #   self-heal.sh stop              stop the loop and hold it stopped
 #   self-heal.sh restart           stop, then start
@@ -15,12 +18,22 @@
 # `once` holds self-heal.lock, so passes never overlap; a pass that finds the
 # lock held exits 0 at once. It reads ~/.config/factory/webhook.env into the
 # environment when this user can read it (for the escalation POST; nothing
-# from it is printed), then pipes `orch health --json` into
+# from it is printed), runs `orch heal deploy --state <state dir>` (#219:
+# the checkout owner fast-forwards the checkout to origin/main, keeping
+# local edits to machines.yml, orch.yml and deploy/install.sh; see
+# lib/self_deploy.py; a failure is logged and never blocks healing), then
+# pipes `orch health --json` into
 # `orch heal --health-json - --state <state dir>`, which decides and runs each
 # restart through the component's own service script and writes
 # self-heal.log. Self-heal itself never sends a signal, so it never stops a
 # job's `orch job run`. Exits 0 and 3 from health are normal; anything else
-# but 1 (an unreadable health file, still reported) fails the pass.
+# but 1 (an unreadable health file, still reported) fails the pass. Health
+# runs after the deploy step in a new process, so a component still on the
+# old commit shows stale code and is restarted in the same pass.
+#
+# `kick` starts factory-self-heal.service with --no-block where the systemd
+# user timer is installed, and otherwise a detached `once` in its own
+# session; the lock keeps it from overlapping a timer pass.
 #
 # Files, in ~/.local/state/factory (ORCH_STATE_DIR): self-heal.lock (one
 # pass at a time), self-heal.pid (the loop), self-heal.stopped (the stop
@@ -70,7 +83,7 @@ export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
 say() { printf '%s self-heal: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 usage() {
-    echo "usage: $(basename "$0") {once|start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
+    echo "usage: $(basename "$0") {once|kick|start|stop|restart|status|ensure|install-autostart|remove-autostart}" >&2
     exit 2
 }
 
@@ -128,6 +141,8 @@ once() {
     export ORCH_DB="${ORCH_DB:-${STATE}/orch.db}"
     export PYTHONUNBUFFERED=1
     set +e
+    "$ORCH" heal deploy --state "$STATE" >>"$LOG" 2>&1 8>&- </dev/null ||
+        say "orch heal deploy exited $?; healing anyway" >>"$LOG"
     "$ORCH" health --json 2>>"$LOG" 8>&- | "$ORCH" heal --health-json - --state "$STATE" 8>&-
     statuses=("${PIPESTATUS[@]}")
     set -e
@@ -139,6 +154,21 @@ once() {
             ;;
     esac
     return "${statuses[1]}"
+}
+
+# Start one pass now without waiting for it.
+kick() {
+    mkdir -p "$STATE"
+    if have_systemd_user && [[ -f "${UNIT_DIR}/factory-self-heal.service" ]]; then
+        if "$SYSTEMCTL" --user start --no-block factory-self-heal.service >>"$LOG" 2>&1; then
+            say "kick: started factory-self-heal.service" >>"$LOG"
+            return 0
+        fi
+    fi
+    local detach=()
+    command -v setsid >/dev/null 2>&1 && detach=(setsid)
+    "${detach[@]}" nohup bash "$SELF" once >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    say "kick: started a detached pass (pid $!)" >>"$LOG"
 }
 
 # The loop. It owns the pidfile; SIGTERM stops it between passes.
@@ -331,6 +361,7 @@ remove_autostart() {
 
 case "$COMMAND" in
     once) once ;;
+    kick) kick ;;
     _loop) run_loop ;;
     start) service_lock && start ;;
     stop) service_lock && stop ;;

@@ -138,7 +138,10 @@ class TrackingMixin:
         ).fetchall()
         for row in queued:
             self.queue.cancel(str(row["id"]), f"merged:{reason}", connection=connection)
-        return prior is None or prior["workflow_state"] != "merged"
+        entered = prior is None or prior["workflow_state"] != "merged"
+        if entered:
+            self.merged_this_poll.add(repo.lower())
+        return entered
 
     def _title_pull(self, ticket: TrackedTicket) -> None:
         """Record the ticket's source issue and, once per PR, prefix its title.

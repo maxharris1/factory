@@ -73,6 +73,17 @@ lib/placed_run.py). One waiter runs per bot: it holds the bot's waiter lock
 for its whole life (`hold_waiter_lock`), and a plain `orch wait` for the bot
 is refused while it does. A waiter that dies between a claim and the start leaves a
 claimed job, which the poller requeues after release_claimed_minutes (#77).
+
+Drain (#219): while the drain marker (`drain`, the state directory's
+waiter-<bot>.drain, which self-heal writes when this waiter runs stale code
+with jobs in flight) names another commit than the one this waiter loaded,
+it reaps and recovers as usual but claims nothing, and writes
+waiter-<bot>.drain.ack naming that commit from a step that has already
+decided not to claim. Self-heal restarts it only with that ack and no
+running job. A waiter already on that commit ignores the marker until an
+ack names it: then it too claims nothing, so an ack stays true when the
+service respawns the waiter that wrote it, until a service start or
+self-heal removes the marker (once the waiter no longer runs stale code).
 """
 
 from __future__ import annotations
@@ -101,6 +112,7 @@ from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
 from lib.harness_env import ApproverProfileExposed, harness_environ
+from lib.health import LOADED_VERSION
 from lib.orch_yml import Approvals, OrchConfig
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue
@@ -165,6 +177,29 @@ def default_harness_config(bot: str) -> Path:
 
 def default_state_dir(bot: str) -> Path:
     return Path.home() / ".local" / "state" / "factory" / f"waiter-{bot}"
+
+
+DRAIN_ENV = "ORCH_WAITER_DRAIN"
+
+
+def _first_line(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def drain_marker(bot: str, environ: Mapping[str, str] | None = None) -> Path:
+    """Where self-heal's drain marker for this bot lives: ORCH_WAITER_DRAIN
+    (deploy/waiter-service.sh sets it), else waiter-<bot>.drain in
+    ORCH_STATE_DIR or ~/.local/state/factory, self-heal's state directory."""
+    env = os.environ if environ is None else environ
+    if env.get(DRAIN_ENV):
+        return Path(env[DRAIN_ENV])
+    state = env.get("ORCH_STATE_DIR") or str(Path.home() / ".local" / "state" / "factory")
+    return Path(state) / f"waiter-{bot}.drain"
 
 
 def load_harness_command(path: Path, bot: str) -> HarnessCommand:
@@ -476,6 +511,8 @@ class Waiter:
         environ: Mapping[str, str] | None = None,
         alive: Callable[[int | None, str | None], bool] = pid_alive,
         approvals: Approvals | None = None,
+        drain: Path | None = None,
+        version: str = LOADED_VERSION,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -507,6 +544,9 @@ class Waiter:
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
+        self.drain = drain
+        self.version = version
+        self._draining_for: str | None = None
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -516,6 +556,8 @@ class Waiter:
         if not self._recovered:
             self._recover()
         self._reap()
+        if self._draining():
+            return None
         try:
             claimed = claim_once(
                 self.queue, self.recipient, self.pool, autostart=self._claimer
@@ -528,6 +570,38 @@ class Waiter:
             return None
         job, placement = claimed
         return self._start(job, placement)
+
+    def _draining(self) -> bool:
+        """The drain marker names another commit than this waiter's, or an
+        ack names the marker's commit: a waiter that took over from the one
+        that acknowledged keeps the drain until the marker goes."""
+        target = _first_line(self.drain)
+        if target == self.version and _first_line(self._ack_path()) != target:
+            target = None
+        if target is not None and target != self._draining_for:
+            self.log(f"draining for {target}: no new claims until restarted "
+                     f"({len(self._children) + len(self._remote)} running jobs)")
+        self._draining_for = target
+        if target is not None:
+            self._acknowledge(target)
+        return target is not None
+
+    def _ack_path(self) -> Path | None:
+        return None if self.drain is None else self.drain.with_name(self.drain.name + ".ack")
+
+    def _acknowledge(self, target: str) -> None:
+        """Tell self-heal this waiter claims nothing more for `target`:
+        written only from a step that has already decided not to claim."""
+        ack = self._ack_path()
+        assert ack is not None
+        if _first_line(ack) == target:
+            return
+        try:
+            temp = ack.with_name(f".{ack.name}.{os.getpid()}.tmp")
+            temp.write_text(target + "\n", encoding="utf-8")
+            os.replace(temp, ack)
+        except OSError as exc:
+            self.log(f"drain ack not written ({type(exc).__name__})")
 
     def serve(self, stop: Stop, *, poll: float = POLL_SECONDS) -> int:
         self.log(

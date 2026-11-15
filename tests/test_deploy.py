@@ -797,3 +797,29 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
         stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
                                  capture_output=True, timeout=60, check=False)
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+
+
+@pytest.mark.parametrize("installer", ["uv", "venv"])
+def test_install_update_keeps_the_venv_running_processes_use(
+    tmp_path: Path, installer: str
+) -> None:
+    """#219: self-deploy's `install.sh --update` installs requirements into
+    the existing venv instead of recreating it; with no venv it makes one."""
+    environment = _install_environment(tmp_path, installer)
+    first = _install(environment, "--update")
+    assert first.returncode == 0, first.stderr
+    witness = tmp_path / ".local/share/factory/venv/witness"
+    witness.write_text("in use", encoding="utf-8")
+    (tmp_path / "requirements-installed").unlink()
+
+    second = _install(environment, "--update")
+
+    assert second.returncode == 0, second.stderr
+    assert witness.read_text(encoding="utf-8") == "in use"
+    assert (tmp_path / "requirements-installed").is_file()
+    assert (tmp_path / ".local/bin/orch").is_file()
+    assert (tmp_path / ".config/factory/profile.sh").is_file()
+
+    plain = _install(environment)
+    assert plain.returncode == 0, plain.stderr
+    assert not witness.exists()

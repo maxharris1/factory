@@ -2,15 +2,20 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: deploy/install.sh [--autostart]" >&2
+    echo "usage: deploy/install.sh [--autostart] [--update]" >&2
     echo "  --autostart  also run deploy/poller-service.sh install-autostart, and" >&2
     echo "               deploy/linear-webhook-service.sh install-autostart when" >&2
     echo "               orch.yml (or orch.local.yml) has linear_webhook" >&2
+    echo "  --update     self-deploy's re-run (#219): install requirements into the" >&2
+    echo "               existing venv instead of recreating it, which running" >&2
+    echo "               processes still use" >&2
 }
 AUTOSTART=0
+UPDATE=0
 for arg in "$@"; do
     case "$arg" in
         --autostart) AUTOSTART=1 ;;
+        --update) UPDATE=1 ;;
         -h | --help) usage; exit 0 ;;
         *) usage; exit 2 ;;
     esac
@@ -123,11 +128,13 @@ if [[ -e "$WRAPPER" ]] && ! grep -q '^# factory-orch-wrapper$' "$WRAPPER"; then
     echo "refusing to overwrite non-factory wrapper at ${WRAPPER}" >&2
     exit 1
 fi
+KEEP_VENV=0
+[[ "$UPDATE" == 1 && -x "${VENV}/bin/python" ]] && KEEP_VENV=1
 if command -v uv >/dev/null 2>&1; then
-    UV_VENV_CLEAR=1 uv venv "$VENV"
+    [[ "$KEEP_VENV" == 1 ]] || UV_VENV_CLEAR=1 uv venv "$VENV"
     uv pip install --python "${VENV}/bin/python" -r "${ROOT}/requirements.txt"
 else
-    python3 -m venv --clear "$VENV"
+    [[ "$KEEP_VENV" == 1 ]] || python3 -m venv --clear "$VENV"
     "${VENV}/bin/python" -m pip install -r "${ROOT}/requirements.txt"
 fi
 cat >"$WRAPPER" <<EOF

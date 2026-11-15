@@ -93,6 +93,9 @@ class DispatcherBase:
         self._stopped_due: set[tuple[str, str]] = set()
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
+        # #219: repos (lowercased) with a ticket that entered merged this
+        # poll, for the self-deploy kick after the cycle.
+        self.merged_this_poll: set[str] = set()
         # #130: while the per-ticket pass runs, an approval later in it may
         # not be recorded yet, so an after: ok's ship waits for the pass end.
         self._ticket_pass = False
