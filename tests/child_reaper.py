@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.procs import alive
+
 TAG = "FACTORY_TEST_PROC_TAG"
 PROC = Path("/proc")
 
@@ -78,6 +80,42 @@ def tagged(tag: str) -> set[int]:
     return found
 
 
+def _environ(pid: int) -> list[bytes]:
+    try:
+        return (PROC / str(pid) / "environ").read_bytes().split(b"\0")
+    except OSError:
+        return []
+
+
+def leaked(before: set[int], tag: str, root: Path) -> set[int]:
+    """Live pids started since `before` that descend from pytest, carry the
+    test's tag, or have HOME or ORCH_STATE_DIR under root: a loop started with
+    a scrubbed env and detached with nohup or setsid matches only the last."""
+    table = _table()
+    mine = descendants(os.getpid(), table)
+    needles = (f"{TAG}={tag}".encode(),)
+    prefixes = tuple(f"{name}={root}/".encode() for name in ("HOME", "ORCH_STATE_DIR"))
+    found = set()
+    for pid in table.keys() - before - {os.getpid()}:
+        environ = _environ(pid)
+        if pid in mine or any(entry in needles or entry.startswith(prefixes) for entry in environ):
+            found.add(pid)
+    return {pid for pid in found if alive(pid)}
+
+
+def kill(leftovers: set[int], protected: set[int], table: dict[int, tuple[int, int]]) -> None:
+    shared = {table[pid][1] for pid in protected if pid in table}
+    for pid in leftovers & table.keys():
+        group = table[pid][1]
+        try:
+            if group in shared:
+                os.kill(pid, signal.SIGKILL)
+            else:
+                os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def reap(before: set[int], tag: str) -> None:
     me = os.getpid()
     protected = before | {me}
@@ -86,16 +124,7 @@ def reap(before: set[int], tag: str) -> None:
         leftovers = ((descendants(me, table) | tagged(tag)) & table.keys()) - protected
         if not leftovers:
             return
-        shared = {table[pid][1] for pid in protected if pid in table}
-        for pid in leftovers:
-            group = table[pid][1]
-            try:
-                if group in shared:
-                    os.kill(pid, signal.SIGKILL)
-                else:
-                    os.killpg(group, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        kill(leftovers, protected, table)
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

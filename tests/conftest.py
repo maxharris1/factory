@@ -174,6 +174,27 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
+def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory):
+    """#358: fail a test that leaves a process running, and kill it. Leaked
+    self-heal loops kept their test dirs alive for hours and filled the box's
+    inodes. `_0_` sorts ahead of every other autouse fixture, so this one is
+    set up first and torn down last, after the test's own cleanup."""
+    from tests import child_reaper, subreaper
+
+    before = set(child_reaper._table())
+    yield
+    root = tmp_path_factory.getbasetemp()
+    tag = request.node.stash.get(child_reaper._tag, "")
+    deadline = time.monotonic() + 3
+    while (leftovers := child_reaper.leaked(before, tag, root)) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if leftovers:
+        described = [subreaper._describe(pid) for pid in sorted(leftovers)]
+        child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
+        pytest.fail("test left processes running:\n" + "\n".join(described), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
 def _a_ssh_control_dir():
     """#222: each test gets its own short ControlMaster socket directory, so
     no fake master outlives its test and a socket path stays bindable. It
