@@ -32,9 +32,17 @@ _REGULAR_MODES = ("100644", "100755")
 
 
 @dataclass(frozen=True)
+class UpdateScope:
+    last_reviewed_head: str
+    merge: str
+    commits: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class UpdateClass:
     trivial: bool
     reason: str
+    scope: UpdateScope | None = None
 
 
 class _NotTrivial(Exception):
@@ -54,7 +62,7 @@ def classify(
             True, _check(clone, approved_head, new_head, base_ref, shared_paths)
         )
     except _NotTrivial as exc:
-        return UpdateClass(False, str(exc))
+        return UpdateClass(False, str(exc), _scope(clone, approved_head, new_head, base_ref))
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError) as exc:
         return UpdateClass(False, f"check failed: {type(exc).__name__}")
 
@@ -94,6 +102,31 @@ def _check(
             " or, in a shared path, both"
         )
     return f"{len(conflicts)} conflicted file(s), each hunk resolved to one side"
+
+
+def _scope(
+    clone: Path, approved_head: str, new_head: str, base_ref: str
+) -> UpdateScope | None:
+    try:
+        approved = _rev(clone, f"{approved_head}^{{commit}}")
+        head = _rev(clone, f"{new_head}^{{commit}}")
+        chain = [
+            line.split()
+            for line in _git(
+                clone, "rev-list", "--first-parent", "--parents", "--reverse",
+                f"{approved}..{head}",
+            ).splitlines()
+        ]
+        if not chain or len(chain[0]) != 3 or chain[0][1] != approved:
+            return None
+        merge, _ours, theirs = chain[0]
+        if _run(clone, "merge-base", "--is-ancestor", theirs, base_ref).returncode != 0:
+            return None
+        if any(len(commit) != 2 for commit in chain[1:]):
+            return None
+        return UpdateScope(approved, merge, tuple(commit[0] for commit in chain[1:]))
+    except (_NotTrivial, OSError, subprocess.SubprocessError, ValueError, UnicodeError):
+        return None
 
 
 def _merge_tree_output(output: bytes) -> tuple[str, dict[str, dict[int, tuple[str, str]]]]:
