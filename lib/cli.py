@@ -329,6 +329,14 @@ heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
   leave the checkout unchanged and escalate once. Runs
   `deploy/install.sh --update` when deploy/ or requirements.txt changed.
   deploy/self-heal.sh runs it before each heal pass.
+heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
+             [--orch PATH] [--dry-run]
+  Bring each enabled remote device's factory checkout (machines.yml
+  factory_root) to this checkout's HEAD on main and run install-skills
+  there (issue #297). A device with a job on it is skipped and retried next
+  pass; local edits on a device are never discarded (refused, escalated
+  once). --dry-run prints each target's state and writes nothing.
+  deploy/self-heal.sh starts it detached after each heal pass.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,

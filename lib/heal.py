@@ -62,7 +62,9 @@ deferral or a drain is logged only when a component's decision changes.
 State is self-heal.state.json beside it, written atomically.
 
 `orch heal deploy` (lib/self_deploy.py, #219) is the step before: it moves
-the checkout to origin/main, so this pass sees the stale code.
+the checkout to origin/main, so this pass sees the stale code. `orch heal
+devices` (lib/device_deploy.py, #297) then brings each remote device's
+factory checkout to the same commit.
 """
 
 from __future__ import annotations
@@ -519,6 +521,7 @@ USAGE = """\
 orch heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
           [--machines PATH] [--orch PATH] [--device NAME] [--dry-run]
 orch heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
+orch heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH] [--dry-run]
                  [--device NAME] [--dry-run]
 """
 
@@ -612,6 +615,10 @@ def main(argv: list[str], *, stdin: TextIO | None = None,
         from lib import self_deploy
 
         return self_deploy.main(argv[1:], clock=clock)
+    if argv[:1] == ["devices"]:
+        from lib import device_deploy
+
+        return device_deploy.main(argv[1:], clock=clock)
     parser = argparse.ArgumentParser(prog="orch heal", usage=USAGE)
     parser.add_argument("--health-json", required=True)
     parser.add_argument("--state", type=Path)
