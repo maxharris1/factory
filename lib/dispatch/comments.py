@@ -54,6 +54,7 @@ class CommentsMixin:
             self._redrive_handoffs(ticket)
             self._process_comments(ticket, comments)
             self._requeue_unanswered_jobs(ticket)
+            self._requeue_refused_reviews(ticket)
         except BaseException as error:
             try:
                 self._settle_external_ships(ticket)
@@ -222,6 +223,10 @@ class CommentsMixin:
                 continue
             if handled:
                 if outcome.startswith("rejected-"):
+                    self._wake_comment_problem(ticket, comment, "rejected", outcome)
+                elif kind == "verdict" and outcome.startswith("stale-"):
+                    self._wake_comment_problem(ticket, comment, "stale", outcome)
+                elif kind == "verdict" and outcome.startswith("superseded-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
                 if outcome in _RECOVERS_EDITED.get(kind, ()) or (
                     kind == "verdict" and _acted_verdict(outcome)
