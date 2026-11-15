@@ -27,6 +27,7 @@ from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
 from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import Approvals, load_orch_yml
+from lib.poll_source import IntakeRisks
 from lib.queue import Job, JobRequest, QueueError, SQLiteJobQueue
 
 GO = (
@@ -2840,6 +2841,7 @@ def test_t3_counts_rounds_using_ticket_risk_and_factory_cap(
 ) -> None:
     actions = FakeReviewActions()
     dispatcher, queue = setup(tmp_path, review_actions=actions)
+    IntakeRisks(dispatcher.state_path).keep("owner/repo", "42", risk)
     head = "a" * 40
     seed_review_job(dispatcher, queue, head)
     actions.states.clear()
