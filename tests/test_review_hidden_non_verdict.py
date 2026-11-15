@@ -68,7 +68,7 @@ def test_a_hidden_builder_blocked_report_never_answers_the_review(
 
 
 @pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
-def test_a_hidden_blocked_verdict_still_answers_its_review(tmp_path: Path, upgrade: str) -> None:
+def test_a_hidden_blocked_verdict_still_holds_its_stop(tmp_path: Path, upgrade: str) -> None:
     board = board_with(tmp_path, on=True)
     board.dispatcher.hooks = (T7Hook(),)
     older = sha(1)
@@ -81,7 +81,7 @@ def test_a_hidden_blocked_verdict_still_answers_its_review(tmp_path: Path, upgra
     blocked = VERDICT.format(round="1/3", head=older, verdict="BLOCKED", risk="high")
     board.post(pr, "blocked-verdict", blocked, "codex-login")
     board.poll()
-    assert board.outcome("blocked-verdict") == "woke-grok-blocked"
+    assert board.outcome("blocked-verdict") == "blocked-review"
     _hide(pr, "blocked-verdict")
     _upgrade(board, tmp_path, upgrade, "blocked-verdict")
     pr.push(sha(2), ci="pending")
@@ -90,9 +90,8 @@ def test_a_hidden_blocked_verdict_still_answers_its_review(tmp_path: Path, upgra
     board.ready(pr, older, "red-ready")
     board.poll()
 
-    fixes = _active_fixes(board)
-    assert [job["source_comment_id"] for job in fixes] == ["red-ready"]
-    assert CI_LOG in instruction(fixes[0])
+    assert _active_fixes(board) == []
+    assert board.state("42")["workflow_state"] == "blocked"
 
 
 @pytest.mark.job_bound
