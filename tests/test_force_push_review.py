@@ -7,12 +7,15 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from lib.brief import render_brief
 from lib.factory_md import parse_factory_context
-from lib.queue import Job
-from lib.update_check import RebaseScope, UpdateClass
+from lib.queue import Job, _job as queue_job
+from lib.update_check import RebaseScope, UpdateClass, rebase_scope
 from tests.merge_queue_support import Board, sha
 from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT, FACTORY_MD
+from tests.test_rebase_scope import Repo
 
 OLD_BASE, NEW_BASE = sha(90), sha(91)
 REWRITE = UpdateClass(False, "not a merge of the approved head and base")
@@ -104,6 +107,57 @@ def test_a_force_push_after_revise_gets_a_range_diff_review(tmp_path: Path) -> N
     round_2 = review_details(board)[-1]
     assert (round_2["head"], round_2["round"]) == (sha(2), "2/3")
     assert round_2["rebase"]["last_reviewed_head"] == sha(1)
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("third", ["rewrite", "follow-up"])
+def test_a_queued_unreviewed_head_is_never_the_range_diff_baseline(
+    tmp_path: Path, third: str
+) -> None:
+    git = Repo(tmp_path / "git")
+    reviewed = git.pr_commit("old = 1\n")
+    unreviewed = git.pr_commit("old = 2\n")
+    if third == "rewrite":
+        latest = git.pr_commit("old = 3\n")
+    else:
+        (git.root / "more.py").write_text("more = 1\n")
+        latest = git.commit("follow-up")
+    board, _calls = board_with_rebases(tmp_path)
+    board.dispatcher.rebase_classifier = lambda _repo, _base, last, head: rebase_scope(
+        git.gitdir, last, head, "refs/heads/main"
+    )
+    snapshot = board.snapshot
+    board.snapshot = lambda pr, fresh=False: replace(
+        snapshot(pr, fresh=fresh), ready_starts_review=True
+    )
+    pr = board.open("42", reviewed)
+    pr.mergeable = None
+    pr.mergeable_state = None
+    first = board.ready(pr, reviewed)
+    board.poll()
+    assert board.outcome(first) == "queued-review"
+    review = board.claim("codex")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=board.approve(pr))
+    board.poll()
+    assert board.state("42")["approved_head"] == reviewed
+
+    for head in (unreviewed, latest):
+        pr.push(head)
+        ready = board.ready(pr, head)
+        board.poll()
+        assert board.outcome(ready) == "queued-review"
+
+    rows = board.jobs("review")
+    assert [(row["head"], row["state"]) for row in rows] == [
+        (reviewed, "done"), (unreviewed, "queued"), (latest, "queued"),
+    ]
+    detail = json.loads(rows[-1]["detail"])
+    assert detail["evidence"]["findings"]["reviewed_head"] == reviewed
+    assert detail["rebase"]["last_reviewed_head"] == reviewed
+    assert (
+        f"git range-diff {git.base}..{reviewed} {git.base}..{latest}"
+        in brief(queue_job(rows[-1]))
+    )
 
 
 def test_a_plain_push_and_a_failed_check_keep_the_generic_delta_line(tmp_path: Path) -> None:

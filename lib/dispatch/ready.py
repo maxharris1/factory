@@ -479,7 +479,7 @@ class ReadyMixin:
                     instruction=detail,
                     update=update,
                     rebase=(
-                        self._rebase_scope(ticket, head)
+                        self._rebase_scope(ticket, head, review_round)
                         if review_round > 1 and update is None
                         else None
                     ),
@@ -689,8 +689,10 @@ class ReadyMixin:
             return None
         return str(row["head"])
 
-    def _rebase_scope(self, ticket: TrackedTicket, head: str) -> RebaseScope | None:
-        last = self._latest_review_head(ticket)
+    def _rebase_scope(
+        self, ticket: TrackedTicket, head: str, review_round: int
+    ) -> RebaseScope | None:
+        last = self._reviewed_head(ticket, review_round)
         if last is None or last == head or self.rebase_classifier is None:
             return None
         try:

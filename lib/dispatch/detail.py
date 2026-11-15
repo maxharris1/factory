@@ -231,6 +231,19 @@ class DetailMixin:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
 
+    def _reviewed_head(self, ticket: TrackedTicket, round_number: int) -> str | None:
+        from lib.evidence.findings import findings_evidence
+
+        with self._connect() as connection:
+            accepted = _accepted_comment_ids(connection, ticket)
+        return findings_evidence(
+            comments=[item for item in ticket.comments if item.id in accepted],
+            trusted_logins=self.trusted_logins,
+            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            current_round=round_number,
+            bases={},
+        ).reviewed_head
+
     def _with_evidence(
         self,
         connection: sqlite3.Connection,
@@ -255,20 +268,7 @@ class DetailMixin:
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
         scope = (ticket.repo.lower(), ticket.ticket_id)
-        accepted = {
-            row[0]
-            for row in connection.execute(
-                """
-                SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT approve_comment_id FROM ship_holds
-                    WHERE lower(repo) = ? AND ticket_id = ?
-                UNION SELECT source_comment_id FROM jobs
-                    WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
-                """,
-                scope * 4,
-            )
-        }
+        accepted = _accepted_comment_ids(connection, ticket)
         findings = findings_evidence(
             comments=[
                 item for item in ticket.comments if item.id == comment.id or item.id in accepted
@@ -509,6 +509,23 @@ class DetailMixin:
             ),
             head=ticket.current_head,
         )
+
+
+def _accepted_comment_ids(connection: sqlite3.Connection, ticket: TrackedTicket) -> set[str]:
+    return {
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT approve_comment_id FROM ship_holds
+                WHERE lower(repo) = ? AND ticket_id = ?
+            UNION SELECT source_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+            """,
+            (ticket.repo.lower(), ticket.ticket_id) * 4,
+        )
+    }
 
 
 def _review_bases(details: list[str]) -> dict[int, str]:
