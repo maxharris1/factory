@@ -62,8 +62,10 @@ export const step = (action, from, to) => {
   if (action === "T4ShipMerge") return "ship = merge";
   if (action === "T4ShipHandoff") return "ship = handoff";
   if (action === "T4ShipAfter") return "ship = after an approver";
-  if (action === "T4Hold") return "ship = merge and the PR is held";
+  if (action === "T4Hold") return "ship = merge or handoff and the PR is held";
   if (action === "T4HoldOk") return "approver's OK at the head, or approver removes a label-only hold";
+  if (action === "T4HoldOkQueue") return "approver's OK at the head, finish_line merge";
+  if (action === "T4HoldOkHandoff") return "approver's OK at the head, ship = handoff, finish_line ready-for-review";
   if (action === "T4HoldPatchDiffers") return "head changed and the patch differs";
   if (action === "T4HoldBaseUpdate") return "PR dirty or behind, base update";
   if (action === "T8Ok") return "OK names the previewed SHA";
