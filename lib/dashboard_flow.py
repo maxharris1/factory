@@ -30,6 +30,7 @@ import re
 from collections import deque
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 CHART_PATH = ROOT / "model" / "chart.mmd"
@@ -155,26 +156,44 @@ def _bridge(adjacency: dict[str, list[str]], a: str, b: str, hops: int) -> list[
     return None
 
 
-def chart_path(chart: dict | None, observed: Iterable[str | None]) -> list[str]:
-    """The states a ticket went through, in order, on the chart."""
+class JobStep(NamedTuple):
+    action: str
+    recipient: str
+    created_at: float
+    started_at: float | None
+    finished_at: float | None
+
+
+class Visit(NamedTuple):
+    state: str
+    steps: list[JobStep]
+
+
+def chart_visits(
+    chart: dict | None, observed: Iterable[tuple[str | None, JobStep | None]]
+) -> list[Visit]:
+    """The visits a ticket made, in order, on the chart, each with the job
+    steps that back it (none for a bridged visit)."""
     known = None if chart is None else {state["name"] for state in chart["states"]}
     adjacency = {} if chart is None else _adjacency(chart)
-    path: list[str] = []
-    for state in observed:
+    visits: list[Visit] = []
+    for state, step in observed:
         if state is None or (known is not None and state not in known):
             continue
-        if not path:
-            path.append(state)
+        steps = [] if step is None else [step]
+        if visits and state == visits[-1].state:
+            visits[-1].steps.extend(steps)
             continue
-        last = path[-1]
-        if state == last:
-            continue
-        if chart is None or state in adjacency[last]:
-            path.append(state)
-            continue
-        bridge = _bridge(adjacency, last, state, MAX_BRIDGE)
-        path.extend(bridge[1:] if bridge else [state])
-    return path
+        if visits and chart is not None and state not in adjacency[visits[-1].state]:
+            bridge = _bridge(adjacency, visits[-1].state, state, MAX_BRIDGE) or []
+            visits.extend(Visit(name, []) for name in bridge[1:-1])
+        visits.append(Visit(state, steps))
+    return visits
+
+
+def chart_path(chart: dict | None, observed: Iterable[str | None]) -> list[str]:
+    """The states a ticket went through, in order, on the chart."""
+    return [visit.state for visit in chart_visits(chart, ((state, None) for state in observed))]
 
 
 def path_edges(chart: dict | None, path: Sequence[str]) -> list[tuple[str, str]]:
