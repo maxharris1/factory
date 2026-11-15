@@ -220,10 +220,18 @@ class PlanMixin:
         self._write_state_label(ticket, next_state)
         return True, outcome
 
-    def _t1p_accepts_plan(
+    def _t1p_accepted_or_accepts_plan(
         self, ticket: TrackedTicket, comment: Comment, reported_round: int | None
     ) -> bool:
         with self._connect() as connection:
+            if connection.execute(
+                """
+                SELECT 1 FROM plan_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone() is not None:
+                return True
             state = connection.execute(
                 """
                 SELECT workflow_state, plan_gap_count, plan_check_comment_id
@@ -233,7 +241,8 @@ class PlanMixin:
                 (ticket.repo.lower(), ticket.ticket_id),
             ).fetchone()
         return (
-            state is not None
+            self._handled_outcome(ticket, comment.id) is None
+            and state is not None
             and (
                 state["workflow_state"] == "planning"
                 or (

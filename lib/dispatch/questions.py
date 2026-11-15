@@ -25,6 +25,7 @@ from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
+from lib.queue import plan_round as _plan_round
 from lib.state_backup import RESTORED
 from lib.update_check import UpdateScope
 
@@ -250,13 +251,9 @@ class QuestionsMixin:
         """The first later trusted orch:v1 comment that already answered the
         action job comment queues for recipient, or None (#108, #66).
 
-        Only the answer that job's step accepts counts: a plan for a plan, a
-        ready for a build or fix, and for a review a REVISE or APPROVE naming
-        head at round_number. It must come from a login trusted for
-        recipient's bot and role, and not have been handled as rejected. With an intact
-        database no such answer exists yet when a comment is handled; it is
-        found on a replay (a lost or restored database) or when both
-        comments landed while the poller was down.
+        With an intact database no such answer exists yet when a comment is
+        handled; it is found on a replay (a lost or restored database) or when
+        both comments landed while the poller was down.
         """
         kind, role = _ANSWERS[action]
         after = _comment_order(comment)
@@ -296,9 +293,9 @@ class QuestionsMixin:
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
                 continue
-            if plan_round is not None and (
+            if action == "plan" and (
                 _round_number(fields.get("round")) != plan_round
-                or (handled is None and not self._t1p_accepts_plan(ticket, item, plan_round))
+                or not self._t1p_accepted_or_accepts_plan(ticket, item, plan_round)
             ):
                 continue
             if (
@@ -358,6 +355,7 @@ class QuestionsMixin:
                 queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
+                plan_round=_plan_round(job.request.detail),
             )
             if answer is not None:
                 answered.append((job, answer))
@@ -429,6 +427,7 @@ class QuestionsMixin:
                 queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
+                plan_round=_plan_round(job.request.detail),
             ) is None:
                 unanswered.append((job, requeue_reason))
         if not unanswered:

@@ -961,7 +961,7 @@ class JobsMixin:
             queued_at=self._first_queued_at(job),
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
-            plan_round=plan_round(job.request.detail) if job.request.action == "plan" else None,
+            plan_round=plan_round(job.request.detail),
         )
         if answer is None:
             return False
@@ -1121,8 +1121,8 @@ class JobsMixin:
                     continue
             elif kind == "plan":
                 reported = _round_number(fields.get("round"))
-                if reported != plan_round(job.request.detail) or (
-                    outcome is None and not self._t1p_accepts_plan(ticket, item, reported)
+                if reported != plan_round(job.request.detail) or not self._t1p_accepted_or_accepts_plan(
+                    ticket, item, reported
                 ):
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):

@@ -17,6 +17,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.grok_delivery import GrokDeliveryError
 from lib.queue import Job, JobRequest
+from lib.queue import plan_round as _plan_round
 from lib.update_check import RebaseScope, UpdateScope
 
 
@@ -226,6 +227,7 @@ class DetailMixin:
             queued_at=self._first_queued_at(job),
             head=request.head,
             round_number=_detail_round_number(request.detail),
+            plan_round=_plan_round(request.detail),
         )
         if answered is not None:
             self._cancel_answered(connection, job, request, answered)

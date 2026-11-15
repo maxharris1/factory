@@ -15,6 +15,7 @@ from pathlib import Path
 
 from lib.device_pool import DevicePool
 from lib.dispatcher import CIResult, Dispatcher, TicketRef, TrackedTicket
+from lib.handoff import parse_comment
 from lib.job_state import record_job_event
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
@@ -758,3 +759,40 @@ def test_reviewer_questions_handled_as_no_questions_then_edited_do_not_settle_th
     board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
     assert "done-from-questions" not in board.events(review)
     assert board.rows("review") == [("failed", 1), ("queued", 2)]
+
+
+def test_a_no_questions_comment_edited_into_a_stale_plan_does_not_settle_a_resumed_plan_job(
+    tmp_path: Path,
+) -> None:
+    for restored in (False, True):
+        board = Board(tmp_path / ("restored" if restored else "fresh"))
+        resumed = _resumed_round_2_plan(board)
+        _drop_plan_round(board, resumed)
+        board.post(
+            "own-plan-2", "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\nNo questions.\n"
+        )
+        board.poll()
+        with board.queue.connect() as connection:
+            (outcome,) = connection.execute(
+                "SELECT outcome FROM handled_comments WHERE comment_id = 'own-plan-2'"
+            ).fetchone()
+        assert outcome == "no-questions"
+        cached = board.snapshot()
+        if restored:
+            with board.queue.connect() as connection:
+                record_job_event(connection, resumed, "restored-claim", "restored", board.now[0])
+                connection.commit()
+        board.comments[-1] = replace(
+            board.comments[-1], body=PLAN.format(round=1, ac="met"), edited_at=board.now[0]
+        )
+        edited = board.comments[-1]
+        assert board.dispatcher._t_plan(
+            board.snapshot(), edited, parse_comment(edited.body).as_dict()
+        ) == (True, "stale-plan")
+        board.fail(resumed)
+        board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+        board.poll()
+        board.poll()
+        assert "done-from-plan" not in board.events(resumed), restored
+        assert board.rows("plan") == [("done", 1), ("done", 1), ("failed", 1), ("queued", 2)], restored
+        assert board.rows("build") == []
