@@ -43,6 +43,11 @@ ATTENTION_CLOSED = "blocker-closed"
 ATTENTION_MISSING = "blocker-missing"
 ATTENTION_REASONS = (ATTENTION_CYCLE, ATTENTION_CLOSED, ATTENTION_MISSING)
 
+FILE_PATH = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w-][\w.-]*\.(?:py|md|mmd|yml|yaml|json|toml|ini|cfg|txt|"
+    r"sh|sql|ts|tsx|js|jsx|mjs|css|scss|html|go|rs|rb|java|kt|swift|tla|svg))(?![\w/-])"
+)
+
 _FENCE = re.compile(r"^\s*(```|~~~)")
 _GATE_LINE = re.compile(
     r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*"

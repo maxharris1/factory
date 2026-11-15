@@ -15,10 +15,15 @@ import re
 
 from markdown_it import MarkdownIt
 
+from lib.feeder_gates import FILE_PATH
+
 ISSUE_BODY_LIMIT = 65536
 _MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
+_CITED_FILE = re.compile(
+    r"(?<![\w/.:-])(?=[\w./-]*[A-Za-z])(?:[\w.-]+/)+[\w.-]*[\w-](?![\w/#-])|" + FILE_PATH.pattern
+)
 
 
 def followups_active(followup_from: int | None, round_number: int | None) -> bool:
@@ -59,11 +64,17 @@ def followup_issue(
     verdict_url: str,
     comment_id: str,
     findings: tuple[str, ...],
+    risk: str,
 ) -> tuple[str, str]:
     title = f"Follow-ups from #{pr} r{round_number}"
+    files = dict.fromkeys(match.group(0) for finding in findings for match in _CITED_FILE.finditer(finding))
+    touches = f"Touches: {', '.join(files)}\n" if files else ""
+    criteria = "".join(f"- Finding {n} below is fixed.\n" for n in range(1, len(findings) + 1))
     head = (
         f"Follow-up findings from the round {round_number} review verdict on "
         f"{repo}#{pr}: {verdict_url}\nBlocked by: #{pr}\n\n"
+        f"Plan first: no\nDepends on: #{pr}\nRisk: {risk}\nConflicts with: none\n{touches}\n"
+        f"## Acceptance criteria\n\n{criteria}\n## Findings\n\n"
     )
     marker = followup_marker(comment_id)
     quoted = "\n\n".join(_defuse_gate_lines(finding) for finding in findings)
