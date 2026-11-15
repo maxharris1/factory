@@ -29,6 +29,8 @@ class HoldsMixin:
             return False, "hold-unread"
         if not decision.blocks:
             return None
+        if ticket.mergeable_state in ("dirty", "behind"):
+            return self._hold_base_update(ticket, comment, head)
         scope = (ticket.repo.lower(), ticket.ticket_id)
         reasons = ",".join(decision.reasons)
         with self._connect() as connection:
@@ -112,6 +114,26 @@ class HoldsMixin:
             ),
         )
         return False, "awaiting-ok"
+
+    def _hold_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+    ) -> tuple[bool, str]:
+        if not self._base_update_out(ticket):
+            _state, review_round = self._review_context(ticket)
+            base = ticket.factory.base_branch
+            self._enqueue_base_update(
+                ticket,
+                comment,
+                head,
+                review_round,
+                f"The approved PR is {ticket.mergeable_state} against {base} while "
+                f"it waits for an ok: merge {base} in.",
+            )
+        self._set_workflow_state(ticket, "fixing")
+        return True, "held-base-update"
 
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         hold = ticket.factory.hold

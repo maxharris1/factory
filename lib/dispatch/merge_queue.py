@@ -553,6 +553,18 @@ class MergeQueueMixin:
             ).fetchall()
         return any(_merge_only(row["detail"]) for row in rows)
 
+    def _base_update_from(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT detail FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'fix'
+                  AND source_comment_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchall()
+        return any(_merge_only(row["detail"]) for row in rows)
+
     def _queue_update(self, ticket: TrackedTicket, row: sqlite3.Row) -> None:
         """An update-from-main job for the conflicting queue head (#130)."""
         head = ticket.current_head

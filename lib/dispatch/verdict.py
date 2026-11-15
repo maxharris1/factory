@@ -246,6 +246,8 @@ class VerdictMixin:
                 ship,
                 intent,
             )
+        if self._base_update_from(ticket, comment):
+            return True, "held-base-update"
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
         reported_round = _round_number(fields.get("round"))
