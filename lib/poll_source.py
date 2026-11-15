@@ -2017,12 +2017,18 @@ def _risk(
 
 def _sql_patch_risk(patch: str) -> bool | None:
     """#195: True when a changed line falls in a SQL statement that changes a
-    realtime table; None when such a statement's start or end is outside the
-    patch, so it cannot be classified."""
+    realtime table, or a changed hunk shows a realtime word at all; None when
+    such a statement's start or end is outside the patch, or a changed hunk
+    shows a block comment, so it cannot be classified."""
     decided: bool | None = False
     hunks = re.split(r"^(@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*)$", patch, flags=re.MULTILINE)
     for index in range(1, len(hunks) - 3, 4):
         body = hunks[index + 3].splitlines()
+        if any(line[:1] in "+-" for line in body):
+            if any(RISKY_CHANGE.search(line[1:]) for line in body):
+                return True
+            if any(SQL_COMMENT.search(line[1:]) for line in body):
+                decided = None
         for start, mark in ((int(hunks[index + 1]), "-"), (int(hunks[index + 2]), "+")):
             lines = [line for line in body if line[:1] in (" ", mark)]
             verdict = _sql_statements_risk(lines, mark, headed=start <= 1)

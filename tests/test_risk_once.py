@@ -268,9 +268,9 @@ def test_a_linear_realtime_table_change_outside_a_realtime_path_is_high(line: st
     assert Dispatcher._config_cap(None, ticket) == 3
 
 
-def test_a_realtime_word_only_in_unchanged_context_stays_low() -> None:
+def test_a_realtime_word_only_in_unchanged_sql_context_fails_high() -> None:
     item = realtime_patch(" -- realtime notes\n+SELECT 1;")
-    assert linear_ticket(labels=[], files=[item])[0].risk == "low"
+    assert linear_ticket(labels=[], files=[item])[0].risk == "high"
 
 
 def sql_change(before: str, after: str, path: str = "db/schema.sql") -> dict:
@@ -418,20 +418,24 @@ def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
             "-- realtime tables live elsewhere; see docs\nCREATE TABLE a (\n  id bigint\n);\n",
         ),
         (
-            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id int\n);\n",
-            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id bigint\n);\n",
-        ),
-        (
             "CREATE TABLE a ( -- not realtime; plain\n  id int\n);\n",
             "CREATE TABLE a ( -- not realtime; plain\n  id bigint\n);\n",
         ),
         (
-            "/* realtime; publication notes */ CREATE TABLE a (\n  id int\n);\n",
-            "/* realtime; publication notes */ CREATE TABLE a (\n  id bigint\n);\n",
+            "/*\nALTER PUBLICATION supabase_realtime ADD TABLE public.events;\n*/\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE public.events;\n",
         ),
         (
-            "INSERT INTO a VALUES ('x; y',\n  1);\n",
-            "INSERT INTO a VALUES ('x; y',\n  2);\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n"
+            "  existing\n  members\n  begin\n  comment;\n"
+            " -- */ public.messages,\n    public.events;\n",
+            "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n"
+            "  existing\n  members\n  begin\n  comment;\n"
+            " -- */ public.messages,\n    public.new_events;\n",
+        ),
+        (
+            "/* realtime; publication notes */ CREATE TABLE a (\n  id int\n);\n",
+            "/* realtime; publication notes */ CREATE TABLE a (\n  id bigint\n);\n",
         ),
         (
             "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
@@ -439,15 +443,60 @@ def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
             "ALTER PUBLICATION supabase_realtime ADD TABLE public.messages;\n"
             "CREATE TABLE a (\n  id bigint\n);\n/* a long note\n  that goes on\n",
         ),
+        (
+            f"{STATEMENTS}/*\nSELECT 1;\n*/\n{STATEMENTS}",
+            f"{STATEMENTS}SELECT 1;\n{STATEMENTS}",
+        ),
+        (
+            f"{STATEMENTS}SELECT 1;\n{STATEMENTS}",
+            f"{STATEMENTS}/*\nSELECT 1;\n{STATEMENTS}",
+        ),
+        (
+            f"/*\n{STATEMENTS}  note one\n  note two;\n*/ SELECT 1;\n",
+            f"/*\n{STATEMENTS}  note one\n  note three;\n*/ SELECT 1;\n",
+        ),
+        (
+            f"/*\n{STATEMENTS}  a\n  b; -- */ c\n  d\n*/ SELECT 1;\n",
+            f"/*\n{STATEMENTS}  a\n  b; -- */ c\n  e\n*/ SELECT 1;\n",
+        ),
     ],
     ids=[
         "next-to-a-realtime-statement",
         "after-a-realtime-comment",
+        "realtime-in-a-line-comment-inside-the-statement",
+        "uncommented-publication",
+        "hunk-starts-inside-a-comment-near-a-publication",
+        "realtime-in-a-block-comment-before-the-statement",
+        "hunk-ending-inside-a-comment-near-a-publication",
+        "removed-comment-delimiters",
+        "added-comment-opener",
+        "hunk-starts-inside-a-block-comment",
+        "line-comment-inside-a-block-comment",
+    ],
+)
+def test_a_sql_change_near_a_publication_or_in_an_unparsed_comment_fails_high(
+    before: str, after: str
+) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
+    assert ticket.risk == "high"
+    assert Dispatcher._config_cap(None, ticket) == 3
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id int\n);\n",
+            f"ALTER PUBLICATION supabase_realtime ADD TABLE a;\n{STATEMENTS}CREATE TABLE b (\n  id bigint\n);\n",
+        ),
+        (
+            "INSERT INTO a VALUES ('x; y',\n  1);\n",
+            "INSERT INTO a VALUES ('x; y',\n  2);\n",
+        ),
+    ],
+    ids=[
         "statement-head-in-context",
-        "realtime-only-in-a-line-comment-inside-the-statement",
-        "realtime-only-in-a-block-comment-before-the-statement",
         "semicolon-in-an-ordinary-string",
-        "headed-hunk-ending-inside-a-comment",
     ],
 )
 def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str) -> None:
