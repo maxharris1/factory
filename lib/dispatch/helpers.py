@@ -373,6 +373,14 @@ def _detail_project_bot(detail: str | None) -> str | None:
     return project_bot if isinstance(project_bot, str) else None
 
 
+def _merge_only(detail: str | None) -> bool:
+    try:
+        parsed = json.loads(detail) if detail else None
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("kind") == "merge-only"
+
+
 def _is_patch_id(value: str) -> bool:
     return re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
 

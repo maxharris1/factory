@@ -75,7 +75,7 @@ def expected_for(job: Job, bot: str) -> Expected:
     elif job.request.action == "plan":
         role, handoff, round_text = "builder", "plan", f"{facts['plan_round']}/2"
     else:
-        role, handoff, round_text = "builder", "ready", facts["round"]
+        role, handoff, round_text = "builder", "ready", None
     return Expected(
         repo=job.request.repo,
         pr=facts["pr"],

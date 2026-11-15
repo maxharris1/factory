@@ -341,6 +341,31 @@ def test_done_sweeps_once_then_the_strip_is_still(tmp_path: Path) -> None:
     assert out["pending"] == 0
 
 
+SETTLE = r"""
+  const make = (key, opts) => PX.strip(key, Object.assign({effect: 'off', tint: '#9ece6a', done: true, cell: 4, height: 8}, opts));
+  const settling = make('new', {settle: true}), historic = make('old', {});
+  found = [settling, historic]; PX.bind();
+  for (let t = 1050; t <= 1900; t += 50) frame(t);
+  out.sweep = draws(settling);
+  out.historic = draws(historic);
+  const settled = draws(settling);
+  for (let t = 1950; t <= 3000; t += 50) frame(t);
+  out.after = draws(settling) - settled;
+  out.pending = rafQueue.length;
+"""
+
+
+@needs_node
+def test_a_strip_born_settling_sweeps_once_and_a_historic_done_strip_does_not(tmp_path: Path) -> None:
+    out = _node(tmp_path, SETTLE)
+    assert out["sweep"] > 5
+    assert out["historic"] == 1
+    assert out["after"] == 0
+    assert out["pending"] == 0
+    still = _node(tmp_path, SETTLE, reduced=True)
+    assert still["sweep"] == 1 and still["historic"] == 1
+
+
 @needs_node
 def test_reduced_motion_gives_one_still_frame_and_no_one_shots(tmp_path: Path) -> None:
     out = _node(tmp_path, r"""
@@ -616,7 +641,9 @@ def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
             assert {"kpi-0", "queue", "meter-box"} <= set(keys[3:]), keys
             continue
         board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
-        assert keys[3:] == (board if name == "job.html" else []), name
+        rows = [key for key in keys[3:] if key.startswith("attention-")]
+        assert keys[3:] == {"job.html": board, "activity.html": rows}.get(name, []), name
+        assert len(rows) == (html.count('class="at-row"') if name == "activity.html" else 0), name
         assert 'class="px-held"' not in html, name
 
 

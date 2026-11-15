@@ -10,7 +10,6 @@ efficiency pages.
   diagram drawn from model/chart.mmd (the statechart's checked-in chart),
   with the job's path and current state highlighted, its round and its time
   in that state.
-- Activity page (activity.html): handoffs, verdicts, log, needs attention.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
 - #63 FU-1: a lane counts max(held, running) slots.
@@ -319,7 +318,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
 # --- activity page -------------------------------------------------------------------------
 
 
-def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> None:
+def test_activity_page_has_attention_and_relay_only(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute(
@@ -328,15 +327,16 @@ def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> No
         )
         connection.execute("UPDATE jobs SET finished_at = ? WHERE id = 'd-codex-review-1'", (NOW - 100,))
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["activity.html"])
-    for panel in ("attention", "handoffs", "verdicts"):
+    for panel in ("attention", "relay"):
         assert f'id="{panel}"' in html, panel
-    assert "queued-review-fix" in _text(_section(html, "verdicts"))
-    assert "scripted" in _text(_section(html, "handoffs"))
+    relay = _text(_section(html, "relay"))
+    assert "queued-review-fix" in relay and "codex" in relay
     attention = _text(_section(html, "attention"))
     assert "AUT-7" in attention and "job-timeout" in attention
     assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
-    for panel in ("lanes", "queue", "health", "savings", "log", "tickets"):
+    for panel in ("lanes", "queue", "health", "savings", "tickets", "handoffs", "verdicts", "log"):
         assert f'id="{panel}"' not in html, panel
+    assert "poller.log" not in _text(html)
 
 
 def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
@@ -657,7 +657,11 @@ if (ids['flow-template'] && status.statechart) {
 global.window = global;
 global.addEventListener = () => {};
 const docListeners = {};
-global.document = {body, hidden: false, activeElement: null, getElementById: (id) => ids[id] || null,
+let focusedNode = null;
+global.document = {body, hidden: false,
+  get activeElement() { return focusedNode && focusedNode.isConnected ? focusedNode : null; },
+  set activeElement(node) { focusedNode = node; },
+  getElementById: (id) => ids[id] || null,
   createElement: (tag) => new Node(tag),
   createElementNS: (ns, tag) => { const n = new Node(tag); n.ns = ns; return n; },
   addEventListener: (type, fn) => { (docListeners[type] = docListeners[type] || []).push(fn); }};
@@ -786,8 +790,7 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
 @needs_node
 def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, last_cycle_at=NOW - 4)
-    activity = _run_page(tmp_path, snapshot, "activity",
-                         BAR + ["hud", "attention", "handoffs", "verdicts"])
+    activity = _run_page(tmp_path, snapshot, "activity", BAR + ["hud", "attention", "relay"])
     text = activity["text"]
     assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
     assert text["attention"].count("AUT-7") == 1

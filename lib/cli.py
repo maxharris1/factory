@@ -642,6 +642,7 @@ def _wait_autostart(
             approvals=policy,
             drain=waiter.drain_marker(args.bot),
             orch_yml=orch_path,
+            home=Path.home(),
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)

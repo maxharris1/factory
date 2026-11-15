@@ -44,17 +44,20 @@ One pass, in order; the first guard that fails ends it:
    while the checkout moves. A box with a job is left alone (`busy`, not
    escalated) and deployed by a later pass; meanwhile the waiter's
    preflight refuses box starts because HEAD lags origin/main. The mark is
-   dropped when the apply ends, and every box row once HEAD is origin/main.
+   dropped when the apply ends, and the box's own row and every lagging
+   row once HEAD is origin/main. A waiter's synced or refused row stays.
 7. When the merge changed deploy/ or requirements.txt, it runs
    `deploy/install.sh --update` (output in self-deploy-install.log). When
-   it changed skills/ (the pin and the pinned files), it then runs
-   `orch install-skills` from the checkout into every bot home, and
-   otherwise into each bot home whose installed skills miss the pin. The
-   bot homes are HOME and the home of each harness user that machines.yml
-   names on this device and that exists here. An up-to-date pass makes the
-   same check, so an install that failed is rerun once its cause is gone;
-   that install takes the same `deploying` mark as step 6 and waits
-   (`busy`) while the box has a job.
+   it changed skills/ (the pin and the pinned files), or HOME's installed
+   skills miss the pin, it then runs `orch install-skills` from the
+   checkout into HOME, this account's own home. A home it cannot read
+   counts as missing the pin. Other bot accounts are never written from
+   here (#345): each box bot's waiter, running as that account, installs
+   into its own home while it has no box job (lib/waiter.py). An
+   up-to-date pass makes the same check, so a failed install is rerun once
+   its cause is gone; that install takes the same `deploying` mark as step
+   6 and waits (`busy`) while the box has a job, and a failure is
+   `install-failed`, never `up-to-date`.
 
 Escalation goes through lib/heal.py's webhook POST (URL and auth from the
 environment, never logged), once per reason: self-deploy.state.json keeps
@@ -67,7 +70,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import pwd
 import re
 import shutil
 import stat
@@ -121,6 +123,7 @@ CONFLICT = "conflict"
 FETCH_FAILED = "fetch-failed"
 ROLLED_BACK = "rolled-back"
 WOULD_DEPLOY = "would-deploy"
+INSTALL_FAILED = "install-failed"
 
 
 @dataclass(frozen=True)
@@ -419,7 +422,9 @@ def _mark_deploying_unless_busy(
 def _release(queue: SQLiteJobQueue, device: str, states: Sequence[str]) -> None:
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        device_sync.clear(connection, device, states)
+        device_sync.clear(connection, device, states, bots=("",))
+        if device_sync.LAGGING in states:
+            device_sync.clear(connection, device, (device_sync.LAGGING,))
         connection.commit()
 
 
@@ -464,9 +469,8 @@ def run_pass(
         if not stale:
             return Outcome(UP_TO_DATE, old=old, new=new), {}
         if queue is None:
-            return Outcome(UP_TO_DATE, old=old, new=new), {
-                "skills": _install_skills(checkout, stale, environ, webhook, state_dir,
-                                          install, clock)}
+            return _installed(old, new, _install_skills(checkout, stale, environ, webhook,
+                                                        state_dir, install, clock))
         jobs = _mark_deploying_unless_busy(queue, device, machines, checkout, old, new, now)
         if jobs:
             return Outcome(BUSY, f"{jobs} jobs on {device}, install-skills next pass",
@@ -476,7 +480,7 @@ def run_pass(
                                      install, clock)
         finally:
             _release(queue, device, (device_sync.DEPLOYING,))
-        return Outcome(UP_TO_DATE, old=old, new=new), {"skills": skills}
+        return _installed(old, new, skills)
     if not git.ok("merge-base", "--is-ancestor", old, new):
         return Outcome(REFUSED, f"local commits: HEAD {old[:12]} is not behind origin/main",
                        old, new), {}
@@ -570,27 +574,30 @@ def _apply(
     return Outcome(DEPLOYED, f"{old[:12]}..{new[:12]}", old, new), extra
 
 
-def bot_homes(machines: MachinesConfig | None, device: str,
-              environ: Mapping[str, str]) -> tuple[Path, ...]:
-    homes = [Path(environ["HOME"])] if environ.get("HOME") else []
-    entry = next((d for d in machines.devices if d.name == device), None) if machines else None
-    for user in sorted(set(entry.harnesses.values())) if entry else ():
-        try:
-            homes.append(Path(pwd.getpwnam(user).pw_dir))
-        except KeyError:
-            continue
-    return tuple(dict.fromkeys(homes))
+def own_home(environ: Mapping[str, str]) -> tuple[Path, ...]:
+    return (Path(environ["HOME"]),) if environ.get("HOME") else ()
 
 
 def _stale_homes(checkout: Path, homes: Sequence[Path]) -> list[Path]:
+    try:
+        pstack_pin.load_pin(checkout)
+    except (OSError, ValueError, UnicodeError):
+        return []
     stale = []
     for home in homes:
         try:
             if pstack_pin.installed_errors(checkout, home):
                 stale.append(home)
         except (OSError, ValueError, UnicodeError):
-            continue
+            stale.append(home)
     return stale
+
+
+def _installed(old: str, new: str, skills: tuple[int, float]) -> tuple[Outcome, dict]:
+    if skills[0] != 0:
+        return (Outcome(INSTALL_FAILED, f"orch install-skills exited {skills[0]}", old, new),
+                {"skills": skills})
+    return Outcome(UP_TO_DATE, old=old, new=new), {"skills": skills}
 
 
 def _install_skills(
@@ -639,8 +646,7 @@ def deploy(
     outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
                               install=install, clock=clock, dry_run=dry_run, queue=queue,
                               device=device, machines=machines,
-                              homes=bot_homes(machines, device, environ) if homes is None
-                              else homes)
+                              homes=own_home(environ) if homes is None else homes)
     escalation: str | None = None
     key: str | None = None
     if outcome.kind == FETCH_FAILED:
@@ -661,7 +667,7 @@ def deploy(
     if outcome.kind == DEPLOYED and "install" in extra and extra["install"][0] != 0:
         key = f"install:{outcome.new}"
         escalation = f"deploy/install.sh --update exited {extra['install'][0]}"
-    elif outcome.kind in (DEPLOYED, UP_TO_DATE) and "skills" in extra and extra["skills"][0] != 0:
+    elif outcome.kind in (DEPLOYED, INSTALL_FAILED) and "skills" in extra and extra["skills"][0] != 0:
         key = f"install-skills:{outcome.new}"
         escalation = f"orch install-skills exited {extra['skills'][0]}"
 

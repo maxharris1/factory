@@ -606,6 +606,16 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
     }
 
 
+_VERDICT_TIMES = (
+    ("jobs", "MIN", "created_at", "source_comment_id"),
+    ("jobs", "MAX", "finished_at", "handoff_comment_id"),
+    ("ticket_state", "MAX", "approved_at", "approve_comment_id"),
+    ("ship_holds", "MAX", "held_at", "approve_comment_id"),
+    ("ticket_retries", "MAX", "recorded_at", "comment_id"),
+    ("followup_filings", "MAX", "created_at", "comment_id"),
+)
+
+
 def collect_snapshot(
     db_path: Path,
     log_path: Path,
@@ -1353,9 +1363,19 @@ def _read_db(
     verdicts = None
     if "handled_comments" in tables:
         verdicts = []
+        same_ticket = "lower(t.repo) = lower(h.repo) AND t.ticket_id = h.ticket_id"
+        times = [
+            f"SELECT {when}(t.{column}) FROM {table} AS t "
+            f"WHERE {same_ticket} AND t.{comment} = h.comment_id"
+            for table, when, column, comment in _VERDICT_TIMES
+            if table in tables
+            and {column, comment}
+            <= {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        ]
+        recorded = f"COALESCE({', '.join(f'({q})' for q in times)}, NULL)" if times else "NULL"
         for row in connection.execute(
-            "SELECT repo, ticket_id, outcome FROM handled_comments "
-            "ORDER BY rowid DESC LIMIT ?",
+            f"SELECT h.rowid AS seq, h.repo, h.ticket_id, h.outcome, {recorded} AS recorded_at "
+            "FROM handled_comments AS h ORDER BY h.rowid DESC LIMIT ?",
             (RECENT_VERDICTS,),
         ):
             outcome = str(row["outcome"])
@@ -1366,6 +1386,8 @@ def _read_db(
                     **_ticket_ref(sources, row["repo"], row["ticket_id"]),
                     "outcome": _clean(outcome, 48),
                     "kind": _verdict_kind(outcome),
+                    "seq": int(row["seq"]),
+                    "age_seconds": _age(now, row["recorded_at"]),
                 }
             )
 
