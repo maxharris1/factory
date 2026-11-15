@@ -11,6 +11,8 @@ from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide
 
+_HELD_BASE_UPDATE = "held-base-update"
+
 
 class HoldsMixin:
     def _hold_gate(
@@ -122,9 +124,6 @@ class HoldsMixin:
         comment: Comment,
         head: str,
     ) -> tuple[bool, str]:
-        """#300: the job, the APPROVE's review_events row and the move to
-        fixing commit together, so a restart replays the APPROVE as
-        held-base-update and never as stale-approve."""
         _state, review_round = self._review_context(ticket)
         base = ticket.factory.base_branch
         request = self._base_update_request(
@@ -151,16 +150,16 @@ class HoldsMixin:
                 """
                 INSERT OR IGNORE INTO review_events (
                     repo, ticket_id, comment_id, outcome
-                ) VALUES (?, ?, ?, 'held-base-update')
+                ) VALUES (?, ?, ?, ?)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, _HELD_BASE_UPDATE),
             )
             write_workflow_state(
                 connection,
                 ticket.repo,
                 ticket.ticket_id,
                 "fixing",
-                source="held-base-update",
+                source=_HELD_BASE_UPDATE,
                 at=self.queue.now(),
                 guard=_NOT_FINISHED,
             )
@@ -168,7 +167,7 @@ class HoldsMixin:
         if job is not None:
             self._flag_dropped(ticket, request, job)
         self._write_state_label(ticket, "fixing")
-        return True, "held-base-update"
+        return True, _HELD_BASE_UPDATE
 
     def _replay_held_base_update(
         self, ticket: TrackedTicket, comment: Comment
@@ -178,17 +177,16 @@ class HoldsMixin:
                 """
                 SELECT 1 FROM review_events
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
-                  AND outcome = 'held-base-update'
+                  AND outcome = ?
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, _HELD_BASE_UPDATE),
             ).fetchone()
         if row is None:
             return None
         self._write_state_label(ticket, self._review_context(ticket)[0])
-        return True, "held-base-update"
+        return True, _HELD_BASE_UPDATE
 
     def _held_at(self, ticket: TrackedTicket, head: str) -> bool:
-        """An awaiting-ok hold already recorded at head that still blocks."""
         if self._held(ticket, head) is None:
             return False
         with self._connect() as connection:
