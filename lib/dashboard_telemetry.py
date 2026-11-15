@@ -5,10 +5,11 @@ lib/telemetry.py) inside the dashboard's read-only transaction. A database
 without the table, or a job without a row, reads as "no telemetry", never an
 error. Only allowlisted columns are read and every value is checked: numbers
 must be finite, counts are non-negative integers, text is one line of at
-most a fixed length, and step kinds and statuses are enumerated. The
-snapshot is then walked by lib/dashboard.py's `_scrub`, so every string here
-also goes through `redact` (and any non-finite float becomes null) before it
-is written. Raw event logs are never read: they stay on the
+most a fixed length, redacted in full before it is cut (lib.dashboard is
+imported late because it imports this module), and step kinds and statuses
+are enumerated. The snapshot is then walked by lib/dashboard.py's `_scrub`,
+so every string here also goes through `redact` again (and any non-finite
+float becomes null) before it is written. Raw event logs are never read: they stay on the
 machine that ran the job.
 
 Snapshot shape:
@@ -110,7 +111,9 @@ def _money(value: object) -> float | None:
 
 
 def _text(value: object, limit: int = TEXT_LIMIT) -> str:
-    text = " ".join(_CONTROL.sub(" ", str(value)).split())
+    from lib.dashboard import redact
+
+    text = " ".join(redact(_CONTROL.sub(" ", str(value))).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 

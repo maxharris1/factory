@@ -393,6 +393,43 @@ def test_secrets_in_live_run_text_never_reach_the_snapshot_or_pages(tmp_path: Pa
                 assert "<script>alert" not in _no_script(body)
 
 
+def _across_cap(limit: int) -> str:
+    token = "ghp_" + "A1" * 18
+    lead = "work " * ((limit - 12) // 5)
+    return lead + "read " + token
+
+
+def test_a_secret_crossing_a_text_cap_is_redacted_before_the_cut(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    task = _across_cap(telemetry.TASK_TEXT_LIMIT)
+    kind = _across_cap(telemetry.LABEL_LIMIT)
+    repo = _across_cap(100)
+    add_telemetry(
+        db, "r-codex-review", repo=repo,
+        plan=json.dumps([{"text": task, "status": "in_progress"}]),
+        current_task=task, last_finished=task,
+        subagents=json.dumps([{"kind": kind, "description": task, "status": "running",
+                               "started_at": NOW - 3, "finished_at": None}]),
+    )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    item = _running(snapshot)["13"]["telemetry"]
+    fields = {
+        "plan": item["plan"][0]["text"],
+        "current_task": item["current_task"],
+        "last_finished": item["last_finished"],
+        "kind": item["subagents"][0]["kind"],
+        "description": item["subagents"][0]["description"],
+        "repo": item["repo"],
+    }
+    for name, value in fields.items():
+        assert "ghp_" not in value and "[redacted" in value, (name, value)
+    out = tmp_path / "out"
+    write_snapshot_pages(out, snapshot)
+    for page in out.rglob("*"):
+        if page.is_file():
+            assert "ghp_A1" not in page.read_text(errors="replace"), page.name
+
+
 # --- the page script draws the same ---------------------------------------------------------
 
 
