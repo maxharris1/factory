@@ -1432,23 +1432,29 @@ def _add_job_tickets(
     telemetry: bool,
 ) -> None:
     """Give each running or queued job its ticket's tracker and flow (current
-    statechart state, the path its jobs took, time in state, the visits). The job's
-    round comes from its own detail (#75), not the ticket's completed
-    review count."""
+    statechart state, the path its jobs took, time in state, the visits).
+    The job's round comes from its own detail (#75), not the ticket's
+    completed review count."""
     if not active:
         return
     # One read for every ticket with a running or queued job, oldest first.
     wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
     ids = sorted({ticket_id for _, ticket_id in wanted})
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
+    columns = (
+        {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+        if telemetry
+        else set()
+    )
+    joined = "job_id" in columns
+    times = ", ".join(
+        f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
+        for name in ("started_at", "finished_at")
+    )
     for row in connection.execute(
-        "SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, "
-        + (
-            "t.started_at, t.finished_at FROM jobs "
-            "LEFT JOIN job_telemetry t ON t.job_id = jobs.id "
-            if telemetry
-            else "NULL AS started_at, NULL AS finished_at FROM jobs "
-        )
+        f"SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, {times} "
+        "FROM jobs "
+        + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
         + f"WHERE jobs.ticket_id IN ({','.join('?' for _ in ids)}) "
         "ORDER BY jobs.created_at, jobs.rowid",
         ids,
