@@ -525,7 +525,7 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state, source_comment_id, detail FROM jobs
+                SELECT action, state, source_comment_id, detail, created_at FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
                 ORDER BY state IN ('queued', 'running') DESC, rowid DESC
@@ -538,11 +538,20 @@ class ReadyMixin:
         if row["state"] in ("queued", "running"):
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
-            ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])
+            ticket,
+            head,
+            _detail_round_number(row["detail"]),
+            str(row["source_comment_id"]),
+            float(row["created_at"]),
         )
 
     def _verdict_handled(
-        self, ticket: TrackedTicket, head: str, review_round: int | None, ready_id: str
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        review_round: int | None,
+        ready_id: str,
+        review_queued_at: float,
     ) -> bool:
         self._remember_verdicts(ticket, ticket.comments)
         with self._connect() as connection:
@@ -552,6 +561,7 @@ class ReadyMixin:
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
                   AND verdict.outcome != 'rejected-edited'
+                  AND NOT COALESCE(recorded.posted_at < ?, 0)
                   AND (
                       recorded.review_round = ?
                       OR recorded.head IS NULL AND verdict.rowid <= (
@@ -564,7 +574,7 @@ class ReadyMixin:
                         AND ready.comment_id = ?
                   ), 0)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, review_round, ready_id),
+                (ticket.repo.lower(), ticket.ticket_id, review_queued_at, review_round, ready_id),
             ).fetchall()
         return any(
             row["head"] is None or _matching_head(str(row["head"]), head) is not None

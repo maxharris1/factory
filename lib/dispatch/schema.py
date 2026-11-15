@@ -122,11 +122,13 @@ class SchemaMixin:
                     comment_id TEXT NOT NULL,
                     head TEXT NOT NULL,
                     review_round INTEGER,
+                    posted_at REAL,
                     PRIMARY KEY (repo, ticket_id, comment_id)
                 )
                 """
             )
             connection.commit()
+            _add_missing_columns(connection, "verdict_heads", {"posted_at": "REAL"})
             _add_missing_columns(
                 connection,
                 "ticket_state",

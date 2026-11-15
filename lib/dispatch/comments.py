@@ -376,11 +376,17 @@ class CommentsMixin:
                         comment.id,
                         fields.get("head") or "",
                         _round_number(fields.get("round")),
+                        comment.created_at,
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO verdict_heads VALUES (?, ?, ?, ?, ?)", rows
+                """
+                INSERT OR IGNORE INTO verdict_heads (
+                    repo, ticket_id, comment_id, head, review_round, posted_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
 
     def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
