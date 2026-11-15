@@ -25,6 +25,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
@@ -83,15 +84,14 @@ class JobsMixin:
             return "rejected-answers-author"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, generation, workflow_state
-                ) VALUES (?, ?, 0, 0, 1, 'abandoned')
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET workflow_state = 'abandoned'
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "abandoned",
+                source="t5-abandoned",
+                at=self.queue.now(),
+                insert={"gate_count": 0, "stuck": 0, "generation": 1},
             )
             closed = self._fail_abandoned_queued(connection)
             connection.commit()

@@ -19,6 +19,7 @@ from lib.dispatch.helpers import (
     _queue_state,
     _scope,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, RetryableStateError, ShipError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
@@ -161,14 +162,19 @@ class MergeQueueMixin:
         self._write_state_label(fresh, back_to)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET approved_head = ?, workflow_state = ?, update_failures = 0,
-                    update_from_head = NULL
-                WHERE repo = ? AND ticket_id = ? AND workflow_state = 'updating'
-                """,
-                (head, back_to, *key),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                back_to,
+                source="update-settled",
+                at=self.queue.now(),
+                also={
+                    "approved_head": head,
+                    "update_failures": 0,
+                    "update_from_head": None,
+                },
+                guard="workflow_state = 'updating'",
             )
             connection.commit()
         if self.log is not None:
@@ -492,12 +498,14 @@ class MergeQueueMixin:
         key = (ticket.repo.lower(), ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                f"""
-                UPDATE ticket_state SET workflow_state = 'abandoned'
-                WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
-                """,
-                key,
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "abandoned",
+                source="closed-unmerged",
+                at=self.queue.now(),
+                guard=_NOT_FINISHED,
             )
             for job in connection.execute(
                 """
@@ -565,13 +573,16 @@ class MergeQueueMixin:
                 request,
                 dedupe_key=f"t-update:{scope}:{head}:u{failures}:g{generation}",
             )
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET workflow_state = 'updating', update_from_head = ?
-                WHERE repo = ? AND ticket_id = ? AND workflow_state = ?
-                """,
-                (head, ticket.repo.lower(), ticket.ticket_id, row["workflow_state"]),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "updating",
+                source="update-queued",
+                at=self.queue.now(),
+                also={"update_from_head": head},
+                guard="workflow_state = ?",
+                guard_args=(row["workflow_state"],),
             )
             connection.commit()
         if self.log is not None:
@@ -628,13 +639,14 @@ class MergeQueueMixin:
                 return "update-superseded"
             failures = int(row["update_failures"]) + 1
             if failures < UPDATE_FAILURES_TO_STOP:
-                connection.execute(
-                    """
-                    UPDATE ticket_state
-                    SET update_failures = ?, update_failed_job = ?, workflow_state = ?
-                    WHERE repo = ? AND ticket_id = ?
-                    """,
-                    (failures, job_id, back_to, *key),
+                write_workflow_state(
+                    connection,
+                    repo,
+                    ticket_id,
+                    back_to,
+                    source="update-failed",
+                    at=self.queue.now(),
+                    also={"update_failures": failures, "update_failed_job": job_id},
                 )
                 connection.commit()
                 if self.log is not None:

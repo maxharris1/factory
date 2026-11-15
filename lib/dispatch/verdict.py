@@ -17,6 +17,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
@@ -151,18 +152,14 @@ class VerdictMixin:
                         f"t3:{_scope(ticket.repo, ticket.ticket_id)}:{comment.id}"
                     ),
                 )
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET review_round = ?, workflow_state = ?
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (
-                    round_number,
-                    next_state,
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                ),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                next_state,
+                source="t3",
+                at=self.queue.now(),
+                also={"review_round": round_number},
             )
             outcome = (
                 "capped-review"

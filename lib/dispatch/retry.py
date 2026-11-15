@@ -10,6 +10,7 @@ from typing import Literal
 
 from lib.dispatch.constants import UPDATE_FAILURES_TO_STOP
 from lib.dispatch.helpers import _comment_link, _queue_state, _scope
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import parse_comment
 from lib.queue import Job, JobRequest, _job
@@ -162,15 +163,23 @@ class RetryMixin:
             )
             update_failures = UPDATE_FAILURES_TO_STOP - 1
         plan_check = None if state == "planning" else row["plan_check_comment_id"]
-        connection.execute(
-            """
-            UPDATE ticket_state
-            SET stuck = 0, stuck_reason = NULL, stuck_source_comment_id = NULL,
-                stuck_wake_job_id = NULL, generation = ?, workflow_state = ?,
-                plan_gap_count = ?, plan_check_comment_id = ?, update_failures = ?
-            WHERE repo = ? AND ticket_id = ?
-            """,
-            (generation, state, gaps, plan_check, update_failures, *key),
+        write_workflow_state(
+            connection,
+            ticket.repo,
+            ticket.ticket_id,
+            state,
+            source="retry",
+            at=self.queue.now(),
+            also={
+                "stuck": 0,
+                "stuck_reason": None,
+                "stuck_source_comment_id": None,
+                "stuck_wake_job_id": None,
+                "generation": generation,
+                "plan_gap_count": gaps,
+                "plan_check_comment_id": plan_check,
+                "update_failures": update_failures,
+            },
         )
         connection.execute(
             """

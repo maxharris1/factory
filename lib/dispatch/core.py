@@ -19,6 +19,7 @@ from lib.dispatch.helpers import (
     _route,
     trusted_bots,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     Comment,
     DeviceChecks,
@@ -233,16 +234,15 @@ class DispatcherBase:
             return
         self._write_state_label(ticket, state)
         with self._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, workflow_state
-                ) VALUES (?, ?, 0, 0, ?)
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET workflow_state = excluded.workflow_state
-                WHERE {_NOT_FINISHED.replace("workflow_state", "ticket_state.workflow_state")}
-                """,
-                (ticket.repo.lower(), ticket.ticket_id, state),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                state,
+                source="set-state",
+                at=self.queue.now(),
+                guard=_NOT_FINISHED,
+                insert={"gate_count": 0, "stuck": 0},
             )
 
     def _routed(self, ticket: TrackedTicket) -> TrackedTicket:
