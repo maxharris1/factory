@@ -170,7 +170,7 @@ def test_stacked_pulls_skips_the_own_pr_and_sorts() -> None:
 
 
 def test_stack_wait_names_other_repos_in_full() -> None:
-    assert stack_wait(HOME, BRANCH, (7,)).reason == f"waiting on #7 (branch {BRANCH} carries its commits)"
+    assert stack_wait(HOME, f"branch {BRANCH}", (7,)).reason == f"waiting on #7 (branch {BRANCH} carries its commits)"
     assert stack_wait(HOME, BRANCH, (7, 8)).attention is None
 
 
@@ -281,23 +281,19 @@ def test_a_resumed_intake_rechecks_the_recorded_branch(tmp_path: Path) -> None:
     assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
 
 
-class BranchSource(FeederSource):
-    branch_name: str | None = BRANCH
-
+class HeadSource(FeederSource):
     def _ticket(self, ref):
         ticket = super()._ticket(ref)
         if ticket is None:
             return None
         head = self.github_fake.branches[(HOME, BRANCH)]
-        return replace(ticket, current_head=head, ci={head: CIResult("success")},
-                       git_branch_name=self.branch_name)
+        return replace(ticket, current_head=head, ci={head: CIResult("success")})
 
 
-def build_ready(tmp_path: Path, branch_name: str | None):
+def build_ready(tmp_path: Path):
     feeder, queue, github, _ = make_feeder(tmp_path)
     github.issues[HOME] = [issue(205)]
-    source = BranchSource(github)
-    source.branch_name = branch_name
+    source = HeadSource(github)
     dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
     dispatcher.poll_once(source)
     build = queue.claim("claude")
@@ -319,11 +315,8 @@ def reviews(queue) -> list:
     return [job for job in queue.outstanding() if job.request.action == "review"]
 
 
-@pytest.mark.parametrize("branch_name", [BRANCH, None], ids=["pr-head-ref", "fed-branch"])
-def test_a_branch_stacked_during_its_build_is_held_before_review(
-    tmp_path: Path, branch_name: str | None
-) -> None:
-    dispatcher, queue, github, source = build_ready(tmp_path, branch_name)
+def test_a_branch_stacked_during_its_build_is_held_before_review(tmp_path: Path) -> None:
+    dispatcher, queue, github, source = build_ready(tmp_path)
 
     dispatcher.poll_once(source)
     dispatcher.poll_once(source)
@@ -361,10 +354,19 @@ def test_each_stacked_set_reaches_grok_under_its_own_identity(tmp_path: Path) ->
     assert len(set(delivery.logical_keys)) == 2
 
 
-@pytest.mark.parametrize("pull_ref", ["actual/pr-branch", None], ids=["pr-head-ref", "no-ref"])
-def test_a_linked_linear_pr_is_held_on_its_own_branch(tmp_path: Path, pull_ref: str | None) -> None:
+def ready_for(head: str) -> Comment:
+    return Comment(
+        id="10001", author="maxharris1", created_at=10001.0,
+        body=format_comment(Handoff(
+            fields=(("kind", "ready"), ("from", "claude-bot"), ("role", "builder"), ("head", head)),
+            body="Ready.",
+        )),
+    )
+
+
+@pytest.mark.parametrize("pull_ref", ["actual/pr-branch", "actual/pr+branch", None])
+def test_a_linked_linear_pr_is_held_on_its_reviewed_head(tmp_path: Path, pull_ref: str | None) -> None:
     repo, suggested = "acme/widgets", "suggested/aut-42"
-    stacked_branch = pull_ref or suggested
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
     gh.head = C
     gh.pull = {"state": "open", "title": "Fix login",
@@ -377,27 +379,54 @@ def test_a_linked_linear_pr_is_held_on_its_own_branch(tmp_path: Path, pull_ref: 
     )
     source.begin_cycle()
     ticket = source._linear_ticket(source.config.projects[0], item)
-    assert ticket.git_branch_name == stacked_branch
+    assert ticket.current_head == C
 
+    pr_branch = pull_ref or "linked/pr"
     github = FakeGitHub()
     github.branches[(repo, suggested)] = A
-    github.branches[(repo, stacked_branch)] = C
-    github.branch_commits[(repo, stacked_branch)] = (B, C)
+    github.branches[(repo, pr_branch)] = C
+    github.branch_commits[(repo, pr_branch)] = (B, C)
     github.branches[(repo, "upstream/pr-113")] = B
-    github.pulls[(repo, 12)] = {"head": stacked_branch, "base": "main"}
+    github.pulls[(repo, 12)] = {"head": pr_branch, "base": "main"}
     github.pulls[(repo, 113)] = {"head": "upstream/pr-113", "base": "main"}
     feeder, queue, _, _ = make_feeder(
         tmp_path, github=github, orch=GITHUB_ORCH.replace("owner/app", repo)
     )
-    ready = Comment(
-        id="10001", author="maxharris1", created_at=10001.0,
-        body=format_comment(Handoff(
-            fields=(("kind", "ready"), ("from", "claude-bot"), ("role", "builder"), ("head", C)),
-            body="Ready.",
-        )),
-    )
     dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
-    dispatcher.process(replace(ticket, comments=(ready,), factory_md=ticket.factory))
+    dispatcher.process(replace(ticket, comments=(ready_for(C),), factory_md=ticket.factory))
 
     assert reviews(queue) == []
     assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
+
+
+def test_a_fork_pr_is_held_on_its_pinned_head_not_a_same_named_base_branch(tmp_path: Path) -> None:
+    repo = "acme/widgets"
+    cfg = config()
+    project = replace(cfg.projects[0], ready_starts_review=True)
+    cfg = replace(cfg, projects=(project,))
+    gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
+    gh.head = C
+    gh.pull = {"state": "open", "title": "Fix login",
+               "head": {"ref": "feature", "label": "contributor:feature",
+                        "repo": {"full_name": "contributor/widgets"}}}
+    source = LivePollSource(cfg, gh_runner=gh)
+    source.begin_cycle()
+    ticket = source._github_ticket(project, source._factory(project), "12")
+
+    reads = RecordedGh()
+    prefix = f"repos/{repo}"
+    reads.route((f"{prefix}/compare/main...feature",),
+                ok({"total_commits": 1, "commits": [{"sha": A}]}))
+    reads.route((f"{prefix}/compare/main...{C}",),
+                ok({"total_commits": 2, "commits": [{"sha": B}, {"sha": C}]}))
+    for sha, pulls in ((A, []), (B, [{"number": 113, "state": "open"}]),
+                       (C, [{"number": 12, "state": "open"}])):
+        reads.route(("--cache", "60s", f"{prefix}/commits/{sha}/pulls?per_page=100"), ok(pulls))
+    feeder, queue, _, _ = make_feeder(tmp_path, orch=GITHUB_ORCH.replace("owner/app", repo))
+    feeder.github = GitHubIntakeClient(reads)
+    dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher.process(replace(ticket, comments=(ready_for(C),)))
+
+    assert reviews(queue) == []
+    assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
+    assert not [call for call in reads.calls if "compare/main...feature" in str(call)]

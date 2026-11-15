@@ -207,9 +207,9 @@ class FakeGitHub:
     def comments(self, repo: str, number: int) -> list[Comment]:
         return list(self.posted.get((repo, number), []))
 
-    def ahead_commits(self, repo: str, base: str, branch: str) -> tuple[str, ...]:
-        self.calls.append(f"ahead:{repo}:{branch}")
-        return self._commits_on(repo, branch)
+    def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
+        self.calls.append(f"ahead:{repo}:{tip}")
+        return self._commits_on(repo, tip)
 
     def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
         return frozenset(
@@ -222,6 +222,10 @@ class FakeGitHub:
     def _commits_on(self, repo: str, branch: str) -> tuple[str, ...]:
         if (repo, branch) in self.branch_commits:
             return self.branch_commits[(repo, branch)]
+        tips = [name for (tip_repo, name), tip in self.branches.items()
+                if tip_repo == repo and tip == branch and (repo, name) in self.branch_commits]
+        if tips:
+            return self.branch_commits[(repo, tips[0])]
         sha = self.branches.get((repo, branch))
         return () if sha is None else (sha,)
 

@@ -417,7 +417,7 @@ class GitHubIntake(Protocol):
 
     def find_pull(self, repo: str, branch: str) -> int | None: ...
 
-    def ahead_commits(self, repo: str, base: str, branch: str) -> Sequence[str]: ...
+    def ahead_commits(self, repo: str, base: str, tip: str) -> Sequence[str]: ...
 
     def commit_pulls(self, repo: str, sha: str) -> Collection[int]: ...
 
@@ -1221,7 +1221,8 @@ class Feeder:
         if branch_found:
             wait = self._stack_hold(
                 repo, issue.key, config.base_branch, branch, number,
-                project_bot=candidate.project.grok_bot, ticket_url=issue.url,
+                where=f"branch {branch}", project_bot=candidate.project.grok_bot,
+                ticket_url=issue.url,
                 held=f"{_ticket_name(issue)} was not fed", until="it feeds",
             )
             if wait is not None:
@@ -1285,44 +1286,35 @@ class Feeder:
         self._record(candidate, go_comment_id=go_id, state="fed", fed_at=now, error=None)
         return TicketRef(repo, ticket_id, issue.tracker)
 
-    def hold_stacked_review(self, ticket: TrackedTicket) -> bool:
-        branch = ticket.git_branch_name or self._fed_branch(ticket.repo, ticket.ticket_id)
-        if branch is None or not _BRANCH.fullmatch(branch):
-            return False
+    def hold_stacked_review(self, ticket: TrackedTicket, head: str) -> bool:
         wait = self._stack_hold(
-            ticket.repo, ticket.ticket_id, ticket.factory.base_branch, branch,
+            ticket.repo, ticket.ticket_id, ticket.factory.base_branch, head,
             int(ticket.pr_number) if ticket.pr_number else None,
+            where=f"head {head[:7]}",
             project_bot=ticket.grok_bot, ticket_url=ticket.ticket_url,
             held=f"{ticket.source_issue or '#' + ticket.ticket_id} was not sent to review",
             until="review starts",
         )
         return wait is not None
 
-    def _fed_branch(self, repo: str, ticket_id: str) -> str | None:
-        with self.queue.connect() as connection:
-            row = connection.execute(
-                f"SELECT branch FROM {FEEDER_TABLE} WHERE repo = ? AND ticket_id = ?",
-                (repo.lower(), ticket_id),
-            ).fetchone()
-        return None if row is None else row[0]
-
     def _stack_hold(
         self,
         repo: str,
         ticket_id: str,
         base: str,
-        branch: str,
+        tip: str,
         own: int | None,
         *,
+        where: str,
         project_bot: str,
         ticket_url: str | None,
         held: str,
         until: str,
     ) -> Wait | None:
-        pulls = stacked_pulls(self.github, repo, base, branch, own)
+        pulls = stacked_pulls(self.github, repo, base, tip, own)
         if not pulls:
             return None
-        wait = stack_wait(repo, branch, pulls)
+        wait = stack_wait(repo, where, pulls)
         stack = ",".join(map(str, pulls))
         self.queue.enqueue(
             JobRequest(

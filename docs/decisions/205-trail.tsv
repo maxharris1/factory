@@ -9,3 +9,5 @@ when	step	hypothesis	result	verdict
 2026-11-15	recheck recorded PR's branch, hold_review before review, set in source id	reviewer repros and new tests pass	retry fed=[] state=waiting-blocked; review jobs=0 blocked wakes=1; keys 205:113 and 205:113,114	VERIFIED
 2026-11-15	r2 REVISE ac-1 (Linear linked PR)	new test fails at 748795e	ticket branch suggested/aut-42, expected actual/pr-branch	VERIFIED red
 2026-11-15	Linear ticket carries the linked PR head ref	reviewer repro and new tests pass	review jobs=0 blocked wakes=1, checked actual/pr-branch	VERIFIED
+2026-11-15	r3 REVISE ac-1 (+ branch, fork head)	new tests fail at 41b1778 merged with main	3 failed; fork repro review jobs=1 blocked wakes=0	VERIFIED red
+2026-11-15	review hold compares base...pinned head; round-3 Linear branch change reverted	reviewer fork repro and new tests pass	review jobs=0 blocked wakes=1, compare main...<head> only	VERIFIED

@@ -322,13 +322,13 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
         return numbers[0] if numbers else None
 
-    def ahead_commits(self, repo: str, base: str, branch: str) -> tuple[str, ...]:
-        """The commits on branch that base lacks (#205). The compare read
+    def ahead_commits(self, repo: str, base: str, tip: str) -> tuple[str, ...]:
+        """The commits on tip that base lacks (#205). The compare read
         lists up to 250; a longer list fails rather than hide a commit."""
-        if not _BRANCH.fullmatch(base) or not _BRANCH.fullmatch(branch):
+        if not _BRANCH.fullmatch(base) or not _BRANCH.fullmatch(tip):
             raise GitHubAdapterError("branch name is not safe")
         compared = self._json(
-            f"{_repo_path(repo)}/compare/{quote(base, safe='/')}...{quote(branch, safe='/')}"
+            f"{_repo_path(repo)}/compare/{quote(base, safe='/')}...{quote(tip, safe='/')}"
         )
         commits = compared.get("commits") if isinstance(compared, dict) else None
         if not isinstance(commits, list):
@@ -339,7 +339,7 @@ class GitHubIntakeClient(GitHubReviewActions):
         )
         total = compared.get("total_commits")
         if not isinstance(total, int) or isinstance(total, bool) or total != len(shas):
-            raise GitHubAdapterError(f"branch {branch} has {total} commits past {base}; read {len(shas)}")
+            raise GitHubAdapterError(f"{tip} has {total} commits past {base}; read {len(shas)}")
         return shas
 
     def commit_pulls(self, repo: str, sha: str) -> frozenset[int]:
