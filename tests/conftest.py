@@ -187,15 +187,37 @@ def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pyt
 
 
 def _fail_on_survivors(owner: str, before: set[int], survivors) -> None:
+    if described := _stop_survivors(before, survivors):
+        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+
+
+def _stop_survivors(before: set[int], survivors) -> list[str]:
     from tests import child_reaper, subreaper
 
     deadline = time.monotonic() + 3
     while (leftovers := survivors()) and time.monotonic() < deadline:
         time.sleep(0.1)
-    if leftovers:
-        described = [subreaper._describe(pid) for pid in sorted(leftovers)]
-        child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
-        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+    if not leftovers:
+        return []
+    described = [subreaper._describe(pid) for pid in sorted(leftovers)]
+    child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
+    return described
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(collector: pytest.Collector):
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    report = yield
+    root = collector.config._tmp_path_factory.getbasetemp()
+    tag = os.environ.get(child_reaper.TAG, "")
+    described = _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))
+    if described:
+        leak = f"{collector.nodeid} left processes running:\n" + "\n".join(described)
+        report.longrepr = f"{report.longrepr}\n\n{leak}" if report.failed else leak
+        report.outcome = "failed"
+    return report
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}
