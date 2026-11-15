@@ -243,7 +243,7 @@ def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
     return None
 
 
-def _prose_and_link_targets(item: str) -> tuple[str, ...]:
+def _prose_and_link_targets(item: str, document: dict[str, object]) -> tuple[str, ...]:
     words: list[str] = []
     targets: list[str] = []
 
@@ -257,9 +257,11 @@ def _prose_and_link_targets(item: str) -> tuple[str, ...]:
                 targets.append(str(token.attrs["href"]))
             elif token.type == "image":
                 targets.append(str(token.attrs["src"]))
+            elif token.type == "html_inline":
+                targets.append(token.content)
             walk(token.children or ())
 
-    walk(_MARKDOWN.parseInline(item))
+    walk(_MARKDOWN.parseInline(item, document))
     return ("".join(words), *targets)
 
 
@@ -317,8 +319,11 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
             "no builder acceptance criteria: add an `## Acceptance criteria` section "
             "with at least one item the builder can meet",
         ))
+    document: dict[str, object] = {}
+    _MARKDOWN.parse(body or "", document)
     for item in criteria:
-        if any(pattern.search(text) for text in _prose_and_link_targets(item) for pattern in _OTHER_PRS):
+        if any(pattern.search(text) for text in _prose_and_link_targets(item, document)
+               for pattern in _OTHER_PRS):
             defects.append(Defect(
                 "other-prs-criterion",
                 f"criterion about other PRs' state ({item!r}): move PR order into "

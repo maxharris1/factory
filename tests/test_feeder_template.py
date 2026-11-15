@@ -182,6 +182,33 @@ def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, exp
     assert (len(report.fed), report.refused, len(github.pulls)) == expected
 
 
+@pytest.mark.parametrize(
+    ("criterion", "definitions"),
+    [
+        ("[PR][docs] #157 is merged first.", "[docs]: https://example.com"),
+        ("PR [#157][docs] is merged first.", "[docs]: https://example.com"),
+        ("[PR][] #157 is merged first.", "[PR]: https://example.com"),
+        ("[PR] #157 is merged first.", "[pr]: https://example.com"),
+        ("Lands after [the fix][fix] does.", "[fix]: https://github.com/owner/app/pull/157"),
+        ("Lands after ![diagram][d] does.", "[d]: https://github.com/owner/app/pull/157"),
+        ("Lands after <a href=\"https://github.com/owner/app/pull/157\">the fix</a> does.", ""),
+    ],
+    ids=["full-word", "full-number", "collapsed", "shortcut", "ref-target", "ref-image", "html-anchor"],
+)
+def test_the_feeder_refuses_other_prs_criteria_that_resolve_through_the_document(
+    tmp_path: Path, criterion: str, definitions: str
+) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    text = body(criteria=("- [ ] " + criterion,)) + f"\n{definitions}\n"
+    github.issues[HOME] = [issue(7, body=text, template=False)]
+    report = feeder.feed_once()
+    assert (len(report.fed), report.refused, len(github.pulls)) == (0, 1, 0)
+
+
+def test_a_bracketed_word_without_a_definition_is_not_an_other_prs_criterion() -> None:
+    assert codes(body(criteria=("- [ ] Shows [draft] next to #120.",)) + "\n[draft]: https://example.com\n") == set()
+
+
 def test_a_plain_issue_reference_is_not_an_other_prs_criterion() -> None:
     assert codes(body(criteria=("- [ ] Fixes the crash in #120.",))) == set()
 
