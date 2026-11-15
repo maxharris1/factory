@@ -7,7 +7,8 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from lib.device_pool import free_slots, sync_blocks, used_slots
+from lib import device_sync
+from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
     _ANSWERS,
@@ -123,18 +124,30 @@ class JobsMixin:
         )
 
     def _lag_blocked_recipients(self) -> frozenset[str]:
+        """Harnesses no checkout can start a job for now: every eligible device
+        is sync-blocked, or the box's own checkout lags its origin/main, which
+        refuses every placement (lib/skill_preflight.py)."""
         config = getattr(self.devices, "config", None)
         if config is None:
             return frozenset()
-        blocked = sync_blocks(self.queue)
+        with self.queue.connect() as connection:
+            rows = device_sync.read(connection)
+        blocked = device_sync.blocked_by(rows)
+        box = box_device(config)
+        box_lagging = {
+            row.harness for row in rows if row.device == box and row.state == device_sync.LAGGING
+        }
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
-            and all(
-                blocked.blocks(device.name, harness)
-                for device in config.devices
-                if device.eligible(harness)
+            and (
+                harness in box_lagging
+                or all(
+                    blocked.blocks(device.name, harness)
+                    for device in config.devices
+                    if device.eligible(harness)
+                )
             )
         )
 
@@ -771,9 +784,7 @@ class JobsMixin:
         if job.request.action == "review" and self._review_retry_waits(job):
             return True
         now = self.queue.now()
-        if lagging.still_lagging_past_wait(
-            now, harness_blocked=job.request.recipient in self._lag_blocked_recipients()
-        ):
+        if lagging.past_wait(now) and job.request.recipient in self._lag_blocked_recipients():
             self._mark_stuck_and_wake(
                 repo=job.request.repo,
                 ticket_id=job.request.ticket_id,

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -265,12 +266,50 @@ def test_a_remote_start_still_refused_past_the_bound_sticks_device_lagging(
     factory = Factory(tmp_path, monkeypatch, lock_root, remote=True)
     job_id, started = factory.device.run_one()
     assert started is None
-    for retry_at in (30, 91, 212, 453, 694, 935):
+    for retry_at in (30, 91, 212, 453, 694):
         factory.poll(START + retry_at)
         assert factory.stuck() == (0, None), "not stuck inside the bound"
         factory.now[0] = START + retry_at + 1
         assert factory.device.waiter.step() is None
-    factory.poll(START + 937)
+    factory.poll(START + 935)
 
     assert factory.stuck() == (1, "device-lagging")
     assert factory.jobs() == [(job_id, "failed", 1)], "no attempt 2"
+
+
+def test_partial_recovery_healthy_box_can_take_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root, remote=True)
+    pool = factory.device.waiter.pool
+    config = replace(pool.config, devices=tuple(
+        replace(device, enabled=True) if device.local else device
+        for device in pool.config.devices
+    ))
+    pool.config = config
+    factory.dispatcher.devices.config = config
+    monkeypatch.setenv("HOME", str(factory.device.home))
+    job_id, started = factory.device.run_one()
+    assert started is None
+    for retry_at in (30, 91, 212, 453, 694):
+        factory.poll(START + retry_at)
+        factory.now[0] = START + retry_at + 1
+        assert factory.device.waiter.step() is None
+    factory.now[0] = START + 800
+    factory.deployed()
+    factory.poll(START + 935)
+    factory.now[0] = START + 936
+    assert factory.device.waiter.step() is None, "the pc, with no checkout, refuses"
+    report = skill_preflight.check(
+        bot="claude-bot", placement=Placement(job_id, "box", "claude", "claude-bot", START),
+        device=config.device("box"), transport=SshTransport(), home=factory.device.home,
+        checkout=str(factory.root), root=factory.root,
+    )
+    assert report.error is None, "the box is current"
+
+    factory.poll(START + 937)
+    assert factory.stuck() == (0, None), "the current box can run the retry"
+    factory.poll(START + 936 + LAGGING_BACKOFF_SECONDS[-1])
+    assert factory.device.waiter.step() == job_id
+    assert factory.jobs() == [(job_id, "running", 1)], "the same row starts on the box"
+    assert factory.stuck() == (0, None)

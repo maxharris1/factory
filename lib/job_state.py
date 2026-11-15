@@ -566,7 +566,6 @@ LAGGING_WAIT_SECONDS = SYNC_GRACE_SECONDS
 class LaggingEnd:
     detail: str
     first_refused_at: float
-    latest_lag_event_at: float
     requeues: int
 
     def backoff(self) -> int:
@@ -574,9 +573,6 @@ class LaggingEnd:
 
     def past_wait(self, at: float) -> bool:
         return at - self.first_refused_at >= LAGGING_WAIT_SECONDS
-
-    def still_lagging_past_wait(self, now: float, *, harness_blocked: bool) -> bool:
-        return self.past_wait(now) and (self.past_wait(self.latest_lag_event_at) or harness_blocked)
 
 
 def fail_lagging(
@@ -665,19 +661,16 @@ def _lag_since_run(
         return None
     detail: str | None = None
     first_refused_at: float | None = None
-    latest_lag_event_at: float | None = None
     requeues = 0
     for event, event_detail, recorded_at in reversed(rows):
         if event in (RUN_DIED, RUN_EXITED):
             break
-        if event in (PREFLIGHT_LAGGING, LAG_BLOCKED) and latest_lag_event_at is None:
-            latest_lag_event_at = float(recorded_at)
         if event == PREFLIGHT_LAGGING:
             first_refused_at = float(recorded_at)
             if detail is None:
                 detail = str(event_detail)
         elif event == REQUEUED_LAGGING:
             requeues += 1
-    if first_refused_at is None or latest_lag_event_at is None or detail is None:
+    if first_refused_at is None or detail is None:
         return None
-    return LaggingEnd(detail, first_refused_at, latest_lag_event_at, requeues)
+    return LaggingEnd(detail, first_refused_at, requeues)
