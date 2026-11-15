@@ -88,7 +88,7 @@ def test_priority_from_linear_must_be_a_bool(tmp_path: Path) -> None:
 
 def _claim_tickets(queue: SQLiteJobQueue) -> list[str]:
     with queue.connect() as connection:
-        return [str(row["ticket_id"]) for row in claim_order(connection, "claude")]
+        return [str(row["ticket_id"]) for row in claim_order(connection, "claude", now=0.0)]
 
 
 def _enqueue(queue: SQLiteJobQueue, now: list[float], *tickets: str) -> None:
@@ -332,7 +332,7 @@ def test_a_database_from_before_tiers_still_reads_and_then_migrates(tmp_path: Pa
         )
     with sqlite3.connect(db) as connection:
         connection.row_factory = sqlite3.Row
-        assert [row["ticket_id"] for row in claim_order(connection, "claude")] == ["8", "7"]
+        assert [row["ticket_id"] for row in claim_order(connection, "claude", now=0.0)] == ["8", "7"]
         assert [(item["issue"], item["tier"], item["unblocks"]) for item in feeder_items(connection)] == [
             ("8", None, 0)
         ]
