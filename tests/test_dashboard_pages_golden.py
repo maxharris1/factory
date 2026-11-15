@@ -59,9 +59,8 @@ NAMES = (
     "_ATTENTION", "_HEALTH_LINK", "_health_link", "_attention", "_relay", "relay_threads",
     "_VERDICT", "_td", "_tickets", "_log", "_POLL_STATE", "_BUDGET_STATE",
     "_health", "_HEALTH_STATE", "_ANCHOR", "_anchor_attr", "_components", "_no_waiter",
-    "_savings", "_active_jobs", "_board", "_legend", "_TRAIL_LEGEND", "_meta", "_job_article",
-    "_jobview", "_flow_template", "_PANELS", "_page", "render_pages",
-    "path_geometry", "render_path_svg", "render_svg", "TELEMETRY_CSS", "TELEMETRY_SCRIPT",
+    "_savings", "_active_jobs", "_board", "_detail_model", "_job_article",
+    "_jobview", "_PANELS", "_page", "render_pages", "TELEMETRY_CSS", "TELEMETRY_SCRIPT",
     "job_block", "rollup_panel", "CODE_COMPONENTS", "label",
 )
 
