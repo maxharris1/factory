@@ -21,7 +21,8 @@ def task_lines(facts: dict) -> list[str]:
         *(
             [
                 "Close the earlier rounds first: for each earlier finding by its `f-<n>` id, and each earlier unmet "
-                "`ac-<n>`, say whether this head closes it. Then review the delta from the last reviewed head "
+                "`ac-<n>`, say whether this head closes it. List each finding it closes as a `[closed]` item in the "
+                "form below. Then review the delta from the last reviewed head "
                 "(`git range-diff` when the branch was rebased). A new finding in code the delta did not change "
                 "is `[minor]` unless it fails a criterion."
             ]
@@ -80,8 +81,16 @@ def handoff(bot: str, facts: dict) -> tuple[str, str]:
         if followups_active(facts["followup_from"], facts["round_number"])
         else "`[blocking]` or `[minor]`"
     )
+    closed = (
+        " Close an earlier finding with an item in this form: `1. [closed] f-<n>. <what shows it closed>.`"
+        if (facts["round_number"] or 1) > 1
+        else ""
+    )
     example = (
         "**Review round N of CAP: VERDICT**, then each criterion by `ac-<n>` with its state and evidence, "
-        f"then numbered findings: `f-<n>`, {tags}, the rule it breaks, file:line, repro."
+        "then the findings as a numbered list, one item each, in exactly this form: "
+        f"`1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.` The tag is one of {tags} "
+        "and comes first, before the id. The dispatcher reads the tag, the id and the `Rule:` sentence from "
+        f"that form to carry the finding into later rounds.{closed}"
     )
     return header, example

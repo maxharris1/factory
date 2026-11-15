@@ -9,7 +9,10 @@ import pytest
 
 import tests.regenerate_brief_snapshots as snapshots
 from lib.brief import render_brief
+from lib.dispatcher import Comment
+from lib.evidence.findings import findings_evidence
 from lib.factory_md import parse_factory_context
+from lib.followups import followup_findings
 from lib.handoff import parse_header_line
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +59,58 @@ def test_round_one_has_no_earlier_rounds_and_round_three_closes_them_by_id() -> 
 def test_every_finding_carries_an_id_and_a_rule(round_text: str) -> None:
     brief = review_brief(round_text)
     assert any("Give each finding an id `f-<n>` and name the rule it breaks" in step for step in steps(brief))
-    assert "numbered findings: `f-<n>`, `[blocking]` or `[minor]`, the rule it breaks" in brief
+    assert "`1. [blocking] f-<n>. Rule: <the rule it breaks>. <file:line>. <repro>.`" in brief
+
+
+def item_forms(brief: str) -> dict[str, str]:
+    return {form.split()[1]: form for form in re.findall(r"`(1\. \[[a-z-]+\] f-<n>\.[^`]*)`", brief)}
+
+
+def posted_verdict(round_text: str, items: list[str], cid: str) -> Comment:
+    template = header(review_brief(round_text))
+    filled = re.sub(r" (repeat|unsat)=<id>", "", template)
+    filled = filled.replace("ac=<met|unmet>", "ac=unmet").replace("verdict=<APPROVE|REVISE|BLOCKED>", "verdict=REVISE")
+    body = "\n".join([filled, f"**Review round {round_text}: REVISE**", "", *items])
+    return Comment(id=cid, author="codex-app[bot]", body=body, created_at=float(cid), url=f"u{cid}")
+
+
+def test_findings_written_in_the_briefs_form_reach_the_next_rounds_evidence() -> None:
+    first = item_forms(review_brief("1/3"))
+    assert set(first) == {"[blocking]"}
+    blocking = first["[blocking]"]
+    raised = [
+        blocking.replace("f-<n>", "f-1")
+        .replace("<the rule it breaks>", "later rounds keep earlier finding ids")
+        .replace("<file:line>", "`lib/evidence/findings.py:37`")
+        .replace("<repro>", "Run the dispatcher lifecycle"),
+        blocking.replace("[blocking]", "[minor]").replace("f-<n>", "f-2"),
+    ]
+    trusted = {"github": {"codex-app[bot]": frozenset({"codex-bot"})}}
+    round_two = findings_evidence(
+        comments=[posted_verdict("1/3", raised, "1")],
+        trusted_logins=trusted,
+        reviewer="codex-bot",
+        current_round=2,
+        bases={},
+    )
+    assert [(f.id, f.rule) for f in round_two.findings] == [("f-1", "later rounds keep earlier finding ids")]
+
+    later = item_forms(review_brief("2/3"))
+    assert set(later) == {"[blocking]", "[closed]"}
+    closed = later["[closed]"].replace("f-<n>", "f-1").replace("<what shows it closed>", "The test passes")
+    round_three = findings_evidence(
+        comments=[posted_verdict("1/3", raised, "1"), posted_verdict("2/3", [closed], "2")],
+        trusted_logins=trusted,
+        reviewer="codex-bot",
+        current_round=3,
+        bases={},
+    )
+    assert round_three.findings == ()
+
+
+def test_follow_up_findings_in_the_briefs_form_are_filed() -> None:
+    form = item_forms(review_brief("1/3"))["[blocking]"].replace("[blocking]", "[follow-up]")
+    assert followup_findings(form.replace("f-<n>", "f-3")) == (form.replace("f-<n>", "f-3"),)
 
 
 @pytest.mark.parametrize("round_text", ["1/3", "3/3"])
