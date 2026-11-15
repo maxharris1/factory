@@ -545,6 +545,22 @@ class DevicePool:
             for row in rows
         )
 
+    def busy(self, device: str, harness: str) -> bool:
+        """True while harness holds a slot on device, or, on the box, has a
+        running job with no slot (issue #90)."""
+        with self.queue.connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT 1 FROM {SLOTS_TABLE} WHERE device = ? AND harness = ?
+                UNION ALL
+                SELECT 1 FROM jobs WHERE ? AND state = 'running' AND recipient = ?
+                AND id NOT IN (SELECT job_id FROM {SLOTS_TABLE})
+                LIMIT 1
+                """,
+                (device, harness, device == box_device(self.config), harness),
+            ).fetchone()
+        return row is not None
+
     def health(self, device: str) -> tuple[float | None, float | None]:
         """(last_ok_at, failing_since) for a device, or (None, None)."""
         with self.queue.connect() as connection:

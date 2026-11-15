@@ -8,3 +8,5 @@ lagging vs synced	the reconcile never overwrites a lagging row with synced	laggi
 install code	reconcile uses skill_preflight.install_into_home in process, as the job-start preflight does	same hash and install path the preflight runs, so synced implies preflight passes
 Repro A	adapted, not verbatim: box pass makes 0 calls into the other home; that bot's waiter installs it	the verbatim assertion needs the deploying UID to write another account's home, which AC2 forbids
 remote devices	unchanged; device_deploy already deploys per (device, bot) over each bot's ssh alias	grounded in the plan; no new remote tests in this round
+busy account	the waiter reads orch.db: a box slot held for its harness, or a running unplaced job, counts as busy	its own children miss runs an earlier waiter started; a slot is held until the worker is confirmed gone (review round 1, finding 1)
+local account checkout	the idle waiter moves its own box factory_root to the deployed box HEAD with device_deploy git steps (sync_local), then installs; synced requires HEAD == that target	reconciling against the checkout's own lock reported synced on an old pin (review round 1, finding 2)

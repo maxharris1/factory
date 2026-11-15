@@ -446,3 +446,100 @@ def test_an_install_skills_retry_waits_while_the_box_runs_a_job(
     assert calls == [({}, 1), ({}, 0)]
     assert b"Merged content." in installed.read_bytes()
     assert pstack_pin.installed_errors(box, home) == []
+
+
+def account_checkout_config(tmp_path: Path) -> MachinesConfig:
+    return MachinesConfig(devices=(MachineDevice(
+        name="box", local=True, slot_max=3, harnesses={"codex": "codex-bot"},
+        factory_root=str(tmp_path / "{bot}" / "factory")),))
+
+
+def test_an_idle_waiter_brings_its_own_account_checkout_to_the_deployed_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
+) -> None:
+    deployed, old = box_behind_new_pin
+    account = tmp_path / "codex-bot" / "factory"
+    account.parent.mkdir()
+    old.rename(account)
+    home = tmp_path / "account-home"
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
+    run, log = bot_waiter(tmp_path, monkeypatch, deployed, home, queue)
+    run.pool.config = account_checkout_config(tmp_path)
+    target = git(deployed, "rev-parse", "HEAD")
+
+    run.step()
+
+    assert git(account, "rev-parse", "HEAD") == target, log
+    assert git(account, "symbolic-ref", "--short", "HEAD") == "main"
+    assert rows(queue) == [("box", "codex-bot", device_sync.SYNCED, "")]
+    assert (home / ".agents/skills/review-retry-skill/SKILL.md").read_text() == (
+        deployed / NEW_SKILL).read_text()
+    report = skill_preflight.check(bot="codex-bot", placement=None,
+                                   device=run.pool.config.devices[0], transport=None,
+                                   home=home, checkout=str(account), root=deployed)
+    assert report.error is None
+
+
+def test_an_account_checkout_that_cannot_reach_the_deployed_commit_is_refused_not_synced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path]
+) -> None:
+    deployed, old = box_behind_new_pin
+    account = tmp_path / "codex-bot" / "factory"
+    account.parent.mkdir()
+    old.rename(account)
+    (account / "local-only").write_text("not on origin\n", encoding="utf-8")
+    git(account, "add", "local-only")
+    git(account, "commit", "-qm", "local commit")
+    before = git(account, "rev-parse", "HEAD")
+    home = tmp_path / "account-home"
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
+    run, _ = bot_waiter(tmp_path, monkeypatch, deployed, home, queue)
+    run.pool.config = account_checkout_config(tmp_path)
+    installs = count_installs(monkeypatch)
+
+    run.step()
+
+    assert git(account, "rev-parse", "HEAD") == before
+    assert installs == []
+    assert rows(queue) == [("box", "codex-bot", device_sync.REFUSED,
+                            "checkout: HEAD has commits not on origin/main")]
+
+
+@pytest.mark.parametrize("placed", [True, False], ids=["placed", "unplaced"])
+def test_a_restarted_waiter_leaves_a_home_alone_while_an_earlier_box_run_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, box_behind_new_pin: tuple[Path, Path],
+    placed: bool,
+) -> None:
+    from tests.test_waiter import enqueue
+
+    _, box = box_behind_new_pin
+    git(box, "pull", "-q", "--ff-only", "origin", "main")
+    home = tmp_path / "codex-home"
+    assert pstack_pin.install_skills(box, home, "local") == []
+    missing = home / ".agents/skills/review-retry-skill"
+    queue = SQLiteJobQueue(tmp_path / "orch.db", clock=lambda: 1000)
+    earlier, _ = bot_waiter(tmp_path, monkeypatch, box, home, queue)
+    job_id = enqueue(queue, "local-job", recipient="codex")
+    assert earlier.pool.claim("codex") is not None
+    if not placed:
+        with queue.connect() as connection:
+            connection.execute("DELETE FROM device_slots")
+            connection.commit()
+    missing.unlink()
+    restarted, _ = bot_waiter(tmp_path, monkeypatch, box, home, queue)
+    installs = count_installs(monkeypatch)
+
+    restarted.step()
+
+    assert restarted.running() == set()
+    assert installs == []
+    assert not missing.exists()
+    with queue.connect() as connection:
+        connection.execute("UPDATE jobs SET state = 'done' WHERE id = ?", (job_id,))
+        connection.execute("DELETE FROM device_slots")
+        connection.commit()
+
+    restarted.step()
+
+    assert installs == [home]
+    assert missing.exists()
