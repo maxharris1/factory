@@ -13,8 +13,8 @@ config (lib/orch_yml.py Intake). Nothing here names a project, a label or a
 state. Trusted appliers default to the keys of `trusted_logins` (GitHub) or
 `trusted_linear_users` (Linear).
 
-For each eligible ticket, in priority order (urgent, then bug, then oldest)
-and only while its builder harness has room, the feeder:
+For each eligible ticket, in priority order and only while its builder
+harness has room, the feeder:
 
 1. opens a branch from the base branch with an empty start commit (a GitHub
    issue gets `factory/issue-<n>`; a Linear issue uses its own
@@ -70,9 +70,15 @@ A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
 
+Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
+the project's `priority_labels` it carries, or its Linear priority when the
+project sets `priority_from_linear`; no tier sorts after every tier), then
+urgent, then bug, then how many of this poll's candidates it unblocks
+(critical_path_counts; 0 with `critical_path_order: false`), then the oldest.
+
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
-the feeder has a ticket id for, so an urgent or bug label added after the
-feed still moves its queued job.
+the feeder has a ticket id for, so a label or blocker change after the feed
+still moves its queued job.
 
 The feeder starts no harness and runs no job. It writes only through the
 GitHub and Linear clients it is given; tests pass fakes.
@@ -103,17 +109,19 @@ from lib.feeder_gates import (
     github_ref,
     linear_status,
     parse_gate_lines,
+    paths_collide,
+    shared_path_matches,
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
 from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 from lib.pr_title import prefixed
 from lib.queue import (
-    PRIORITY_TABLE,
     JobRequest,
     SQLiteJobQueue,
     _has_table,
-    priority_rank,
+    ensure_priority_table,
+    rank,
     set_ticket_priority,
 )
 
@@ -148,6 +156,8 @@ _COLUMNS = (
     ("conflicts", "TEXT"),
     ("released", "INTEGER NOT NULL DEFAULT 0"),
     ("capped_release", "INTEGER NOT NULL DEFAULT 0"),
+    ("tier", "INTEGER"),
+    ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
@@ -156,6 +166,7 @@ BUG_LABELS = frozenset({"bug"})
 RISK_HIGH_LABEL = "risk:high"
 INTAKE_REFUSED = "intake-refused"  # needs_attention reason
 LINEAR_URGENT_PRIORITY = 1
+LINEAR_PRIORITIES = (1, 2, 3, 4)  # Urgent, High, Medium, Low; 0 is no priority
 PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a plan
 # A fed ticket holds room until its job is queued, at most this long: a go
 # the poller never acts on (say, an untrusted author) must not stall the
@@ -410,18 +421,35 @@ class _Candidate:
 
     lines: GateLines = GateLines()
     template: IntakeTemplate = IntakeTemplate()
+    unblocks: int = 0
 
     @property
     def harness(self) -> str:
         return self.context.config.builder_harness
 
     @property
+    def tier(self) -> int | None:
+        intake = self.project.intake
+        assert intake is not None
+        labels = {label.lower() for label in self.issue.labels}
+        for index, label in enumerate(intake.priority_labels):
+            if label.lower() in labels:
+                return index
+        if intake.priority_from_linear and self.issue.priority in LINEAR_PRIORITIES:
+            return LINEAR_PRIORITIES.index(self.issue.priority)
+        return None
+
+    @property
     def ref(self) -> Ref:
         return Ref(self.issue.tracker, self.issue.repo.lower(), self.issue.key)  # type: ignore[arg-type]
 
-    def order(self) -> tuple[int, float, tuple[int, int, str]]:
-        rank = priority_rank(urgent=self.issue.urgent, resume=False, bug=self.issue.bug)
-        return rank, self.issue.created_at, _key_order(self.issue.key)
+    def order(self) -> tuple[bool, int, int, int, float, tuple[int, int, str]]:
+        return (
+            *rank(tier=self.tier, urgent=self.issue.urgent, resume=False, bug=self.issue.bug,
+                  unblocks=self.unblocks),
+            self.issue.created_at,
+            _key_order(self.issue.key),
+        )
 
 
 def _holding(lines: GateLines, capped: bool) -> GateLines:
@@ -509,6 +537,8 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             conflicts TEXT,
             released INTEGER NOT NULL DEFAULT 0,
             capped_release INTEGER NOT NULL DEFAULT 0,
+            tier INTEGER,
+            unblocks INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, issue)
         )
         """
@@ -522,18 +552,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
-            repo TEXT NOT NULL,
-            ticket_id TEXT NOT NULL,
-            urgent INTEGER NOT NULL DEFAULT 0,
-            bug INTEGER NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL,
-            PRIMARY KEY (repo, ticket_id)
-        )
-        """
-    )
+    ensure_priority_table(connection)
 
 
 def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -565,11 +584,12 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    reason = "waiting_reason" if "waiting_reason" in present else "NULL AS waiting_reason"
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0"}
+    optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error, {reason}
+               pr_number, issue_created_at, error, {optional}
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),
@@ -578,7 +598,8 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     items = [dict(zip(names, tuple(row))) for row in cursor.fetchall()]
     items.sort(
         key=lambda row: (
-            priority_rank(urgent=bool(row["urgent"]), resume=False, bug=bool(row["bug"])),
+            *rank(tier=row["tier"], urgent=bool(row["urgent"]), resume=False,
+                  bug=bool(row["bug"]), unblocks=int(row["unblocks"])),
             float(row["issue_created_at"]),
             str(row["repo"]),
             _key_order(str(row["issue"])),
@@ -632,7 +653,10 @@ class Feeder:
         self._sync_intake_attention(
             [c for c in candidates if c.ref in refused], read_repos, now
         )
-        waits, holds, capped, gate_read = self._gates(candidates, states, refused)
+        waits, holds, capped, gate_read, unblocks = self._gates(candidates, states, refused)
+        for candidate in candidates:
+            candidate.unblocks = unblocks[candidate.ref]
+        self._record_priority(candidates, now)
         if gate_read:
             self._sync_attention(waits, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
@@ -790,10 +814,11 @@ class Feeder:
         candidates: Sequence[_Candidate],
         states: Mapping[Ref, str],
         refused: Collection[Ref] = frozenset(),
-    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool]:
+    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int]]:
         """Blocker waits, the holds of tickets in flight, the holders that
-        hold as capped, and whether the status read (when one was needed)
-        succeeded. A ticket refused at intake is not gated."""
+        hold as capped, whether the status read (when one was needed)
+        succeeded, and how many tickets each candidate unblocks. A ticket
+        refused at intake is not gated."""
         rows = self._feeder_rows()
         unstarted = [
             c for c in candidates if states[c.ref] in UNSTARTED and c.ref not in refused
@@ -869,7 +894,8 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        return blocker_waits(gated, statuses), holds, capped_refs, ok
+        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, holds.shared)
+        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
@@ -995,15 +1021,16 @@ class Feeder:
                 connection.execute(
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
-                        repo, issue, tracker, title, harness, state, urgent, bug,
+                        repo, issue, tracker, title, harness, state, urgent, bug, tier,
                         risk, issue_created_at, first_seen_at, seen_at, touches, conflicts
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
                         conflicts = excluded.conflicts,
                         urgent = excluded.urgent,
                         bug = excluded.bug,
+                        tier = excluded.tier,
                         risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
                                     ELSE risk END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
@@ -1018,6 +1045,7 @@ class Feeder:
                         candidate.harness,
                         int(issue.urgent),
                         int(issue.bug),
+                        candidate.tier,
                         candidate.template.risk or "unset",
                         issue.created_at,
                         now,
@@ -1028,14 +1056,6 @@ class Feeder:
                         ),
                     ),
                 )
-                ticket = connection.execute(
-                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
-                    (issue.repo.lower(), issue.key),
-                ).fetchone()[0]
-                if ticket is not None:
-                    set_ticket_priority(
-                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug, at=now
-                    )
             connection.execute(
                 f"INSERT INTO {POLL_TABLE} (id, at) VALUES (1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
@@ -1047,6 +1067,29 @@ class Feeder:
                 f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted})",
                 (now,),
             )
+            connection.commit()
+
+    def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
+        """Each ticket's unblocks count, and the claim order of every ticket
+        with a ticket id, so a label or blocker change after the feed still
+        moves its queued job."""
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                issue = candidate.issue
+                where = (issue.repo.lower(), issue.key)
+                connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET unblocks = ? WHERE repo = ? AND issue = ?",
+                    (candidate.unblocks, *where),
+                )
+                ticket = connection.execute(
+                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?", where
+                ).fetchone()[0]
+                if ticket is not None:
+                    set_ticket_priority(
+                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
+                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
+                    )
             connection.commit()
 
     def _mark_done(self) -> None:
@@ -1157,7 +1200,8 @@ class Feeder:
         holds.alias(candidate.ref, github_ref(repo, number))
         with self.queue.connect() as connection:
             set_ticket_priority(
-                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug, at=now
+                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug,
+                tier=candidate.tier, unblocks=candidate.unblocks, at=now,
             )
         linear = issue.tracker == "linear"
         if not linear and config.tickets == "github":
@@ -1210,6 +1254,54 @@ class Feeder:
                 return issue.branch
             return f"factory/{issue.key.lower()}"
         return f"factory/issue-{issue.key}"
+
+
+def critical_path_counts(
+    candidates: Sequence[_Candidate],
+    eligible_gates: Mapping[Ref, GateLines],
+    unstarted: Collection[Ref],
+    pull_of: Mapping[Ref, Ref],
+    shared: Mapping[str, Collection[str]],
+) -> dict[Ref, int]:
+    owner = {c.ref: c.ref for c in candidates}
+    owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
+    blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
+    for dependent, lines in eligible_gates.items():
+        for blocker in lines.blocked_by:
+            if owner.get(blocker, dependent) != dependent:
+                blocks[owner[blocker]].add(dependent)
+    counts: dict[Ref, int] = {}
+    for c in candidates:
+        assert c.project.intake is not None
+        if not c.project.intake.critical_path_order:
+            counts[c.ref] = 0
+            continue
+        own = shared.get(c.ref.repo, ())
+        found = blocks[c.ref] | {
+            other.ref
+            for other in candidates
+            if other.ref in unstarted
+            and other.ref.repo == c.ref.repo
+            and _paths_meet(c.lines.touches, other.lines.touches, own)
+        }
+        pending = list(found)
+        while pending:
+            for dependent in blocks[pending.pop()] - found:
+                found.add(dependent)
+                pending.append(dependent)
+        found.discard(c.ref)
+        counts[c.ref] = len(found)
+    return counts
+
+
+def _paths_meet(first: Collection[str], second: Collection[str], shared: Collection[str]) -> bool:
+    return any(
+        paths_collide(path, other)
+        for path in first
+        if not shared_path_matches(shared, path)
+        for other in second
+        if not shared_path_matches(shared, other)
+    )
 
 
 def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:
