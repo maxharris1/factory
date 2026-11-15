@@ -306,38 +306,36 @@ class MergeQueueMixin:
         return True, "merge-queue"
 
     def _advance_merge_queues(self) -> None:
-        """#130: act on the head of each repo's merge queue, once a poll.
-
-        Only the oldest approval per repo moves: it merges, or gets an
-        update-from-main job when it conflicts. Every other member waits,
-        so two approved PRs never keep breaking each other.
-        """
-        heads: dict[str, sqlite3.Row] = {}
+        queues: dict[str, list[sqlite3.Row]] = {}
         for row in self._merge_queue_members():
             if str(row["repo"]) not in self._merged_repos:
-                heads.setdefault(str(row["repo"]), row)
-        for row in heads.values():
+                queues.setdefault(str(row["repo"]), []).append(row)
+        for head, *behind in queues.values():
             try:
-                self._advance_merge_queue(row)
+                head_waits = self._advance_merge_queue(head)
             except Exception as exc:
-                self.record_poll_error(
-                    str(row["repo"]),
-                    str(row["ticket_id"]),
-                    f"merge-queue:{type(exc).__name__}",
-                )
+                self._record_queue_error(head, exc)
+                continue
+            if head_waits:
+                self._merge_first_ready(head, behind)
 
-    def _advance_merge_queue(self, row: sqlite3.Row) -> None:
+    def _record_queue_error(self, row: sqlite3.Row, exc: Exception) -> None:
+        self.record_poll_error(
+            str(row["repo"]), str(row["ticket_id"]), f"merge-queue:{type(exc).__name__}"
+        )
+
+    def _advance_merge_queue(self, row: sqlite3.Row) -> bool:
         polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
         if polled is None:
-            return
+            return False
         ticket = self._fresh_ticket(polled)
         if ticket is None:
-            return
+            return False
         if ticket.merged:
             self.record_terminal(ticket.repo, ticket.ticket_id, "merged", ticket)
-            return
+            return False
         if ticket.closed:
-            return
+            return False
         if row["workflow_state"] == "updating":
             # An update job is out: its ready (T2) or failure (T6) moves on,
             # and so does a done job whose ready never came.
@@ -354,18 +352,48 @@ class MergeQueueMixin:
                     job_id=job_id,
                     why=why,
                 )
-            return
+            return True
         if ticket.factory.finish_line != "merge":
-            return
+            return False
         if ticket.mergeable_state in ("dirty", "behind") and not self._base_update_out(ticket):
             self._queue_update(ticket, row)
-            return
+            return True
         head = ticket.current_head
         wait = self._queue_head_wait_reason(ticket, row, head)
         if wait is not None:
             self._log_queue_wait(ticket, head, wait)
-            return
+            return _waits_on_update_or_ci(ticket)
         self._merge_queue_head(ticket, row, head)
+        return False
+
+    def _merge_first_ready(self, head: sqlite3.Row, rows: list[sqlite3.Row]) -> None:
+        for row in rows:
+            if row["workflow_state"] != "merge-queue":
+                continue
+            polled = self._polled.get((str(row["repo"]), str(row["ticket_id"])))
+            if polled is None or polled.current_head is None:
+                continue
+            ci = polled.ci.get(polled.current_head)
+            if ci is None or ci.status != "success":
+                continue
+            try:
+                ticket = self._fresh_ticket(polled)
+                if ticket is None or ticket.merged or ticket.closed:
+                    continue
+                if ticket.factory.finish_line != "merge":
+                    return
+                current = ticket.current_head
+                if current is None or self._queue_head_wait_reason(ticket, row, current):
+                    continue
+                if self.log is not None:
+                    self.log(
+                        f"merge-queue: {ticket.repo}#{ticket.ticket_id} merges ahead of "
+                        f"#{head['ticket_id']}, which waits on its update or CI"
+                    )
+                self._merge_queue_head(ticket, row, current)
+            except Exception as exc:
+                self._record_queue_error(row, exc)
+            return
 
     def _queue_head_wait_reason(
         self, ticket: TrackedTicket, row: sqlite3.Row, head: str | None
@@ -817,6 +845,16 @@ class MergeQueueMixin:
             ):
                 return True
         return False
+
+
+def _waits_on_update_or_ci(ticket: TrackedTicket) -> bool:
+    if ticket.mergeable_state in ("dirty", "behind"):
+        return True
+    head = ticket.current_head
+    if head is None:
+        return False
+    ci = ticket.ci.get(head)
+    return ci is None or ci.status == "pending"
 
 
 def _started(
