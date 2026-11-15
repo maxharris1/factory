@@ -517,10 +517,11 @@ class JobsMixin:
     def _device_offline(self, job_id: str, device: str, seconds: float) -> None:
         """Fail a job running on an offline device and mark its ticket stuck.
 
-        #218: a link-dropped job is left to `_check_job_states` until its
-        worker is past its device-enforced deadline. One transaction: the job leaves running (failure already handled, so
+        One transaction: the job leaves running (failure already handled, so
         T6 never retries it) and the ticket's stuck flag wakes Grok Bot once.
-        The job is never done, and its slot stays held.
+        The job is never done, and its slot stays held. #218: a link-dropped
+        job is left to `_check_job_states` until its worker is past its
+        device-enforced deadline.
         """
         now = self.queue.now()
         with self._connect() as connection:
@@ -538,7 +539,7 @@ class JobsMixin:
                 dropped[1], job.request.timeout_seconds
             ):
                 connection.commit()
-                return  # #218: _check_job_states fails it once its worker is past its deadline
+                return
             connection.execute(
                 """
                 UPDATE jobs
@@ -683,13 +684,22 @@ class JobsMixin:
         its backoff with the failure still unhandled. A string names the
         link drop once the row's budget is spent, for the stuck detail; T6
         then retries or calls the ticket stuck as for any failure. None when
-        the job's latest run did not end in a link drop.
+        the job's latest run did not end in a link drop, or it is a review
+        whose head this poll read as replaced (T6 drops that retry).
         """
         now = self.queue.now()
         with self._connect() as connection:
             dropped = link_drop_end(connection, job.id)
             used = link_drop_requeues(connection, job.id)
         if dropped is None:
+            return None
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if (
+            job.request.action == "review"
+            and ticket is not None
+            and ticket.current_head is not None
+            and _matching_head(job.request.head or "", ticket.current_head) is None
+        ):
             return None
         if used >= MAX_LINK_DROP_REQUEUES:
             spent = f"link-drop on {dropped[0]} ({used} free requeues spent)"
