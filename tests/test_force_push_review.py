@@ -1,0 +1,169 @@
+"""#207: a force-pushed ticket branch gets a range-diff review, never an old approval,
+and CI is read on the new head."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+
+from lib.brief import render_brief
+from lib.factory_md import parse_factory_context
+from lib.queue import Job
+from lib.update_check import RebaseScope, UpdateClass
+from tests.merge_queue_support import Board, sha
+from tests.regenerate_brief_snapshots import BOX_FACTORY_ROOT, FACTORY_MD
+
+OLD_BASE, NEW_BASE = sha(90), sha(91)
+REWRITE = UpdateClass(False, "not a merge of the approved head and base")
+CONTEXT = parse_factory_context(FACTORY_MD)[0]
+
+
+def brief(job: Job) -> str:
+    return render_brief(job, bot="codex-bot", context=CONTEXT, factory_root=BOX_FACTORY_ROOT)
+
+
+def board_with_rebases(tmp_path: Path, *, start_before_ci: bool = False) -> tuple[Board, list]:
+    board = Board(tmp_path)
+    board.verdict = REWRITE
+    board.factory = replace(board.factory, start_before_ci=start_before_ci)
+    calls: list[tuple[str, str, str, str]] = []
+
+    def rebased(repo: str, base: str, last: str, head: str) -> RebaseScope:
+        calls.append((repo, base, last, head))
+        return RebaseScope(last, OLD_BASE, NEW_BASE)
+
+    board.dispatcher.rebase_classifier = rebased
+    return board, calls
+
+
+def review_details(board: Board) -> list[dict]:
+    return [json.loads(row["detail"]) for row in board.jobs("review")]
+
+
+def test_a_force_push_after_approve_is_not_covered_and_round_2_gets_a_range_diff(
+    tmp_path: Path,
+) -> None:
+    board, calls = board_with_rebases(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=None)
+
+    pr.push(sha(2))
+    board.poll()
+    assert board.actions.merges == []
+    assert any(
+        f"approval at {sha(1)[:12]} does not cover {sha(2)[:12]}" in line for line in board.log
+    )
+
+    ready = board.ready(pr, sha(2))
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    assert board.state("42")["approved_head"] is None
+    assert calls == [("owner/repo", "main", sha(1), sha(2))]
+    round_2 = review_details(board)[-1]
+    assert (round_2["head"], round_2["round"]) == (sha(2), "2/3")
+    assert round_2["rebase"] == {
+        "last_reviewed_head": sha(1), "reviewed_base": OLD_BASE, "base": NEW_BASE,
+    }
+    assert board.actions.merges == []
+
+    job = board.claim("codex")
+    text = brief(job)
+    assert (
+        f"Review the delta with `git range-diff {OLD_BASE}..{sha(1)} {NEW_BASE}..{sha(2)}`"
+        in text
+    )
+    evidence = json.loads(job.request.detail)["evidence"]["findings"]
+    assert (evidence["reviewed_head"], evidence["reviewed_base"]) == (sha(1), OLD_BASE)
+
+    board.queue.finish(job.id, owner="codex", handoff_comment_id=f"handoff-{job.id}")
+    board.approve(pr, "2/3")
+    board.poll()
+    board.poll()
+    assert board.actions.merges == [(True, sha(2))]
+
+
+def test_a_force_push_after_revise_gets_a_range_diff_review(tmp_path: Path) -> None:
+    board, _calls = board_with_rebases(tmp_path)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go-42")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    board.revise(pr, "1/3")
+    board.poll()
+    board.finish("claude")
+
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+
+    round_2 = review_details(board)[-1]
+    assert (round_2["head"], round_2["round"]) == (sha(2), "2/3")
+    assert round_2["rebase"]["last_reviewed_head"] == sha(1)
+
+
+def test_a_plain_push_and_a_failed_check_keep_the_generic_delta_line(tmp_path: Path) -> None:
+    for name, classifier in (
+        ("descendant", lambda *_args: None),
+        ("broken", lambda *_args: (_ for _ in ()).throw(OSError("no clone"))),
+        ("absent", None),
+    ):
+        board = Board(tmp_path / name)
+        board.verdict = REWRITE
+        board.dispatcher.rebase_classifier = classifier
+        pr = board.open("42", sha(1))
+        board.build_and_approve(pr, mergeable=None)
+        pr.push(sha(2))
+        board.ready(pr, sha(2))
+        board.poll()
+
+        round_2 = review_details(board)[-1]
+        assert (round_2["head"], round_2["round"]) == (sha(2), "2/3"), name
+        assert "rebase" not in round_2, name
+        text = brief(board.claim("codex"))
+        assert "(`git range-diff` when the branch was rebased)" in text, name
+        with board.queue.connect() as connection:
+            errors = [row[0] for row in connection.execute("SELECT error FROM poll_errors")]
+        assert ("rebase-check:OSError" in errors) == (name == "broken"), name
+
+
+def test_ci_is_read_on_the_force_pushed_head_not_the_approved_one(tmp_path: Path) -> None:
+    board, _calls = board_with_rebases(tmp_path, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=None)
+    assert pr.ci[sha(1)] == "success"
+
+    pr.push(sha(2), ci="failure")
+    red = board.ready(pr, sha(2))
+    board.poll()
+    assert board.outcome(red) == "queued-ci-fix"
+    assert [row["head"] for row in board.jobs("review")] == [sha(1)]
+    assert [row["head"] for row in board.jobs("fix")] == [sha(2)]
+    with board.queue.connect() as connection:
+        ci_heads = {
+            row["head"]: row["status"]
+            for row in connection.execute("SELECT head, status FROM ci_events")
+        }
+    assert ci_heads[sha(2)] == "failure"
+    board.finish("claude")
+
+    pr.push(sha(3), ci="pending")
+    board.ready(pr, sha(3))
+    board.poll()
+    round_2 = review_details(board)[-1]
+    assert (round_2["head"], round_2["round"]) == (sha(3), "2/3")
+    board.finish("codex")
+    approve = board.approve(pr, "2/3")
+    board.poll()
+    assert board.outcome(approve) is None
+    assert board.actions.merges == []
+    assert board.state("42")["approved_head"] is None
+
+    pr.ci[sha(3)] = "success"
+    board.poll()
+    board.poll()
+    assert board.actions.merges == [(True, sha(3))]
