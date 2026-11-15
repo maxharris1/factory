@@ -355,11 +355,9 @@ class CommentsMixin:
             ).fetchone()
         return row is not None
 
-    def _handled_by(
+    def _handled_no_later_than(
         self, ticket: TrackedTicket, comment_id: str, source_id: str | None
     ) -> bool:
-        """True when comment_id was handled no later than source_id, whose
-        handling queued the job, even after source_id left the ticket."""
         if source_id is None:
             return False
         with self._connect() as connection:

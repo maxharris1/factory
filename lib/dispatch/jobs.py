@@ -1045,9 +1045,7 @@ class JobsMixin:
         no earlier than its first attempt was queued, from a login trusted for
         its `from` and `role`, of a kind in _SETTLING_KINDS for the job's
         action, and not already rejected when it was handled (stale,
-        superseded, ...) nor edited while still unhandled, which comment
-        processing rejects (#439). With the queueing comment gone from the
-        ticket, a comment handled no later than it does not count either. A ready stale only because its review already
+        superseded, ...). A ready stale only because its review already
         answered (#71 stale-ready-verdict) still counts. An update job's ready
         is matched by TU's attribution, not by time.
 
@@ -1099,7 +1097,7 @@ class JobsMixin:
                 self._predates(ticket, item, queued_at)
                 or (
                     not after_source
-                    and self._handled_by(ticket, item.id, job.request.source_comment_id)
+                    and self._handled_no_later_than(ticket, item.id, job.request.source_comment_id)
                 )
             ):
                 continue
