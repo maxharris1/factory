@@ -176,7 +176,9 @@ class CommentsMixin:
                         # #108: a verdict with no re-entry behind it wakes nobody.
                         self._mark_handled(ticket, comment.id, "after-handoff")
                         continue
-                    if verdict == "REVISE":
+                    if self._blocked_by_another(ticket, comment):
+                        handled, outcome = True, "verdict-while-blocked"
+                    elif verdict == "REVISE":
                         handled, outcome = self._t3(ticket, comment, fields)
                     elif verdict == "APPROVE":
                         handled, outcome = self._t4(ticket, comment, fields)

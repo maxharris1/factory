@@ -45,6 +45,7 @@ def detail(job: Job) -> dict[str, object]:
 
 def test_blocked_verdict_wake_links_the_verdict(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
+    in_review(queue, HEAD_A)
     blocked = linked(
         say("901", VERDICT.format(head=HEAD_A, verdict="BLOCKED"), "codex-login", 1)
     )

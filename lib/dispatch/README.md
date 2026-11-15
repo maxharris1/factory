@@ -40,9 +40,10 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
-| Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the seven rule mixins below and re-exports the old `verdict.py` names |
+| Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the eight rule mixins below and re-exports the old `verdict.py` names |
 | Verdicts: REVISE (T3) | `verdict/t3.py` (`T3Mixin`) | `ReviseCIGate`, `_t3`, `_revise_ci_gate` |
 | Verdicts: APPROVE (T4) | `verdict/t4.py` (`T4Mixin`) | `_t4`, `_approve_ci_red_fix` |
+| Verdicts: BLOCKED | `verdict/blocked.py` (`BlockedMixin`) | `_t_blocked`: stop the ticket and wake Grok once. `_blocked_by_another`: whether a verdict other than this comment blocked the ticket |
 | Verdicts: approval recording | `verdict/record.py` (`ApprovalRecordMixin`) | `_record_approval`: the covering APPROVE the merge queue orders and gates on |
 | Verdicts: approval coverage | `verdict/coverage.py` (`ApprovalCoverageMixin`) | `_approval_covers`: whether an APPROVE covers a head, by T4's rule |
 | Verdicts: shipped approval | `verdict/shipped.py` (`ShippedApprovalMixin`) | `_shipped_approval`: the APPROVE whose ship intent completed last (T2) |

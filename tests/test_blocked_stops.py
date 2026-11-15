@@ -16,15 +16,19 @@ import pytest
 
 from lib.dispatcher import Dispatcher
 from lib.hook_t7 import T7Hook
+from lib.orch_yml import Approvals
 from tests.test_approver_credential import APP_BOT, MAX, AppFlow
 from tests.test_dispatcher import (
+    ANSWERS,
     READY,
     VERDICT,
     FakeGrokDelivery,
     FakeReviewActions,
     comment,
+    handled_outcome,
     job_count,
 )
+from tests.test_job_bound_accept import _claim, _reviewing, _verdict_ticket
 from tests.test_rounds_and_caps import APPROVE, HEADS, Flow, round_of
 
 
@@ -300,3 +304,66 @@ def test_blocked_at_the_wrong_round_or_head_is_stale(
     assert flow.wakes("blocked") == []
     assert [row["source_comment_id"] for row in flow.wakes("stale")] == ["blocked-1"]
 
+
+
+def _blocked_review(tmp_path: Path):
+    dispatcher, queue, actions = _reviewing(tmp_path)
+    dispatcher.approvals = Approvals(app_trust=True, logins=frozenset({"max-login"}))
+    snapshot = _verdict_ticket("blocked-1", "BLOCKED")
+    review = _claim(queue, "codex")
+    queue.finish(review.id, owner="codex", handoff_comment_id="blocked-1")
+    dispatcher.process(snapshot)
+    assert handled_outcome(queue, "blocked-1") == "blocked-review"
+    return dispatcher, queue, actions, snapshot
+
+
+def _grok_wakes(queue) -> list[tuple[str, str]]:
+    with queue.connect() as connection:
+        return [
+            (str(row[0]), str(row[1]))
+            for row in connection.execute(
+                "SELECT action, source_comment_id FROM jobs "
+                "WHERE recipient = 'grok' ORDER BY rowid"
+            )
+        ]
+
+
+@pytest.mark.job_bound
+def test_questions_and_answers_on_a_blocked_ticket_do_not_release_it(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue, actions, snapshot = _blocked_review(tmp_path)
+    questions = comment(
+        "questions-1",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
+        "Can the review continue?",
+        author="codex-login",
+        created_at=400,
+    )
+    answers = comment("answers-1", ANSWERS, author="grok-login", created_at=500)
+    for item in (questions, answers):
+        snapshot = replace(snapshot, comments=(*snapshot.comments, item))
+        dispatcher.process(snapshot)
+    assert handled_outcome(queue, "questions-1") == "questions-while-blocked"
+    assert job_count(queue, action="review") == 1
+    approve = replace(_verdict_ticket("approve-2", "APPROVE").comments[-1], created_at=600)
+    dispatcher.process(replace(snapshot, comments=(*snapshot.comments, approve)))
+
+    assert handled_outcome(queue, "approve-2") == "verdict-while-blocked"
+    assert actions.merges == []
+    assert _grok_wakes(queue)[0] == ("blocked", "blocked-1")
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("verdict", ["APPROVE", "REVISE", "BLOCKED"])
+def test_an_unregistered_verdict_after_blocked_adds_no_wake(
+    tmp_path: Path, verdict: str
+) -> None:
+    dispatcher, queue, actions, snapshot = _blocked_review(tmp_path)
+    late = replace(_verdict_ticket("late-1", verdict).comments[-1], created_at=400)
+    dispatcher.process(replace(snapshot, comments=(*snapshot.comments, late)))
+    dispatcher.process(replace(snapshot, comments=(*snapshot.comments, late)))
+
+    assert handled_outcome(queue, "late-1") == "verdict-while-blocked"
+    assert _grok_wakes(queue) == [("blocked", "blocked-1")]
+    assert actions.merges == []

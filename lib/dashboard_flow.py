@@ -61,6 +61,7 @@ QUEUE_JOB_BEFORE_ROW = frozenset(
         "t3",
         "t5-answers",
         "cap-resume",
+        "blocked-resume",
         "update-queued",
         "held-base-update",
     }
@@ -510,10 +511,10 @@ FLOWMAP_PLACES = {
     "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
     "planning": (1, 0), "plan-check": (1, 1),
     "building": (2, 0), "fixing": (2, 1),
-    "review": (3, 0), "capped": (3, 1),
+    "review": (3, 0), "capped": (3, 1), "blocked": (3, 2),
     "ship": (4, 0), "awaiting-ok": (4, 1), "waiting-external": (4, 2),
     "merged": (5, 0), "post-merge": (5, 1), "done": (5, 2), "handed-off": (5, 3),
-    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4), "blocked": (3, 4),
+    "refused": (0, 4), "abandoned": (1, 4), "stuck": (2, 4),
 }
 FLOWMAP_COLUMNS = {"Ask": 0, "Plan": 1, "Build": 2, "Review": 3, "Ship": 4, "Shipped": 5}
 FLOWMAP_HEADS = (("Ask", 0, 1), ("Plan", 1, 1), ("Build", 2, 1), ("Review", 3, 1), ("Ship", 4, 2))

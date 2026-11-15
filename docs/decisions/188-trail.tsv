@@ -8,3 +8,6 @@ later verdicts while blocked	T3, T4 and a second BLOCKED return verdict-while-bl
 awaiting-ok BLOCKED	stale-blocked	model T7Blocked allows only review
 existing tests	test_job_bound_accept used a registered BLOCKED as inert filler; now REVISE with the stray at round 2/3. test_hooks BLOCKED wake tests moved; slash_go no-target list drops blocked	BLOCKED is no longer inert, by design
 model	blocked leaves Terminal; MaxGoAfterBlocked blocked->review; ChartEdges requires it; chart.mmd edge added by hand	no java on this device, so model/check.sh did not run locally; CI runs it
+round 2: later verdicts while blocked (f-2)	one guard in comments.py, _blocked_by_another, before T3, T4 and _t_blocked run, so before registration	registration rejected the trailing APPROVE first and woke Grok again; a single guard means no handler can order it wrong
+round 2: questions while blocked (f-1)	_t5_questions returns questions-while-blocked and leaves state blocked	questions overwrote blocked with waiting-max, so bot answers resumed the review and the APPROVE merged with no approver go
+round 2: dashboard	blocked now has an exit, so it moves off the stop rail to Review (3, 2) beside capped; hops to shipped 3; goldens re-recorded	chart edge blocked->review made the old stop and journey expectations false

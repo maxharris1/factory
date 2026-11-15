@@ -47,8 +47,6 @@ class T4Mixin:
             return replayed
         approved_head = fields["head"]
         state, review_round = self._review_context(ticket)
-        if state == "blocked":
-            return True, "verdict-while-blocked"
         reported_round = _round_number(fields.get("round"))
         if self._over_cap(ticket, reported_round):
             return True, "rejected-over-cap"

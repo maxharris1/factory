@@ -49,9 +49,6 @@ class BlockedMixin:
                     """,
                     (ticket.repo.lower(), ticket.ticket_id),
                 ).fetchone()
-                if state is not None and state["workflow_state"] == "blocked":
-                    connection.commit()
-                    return True, "verdict-while-blocked"
                 if (
                     state is None
                     or state["workflow_state"] != "review"
@@ -93,3 +90,20 @@ class BlockedMixin:
         )
         self._write_state_label(ticket, "blocked")
         return True, "blocked-review"
+
+    def _blocked_by_another(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM ticket_state AS state
+                WHERE state.repo = ? AND state.ticket_id = ?
+                  AND state.workflow_state = 'blocked'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM review_events AS event
+                    WHERE event.repo = state.repo AND event.ticket_id = state.ticket_id
+                      AND event.comment_id = ?
+                  )
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+        return row is not None
