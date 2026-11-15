@@ -225,6 +225,24 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS followup_filings (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    round INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    labels TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'filed', 'commented')),
+                    issue_number INTEGER,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ticket_retries (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

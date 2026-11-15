@@ -41,6 +41,7 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |
 | Retry (TR) | `retry.py` (`RetryMixin`) | `_t_retry`, `_retry_step` (the resume table), `ticket_retries` rows |
 | Jobs (T6) | `jobs.py` (`JobsMixin`) | `_t6`, `reconcile_jobs`, abandoned and dead jobs, devices, failure waits, stuck wakes |
+| Follow-ups | `followups.py` (`FollowupsMixin`) | `_record_followups` (T3, T4), `_drain_followups`: file a verdict's `[follow-up]` findings once and link them from the PR (issue #259) |
 | Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_deliver_grok_jobs` |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |
