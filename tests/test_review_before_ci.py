@@ -337,6 +337,36 @@ def test_on_a_ci_only_fix_at_the_same_head_reviews_the_round_again(tmp_path: Pat
     assert board.actions.merges == [(True, pr.head)]
 
 
+def test_on_a_ci_only_fix_after_a_retried_review_reviews_the_round_again(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head)
+    board.poll()
+    board.fail("codex")
+    board.poll()
+    board.now[0] += 600
+    board.poll()
+    assert board.finish("codex").request.attempt == 2
+    pr.ci[pr.head] = "failure"
+    approve = board.approve(pr)
+    board.poll()
+    assert board.outcome(approve) == "approve-ci-red-fix"
+    board.finish("claude")
+
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-after-retried-review-ci-fix")
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    rereview = board.queue.claim("codex")
+    assert rereview is not None
+    assert rereview.request.head == pr.head
+    assert json.loads(rereview.request.detail)["round"].startswith("1/")
+
+
 def test_on_a_reposted_ready_after_a_red_revise_queues_no_second_fix(tmp_path: Path) -> None:
     board = board_with(tmp_path, on=True)
     pr = built_with_ci_pending(board, sha(1))

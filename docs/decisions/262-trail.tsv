@@ -12,3 +12,4 @@ T2 refactor	CI-red tail split into _ci_red_stuck and _queue_ci_fix, shared by T2
 TLA model	model/Orchestrator.tla unchanged	it abstracts CI on that SHA; the T4-red-to-fixing edge is a follow-up if the reviewer wants it
 same-head CI-only fix (round 1 f-1)	the review dedupe key gains the id of a later fix at that head	the approved round is not counted, so the round's spent key stranded the ticket in review
 red ready with a job in flight (round 1 ac-3)	under the option, no CI fix while a review or fix of the head is queued or running	the verdict or the queued fix already carries the CI failure; a second fix duplicated the work
+same-head CI-only fix after a T6 retry (round 2 f-1)	the round's review counts as finished when the keyed job or its T6 retry is done	the retry runs under its own t6-retry key, so the failed keyed row alone hid the verdict that the retry gave

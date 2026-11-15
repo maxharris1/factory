@@ -465,13 +465,16 @@ class ReadyMixin:
         with self._connect() as connection:
             fix = connection.execute(
                 """
-                SELECT fix.id FROM jobs AS review
+                SELECT fix.id FROM jobs AS keyed
+                JOIN jobs AS review
+                  ON review.id = keyed.id
+                  OR review.dedupe_key LIKE 't6-retry:' || keyed.id || ':%'
                 JOIN jobs AS fix
                   ON lower(fix.repo) = lower(review.repo)
                  AND fix.ticket_id = review.ticket_id
                  AND fix.action = 'fix' AND fix.head = review.head
                  AND fix.rowid > review.rowid
-                WHERE review.dedupe_key = ? AND review.state = 'done'
+                WHERE keyed.dedupe_key = ? AND review.state = 'done'
                 ORDER BY fix.rowid DESC LIMIT 1
                 """,
                 (key,),
