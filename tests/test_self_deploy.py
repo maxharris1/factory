@@ -740,3 +740,19 @@ def test_orch_heal_deploy_dry_run_moves_nothing(repo: Repo) -> None:
     assert code == 0
     assert repo.head() == old
     assert "would deploy" in log(repo)[-1]
+
+
+def test_an_up_to_date_pass_keeps_each_waiters_own_box_row(repo: Repo, tmp_path: Path) -> None:
+    queue, _ = box_queue(tmp_path)
+    with queue.connect() as connection:
+        for bot, state in (("", "deploying"), ("claude-bot", "refused"),
+                           ("codex-bot", "lagging"), ("cursor-bot", "synced")):
+            device_sync.upsert(connection, device="box", bot=bot, harness=bot[:-4], checkout="c",
+                               target=None, sha=None, state=state, detail="", now=NOW)
+        connection.commit()
+
+    assert run(repo, db=queue.path)[0].kind == "up-to-date"
+
+    with queue.connect() as connection:
+        assert [(r.bot, r.state) for r in device_sync.read(connection)] == [
+            ("claude-bot", "refused"), ("cursor-bot", "synced")]

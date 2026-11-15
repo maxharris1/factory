@@ -26,9 +26,11 @@ A device with no row is placeable, so a new device is not dead before its
 first pass; the start's preflight still checks its HEAD.
 
 The box has rows too, written by lib/self_deploy.py (device bot "",
-deploying while its checkout moves) and by the waiter (lagging, when a box
-start was refused); self-deploy drops them once the box HEAD is
-origin/main, and `orch heal devices` never forgets them.
+deploying while its checkout moves) and by each bot's waiter: lagging when
+a box start was refused, and synced or refused for the skills installed in
+its own home (#345). Self-deploy drops its own row and the lagging rows
+once the box HEAD is origin/main, and `orch heal devices` never forgets
+box rows.
 """
 
 from __future__ import annotations
@@ -208,14 +210,23 @@ def forget_except(
             )
 
 
-def clear(connection: sqlite3.Connection, device: str, states: Iterable[str] = STATES) -> None:
+def clear(
+    connection: sqlite3.Connection,
+    device: str,
+    states: Iterable[str] = STATES,
+    *,
+    bots: Iterable[str] | None = None,
+) -> None:
     if not _exists(connection):
         return
     wanted = tuple(states)
-    marks = ", ".join("?" for _ in wanted)
-    connection.execute(
-        f"DELETE FROM {TABLE} WHERE device = ? AND state IN ({marks})", (device, *wanted)
-    )
+    sql = f"DELETE FROM {TABLE} WHERE device = ? AND state IN ({', '.join('?' for _ in wanted)})"
+    params: tuple[str, ...] = (device, *wanted)
+    if bots is not None:
+        names = tuple(bots)
+        sql += f" AND bot IN ({', '.join('?' for _ in names)})"
+        params += names
+    connection.execute(sql, params)
 
 
 @dataclass(frozen=True)

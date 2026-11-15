@@ -40,8 +40,9 @@ escalates it and health flags it.
 
 On the box the files are read in place. When an installed file is missing
 or changed, the waiter first runs install-skills from the checkout into its
-own home and hashes again, so every bot account on the box picks up a newly
-pinned skill at its next start, and a failed install is retried. On a
+own home and hashes again, and a failed install is retried. Each bot's
+waiter also does this while idle (#345), so a newly pinned skill reaches
+every bot account on the box with no job start. On a
 remote device one ssh call sends the paths on stdin (relative to $HOME, or
 absolute) and reads back one `<sha256> <path>` line per file, or
 `- <path>` for a file that is not there.

@@ -24,7 +24,12 @@ runs as the owning bot's own user and login, starts the job itself:
   runs `orch job run <bot> <job-id> --db ... --machines ... [--worktree] --
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
-* it goes straight back to waiting, and reaps each `orch job run` it started.
+* it goes straight back to waiting, and reaps each `orch job run` it started;
+* while it has no box run it keeps its own home's installed skills at the
+  box checkout's pin (#345), with the preflight's own hash and install
+  code, and records the result as its (box, bot) device_sync row: synced,
+  or refused with the reason (retried after HOME_RETRY_SECONDS). It runs as
+  this bot's account, so no other account writes into this home.
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
@@ -125,9 +130,9 @@ from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import ReadError, expected_for, gh_reader
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
-from lib.health import LOADED_VERSION
+from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
-from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
+from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, PreflightError
@@ -166,6 +171,7 @@ MARKER_TAIL_BYTES = 64 * 1024
 REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
 RUN_LOCK = "run.lock"
+HOME_RETRY_SECONDS = 60.0
 
 Log = Callable[[str], None]
 
@@ -530,6 +536,8 @@ class Waiter:
         drain: Path | None = None,
         version: str = LOADED_VERSION,
         orch_yml: Path = FACTORY_CHECKOUT / "orch.yml",
+        home: Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         if bot not in OWNING_BOTS:
             raise WaiterError(f"{bot!r} is not a harness bot")
@@ -566,6 +574,10 @@ class Waiter:
         self.version = version
         self.orch_yml = Path(orch_yml)
         self._draining_for: str | None = None
+        self.home = home
+        self.clock = clock
+        self._home_key: tuple[object, ...] | None = None
+        self._home_retry_at = 0.0
 
     def running(self) -> set[str]:
         return set(self._children)
@@ -575,6 +587,7 @@ class Waiter:
         if not self._recovered:
             self._recover()
         self._reap()
+        self._reconcile_home()
         if self._draining():
             return None
         try:
@@ -589,6 +602,66 @@ class Waiter:
             return None
         job, placement = claimed
         return self._start(job, placement)
+
+    def _reconcile_home(self) -> None:
+        """Keep this bot's own home at the box checkout's pin while it has no box run (#345)."""
+        if self.home is None or any(job_id not in self._remote for job_id in self._children):
+            return
+        device = next((d for d in self.pool.config.devices if d.local), None)
+        checkout = self._factory_root(device)
+        if checkout is None:
+            return
+        root = Path(checkout)
+        head = checkout_sha(root)
+        try:
+            lock = (root / LOCK_PATH).stat()
+            key: tuple[object, ...] = (head, lock.st_mtime_ns, lock.st_size)
+        except OSError as exc:
+            key = (head, type(exc).__name__)
+        if key == self._home_key or self.clock() < self._home_retry_at:
+            return
+        detail = ""
+        try:
+            pinned = skill_preflight.pinned_files(root)
+            expected = skill_preflight.wanted(skill_preflight.skills_dir(self.bot), checkout, pinned)
+            found = skill_preflight.local_hashes(self.home, sorted(expected))
+            errors: list[str] = []
+            if skill_preflight.home_install_stale(expected, found):
+                errors = skill_preflight.install_into_home(root, self.home)
+                found = skill_preflight.local_hashes(self.home, sorted(expected))
+            error = skill_preflight.compare(expected, found)
+            if error is not None:
+                detail = f"install-skills: {errors[0]}" if errors else error
+        except (OSError, ValueError, UnicodeError) as exc:
+            detail = f"install-skills: {_one_line(exc)}"
+        state = device_sync.REFUSED if detail else device_sync.SYNCED
+        name = device.name if device is not None else "box"
+
+        def write() -> None:
+            with self.queue.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = next((row.state for row in device_sync.read(connection)
+                                if (row.device, row.bot) == (name, self.bot)), None)
+                if not (state == device_sync.SYNCED and current == device_sync.LAGGING):
+                    device_sync.upsert(
+                        connection, device=name, bot=self.bot, harness=self.recipient,
+                        checkout=checkout, target=head, sha=head, state=state,
+                        detail=detail, now=self.queue.now(),
+                    )
+                connection.commit()
+
+        try:
+            retry_locked(write)
+        except (QueueError, sqlite3.Error, OSError) as exc:
+            self.log(f"skills in {self.home}: sync state not written ({_one_line(exc)})")
+            self._home_retry_at = self.clock() + HOME_RETRY_SECONDS
+            return
+        if detail:
+            self.log(f"skills in {self.home}: {detail}; retry in {HOME_RETRY_SECONDS:.0f}s")
+            self._home_retry_at = self.clock() + HOME_RETRY_SECONDS
+        else:
+            self.log(f"skills in {self.home}: at the pin of {checkout} {(head or '?')[:12]}")
+            self._home_key = key
 
     def _draining(self) -> bool:
         """The drain marker names another commit than this waiter's, or an
