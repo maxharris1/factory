@@ -14,7 +14,7 @@ from lib.dispatch.helpers import (
     _comment_link,
     _comment_order,
     _detail_round_number,
-    _has_questions,
+    _asks_questions,
     _matching_head,
     _retry_of,
     _round_number,
@@ -46,10 +46,7 @@ class QuestionsMixin:
     ) -> tuple[bool, str]:
         if not self._trusted_session(ticket, comment, fields):
             return True, "rejected-questions-author"
-        if fields.get("state") != "waiting-max" and (
-            fields.get("role") == "orchestrator"
-            or not _has_questions(parse_comment(comment.body).body)
-        ):
+        if not _asks_questions(fields, parse_comment(comment.body).body):
             return True, "no-questions"
         step = self._latest_step(ticket)
         if step is None:
@@ -144,7 +141,8 @@ class QuestionsMixin:
             paused = connection.execute(
                 """
                 SELECT workflow_state, paused_action, paused_recipient,
-                       paused_head, paused_generation, paused_question_id
+                       paused_head, paused_generation, paused_question_id,
+                       plan_gap_count
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -199,6 +197,9 @@ class QuestionsMixin:
                 instruction=_comment_link(comment),
                 resume=True,
                 update=UpdateScope.from_detail(prior or {}, head),
+                plan_round=(
+                    int(paused["plan_gap_count"]) + 1 if action == "plan" else None
+                ),
             ),
         )
         with self._connect() as connection:

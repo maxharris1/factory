@@ -391,6 +391,7 @@ class DetailMixin:
         kind: str | None = None,
         update: UpdateScope | None = None,
         rebase: RebaseScope | None = None,
+        plan_round: int | None = None,
     ) -> str:
         if round_number is not None and cap is None:
             cap = self._effective_cap(ticket)
@@ -427,6 +428,8 @@ class DetailMixin:
             }
         if kind is not None:
             context["kind"] = kind
+        if plan_round is not None:
+            context["plan_round"] = plan_round
         if update is not None:
             context.update(
                 kind="update",

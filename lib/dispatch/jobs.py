@@ -18,6 +18,7 @@ from lib.dispatch.helpers import (
     _NO_READ_SINCE_FAILURE,
     _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
+    _asks_questions,
     _comment_order,
     _detail_project_bot,
     _detail_round,
@@ -1104,8 +1105,10 @@ class JobsMixin:
                 continue
             outcome = self._handled_outcome(ticket, item.id)
             if kind == "questions":
-                if (update and not after_source) or outcome == "no-questions" or (
-                    outcome is not None and outcome.startswith(_REJECTED_OUTCOMES)
+                if (
+                    (update and not after_source)
+                    or not _asks_questions(fields, parse_comment(item.body).body)
+                    or (outcome is not None and outcome.startswith(_REJECTED_OUTCOMES))
                 ):
                     continue
                 return HandoffCandidate(item, False)

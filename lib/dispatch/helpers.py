@@ -335,6 +335,12 @@ def _comment_order(comment: Comment) -> tuple[float, int, int | str]:
     return comment.created_at, 1, comment.id
 
 
+def _asks_questions(fields: Mapping[str, str], body: str) -> bool:
+    return fields.get("state") == "waiting-max" or (
+        fields.get("role") != "orchestrator" and _has_questions(body)
+    )
+
+
 def _has_questions(body: str) -> bool:
     """Whether a trusted questions comment asks anything.
 

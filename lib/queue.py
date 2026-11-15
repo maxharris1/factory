@@ -759,8 +759,11 @@ def plan_round(detail: str | None) -> int:
         value = json.loads(detail)
     except ValueError:
         return 1
-    instruction = value.get("instruction") if isinstance(value, dict) else None
-    return 2 if str(instruction or "").startswith("round=2/2") else 1
+    if not isinstance(value, dict):
+        return 1
+    if value.get("plan_round") in (1, 2):
+        return int(value["plan_round"])
+    return 2 if str(value.get("instruction") or "").startswith("round=2/2") else 1
 
 
 def claim_order(

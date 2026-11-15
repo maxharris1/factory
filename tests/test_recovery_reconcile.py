@@ -501,7 +501,6 @@ def test_a_round_2_plan_job_that_posted_its_round_2_plan_is_done_from_plan(tmp_p
     assert "done-from-plan" in board.events(second.id)
 
 
-
 def test_a_restored_plan_job_is_not_settled_by_a_plan_for_another_round(tmp_path: Path) -> None:
     board = Board(tmp_path)
     plan_job = board.start("planning")
@@ -514,6 +513,50 @@ def test_a_restored_plan_job_is_not_settled_by_a_plan_for_another_round(tmp_path
     board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
     assert "done-from-plan" not in board.events(plan_job)
     assert board.rows("plan") == [("failed", 1), ("queued", 2)]
+
+
+def _resumed_round_2_plan(board: Board) -> str:
+    first = board.start("planning")
+    board.post("plan-1", PLAN.format(round=1, ac="unmet"))
+    board.queue.finish(first, owner="claude", handoff_comment_id="plan-1")
+    board.poll()
+    second = board.queue.claim("claude")
+    assert second is not None and "round=2/2" in str(second.request.detail)
+    board.post("questions-2", QUESTIONS)
+    board.queue.finish(second.id, owner="claude", handoff_comment_id="questions-2")
+    board.poll()
+    board.post("answers-2", ANSWERS, bot="grok")
+    board.poll()
+    resumed = board.queue.claim("claude")
+    assert resumed is not None and resumed.request.action == "plan"
+    return resumed.id
+
+
+def test_an_answer_resumed_round_2_plan_job_is_not_settled_by_a_round_1_plan(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    resumed = _resumed_round_2_plan(board)
+    cached = board.snapshot()
+    board.post("posted-plan", PLAN.format(round=1, ac="met"))
+    board.fail(resumed)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    board.poll()
+    assert "done-from-plan" not in board.events(resumed)
+    assert board.rows("plan") == [("done", 1), ("done", 1), ("failed", 1), ("queued", 2)]
+
+
+def test_an_answer_resumed_round_2_plan_job_is_done_from_its_round_2_plan(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    resumed = _resumed_round_2_plan(board)
+    board.post("posted-plan", PLAN.format(round=2, ac="met"))
+    board.fail(resumed)
+    board.poll()
+    assert "done-from-plan" in board.events(resumed)
+    assert board.rows("plan") == [("done", 1), ("done", 1), ("done", 1)]
+    assert board.workflow_state() == "building"
 
 
 REVIEWER_WAITING_MAX = (
@@ -531,7 +574,9 @@ class FreshSource(Source):
         return self.fresh
 
 
-def _failed_review(tmp_path: Path, *, questions: bool) -> tuple[Board, str, TrackedTicket]:
+def _failed_review(
+    tmp_path: Path, *, questions: bool, body: str = REVIEWER_WAITING_MAX
+) -> tuple[Board, str, TrackedTicket]:
     board = Board(tmp_path)
     build = board.start("building")
     box = Device(
@@ -550,7 +595,7 @@ def _failed_review(tmp_path: Path, *, questions: bool) -> tuple[Board, str, Trac
     assert review is not None
     before_questions = replace(board.snapshot(), ci={HEAD: CIResult("success")})
     if questions:
-        board.post("review-q", REVIEWER_WAITING_MAX, bot="codex")
+        board.post("review-q", body, bot="codex")
     board.queue.finish(review.id, owner="codex", handoff_comment_id=None)
     return board, review.id, before_questions
 
@@ -581,6 +626,41 @@ def test_an_ordinary_read_of_reviewer_questions_leaves_one_review_after_answers(
     board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
     _answer(board)
     assert [row for row in board.rows("review") if row[0] == "queued"] == [("queued", 1)]
+
+
+REVIEWER_NO_QUESTIONS = (
+    "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\n## Questions\nNone.\n"
+)
+
+
+BUILDER_NO_QUESTIONS = (
+    "<!-- orch:v1 kind=questions from=claude-bot role=builder -->\n## Questions\nNone.\n"
+)
+
+
+def test_a_cached_read_that_misses_reviewer_no_questions_still_retries_the_review(
+    tmp_path: Path,
+) -> None:
+    board, review, cached = _failed_review(tmp_path, questions=True, body=REVIEWER_NO_QUESTIONS)
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(cached, board.now, fresh))
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+    assert "done-from-questions" not in board.events(review)
+    assert board.rows("review") == [("failed", 1), ("queued", 2)]
+
+
+def test_a_cached_read_that_misses_builder_no_questions_still_retries_the_build(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    build = board.start("building")
+    cached = board.snapshot()
+    board.post("build-q", BUILDER_NO_QUESTIONS)
+    board.fail(build)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    board.poll()
+    assert "done-from-questions" not in board.events(build)
+    assert board.rows("build") == [("failed", 1), ("queued", 2)]
 
 
 def test_a_failed_review_with_no_questions_or_verdict_still_gets_its_retry(tmp_path: Path) -> None:

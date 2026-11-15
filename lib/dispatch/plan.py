@@ -156,6 +156,7 @@ class PlanMixin:
                                 "round=2/2; previous plan "
                                 f"{_comment_link(comment)}"
                             ),
+                            plan_round=2,
                         ),
                     ),
                     dedupe_key=(
