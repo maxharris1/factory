@@ -8,6 +8,7 @@ import pytest
 from lib.brief.rules import review_rules
 from lib.dispatcher import Dispatcher
 from lib.factory_md import parse_factory_md
+from tests.merge_queue_support import Board, sha
 from tests.test_dispatcher import (
     TRUSTED_LOGINS,
     VERDICT,
@@ -293,3 +294,77 @@ def test_review_rules_name_the_policy_only_when_it_is_on() -> None:
     text = review_rules(_facts(2))
     assert "the poller grants up to 2 more itself under factory.md `review.auto_extra_rounds`" in text
     assert "each round past those needs Max's own words" in text
+
+
+class OutageBoard(Board):
+    def __init__(self, tmp_path: Path) -> None:
+        super().__init__(tmp_path)
+        self.factory = dataclasses.replace(self.factory, auto_extra_rounds=2)
+        self.posted: list[str] = []
+        self.outage = True
+        self.actions.comment_once = self._comment_once
+
+    def _comment_once(self, ticket, body, marker) -> None:
+        del ticket
+        if self.outage:
+            raise RuntimeError("comment endpoint outage")
+        if not any(marker in existing for existing in self.posted):
+            self.posted.append(body)
+
+    def approve_after_one_auto_grant(self, *, mergeable: str = "clean"):
+        pr = self.open("42", sha(1))
+        self.go(pr, "go-42")
+        self.poll()
+        self.finish("claude")
+        for number in (1, 2, 3):
+            pr.push(sha(number + 1))
+            self.ready(pr, pr.head)
+            self.poll()
+            self.finish("codex")
+            self.revise(pr, f"{number}/3")
+            self.poll()
+            self.finish("claude")
+        pr.push(sha(5), state=mergeable)
+        self.ready(pr, pr.head)
+        self.poll()
+        self.finish("codex")
+        self.approve(pr, "4/4")
+        self.poll()
+        assert self.state("42")["cap_extra"] == 1
+        return pr
+
+    def notices(self) -> list[str]:
+        with self.queue.connect() as connection:
+            return [str(row["status"]) for row in connection.execute(
+                "SELECT status FROM auto_extra_comments"
+            )]
+
+
+def test_a_pending_notice_posts_once_after_the_pr_merges(tmp_path: Path) -> None:
+    board = OutageBoard(tmp_path)
+    pr = board.approve_after_one_auto_grant()
+    assert pr.merged
+    assert board.notices() == ["pending"]
+    board.outage = False
+    board.poll()
+    board.poll()
+    assert len(board.posted) == 1
+    assert board.posted[0].startswith("Auto extra round 1 of 2 ")
+    assert board.notices() == ["posted"]
+    board.poll()
+    assert board.dispatcher._tracked_refs() == ()
+
+
+def test_a_pending_notice_posts_once_after_the_pr_closes(tmp_path: Path) -> None:
+    board = OutageBoard(tmp_path)
+    pr = board.approve_after_one_auto_grant(mergeable="dirty")
+    assert board.state("42")["workflow_state"] == "updating"
+    pr.closed = True
+    board.poll()
+    assert board.state("42")["workflow_state"] == "abandoned"
+    assert board.notices() == ["pending"]
+    board.outage = False
+    board.poll()
+    board.poll()
+    assert len(board.posted) == 1
+    assert board.notices() == ["posted"]

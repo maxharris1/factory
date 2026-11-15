@@ -280,7 +280,7 @@ class TrackingMixin:
             rows = connection.execute(
                 """
                 SELECT repo, ticket_id, tracker, workflow_state, stuck, replay,
-                       unsettled, unlinked, read_at
+                       unsettled, outbox, read_at
                 FROM (
                     SELECT tracked.repo, tracked.ticket_id, tracked.tracker,
                            state.workflow_state, reads.read_at,
@@ -310,7 +310,13 @@ class TrackingMixin:
                                WHERE filing.repo = tracked.repo
                                  AND filing.ticket_id = tracked.ticket_id
                                  AND filing.status IN ('pending', 'filed')
-                           ) AS unlinked
+                           ) OR EXISTS (
+                               SELECT 1
+                               FROM auto_extra_comments AS notice
+                               WHERE notice.repo = LOWER(tracked.repo)
+                                 AND notice.ticket_id = tracked.ticket_id
+                                 AND notice.status = 'pending'
+                           ) AS outbox
                     FROM tracked_tickets AS tracked
                     LEFT JOIN ticket_state AS state
                       ON state.repo = tracked.repo
@@ -322,7 +328,7 @@ class TrackingMixin:
                 WHERE workflow_state IS NULL
                    OR workflow_state NOT IN ('merged', 'done', 'abandoned')
                    OR (workflow_state = 'merged' AND (replay OR unsettled))
-                   OR unlinked
+                   OR outbox
                 ORDER BY repo, ticket_id
                 """
             ).fetchall()
@@ -331,7 +337,7 @@ class TrackingMixin:
         for row in rows:
             state = row["workflow_state"]
             catching_up = (
-                bool(row["replay"]) or bool(row["unsettled"]) or bool(row["unlinked"])
+                bool(row["replay"]) or bool(row["unsettled"]) or bool(row["outbox"])
             )
             stopped = bool(row["stuck"]) or state in STOPPED_STATES
             if now is not None and stopped and not catching_up:
@@ -348,7 +354,7 @@ class TrackingMixin:
                     ticket_id=str(row["ticket_id"]),
                     tracker=str(row["tracker"]),
                     allow_merged=state == "merged"
-                    or bool(row["unlinked"])
+                    or bool(row["outbox"])
                     or (
                         state in ("handed-off", *WATCHED_STATES)
                         and bool(row["replay"])
