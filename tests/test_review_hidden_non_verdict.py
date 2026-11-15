@@ -200,11 +200,9 @@ def test_a_hidden_registered_questions_handoff_never_answers_the_review(
 ORCHESTRATOR_STUCK = "<!-- orch:v1 kind=stuck from=grok-bot role=orchestrator state=stuck -->\nStuck.\n"
 
 
-@pytest.mark.job_bound
-@pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
-def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retried_review(
-    tmp_path: Path, upgrade: str
-) -> None:
+def _red_ready_after_a_hidden_stuck_questions_handoff(
+    tmp_path: Path, upgrade: str, retried_handoff: str
+):
     board = board_with(tmp_path, on=True)
     board.dispatcher.hooks = (T7Hook(),)
     older = sha(1)
@@ -224,8 +222,9 @@ def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retrie
         "user": {"login": "codex-login"},
         "body": body,
     }
-    expected = expected_for(review, "codex-bot")
-    assert problems(expected, "123456", lambda _: raw, TRUSTED_LOGINS["github"]) == []
+    assert problems(
+        expected_for(review, "codex-bot"), "123456", lambda _: raw, TRUSTED_LOGINS["github"]
+    ) == []
     board.post(pr, "stuck-report", ORCHESTRATOR_STUCK, "grok-login")
     board.poll()
     assert board.state("42")["stuck"]
@@ -239,7 +238,10 @@ def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retrie
     board.poll()
     assert board.outcome("retry-review") == "queued-retry-review"
     retried = board.claim("codex")
-    board.queue.finish(retried.id, owner="codex", handoff_comment_id="654321")
+    assert problems(
+        expected_for(retried, "codex-bot"), retried_handoff, lambda _: raw, TRUSTED_LOGINS["github"]
+    ) == []
+    board.queue.finish(retried.id, owner="codex", handoff_comment_id=retried_handoff)
     _hide(pr, "123456")
     _upgrade(board, tmp_path, upgrade, "123456")
     board.dispatcher.hooks = (T7Hook(),)
@@ -260,6 +262,17 @@ def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retrie
     board.queue.finish(rebuild.id, owner="claude", handoff_comment_id="red-ready")
     board.ready(pr, older, "red-ready")
     board.poll()
+    return board, pr, older
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
+def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retried_review(
+    tmp_path: Path, upgrade: str
+) -> None:
+    board, pr, older = _red_ready_after_a_hidden_stuck_questions_handoff(
+        tmp_path, upgrade, "654321"
+    )
 
     assert board.outcome("red-ready") == "ci-red-in-flight"
     assert _active_fixes(board) == []
@@ -270,3 +283,16 @@ def test_a_hidden_questions_handoff_handled_while_stuck_never_answers_the_retrie
     fixes = _active_fixes(board)
     assert [job["source_comment_id"] for job in fixes] == ["654321"]
     assert CI_LOG in instruction(fixes[0])
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
+def test_a_retried_review_reusing_the_hidden_stuck_questions_id_is_not_answered(
+    tmp_path: Path, upgrade: str
+) -> None:
+    board, _pr, _older = _red_ready_after_a_hidden_stuck_questions_handoff(
+        tmp_path, upgrade, "123456"
+    )
+
+    assert board.outcome("red-ready") == "ci-red-in-flight"
+    assert _active_fixes(board) == []
