@@ -118,8 +118,9 @@ the job. Each refuses an owner that is not a recipient, a job that belongs to
 another recipient, and a job that is not running; a refused call changes
 nothing. A repeated `finish` with the same outcome and handoff ID returns the
 recorded job unchanged; one with a different outcome or handoff ID is refused
-and the first stays. `claim` takes a job in the issue #85 order: urgent, then a
-resumed paused step, then bug, then the oldest.
+and the first stays. `claim` takes a job in the issue #85 order, priority tier first (#258):
+urgent, then a resumed paused step, then bug, then the ticket that unblocks
+more, then the oldest.
 
 Jobs name one action (`plan`, `build`, `review`, `fix`, `clarify`, `stuck`,
 or the Grok wakes `blocked`, `capped`, `refused`, `unparsed` and `ship-failed`),
@@ -168,9 +169,10 @@ has no bot users and no SSH yet. The PC's `workdir_root` is
 assumes a device is reachable: the poller checks it (below).
 
 [`lib/device_pool.py`](lib/device_pool.py) is the scheduler. `DevicePool.claim(harness)`
-moves the first queued job for that harness, in claim order (a ticket marked
-urgent, then a job resuming a paused step, then a ticket marked bug, then the
-oldest; issue #85), to running and holds a slot on the least-loaded device
+moves the first queued job for that harness, in claim order (a priority tier
+first, then a ticket marked urgent, then a job resuming a paused step, then a
+ticket marked bug, then the ticket that unblocks more, then the oldest; issues
+#85, #258), to running and holds a slot on the least-loaded device
 (the lowest utilization, slots held over `slot_max`; a tie goes to a remote
 device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
@@ -369,7 +371,9 @@ the stable Linear user ID for Max to confirm. Max approved the GitHub map at
 comments on factory PRs". This approves the login map, not stronger identity:
 any session using that login can choose a marker. While any configured Linear
 project lacks `trusted_linear_users`, `orch poll` refuses to start at all,
-including for GitHub projects. Missing secrets fail by environment-variable
+including for GitHub projects. `approver_linear_users` names the Linear users
+whose `go` lifts a cap on a Linear ticket
+([docs/decisions/174-linear-approver.md](docs/decisions/174-linear-approver.md)). Missing secrets fail by environment-variable
 name; values are never printed or included in exceptions.
 
 Linear issues are searched by ID with comments included; each hit is then
@@ -517,11 +521,19 @@ schedulable device that lists it, minus its queued jobs, minus tickets fed
 for it in the last 10 minutes whose job is not queued yet (so a go the
 poller never acts on cannot stall the feeder). A ticket whose feed failed
 midway resumes first, but takes room like a new one: it waits while the
-harness has none. Tickets are fed urgent first (an `urgent`
-label or Linear priority Urgent), then `bug`, then oldest; the feeder also
-records those marks in `ticket_priority`, refreshed every poll (a label
-added after the feed still moves the queued job), which the queue's claim
-order reads (urgent, then a resumed paused step, then bug, then oldest). The live
+harness has none. Tickets are fed by priority tier first (issue #258): the
+project's `intake.priority_labels` is an ordered label list, a ticket's tier
+is the first one it carries, and a ticket with none sorts after every tier
+(a Linear project may set `priority_from_linear: true` to use Linear
+priority Urgent..Low as tiers 0-3). Inside a tier: urgent (an `urgent`
+label or Linear priority Urgent), then `bug`, then the ticket that unblocks
+the most open intake tickets (through `Blocked by:` lines, plus the
+unstarted tickets that share a `Touches:` path with it; `critical_path_order:
+false` turns this off), then oldest. The feeder also records those marks in
+`ticket_priority`, refreshed every poll (a label added after the feed still
+moves the queued job), which the queue's claim order reads (tier, then
+urgent, then a resumed paused step, then bug, then unblocks, then oldest).
+`orch status` and the dashboard show a ticket's tier (`tier 0`). The live
 clients are in [`lib/intake_live.py`](lib/intake_live.py): GitHub through the
 same `env -u GH_TOKEN ... gh api` seam, Linear through the poller's own
 Linear request path and budget (every page of the intake state, read with
@@ -704,7 +716,7 @@ jobs the same way (#108).
 [`lib/wait.py`](lib/wait.py) blocks on the queue above. `orch wait` accepts
 only `claude-bot`, `codex-bot`, and `cursor-bot` (recipients `claude`,
 `codex`, `cursor`). It checks for a job once a second, claims the next one
-in the queue's claim order (urgent, resumed, bug, then oldest) through the
+in the queue's claim order (tier, urgent, resumed, bug, unblocks, then oldest) through the
 device pool (`--machines`, default the checkout's `machines.yml`,
 placeholders accepted and never scheduled), and prints one JSON line with the
 job's `device` and `remote` and, on a remote device, its `workdir`. With no free
@@ -967,7 +979,17 @@ and `deploy/linear-webhook-service.sh install-autostart` when `orch.yml` or
 `orch.local.yml` has `linear_webhook`. It always installs self-heal (see
 "Self-heal"). The generated `profile.sh` runs once per shell (a second
 source is a no-op) and creates the state directory before any hook writes
-a log there.
+a log there. Its hooks run only in the host PID namespace and outside
+factory jobs (issue #308): `install.sh` records the host namespace in
+`~/.config/factory/host-pidns` once and never replaces a record that
+differs from its own namespace, and a shell whose `NSpid` has more than one
+entry, whose namespace differs from that record, or that has `ORCH_JOB_PROOF`
+or `CODEX_SANDBOX` set starts nothing. The poller, waiter, Linear webhook and
+self-heal scripts refuse `start`, `stop`, `restart`, `ensure` and their
+internal loops in a non-host namespace (exit 4), so a sandboxed shell never
+writes its own pids into the host's pidfiles. After a host restart that
+renumbers namespaces (WSL), delete that record and rerun
+`deploy/install.sh --update` from a host shell.
 
 It also retires the launchers that lived outside the repository (issue
 #107): for `~/.local/share/factory/run-poller.sh` and, unless it is already

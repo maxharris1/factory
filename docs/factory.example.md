@@ -10,6 +10,7 @@ review:
     low: 1
     high: 3
   verify: verify-cleffy
+  # followup_from_round: 4  # optional; from this round, variants of an earlier finding become a follow-up ticket
 ship: merge
 # finish_line: merge  # optional; omitted, it follows ship
 skills:

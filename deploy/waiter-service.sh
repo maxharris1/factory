@@ -25,7 +25,10 @@
 # the supervisor is killed (SIGKILL), its waiter lives on holding the lock:
 # a new supervisor's waiter then refuses and is retried with backoff, and
 # stop also stops that waiter (the lock's pid, checked to be this bot's
-# `orch wait <bot> --autostart`). A waiter that exits is
+# `orch wait <bot> --autostart`). stop also stops every other supervisor
+# for this bot and state directory owned by this user, and a supervisor
+# whose pid is no longer in the pidfile exits instead of starting another
+# waiter (#295). A waiter that exits is
 # started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
 # keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
 #
@@ -63,6 +66,10 @@ COMMAND="${2:-}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
+
+# shellcheck source=deploy/host-pidns.sh
+. "${HERE}/host-pidns.sh"
+
 STATE="${ORCH_STATE_DIR:-${HOME}/.local/state/factory}"
 CONFIG="${HOME}/.config/factory"
 PIDFILE="${STATE}/waiter-${BOT}.pid"
@@ -99,6 +106,73 @@ is_supervisor_argv() {
     return 1
 }
 
+stateless_supervisor_is_own() {
+    local pid="$1" kv home="" state="" command
+    local -a environ=()
+    if [[ -d "$PROC" ]]; then
+        mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
+        for kv in "${environ[@]}"; do
+            case "$kv" in
+                ORCH_STATE_DIR=?*) state="${kv#*=}" ;;
+                HOME=*) home="${kv#*=}" ;;
+            esac
+        done
+        [[ -n "$state" || -n "$home" ]] || return 1
+        [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
+    else
+        command=" $(ps -E -ww -p "$pid" -o command= 2>/dev/null) " || return 1
+        if [[ "$command" == *" ORCH_STATE_DIR="[!\ ]* ]]; then
+            [[ "$command" == *" ORCH_STATE_DIR=${STATE} "* ]]
+        else
+            [[ "$STATE" == */.local/state/factory &&
+                "$command" == *" HOME=${STATE%/.local/state/factory} "* ]]
+        fi
+    fi
+}
+
+is_own_supervisor_argv() {
+    local pid="$1" i
+    shift
+    for i in 0 1; do
+        if (($# > i + 2)) && [[ "${@:i+1:1}" =~ (^|/)waiter-service\.sh$ &&
+            "${@:i+2:1}" == "$BOT" && "${@:i+3:1}" == _supervise ]]; then
+            if (($# > i + 3)); then
+                [[ "${@:i+4:1}" == "$STATE" ]]
+            else
+                stateless_supervisor_is_own "$pid"
+            fi
+            return
+        fi
+    done
+    return 1
+}
+
+own_supervisors() {
+    local dir pid command
+    local -a argv=()
+    if [[ -d "$PROC" ]]; then
+        for dir in "$PROC"/[0-9]*; do
+            [[ -O "$dir" ]] || continue
+            mapfile -d '' -t argv 2>/dev/null <"${dir}/cmdline" || continue
+            if is_own_supervisor_argv "${dir##*/}" "${argv[@]}"; then
+                printf '%s\n' "${dir##*/}"
+            fi
+        done
+    else
+        while read -r pid command; do
+            read -r -a argv <<<"${command%% _supervise *}"
+            [[ "$command" != *" _supervise "* ]] || argv+=(_supervise "${command#* _supervise }")
+            if is_own_supervisor_argv "$pid" "${argv[@]}"; then
+                printf '%s\n' "$pid"
+            fi
+        done < <(ps -ww -U "$(id -u)" -o pid= -o command=)
+    fi
+}
+
+owns_pidfile() {
+    [[ "$(head -n 1 "$PIDFILE" 2>/dev/null || true)" == "$$" ]]
+}
+
 # Print the pid of this bot's running supervisor, or fail.
 running_pid() {
     local pid command
@@ -112,7 +186,7 @@ running_pid() {
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
         is_supervisor_argv "${argv[@]}" || return 1
     else
-        command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
         is_supervisor_argv "${argv[@]}" || return 1
     fi
@@ -151,7 +225,7 @@ waiter_pid() {
         [[ -r "${PROC}/${pid}/cmdline" ]] || return 1
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
     else
-        command="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
     fi
     is_waiter_argv "${argv[@]}" || return 1
@@ -174,13 +248,15 @@ stop_waiter() {
 }
 
 service_lock() {
-    command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$STATE"
     exec 9>>"$SERVICE_LOCK"
-    flock 9
+    if command -v flock >/dev/null 2>&1; then
+        flock 9
+    elif command -v perl >/dev/null 2>&1; then
+        LC_ALL=C perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or die "$!\n"; flock($fh, LOCK_EX) or die "$!\n"'
+    fi
 }
 
-# The supervisor loop. It owns the pidfile; SIGTERM stops the waiter and it.
 supervise() {
     local child="" status started delay="$RESTART_SEC" stopping=""
     trap 'stopping=1; [[ -n "$child" ]] && kill -TERM "$child" 2>/dev/null || true' TERM INT HUP
@@ -198,10 +274,15 @@ supervise() {
     export ORCH_WAITER_DRAIN="$DRAIN"
     export PYTHONUNBUFFERED=1
     while [[ -z "$stopping" && ! -e "$STOPPED" ]]; do
+        if ! owns_pidfile; then
+            say "${PIDFILE} no longer names this supervisor (pid $$); exiting"
+            break
+        fi
         started="$SECONDS"
         say "starting orch wait ${BOT} --autostart"
         "$ORCH" wait "$BOT" --autostart 9>&- &
         child=$!
+        [[ -z "$stopping" ]] || kill -TERM "$child" 2>/dev/null || true
         status=0
         wait "$child" || status=$?
         # A trapped signal interrupts `wait`; wait again until the waiter is gone.
@@ -220,7 +301,7 @@ supervise() {
         delay="$(awk -v d="$delay" -v m="$RESTART_MAX" 'BEGIN { d *= 2; if (d > m) d = m; print d }')"
     done
     say "supervisor stopped"
-    if [[ "$(head -n 1 "$PIDFILE" 2>/dev/null || true)" == "$$" ]]; then
+    if owns_pidfile; then
         rm -f "$PIDFILE"
     fi
 }
@@ -238,7 +319,7 @@ launch() {
         say "waiter supervisor already running (pid ${pid})"
         return 0
     fi
-    nohup bash "$SELF" "$BOT" _supervise >>"$LOG" 2>&1 </dev/null 9>&- &
+    nohup bash "$SELF" "$BOT" _supervise "$STATE" >>"$LOG" 2>&1 </dev/null 9>&- &
     child=$!
     for ((i = 0; i < START_WAIT * 10; i++)); do
         if pid="$(running_pid)"; then
@@ -256,25 +337,37 @@ launch() {
 }
 
 stop() {
-    local pid i
+    local main="" pids="" left="" pid i
     mkdir -p "$STATE"
     : >"$STOPPED"
-    if ! pid="$(running_pid)"; then
-        say "waiter supervisor is not running"
-        stop_waiter
-        return
-    fi
-    kill -TERM "$pid"
+    main="$(running_pid)" || say "waiter supervisor is not running"
+    for pid in $main $(own_supervisors); do
+        [[ "${pids} " == *" ${pid} "* ]] || pids+=" ${pid}"
+    done
+    for pid in $pids; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            say "stopped waiter supervisor (pid ${pid})"
-            stop_waiter
-            return
-        fi
+        left=""
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                left+=" ${pid}"
+            fi
+        done
+        [[ -n "$left" ]] || break
         sleep 0.1
     done
-    say "waiter supervisor (pid ${pid}) did not stop within ${STOP_WAIT}s" >&2
-    return 1
+    for pid in $pids; do
+        if [[ "${left} " == *" ${pid} "* ]]; then
+            say "waiter supervisor (pid ${pid}) did not stop within ${STOP_WAIT}s" >&2
+        elif [[ "$pid" == "$main" ]]; then
+            say "stopped waiter supervisor (pid ${pid})"
+        else
+            say "stopped stray waiter supervisor (pid ${pid})"
+        fi
+    done
+    [[ -z "$left" ]] || return 1
+    stop_waiter
 }
 
 # A restart whose stop times out drops the hold that stop just wrote, so
@@ -379,12 +472,12 @@ remove_autostart() {
 }
 
 case "$COMMAND" in
-    _supervise) supervise ;;
-    start) service_lock && start ;;
-    stop) service_lock && stop ;;
-    restart) service_lock && restart ;;
+    _supervise) factory_host_pidns_or_refuse _supervise && supervise ;;
+    start) factory_host_pidns_or_refuse start && service_lock && start ;;
+    stop) factory_host_pidns_or_refuse stop && service_lock && stop ;;
+    restart) factory_host_pidns_or_refuse restart && service_lock && restart ;;
     status) status ;;
-    ensure) service_lock && ensure ;;
+    ensure) factory_host_pidns_or_refuse ensure && service_lock && ensure ;;
     install-autostart) install_autostart ;;
     remove-autostart) remove_autostart ;;
     *) usage ;;

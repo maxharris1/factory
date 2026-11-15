@@ -6,11 +6,11 @@ efficiency pages.
   the queue in a side rail. The attention strip under the header band (#139)
   links to the Activity page. No poll/Linear budget, handoffs, verdicts, tickets, log or
   savings.
-- Job page (job.html): a flow diagram drawn from model/chart.mmd (the
-  statechart's checked-in chart), with the job's path and current state
-  highlighted, its round and its time in that state.
-- Activity page (activity.html): handoffs, verdicts, tickets, log, needs
-  attention.
+- Job page (job.html): the Tickets board and its table view, and a flow
+  diagram drawn from model/chart.mmd (the statechart's checked-in chart),
+  with the job's path and current state highlighted, its round and its time
+  in that state.
+- Activity page (activity.html): handoffs, verdicts, log, needs attention.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
 - #63 FU-1: a lane counts max(held, running) slots.
@@ -188,9 +188,9 @@ def test_static_server_serves_every_page() -> None:
 # --- main page --------------------------------------------------------------------------
 
 
-def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
+def test_main_page_has_status_lanes_just_happened_and_intake(tmp_path: Path) -> None:
     html = _pages(tmp_path)["index.html"]
-    for panel in ("kpis", "lanes", "queue"):
+    for panel in ("kpis", "lanes", "queue", "just-happened", "intake"):
         assert f'id="{panel}"' in html, panel
     # Moved to the Activity and Efficiency pages.
     for panel in ("health", "handoffs", "verdicts", "tickets", "log", "savings"):
@@ -198,21 +198,23 @@ def test_main_page_has_status_lanes_and_queue_rail_only(tmp_path: Path) -> None:
     for words in ("Poll and Linear budget", "Recent handoffs", "Recent verdicts",
                   "Handoff savings", "poller.log", "scripted share"):
         assert words.lower() not in _text(_no_script(html)).lower(), words
-    # Status first, then the lanes, then the queue rail beside them.
+    # #140: status, then the lanes with the queue lane first, then Just happened beside Intake.
     assert html.index('id="kpis"') < html.index('id="lanes"') < html.index('id="queue"')
-    assert _section(html, "queue").startswith('<section class="panel rail" id="queue"')
+    assert html.index('id="queue"') < html.index('data-device="box"') < html.index('id="just-happened"')
+    assert html.index('id="just-happened"') < html.index('id="intake"')
+    assert 'id="queue" data-device="queue"' in _section(html, "lanes")
 
 
 def test_main_page_slot_shows_ticket_bot_step_round_and_elapsed(tmp_path: Path) -> None:
     html = _no_script(_pages(tmp_path)["index.html"])
     lanes = _section(html, "lanes")
-    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
+    card = re.search(r'<a class="tile [^"]*" href="job.html#job-h-review"[^>]*>.*?</a>', lanes, re.S)
     assert card, lanes
     text = _text(card.group(0))
     assert "PR" in text and "cleffy#40" in text  # a GitHub ticket is a PR
     assert "codex" in text  # bot
     assert "review" in text  # step
-    assert "round 2/3" in text  # the job's detail.round, not the ticket's count
+    assert "2/3" in text  # the job's detail.round, not the ticket's count
     assert "T+ 33m 20s" in text  # elapsed since it was queued
 
 
@@ -222,7 +224,7 @@ def test_a_linear_slot_shows_its_ticket_not_a_pr(tmp_path: Path) -> None:
         add_job(connection, "lin-build", state="running", repo="aut0-code/aut0",
                 ticket_id="AUT-7", created_at=NOW - 30)
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["index.html"])
-    card = re.search(r'<a class="slot job[^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
+    card = re.search(r'<a class="tile [^"]*" href="job.html#job-lin-buil"[^>]*>.*?</a>', html, re.S)
     assert card
     text = _text(card.group(0))
     assert "AUT-7" in text and "ticket" in text and "PR" not in text.split()
@@ -295,7 +297,7 @@ def test_lane_uses_held_slots_when_more_than_running(tmp_path: Path) -> None:
     pc = next(row for row in snapshot["slots"]["devices"] if row["name"] == "pc")
     assert pc["held"] == 2
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
-    card = re.search(r'<section class="device[^"]*" data-device="pc">.*?</section>', lanes, re.S)
+    card = re.search(r'<div class="lane[^"]*" data-device="pc">.*?(?=<div class="lane[ "]|$)', lanes, re.S)
     assert card, lanes
     text = _text(card.group(0))
     assert "2 / 2 slots" in text
@@ -307,7 +309,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW, machines_path=_machines(tmp_path))
     lanes = _section(_no_script(render_pages(snapshot)["index.html"]), "lanes")
-    card = re.search(r'<section class="device[^"]*" data-device="box">.*?</section>', lanes, re.S)
+    card = re.search(r'<div class="lane[^"]*" data-device="box">.*?(?=<div class="lane[ "]|$)', lanes, re.S)
     text = _text(card.group(0))
     # Two running box jobs, no device_slots rows: 2 used, 1 idle.
     assert "2 / 3 slots" in text
@@ -317,7 +319,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
 # --- activity page -------------------------------------------------------------------------
 
 
-def test_activity_page_has_handoffs_verdicts_tickets_log_and_attention(tmp_path: Path) -> None:
+def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute(
@@ -326,28 +328,36 @@ def test_activity_page_has_handoffs_verdicts_tickets_log_and_attention(tmp_path:
         )
         connection.execute("UPDATE jobs SET finished_at = ? WHERE id = 'd-codex-review-1'", (NOW - 100,))
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["activity.html"])
-    for panel in ("attention", "handoffs", "verdicts", "tickets", "log"):
+    for panel in ("attention", "handoffs", "verdicts"):
         assert f'id="{panel}"' in html, panel
     assert "queued-review-fix" in _text(_section(html, "verdicts"))
     assert "scripted" in _text(_section(html, "handoffs"))
-    tickets = _text(_section(html, "tickets"))
-    assert "AUT-7" in tickets and "waiting-max" in tickets
-    assert "cycle line 79" in _text(_section(html, "log"))
     attention = _text(_section(html, "attention"))
     assert "AUT-7" in attention and "job-timeout" in attention
     assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
-    for panel in ("lanes", "queue", "health", "savings"):
+    for panel in ("lanes", "queue", "health", "savings", "log", "tickets"):
         assert f'id="{panel}"' not in html, panel
+
+
+def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
+    html = _no_script(render_pages(collect_snapshot(*seeded(tmp_path), now=NOW))["job.html"])
+    for panel in ("ticket-filter", "pipeline", "shipped", "tickets", "jobview"):
+        assert f'id="{panel}"' in html, panel
+    assert 'id="jobs"' not in html
+    tickets = _text(_section(html, "tickets"))
+    assert "AUT-7" in tickets and "waiting-max" in tickets
+    assert "AUT-7" in _text(_section(html, "shipped"))
+    assert "tracy-harris-coaching#5" in _text(_section(html, "pipeline"))
 
 
 # --- efficiency page --------------------------------------------------------------------------
 
 
-def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path, last_cycle_at=NOW - 4)["efficiency.html"])
-    for panel in ("health", "savings"):
-        assert f'id="{panel}"' in html, panel
-    health = _text(_section(html, "health"))
+def test_efficiency_page_has_savings_and_a_one_line_definition(tmp_path: Path) -> None:
+    pages = _pages(tmp_path, last_cycle_at=NOW - 4)
+    html = _no_script(pages["efficiency.html"])
+    assert 'id="savings"' in html
+    health = _text(_section(_no_script(pages["health.html"]), "health"))
     assert "OK" in health and "1,250 req/h" in health
     savings = _section(html, "savings")
     line = re.search(r'<p class="definition" id="share-definition">(.*?)</p>', savings, re.S)
@@ -358,7 +368,7 @@ def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: 
     assert definition.lower().startswith("scripted share")
     assert len(definition) <= 200
     assert "50%" in _text(savings)
-    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log"):
+    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log", "health"):
         assert f'id="{panel}"' not in html, panel
 
 
@@ -459,6 +469,8 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
     job = next(row for row in snapshot["running"] if row["ticket_id"] == "40")
     assert job["round"] == "2/3"
     assert job["tracker"] == "github"
+    keys = ("state", "who", "started_at", "duration_seconds", "time_known", "off_chart",
+            "reason", "current")
     assert job["flow"] == {
         "state": "review",
         "path": ["intake", "questions", "building", "review", "fixing", "review"],
@@ -466,6 +478,18 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
         # #78: the chart's direct successors of review, and review is not finished.
         "next": ["blocked", "ship", "stuck", "fixing", "capped"],
         "terminal": False,
+        "visits": [dict(zip(keys, row)) for row in (
+            ("intake", "script", None, None, False, False, None, False),
+            ("questions", "script", None, None, False, False,
+             "brief and acceptance criteria posted", False),
+            ("building", "claude", NOW - 5000, 1000, True, False, "kind=go, queue build", False),
+            ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False),
+            ("fixing", "claude", NOW - 3000, 1000, True, False, "REVISE, under the round cap",
+             False),
+            ("review", "codex", NOW - 2000, 2000, True, False, "ready, CI green", True),
+        )],
+        "hops_to_shipped": 2,
+        "all_durations_known": False,
     }
 
 
@@ -497,7 +521,14 @@ def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
     html = _no_script(render_pages(snapshot)["job.html"])
     for row in snapshot["running"] + snapshot["queued"]:
         assert f'id="job-{row["job"]}"' in html, row["job"]
-        assert f'href="#job-{row["job"]}"' in _section(html, "jobs")
+    board = _section(html, "pipeline") + _section(html, "shipped")
+    tracked = {(row["repo"], row["ticket_id"]) for row in snapshot["tickets"]}
+    for ticket in tracked:
+        jobs = [row["job"] for row in snapshot["running"] + snapshot["queued"]
+                if (row["repo"], row["ticket_id"]) == ticket]
+        if jobs:
+            assert any(f'href="job.html#job-{job}"' in board for job in jobs), ticket
+    assert 'href="job.html#job-h-review"' in board and 'href="job.html#job-r-codex-"' in board
 
 
 def test_a_job_with_no_ticket_state_still_gets_a_diagram(tmp_path: Path) -> None:
@@ -584,6 +615,7 @@ class Node {
     this.children = kids; kids.forEach(c => { c.parentNode = this; }); this._text = ''; }
   get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === body; }
   focus() { global.document.activeElement = this; }
+  scrollIntoView() {}
   setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
@@ -719,6 +751,7 @@ def _run_page(
 # The shell on every page (#139): the TopBar's link state and caret, the band,
 # the attention strip and the status line.
 BAR = ["link", "link-text", "age", "clock", "caret", "band", "attention-strip", "statusline"]
+JOB = BAR + ["hud", "ticket-filter", "pipeline", "shipped", "tickets", "jobview", "flow-template"]
 
 
 def attention_count(out: dict) -> str:
@@ -733,35 +766,36 @@ def attention_count(out: dict) -> str:
 @needs_node
 def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
     snapshot = _held_more_than_running(tmp_path)
-    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "queue"])
+    out = _run_page(tmp_path, snapshot, "main", BAR + ["hud", "kpis", "lanes", "just-happened", "intake"])
     assert "LIVE" in out["text"]["link-text"]
     assert attention_count(out) == "3"
     lanes = out["dump"]["lanes"]
-    assert "a.slot.job[href=job.html#job-r-codex-]" in lanes
-    for needle in ("cleffy#13", "codex", "review", "round 3/3", "T+ ", "OVERDUE", "DISABLED",
-                   "stale heartbeat"):
+    assert "a.tile.codex[href=job.html#job-r-codex-]" in lanes
+    for needle in ("cleffy#13", "codex", "review", "3/3", "T+ ", "OVERDUE", "DISABLED",
+                   "stale"):
         assert needle in out["text"]["lanes"], (needle, lanes)
     # #63 FU-1: pc holds 2 slots with 1 job running; the lane is full.
     pc = lanes[lanes.index("[data-device=pc]") :]
     pc = pc[: pc.index("[data-device=", 1)] if "[data-device=" in pc[1:] else pc
     assert '"2 / 2 slots"' in pc and '"held"' in pc and '"idle"' not in pc
-    assert "a.queue-item[href=job.html#job-q-claude]" in out["dump"]["queue"]
-    assert "cleffy#12" in out["text"]["queue"]
+    queue = lanes[lanes.index("[data-device=queue]") : lanes.index("[data-device=", lanes.index("[data-device=queue]") + 1)]
+    assert "a[href=job.html#job-q-claude]" in queue
+    assert "cleffy#12" in queue
 
 
 @needs_node
 def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, last_cycle_at=NOW - 4)
     activity = _run_page(tmp_path, snapshot, "activity",
-                         BAR + ["hud", "attention", "handoffs", "verdicts", "tickets", "log"])
+                         BAR + ["hud", "attention", "handoffs", "verdicts"])
     text = activity["text"]
     assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
     assert text["attention"].count("AUT-7") == 1
-    assert "AUT-7" in text["tickets"]
-    assert "cycle line 79" in text["log"]
-    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings"])
+    system = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "health", "log"])
+    assert "cycle line 79" in system["text"]["log"]
+    assert "OK" in system["text"]["health"]
+    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "savings"])
     text = efficiency["text"]
-    assert "OK" in text["health"]
     assert dashboard.SCRIPTED_SHARE_DEFINITION in text["savings"]
     assert "50%" in text["savings"]
 
@@ -769,8 +803,7 @@ def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> Non
 @needs_node
 def test_script_highlights_the_selected_jobs_path(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
-    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
-                    hash_="#job-h-review")
+    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review")
     view = out["dump"]["jobview"]
     assert "cleffy#40" in out["text"]["jobview"]
     assert "round 2/3" in out["text"]["jobview"]
@@ -784,13 +817,13 @@ def test_script_highlights_the_selected_jobs_path(tmp_path: Path) -> None:
                      ("review", "fixing"), ("fixing", "review")}
     # Only the selected job is shown.
     assert "cleffy#13" not in out["text"]["jobview"]
-    assert "#job-r-codex-" in out["dump"]["jobs"]
+    assert "a[href=job.html#job-r-codex-]" in out["dump"]["pipeline"]
+    assert "AUT-7" in out["text"]["tickets"]
 
 
 @needs_node
 def test_script_says_when_the_selected_job_is_gone(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _snapshot(tmp_path), "job",
-                    BAR + ["hud", "jobs", "jobview", "flow-template"], hash_="#job-finished")
+    out = _run_page(tmp_path, _snapshot(tmp_path), "job", JOB, hash_="#job-finished")
     assert "no longer running or queued" in out["text"]["jobview"]
 
 
@@ -853,4 +886,4 @@ def test_jobs_on_a_database_without_ticket_tables_still_render(tmp_path: Path) -
     assert job["flow"]["path"] == ["intake", "review"]
     pages = render_pages(snapshot)
     assert 'id="job-r-codex-"' in pages["job.html"]
-    assert "round 3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))
+    assert "3/3" in _text(_section(_no_script(pages["index.html"]), "lanes"))

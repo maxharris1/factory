@@ -1,0 +1,14 @@
+decision	choice	why
+rules source	a rules snapshot field built in lib/dashboard.py from lib/health.py constants, the Linear budget constants and chart edge labels (_CHART_RULES)	one Python function; the script twin only prints rows; no copied values
+chart missing	chart rows read 'chart unavailable'; an edge renamed out of the chart reads 'not in the chart'	SPEC 9 runtime gap, plain text
+drift scope	every configured component, not only CODE_COMPONENTS; status line keeps #139's stale_code count	artboard counts all 13 and colours tunnel orange; changing #139's segment is out of scope
+newest version	health.code_version, else the known version with the latest started_at	the checkout is what self-deploy converges to
+matrix columns	slots.devices order filtered to devices with a heartbeat, then heartbeat-only devices	matches the artboard's box, pc, mac and avoids empty columns
+down cell	a link to its process-details row with a plain 10px block; no canvas, data-px or animation	AC 2: down is static red; AC 1: links land on rows
+layout	two sys-row flex wrappers with the artboard's flex bases; panels keep their ids so the script replaces children in place	a 12-column span would round 340/520 and 560/380
+process details columns	kept today's 9 columns including last seen (ET)	ticket says today's full table; additions allowed
+test change	test_health _states reads chips after 'process details'	the matrix adds UP/DOWN text before the table
+delegation	main job owned the diff; comment-sicko reviewed it; Codex reviews the PR	one-hour job budget; review separation comes from the cross-family reviewer
+fragment reveal (round 2)	revealHash in the shared page script opens every details ancestor of the fragment target and scrolls to it, after the first render and after each hashchange redraw; not on every poll	fixes the round-1 REVISE in the shared redraw path so every details on every page is covered; skipping polls keeps a later operator collapse
+browser regression test	headless Chrome over --remote-debugging-pipe, driven from pytest; skipped where no Chrome is installed	the node fake DOM has no details or hashchange; the pipe needs no WebSocket client, and ubuntu-latest ships google-chrome
+CI red on test_remote_darwin (round 2 fix)	the Darwin check relists the recorded group when the leader or snapshot member it listed has exited by its own probe, and reports gone if the group is now empty; unsure otherwise	the keeper can exit between the listing and its probe, which read as unknown and held a finished job's slot; an empty group is gone by the existing contract and a nonempty one stays unsure, so reuse safety is unchanged

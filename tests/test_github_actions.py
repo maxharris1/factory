@@ -4,6 +4,7 @@ import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -94,15 +95,21 @@ MARK_READY_QUERY = (
     "{ pullRequest { id isDraft headRefOid } } }"
 )
 # GitHub has no REST route for draft -> ready. gh pr ready uses this mutation.
-MARK_READY = (
-    "-X",
-    "POST",
-    "graphql",
-    "-f",
-    f"query={MARK_READY_QUERY}",
-    "-f",
-    f"id={NODE_ID}",
-)
+def mark_ready(repo: str = "owner/repo") -> tuple[str, ...]:
+    return (
+        "-X",
+        "POST",
+        "graphql",
+        "-f",
+        f"query={MARK_READY_QUERY}",
+        "-f",
+        f"id={NODE_ID}",
+        "-f",
+        f"owner={repo.partition('/')[0]}",
+    )
+
+
+MARK_READY = mark_ready()
 PREVIEW = (
     "-X",
     "POST",
@@ -1284,6 +1291,8 @@ def test_handoff_marks_a_draft_ready_with_the_exact_graphql_gh_argv() -> None:
             "input: {pullRequestId: $id}) { pullRequest { id isDraft headRefOid } } }",
             "-f",
             "id=PR_kwDOKfac0s6CiTKq",
+            "-f",
+            "owner=owner",
         ],
     ]
     assert not any("ready_for_review" in part for call in gh.calls for part in call)
@@ -1688,3 +1697,125 @@ def test_ci_status_says_whether_anything_reported(
     result = actions.ci_status("owner/repo", HEAD)
     assert result.status == "pending"
     assert result.reported is reported
+
+
+FOLLOWUP_MARKER = "<!-- orch-followup verdict=99 -->"
+FOLLOWUP_SINCE = datetime(2026, 11, 14, 12, tzinfo=timezone.utc).timestamp()
+ISSUES = ("--paginate", f"{REPO}/issues?state=all&since=2026-11-14T11:00:00Z&per_page=100")
+CREATE_ISSUE = (
+    "-X",
+    "POST",
+    f"{REPO}/issues",
+    "-f",
+    "title=Follow-ups from #42 r4",
+    "-f",
+    f"body=findings\n\n{FOLLOWUP_MARKER}",
+    "-f",
+    "labels[]=factory:ready",
+    "-f",
+    "labels[]=urgent",
+)
+
+
+USER = ("user",)
+OWN_LOGIN = "maxharris1"
+
+
+def issues_page(*bodies: str | None, login: str = OWN_LOGIN, **extra: object) -> GhResult:
+    items = [
+        {"number": 100 + index, "body": body, "user": {"login": login}, **extra}
+        for index, body in enumerate(bodies)
+    ]
+    return GhResult(0, json.dumps(items), "")
+
+
+def adapter_as_own_login() -> tuple[GitHubReviewActions, RecordedGh]:
+    actions, gh = adapter()
+    gh.route(USER, GhResult(0, json.dumps({"login": OWN_LOGIN}), ""))
+    return actions, gh
+
+
+def file_followup(actions: GitHubReviewActions) -> int:
+    return actions.file_issue(
+        pr(),
+        "Follow-ups from #42 r4",
+        f"findings\n\n{FOLLOWUP_MARKER}",
+        ("factory:ready", "urgent"),
+        FOLLOWUP_MARKER,
+        FOLLOWUP_SINCE,
+    )
+
+
+def test_file_issue_creates_the_issue_when_no_issue_carries_the_marker() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, issues_page("unrelated", f"> {FOLLOWUP_MARKER}", None))
+    gh.route(CREATE_ISSUE, GhResult(0, json.dumps({"number": 307}), ""))
+
+    assert file_followup(actions) == 307
+    assert gh.keys() == [ISSUES, CREATE_ISSUE]
+
+
+def test_file_issue_returns_the_issue_an_earlier_try_created() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, issues_page("unrelated", f"findings\n\n{FOLLOWUP_MARKER}"))
+
+    assert file_followup(actions) == 101
+    assert gh.keys() == [ISSUES, USER]
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        issues_page(FOLLOWUP_MARKER, login="untrusted-contributor"),
+        issues_page(
+            FOLLOWUP_MARKER,
+            pull_request={"url": f"https://api.github.com/{REPO}/pulls/42"},
+        ),
+    ],
+    ids=["other-author", "pull-request"],
+)
+def test_file_issue_creates_the_issue_when_only_someone_else_carries_the_marker(
+    page: GhResult,
+) -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, page)
+    gh.route(CREATE_ISSUE, GhResult(0, json.dumps({"number": 307}), ""))
+
+    assert file_followup(actions) == 307
+    assert gh.count(CREATE_ISSUE) == 1
+
+
+def pr_comment(comment_id: int, body: str, login: str = OWN_LOGIN) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "user": {"login": login},
+        "body": body,
+        "created_at": "2026-11-14T12:00:00Z",
+    }
+
+
+LINK_MARKER = "<!-- orch-followup-link verdict=99 -->"
+LINK_BODY = f"Follow-ups are filed as #307.\n\n{LINK_MARKER}"
+POST_LINK = ("-X", "POST", f"{REPO}/issues/42/comments", "-f", f"body={LINK_BODY}")
+
+
+def test_comment_once_posts_only_when_no_comment_carries_the_marker() -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, f"quoted\n> {LINK_MARKER}")]), ""))
+    gh.route(POST_LINK, GhResult(0, "{}", ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.keys() == [COMMENTS, POST_LINK]
+
+    actions, gh = adapter_as_own_login()
+    gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, LINK_BODY)]), ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.keys() == [COMMENTS, USER]
+
+
+def test_comment_once_posts_when_only_someone_else_carries_the_marker() -> None:
+    actions, gh = adapter_as_own_login()
+    forged = pr_comment(1, LINK_BODY, login="untrusted-contributor")
+    gh.route(COMMENTS, GhResult(0, json.dumps([forged]), ""))
+    gh.route(POST_LINK, GhResult(0, "{}", ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.count(POST_LINK) == 1

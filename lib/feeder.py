@@ -13,8 +13,8 @@ config (lib/orch_yml.py Intake). Nothing here names a project, a label or a
 state. Trusted appliers default to the keys of `trusted_logins` (GitHub) or
 `trusted_linear_users` (Linear).
 
-For each eligible ticket, in priority order (urgent, then bug, then oldest)
-and only while its builder harness has room, the feeder:
+For each eligible ticket, in priority order and only while its builder
+harness has room, the feeder:
 
 1. opens a branch from the base branch with an empty start commit (a GitHub
    issue gets `factory/issue-<n>`; a Linear issue uses its own
@@ -24,9 +24,22 @@ and only while its builder harness has room, the feeder:
    `orch:state/<building|planning>` (a Linear repo gets no GitHub labels);
 4. posts a `brief` handoff rendered from the ticket body plus the repo's
    factory.md prose, then a `go` handoff (state=planning when the ticket
-   names more than 3 files, else building; risk=high on a `risk:high`
-   label, else low), both as the orchestrator. On a Linear project both go
-   on the Linear issue, in the visible header form.
+   says `Plan first: yes` or names more than 3 files, else building; risk
+   from the ticket's `Risk:` line, raised to high by a `risk:high` label),
+   both as the orchestrator. On a Linear project both go on the Linear
+   issue, in the visible header form.
+
+Intake template (#204, parse_intake): a ticket not started yet is fed only
+when its body has an `Acceptance criteria` section with at least one
+builder criterion, a `Risk: low|high` line, a `Plan first: yes|no` line and
+a `Depends on:` line. Risk is never defaulted to low. A criterion about
+other PRs' state (SF-5, the N-02 case) is refused: PR order belongs in
+`Blocked by` / `Conflicts with`. A criterion that needs an operator action
+is not refused; it goes into the brief's separate ops step. A ticket that
+fails is `refused-intake` with its reasons, takes no room and no holds,
+posts nothing, raises needs-attention (`intake-refused`) and queues one
+Grok `refused` wake per distinct defect set. It is re-checked every poll,
+so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
 
 It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
@@ -57,9 +70,15 @@ A holder whose ticket is `capped` in `ticket_state` (read-only) holds only
 its `Conflicts with` edges while it waits for a go, and takes its paths back
 on the poll after the round resumes (#270).
 
+Priority order (#258, lib/queue.py rank): a ticket's tier first (the first of
+the project's `priority_labels` it carries, or its Linear priority when the
+project sets `priority_from_linear`; no tier sorts after every tier), then
+urgent, then bug, then how many of this poll's candidates it unblocks
+(critical_path_counts; 0 with `critical_path_order: false`), then the oldest.
+
 Each poll also refreshes the claim order (`ticket_priority`) of every ticket
-the feeder has a ticket id for, so an urgent or bug label added after the
-feed still moves its queued job.
+the feeder has a ticket id for, so a label or blocker change after the feed
+still moves its queued job.
 
 The feeder starts no harness and runs no job. It writes only through the
 GitHub and Linear clients it is given; tests pass fakes.
@@ -73,6 +92,9 @@ import sqlite3
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
+
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from lib import attention
 from lib.device_pool import free_slots, slots_in_use
@@ -91,16 +113,19 @@ from lib.feeder_gates import (
     github_ref,
     linear_status,
     parse_gate_lines,
+    paths_collide,
+    shared_path_matches,
 )
 from lib.handoff import Handoff, HandoffError, format_comment, parse_comment
 from lib.machines_yml import MachinesConfig
-from lib.orch_yml import OrchConfig, Project
+from lib.orch_yml import OrchConfig, Project, resolve_job_timeout
 from lib.pr_title import prefixed
 from lib.queue import (
-    PRIORITY_TABLE,
+    JobRequest,
     SQLiteJobQueue,
     _has_table,
-    priority_rank,
+    ensure_priority_table,
+    rank,
     set_ticket_priority,
 )
 
@@ -111,18 +136,20 @@ POLL_TABLE = "feeder_poll"  # one row: when the feeder last read intake
 # next poll); fed: brief and go posted; done: fed and its job is queued;
 # closed: its recorded PR was closed or merged before the feed finished;
 # waiting-blocked: a blocker is not done or an in-flight ticket holds one of
-# its paths or a conflicts-with edge (waiting_reason says which).
+# its paths or a conflicts-with edge (waiting_reason says which);
+# refused-intake: its body fails the intake template (waiting_reason says how).
 STATES = (
     "eligible",
     "waiting-capacity",
     "waiting-blocked",
+    "refused-intake",
     "feeding",
     "error",
     "fed",
     "done",
     "closed",
 )
-UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked")
+UNSTARTED = ("eligible", "waiting-capacity", "waiting-blocked", "refused-intake")
 IN_FLIGHT = ("feeding", "error")
 FED = ("fed", "done")
 FINAL = (*FED, "closed")
@@ -133,13 +160,17 @@ _COLUMNS = (
     ("conflicts", "TEXT"),
     ("released", "INTEGER NOT NULL DEFAULT 0"),
     ("capped_release", "INTEGER NOT NULL DEFAULT 0"),
+    ("tier", "INTEGER"),
+    ("unblocks", "INTEGER NOT NULL DEFAULT 0"),
 )
 ORCHESTRATOR = "grok-bot"
 FACTORY_LABEL = "factory"
 URGENT_LABELS = frozenset({"urgent", "priority:urgent"})
 BUG_LABELS = frozenset({"bug"})
 RISK_HIGH_LABEL = "risk:high"
+INTAKE_REFUSED = "intake-refused"  # needs_attention reason
 LINEAR_URGENT_PRIORITY = 1
+LINEAR_PRIORITIES = (1, 2, 3, 4)  # Urgent, High, Medium, Low; 0 is no priority
 PLANNING_FILE_COUNT = 3  # SPEC section 4.1 (D36): over 3 files starts with a plan
 # A fed ticket holds room until its job is queued, at most this long: a go
 # the poller never acts on (say, an untrusted author) must not stall the
@@ -156,6 +187,183 @@ _FILE = re.compile(
 )
 
 Log = Callable[[str], None]
+
+# -- intake template (#204) ----------------------------------------------------
+
+_FENCE = re.compile(r"^\s*(```|~~~)")
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+_CRITERIA_HEADING = re.compile(r"^(?:\*\*|__)?acceptance\s+criteria(?:\*\*|__)?:?$", re.IGNORECASE)
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$")
+_FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(?P<value>.*?)\s*$"
+_RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
+_PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
+_DEPENDS_LINE = re.compile(_FIELD.format(name=r"depends\s+on"), re.IGNORECASE)
+_OTHER_PRS = (
+    re.compile(
+        r"\b(?:other|every|all|any)\s+(?:other\s+)?(?:open\s+)?(?:PRs?|pull\s+requests?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bmerges?\s+(?:cleanly|without\s+(?:a\s+)?conflicts?)\s+(?:against|with)\b", re.IGNORECASE),
+    re.compile(r"\b(?:PRs?|pull\s+requests?)\s*(?:#|number\s+|no\.\s*)?\d+\b", re.IGNORECASE),
+    re.compile(r"/pull/\d+\b"),
+)
+_MARKDOWN = MarkdownIt("commonmark").enable("strikethrough")
+_OPS_TAG = re.compile(r"^(?:ops\s*:|\(ops\)|\[ops\])\s*", re.IGNORECASE)
+_OPS_ACTION = re.compile(
+    r"^(?:manually|by\s+hand)\b|^(?:restart|install|reboot|rotate)\s+the\b|\bon\s+the\s+box\b|"
+    r"\b(?:Max|the\s+operator|an\s+operator)\s+(?:runs|installs|restarts|sets|rotates|deploys)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class Defect:
+    code: str  # no-criteria, other-prs-criterion, no-risk, no-plan-first, no-depends-on
+    reason: str
+
+
+@dataclass(frozen=True)
+class IntakeTemplate:
+    """What a ticket body says in the intake template's fields."""
+
+    criteria: tuple[str, ...] = ()
+    ops_criteria: tuple[str, ...] = ()
+    risk: str | None = None  # "low" or "high"; None when the template does not say
+    risk_source: str | None = None  # "Risk line" or "risk:high label"
+    plan_first: bool | None = None
+    depends_on: str | None = None
+    defects: tuple[Defect, ...] = ()
+
+
+def _unfenced(body: str) -> list[str]:
+    lines: list[str] = []
+    fenced = False
+    for line in (body or "").splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if not fenced:
+            lines.append(line)
+    return lines
+
+
+def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            return match.group("value").strip("*_ ").strip()
+    return None
+
+
+def _prose_and_link_targets(item: str, document: dict[str, object]) -> tuple[str, ...]:
+    words: list[str] = []
+    targets: list[str] = []
+
+    def walk(tokens: Sequence[Token]) -> None:
+        for token in tokens:
+            if token.type in ("text", "code_inline"):
+                words.append(token.content)
+            elif token.type in ("softbreak", "hardbreak"):
+                words.append(" ")
+            elif token.type == "link_open":
+                targets.append(str(token.attrs["href"]))
+            elif token.type == "image":
+                targets.append(str(token.attrs["src"]))
+            elif token.type == "html_inline":
+                targets.append(token.content)
+            walk(token.children or ())
+
+    walk(_MARKDOWN.parseInline(item, document))
+    return ("".join(words), *targets)
+
+
+def _criteria_items(lines: Sequence[str]) -> list[str]:
+    items: list[str] = []
+    level: int | None = None
+    open_item = blank = False
+    for line in lines:
+        heading = _HEADING.match(line)
+        if heading:
+            open_item = blank = False
+            depth = len(heading.group(1))
+            if level is not None and depth <= level:
+                level = None
+            if level is None and 2 <= depth <= 4 and _CRITERIA_HEADING.match(heading.group(2)):
+                level = depth
+            continue
+        if level is None:
+            continue
+        if not line.strip():
+            blank = True
+            continue
+        item = _LIST_ITEM.match(line)
+        if item:
+            current = item.group(1).strip()
+            if current:
+                items.append(current)
+            open_item, blank = bool(current), False
+            continue
+        if open_item and (not blank or line[:1].isspace()):
+            items[-1] = f"{items[-1]} {line.strip()}"
+        else:
+            open_item = False
+        blank = False
+    return items
+
+
+def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
+    """The ticket's intake template fields and what is wrong with them."""
+    lines = _unfenced(body)
+    defects: list[Defect] = []
+    criteria: list[str] = []
+    ops: list[str] = []
+    for item in _criteria_items(lines):
+        tagged = _OPS_TAG.match(item)
+        if tagged:
+            ops.append(item[tagged.end():].strip())
+        elif _OPS_ACTION.search(item):
+            ops.append(item)
+        else:
+            criteria.append(item)
+    if not criteria:
+        defects.append(Defect(
+            "no-criteria",
+            "no builder acceptance criteria: add an `## Acceptance criteria` section "
+            "with at least one item the builder can meet",
+        ))
+    document: dict[str, object] = {}
+    _MARKDOWN.parse(body or "", document)
+    for item in criteria:
+        if any(pattern.search(text) for text in _prose_and_link_targets(item, document)
+               for pattern in _OTHER_PRS):
+            defects.append(Defect(
+                "other-prs-criterion",
+                f"criterion about other PRs' state ({item!r}): move PR order into "
+                "`Blocked by` / `Conflicts with` lines",
+            ))
+    risk_text = _field(lines, _RISK_LINE)
+    risk = risk_text.lower() if risk_text and risk_text.lower() in ("low", "high") else None
+    source = "Risk line" if risk else None
+    if any(label.lower() == RISK_HIGH_LABEL for label in labels) and risk != "high":
+        risk, source = "high", "risk:high label"
+    if risk_text is None or risk_text.lower() not in ("low", "high"):
+        defects.append(Defect("no-risk", "no `Risk: low` or `Risk: high` line"))
+    plan_text = (_field(lines, _PLAN_LINE) or "").lower()
+    plan_first = {"yes": True, "no": False}.get(plan_text)
+    if plan_first is None:
+        defects.append(Defect("no-plan-first", "no `Plan first: yes` or `Plan first: no` line"))
+    depends = _field(lines, _DEPENDS_LINE) or None
+    if depends is None:
+        defects.append(Defect("no-depends-on", "no `Depends on:` line (`Depends on: none` is fine)"))
+    return IntakeTemplate(
+        criteria=tuple(criteria),
+        ops_criteria=tuple(ops),
+        risk=risk,
+        risk_source=source,
+        plan_first=plan_first,
+        depends_on=depends,
+        defects=tuple(defects),
+    )
 
 
 @dataclass(frozen=True)
@@ -187,10 +395,6 @@ class IntakeIssue:
     @property
     def bug(self) -> bool:
         return any(label.lower() in BUG_LABELS for label in self.labels)
-
-    @property
-    def risk(self) -> str:
-        return "high" if any(label.lower() == RISK_HIGH_LABEL for label in self.labels) else "low"
 
 
 class GitHubIntake(Protocol):
@@ -236,6 +440,7 @@ class FeedReport:
     waiting: int = 0
     blocked: int = 0
     errors: int = 0
+    refused: int = 0
 
 
 @dataclass
@@ -245,18 +450,36 @@ class _Candidate:
     issue: IntakeIssue
 
     lines: GateLines = GateLines()
+    template: IntakeTemplate = IntakeTemplate()
+    unblocks: int = 0
 
     @property
     def harness(self) -> str:
         return self.context.config.builder_harness
 
     @property
+    def tier(self) -> int | None:
+        intake = self.project.intake
+        assert intake is not None
+        labels = {label.lower() for label in self.issue.labels}
+        for index, label in enumerate(intake.priority_labels):
+            if label.lower() in labels:
+                return index
+        if intake.priority_from_linear and self.issue.priority in LINEAR_PRIORITIES:
+            return LINEAR_PRIORITIES.index(self.issue.priority)
+        return None
+
+    @property
     def ref(self) -> Ref:
         return Ref(self.issue.tracker, self.issue.repo.lower(), self.issue.key)  # type: ignore[arg-type]
 
-    def order(self) -> tuple[int, float, tuple[int, int, str]]:
-        rank = priority_rank(urgent=self.issue.urgent, resume=False, bug=self.issue.bug)
-        return rank, self.issue.created_at, _key_order(self.issue.key)
+    def order(self) -> tuple[bool, int, int, int, float, tuple[int, int, str]]:
+        return (
+            *rank(tier=self.tier, urgent=self.issue.urgent, resume=False, bug=self.issue.bug,
+                  unblocks=self.unblocks),
+            self.issue.created_at,
+            _key_order(self.issue.key),
+        )
 
 
 def _holding(lines: GateLines, capped: bool) -> GateLines:
@@ -296,8 +519,11 @@ def gate_lines(issue: IntakeIssue) -> GateLines:
     return GateLines(lines.blocked_by | linear, lines.touches, lines.conflicts_with)
 
 
-def go_state_for(body: str) -> str:
-    """planning when the ticket names more than 3 distinct files, else building."""
+def go_state_for(body: str, plan_first: bool | None = None) -> str:
+    """planning when the ticket says Plan first: yes or names more than 3
+    distinct files, else building."""
+    if plan_first:
+        return "planning"
     files = {match.group(1) for match in _FILE.finditer(body or "")}
     return "planning" if len(files) > PLANNING_FILE_COUNT else "building"
 
@@ -341,6 +567,8 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
             conflicts TEXT,
             released INTEGER NOT NULL DEFAULT 0,
             capped_release INTEGER NOT NULL DEFAULT 0,
+            tier INTEGER,
+            unblocks INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (repo, issue)
         )
         """
@@ -354,18 +582,7 @@ def ensure_tables(connection: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {POLL_TABLE} "
         "(id INTEGER PRIMARY KEY CHECK (id = 1), at REAL NOT NULL)"
     )
-    connection.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {PRIORITY_TABLE} (
-            repo TEXT NOT NULL,
-            ticket_id TEXT NOT NULL,
-            urgent INTEGER NOT NULL DEFAULT 0,
-            bug INTEGER NOT NULL DEFAULT 0,
-            updated_at REAL NOT NULL,
-            PRIMARY KEY (repo, ticket_id)
-        )
-        """
-    )
+    ensure_priority_table(connection)
 
 
 def feeder_counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -397,11 +614,12 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    reason = "waiting_reason" if "waiting_reason" in present else "NULL AS waiting_reason"
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
+    optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""
         SELECT repo, issue, tracker, title, harness, state, urgent, bug,
-               pr_number, issue_created_at, error, {reason}
+               pr_number, issue_created_at, error, {optional}
         FROM {FEEDER_TABLE} WHERE seen_at = ?
         """,
         (last,),
@@ -410,7 +628,8 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     items = [dict(zip(names, tuple(row))) for row in cursor.fetchall()]
     items.sort(
         key=lambda row: (
-            priority_rank(urgent=bool(row["urgent"]), resume=False, bug=bool(row["bug"])),
+            *rank(tier=row["tier"], urgent=bool(row["urgent"]), resume=False,
+                  bug=bool(row["bug"]), unblocks=int(row["unblocks"])),
             float(row["issue_created_at"]),
             str(row["repo"]),
             _key_order(str(row["issue"])),
@@ -453,7 +672,21 @@ class Feeder:
         self._record_seen(candidates, now)
         self._mark_done()
         states = {candidate.ref: self._state(candidate) for candidate in candidates}
-        waits, holds, capped, gate_read = self._gates(candidates, states)
+        refused = {
+            candidate.ref
+            for candidate in candidates
+            if states[candidate.ref] in UNSTARTED and candidate.template.defects
+        }
+        for candidate in candidates:
+            if candidate.ref in refused:
+                self._refuse(candidate)
+        self._sync_intake_attention(
+            [c for c in candidates if c.ref in refused], read_repos, now
+        )
+        waits, holds, capped, gate_read, unblocks = self._gates(candidates, states, refused)
+        for candidate in candidates:
+            candidate.unblocks = unblocks[candidate.ref]
+        self._record_priority(candidates, now)
         if gate_read:
             self._sync_attention(waits, read_repos, now)
         room = self._room({candidate.harness for candidate in candidates}, now)
@@ -464,6 +697,8 @@ class Feeder:
         for candidate in sorted(candidates, key=lambda item: (
             states[item.ref] not in IN_FLIGHT, *item.order()
         )):
+            if candidate.ref in refused:
+                continue
             state = self._state(candidate)
             if state in FINAL:
                 continue
@@ -512,6 +747,7 @@ class Feeder:
             waiting=waiting,
             blocked=blocked,
             errors=errors,
+            refused=len(refused),
         )
 
     def _candidates(self) -> tuple[list[_Candidate], set[str], int]:
@@ -543,20 +779,80 @@ class Feeder:
                 if issue.applied_by is None or issue.applied_by not in trusted:
                     continue
                 found.append(
-                    _Candidate(project=project, context=context, issue=issue, lines=gate_lines(issue))
+                    _Candidate(
+                        project=project,
+                        context=context,
+                        issue=issue,
+                        lines=gate_lines(issue),
+                        template=parse_intake(issue.body, issue.labels),
+                    )
                 )
         return found, read, errors
+
+    # -- intake template (#204) ------------------------------------------------------
+
+    def _refuse(self, candidate: _Candidate) -> None:
+        """Mark a ticket refused-intake and wake Grok once per defect set."""
+        issue = candidate.issue
+        defects = candidate.template.defects
+        reason = "; ".join(defect.reason for defect in defects)
+        self._set_state(candidate, "refused-intake", reason=reason)
+        repo = candidate.project.repo
+        codes = sorted({defect.code for defect in defects})
+        detail = (
+            f"{_ticket_name(issue)} was not fed: its body fails the intake template "
+            f"(#204): {reason}"
+        )
+        self.queue.enqueue(
+            JobRequest(
+                repo=repo,
+                ticket_id=issue.key,
+                action="refused",
+                recipient="grok",
+                source_comment_id=f"feeder-intake:{issue.key}",
+                timeout_seconds=resolve_job_timeout(self.config, repo) * 60,
+                detail=json.dumps(
+                    {
+                        "project_bot": candidate.project.grok_bot,
+                        "detail": detail,
+                        "ticket_url": issue.url,
+                        "defects": codes,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+            dedupe_key=f"feeder-intake:{repo.lower()}:{issue.key}:{','.join(codes)}",
+        )
+        self.log(f"feeder: {issue.repo}#{issue.key} refused at intake: {reason}")
+
+    def _sync_intake_attention(
+        self, refused: Sequence[_Candidate], repos: set[str], now: float
+    ) -> None:
+        flags = {
+            (c.issue.repo.lower(), c.issue.key, INTAKE_REFUSED): "; ".join(
+                defect.reason for defect in c.template.defects
+            )
+            for c in refused
+        }
+        with self.queue.connect() as connection:
+            attention.sync(connection, (INTAKE_REFUSED,), repos, flags, now)
 
     # -- gates (#156) ----------------------------------------------------------------
 
     def _gates(
-        self, candidates: Sequence[_Candidate], states: Mapping[Ref, str]
-    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool]:
+        self,
+        candidates: Sequence[_Candidate],
+        states: Mapping[Ref, str],
+        refused: Collection[Ref] = frozenset(),
+    ) -> tuple[dict[Ref, Wait], Holds, set[Ref], bool, dict[Ref, int]]:
         """Blocker waits, the holds of tickets in flight, the holders that
-        hold as capped, and whether the status read (when one was needed)
-        succeeded."""
+        hold as capped, whether the status read (when one was needed)
+        succeeded, and how many tickets each candidate unblocks. A ticket
+        refused at intake is not gated."""
         rows = self._feeder_rows()
-        unstarted = [c for c in candidates if states[c.ref] in UNSTARTED]
+        unstarted = [
+            c for c in candidates if states[c.ref] in UNSTARTED and c.ref not in refused
+        ]
         linear_refs = {ref.key: ref for ref in rows if ref.tracker == "linear"}
         linear_refs.update({c.ref.key: c.ref for c in candidates if c.ref.tracker == "linear"})
 
@@ -628,7 +924,8 @@ class Feeder:
                 holds.take(ref, (), GateLines())
         self._release(released)
         self._flip_capped(flips)
-        return blocker_waits(gated, statuses), holds, capped_refs, ok
+        unblocks = critical_path_counts(candidates, gated, {c.ref for c in unstarted}, pull_of, holds.shared)
+        return blocker_waits(gated, statuses), holds, capped_refs, ok, unblocks
 
     def _feeder_rows(self) -> dict[Ref, _Holder]:
         """Tickets fed or feeding."""
@@ -736,6 +1033,7 @@ class Feeder:
                         SELECT 1 FROM jobs
                         WHERE lower(jobs.repo) = item.repo
                           AND jobs.ticket_id = item.ticket_id
+                          AND jobs.recipient != 'grok'
                       )
                     """,
                     (harness, now - FED_PENDING_SECONDS),
@@ -746,6 +1044,7 @@ class Feeder:
     # -- bookkeeping -------------------------------------------------------------
 
     def _record_seen(self, candidates: Sequence[_Candidate], now: float) -> None:
+        unstarted = ", ".join(f"'{state}'" for state in UNSTARTED)
         with self.queue.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for candidate in candidates:
@@ -753,17 +1052,18 @@ class Feeder:
                 connection.execute(
                     f"""
                     INSERT INTO {FEEDER_TABLE} (
-                        repo, issue, tracker, title, harness, state, urgent, bug,
+                        repo, issue, tracker, title, harness, state, urgent, bug, tier,
                         risk, issue_created_at, first_seen_at, seen_at, touches, conflicts
-                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, 'eligible', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repo, issue) DO UPDATE SET
                         title = excluded.title,
                         touches = excluded.touches,
                         conflicts = excluded.conflicts,
                         urgent = excluded.urgent,
                         bug = excluded.bug,
-                        risk = CASE WHEN state IN ('fed', 'done', 'closed') THEN risk
-                                    ELSE excluded.risk END,
+                        tier = excluded.tier,
+                        risk = CASE WHEN state IN ({unstarted}) THEN excluded.risk
+                                    ELSE risk END,
                         harness = CASE WHEN state IN ('fed', 'done', 'closed') THEN harness
                                        ELSE excluded.harness END,
                         seen_at = excluded.seen_at
@@ -776,7 +1076,8 @@ class Feeder:
                         candidate.harness,
                         int(issue.urgent),
                         int(issue.bug),
-                        issue.risk,
+                        candidate.tier,
+                        candidate.template.risk or "unset",
                         issue.created_at,
                         now,
                         now,
@@ -786,14 +1087,6 @@ class Feeder:
                         ),
                     ),
                 )
-                ticket = connection.execute(
-                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?",
-                    (issue.repo.lower(), issue.key),
-                ).fetchone()[0]
-                if ticket is not None:
-                    set_ticket_priority(
-                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug, at=now
-                    )
             connection.execute(
                 f"INSERT INTO {POLL_TABLE} (id, at) VALUES (1, ?) "
                 "ON CONFLICT(id) DO UPDATE SET at = excluded.at",
@@ -802,12 +1095,32 @@ class Feeder:
             # A ticket that lost its signal before it was fed is forgotten; a
             # fed one is kept forever, so it is never fed (or opened) twice.
             connection.execute(
-                f"""
-                DELETE FROM {FEEDER_TABLE}
-                WHERE seen_at < ? AND state IN ('eligible', 'waiting-capacity', 'waiting-blocked')
-                """,
+                f"DELETE FROM {FEEDER_TABLE} WHERE seen_at < ? AND state IN ({unstarted})",
                 (now,),
             )
+            connection.commit()
+
+    def _record_priority(self, candidates: Sequence[_Candidate], now: float) -> None:
+        """Each ticket's unblocks count, and the claim order of every ticket
+        with a ticket id, so a label or blocker change after the feed still
+        moves its queued job."""
+        with self.queue.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                issue = candidate.issue
+                where = (issue.repo.lower(), issue.key)
+                connection.execute(
+                    f"UPDATE {FEEDER_TABLE} SET unblocks = ? WHERE repo = ? AND issue = ?",
+                    (candidate.unblocks, *where),
+                )
+                ticket = connection.execute(
+                    f"SELECT ticket_id FROM {FEEDER_TABLE} WHERE repo = ? AND issue = ?", where
+                ).fetchone()[0]
+                if ticket is not None:
+                    set_ticket_priority(
+                        connection, issue.repo, ticket, urgent=issue.urgent, bug=issue.bug,
+                        tier=candidate.tier, unblocks=candidate.unblocks, at=now,
+                    )
             connection.commit()
 
     def _mark_done(self) -> None:
@@ -819,6 +1132,7 @@ class Feeder:
                     SELECT 1 FROM jobs
                     WHERE lower(jobs.repo) = {FEEDER_TABLE}.repo
                       AND jobs.ticket_id = {FEEDER_TABLE}.ticket_id
+                      AND jobs.recipient != 'grok'
                 )
                 """
             )
@@ -885,7 +1199,10 @@ class Feeder:
                     raise _Held(wait)
         self._set_state(candidate, "feeding")
         risk = str(row["risk"])
-        state = go_state_for(issue.body)
+        if risk not in ("low", "high"):
+            raise ValueError(f"ticket risk {risk!r} is not low or high")
+        template = candidate.template
+        state = go_state_for(issue.body, template.plan_first)
         self._record(candidate, branch=branch)
         if row["pr_number"]:
             number = int(row["pr_number"])
@@ -914,7 +1231,8 @@ class Feeder:
         holds.alias(candidate.ref, github_ref(repo, number))
         with self.queue.connect() as connection:
             set_ticket_priority(
-                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug, at=now
+                connection, repo, ticket_id, urgent=issue.urgent, bug=issue.bug,
+                tier=candidate.tier, unblocks=candidate.unblocks, at=now,
             )
         linear = issue.tracker == "linear"
         if not linear and config.tickets == "github":
@@ -935,7 +1253,7 @@ class Feeder:
         if brief_id is None:
             brief_id = post(
                 _brief(issue, candidate.context, number=number, branch=branch, risk=risk,
-                       state=state, visible=linear)
+                       state=state, visible=linear, template=template)
             )
         self._record(candidate, brief_comment_id=brief_id)
         go_id = row["go_comment_id"] or _existing(existing, "go", authors)
@@ -967,6 +1285,54 @@ class Feeder:
                 return issue.branch
             return f"factory/{issue.key.lower()}"
         return f"factory/issue-{issue.key}"
+
+
+def critical_path_counts(
+    candidates: Sequence[_Candidate],
+    eligible_gates: Mapping[Ref, GateLines],
+    unstarted: Collection[Ref],
+    pull_of: Mapping[Ref, Ref],
+    shared: Mapping[str, Collection[str]],
+) -> dict[Ref, int]:
+    owner = {c.ref: c.ref for c in candidates}
+    owner.update({pull_of[c.ref]: c.ref for c in candidates if c.ref in pull_of})
+    blocks: dict[Ref, set[Ref]] = {c.ref: set() for c in candidates}
+    for dependent, lines in eligible_gates.items():
+        for blocker in lines.blocked_by:
+            if owner.get(blocker, dependent) != dependent:
+                blocks[owner[blocker]].add(dependent)
+    counts: dict[Ref, int] = {}
+    for c in candidates:
+        assert c.project.intake is not None
+        if not c.project.intake.critical_path_order:
+            counts[c.ref] = 0
+            continue
+        own = shared.get(c.ref.repo, ())
+        found = blocks[c.ref] | {
+            other.ref
+            for other in candidates
+            if other.ref in unstarted
+            and other.ref.repo == c.ref.repo
+            and _paths_meet(c.lines.touches, other.lines.touches, own)
+        }
+        pending = list(found)
+        while pending:
+            for dependent in blocks[pending.pop()] - found:
+                found.add(dependent)
+                pending.append(dependent)
+        found.discard(c.ref)
+        counts[c.ref] = len(found)
+    return counts
+
+
+def _paths_meet(first: Collection[str], second: Collection[str], shared: Collection[str]) -> bool:
+    return any(
+        paths_collide(path, other)
+        for path in first
+        if not shared_path_matches(shared, path)
+        for other in second
+        if not shared_path_matches(shared, other)
+    )
 
 
 def _progress(statuses: Mapping[Ref, RefStatus], ref: Ref) -> Progress | None:
@@ -1034,17 +1400,29 @@ def _brief(
     risk: str,
     state: str,
     visible: bool,
+    template: IntakeTemplate = IntakeTemplate(),
 ) -> str:
     config = context.config
     body = issue.body.strip() or "(the ticket has no body)"
     if len(body) > BODY_LIMIT:
         body = body[:BODY_LIMIT] + f"\n[cut at {BODY_LIMIT} characters]"
     fence = _fence(body)
-    why = (
-        "the ticket names more than 3 files, so it starts with a plan"
-        if state == "planning"
-        else "the ticket names 3 files or fewer, so it starts building"
-    )
+    if state == "planning" and template.plan_first:
+        why = "the ticket says Plan first: yes"
+    elif state == "planning":
+        why = "the ticket names more than 3 files, so it starts with a plan"
+    else:
+        why = "the ticket names 3 files or fewer, so it starts building"
+    source = template.risk_source if template.risk == risk else None
+    sections: list[str] = []
+    if template.criteria:
+        sections += ["", "### Acceptance criteria", *(f"- {item}" for item in template.criteria)]
+    if template.ops_criteria:
+        sections += [
+            "",
+            "### Ops step (operator action, not the builder's)",
+            *(f"- {item}" for item in template.ops_criteria),
+        ]
     prose = re.sub(r"^(#{1,5}) ", r"#\1 ", context.body.strip(), flags=re.MULTILINE)
     text = "\n".join(
         [
@@ -1053,11 +1431,12 @@ def _brief(
             f"- Goal: {' '.join(issue.title.split())[:180]}",
             f"- Ticket: {issue.url or _ticket_name(issue)}",
             f"- PR: #{number} on branch `{branch}` off `{config.base_branch}`",
-            f"- Risk: {risk} ({'a risk:high label' if risk == 'high' else 'no risk:high label'})",
+            f"- Risk: {risk} (from the ticket's {source or 'intake record'})",
             f"- Start: {state} ({why})",
             f"- Builder: {config.builder_harness}; reviewer: {config.reviewer_harness}",
             "- Questions: the chat that filed this ticket was its questions step. "
             "Post a questions handoff if a product call is still open.",
+            *sections,
             "",
             "### Ticket",
             fence,

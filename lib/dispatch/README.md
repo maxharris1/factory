@@ -11,6 +11,14 @@ No module here imports `lib.dispatcher` at run time, and no mixin imports
 another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 `types.py` and `errors_text.py`.
 
+The caps rules live in the `caps/` package, one module per rule. For a change
+to one rule, name its module in `Touches:`, for example
+`lib/dispatch/caps/effective.py`. Never name the directory `lib/dispatch/caps/`:
+the feeder treats a directory as overlapping every file under it, so tickets
+would queue one at a time again. A ticket that changes how `CapsMixin` is
+composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
+`__init__.py` imports the rule modules.
+
 | Area | Module | Main contents |
 |---|---|---|
 | Data types | `types.py` | `Comment`, `CIResult`, `TrackedTicket`, `TicketRef`, the Protocols (`PollSource`, `ReviewActions`, `GrokDelivery`, `Hook`, `DeviceChecks`, `Feeder`), ship errors, `ShipRequest`, `LINEAR_STATE_PHASES` |
@@ -18,16 +26,22 @@ another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 | Error text | `errors_text.py` | `_redact*`, `poll_error_detail`, `poll_error_text`, `safe_ship_error`, `scrub_detail` |
 | Shared functions | `helpers.py` | `trusted_bots`, `_spread`, `_scope`, rounds, `_matching_head`, `_holds`, `ship_mode`, `_comment_order`, questions text, state names |
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
-| Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_after_finish`, `_reject_edited`, handled-comment bookkeeping |
+| Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
 | Verdicts (T3, T4) | `verdict.py` (`VerdictMixin`) | `_t3`, `_t4`, `_record_approval`, `_approval_covers` |
-| Caps (T1) | `caps.py` (`CapsMixin`) | `_t1`, `_resume_after_cap`, `_over_cap`, `_effective_cap`, `_wake_capped` |
+| Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the four rule mixins below and re-exports the old `caps.py` names |
+| Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build |
+| Caps: resume after a cap | `caps/resume.py` (`ResumeAfterCapMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix |
+| Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
+| Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
 | Merge queue | `merge_queue.py` (`MergeQueueMixin`) | `_enter_merge_queue`, `_advance_merge_queue(s)`, base updates, `_settle_update`, `_classify_update`, `_update_failed` |
-| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_may_approve*`, `_approver_go`, `_ship_head` |
+| Holds | `holds.py` (`HoldsMixin`) | `_hold_gate`, `_hold_decision`, `_held`, `_hold_in_play`, `_may_approve*`, `_approver_go`, `_ship_head` |
 | Ship | `ship.py` (`ShipMixin`, `ReviewShipper`) | ship intents, handoff redrive, external ships |
-| Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_answered_by`, cancel and requeue of answered jobs |
+| Questions (T5) | `questions.py` (`QuestionsMixin`) | `_t5_questions`, `_t5_answers`, `_resume_paused`, `_answered_by`, cancel and requeue of answered jobs |
 | Plan | `plan.py` (`PlanMixin`) | `_t_plan`, `_latest_plan_step` |
+| Retry (TR) | `retry.py` (`RetryMixin`) | `_t_retry`, `_retry_step` (the resume table), `ticket_retries` rows |
 | Jobs (T6) | `jobs.py` (`JobsMixin`) | `_t6`, `reconcile_jobs`, abandoned and dead jobs, devices, failure waits, stuck wakes |
+| Follow-ups | `followups.py` (`FollowupsMixin`) | `_record_followups` (T3, T4), `_drain_followups`: file a verdict's `[follow-up]` findings once and link them from the PR (issue #259) |
 | Job detail and Grok | `detail.py` (`DetailMixin`) | `_job_detail`, `_enqueue_step`, `_enqueue_or_flag`, `_project_wake_detail`, `wake_grok_once`, `_deliver_grok_jobs` |
 | Tracking | `tracking.py` (`TrackingMixin`) | `_feed`, `_discover`, `_starts_tracking`, `_tracked_*`, `active_job_tickets`, `record_terminal`, `_enter_merged` |
 | State DB | `schema.py` (`SchemaMixin`) | `_connect`, `_initialize`, migrations, `_add_missing_columns` |

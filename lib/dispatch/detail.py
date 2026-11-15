@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict, replace
 
-from lib.dispatch.constants import GROK_WAKE_REASONS
+from lib.dispatch.constants import GROK_WAKE_REASONS, RETRY_REJECTION_NOTES
 from lib.dispatch.helpers import (
     _ANSWERS,
     _comment_link,
@@ -159,6 +160,7 @@ class DetailMixin:
         comment queues goes through here, so no claim sees an answered step
         queued. Returns the job and that answer.
         """
+        request = self._with_evidence(connection, ticket, comment, request)
         job = self.queue.enqueue_in_transaction(connection, request, dedupe_key=dedupe_key)
         if request.action not in _ANSWERS:
             return job, None
@@ -173,6 +175,137 @@ class DetailMixin:
         if answered is not None:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
+
+    def _with_evidence(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        request: JobRequest,
+    ) -> JobRequest:
+        detail = json.loads(request.detail or "{}")
+        resume = detail.get("resume") is True
+        if request.action not in ("review", "fix") and not resume:
+            return request
+        from lib.evidence.ci import ci_evidence
+        from lib.evidence.criteria import criteria_evidence
+        from lib.evidence.findings import findings_evidence
+        from lib.evidence.instructions import instructions_evidence
+
+        state = connection.execute(
+            """
+            SELECT plan_gap_count, paused_question_id FROM ticket_state
+            WHERE repo = ? AND ticket_id = ?
+            """,
+            (ticket.repo.lower(), ticket.ticket_id),
+        ).fetchone()
+        scope = (ticket.repo.lower(), ticket.ticket_id)
+        accepted = {
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT approve_comment_id FROM ship_holds
+                    WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT source_comment_id FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                """,
+                scope * 4,
+            )
+        }
+        findings = findings_evidence(
+            comments=[
+                item for item in ticket.comments if item.id == comment.id or item.id in accepted
+            ],
+            trusted_logins=self.trusted_logins,
+            reviewer=f"{ticket.factory.reviewer_harness}-bot",
+            current_round=_detail_round_number(request.detail) or 1,
+            bases={},
+        )
+        result = ticket.ci.get(request.head or "")
+        ci = None
+        if result is not None and result.status == "failure":
+            ci = ci_evidence(
+                failed_checks=[
+                    name
+                    for name in (result.log or "").removeprefix("failed: ").split(", ")
+                    if name
+                ],
+                run_url=None,
+                fetch_log=str,
+            )
+        detail["evidence"] = {
+            "criteria": asdict(
+                criteria_evidence(
+                    issue_key=ticket.source_issue or ticket.ticket_id,
+                    issue_url=ticket.ticket_url,
+                    comments=ticket.comments,
+                    trusted_logins=self.trusted_logins,
+                    issue_body=None,
+                    pr_body=None,
+                    ready_starts_review=ticket.ready_starts_review,
+                    pr_url=ticket.ticket_url,
+                )
+            ),
+            "findings": asdict(findings),
+            "instructions": asdict(
+                instructions_evidence(
+                    comments=ticket.comments,
+                    trusted_logins=self.trusted_logins,
+                    source_comment_id=comment.id,
+                    action=request.action,
+                    detail=detail,
+                    prior_detail=(
+                        self._resumed_step_detail(
+                            connection,
+                            ticket,
+                            comment,
+                            request.action,
+                            state["paused_question_id"] if state is not None else None,
+                        )
+                        if resume
+                        else None
+                    ),
+                    plan_gaps=int(state["plan_gap_count"]) if state is not None else 0,
+                    findings=findings.findings,
+                    approvers=self.approvals.logins,
+                )
+            ),
+            "ci": asdict(ci) if ci is not None else None,
+        }
+        return replace(
+            request, detail=json.dumps(detail, separators=(",", ":"), sort_keys=True)
+        )
+
+    def _resumed_step_detail(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment: Comment,
+        action: str,
+        question_id: str | None,
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            """
+            SELECT detail FROM jobs
+            WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
+              AND source_comment_id != ?
+              AND (? IS NULL OR handoff_comment_id = ? OR handoff_comment_id IS NULL)
+            ORDER BY coalesce(handoff_comment_id = ?, 0) DESC, created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (
+                ticket.repo.lower(),
+                ticket.ticket_id,
+                action,
+                comment.id,
+                question_id,
+                question_id,
+                question_id,
+            ),
+        ).fetchone()
+        return json.loads(row["detail"] or "{}") if row is not None else None
 
     def _job_detail(
         self,
@@ -236,21 +369,20 @@ class DetailMixin:
     ) -> None:
         if not self._trusted_bots(comment):
             return
+        detail = {
+            "project_bot": ticket.grok_bot,
+            "outcome": outcome,
+            "comment": _comment_link(comment),
+        }
+        if outcome in RETRY_REJECTION_NOTES:
+            detail["note"] = RETRY_REJECTION_NOTES[outcome]
         self.wake_grok_once(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
             reason=reason,
             source_comment_id=comment.id,
             timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=json.dumps(
-                {
-                    "project_bot": ticket.grok_bot,
-                    "outcome": outcome,
-                    "comment": _comment_link(comment),
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
+            detail=json.dumps(detail, separators=(",", ":"), sort_keys=True),
             head=ticket.current_head,
         )
 

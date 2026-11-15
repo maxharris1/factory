@@ -651,18 +651,17 @@ def test_the_dashboard_shows_each_state_and_the_real_round(tmp_path: Path) -> No
     pages = render_pages(snapshot)
     index = re.sub(r"<script>.*?</script>", "", pages["index.html"], flags=re.S)
     card = re.search(
-        rf'<a class="slot job[^"]*" href="job.html#job-{ids["claimed"][:8]}"[^>]*>.*?</a>',
+        rf'<a class="tile [^"]*" href="job.html#job-{ids["claimed"][:8]}"[^>]*>.*?</a>',
         index,
         re.S,
     )
     assert card, index
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", card.group(0)))
-    assert "claimed, not started" in text and "not started" in text
-    assert "round 1/1" in text and "round 0" not in text
-    assert "T+" not in text and "hb " not in text  # no timer or bar as if it ran
-    assert 'class="hb' not in card.group(0)
-    assert "stale heartbeat" in index and "runner dead" in index
-    assert '<div class="kpi bad"><b>2</b><span>stuck / overdue</span></div>' in index
+    assert "claimed" in text and 'aria-label="waiting to start"' in card.group(0)
+    assert 'title="round 1/1"' in card.group(0) and "round 0" not in text
+    assert "hb —" in text and '<i style="width:0%">' in card.group(0)
+    assert "no heartbeat" in index and "runner dead" in index
+    assert '<div class="kpi bad" data-kpi="stuck / overdue"><b>2</b><span>stuck / overdue</span>' in index
 
 
 @needs_node
@@ -675,17 +674,15 @@ def test_the_page_script_draws_the_same_states(tmp_path: Path) -> None:
     )
     out = _run_page(tmp_path, snapshot, "main", BAR + ["kpis", "lanes"])
     lanes = out["text"]["lanes"]
-    for needle in ("claimed, not started", "not started", "round 1/1",
-                   "stale heartbeat", "runner dead", "running"):
+    for needle in ("claimed", "waiting to start", "1/1", "no heartbeat", "runner dead", "running"):
         assert needle in lanes, (needle, lanes)
     assert "round 0" not in lanes
     assert attention_count(out) == "2"
     assert "2stuck / overdue" in out["text"]["kpis"]
-    # The claimed card has no heartbeat bar.
     dump = out["dump"]["lanes"]
     card = dump[dump.index(f"job-{ids['claimed'][:8]}") :]
-    card = card[: card.index("a.slot.job", 1)] if "a.slot.job" in card[1:] else card
-    assert "div.hb" not in card and "T+" not in card
+    card = card[: card.index("a.tile", 1)] if "a.tile" in card[1:] else card
+    assert 'span.hbt "hb —"' in card and "span.chip.warn \"claimed\"" in card
 
 
 def test_the_dashboard_never_copies_more_of_detail_than_the_round(tmp_path: Path) -> None:

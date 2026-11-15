@@ -124,7 +124,13 @@ class HoldsMixin:
             covers=lambda ok_head: self._approval_covers(ticket, ok_head, head),
         )
 
-    def _held(self, ticket: TrackedTicket, head: str) -> bool:
+    def _held(self, ticket: TrackedTicket, head: str) -> HoldDecision | None:
+        if ticket.factory.ship != "merge" or ticket.factory.hold is None:
+            return None
+        decision = self._hold_decision(ticket, head)
+        return decision if decision.blocks else None
+
+    def _hold_in_play(self, ticket: TrackedTicket, head: str) -> bool:
         if ticket.factory.ship != "merge" or ticket.factory.hold is None:
             return False
         decision = self._hold_decision(ticket, head)
@@ -163,6 +169,11 @@ class HoldsMixin:
         if author.startswith("linear:") or not self.approvals.app_trust:
             return True
         return self.approvals.may_approve(author)
+
+    def _may_lift_cap(self, author: str) -> bool:
+        if author.startswith("linear:"):
+            return self.approvals.may_approve_linear(author)
+        return self._may_approve_go(author)
 
     def _trusted_login(self, login: str) -> bool:
         wanted = login.casefold()

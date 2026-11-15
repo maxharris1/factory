@@ -40,6 +40,7 @@ from tests.test_github_actions import (
     PULL,
     RecordedGh,
     draft_pull,
+    mark_ready,
     served,
 )
 
@@ -56,6 +57,7 @@ LEAKY_STDOUT = (
 )
 AUT0 = "aut0-code/aut0"
 AUT0_PULL = (f"repos/{AUT0}/pulls/1360",)
+AUT0_MARK_READY = mark_ready(AUT0)
 
 
 def approve_snapshot(
@@ -471,7 +473,7 @@ def test_aut_2286_legacy_failed_intent_completes_after_the_fix_is_installed(
     legacy_db(path)
     gh = RecordedGh()
     gh.route(AUT0_PULL, draft_pull())
-    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    gh.route(AUT0_MARK_READY, served("graphql-mark-ready.json"))
     moved: list[str] = []
     fresh_reads: list[str] = []
 
@@ -525,7 +527,7 @@ def test_aut_2286_legacy_failed_intent_completes_after_the_fix_is_installed(
 
     dispatcher.process(aut0_2286())
 
-    assert gh.keys() == [AUT0_PULL, MARK_READY]
+    assert gh.keys() == [AUT0_PULL, AUT0_MARK_READY]
     assert fresh_reads == ["AUT-2286"]
     assert moved == ["AUT-2286"]
     with queue.connect() as connection:
@@ -646,7 +648,7 @@ def aut0_dispatcher(
         )
     gh = RecordedGh()
     gh.route(AUT0_PULL, *(pulls if pulls is not None else (draft_pull(),)))
-    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    gh.route(AUT0_MARK_READY, served("graphql-mark-ready.json"))
     moved: list[str] = []
 
     def fresh(ref):
@@ -706,7 +708,7 @@ def test_re_drive_refuses_an_approval_superseded_by_a_newer_verdict(
 ) -> None:
     dispatcher, queue, gh = github_setup(tmp_path)
     gh.route(PULL, GhResult(1, "", "gh: Server Error (HTTP 502)\n"), draft_pull())
-    gh.route(MARK_READY, served("graphql-mark-ready.json"))
+    gh.route(AUT0_MARK_READY, served("graphql-mark-ready.json"))
     snapshot = approve_snapshot()
     dispatcher.process(snapshot)
     assert intent(queue)["redrive"] == "eligible"
@@ -719,7 +721,7 @@ def test_re_drive_refuses_an_approval_superseded_by_a_newer_verdict(
 
     dispatcher.process(replace(snapshot, comments=(*snapshot.comments, revise)))
 
-    assert gh.count(MARK_READY) == 0
+    assert gh.count(AUT0_MARK_READY) == 0
     assert gh.keys() == [PULL]
     assert (intent(queue)["status"], intent(queue)["redrive"]) == ("failed", "spent")
     assert "done" not in [action for action, _ in grok_wakes(queue)]
@@ -759,7 +761,7 @@ def test_an_untrusted_newer_verdict_does_not_supersede_the_approval(
 
     dispatcher.process(aut0_ticket(aut0_approve("6813518921", 1), forged))
 
-    assert gh.keys() == [AUT0_PULL, MARK_READY]
+    assert gh.keys() == [AUT0_PULL, AUT0_MARK_READY]
     assert moved == ["AUT-2286"]
     assert aut0_intent(queue, "6813518921") == ("completed", None, "spent")
 
@@ -783,7 +785,7 @@ def test_two_eligible_intents_on_one_ticket_hand_off_once(tmp_path: Path) -> Non
     dispatcher.process(snapshot)
 
     assert moved == ["AUT-2286"]
-    assert gh.count(MARK_READY) == 1
+    assert gh.count(AUT0_MARK_READY) == 1
     assert [action for action, _ in grok_wakes(queue)] == ["done"]
     assert aut0_intent(queue, "6813518999") == ("completed", None, "spent")
     assert aut0_intent(queue, "6813518921") == ("failed", "GitHubAdapterError", "spent")
@@ -832,7 +834,7 @@ def test_no_re_drive_once_the_ticket_is_terminal(tmp_path: Path, state: str) -> 
 @pytest.mark.parametrize(
     ("phase", "pull", "keys"),
     [
-        ("moved-on", "draft", [AUT0_PULL, MARK_READY]),
+        ("moved-on", "draft", [AUT0_PULL, AUT0_MARK_READY]),
         ("moved-on", "ready", [AUT0_PULL]),
         ("ready-for-review", "ready", [AUT0_PULL]),
     ],

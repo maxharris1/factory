@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from lib.github_app_token import TOKEN_VARIABLES
+
 if TYPE_CHECKING:
     from lib.orch_yml import Approvals
 
@@ -46,7 +48,7 @@ def harness_environ(
     count as the profile, and a gh directory holding a symlink or hard link
     to one of the profile's files counts as the profile: paths are resolved
     and stat'ed, never opened."""
-    env = dict(environ)
+    env = {name: value for name, value in environ.items() if name not in TOKEN_VARIABLES}
     if approvals is None or not approvals.app_trust or approvals.gh_config_dir is None:
         return env
     profile = approvals.gh_config_dir

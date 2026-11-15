@@ -74,6 +74,7 @@ _TOP_KEYS = {
     "job_states",
     "refused_harnesses",
     "approver_logins",
+    "approver_linear_users",
     "approver_gh_config_dir",
     "github_app",
 }
@@ -95,7 +96,14 @@ _PROJECT_KEYS = {
     "ready_starts_review",
     "intake",
 }
-_INTAKE_KEYS = {"label", "linear_state", "trusted"}
+_INTAKE_KEYS = {
+    "label",
+    "linear_state",
+    "trusted",
+    "priority_labels",
+    "priority_from_linear",
+    "critical_path_order",
+}
 DEFAULT_INTAKE_LABEL = "factory:ready"
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/ -]{0,49}$")
 _LINEAR_STATE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,59}$")
@@ -115,6 +123,9 @@ class Intake:
     label: str | None = None
     linear_state: str | None = None
     trusted: frozenset[str] | None = None
+    priority_labels: tuple[str, ...] = ()
+    priority_from_linear: bool = False
+    critical_path_order: bool = True
 
 
 @dataclass(frozen=True)
@@ -196,9 +207,13 @@ class Approvals:
     logins: frozenset[str] = frozenset()
     gh_config_dir: Path | None = None
     app_logins: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    linear_users: frozenset[str] | None = None
 
     def may_approve(self, login: str) -> bool:
         return login.casefold() in self.logins
+
+    def may_approve_linear(self, author: str) -> bool:
+        return author in (self.linear_users or ())
 
     def app_bot(self, login: str) -> str | None:
         """The bot whose App posts as login, when the switch is on."""
@@ -228,12 +243,16 @@ class OrchConfig:
     refused_harnesses: tuple[str, ...] = ()
     github_app: GitHubApps | None = None
     approver_logins: frozenset[str] | None = None
+    approver_linear_users: frozenset[str] | None = None
     approver_gh_config_dir: Path | None = None
 
 
 def approvals(config: OrchConfig) -> Approvals:
     return _approvals(
-        config.github_app, config.approver_logins, config.approver_gh_config_dir
+        config.github_app,
+        config.approver_logins,
+        config.approver_gh_config_dir,
+        config.approver_linear_users,
     )
 
 
@@ -241,6 +260,7 @@ def _approvals(
     github_app: GitHubApps | None,
     approver_logins: frozenset[str] | None,
     gh_config_dir: Path | None,
+    approver_linear_users: frozenset[str] | None,
 ) -> Approvals:
     apps = github_app.apps.values() if github_app is not None else ()
     return Approvals(
@@ -248,6 +268,7 @@ def _approvals(
         logins=frozenset(login.casefold() for login in approver_logins or ()),
         gh_config_dir=gh_config_dir,
         app_logins=MappingProxyType({app.bot_login.casefold(): app.bot for app in apps}),
+        linear_users=approver_linear_users,
     )
 
 
@@ -259,13 +280,24 @@ def load_approvals(path: Path) -> tuple[Approvals | None, list[Finding]]:
     if data is None:
         return None, findings
     approver_logins = _approver_logins(data, findings)
+    approver_linear_users = _approver_linear_users(data, findings)
     gh_config_dir = _absolute_path(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
     app = _github_app(data, findings)
     if findings:
         return None, findings
-    return _approvals(app, approver_logins, gh_config_dir), findings
+    return _approvals(app, approver_logins, gh_config_dir, approver_linear_users), findings
+
+
+def linear_approver_findings(config: OrchConfig) -> list[Finding]:
+    if config.approver_linear_users is not None or not any(
+        project.linear_project_id is not None for project in config.projects
+    ):
+        return []
+    return [
+        Finding("warning", "approver_linear_users is unset: no Linear go lifts a cap")
+    ]
 
 
 def hold_approver_findings(config: OrchConfig, hold: HoldConfig | None) -> list[Finding]:
@@ -362,6 +394,16 @@ def _validate(
     job_states = _job_states(data, findings)
     refused_harnesses = _refused_harnesses(data, findings)
     approver_logins = _approver_logins(data, findings)
+    approver_linear_users = _approver_linear_users(data, findings)
+    for author in sorted(approver_linear_users or ()):
+        if author not in trusted_linear_users:
+            findings.append(
+                Finding(
+                    "error",
+                    f"approver_linear_users {author.removeprefix('linear:')} "
+                    "is not a trusted_linear_users key",
+                )
+            )
     approver_gh_config_dir = _absolute_path(
         data, "approver_gh_config_dir", "approver_gh_config_dir", findings
     )
@@ -408,6 +450,7 @@ def _validate(
             refused_harnesses=refused_harnesses,
             github_app=github_app,
             approver_logins=approver_logins,
+            approver_linear_users=approver_linear_users,
             approver_gh_config_dir=approver_gh_config_dir,
         ),
         findings,
@@ -672,12 +715,40 @@ def _intake(
             ok = False
         else:
             trusted = frozenset(raw)
+    priority_labels: tuple[str, ...] = ()
+    if "priority_labels" in value:
+        raw = value["priority_labels"]
+        if not isinstance(raw, list) or not all(
+            isinstance(entry, str) and _LABEL.fullmatch(entry) for entry in raw
+        ):
+            findings.append(Finding("error", f"{where}.priority_labels must be a list of label names"))
+            ok = False
+        else:
+            seen: set[str] = set()
+            for entry in raw:
+                if entry.lower() in seen:
+                    findings.append(Finding("error", f"{where}.priority_labels names {entry.lower()} twice"))
+                    ok = False
+                seen.add(entry.lower())
+            priority_labels = tuple(raw)
+    from_linear = value.get("priority_from_linear", False)
+    critical_path = value.get("critical_path_order", True)
+    for key, setting in (("priority_from_linear", from_linear), ("critical_path_order", critical_path)):
+        if not isinstance(setting, bool):
+            findings.append(Finding("error", f"{where}.{key} must be true or false"))
+            ok = False
+    if from_linear is True and not linear:
+        findings.append(Finding("error", f"{where}.priority_from_linear requires linear_project_id"))
+        ok = False
     if not ok:
         return None
     return Intake(
         label=None if linear else label,
         linear_state=state if linear else None,
         trusted=trusted,
+        priority_labels=priority_labels,
+        priority_from_linear=from_linear,
+        critical_path_order=critical_path,
     )
 
 
@@ -836,6 +907,22 @@ def _approver_logins(data: dict, findings: list[Finding]) -> frozenset[str] | No
         )
         return None
     return frozenset(value)
+
+
+def _approver_linear_users(data: dict, findings: list[Finding]) -> frozenset[str] | None:
+    if "approver_linear_users" not in data:
+        return None
+    value = data["approver_linear_users"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        findings.append(
+            Finding("error", "approver_linear_users must list stable Linear user ids")
+        )
+        return None
+    return frozenset(f"linear:{item}" for item in value)
 
 
 def _absolute_path(

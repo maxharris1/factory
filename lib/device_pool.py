@@ -2,11 +2,11 @@
 
 A slot is one row in `device_slots`, in the dispatcher database next to
 `jobs`. `claim` moves the first queued job for a harness, in the queue's
-claim order (lib/queue.py claim_order: urgent, a resumed paused step, bug,
-then oldest), to running and holds a slot for it on the least-loaded
-device (lowest utilization, slots held over slot_max; a tie goes to a remote
-before the local box, remotes in machines.yml order; issue #223) that is
-schedulable and lists that harness (issue #85). Both writes happen
+claim order (lib/queue.py claim_order), to running
+and holds a slot for it on the least-loaded device (lowest utilization,
+slots held over slot_max; a tie goes to a remote before the local box,
+remotes in machines.yml order; issue #223) that is schedulable and lists
+that harness (issue #85). Both writes happen
 in one BEGIN IMMEDIATE transaction, so two claims cannot take the same
 last slot. Slots are generic: any free slot on an eligible device takes
 any harness.
@@ -118,13 +118,15 @@ def choose_device(
     harness: str,
     used: Mapping[str, int],
     blocked: Blocked = NOTHING_BLOCKED,
+    avoid: Collection[str] = frozenset(),
 ) -> Device | None:
     """The schedulable device listing harness with the lowest utilization, or None.
 
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
     (issue #223). A full device is never chosen, nor one whose factory
-    checkout for harness is out of sync or being updated (#297).
+    checkout for harness is out of sync or being updated (#297). A device
+    in `avoid` is chosen only when no other has a free slot (#218).
     """
     candidates = []
     for index, device in enumerate(config.devices):
@@ -133,7 +135,8 @@ def choose_device(
         assert device.slot_max is not None
         held = used.get(device.name, 0)
         if held < device.slot_max:
-            candidates.append(((Fraction(held, device.slot_max), device.local, index), device))
+            rank = (device.name in avoid, Fraction(held, device.slot_max), device.local, index)
+            candidates.append((rank, device))
     if not candidates:
         return None
     return min(candidates, key=lambda candidate: candidate[0])[1]
@@ -257,6 +260,16 @@ class DevicePool:
             if row is None:
                 connection.commit()
                 return None
+            dropped = _link_dropped_on(connection, str(row["id"]))
+            if dropped == device.name:
+                device = choose_device(
+                    self.config,
+                    harness,
+                    _used(connection, self.config),
+                    sync_blocked(connection),
+                    avoid={dropped},
+                )
+                assert device is not None
             changed = connection.execute(
                 """
                 UPDATE jobs
@@ -716,6 +729,33 @@ def slots_in_use(
 ) -> dict[str, int]:
     """used_slots on an open connection (the feeder's capacity read)."""
     return _used(connection, config)
+
+
+LINK_DROP_TAG = "; worker tag "
+
+
+def link_drop_detail(device: str, minutes: str, tag: str) -> str:
+    return f"{device}: no certain answer for {minutes}{LINK_DROP_TAG}{tag}"
+
+
+def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """#218: the device job_id's latest run lost its link to, or None."""
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
+    ).fetchone()
+    if table is None:
+        return None
+    row = connection.execute(
+        """
+        SELECT event, detail FROM job_events
+        WHERE job_id = ? AND event IN ('run-died', 'run-exited', 'link-drop')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (job_id,),
+    ).fetchone()
+    if row is None or row[0] != "link-drop":
+        return None
+    return str(row[1]).split(": no certain answer for ", 1)[0]
 
 
 def _used(

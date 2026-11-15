@@ -52,13 +52,15 @@ import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
 from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_flow import job_flow, load_chart
+from lib.dashboard_flow import JobStep, job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
+from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
 from lib.dashboard_usage import read_usage
 from lib.dashboard_page import PAGES, render_pages
@@ -82,7 +84,7 @@ from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
-from lib.queue import ACTIONS, RECIPIENTS, STATES
+from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -763,9 +765,51 @@ def collect_snapshot(
         "statechart": chart,
         "telemetry": telemetry["rollup"],
         "projects": _projects(orch, rules, now),
+        "rules": rules_and_limits(chart),
         "usage": usage,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+_CHART_RULES = (
+    ("stuck", (("building", "stuck"),), lambda labels: labels[0]),
+    ("plan-check", (("plan-check", "planning"), ("plan-check", "stuck")),
+     lambda labels: f"sends work back when {labels[0]}; {labels[1]} → stuck"),
+    ("rounds", (("review", "fixing"), ("review", "capped"), ("capped", "fixing")),
+     lambda labels: f"{labels[0]} → fixing; {labels[1]} → capped ({labels[2]})"),
+    ("ship", (("ship", "merged"), ("ship", "handed-off"), ("ship", "waiting-external")),
+     lambda labels: "{}, {}, or {}".format(*(label.removeprefix("ship = ") for label in labels))),
+    ("approver", (("waiting-external", "stuck"),),
+     lambda labels: f"{labels[0]} from an external approver → stuck"),
+)
+
+
+def rules_and_limits(chart: dict | None) -> list[dict]:
+    """Each value is read from lib/health.py, the Linear budget or the chart's
+    edge labels, never copied."""
+    beat = f"{component_health.BEAT_SECONDS:g}"
+    probe = f"{component_health.PROBE_SECONDS:g}"
+    rows = [
+        {"key": "heartbeat", "text": f"every {beat} s (device probes every {probe} s)"},
+        {"key": "liveness", "text": f"up within {component_health.STALE_BEATS} intervals, "
+                                    f"stale within {component_health.DOWN_BEATS}, down older"},
+    ]
+    edges = (
+        {} if chart is None
+        else {(edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]}
+    )
+    for key, wanted, join in _CHART_RULES:
+        labels = [edges.get(pair) for pair in wanted]
+        if chart is None:
+            text = "chart unavailable"
+        elif None in labels:
+            text = "not in the chart"
+        else:
+            text = join(labels)
+        rows.append({"key": key, "text": text})
+    rows.append({"key": "linear", "text": f"budget {LINEAR_BUDGET_REQUESTS_PER_HOUR:,} req/h and "
+                                          f"{LINEAR_BUDGET_COMPLEXITY_PER_HOUR:,} complexity/h"})
+    return rows
 
 
 def _ticket_ref(
@@ -910,7 +954,7 @@ def _poll_health(
 
 def _verdict_kind(outcome: str) -> str:
     """Group a handled comment's outcome for the feed."""
-    if outcome.startswith("queued-"):
+    if outcome.startswith(("queued-", "retried-")):
         return "routed"
     if outcome.startswith("stale-"):
         return "stale"
@@ -1007,6 +1051,7 @@ def _read_db(
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
     box_running = 0  # running harness jobs with no placement: on the box (#90)
+    marks = priority_marks(connection) if jobs else {}
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
@@ -1077,7 +1122,9 @@ def _read_db(
                 # The poller's queue-wait clock: since it was queued, or
                 # since a claim that never started was released (#77 F1.2).
                 age = _age(now, row["last_activity_at"]) or 0
-                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age}
+                mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
+                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age,
+                        "tier": mark.tier}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
             # Stuck / overdue: past the timeout, or (#75) a running job whose
@@ -1095,8 +1142,7 @@ def _read_db(
     tickets: list[dict] = []
     stuck_tickets: list[dict] = []
     paused: list[dict] = []
-    # (repo casefolded, ticket id) as stored -> tracker, round, state.
-    ticket_info: dict[tuple[str, str], tuple[str, int, str]] = {}
+    ticket_info: dict[tuple[str, str], TicketInfo] = {}
     if "tracked_tickets" in tables and "ticket_state" in tables:
         approvers = _hold_approvers(connection)
         for row in connection.execute(
@@ -1127,10 +1173,8 @@ def _read_db(
                 else None
             )
             waiting = {"waiting_on": _clean(approver, 39)} if approver else {}
-            ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = (
-                _enum(row["tracker"], TRACKERS),
-                int(row["review_round"]),
-                state,
+            ticket_info[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = TicketInfo(
+                _enum(row["tracker"], TRACKERS), stuck, state
             )
             tickets.append(
                 {
@@ -1165,7 +1209,7 @@ def _read_db(
                         **waiting,
                     }
                 )
-    _add_job_tickets(connection, active, ticket_info, chart, now)
+    _add_job_tickets(connection, active, ticket_info, chart, now, tables)
 
     order = lambda item: (item["repo"].casefold(), item["ticket_id"])  # noqa: E731
     tickets.sort(key=order)
@@ -1232,6 +1276,8 @@ def _read_db(
                     "state": _enum(item["state"], FEEDER_STATES),
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
+                    "fed_age_seconds": _age(now, item["fed_at"]),
+                    "tier": None if item["tier"] is None else int(item["tier"]),
                 }
                 for item in items
             ],
@@ -1420,37 +1466,71 @@ def _read_db(
     }
 
 
+class TicketInfo(NamedTuple):
+    tracker: str | None
+    stuck: bool
+    state: str | None
+
+
 def _add_job_tickets(
     connection: sqlite3.Connection,
     active: list[tuple[dict, str, str]],
-    ticket_info: dict[tuple[str, str], tuple[str, int, str]],
+    ticket_info: dict[tuple[str, str], TicketInfo],
     chart: dict | None,
     now: float,
+    tables: set[str],
 ) -> None:
-    """Give each running or queued job its ticket's tracker and flow (current
-    statechart state, the path its jobs took, time in state). The job's
-    round comes from its own detail (#75), not the ticket's completed
-    review count."""
     if not active:
         return
     # One read for every ticket with a running or queued job, oldest first.
     wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
     ids = sorted({ticket_id for _, ticket_id in wanted})
-    histories: dict[tuple[str, str], list[tuple[str, float]]] = {key: [] for key in wanted}
+    histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
+    columns = (
+        {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
+        if "job_telemetry" in tables
+        else set()
+    )
+    joined = "job_id" in columns
+    times = ", ".join(
+        f"t.{name} AS {name}" if joined and name in columns else f"NULL AS {name}"
+        for name in ("started_at", "finished_at")
+    )
     for row in connection.execute(
-        "SELECT repo, ticket_id, action, created_at FROM jobs "
-        f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
-        "ORDER BY created_at, rowid",
+        f"SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, {times} "
+        "FROM jobs "
+        + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
+        + f"WHERE jobs.ticket_id IN ({','.join('?' for _ in ids)}) "
+        "ORDER BY jobs.created_at, jobs.rowid",
         ids,
     ):
         key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
         if key in histories:
-            histories[key].append((str(row["action"]), float(row["created_at"])))
+            histories[key].append(JobStep(
+                str(row["action"]),
+                _enum(row["recipient"], RECIPIENTS),
+                float(row["created_at"]),
+                _telemetry_time(row["started_at"]),
+                _telemetry_time(row["finished_at"]),
+            ))
+    retries: dict[tuple[str, str], int] = {}
+    if "ticket_retries" in tables:
+        for row in connection.execute(
+            "SELECT repo, ticket_id, count(*) AS n FROM ticket_retries "
+            f"WHERE ticket_id IN ({','.join('?' for _ in ids)}) "
+            "AND outcome NOT LIKE 'rejected-%' GROUP BY repo, ticket_id",
+            ids,
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            retries[key] = retries.get(key, 0) + int(row["n"])
     for item, repo, ticket_id in active:
         key = (repo.casefold(), ticket_id)
-        tracker, _review_round, state = ticket_info.get(key, (None, None, None))
-        item["tracker"] = tracker
-        item["flow"] = job_flow(chart, histories[key], state, now)
+        info = ticket_info.get(key, TicketInfo(None, False, None))
+        item["tracker"] = info.tracker
+        item["stuck"] = info.stuck
+        item["flow"] = job_flow(chart, histories[key], info.state, now)
+        if key in retries:
+            item["retries"] = retries[key]
 
 
 def _has_placeholder(value: object) -> bool:

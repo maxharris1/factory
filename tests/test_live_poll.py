@@ -15,6 +15,7 @@ from lib.dispatcher import (
     LINEAR_HANDOFF_QUERY,
     Comment,
     Dispatcher,
+    STOPPED_POLL_SECONDS,
     RetryableStateError,
     TicketRef,
     TrackedTicket,
@@ -416,8 +417,9 @@ def test_untrusted_risk_comment_leaves_the_ticket_low(login: str, body: str) -> 
     assert _risk_after(("grok-login", GROK_LOW), (login, body)) == "low"
 
 
-def test_later_trusted_risk_still_applies() -> None:
-    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "high"
+def test_a_later_trusted_risk_does_not_move_the_intake_risk() -> None:
+    # #195: the first trusted orchestrator brief or go sets the risk.
+    assert _risk_after(("grok-login", GROK_LOW), ("grok-login", GROK_HIGH)) == "low"
 
 
 def test_linear_risk_counts_only_from_trusted_linear_users() -> None:
@@ -1764,10 +1766,10 @@ def test_linear_rate_limit_uses_retry_after_backoff(
         "expected_complexity_per_hour",
     ),
     [
-        (5, 1, 2, 300, 134_880),
-        (25, 5, 10, 1_020, 618_720),
-        (100, 20, 40, 1_080, 592_320),
-        (500, 20, 460, 1_080, 659_040),
+        (5, 1, 2, 300, 145_140),
+        (25, 5, 10, 1_020, 670_020),
+        (100, 20, 40, 1_080, 640_200),
+        (500, 20, 460, 1_080, 713_760),
     ],
 )
 def test_linear_poll_hour_stays_within_shared_budget(
@@ -2920,13 +2922,16 @@ def test_a_discovered_linear_ticket_whose_pr_is_merged_queues_no_build(
 # --- #108 r1: stopped tickets on the live source's own cadence ---------------
 
 
+CYCLE_SECONDS = 30
+
+
 def _one_linear_ticket_per_phase() -> list[str]:
-    """Ten identifiers whose stopped-read turns cover every cycle mod 10."""
     by_phase: dict[int, str] = {}
     number = 0
     while len(by_phase) < 10:
         number += 1
-        by_phase.setdefault(_spread("acme/widgets", f"AUT-{number}") % 10, f"AUT-{number}")
+        offset = _spread("acme/widgets", f"AUT-{number}") % STOPPED_POLL_SECONDS
+        by_phase.setdefault(offset // CYCLE_SECONDS, f"AUT-{number}")
     return sorted(by_phase.values())
 
 
@@ -2944,8 +2949,14 @@ def _handed_off(queue, tracker: str, ticket_ids: list[str]) -> None:
             )
 
 
-def _stopped_linear_poll(tmp_path: Path, gh_runner):
-    dispatcher, queue = setup(tmp_path)
+def _poll_every_30_seconds(dispatcher, source, now: list[float], cycles: int) -> None:
+    for _ in range(cycles):
+        dispatcher.poll_once(source)
+        now[0] += CYCLE_SECONDS
+
+
+def _stopped_linear_poll(tmp_path: Path, gh_runner, now: list[float]):
+    dispatcher, queue = setup(tmp_path, now)
     identifiers = _one_linear_ticket_per_phase()
     _handed_off(queue, "linear", identifiers)
     reads: Counter[str] = Counter()
@@ -2979,12 +2990,12 @@ def test_a_stopped_linear_ticket_is_read_within_ten_cycles_at_every_phase(
     ticket whose turn fell on a GitHub-only cycle was never read, so its
     merge was never seen."""
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    now = [100.0]
     dispatcher, queue, source, identifiers, _ = _stopped_linear_poll(
-        tmp_path, _merged_runner(gh)
+        tmp_path, _merged_runner(gh), now
     )
 
-    for _ in range(11):
-        dispatcher.poll_once(source)
+    _poll_every_30_seconds(dispatcher, source, now, 11)
 
     with queue.connect() as connection:
         states = dict(
@@ -2997,10 +3008,10 @@ def test_a_stopped_linear_ticket_is_still_read_once_per_300_seconds(
     tmp_path: Path,
 ) -> None:
     gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
-    dispatcher, _, source, identifiers, reads = _stopped_linear_poll(tmp_path, gh)
+    now = [100.0]
+    dispatcher, _, source, identifiers, reads = _stopped_linear_poll(tmp_path, gh, now)
 
-    for _ in range(100):
-        dispatcher.poll_once(source)
+    _poll_every_30_seconds(dispatcher, source, now, 100)
 
     assert set(reads) == set(identifiers)
     assert set(reads.values()) <= {9, 10}
@@ -3010,7 +3021,8 @@ def test_github_discovery_does_not_read_a_tracked_pr(tmp_path: Path) -> None:
     """A tracked PR is read by tracked_tickets on its own cadence; discovery
     reading every labelled PR made a handed-off PR's 300-second budget a
     per-cycle one."""
-    dispatcher, queue = setup(tmp_path)
+    now = [100.0]
+    dispatcher, queue = setup(tmp_path, now)
     _handed_off(queue, "github", ["12"])
     gh = FakeGh(FACTORY.format(tickets="github", ship="handoff"))
     gh.issues = [
@@ -3026,6 +3038,7 @@ def test_github_discovery_does_not_read_a_tracked_pr(tmp_path: Path) -> None:
     for _ in range(10):
         before = len(gh.calls)
         dispatcher.poll_once(source)
+        now[0] += 30
         reads.append(
             sum("/comments?" in part for call in gh.calls[before:] for part in call)
         )

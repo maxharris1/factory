@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import reap_home, sandbox_env
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,20 +99,15 @@ python.chmod(0o755)
         + "\ntrusted_linear_users:\n  test-user-id: [grok-bot]\n",
         encoding="utf-8",
     )
-    environment = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
-    environment.update(
-        {
-            "EXPECTED_REQUIREMENTS": str(ROOT / "requirements.txt"),
-            "FAKE_VENV_PYTHON": FAKE_VENV_PYTHON,
-            "HOME": str(tmp_path),
-            "ORCH_CONFIG": str(orch_config),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            # Never a real crontab or systemd; autostart tests point these at fakes.
-            "ORCH_CRONTAB": str(fake_bin / "no-such-crontab"),
-            "ORCH_SYSTEMCTL": str(fake_bin / "no-such-systemctl"),
-        }
+    return sandbox_env(
+        tmp_path,
+        EXPECTED_REQUIREMENTS=str(ROOT / "requirements.txt"),
+        FAKE_VENV_PYTHON=FAKE_VENV_PYTHON,
+        ORCH_CONFIG=str(orch_config),
+        PATH=f"{fake_bin}:/usr/bin:/bin",
+        ORCH_CRONTAB=str(fake_bin / "no-such-crontab"),
+        ORCH_SYSTEMCTL=str(fake_bin / "no-such-systemctl"),
     )
-    return environment
 
 
 @pytest.mark.parametrize("installer", ["uv", "venv"])
@@ -167,7 +164,7 @@ def test_profile_snippet_is_safe_before_install(tmp_path: Path) -> None:
             "set -e; source deploy/profile.sh; printf ok",
         ],
         cwd=ROOT,
-        env={**os.environ, "HOME": str(tmp_path)},
+        env=sandbox_env(tmp_path),
         text=True,
         capture_output=True,
         check=False,
@@ -383,7 +380,7 @@ def test_run_poller_exports_both_env_files_unbuffered(tmp_path: Path) -> None:
     result = subprocess.run(
         ["bash", "deploy/run-poller.sh", "--once"],
         cwd=ROOT,
-        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
         text=True,
         capture_output=True,
         check=False,
@@ -417,7 +414,7 @@ def test_run_poller_refuses_to_start_without_its_env(tmp_path: Path, missing: st
     orch.chmod(0o755)
 
     result = subprocess.run(["bash", "deploy/run-poller.sh"], cwd=ROOT,
-                            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                            env=sandbox_env(tmp_path, PATH="/usr/bin:/bin"),
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 78
@@ -434,6 +431,26 @@ def test_ci_runs_once_per_push() -> None:
     triggers = workflow[True]
     assert triggers["push"] == {"branches": ["main"]}
     assert "pull_request" in triggers
+
+
+def test_ci_cancels_superseded_pr_runs_and_runs_every_shard_and_serial_test() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    concurrency = workflow["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert "github.event.pull_request.number || github.run_id" in concurrency["group"]
+
+    test = workflow["jobs"]["test"]
+    shards = test["strategy"]["matrix"]["shard"]
+    assert shards == list(range(1, len(shards) + 1))
+    pytest_runs = [step["run"] for step in test["steps"] if "pytest" in step.get("run", "")]
+    assert len(pytest_runs) == 1
+    assert '-m "not serial"' in pytest_runs[0]
+    assert "--shard ${{ matrix.shard }}/${{ strategy.job-total }}" in pytest_runs[0]
+
+    runs = [step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"]]
+    assert "pytest -m serial -p no:xdist" in runs
 
 
 FAKE_CRONTAB = """#!/usr/bin/python3
@@ -510,12 +527,12 @@ def test_install_refuses_an_unknown_option(tmp_path: Path) -> None:
 
 
 def _profile_env(tmp_path: Path) -> dict[str, str]:
-    return {
-        "HOME": str(tmp_path),
-        "PATH": "/usr/bin:/bin",
-        "ORCH_POLL_START_WAIT": "10",
-        "ORCH_CRONTAB": str(tmp_path / "no-such-crontab"),
-    }
+    return sandbox_env(
+        tmp_path,
+        PATH="/usr/bin:/bin",
+        ORCH_POLL_START_WAIT="10",
+        ORCH_CRONTAB=str(tmp_path / "no-such-crontab"),
+    )
 
 
 def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> None:
@@ -538,23 +555,23 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
     pidfile = tmp_path / ".local/state/factory/poller.pid"
     source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
 
-    off = subprocess.run(
-        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
-        capture_output=True, timeout=30, check=False,
-    )
-    assert off.returncode == 0 and off.stdout == "ok", off.stderr
-    time.sleep(0.5)
-    assert not pidfile.exists()
-
-    (config / "poller-autostart").touch()
-    started = time.monotonic()
-    on = subprocess.run(
-        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
-        capture_output=True, timeout=30, check=False,
-    )
-    assert on.returncode == 0 and on.stdout == "ok", on.stderr
-    assert time.monotonic() - started < 5  # the hook does not block the shell
     try:
+        off = subprocess.run(
+            source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+            capture_output=True, timeout=30, check=False,
+        )
+        assert off.returncode == 0 and off.stdout == "ok", off.stderr
+        time.sleep(0.5)
+        assert not pidfile.exists()
+
+        (config / "poller-autostart").touch()
+        started = time.monotonic()
+        on = subprocess.run(
+            source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+            capture_output=True, timeout=30, check=False,
+        )
+        assert on.returncode == 0 and on.stdout == "ok", on.stderr
+        assert time.monotonic() - started < 5
         deadline = time.monotonic() + 15
         while not pidfile.exists():
             assert time.monotonic() < deadline, (
@@ -562,9 +579,11 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
             ).read_text() if (tmp_path / ".local/state/factory/poller-service.log").exists() else "no log"
             time.sleep(0.1)
     finally:
-        time.sleep(0.2)
-        if pidfile.exists():
-            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        try:
+            subprocess.run(["bash", "deploy/poller-service.sh", "stop"], cwd=ROOT,
+                           env=_profile_env(tmp_path), capture_output=True, timeout=60, check=False)
+        finally:
+            reap_home(tmp_path)
 
 
 # --- #107: profile, self-heal and legacy launchers ---------------------------------------------
@@ -694,11 +713,15 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         f"@reboot {listener} ensure\n"
         "0 3 * * * /usr/bin/true # keep\n",
         encoding="utf-8")
-    poller_env = {**os.environ, "HOME": str(tmp_path)}
-    pollers = [subprocess.Popen(["/bin/sh", str(poller)], env=poller_env) for _ in range(20)]
-    children = [_child(tmp_path / f"child-{proc.pid}") for proc in pollers]
-    bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"])
+    poller_env = sandbox_env(tmp_path)
+    pollers: list[subprocess.Popen] = []
+    children: list[int] = []
+    bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"],
+                                 start_new_session=True)
     try:
+        pollers.extend(subprocess.Popen(["/bin/sh", str(poller)], env=poller_env)
+                       for _ in range(20))
+        children.extend(_child(tmp_path / f"child-{proc.pid}") for proc in pollers)
         result = _install(environment)
 
         assert result.returncode == 0, result.stderr
@@ -720,10 +743,16 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         assert f"removed legacy launcher {listener}" not in again.stdout
         assert listener.exists()
     finally:
+        os.killpg(bystander.pid, signal.SIGKILL)
         for proc in (*pollers, bystander):
             if proc.poll() is None:
                 proc.kill()
-                proc.wait()
+            proc.wait()
+        for child in children:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_install_leaves_the_legacy_launchers_when_the_crontab_is_unreadable(
@@ -774,18 +803,19 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
     }
     source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
     lock = tmp_path / ".local/state/factory/linear-webhook-listener.lock"
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
 
-    off = subprocess.run(source, cwd=ROOT, env=env, text=True,
-                         capture_output=True, timeout=30, check=False)
-    assert off.returncode == 0 and off.stdout == "ok", off.stderr
-    time.sleep(0.5)
-    assert not lock.exists()
-
-    (tmp_path / ".config/factory/linear-webhook-autostart").touch()
-    on = subprocess.run(source, cwd=ROOT, env=env, text=True,
-                        capture_output=True, timeout=30, check=False)
-    assert on.returncode == 0 and on.stdout == "ok", on.stderr
     try:
+        off = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                             capture_output=True, timeout=30, check=False)
+        assert off.returncode == 0 and off.stdout == "ok", off.stderr
+        time.sleep(0.5)
+        assert not lock.exists()
+
+        (tmp_path / ".config/factory/linear-webhook-autostart").touch()
+        on = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                            capture_output=True, timeout=30, check=False)
+        assert on.returncode == 0 and on.stdout == "ok", on.stderr
         deadline = time.monotonic() + 15
         while not (tmp_path / ".local/state/factory/linear-webhook-listener.pid").exists():
             assert time.monotonic() < deadline, "the profile hook never started the listener loop"
@@ -794,8 +824,11 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
                                 capture_output=True, timeout=30, check=False)
         assert status.returncode == 0, status.stdout + status.stderr
     finally:
-        stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
-                                 capture_output=True, timeout=60, check=False)
+        try:
+            stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
+                                     capture_output=True, timeout=60, check=False)
+        finally:
+            reap_home(tmp_path)
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
 
 
@@ -823,3 +856,128 @@ def test_install_update_keeps_the_venv_running_processes_use(
     plain = _install(environment)
     assert plain.returncode == 0, plain.stderr
     assert not witness.exists()
+
+
+def _fake_proc(tmp_path: Path, nspid: str, ns: str) -> Path:
+    proc = tmp_path / "fake-proc"
+    (proc / "self/ns").mkdir(parents=True)
+    (proc / "self/status").write_text(f"Name:\tsh\nNSpid:\t{nspid}\n", encoding="utf-8")
+    (proc / "self/ns/pid").symlink_to(ns)
+    return proc
+
+
+def test_install_records_the_host_pid_namespace(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+
+    result = _install(environment)
+
+    assert result.returncode == 0, result.stderr
+    record = tmp_path / ".config/factory/host-pidns"
+    assert record.read_text(encoding="utf-8").strip() == os.readlink("/proc/self/ns/pid")
+    helper = tmp_path / ".local/share/factory/host-pidns.sh"
+    assert helper.read_bytes() == (ROOT / "deploy/host-pidns.sh").read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("nspid", "ns", "extra"),
+    [
+        ("1728748\t61", "pid:[1]", {}),
+        ("61", "pid:[4026532782]", {}),
+        ("4484", None, {"ORCH_JOB_PROOF": "x"}),
+        ("4484", None, {"CODEX_SANDBOX": "seatbelt"}),
+    ],
+    ids=["two-field-nspid", "own-proc-mount", "job", "codex-sandbox"],
+)
+def test_install_update_keeps_the_host_record_outside_the_host(
+    tmp_path: Path, nspid: str, ns: str | None, extra: dict[str, str],
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    record = tmp_path / ".config/factory/host-pidns"
+    host = os.readlink("/proc/self/ns/pid")
+    environment |= extra
+    environment["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, nspid, ns or host))
+
+    again = _install(environment, "--update")
+
+    assert again.returncode == 0, again.stderr
+    assert "not recording the host PID namespace" in again.stderr
+    assert record.read_text(encoding="utf-8").strip() == host
+
+
+@pytest.mark.parametrize(
+    ("nspid", "ns", "extra"),
+    [
+        ("1728748\t61", None, {}),
+        ("61", "pid:[4026532782]", {}),
+        (None, None, {"ORCH_JOB_PROOF": "x"}),
+        (None, None, {"CODEX_SANDBOX": "seatbelt"}),
+    ],
+    ids=["two-field-nspid", "recorded-namespace-differs", "job", "codex-sandbox"],
+)
+def test_profile_hook_starts_nothing_outside_the_host_pid_namespace(
+    tmp_path: Path, nspid: str | None, ns: str | None, extra: dict[str, str],
+) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    ran = tmp_path / "ran"
+    (tmp_path / ".local/bin/orch").write_text(
+        f"#!/bin/sh\ntouch {ran}\nsleep 30\n", encoding="utf-8",
+    )
+    config = tmp_path / ".config/factory"
+    for flag in ["poller-autostart", "waiter-autostart-claude-bot", "self-heal-autostart",
+                 "linear-webhook-autostart"]:
+        (config / flag).touch()
+    state = tmp_path / ".local/state/factory"
+    pidfiles = {state / "poller.pid": "1599489\n", state / "waiter-claude-bot.pid": "1667506\n"}
+    for path, text in pidfiles.items():
+        path.write_text(text, encoding="utf-8")
+    stamps = {path: path.stat().st_mtime_ns for path in pidfiles}
+    logs_before = sorted(state.glob("*.log"))
+    env = _profile_env(tmp_path) | extra
+    if nspid is not None:
+        host = os.readlink("/proc/self/ns/pid")
+        env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, nspid, ns or host))
+
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        assert sourced.stderr == ""
+        time.sleep(2)
+        assert not ran.exists()
+        for path, text in pidfiles.items():
+            assert path.read_text(encoding="utf-8") == text
+            assert path.stat().st_mtime_ns == stamps[path]
+        assert sorted(state.glob("*.log")) == logs_before
+    finally:
+        reap_home(tmp_path)
+
+
+def test_profile_hook_still_runs_in_the_recorded_host_namespace(tmp_path: Path) -> None:
+    environment = _install_environment(tmp_path, "venv")
+    assert _install(environment).returncode == 0
+    (tmp_path / ".config/factory/self-heal-autostart").unlink()
+    (tmp_path / ".config/factory/poller-autostart").touch()
+    env = _profile_env(tmp_path)
+    env.pop("ORCH_JOB_PROOF", None)
+    env.pop("CODEX_SANDBOX", None)
+    env["ORCH_PROC_DIR"] = str(_fake_proc(tmp_path, "4484", os.readlink("/proc/self/ns/pid")))
+
+    try:
+        sourced = subprocess.run(
+            ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"], cwd=ROOT, env=env,
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+
+        assert sourced.returncode == 0 and sourced.stdout == "ok", sourced.stderr
+        log = tmp_path / ".local/state/factory/poller-service.log"
+        deadline = time.monotonic() + 10
+        while not log.exists():
+            assert time.monotonic() < deadline, "the hook did not run poller-service.sh ensure"
+            time.sleep(0.1)
+    finally:
+        reap_home(tmp_path)
