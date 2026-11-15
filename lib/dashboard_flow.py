@@ -218,13 +218,9 @@ def is_terminal(chart: dict | None, state: str | None) -> bool:
     return not any(name in _reach(adjacency, name) for name in ahead)
 
 
-# The Tickets board's phases (#142): the five pipeline columns, the Shipped
-# shelf and the Stopped group.
 PIPELINE = ("Ask", "Plan", "Build", "Review", "Ship")
 SHIPPED = ("handed-off", "merged", "done")
 PHASES = (*PIPELINE, "Shipped", "Stop")
-# Max's calls on top of the chart's colour groups: capped is Stopped
-# (STATUS.md decision 4) and the settled ship states sit on the shelf.
 PHASE_OVERRIDES = {"capped": "Stop", **{name: "Shipped" for name in SHIPPED}}
 
 
@@ -253,9 +249,6 @@ def ticket_phases(chart: dict | None) -> dict[str, str]:
 
 
 def ticket_phase(phases: dict[str, str], state: str, stuck: bool) -> str:
-    """A ticket's phase: Stop when flagged stuck, whatever its state (STATUS.md
-    decision 5), and Stop for a state the chart does not have, so the board
-    never drops a ticket."""
     return "Stop" if stuck else phases.get(state, "Stop")
 
 

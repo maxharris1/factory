@@ -265,7 +265,7 @@ def test_the_dashboard_shows_the_issue_first_and_the_pr_second(tmp_path: Path) -
     pages = render_pages(snapshot)
     assert ">repo#115 (PR #116)<" in pages["index.html"]
     assert ">repo#115 (PR #116)<" in pages["job.html"]
-    assert ">owner/repo#115 (PR #116)<" in pages["job.html"]  # the tickets table (#142)
+    assert ">owner/repo#115 (PR #116)<" in pages["job.html"]
 
 
 @pytest.mark.parametrize("source", ["ABCDEFGHIJ-1234567890", "#1234567890"])

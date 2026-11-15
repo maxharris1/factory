@@ -1,6 +1,4 @@
-"""job.html (Tickets): the Tickets board (#142; Tickets.dc.html plus a Ship
-column) and, as its "table" view, the tickets table. Every tracked ticket sits
-in one place: a pipeline column, the Shipped shelf or the Stopped group."""
+"""job.html (Tickets): the Tickets board and, as its table view, the tickets table."""
 
 from __future__ import annotations
 
@@ -68,10 +66,7 @@ font-family:var(--mono)}
 
 
 SCRIPT_TICKETS = r"""
-  // --- job page: the Tickets board and its table view (#142) ------------------
 
-  // lib/dashboard_pages/tickets.py phase_table: each state's phase, the
-  // columns with their states and glyphs, the shelf and the Stopped group.
   var PHASES = __PHASES__;
   var WAITING = {'awaiting-ok': 1, 'waiting-max': 1};
   var WAIT_TINT = '#ff9e64';
@@ -313,7 +308,6 @@ SCRIPT_TICKETS = r"""
 
 
 GLYPH_TINT = "#a9b1d6"
-# DESIGN-TOKENS-AND-DATA.md section 5; seeds 71 to 74 are the artboard's.
 PHASE_GLYPH = {
     "Ask": {"effect": "twinkle", "seed": 71},
     "Plan": {"effect": "field", "seed": 72},
@@ -322,7 +316,6 @@ PHASE_GLYPH = {
     "Ship": {"effect": "off", "done": True, "seed": 75},
     "Stop": {"effect": "static", "tint": "#f7768e", "seed": 76},
 }
-# Waiting on a human: still and amber (SPEC motion rule 4).
 WAITING = ("awaiting-ok", "waiting-max")
 _WAIT_TINT = "#ff9e64"
 _EMPTY = {"Ask": "nothing waiting on questions"}
@@ -330,9 +323,6 @@ _ROUND = re.compile(r"([0-9]+)/([0-9]+)")
 
 
 def phase_table(chart: dict | None) -> dict:
-    """The board's phases from the chart: each state's phase, the pipeline
-    columns with their states and glyph, the shelf groups and the Stopped
-    group. The page script gets this table as PHASES."""
     phases = ticket_phases(chart)
 
     def states(phase: str) -> list[str]:
@@ -366,8 +356,6 @@ def _first(rows: list | None) -> dict[str, dict]:
 
 
 def board(snapshot: dict, project: str | None = None) -> dict:
-    """The board for the snapshot's tracked tickets, or one project's. Mirrors
-    boardOf in the page script."""
     table = phase_table(snapshot.get("statechart"))
     rows = snapshot["tickets"]
     counts = Counter(row["repo"] for row in rows)
@@ -409,7 +397,6 @@ def board(snapshot: dict, project: str | None = None) -> dict:
 
 
 def _px():
-    # shell imports this module for its panel lists, so PixelStrip loads late.
     from lib.dashboard_pages import shell
 
     return shell
@@ -536,8 +523,6 @@ def _shelf(found: dict) -> str:
 
 
 def _board(snapshot: dict) -> str:
-    """The filter row, the Pipeline columns and the Shipped panel (shelf and
-    Stopped). Same markup as renderBoard in the page script."""
     found = board(snapshot)
     buttons = _button(f"all {found['total']}", "data-project", "", True) + "".join(
         _button(f"{_short(repo)} {n}", "data-project", repo, False) for repo, n in found["projects"]
@@ -563,8 +548,6 @@ def _board(snapshot: dict) -> str:
 
 
 def _tickets(snapshot: dict) -> str:
-    """The board's table view, hidden until the switch picks it (and shown
-    without script, under the board)."""
     rows = snapshot["tickets"]
     if not rows:
         inner = '<p class="empty">no tracked tickets</p>'

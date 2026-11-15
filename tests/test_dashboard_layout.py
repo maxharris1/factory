@@ -6,10 +6,10 @@ efficiency pages.
   the queue in a side rail. The attention strip under the header band (#139)
   links to the Activity page. No poll/Linear budget, handoffs, verdicts, tickets, log or
   savings.
-- Job page (job.html): the Tickets board and its table view (#142), and a
-  flow diagram drawn from model/chart.mmd (the statechart's checked-in
-  chart), with the job's path and current state highlighted, its round and
-  its time in that state.
+- Job page (job.html): the Tickets board and its table view, and a flow
+  diagram drawn from model/chart.mmd (the statechart's checked-in chart),
+  with the job's path and current state highlighted, its round and its time
+  in that state.
 - Activity page (activity.html): handoffs, verdicts, log, needs attention.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
@@ -334,7 +334,6 @@ def test_activity_page_has_handoffs_verdicts_log_and_attention(tmp_path: Path) -
     attention = _text(_section(html, "attention"))
     assert "AUT-7" in attention and "job-timeout" in attention
     assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
-    # #142: the tickets table moved to job.html as the board's table view.
     for panel in ("lanes", "queue", "health", "savings", "tickets"):
         assert f'id="{panel}"' not in html, panel
 
@@ -346,7 +345,7 @@ def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
     assert 'id="jobs"' not in html
     tickets = _text(_section(html, "tickets"))
     assert "AUT-7" in tickets and "waiting-max" in tickets
-    assert "AUT-7" in _text(_section(html, "shipped"))  # stuck: in the Stopped group
+    assert "AUT-7" in _text(_section(html, "shipped"))
     assert "tracy-harris-coaching#5" in _text(_section(html, "pipeline"))
 
 
@@ -507,7 +506,6 @@ def test_job_page_lists_every_running_and_queued_job(tmp_path: Path) -> None:
     html = _no_script(render_pages(snapshot)["job.html"])
     for row in snapshot["running"] + snapshot["queued"]:
         assert f'id="job-{row["job"]}"' in html, row["job"]
-    # #142: a tracked ticket's board card links the job working on it.
     board = _section(html, "pipeline") + _section(html, "shipped")
     tracked = {(row["repo"], row["ticket_id"]) for row in snapshot["tickets"]}
     for ticket in tracked:
@@ -737,7 +735,6 @@ def _run_page(
 # The shell on every page (#139): the TopBar's link state and caret, the band,
 # the attention strip and the status line.
 BAR = ["link", "link-text", "age", "clock", "caret", "band", "attention-strip", "statusline"]
-# job.html's panels: the Tickets board, its table view and the job view (#142).
 JOB = BAR + ["hud", "ticket-filter", "pipeline", "shipped", "tickets", "jobview", "flow-template"]
 
 

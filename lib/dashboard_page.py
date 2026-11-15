@@ -92,8 +92,6 @@ def font_faces() -> str:
 
 
 def page_script(chart: dict | None = None) -> str:
-    """The page script; `chart` is the snapshot's statechart, whose board phases
-    it carries (PHASES)."""
     return (
         SCRIPT.replace("__TELEMETRY__", TELEMETRY_SCRIPT)
         .replace("__PIXELSTRIP__", px_script())

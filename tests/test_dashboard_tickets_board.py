@@ -1,14 +1,3 @@
-"""The Tickets board on job.html (#142): phase columns Ask, Plan, Build, Review
-and Ship, the Shipped shelf and the Stopped group, each ticket in exactly one
-place, with the tickets table moved here as the "table" view.
-
-board_snapshot() builds the fixture: one tracked ticket per state of
-model/chart.mmd, a stuck-flagged building ticket, an awaiting-ok ticket with an
-approver, running plan, build, review and fix jobs, one queued job and three
-projects. The node tests run the page script against it and hold the script's
-markup to the server's.
-"""
-
 from __future__ import annotations
 
 import json
@@ -45,7 +34,6 @@ GLYPHS = {"Ask": ("twinkle", "#a9b1d6"), "Plan": ("field", "#a9b1d6"), "Build": 
 
 
 def _state_tickets() -> dict[str, tuple[str, str]]:
-    """Each chart state's fixture ticket: (repo, ticket id)."""
     chart = flow.load_chart(CHART)
     assert chart is not None
     found = {}
@@ -56,8 +44,6 @@ def _state_tickets() -> dict[str, tuple[str, str]]:
 
 
 def board_snapshot(tmp_path: Path) -> dict:
-    """A real snapshot (collect_snapshot over a seeded orch.db) with every
-    chart state on the board."""
     db = tmp_path / "orch.db"
     make_db(db)
     tickets = _state_tickets()
@@ -87,9 +73,6 @@ def board_snapshot(tmp_path: Path) -> dict:
     log = tmp_path / "poller.log"
     log.write_text("cycle\n", encoding="utf-8")
     return collect_snapshot(db, log, now=NOW, chart_path=CHART)
-
-
-# --- a small DOM over server and script markup alike --------------------------------
 
 
 class _Tree(HTMLParser):
@@ -156,7 +139,7 @@ def _server(snapshot: dict) -> dict[str, str]:
     return {ident: _inner(html, ident) for ident in BOARD}
 
 
-HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", "let nowMs = 1800000000000;").replace(
+HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", f"let nowMs = {int(NOW * 1000)};").replace(
     "    } else if (kind === 'record') {",
     "    } else if (kind === 'press') {\n"
     "      const node = find(body, n => n.attrs[arg[0]] === arg[1]);\n"
@@ -170,9 +153,7 @@ HARNESS = layout.HARNESS.replace("let nowMs = 1800000003000;", "let nowMs = 1800
 
 
 def _script(tmp_path: Path, snapshot: dict, actions: list | None = None) -> dict:
-    """The job page script's run against the snapshot (since() is 0, so a
-    ticking T+ reads as the server wrote it)."""
-    assert "kind === 'press'" in HARNESS and "nowMs = 1800000000000" in HARNESS
+    assert "kind === 'press'" in HARNESS and f"nowMs = {int(NOW * 1000)};" in HARNESS
     html = render_pages(snapshot)["job.html"]
     (script,) = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
     (tmp_path / "page.js").write_text(script, encoding="utf-8")
@@ -206,9 +187,6 @@ def _card(markup: str, key: str) -> dict:
 @pytest.fixture(scope="module")
 def snapshot(tmp_path_factory) -> dict:
     return board_snapshot(tmp_path_factory.mktemp("board"))
-
-
-# --- the phase table (lib/dashboard_flow.py) -------------------------------------------
 
 
 def test_every_chart_state_has_exactly_one_phase_from_its_legend_group() -> None:
@@ -247,9 +225,6 @@ def test_stuck_and_unknown_tickets_go_to_stop() -> None:
     assert flow.ticket_phases(None) == {}
 
 
-# --- AC1: every tracked ticket appears exactly once --------------------------------------
-
-
 def test_the_fixture_covers_every_chart_state(snapshot: dict) -> None:
     chart = flow.load_chart(CHART)
     states = Counter(row["state"] for row in snapshot["tickets"])
@@ -283,9 +258,6 @@ def test_script_board_places_every_ticket_once_and_matches_the_server(tmp_path: 
     for ident in BOARD:
         assert out["html"][ident] == server[ident], ident
     assert out["hidden"]["tickets"] and not out["hidden"]["pipeline"]
-
-
-# --- AC2a: header and filter counts equal the rendered cards ------------------------------
 
 
 def _check_counts(markup: dict[str, str], rows: list[dict]) -> None:
@@ -344,9 +316,6 @@ def test_script_project_filter_recomputes_every_count(tmp_path: Path, snapshot: 
     assert len(_all(_dom(table["snap"]["tickets"]), lambda n: n["tag"] == "tr")) == len(last) + 1
     assert cleared["hidden"]["tickets"] is False
     assert len(_all(_dom(cleared["snap"]["tickets"]), lambda n: n["tag"] == "tr")) == len(rows) + 1
-
-
-# --- AC2b: phase glyphs and card strips -------------------------------------------------
 
 
 def _canvas(node: dict) -> dict:
@@ -463,9 +432,6 @@ def test_script_without_a_chart_matches_the_server(tmp_path: Path) -> None:
         assert out["html"][ident] == server[ident], ident
 
 
-# --- reduced motion and the PixelStrip engine --------------------------------------------
-
-
 def _strip_attrs(markup: str) -> list[dict]:
     return [node["attrs"] for node in _all(_dom(markup), lambda n: n["tag"] == "canvas")]
 
@@ -500,9 +466,6 @@ def test_script_strip_with_cell_and_done_is_the_server_strip(tmp_path: Path) -> 
     out = pixelstrip._node(tmp_path, "out.calls = " + json.dumps(calls) +
                            ".map(c => serialize(PX.strip(c[0], c[1])));")
     assert out["calls"] == [page.px_strip(key, **kwargs) for key, kwargs in calls]
-
-
-# --- the table moved off activity.html --------------------------------------------------
 
 
 def test_the_table_is_on_job_html_only(snapshot: dict) -> None:
