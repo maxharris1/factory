@@ -1,9 +1,10 @@
 decision	choice	why
-where to normalize	strip inline markup from a copy of each criterion, then run the existing _OTHER_PRS table on it	one edit point; the four patterns stay readable; the original text is untouched by construction
+where to normalize	classify a rendered copy of each criterion, then run the existing _OTHER_PRS table on it	one edit point; the four patterns stay readable; the original text is untouched by construction
 rejected: widen each _OTHER_PRS regex	not done	four rewrites, a gap for every new marker, hard to read
-rejected: full Markdown parser	not done	new dependency for a one-line need
-underscore handling	remove _ runs only at a word edge	pr_157 stays one word and is not read as pr157
-links	keep link text and URL	a /pull/N link target still refuses, as before
+underscore handling	intraword _ is literal under CommonMark	pr_157 stays one word and is not read as pr157
+links	link text joins the prose, URL checked apart	a /pull/N link target still refuses, as before
 ops tags	not normalized here	ticket scopes the fix to the other-PRs gate; a formatted ops tag is a follow-up
 implementation	one poteto-agent (opus high) wrote lib/feeder.py against tests committed first	feature.md step 4 review separation; diff reviewed in the main job
 agent claim: escaped markup missed	refuted by running parse_intake on PR \*\*#157\*\* (refused)	verify by inspecting the artifact, not a self-report
+round 2: regex stripping replaced by markdown-it-py parseInline	_prose_and_link_targets joins text and code_inline content, checks each link and image target apart	review round 1 showed regex stripping deletes autolinks, invents pr2 from code `pr*2`, and leaves [PR](url) #157 unread; markdown-it-py is already a pinned runtime dependency, so the "new dependency" objection was wrong
+round 2: link targets checked apart from prose	a URL never joins surrounding words	keeps the /pull/N check without letting an href complete a PR #N match

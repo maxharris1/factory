@@ -166,8 +166,14 @@ def test_an_operator_step_is_an_ops_criterion(criterion: str) -> None:
         ("**Pull request** #157 is merged first.", (0, 1, 0)),
         ("PR **#157** is merged first.", (0, 1, 0)),
         ("`PR` #157 is merged first.", (0, 1, 0)),
+        ("Lands after <https://github.com/owner/app/pull/157> does.", (0, 1, 0)),
+        ("Evaluates `pr*2` correctly when pr is the pressure ratio.", (1, 0, 1)),
+        ("Accepts `pr~1` as the parent revision of branch pr.", (1, 0, 1)),
+        ("[PR](https://example.com) #157 is merged first.", (0, 1, 0)),
+        ("PR [#157](https://example.com) is merged first.", (0, 1, 0)),
     ],
-    ids=["wrapped", "spelled-out", "user-manual", "bold-words", "bold-number", "code"],
+    ids=["wrapped", "spelled-out", "user-manual", "bold-words", "bold-number", "code",
+         "autolink", "code-star", "code-tilde", "link-word", "link-number"],
 )
 def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, expected) -> None:
     feeder, _, github, _ = make_feeder(tmp_path)
@@ -190,6 +196,9 @@ def test_a_plain_issue_reference_is_not_an_other_prs_criterion() -> None:
         "*PR* #157 is merged first.",
         "[**PR** #157](https://example.com) is merged first.",
         "PR&nbsp;#157 is merged first.",
+        "Lands after [the fix](https://github.com/owner/app/pull/9) does.",
+        "![PR #157](diagram.png) is merged first.",
+        "PR <span>#157</span> is merged first.",
     ],
 )
 def test_a_formatted_other_prs_criterion_is_refused(criterion: str) -> None:
@@ -201,7 +210,9 @@ def test_a_formatted_other_prs_criterion_is_refused(criterion: str) -> None:
 
 @pytest.mark.parametrize(
     "criterion",
-    ["Keeps `pr_157` as one name.", "Fixes **#120**.", "Edits `lib/feeder.py` **only**."],
+    ["Keeps `pr_157` as one name.", "Fixes **#120**.", "Edits `lib/feeder.py` **only**.",
+     "Parses `pr*2` and `pr~1` literally.", "Renders `<b>pr</b>2` as code.",
+     "Escapes `pr\\_2` as written."],
 )
 def test_formatting_alone_does_not_make_an_other_prs_criterion(criterion: str) -> None:
     assert codes(body(criteria=(f"- [ ] {criterion}",))) == set()

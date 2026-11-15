@@ -14,7 +14,7 @@ These are the defaults the builder picked for issue #204. They are listed in the
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/285
 
-- **Decision:** The other-PRs check reads each criterion with its inline Markdown removed: bold, italic, code, strikethrough, HTML tags, backslash escapes and HTML entities. So `PR **#157**`, `**Pull request** #157` and `` `PR` #157 `` are refused like `PR #157`. An underscore inside a word stays, so `pr_157` is not read as `pr157`. Link text and URLs stay, so a `/pull/N` link still counts. The stored criterion, the refusal reason and the brief keep the text as written.
+- **Decision:** The other-PRs check reads each criterion as CommonMark (plus strikethrough) renders it: the text and code-span content, with markup and inline HTML dropped and entities and escapes decoded. Each link or image target is checked on its own, so a `/pull/N` link or autolink still counts. So `PR **#157**`, `[PR](https://example.com) #157` and `` `PR` #157 `` are refused like `PR #157`, while code such as `` `pr*2` `` stays literal and is not read as `pr2`. The stored criterion, the refusal reason and the brief keep the text as written.
 - **When:** 2026-11-14 ET, by Factory decided (technical)
 - **Source:** https://github.com/maxharris1/factory/pull/319
 
