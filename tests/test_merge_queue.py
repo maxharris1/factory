@@ -4,6 +4,7 @@ oldest approval first."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -121,7 +122,7 @@ def test_ship_merge_merges_through_the_queue_in_the_approve_poll(tmp_path: Path)
     assert board.state("42")["workflow_state"] == "merged"
 
 
-def test_ship_merge_waits_behind_an_older_approval(tmp_path: Path) -> None:
+def test_ship_merge_merges_past_an_older_approval_that_is_updating(tmp_path: Path) -> None:
     board = Board(tmp_path, ship="merge")
     older = board.open("1", sha(1))
     younger = board.open("2", sha(2))
@@ -129,8 +130,94 @@ def test_ship_merge_waits_behind_an_older_approval(tmp_path: Path) -> None:
     assert board.state("1")["workflow_state"] == "updating"
 
     assert board.outcome(board.build_and_approve(younger)) == "merge-queue"
+    assert board.actions.merges == [(True, sha(2))]
+    assert board.state("1")["workflow_state"] == "updating"
+
+
+def _queue_of(board: Board, *numbers: str) -> list:
+    prs = [board.open(number, sha(int(number))) for number in numbers]
+    for pr in prs:
+        board.build_and_approve(pr, mergeable=None)
+    for pr in prs:
+        pr.mergeable, pr.mergeable_state = True, "clean"
+    return prs
+
+
+@pytest.mark.parametrize("head_waits", ["update", "ci"])
+def test_ready_entries_merge_one_a_cycle_past_a_head_waiting_on_its_update(
+    tmp_path: Path, head_waits: str
+) -> None:
+    board = Board(tmp_path)
+    head, *behind = _queue_of(board, "407", "418", "416", "391")
+    if head_waits == "update":
+        head.conflict()
+    else:
+        head.ci[head.head] = "pending"
+
+    merged = []
+    for pr in behind:
+        board.poll()
+        merged.append((True, pr.head))
+        assert board.actions.merges == merged
+        assert board.state(pr.number)["workflow_state"] == "merged"
+        assert board.state("407")["workflow_state"] == (
+            "updating" if head_waits == "update" else "merge-queue"
+        )
+    assert len(board.jobs("update-from-main")) == (head_waits == "update")
+
+
+def test_only_a_ready_entry_merges_out_of_turn(tmp_path: Path) -> None:
+    board = Board(tmp_path, hold=HoldConfig())
+    head, held, red, pending, dirty, ready = _queue_of(board, "1", "2", "3", "4", "5", "6")
+    head.conflict()
+    held.labels = ("factory:hold",)
+    red.ci[red.head] = "failure"
+    pending.ci[pending.head] = "pending"
+    dirty.conflict()
+
+    board.poll()
+    assert board.actions.merges == [(True, ready.head)]
+    [update] = board.jobs("update-from-main")
+    assert update["ticket_id"] == "1"
+
+    board.poll()
+    assert board.actions.merges == [(True, ready.head)]
+    for number in ("2", "3", "4", "5"):
+        assert board.state(number)["workflow_state"] == "merge-queue"
+
+
+def test_no_entry_merges_past_an_updating_head_once_finish_line_is_not_merge(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    head, behind = _queue_of(board, "407", "418")
+    behind.ci[behind.head] = "pending"
+    head.conflict()
+    board.poll()
+    assert board.state("407")["workflow_state"] == "updating"
+
+    board.factory = replace(board.factory, finish_line="ready-for-review")
+    behind.ci[behind.head] = "success"
+    board.poll()
     assert board.actions.merges == []
-    assert board.state("2")["workflow_state"] == "merge-queue"
+    assert board.state("418")["workflow_state"] == "merge-queue"
+
+
+@pytest.mark.parametrize("head_waits", ["ci-red", "held", "mergeability"])
+def test_a_head_waiting_on_anything_but_its_update_holds_the_queue(
+    tmp_path: Path, head_waits: str
+) -> None:
+    board = Board(tmp_path, hold=HoldConfig())
+    head, behind = _queue_of(board, "1", "2")
+    if head_waits == "ci-red":
+        head.ci[head.head] = "failure"
+    elif head_waits == "held":
+        head.labels = ("factory:hold",)
+    else:
+        head.mergeable, head.mergeable_state = None, None
+    board.poll()
+    assert board.actions.merges == []
+    assert board.fresh_reads[-1] == "1"
 
 
 def test_hold_still_blocks_a_queued_ship_merge(tmp_path: Path) -> None:
