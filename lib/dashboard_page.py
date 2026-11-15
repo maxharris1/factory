@@ -44,7 +44,7 @@ from lib.dashboard_pages.ticket_detail import (  # noqa: F401
 )
 from lib.dashboard_pages.tickets import _active_jobs, _board, _tickets  # noqa: F401
 from lib.dashboard_telemetry import (  # noqa: F401
-    TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel,
+    TELEMETRY_CSS, TELEMETRY_SCRIPT, rollup_panel,
 )
 from lib.health import CODE_COMPONENTS  # noqa: F401
 from lib.pr_title import label  # noqa: F401

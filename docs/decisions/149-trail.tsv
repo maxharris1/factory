@@ -1,0 +1,7 @@
+step	decision	evidence
+1	Replace job_block with live_run(row) branching on live_mode (none/counters/live)	plan comment 6893150794; job_block had no other caller (grep)
+2	Tiles read #100 counters; head/plan/sub-agents read #148 fields only	tests/test_dashboard_live_run.py ac-1 tests
+3	Null subagents shows "no sub-agent data", empty plan shows "no plan yet", never sample copy	test_nothing_invented over 6 fixtures
+4	No "..." appended to current_task: the text is the agent's own and may already be capped with an ellipsis	design review vs live-run.png
+5	Head and sub-agent strips move only while px_state is a running action	test_broken_jobs_hold_the_head_and_agent_strips_still
+6	Server and script render byte-identical markup	test_script_renders_the_same_panel over 6 fixtures (node)

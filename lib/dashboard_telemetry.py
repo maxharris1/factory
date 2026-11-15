@@ -1,4 +1,4 @@
-"""Job telemetry on the dashboard: the job modal's feed and the Efficiency rollup (#93).
+"""Job telemetry on the dashboard: the snapshot's job summaries and the Efficiency rollup (#93).
 
 `read_telemetry` reads the `job_telemetry` table (written by `orch job run`,
 lib/telemetry.py) inside the dashboard's read-only transaction. A database
@@ -39,8 +39,8 @@ Snapshot shape:
   of the RECENT_JOBS most recently finished jobs (so a job modal opened on
   a job that has just finished can still show how it ended).
 
-The page side mirrors lib/dashboard_page.py: `job_block` and `rollup_panel`
-render server-side, and TELEMETRY_SCRIPT holds the same renderers for the
+The page side mirrors lib/dashboard_page.py: `rollup_panel` renders
+server-side, and TELEMETRY_SCRIPT holds the same renderers for the
 page script (createElement/textContent only), spliced into its scope.
 """
 
@@ -370,82 +370,9 @@ def _usd(value: object) -> str:
     return f"${value:,.2f}"
 
 
-def _dur(seconds: object) -> str:
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
-        return "—"
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m {seconds % 60:02d}s"
-    if seconds < 86400:
-        return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
-    return f"{seconds // 86400}d {seconds % 86400 // 3600}h"
-
-
 def _span(cls: str | None, text: object) -> str:
     attr = f' class="{cls}"' if cls else ""
     return f"<span{attr}>{_e(text)}</span>"
-
-
-def _tests(item: dict) -> str:
-    if item["tests_passed"] is None and item["tests_failed"] is None:
-        return "—" if not item["test_runs"] else f"{item['test_runs']} runs"
-    return f"{_num(item['tests_passed'])} / {_num(item['tests_failed'])}"
-
-
-def _tokens(item: dict) -> str:
-    if not item.get("tokens_known", True):
-        return NO_DATA
-    return f"{_num(item['tokens_in'])} / {_num(item['tokens_out'])}"
-
-
-def _stats(item: dict) -> list[tuple[str, str, str]]:
-    failed = item["tests_failed"] or 0
-    return [
-        (_num(item["turns"]), "turns", ""),
-        (_num(item["tool_calls_total"]), "tool calls", ""),
-        (_num(item["commands"]), "commands", ""),
-        (_num(item["files_touched"]), "files touched", ""),
-        (_tests(item), "tests pass / fail", "bad" if failed else ""),
-        (_tokens(item), "tokens in / out", ""),
-        (_usd(item["cost_usd"]), "cost", ""),
-        (_dur(item["elapsed_seconds"]), "elapsed", ""),
-    ]
-
-
-def job_block(item: dict | None) -> str:
-    """The telemetry section of a job's page: counters only."""
-    head = '<h3 class="tele-head">telemetry</h3>'
-    if item is None:
-        return f'<section class="telemetry">{head}<p class="empty">no telemetry</p></section>'
-    if item["finished"]:
-        reason = item["exit_reason"] or "finished"
-        bad = item["exit_code"] not in (0, None)
-        status = (
-            f'<p class="tele-exit">{_span("label", "exit")}'
-            f'{_span("chip " + ("bad" if bad else "ok"), reason)}</p>'
-        )
-    else:
-        activity = item["last_activity_age_seconds"]
-        status = (
-            f'<p class="muted tele-live">{_e(item["harness"])} · '
-            + ("no events yet" if activity is None else f"last activity {_dur(activity)} ago")
-            + "</p>"
-        )
-    if not item["events"]:
-        empty = "no telemetry yet" if not item["finished"] else "no telemetry"
-        return f'<section class="telemetry">{head}{status}<p class="empty">{empty}</p></section>'
-    stats = "".join(
-        f'<div class="stat"><b class="{cls}">{value}</b>{_span(None, label)}</div>'
-        if cls
-        else f'<div class="stat"><b>{value}</b>{_span(None, label)}</div>'
-        for value, label, cls in _stats(item)
-    )
-    return (
-        f'<section class="telemetry">{head}{status}'
-        f'<div class="stats tele-stats">{stats}</div></section>'
-    )
 
 
 def _table(rows: list[dict], first: str) -> str:
@@ -535,67 +462,22 @@ def rollup_panel(snapshot: dict) -> str:
 
 
 TELEMETRY_CSS = (
-    ".telemetry{margin:12px 0 4px;padding-top:8px;border-top:1px solid var(--line)}"
     ".tele-head{margin:14px 0 6px;font:500 11px/1.4 var(--mono);color:var(--muted);"
     "text-transform:uppercase;letter-spacing:.08em}"
     "#tokens .stats{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 12px}"
     "#tokens .stat{flex:1 1 140px;padding:10px 14px 12px}"
     "#tokens .stat b{font:600 30px/1.15 var(--mono);letter-spacing:-.03em}"
     "#tokens .stat span{font:500 12px/1.3 var(--mono)}"
-    ".tele-exit{display:flex;gap:8px;align-items:baseline;margin:4px 0}"
 )
 
 
 # The page script's renderers for the same markup. Spliced into the script's
-# scope (lib/dashboard_pages/common.py, __TELEMETRY__), so el, add, chip, num and dur
+# scope (lib/dashboard_pages/common.py, __TELEMETRY__), so el, add and num
 # are the script's own helpers. textContent only.
 TELEMETRY_SCRIPT = r"""
-  // --- job telemetry (#93): the modal's feed and the Efficiency rollup -------
+  // --- job telemetry (#93): the Efficiency rollup -------
 
   function usd(v) { return (v === null || v === undefined || !isFinite(v)) ? '—' : '$' + Number(v).toFixed(2); }
-  function teleTests(t) {
-    if ((t.tests_passed === null || t.tests_passed === undefined) &&
-        (t.tests_failed === null || t.tests_failed === undefined)) {
-      return t.test_runs ? t.test_runs + ' runs' : '—';
-    }
-    return num(t.tests_passed) + ' / ' + num(t.tests_failed);
-  }
-  function teleTokens(t) {
-    return t.tokens_known === false ? 'no data' : num(t.tokens_in) + ' / ' + num(t.tokens_out);
-  }
-  function telemetryBlock(t) {
-    var sec = el('section', 'telemetry');
-    add(sec, el('h3', 'tele-head', 'telemetry'));
-    if (!t) { add(sec, el('p', 'empty', 'no telemetry')); return sec; }
-    if (t.finished) {
-      var exit = add(sec, el('p', 'tele-exit'));
-      add(exit, el('span', 'label', 'exit'));
-      add(exit, chip(t.exit_reason || 'finished', (t.exit_code === 0 || t.exit_code === null || t.exit_code === undefined) ? 'ok' : 'bad'));
-    } else {
-      var live = add(sec, el('p', 'muted tele-live'));
-      if (t.last_activity_age_seconds === null || t.last_activity_age_seconds === undefined) {
-        live.textContent = t.harness + ' · no events yet';
-      } else {
-        ticking(live, t.last_activity_age_seconds, t.harness + ' · last activity ', ' ago');
-      }
-    }
-    if (!t.events) { add(sec, el('p', 'empty', t.finished ? 'no telemetry' : 'no telemetry yet')); return sec; }
-    var stats = add(sec, el('div', 'stats tele-stats'));
-    [[num(t.turns), 'turns', ''], [num(t.tool_calls_total), 'tool calls', ''], [num(t.commands), 'commands', ''],
-     [num(t.files_touched), 'files touched', ''], [teleTests(t), 'tests pass / fail', t.tests_failed ? 'bad' : ''],
-     [teleTokens(t), 'tokens in / out', ''], [usd(t.cost_usd), 'cost', ''],
-     [dur(t.elapsed_seconds), 'elapsed', '']].forEach(function (s) {
-      var box = add(stats, el('div', 'stat'));
-      add(box, el('b', s[2] || null, s[0]));
-      add(box, el('span', null, s[1]));
-    });
-    return sec;
-  }
-  // A job that just finished leaves the running list; its summary is in the rollup.
-  function finishedTelemetry(d, job) {
-    var recent = (d.telemetry && d.telemetry.recent) || [];
-    return recent.filter(function (t) { return t.job === job; })[0] || null;
-  }
   function teleTable(root, rows, first, recent) {
     if (!rows.length) { add(root, el('p', 'empty', recent ? 'no finished jobs with telemetry' : 'no jobs with telemetry')); return; }
     var table = add(root, el('table'));
