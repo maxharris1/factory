@@ -360,6 +360,7 @@ SCRIPT = r"""
       var a = add(li, link(null, 'job.html#' + anchor(r.job)));
       add(a, bot(r.recipient));
       add(a, el('span', 'ticket', jobLabel(r)));
+      tierChip(a, r.tier);
       add(li, el('span', 'what', r.action));
       ticking(add(li, el('span', 'when')), r.age_seconds, 'waiting ');
       if (r.no_waiter) add(li, link('chip bad', healthLink(r.no_waiter_link))).textContent = 'no waiter for ' + r.no_waiter;
@@ -448,6 +449,10 @@ SCRIPT = r"""
     'waiting-blocked': 'waiting on a blocker', 'feeding': 'feeding', 'error': 'feed error, retrying',
     'fed': 'fed', 'done': 'fed, job queued', 'closed': 'PR closed, not fed'};
 
+  function tierChip(parent, tier) {
+    if (tier !== null && tier !== undefined) add(parent, chip('tier ' + tier, 'accent'));
+  }
+
   function intakeSplit(items) {
     var fed = items.filter(function (x) { return x.fed_age_seconds !== null && x.fed_age_seconds !== undefined; })
       .sort(function (a, b) { return a.fed_age_seconds - b.fed_age_seconds; }).slice(0, 3);
@@ -497,6 +502,7 @@ SCRIPT = r"""
       split.top.forEach(function (x) {
         var li = add(ul, el('li'));
         add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
+        tierChip(li, x.tier);
         add(li, el('span', 'what', state(x)));
         add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
       });
@@ -507,6 +513,7 @@ SCRIPT = r"""
       split.rest.forEach(function (x) {
         var li = add(list2, el('li'));
         add(li, el('span', 'ticket', short(x.repo) + '#' + x.issue));
+        tierChip(li, x.tier);
         add(li, el('span', 'what', state(x)));
         add(li, el('span', 'when', x.pr ? '→ PR #' + x.pr : ''));
       });
@@ -718,7 +725,8 @@ def _queue_lane(snapshot: dict) -> str:
                 chip = ""
             items.append(
                 f'<li><a href="job.html#{anchor(row["job"])}">{_bot(row["recipient"])}'
-                f'{_span("ticket", _job_label(row))}</a>{_span("what", row["action"])}'
+                f'{_span("ticket", _job_label(row))}{_tier_chip(row.get("tier"))}</a>'
+                f'{_span("what", row["action"])}'
                 f'{_when(row["age_seconds"], "waiting ")}{chip}'
                 f'<span class="belt" aria-hidden="true">{strip}</span></li>'
             )
@@ -867,11 +875,16 @@ def _feeder(snapshot: dict) -> str:
     )
 
 
+def _tier_chip(tier: object) -> str:
+    return "" if tier is None else _chip(f"tier {tier}", "accent")
+
+
 def _fed_line(item: dict) -> str:
     state = item.get("reason") or _FEEDER_STATE.get(item["state"], item["state"])
     pr = f"→ PR #{item['pr']}" if item.get("pr") else ""
     return (
-        f'<li>{_span("ticket", f"{_short(item["repo"])}#{item["issue"]}")}{_span("what", state)}'
+        f'<li>{_span("ticket", f"{_short(item["repo"])}#{item["issue"]}")}{_tier_chip(item.get("tier"))}'
+        f'{_span("what", state)}'
         f'<span class="when">{_e(pr)}</span></li>'
     )
 

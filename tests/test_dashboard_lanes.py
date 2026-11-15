@@ -454,20 +454,6 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"
 
 
-@needs_chrome
-def test_the_jobs_list_keeps_its_spacing_on_the_tickets_page(tmp_path: Path, browser: Browser) -> None:
-    browser.open(_page_with_status_stub(_base(tmp_path), "job.html"), 375)
-    items = browser.eval("""[].map.call(document.querySelectorAll('#jobs .queue-item'), function (a) {
-      var s = getComputedStyle(a), kids = [].map.call(a.children, function (c) { return c.getBoundingClientRect(); });
-      return {display: s.display, underline: s.textDecorationLine,
-              gaps: kids.slice(1).map(function (k, i) { return k.top >= kids[i].bottom ? 8 : k.left - kids[i].right; })};
-    })""")
-    assert items
-    for item in items:
-        assert item["display"] == "flex" and item["underline"] == "none"
-        assert min(item["gaps"]) >= 8, item
-
-
 def write_screenshots(out: Path) -> list[Path]:
     html = _page_with_status_stub(fifteen_slot_snapshot(Path(tempfile.mkdtemp())), "index.html")
     chrome = Browser()

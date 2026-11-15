@@ -68,6 +68,7 @@ out holds one slot on one device. `orch job run` then:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -80,7 +81,7 @@ from typing import IO, BinaryIO
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
 from lib.device_pool import DevicePool, Placement, read_autostart
-from lib.job_run import OUTPUT_GRACE_SECONDS
+from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
     REQUEUED_EARLY_EXIT,
     RUN_DIED,
@@ -237,6 +238,7 @@ class PlacedRun:
         *,
         report_env: bool = False,
         output: Callable[[IO[bytes]], None] | None = None,
+        budget: Budget | None = None,
     ) -> int:
         """Launch the command detached on the device and follow it (#128).
 
@@ -250,6 +252,9 @@ class PlacedRun:
         its private `env` file, which the follower relays ahead of the log.
         `output` (lib/telemetry.py) then takes the relayed output in place
         of stdout, as job_run.run's `output` does for a local command.
+
+        With a `budget` (#199 r1), the launch carries what is left of it, so
+        the device stops the run past it even when this runner is gone.
         """
         assert self.target is not None
         # Factory, Nov 13: the waiter config is shared by every device, so a
@@ -266,11 +271,17 @@ class PlacedRun:
             report_env=report_env,
             env_file=run_file(self.target, ENV_FILE) if report_env else None,
         )
+        limits = (
+            {"budget": max(1, math.ceil(budget.remaining())), "grace": math.ceil(budget.grace)}
+            if budget is not None
+            else {}
+        )
         launch = launch_script(
             self.target,
             start,
             size=len(brief),
             not_after=int(time.time()) + LAUNCH_TTL_SECONDS,
+            **limits,
         )
         assert isinstance(self.transport, ByteTransport)
         sink: BinaryIO = sys.stdout.buffer
@@ -395,6 +406,17 @@ class PlacedRun:
             return False
         return harness_launched(self.transport, self.target) is False
 
+    def live_worker(self) -> int | None:
+        """A box worker of this job that still runs (its pid), or None."""
+        workers = list(self._worker)
+        if self.placement.worker_pid is not None:
+            # a worker an earlier, dead runner of this job left behind
+            workers.append((self.placement.worker_pid, self.placement.worker_start))
+        for pid, start in workers:
+            if self.alive(pid, start):
+                return pid
+        return None
+
     def finish(
         self, code: int | None = None, settle: Callable[[], None] | None = None
     ) -> bool:
@@ -411,14 +433,10 @@ class PlacedRun:
         if self.requeued:
             return True  # the requeue freed the slot; nothing was started
         if self.target is None:
-            workers = list(self._worker)
-            if self.placement.worker_pid is not None:
-                # a worker an earlier, dead runner of this job left behind
-                workers.append((self.placement.worker_pid, self.placement.worker_start))
-            for pid, start in workers:
-                if self.alive(pid, start):
-                    self.log(f"worker pid {pid} still runs; slot held")
-                    return _held(settle)
+            pid = self.live_worker()
+            if pid is not None:
+                self.log(f"worker pid {pid} still runs; slot held")
+                return _held(settle)
             return self._release(code, settle)
         status = check_worker(self.transport, self.target)
         cancelled = self.follow_end is not None and self.follow_end.kind == STOPPED

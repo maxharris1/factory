@@ -83,7 +83,7 @@ from lib.load import load_yaml
 from lib.orch_yml import POLL_SECONDS, POLL_SECONDS_ALLOWED, OrchConfig
 from lib.pr_title import SOURCE, read_sources
 from lib.project_rules import read_rows as read_project_rules
-from lib.queue import ACTIONS, RECIPIENTS, STATES
+from lib.queue import ACTIONS, RECIPIENTS, STATES, PriorityMark, priority_marks
 from lib.schema import TICKETS
 from lib.status import PAUSED_STATES, _hold_approvers
 from lib.worktrees import pid_alive
@@ -1008,6 +1008,7 @@ def _read_db(
     # Each running or queued job's ticket as stored, to find its history.
     active: list[tuple[dict, str, str]] = []
     box_running = 0  # running harness jobs with no placement: on the box (#90)
+    marks = priority_marks(connection) if jobs else {}
     running_on: dict[str, int] = {}  # running jobs per device they are placed on
     if jobs:
         for row in connection.execute(
@@ -1078,7 +1079,9 @@ def _read_db(
                 # The poller's queue-wait clock: since it was queued, or
                 # since a claim that never started was released (#77 F1.2).
                 age = _age(now, row["last_activity_at"]) or 0
-                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age}
+                mark = marks.get((str(row["repo"]).lower(), str(row["ticket_id"])), PriorityMark())
+                item = {**base, "round": _detail_round(row["detail"]), "age_seconds": age,
+                        "tier": mark.tier}
                 queued.append(item)
                 active.append((item, str(row["repo"]), str(row["ticket_id"])))
             # Stuck / overdue: past the timeout, or (#75) a running job whose
@@ -1231,6 +1234,7 @@ def _read_db(
                     "pr": _clean(item["pr_number"], 16) if item["pr_number"] is not None else None,
                     "reason": _clean(item["waiting_reason"], 200) if item["waiting_reason"] else None,
                     "fed_age_seconds": _age(now, item["fed_at"]),
+                    "tier": None if item["tier"] is None else int(item["tier"]),
                 }
                 for item in items
             ],

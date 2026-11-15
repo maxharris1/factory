@@ -1,0 +1,15 @@
+decision	choice	why
+phase per state	ticket_phases(chart) in lib/dashboard_flow.py: each state takes the legend name of its colour group, then PHASE_OVERRIDES (capped to Stop; handed-off, merged, done to Shipped)	ticket: one tested function, not a second hard-coded list; STATUS.md decision 4
+stuck and unknown states	ticket_phase sends a stuck-flagged ticket, or a state the chart lacks, to Stop	STATUS.md decision 5; AC1 holds for any database
+merge-queue and updating	Ship column	teal on the chart and in flight; follows from the derivation
+script twin phase table	page_script(chart) fills __PHASES__ from phase_table; the script does not re-derive it	one source for server and script, like __FLOW__
+waiting-on-a-human strip	static effect, warn tint #ff9e64, for awaiting-ok and waiting-max	SPEC motion rule 4 still and amber; the delegate used off, which draws zero intensity (a dark bar)
+Stopped tickets	full cards in the artboard stuck-card pattern inside the Shipped panel, with a Stop glyph on the label	artboard shows Stopped empty; AC names a Stop static red glyph
+done subgroup	added after merged on the shelf	ticket lists done in the shelf; artboard has two subgroups
+px_strip import in tickets.py	function-local import of shell	shell imports tickets for _PANELS; moving 650 lines of PixelStrip code would conflict with every open Mission Control ticket
+screenshots	tests/render_board_screenshots.py renders board_snapshot through headless Chromium over CDP, clock pinned to the fixture NOW	rerunnable by the reviewer
+comment-sicko MUST KILL board twice	rejected	the ticket requires a server render and a script twin with the same markup; parity tests guard it
+comment-sicko MUST KILL _px	left open	see px_strip import row
+script twin phase table (round 2)	the script derives the table from each snapshot statechart with phaseTable; page_script takes no chart and injects board_constants as __BOARD__	codex f-2: a page built while the chart was missing froze PHASES empty and never recovered; the parity tests over every chart state keep the two derivations equal
+job joins (round 2)	cards join running, queued, verdict and stuck rows on the casefolded repo#ticket key (_join, joinKey); display keys keep their case	codex ac-3: the dispatcher lowercases tracked repos but jobs keep the project spelling, so mixed-case repos showed no job running; same rule as lib/dashboard.py job flow
+filter focus (round 2)	renderBoard notes the focused tk-btn and focuses the rebuilt button with the same data-project or data-view value	codex f-1: rebuilding the controls on each render dropped focus to BODY; restoring by value is smaller than diffing the buttons

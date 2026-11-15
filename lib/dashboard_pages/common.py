@@ -34,7 +34,7 @@ CSS_PANEL = """\
 .panel{grid-column:span 4;position:relative;min-width:0;padding:14px 16px 16px;
 background:var(--panel);box-shadow:var(--elev);transition:box-shadow .15s var(--ease)}
 .panel:hover{box-shadow:var(--elev-hi)}
-#kpis,#tickets,#log,#attention,#jobs,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
+#kpis,#ticket-filter,#pipeline,#shipped,#tickets,#log,#attention,#jobview,#components,#no-waiter{grid-column:1/-1}#lanes{grid-column:span 9}#queue{grid-column:span 3}
 #handoffs,#verdicts,#health{grid-column:span 6}
 .panel h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:0 0 12px;
 font:600 13px/1.3 var(--mono);letter-spacing:-.01em;color:var(--text)}
@@ -268,8 +268,8 @@ SCRIPT_TAIL = r"""
 
   var PAGES = {
     main: [renderKpis, renderLanes, renderJustHappened, renderIntake],
-    job: [renderJobs, renderJobView],
-    activity: [renderAttention, renderHandoffs, renderVerdicts, renderTickets, renderLog],
+    job: [renderBoard, renderTickets, renderJobView],
+    activity: [renderAttention, renderHandoffs, renderVerdicts, renderLog],
     efficiency: [renderSavings, renderJobsLifetime, renderRounds, renderWorking, renderHeadroom, renderTokens,
                  renderHealth],
     health: [renderComponents, renderNoWaiter]
@@ -461,11 +461,13 @@ def _chip(text: object, cls: str = "muted") -> str:
     return _span(f"chip {cls}", text)
 
 
-def _panel(ident: str, title: str, inner: str, *, count: object = None, extra: str = "") -> str:
+def _panel(
+    ident: str, title: str, inner: str, *, count: object = None, extra: str = "", hidden: bool = False
+) -> str:
     head = _span(None, title) + ("" if count is None else _span("count", count))
     classes = f"panel {extra}".strip()
     return (
-        f'<section class="{classes}" id="{ident}" aria-label="{_e(title)}">'
+        f'<section class="{classes}" id="{ident}" aria-label="{_e(title)}"{" hidden" if hidden else ""}>'
         f"<h2>{head}</h2>{inner}</section>"
     )
 

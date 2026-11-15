@@ -20,7 +20,7 @@ from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _health, _log, _no_waiter, _POLL_STATE,
 )
 from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
-from lib.dashboard_pages.tickets import _jobs, _tickets
+from lib.dashboard_pages.tickets import _board, _tickets
 
 
 CSS = """\
@@ -325,7 +325,7 @@ PX_SCRIPT = r"""
 (function () {
   var TABLE = __PX__;
   var FPS = 20;
-  var DATA = ['progress', 'load', 'seed', 'speed', 'used', 'slots', 'rate', 'done', 'burst', 'still'];
+  var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst', 'still'];
   var STRIPS = new Map();
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   var sysStill = !!(mq && mq.matches);
@@ -786,6 +786,8 @@ PX_SCRIPT = r"""
       if (opts[k] !== null && opts[k] !== undefined) el.setAttribute('data-' + k, String(Number(opts[k])));
     });
     if (opts.still) el.setAttribute('data-still', 'true');
+    if (opts.cell !== null && opts.cell !== undefined) el.setAttribute('data-cell', String(Math.max(2, Math.min(16, Math.floor(Number(opts.cell) || 4)))));
+    if (opts.done) el.setAttribute('data-done', 'true');
     el.setAttribute('data-px-key', String(key));
     el.setAttribute('aria-hidden', 'true');
     el.setAttribute('style', style + 'height:' + height + 'px');
@@ -969,6 +971,8 @@ def px_strip(
     slots: int | None = None,
     burst: int | None = None,
     still: bool = False,
+    cell: int | None = None,
+    done: bool = False,
     height: int = 16,
 ) -> str:
     """A PixelStrip canvas (the script draws it; without script its CSS
@@ -1009,6 +1013,10 @@ def px_strip(
             attrs.append((f"data-{name}", f"{float(value):g}"))
     if still:
         attrs.append(("data-still", "true"))
+    if cell is not None:
+        attrs.append(("data-cell", str(max(2, min(16, int(cell))))))
+    if done:
+        attrs.append(("data-done", "true"))
     attrs += [("data-px-key", str(key)), ("aria-hidden", "true"), ("style", f"{style}height:{height}px")]
     return "<canvas " + " ".join(f'{name}="{_e(value)}"' for name, value in attrs) + "></canvas>"
 
@@ -1240,10 +1248,10 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _just_happened_and_intake),
-    "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
+    "activity.html": (_attention, _handoffs, _verdicts, _log),
     "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel, _health),
     "health.html": (_components, _no_waiter),
-    "job.html": (_jobs, _jobview),
+    "job.html": (_board, _tickets, _jobview),
 }
 
 
