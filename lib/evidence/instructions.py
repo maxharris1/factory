@@ -13,8 +13,8 @@ None for any other trigger. A go or answers counts only with `from=grok-bot`,
 extra-round go also counts from an approvers login, matched without regard to
 case, as the dispatcher lets an approver lift a cap. The prose is the trigger's
 body without its header, or None when the comment was edited after it was
-posted. An approver's plain `/go` (#173) counts as a go, and its prose is its
-instruction line.
+posted. An approver's plain `/go` (#173) counts too, as extra-round for a fix and
+go otherwise; its prose is its instruction line.
 
 prior_instruction is the resumed job's `instruction`, which the resume's own
 instruction replaces in its detail. plan_attempt is plan_gap_count + 1 for a
@@ -92,7 +92,8 @@ def _trigger(
             login.casefold() for login in approvers
         }:
             return None, None, None
-        return ("extra-round" if action == "fix" else "go"), slash_go.instruction, comment.url
+        prose = None if comment.edited_at is not None else slash_go.instruction
+        return ("extra-round" if action == "fix" else "go"), prose, comment.url
     fields = handoff.as_dict()
     kind = fields["kind"]
     if kind == "go":

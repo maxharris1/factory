@@ -130,8 +130,6 @@ class QuestionsMixin:
         ticket: TrackedTicket,
         comment: Comment,
     ) -> tuple[bool, str] | None:
-        """Queue again the step a waiting-max ticket paused, keyed on the
-        releasing comment. None when nothing is paused."""
         with self._connect() as connection:
             paused = connection.execute(
                 """

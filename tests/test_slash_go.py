@@ -1,5 +1,4 @@
-"""#173: Max's own `/go` from an approver login releases a capped or
-waiting-max ticket, as an approver `kind=go` would."""
+"""#173: an approver's plain `/go` releases a capped or waiting-max ticket."""
 
 from __future__ import annotations
 
@@ -31,9 +30,6 @@ def to_waiting_max(flow: AppFlow) -> None:
     assert flow.state()["workflow_state"] == "waiting-max"
 
 
-# --- parser ----------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("body", "parsed"),
     [
@@ -61,9 +57,6 @@ def test_parse_slash_go_accepts_go_and_one_instruction_line(body: str, parsed: S
 )
 def test_parse_slash_go_refuses_chat(body: str) -> None:
     assert parse_slash_go(body) is None
-
-
-# --- AC1: a capped ticket --------------------------------------------------------
 
 
 @pytest.mark.parametrize("enabled", [True, False, None])
@@ -95,9 +88,6 @@ def test_slash_go_instruction_reaches_the_fix_evidence(tmp_path: Path) -> None:
     assert job is not None and job.request.source_comment_id == "slash-1"
     instructions = json.loads(job.request.detail)["evidence"]["instructions"]
     assert (instructions["cause"], instructions["prose"]) == ("extra-round", "Try the smaller parser.")
-
-
-# --- AC2: a waiting-max ticket ---------------------------------------------------
 
 
 def test_slash_go_from_max_releases_a_waiting_max_ticket(tmp_path: Path) -> None:
@@ -154,9 +144,6 @@ def test_slash_go_releases_an_unsatisfiable_criterion(tmp_path: Path) -> None:
     assert flow.state()["workflow_state"] != "waiting-max"
 
 
-# --- AC3: a bot login ------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("enabled", "author"),
     [(True, APP_BOT), (False, "grok-login"), (True, "grok-login"), (True, "claude-login"), (False, "codex-login")],
@@ -197,9 +184,6 @@ def test_slash_go_from_a_stranger_is_ignored_without_a_wake(tmp_path: Path) -> N
 
     assert (flow.state()["workflow_state"], flow.state()["cap_extra"]) == ("capped", 0)
     assert jobs(flow) == before
-
-
-# --- AC4: no target, and the other gates ------------------------------------------
 
 
 @pytest.mark.parametrize("state", ["building", "review", "fixing", "handed-off", "merge-queue", "blocked"])

@@ -1,9 +1,4 @@
-"""Max's plain slash commands on a PR (#173).
-
-A `/go` comment is the first non-blank line `/go` (any case), then at most
-one more non-blank line: the instruction. Anything longer, or prose that only
-mentions `/go`, is chat and parses to None.
-"""
+"""Max's plain slash commands on a PR (#173)."""
 
 from __future__ import annotations
 
