@@ -615,6 +615,9 @@ class Dispatcher:
         self._stopped_due: set[tuple[str, str]] = set()
         # Repos (lowercased) that merged a PR this poll: one merge each (#130).
         self._merged_repos: set[str] = set()
+        # #219: repos (lowercased) with a ticket that entered merged this
+        # poll, for the self-deploy kick after the cycle.
+        self.merged_this_poll: set[str] = set()
         # #130: while the per-ticket pass runs, an approval later in it may
         # not be recorded yet, so an after: ok's ship waits for the pass end.
         self._ticket_pass = False
@@ -630,6 +633,7 @@ class Dispatcher:
             begin()
         self._polled = {}
         self._merged_repos = set()
+        self.merged_this_poll = set()
         self._fresh_reader = getattr(source, "fresh_ticket", None)
         self._poll_seconds = getattr(
             getattr(source, "config", None), "poll_seconds", POLL_SECONDS
@@ -977,7 +981,10 @@ class Dispatcher:
         ).fetchall()
         for row in queued:
             self.queue.cancel(str(row["id"]), f"merged:{reason}", connection=connection)
-        return prior is None or prior["workflow_state"] != "merged"
+        entered = prior is None or prior["workflow_state"] != "merged"
+        if entered:
+            self.merged_this_poll.add(repo.lower())
+        return entered
 
     def process(self, ticket: TrackedTicket) -> None:
         try:
