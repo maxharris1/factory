@@ -22,6 +22,7 @@ from lib.followups import (
     link_comment,
     link_marker,
 )
+from lib.handoff import parse_comment
 
 
 class FollowupsMixin:
@@ -46,6 +47,7 @@ class FollowupsMixin:
             _comment_link(comment),
             comment.id,
             findings,
+            parse_comment(comment.body).as_dict().get("risk", ticket.risk),
         )
         labels = [*([ticket.intake_label] if ticket.intake_label else []), "urgent"]
         connection.execute(

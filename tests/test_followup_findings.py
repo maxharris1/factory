@@ -11,7 +11,8 @@ from markdown_it import MarkdownIt
 from lib.brief import render_brief
 from lib.dispatcher import CIResult, Dispatcher, TrackedTicket
 from lib.factory_md import load_factory_md, parse_factory_context, parse_factory_md
-from lib.feeder_gates import github_ref, parse_gate_lines
+from lib.feeder import parse_intake
+from lib.feeder_gates import GateLines, Holds, github_ref, parse_gate_lines
 from lib.followups import followup_findings, followup_issue
 from tests import regenerate_brief_snapshots as snapshots
 from tests.merge_queue_support import Board, sha
@@ -119,7 +120,7 @@ def test_follow_up_items_are_kept_verbatim_and_others_dropped() -> None:
 
 def test_follow_up_ticket_names_the_pr_verdict_and_findings() -> None:
     url = "https://github.com/owner/repo/pull/42#issuecomment-99"
-    title, body = followup_issue("owner/repo", 42, 4, url, "99", (FIRST, SECOND))
+    title, body = followup_issue("owner/repo", 42, 4, url, "99", (FIRST, SECOND), "low")
 
     assert title == "Follow-ups from #42 r4"
     assert "Blocked by: #42" in body.splitlines()
@@ -131,16 +132,48 @@ def test_follow_up_ticket_names_the_pr_verdict_and_findings() -> None:
 
 
 def test_only_the_follow_up_ticket_own_blocker_is_a_feeder_gate() -> None:
-    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (FIRST, SECOND))
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (FIRST, SECOND), "low")
     gates = parse_gate_lines(body, "owner/repo")
     assert gates.blocked_by == frozenset({github_ref("owner/repo", 42)})
-    assert gates.touches == frozenset()
+    assert gates.touches == frozenset({"lib/a.py", "lib/x.py", "lib/c.py", "lib/y.py"})
     assert gates.conflicts_with == frozenset()
+
+
+@pytest.mark.parametrize("risk", ["low", "high"])
+def test_follow_up_ticket_passes_feeder_intake(risk: str) -> None:
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (FIRST, SECOND), risk)
+    intake = parse_intake(body, labels=("factory:ready", "urgent"))
+    assert intake.defects == ()
+    assert intake.risk == risk
+    assert intake.plan_first is False
+    assert intake.depends_on == "#42"
+    assert len(intake.criteria) == 2
+
+
+@pytest.mark.parametrize("path", ["bin/orch", "deploy/orch-poll.service", "lib/a.py", "factory.md"])
+def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str) -> None:
+    finding = (
+        f"1. [follow-up] {path}:10 drops the exit status (round 4/5, owner/repo#7, "
+        "https://github.com/owner/repo/pull/7, /home/bot/x.py, lib.followups)."
+    )
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (finding,), "low")
+    gates = parse_gate_lines(body, "owner/repo")
+    holds = Holds()
+    holds.take(github_ref("owner/repo", 100), (), GateLines(touches=frozenset({path})))
+
+    assert gates.touches == frozenset({path})
+    assert holds.collision(github_ref("owner/repo", 101), gates) is not None
+
+
+def test_follow_up_ticket_without_cited_files_has_no_touches_line() -> None:
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", ("1. [follow-up] rename it",), "low")
+    assert parse_intake(body, labels=()).defects == ()
+    assert parse_gate_lines(body, "owner/repo").touches == frozenset()
 
 
 def test_follow_up_ticket_body_fits_github_limit() -> None:
     huge = tuple(f"{n}. [follow-up] " + "x" * 9000 for n in range(1, 11))
-    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", huge)
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", huge, "low")
     assert len(body) <= 65536
     assert "Blocked by: #42" in body.splitlines()
     assert body.splitlines()[-1] == "<!-- orch-followup verdict=99 -->"
@@ -249,9 +282,10 @@ def verdict_ticket(
     followup: int | None = 4,
     author: str = "codex-login",
     head: str = HEAD,
+    risk: str = "high",
 ) -> TrackedTicket:
     body = (
-        VERDICT.format(round=f"{round_number}/5", head=head, verdict=verdict, risk="high")
+        VERDICT.format(round=f"{round_number}/5", head=head, verdict=verdict, risk=risk)
         + "\n".join(findings)
         + "\n"
     )
@@ -284,7 +318,8 @@ def test_approve_with_follow_ups_ships_as_before_and_files_one_ticket(tmp_path: 
 
     actions = FollowupActions()
     dispatcher, queue = at_round(tmp_path / "followup", actions, 4)
-    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A, MINOR, FOLLOWUP_B))
+    approve = verdict_ticket("APPROVE", 4, (FOLLOWUP_A, MINOR, FOLLOWUP_B), risk="low")
+    assert approve.risk == "high"
     dispatcher.process(approve)
 
     assert handled_outcome(queue, VERDICT_ID) == handled_outcome(plain_queue, VERDICT_ID) == "merged"
@@ -298,6 +333,10 @@ def test_approve_with_follow_ups_ships_as_before_and_files_one_ticket(tmp_path: 
     assert "> 1. [follow-up] lib/a.py:10 breaks the path-format rule from round 2." in body
     assert "> 2. [follow-up] lib/c.py:7 breaks the exception rule from round 3." in body
     assert "[minor]" not in body
+    intake = parse_intake(body, labels)
+    assert intake.defects == ()
+    assert intake.risk == "low"
+    assert "Touches: lib/a.py, lib/c.py" in body.splitlines()
     assert actions.pr_comments == [
         "Follow-ups from review round 4 are filed as #300; they do not block this PR."
         f"\n\n<!-- orch-followup-link verdict={VERDICT_ID} -->"
