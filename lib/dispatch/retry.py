@@ -33,6 +33,7 @@ _STEP_BY_STATE: Mapping[str, RetryStep] = {
     "updating": "update",
 }
 _HARNESS_ACTIONS = ("plan", "build", "review", "fix", "update-from-main")
+_REPLAY_STATE: Mapping[str, str] = {"plan": "planning", "review": "review"}
 
 
 def _retry_step(
@@ -153,8 +154,8 @@ class RetryMixin:
         if step == "plan":
             state = "planning"
             gaps = min(gaps, _LAST_PLAN_GAP_COUNT)
-        elif step == "replay" and newest is not None and newest.request.action == "plan":
-            state = "planning"
+        elif step == "replay" and newest is not None:
+            state = _REPLAY_STATE.get(newest.request.action, state)
         elif step == "update":
             state = (
                 "updating"

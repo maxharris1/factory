@@ -26,7 +26,7 @@ from lib.handoff import HandoffError, parse_comment
 
 _RECOVERS_EDITED = {
     "ready": frozenset({"queued-review", "answered-review", "queued-ci-fix"}),
-    "verdict": frozenset({"answered-fix", "approve-ci-red-fix"}),
+    "verdict": frozenset({"answered-fix", "approve-ci-red-fix", "held-base-update"}),
 }
 
 

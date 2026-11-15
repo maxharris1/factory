@@ -27,14 +27,16 @@ runs as the owning bot's own user and login, starts the job itself:
   <command>` with the brief on stdin and its path in ORCH_JOB_BRIEF, in a new
   session (so a waiter restart never kills a job), output to run.log there;
 * it goes straight back to waiting, and reaps each `orch job run` it started;
-* while this bot has no box run (no box slot and no unplaced running job
-  in orch.db) it brings its own box factory_root to the deployed box
-  checkout's HEAD with lib/device_deploy.py's git steps, then its home's
-  installed skills to that pin with the preflight's own hash and install
-  code (#345). It
-  records the result as its (box, bot) device_sync row: synced, or refused
-  with the reason (retried after HOME_RETRY_SECONDS). It runs as this
-  bot's account, so no other account writes into this checkout or home.
+* before each claim, whatever jobs it runs (#366), it brings its own box
+  factory_root to the deployed box checkout's HEAD with lib/device_deploy.py's
+  git steps, then its home's installed skills to that pin with the preflight's
+  own hash and install code (#345). It records the result as its (box, bot)
+  device_sync row: synced, or refused
+  with the reason (retried after HOME_RETRY_SECONDS). A sync that reaches the
+  box HEAD while the box is not behind its origin/main clears this bot's
+  lagging row. It syncs the checkout again after a box claim commits and
+  before the preflight. It runs as this bot's account, so no other account
+  writes into this checkout or home.
 
 A remote device has no orch.db, so the harness there cannot run `orch job
 done`. Its brief asks it to end its output with `ORCH-HANDOFF: <comment-id>`
@@ -142,6 +144,7 @@ from lib.health import LOADED_VERSION, checkout_sha
 from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import LOCK_PATH, ROOT as FACTORY_CHECKOUT
 from lib.queue import Job, QueueError, SQLiteJobQueue, job_from_row
+from lib.scratch import remove as remove_scratch
 from lib.self_deploy import git_env, own_repo
 from lib import skill_preflight
 from lib.skill_preflight import CheckoutLagging, PreflightError
@@ -576,6 +579,7 @@ class Waiter:
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
         self._remote: dict[str, tuple[Path, int]] = {}
+        self._scratch_failures: dict[str, str] = {}
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -612,23 +616,13 @@ class Waiter:
         job, placement = claimed
         return self._start(job, placement)
 
-    def _box_busy(self, box: str) -> bool:
-        if any(job_id not in self._remote for job_id in self._children):
-            return True
-        try:
-            return retry_locked(lambda: self.pool.busy(box, self.recipient))
-        except (QueueError, sqlite3.Error, OSError) as exc:
-            self.log(f"skills in {self.home}: cannot tell whether {box} is idle "
-                     f"({_one_line(exc)}); left alone")
-            return True
-
     def _reconcile_home(self) -> None:
         if self.home is None:
             return
         device = next((d for d in self.pool.config.devices if d.local), None)
         name = device.name if device is not None else "box"
         checkout = self._factory_root(device)
-        if checkout is None or self._box_busy(name):
+        if checkout is None:
             return
         root = Path(checkout)
         target = checkout_sha(FACTORY_CHECKOUT)
@@ -639,13 +633,17 @@ class Waiter:
         if not detail:
             detail = self._install_home(root, checkout)
         state = device_sync.REFUSED if detail else device_sync.SYNCED
+        clears_lagging = (head == checkout_sha(FACTORY_CHECKOUT)
+                          and skill_preflight.box_behind_origin(
+                              name, self.bot, str(FACTORY_CHECKOUT)) is None)
 
         def write() -> None:
             with self.queue.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 current = next((row.state for row in device_sync.read(connection)
                                 if (row.device, row.bot) == (name, self.bot)), None)
-                if not (state == device_sync.SYNCED and current == device_sync.LAGGING):
+                if not (state == device_sync.SYNCED and current == device_sync.LAGGING
+                        and not clears_lagging):
                     device_sync.upsert(
                         connection, device=name, bot=self.bot, harness=self.recipient,
                         checkout=checkout, target=target, sha=head, state=state,
@@ -685,6 +683,13 @@ class Waiter:
             sha=target, environ=git_env(self.environ, Webhook()),
         )
         return f"checkout: {refused}" if refused else ""
+
+    def _sync_checkout_to_box_head(self, checkout: str | None, label: str) -> None:
+        if self.home is None or checkout is None:
+            return
+        refused = self._sync_checkout(checkout, checkout_sha(FACTORY_CHECKOUT))
+        if refused:
+            self.log(f"{label}: {checkout} not at the box HEAD ({refused}); the preflight decides")
 
     def _install_home(self, root: Path, checkout: str) -> str:
         try:
@@ -758,6 +763,8 @@ class Waiter:
         )
         remote = device is not None and not device.local
         factory_root = self._factory_root(device)
+        if not remote:
+            self._sync_checkout_to_box_head(factory_root, label)
         try:
             skill_preflight.preflight(
                 self.queue, job, bot=self.bot, placement=placement, device=device,
@@ -1029,6 +1036,32 @@ class Waiter:
                     self._finish_remote(job_id, remote[0], code, offset=remote[1])
                 else:
                     self._settle(job_id, child.pid, code)
+        self._remove_scratch_once_workers_exit()
+
+    def _remove_scratch_once_workers_exit(self) -> None:
+        jobs = self.state_dir / "jobs"
+        failures: dict[str, str] = {}
+        for path in sorted(jobs.glob("*/tmp")) if jobs.is_dir() else []:
+            job_id = path.parent.name
+            if not _JOB_ID.fullmatch(job_id) or job_id in self._children:
+                continue
+            try:
+                placement = self.pool.placement(job_id)
+            except (QueueError, sqlite3.Error, OSError) as exc:
+                self.log(f"job {job_id}: scratch kept, its placement is unreadable ({_one_line(exc)})")
+                continue
+            if placement is not None and not placement.remote_started and any(
+                pid is not None and self.alive(pid, start)
+                for pid, start in ((placement.runner_pid, placement.runner_start),
+                                   (placement.worker_pid, placement.worker_start))
+            ):
+                continue
+            failure = remove_scratch(path)
+            if failure is not None:
+                if failure != self._scratch_failures.get(job_id):
+                    self.log(f"job {job_id}: {failure}")
+                failures[job_id] = failure
+        self._scratch_failures = failures
 
     def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
         """`orch job done` on the box for a remote run, from its marker line.

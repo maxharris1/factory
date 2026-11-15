@@ -44,12 +44,9 @@ One pass, in order; the first guard that fails ends it:
    checked out, `git merge --ff-only` runs, and the merged contents are
    written back. A failure there resets to the old HEAD and restores the
    backups.
-   Before anything is touched (#297), the pass counts the box's jobs in
-   orch.db (ORCH_DB) and, when there are none, marks the box `deploying`
-   in device_sync in the same transaction, so no job is placed on the box
-   while the checkout moves. A box with a job is left alone (`busy`, not
-   escalated) and deployed by a later pass; meanwhile the waiter's
-   preflight refuses box starts because HEAD lags origin/main. The mark is
+   Before anything is touched, the pass marks the box `deploying` in
+   device_sync in orch.db (ORCH_DB), so no job is placed on the box while
+   the checkout moves. Jobs already running keep running. The mark is
    dropped when the apply ends, and the box's own row and every lagging
    row once HEAD is origin/main. A waiter's synced or refused row stays.
 7. When the merge changed deploy/ or requirements.txt, it runs
@@ -59,11 +56,10 @@ One pass, in order; the first guard that fails ends it:
    checkout into HOME, this account's own home. A home it cannot read
    counts as missing the pin. Other bot accounts are never written from
    here (#345): each box bot's waiter, running as that account, installs
-   into its own home while it has no box job (lib/waiter.py). An
+   into its own home before each claim (lib/waiter.py). An
    up-to-date pass makes the same check, so a failed install is rerun once
    its cause is gone; that install takes the same `deploying` mark as step
-   6 and waits (`busy`) while the box has a job, and a failure is
-   `install-failed`, never `up-to-date`.
+   6, and a failure is `install-failed`, never `up-to-date`.
 
 Escalation goes through lib/heal.py's webhook POST (URL and auth from the
 environment, never logged), once per reason: self-deploy.state.json keeps
@@ -90,7 +86,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import device_sync, health, pstack_pin
-from lib.device_pool import slots_in_use
 from lib.heal import (
     ESCALATE,
     LOG_NAME,
@@ -104,7 +99,6 @@ from lib.heal import (
     stamp,
 )
 from lib.grok_delivery import send_webhook
-from lib.machines_yml import MachinesConfig
 from lib.queue import SQLiteJobQueue
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,7 +121,6 @@ SKIPPED = "skipped"
 UP_TO_DATE = "up-to-date"
 DEPLOYED = "deployed"
 REFUSED = "refused"
-BUSY = "busy"
 CONFLICT = "conflict"
 FETCH_FAILED = "fetch-failed"
 ROLLED_BACK = "rolled-back"
@@ -413,19 +406,15 @@ def _restore(git: Git, folder: Path, old: str, dirty: Sequence[str]) -> bool:
     return current.returncode == 0 and current.stdout == (folder / "local.patch").read_bytes()
 
 
-def _mark_deploying_unless_busy(
-    queue: SQLiteJobQueue, device: str, machines: MachinesConfig | None,
-    checkout: Path, old: str, new: str, now: float,
-) -> int:
+def _mark_deploying(
+    queue: SQLiteJobQueue, device: str, checkout: Path, old: str, new: str, now: float,
+) -> None:
     with queue.connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        jobs = slots_in_use(connection, machines).get(device, 0)
-        if jobs == 0:
-            device_sync.upsert(connection, device=device, bot="", harness="",
-                               checkout=str(checkout), target=new, sha=old,
-                               state=device_sync.DEPLOYING, detail="", now=now)
+        device_sync.upsert(connection, device=device, bot="", harness="",
+                           checkout=str(checkout), target=new, sha=old,
+                           state=device_sync.DEPLOYING, detail="", now=now)
         connection.commit()
-    return jobs
 
 
 def _release(queue: SQLiteJobQueue, device: str, states: Sequence[str]) -> None:
@@ -449,7 +438,6 @@ def run_pass(
     dry_run: bool = False,
     queue: SQLiteJobQueue | None = None,
     device: str = "box",
-    machines: MachinesConfig | None = None,
     homes: Sequence[Path] = (),
 ) -> tuple[Outcome, dict]:
     """Decide and do one deploy pass; the outcome and what to log about it."""
@@ -480,10 +468,7 @@ def run_pass(
         if queue is None:
             return _installed(old, new, _install_skills(checkout, stale, environ, webhook,
                                                         state_dir, install, clock))
-        jobs = _mark_deploying_unless_busy(queue, device, machines, checkout, old, new, now)
-        if jobs:
-            return Outcome(BUSY, f"{jobs} jobs on {device}, install-skills next pass",
-                           old, new), {}
+        _mark_deploying(queue, device, checkout, old, new, now)
         try:
             skills = _install_skills(checkout, stale, environ, webhook, state_dir,
                                      install, clock)
@@ -521,9 +506,7 @@ def run_pass(
         return _apply(git, state_dir, dirty, changed, merged, old, new, environ=environ,
                       webhook=webhook, now=now, install=install, clock=clock, started=started,
                       homes=homes)
-    jobs = _mark_deploying_unless_busy(queue, device, machines, checkout, old, new, now)
-    if jobs:
-        return Outcome(BUSY, f"{jobs} jobs on {device}, retry next pass", old, new), {}
+    _mark_deploying(queue, device, checkout, old, new, now)
     try:
         outcome, extra = _apply(git, state_dir, dirty, changed, merged, old, new,
                                 environ=environ, webhook=webhook, now=now, install=install,
@@ -649,7 +632,6 @@ def deploy(
     owner: Callable[[Path], bool] = owns,
     clock: Callable[[], float] = time.monotonic,
     dry_run: bool = False,
-    machines: MachinesConfig | None = None,
     homes: Sequence[Path] | None = None,
 ) -> Outcome:
     """One pass: run it, log it, escalate once per reason, save the state."""
@@ -675,7 +657,7 @@ def deploy(
         queue = SQLiteJobQueue(db, clock=lambda: now) if db is not None else None
         outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
                                   install=install, clock=clock, dry_run=dry_run, queue=queue,
-                                  device=device, machines=machines,
+                                  device=device,
                                   homes=own_home(environ) if homes is None else homes)
         escalation: str | None = None
         key: str | None = None
@@ -822,8 +804,7 @@ def main(argv: list[str], *, clock: Callable[[], float] = time.time) -> int:
     if not owns(checkout):
         return 0
     webhook = _webhook(args.orch if args.orch is not None else checkout / "orch.yml")
-    machines = health.load_machines(args.machines)
-    device = args.device or health.local_device(machines)
+    device = args.device or health.local_device(health.load_machines(args.machines))
     deploy(checkout, state_dir, device=device, environ=os.environ, webhook=webhook,
-           now=clock(), dry_run=args.dry_run, machines=machines)
+           now=clock(), dry_run=args.dry_run)
     return 0

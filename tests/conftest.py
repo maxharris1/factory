@@ -174,6 +174,68 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
+def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory):
+    """#358. pytest orders a module's autouse fixtures by name, so `_0_` is set
+    up first and torn down last, after the test's own cleanup."""
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    yield
+    root = tmp_path_factory.getbasetemp()
+    tag = request.node.stash.get(child_reaper._tag, "")
+    _fail_on_survivors("test", before, lambda: child_reaper.leaked(before, tag, root))
+
+
+def _fail_on_survivors(owner: str, before: set[int], survivors) -> None:
+    from tests import child_reaper, subreaper
+
+    deadline = time.monotonic() + 3
+    while (leftovers := survivors()) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if leftovers:
+        described = [subreaper._describe(pid) for pid in sorted(leftovers)]
+        child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
+        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+
+
+_broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}
+
+
+def _started_since(before: set[int], request: pytest.FixtureRequest) -> set[int]:
+    from lib.worktrees import process_start
+    from tests import child_reaper
+    from tests.procs import alive
+
+    root = request.config._tmp_path_factory.getbasetemp()
+    claimed = {pid for _, started in _broad_fixtures.values() for pid, start in started.items()
+               if alive(pid) and process_start(pid) == start}
+    return child_reaper.leaked(before, os.environ.get(child_reaper.TAG, ""), root) - claimed
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest):
+    if fixturedef.scope == "function":
+        return (yield)
+    from lib.worktrees import process_start
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    try:
+        return (yield)
+    finally:
+        started = _started_since(before, request)
+        _broad_fixtures[fixturedef] = (before, {pid: process_start(pid) for pid in started})
+
+
+def pytest_fixture_post_finalizer(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest) -> None:
+    if fixturedef not in _broad_fixtures:
+        return
+    before, _ = _broad_fixtures.pop(fixturedef)
+    _fail_on_survivors(f"{fixturedef.scope}-scoped fixture {fixturedef.argname!r}", before,
+                       lambda: _started_since(before, request))
+
+
+@pytest.fixture(autouse=True)
 def _a_ssh_control_dir():
     """#222: each test gets its own short ControlMaster socket directory, so
     no fake master outlives its test and a socket path stays bindable. It

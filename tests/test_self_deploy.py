@@ -6,9 +6,11 @@ clone. Install runs and webhook posts are fakes that record their calls.
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,13 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from lib import device_sync, heal, pstack_pin, self_deploy
+from lib import device_sync, heal, pstack_pin, self_deploy, skill_preflight
 from lib.device_pool import DevicePool, slots_in_use
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.grok_delivery import WebhookResult
 from lib.heal import Webhook, run_service
+from tests.handoff_store import serve_job
 from tests.test_skills_reconcile import box_behind_new_pin
+
+ROOT = Path(__file__).resolve().parent.parent
 
 NOW = 1_800_000_000.0
 SECRETS = {
@@ -274,34 +279,141 @@ def box_rows(queue: SQLiteJobQueue) -> list[tuple[str, str]]:
         return [(row.device, row.state) for row in device_sync.read(connection)]
 
 
-def test_a_box_with_a_job_stays_on_its_old_head_until_the_job_is_gone(
+def running_jobs(queue: SQLiteJobQueue) -> list[tuple[str, int]]:
+    with queue.connect() as connection:
+        states = [row[0] for row in connection.execute("SELECT state FROM jobs")]
+        return [(state, slots_in_use(connection, None).get("box", 0)) for state in states]
+
+
+def test_a_box_deploys_while_a_job_stays_running_past_the_bound(
     repo: Repo, tmp_path: Path
 ) -> None:
     queue, pool = box_queue(tmp_path)
     enqueue(queue, "1")
     assert pool.claim("codex") is not None
-    old = repo.head()
+
+    for version, offset in enumerate(range(0, 601, 120), start=2):
+        write(repo.upstream, "lib/code.py", f"VERSION = {version}\n")
+        new = repo.commit(f"merge {version}")
+
+        outcome, _, posts = run(repo, now=NOW + offset, db=queue.path)
+
+        assert (outcome.kind, repo.head()) == ("deployed", new), offset
+        assert running_jobs(queue) == [("running", 1)], offset
+        assert box_rows(queue) == [], offset
+        assert posts.calls == []
+
+
+def test_a_claim_after_a_busy_deploy_starts_on_the_new_head(repo: Repo, tmp_path: Path) -> None:
+    queue, pool = box_queue(tmp_path)
+    enqueue(queue, "1")
+    assert pool.claim("codex") is not None
     write(repo.upstream, "lib/code.py", "VERSION = 2\n")
     new = repo.commit("code")
-
-    outcome, _, posts = run(repo, db=queue.path)
-
-    assert outcome.kind == "busy"
-    assert outcome.detail == "1 jobs on box, retry next pass"
-    assert repo.head() == old
-    assert posts.calls == []
-    assert box_rows(queue) == []
+    git(repo.box, "fetch", "--quiet", "origin")
+    lagging = skill_preflight.box_behind_origin("box", "codex-bot", str(repo.box))
+    assert lagging is not None and lagging.startswith("preflight-lagging: box codex-bot")
     with queue.connect() as connection:
-        connection.execute("DELETE FROM device_slots")
-        connection.execute("UPDATE jobs SET state = 'done'")
+        device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
+                           checkout=str(repo.box), target=None, sha=None,
+                           state=device_sync.LAGGING, detail=lagging, now=NOW)
         connection.commit()
+    enqueue(queue, "2")
+    assert pool.claim("codex") is None
 
     assert run(repo, db=queue.path)[0].kind == "deployed"
+
     assert repo.head() == new
+    assert box_rows(queue) == []
+    assert skill_preflight.box_behind_origin("box", "codex-bot", str(repo.box)) is None
+    second = pool.claim("codex")
+    assert second is not None and second[0].request.ticket_id == "2"
+    assert running_jobs(queue) == [("running", 2), ("running", 2)]
+
+
+def test_a_job_running_through_a_deploy_finishes_and_hands_off(
+    repo: Repo, tmp_path: Path
+) -> None:
+    ignore = shutil.ignore_patterns("__pycache__")
+    for name in ("bin", "lib"):
+        shutil.rmtree(repo.upstream / name, ignore_errors=True)
+        shutil.copytree(ROOT / name, repo.upstream / name, ignore=ignore)
+    for name in (".gitignore", "orch.yml", "machines.yml"):
+        shutil.copy2(ROOT / name, repo.upstream / name)
+    repo.commit("factory code")
+    git(repo.box, "pull", "--quiet", "--ff-only", "origin", "main")
+    queue, pool = box_queue(tmp_path)
+    enqueue(queue, "1")
+    claimed = pool.claim("codex")
+    assert claimed is not None
+    job = claimed[0]
+    serve_job(queue.path, job.id, "123")
+    go = tmp_path / "go"
+    script = (
+        "import pathlib, subprocess, sys, time\n"
+        f"while not pathlib.Path({str(go)!r}).exists(): time.sleep(0.05)\n"
+        f"subprocess.run([sys.executable, {str(repo.box / 'bin/orch')!r}, 'job', 'done', "
+        f"'codex-bot', {job.id!r}, '--handoff', '123', '--db', {str(queue.path)!r}], "
+        "check=True)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "ORCH_DB"}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.Popen(
+        [sys.executable, str(repo.box / "bin/orch"), "job", "run", "codex-bot", job.id,
+         "--db", str(queue.path), "--interval", "0.1", "--", sys.executable, "-c", script],
+        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        handoff = repo.upstream / "lib/handoff.py"
+        handoff.write_text(handoff.read_text(encoding="utf-8") + "\nDEPLOYED_WHILE_BUSY = True\n",
+                           encoding="utf-8")
+        new = repo.commit("change a module the job uses")
+
+        outcome, _, _ = run(repo, db=queue.path)
+
+        assert (outcome.kind, repo.head()) == ("deployed", new)
+        assert proc.poll() is None
+        assert "DEPLOYED_WHILE_BUSY" in (repo.box / "lib/handoff.py").read_text(encoding="utf-8")
+        go.touch()
+        _, stderr = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 0, stderr
+    assert "Traceback" not in stderr
+    with queue.connect() as connection:
+        row = connection.execute("SELECT state, handoff_comment_id FROM jobs WHERE id = ?",
+                                 (job.id,)).fetchone()
+    assert tuple(row) == ("done", "123")
+    assert running_jobs(queue) == [("done", 0)]
+
+
+def _function_imports(path: Path, names: set[str] | None = None) -> list[str]:
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if names is not None and node.name not in names:
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.ImportFrom) and (inner.module or "").startswith("lib"):
+                found.append(f"{path.name}:{inner.lineno} from {inner.module}")
+            if isinstance(inner, ast.Import):
+                found += [f"{path.name}:{inner.lineno} import {alias.name}"
+                          for alias in inner.names if alias.name.startswith("lib")]
+    return found
+
+
+def test_orch_job_run_loads_its_factory_code_before_the_checkout_can_move() -> None:
+    assert _function_imports(ROOT / "lib/job_run.py") == []
+    assert _function_imports(ROOT / "lib/cli.py", {"_job_run", "_job_run_command"}) == []
 
 
 def test_no_job_is_placed_on_the_box_while_its_checkout_moves(repo: Repo, tmp_path: Path) -> None:
     queue, pool = box_queue(tmp_path)
+    enqueue(queue, "0")
+    assert pool.claim("codex") is not None
     with queue.connect() as connection:
         device_sync.upsert(connection, device="box", bot="codex-bot", harness="codex",
                            checkout=str(repo.box), target=None, sha=None,
@@ -776,7 +888,7 @@ def test_an_overlapping_deploy_pass_leaves_the_active_pass_and_its_placement_gua
     environ = {"PATH": os.environ["PATH"], "HOME": str(home), "ORCH_DB": str(queue.path),
                "TMPDIR": str(temp)}
     kw = dict(device="box", environ=environ, webhook=Webhook(), now=NOW,
-              owner=lambda _: True, machines=pool.config, homes=(home,))
+              owner=lambda _: True, homes=(home,))
     ready, resume = threading.Event(), threading.Event()
     installs: list[tuple[dict, int]] = []
     first: list[str] = []

@@ -14,9 +14,8 @@ import sys
 import time
 from pathlib import Path
 
-from tests.child_reaper import descendants
+from tests.child_reaper import PR_SET_CHILD_SUBREAPER, descendants
 
-PR_SET_CHILD_SUBREAPER = 36
 GRACE_SECONDS = 5
 
 

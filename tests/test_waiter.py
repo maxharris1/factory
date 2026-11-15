@@ -18,6 +18,7 @@ import os
 import sqlite3
 import stat
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,8 @@ from lib.waiter import (
     local_only,
 )
 from tests import fake_runner
+from tests.child_reaper import descendants
+from tests.procs import alive
 from tests.test_brief import FACTORY_MD, detail
 from tests.test_wait import GO, dispatcher_for, tracked
 
@@ -343,6 +346,122 @@ def test_a_finished_run_is_reaped_and_logged(tmp_path: Path) -> None:
     waiter.step()
     assert waiter.running() == set()
     assert any(job_id in line and "exited 3" in line for line in log)
+
+
+def test_reaping_a_killed_run_removes_its_job_tmpdir(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    waiter.step()
+    scratch = tmp_path / "state" / "jobs" / job_id / "tmp"
+    (scratch / "venv").mkdir(parents=True)
+    (scratch / "venv" / "x").write_text("left by a run whose teardown never ran")
+    spawn.children[0].returncode = -9
+    waiter.step()
+    assert waiter.running() == set()
+    assert not scratch.exists()
+    assert (scratch.parent / "brief.md").is_file()
+
+
+def test_reaping_a_run_removes_a_job_tmpdir_its_harness_locked(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    waiter.step()
+    locked = tmp_path / "state" / "jobs" / job_id / "tmp" / "locked"
+    (locked / "deep").mkdir(parents=True)
+    (locked / "deep" / "x").write_text("scratch")
+    (locked / "deep").chmod(0)
+    locked.chmod(0)
+    spawn.children[0].returncode = 0
+    try:
+        waiter.step()
+        assert not locked.parent.exists()
+    finally:
+        if locked.exists():
+            locked.chmod(0o700)
+            (locked / "deep").chmod(0o700)
+
+
+def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    log: list[str] = []
+    waiter = make_waiter(tmp_path, queue, db, spawn, log=log)
+    waiter.step()
+    scratch = tmp_path / "state" / "jobs" / job_id / "tmp"
+    scratch.mkdir()
+    (scratch / "needed").write_text("scratch")
+    spawn.children[0].returncode = 0
+    scratch.parent.chmod(0o500)
+    try:
+        waiter._reap()
+        waiter._reap()
+        assert scratch.exists()
+    finally:
+        scratch.parent.chmod(0o700)
+    assert sum("could not remove" in line for line in log) == 1
+    waiter._reap()
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("replaced", ["never", "after-scratch", "before-scratch"])
+def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
+    tmp_path: Path, replaced: str
+) -> None:
+    from tests.test_job_run import _orch
+
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "live-scratch", head=None)
+    waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+    assert waiter.pool.claim("claude")[0].id == job_id
+    job_dir = tmp_path / "state" / "jobs" / job_id
+    ready, release, result = (tmp_path / name for name in ("ready", "release", "result"))
+    if replaced == "before-scratch":
+        waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+        waiter.step()
+    harness = (
+        "import os, pathlib, time\n"
+        "scratch = pathlib.Path(os.environ['TMPDIR'])\n"
+        "(scratch / 'needed').write_text('scratch')\n"
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+        f"while not pathlib.Path({str(release)!r}).exists(): time.sleep(0.02)\n"
+        f"pathlib.Path({str(result)!r}).write_text((scratch / 'needed').read_text())\n"
+    )
+    runner = _orch("job", "run", "claude-bot", job_id, "--db", str(db), "--machines", str(MACHINES),
+                   "--", sys.executable, "-c", harness,
+                   env={"ORCH_JOB_STATE_DIR": str(job_dir), "ORCH_TELEMETRY": "off"})
+    worker = None
+    try:
+        _wait_for(ready.exists, 10, runner)
+        worker = int(ready.read_text())
+        if replaced != "before-scratch":
+            waiter._children[job_id] = runner
+        runner.kill()
+        runner.wait(5)
+        waiter.step()
+        assert alive(worker)
+        assert state(db, job_id) == "running"
+        assert (job_dir / "tmp" / "needed").is_file()
+        if replaced == "after-scratch":
+            waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+            waiter.step()
+            assert (job_dir / "tmp" / "needed").is_file()
+        release.touch()
+        _wait_for(lambda: result.exists() and not alive(worker), 10)
+        waiter.step()
+        assert result.read_text() == "scratch"
+        assert not (job_dir / "tmp").exists()
+    finally:
+        release.touch()
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(5)
+        if worker and alive(worker):
+            os.kill(worker, signal.SIGKILL)
 
 
 def test_a_job_with_no_standard_brief_is_failed_for_t6_and_its_slot_freed(
@@ -1306,11 +1425,14 @@ def test_the_waiter_lock_frees_when_the_waiter_dies_even_with_runs_alive(
     proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
     job_id = enqueue(queue, "a", head=None)
     _wait_for(lambda: _running(db, job_id), 20, proc)
+    runs = descendants(proc.pid)
     proc.kill()
     proc.wait(10)
     fd = waiter_module.hold_waiter_lock(db, "claude-bot")
     os.close(fd)
     assert state(db, job_id) == "running"
+    (autostart["harness_dir"] / f"{job_id}.crash").touch()
+    _wait_for(lambda: not any(alive(pid) for pid in runs), 20)
 
 
 def test_hold_waiter_lock_refuses_a_second_holder_in_process(tmp_path: Path) -> None:
