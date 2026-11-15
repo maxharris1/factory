@@ -69,7 +69,8 @@ Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Read the plan handoff comment at https://github.com/owner/repo/pull/42#issuecomment-5: it is the plan.
 2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
 3. Run only the tests for the files you touched plus a short smoke set. Before `ready`, run the router's "Before ready" steps.
-4. Push, then post the ready handoff below with the head you pushed.
+4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+5. Push, then post the ready handoff below with the head you pushed.
 The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.
@@ -179,7 +180,7 @@ You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this
 - attempt: 1
 - wall-clock budget: 60 minutes from the start of this run. Near it, push what you have and post `questions`. Past it, `orch job run` stops you and the job fails `wall-clock`.
 - repo skills: `.claude/skills/verify-cleffy/SKILL.md`
-- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`), empty at the start: clone owner/repo there with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone` and check out the branch the task names. This brief is on your stdin only.
+- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`). It is not empty: the run's `.orch-worker*.pid` record is there, so clone into a subfolder with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone owner/repo repo`, then `cd repo` and check out the branch the task names. This brief is on your stdin only.
 
 ## Skills
 Read the router (the first path) and the pstack files it names, at these absolute paths in the deployed factory checkout, never the job's working directory. Read each file with `Read`: the Skill tool refuses most pstack skills (`docs/harness/claude-code.md`, Tools).
@@ -227,7 +228,8 @@ Build the ticket. Follow the router in Skills above.
 1. Read the ticket and its brief (Job data). Read the plan handoff comment at https://github.com/owner/repo/pull/42#issuecomment-5: it is the plan.
 2. Work on the ticket's branch (`gitBranchName` in Job data, else a new branch off `dev`). Test first.
 3. Run only the tests for the files you touched plus a short smoke set. Before `ready`, run the router's "Before ready" steps.
-4. Push, then post the ready handoff below with the head you pushed.
+4. Bring the base in before `ready`: `git fetch origin dev`, then either `git rebase origin/dev` and push with `git push --force-with-lease`, or `git merge origin/dev` and push. If the base changed files you touched, rerun their tests.
+5. Push, then post the ready handoff below with the head you pushed.
 The PR's title starts with its source issue: `#<issue>: <issue title>`, with the source issue's number (not the PR's); for a Linear ticket, `<KEY>: <title>` (for example `AUT-2284: <title>`). If you open the PR, title it so; if its title lacks the prefix, fix it with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh pr edit --title`.
 Tests: run only the tests for the files you touched plus a short smoke set, in the foreground. Then push and post `ready`. CI runs the full suite and is the gate: a red CI comes back to you as a fix job. Print mode stops background tasks after your last turn, and unpushed work is lost.
 Never run the whole test suite locally, in the background, or in chunks, and never poll, watch or wait on that suite, on GitHub Actions or on any other CI from inside this job. CI after `ready` is the full-suite gate.

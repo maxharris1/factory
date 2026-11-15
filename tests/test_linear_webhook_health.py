@@ -150,7 +150,7 @@ def test_dashboard_shows_webhook_health_only_when_a_listener_ran(
         "note": QUIET,
     }
     page = render_html(snapshot)
-    assert "<h2>Linear webhook</h2>" in page
+    assert '<span class="ilabel">Linear webhook</span>' in page
     assert f'<p class="muted">note: {QUIET}</p>' in page
 
 

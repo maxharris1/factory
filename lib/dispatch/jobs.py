@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from lib.device_pool import free_slots, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
@@ -26,6 +27,8 @@ from lib.dispatch.types import Comment, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
+    LINK_DROP_BACKOFF_SECONDS,
+    MAX_LINK_DROP_REQUEUES,
     RELEASED_UNSTARTED,
     RUN_DIED,
     STALE,
@@ -33,7 +36,12 @@ from lib.job_state import (
     claimed_too_long,
     derive,
     last_run_end,
+    link_drop_end,
+    link_drop_requeues,
+    link_drop_settled_at,
     read_placements,
+    release_link_dropped,
+    requeue_link_drop,
     requeue_unstarted,
     unstarted_too_long,
 )
@@ -47,6 +55,16 @@ from lib.queue import (
     retire_requeued,
 )
 from lib.schema import HARNESSES
+
+
+@dataclass(frozen=True)
+class _LinkDrop:
+    detail: str
+    used: int
+
+    @property
+    def spent(self) -> str:
+        return f"link-drop on {self.detail} ({self.used} free requeues spent)"
 
 
 class JobsMixin:
@@ -296,6 +314,14 @@ class JobsMixin:
                 ):
                     assert placement is not None
                     self._release_unstarted(job, placement.placed_at, placement.runner_pid, now)
+                elif (
+                    placement is not None
+                    and placement.remote_started
+                    and facts.runner_alive is False
+                    and facts.worker_gone is None
+                    and self._link_drop_settled(job, now)
+                ):
+                    self._fail_dead(job, placement.runner_pid, now, link_drop=placement.device)
                 elif state == DEAD:
                     assert placement is not None
                     self._fail_dead(job, placement.runner_pid, now)
@@ -418,12 +444,25 @@ class JobsMixin:
             connection.commit()
         self._log_job_event(job, "dead", detail)
 
-    def _fail_dead(self, job: Job, runner_pid: int | None, now: float) -> None:
+    def _link_drop_settled(self, job: Job, now: float) -> bool:
+        """#218: the job's latest run ended in a link drop and the device has
+        since stopped its worker on its own, reachable or not."""
+        with self._connect() as connection:
+            dropped = link_drop_end(connection, job.id)
+        return dropped is not None and now >= link_drop_settled_at(
+            dropped[1], job.request.timeout_seconds
+        )
+
+    def _fail_dead(
+        self, job: Job, runner_pid: int | None, now: float, *, link_drop: str | None = None
+    ) -> None:
         """Fail a job whose runner and worker are gone; T6 takes it from here.
 
         Guarded like a timeout (no heartbeat since it was read) and on the
         same recorded runner, so a new `orch job run` that took the job
-        over in between is left alone.
+        over in between is left alone. #218: `link_drop` names the
+        unreachable device of a link-dropped run whose worker is past its
+        device-enforced deadline (`_link_drop_settled`).
         """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -442,6 +481,11 @@ class JobsMixin:
                 connection.commit()
                 return
             detail = f"runner pid {runner_pid} and its worker are gone; failed for T6"
+            if link_drop is not None:
+                detail = (
+                    f"link drop on {link_drop}; runner pid {runner_pid} is gone and its "
+                    "worker is past its device-enforced deadline; failed for T6"
+                )
             ended = last_run_end(connection, job.id, job.last_activity_at)
             if ended is not None:
                 detail += f" (its command: {ended[1]})"  # #91: the exit reason
@@ -488,7 +532,9 @@ class JobsMixin:
 
         One transaction: the job leaves running (failure already handled, so
         T6 never retries it) and the ticket's stuck flag wakes Grok Bot once.
-        The job is never done, and its slot stays held.
+        The job is never done, and its slot stays held. #218: a link-dropped
+        job is left to `_check_job_states`, which fails it once its worker
+        is past its device-enforced deadline.
         """
         now = self.queue.now()
         with self._connect() as connection:
@@ -501,6 +547,9 @@ class JobsMixin:
                 connection.commit()
                 return
             job = _job(row)
+            if link_drop_end(connection, job_id) is not None:
+                connection.commit()
+                return
             connection.execute(
                 """
                 UPDATE jobs
@@ -525,6 +574,7 @@ class JobsMixin:
                 detail=json.dumps(
                     {
                         "project_bot": _detail_project_bot(job.request.detail),
+                        "job_id": job.id,
                         "detail": (
                             f"device {device} offline {int(seconds // 60)} minutes "
                             f"during the {job.request.action} job"
@@ -577,6 +627,17 @@ class JobsMixin:
             return
         if self._restored_failure_waits(job):
             return
+        link_drop = self._link_drop(job)
+        if link_drop is not None:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                release_link_dropped(connection, job.id)
+                connection.commit()
+            if job.request.action == "review" and self._review_retry_waits(job):
+                return
+            if link_drop.used < MAX_LINK_DROP_REQUEUES:
+                self._requeue_link_dropped(job, link_drop)
+                return
         if job.request.action == "update-from-main":
             # #130: a failed update counts toward update-failed-2 in place of
             # the generic retry; the queue queues the next attempt.
@@ -626,13 +687,55 @@ class JobsMixin:
             detail=json.dumps(
                 {
                     "project_bot": _detail_project_bot(job.request.detail),
-                    "detail": f"{job.request.action} job failed twice",
+                    "detail": f"{job.request.action} job failed twice"
+                    + (f"; last failure {link_drop.spent}" if link_drop else ""),
+                    "job_id": job.id,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
             ),
         )
         self.queue.mark_failure_handled(job.id)
+
+    def _link_drop(self, job: Job) -> _LinkDrop | None:
+        """#218: the job's latest run ended in a link drop, unless it is a
+        review whose head this poll read as replaced (T6 drops that retry)."""
+        with self._connect() as connection:
+            dropped = link_drop_end(connection, job.id)
+            used = link_drop_requeues(connection, job.id)
+        if dropped is None:
+            return None
+        ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
+        if (
+            job.request.action == "review"
+            and ticket is not None
+            and ticket.current_head is not None
+            and _matching_head(job.request.head or "", ticket.current_head) is None
+        ):
+            return None
+        link_drop = _LinkDrop(dropped[0], used)
+        if used >= MAX_LINK_DROP_REQUEUES:
+            self._record_job_event_once(job, "link-drop-budget-spent", link_drop.spent)
+        return link_drop
+
+    def _requeue_link_dropped(self, job: Job, link_drop: _LinkDrop) -> None:
+        """Requeue the same row once its backoff from the failure has passed;
+        until then the failure stays unhandled."""
+        now = self.queue.now()
+        backoff = LINK_DROP_BACKOFF_SECONDS[link_drop.used]
+        if now < (job.finished_at or now) + backoff:
+            self._record_job_event_once(
+                job, "requeue-deferred", f"link drop; T6 requeues it after a {backoff} s backoff"
+            )
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = requeue_link_drop(
+                connection, job.id, now=now, reason=f"link drop on {link_drop.detail}"
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
 
     def _restored_failure_waits(self, job: Job) -> bool:
         """#108: settle a failed job restore() marked against its thread
@@ -1068,6 +1171,7 @@ class JobsMixin:
                 )
                 return
         generation = int(state["generation"]) + 1
+        source_comment_id = str(state["stuck_source_comment_id"] or "-")
         if detail is None and previous_detail is not None:
             reason = previous_detail
         else:
@@ -1077,6 +1181,7 @@ class JobsMixin:
                 ticket_id,
                 detail or str(state["stuck_reason"] or "ticket is stuck"),
             )
+        reason = self._linked_wake_detail(repo, ticket_id, source_comment_id, reason)
         queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(
@@ -1084,7 +1189,7 @@ class JobsMixin:
                 ticket_id=ticket_id,
                 action="stuck",
                 recipient="grok",
-                source_comment_id=str(state["stuck_source_comment_id"] or "-"),
+                source_comment_id=source_comment_id,
                 timeout_seconds=int(
                     state["timeout_seconds"] or DEFAULT_JOB_TIMEOUT_MINUTES * 60
                 ),

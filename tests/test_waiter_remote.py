@@ -56,7 +56,7 @@ def remote_machines(tmp_path: Path, *, box_slots: int = 1, box_enabled: bool = T
 
 
 def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None,
-                orch=("python3", "/factory/bin/orch"), alive=None):
+                orch=("python3", "/factory/bin/orch"), alive=None, gone=None):
     db = tmp_path / "orch.db"
     queue = SQLiteJobQueue(db, clock=time.time)
     config, findings = load_machines_yml(machines, allow_placeholders=True)
@@ -75,6 +75,7 @@ def make_waiter(tmp_path: Path, machines: Path, spawn, *, environ=None, log=None
         log=(log if log is not None else []).append,
         environ=environ or {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
         **({"alive": alive} if alive is not None else {}),
+        **({"gone": gone} if gone is not None else {}),
     )
     return waiter, queue, db
 
@@ -404,9 +405,11 @@ def test_a_restarted_waiter_fails_a_remote_run_whose_runner_died_without_a_statu
     tmp_path: Path,
 ) -> None:
     machines = remote_machines(tmp_path, box_enabled=False)
-    first, queue, db = make_waiter(tmp_path, machines, FakeSpawn())
+    runner = FakeSpawn()
+    first, queue, db = make_waiter(tmp_path, machines, runner)
     job_id = enqueue(queue, "a")
     first.step()
+    runner.end_runners()
     alive = Liveness()
     alive.running = False
     job_dir = tmp_path / "state" / "jobs" / job_id
@@ -464,10 +467,12 @@ def test_a_restarted_waiter_leaves_a_started_remote_run_to_the_device_check(
     tmp_path: Path,
 ) -> None:
     machines = remote_machines(tmp_path, box_enabled=False)
-    first, queue, db = make_waiter(tmp_path, machines, FakeSpawn())
+    runner = FakeSpawn()
+    first, queue, db = make_waiter(tmp_path, machines, runner)
     job_id = enqueue(queue, "a")
     first.step()
     _started_remotely(first, job_id)
+    runner.end_runners()
     alive = Liveness()
     alive.running = False
     second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=alive)

@@ -53,6 +53,7 @@ from lib.orch_yml import (
     OrchConfig,
     approvals,
     hold_approver_findings,
+    linear_approver_findings,
     load_approvals,
     load_orch_yml,
     parse_bind,
@@ -436,6 +437,8 @@ def _check_config(argv: list[str]) -> int:
         orch_path,
         allow_placeholders=args.allow_placeholders,
     )
+    if orch_config is not None:
+        orch_findings = orch_findings + linear_approver_findings(orch_config)
     failed = _report(orch_path, orch_findings)
     machines_path = args.machines
     if machines_path is None and args.orch is None:

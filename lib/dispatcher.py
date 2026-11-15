@@ -65,6 +65,9 @@ from lib.dispatch.core import (
 from lib.dispatch.detail import (
     DetailMixin,
 )
+from lib.dispatch.followups import (
+    FollowupsMixin,
+)
 from lib.dispatch.errors_text import (
     _CREDENTIAL_WORD,
     _PLAIN_MESSAGE,
@@ -231,6 +234,7 @@ class Dispatcher(
     RetryMixin,
     JobsMixin,
     DetailMixin,
+    FollowupsMixin,
     TrackingMixin,
     PollMixin,
     SchemaMixin,

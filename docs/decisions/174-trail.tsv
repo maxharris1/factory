@@ -1,0 +1,9 @@
+decision	choice	why
+where the check lives	the dispatcher's capped-go path (_may_lift_cap in lib/dispatch/holds.py), not lib/poll_source.py	the GitHub approver check already lives there; poll_source only builds the linear:<id> author, which already carries what the check needs
+data shape	Approvals.linear_users, a frozenset of linear:<id> authors or None	mirrors approver_logins (#122); stored with the linear: prefix like trusted_linear_users keys, so the check is one membership test
+unset key	refuses every capped Linear go; check-config warns when a Linear project exists	round-1 review (issuecomment-6891312598): AC 2 has no unset-key exception, and the shipped orch.yml does not set the key, so the old fallback left the gap open
+where the warning lives	orch check-config (linear_approver_findings), not load_orch_yml	inside load_orch_yml it broke 8 existing tests that pin findings == [] for Linear configs, and every orch command would print it
+retry and /go	unchanged	the ticket asks only for the go check; Linear retry is listed open in the note
+red check	tests/test_linear_go_author.py against main's dispatcher with only the orch_yml change: 3 failed (queued-fix != go-not-from-approver), 20 passed	isolates the dispatcher check as what closes AC 2
+comment-sicko	accepted 4 docstring deletions; restored the resume.py docstring (the deletion took untouched #105 text) and the example-config key; rejected the shared trust-map helper	the helper would touch lib/cli.py and lib/poll_source.py, outside this ticket
+round-1 fix red check	tests/test_linear_go_author.py at 4db5cdb: 6 failed (queued-fix != go-not-from-approver) on the unset-key cases, 23 passed	the unset-key cases are the whole class the review named

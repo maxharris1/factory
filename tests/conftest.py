@@ -126,6 +126,14 @@ def _write_gh(directory: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _end_fake_runners():
+    yield
+    from tests import fake_runner
+
+    fake_runner.end_all()
+
+
+@pytest.fixture(autouse=True)
 def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """Each test's fake gh answers from its own store, empty until a test
     serves a comment (tests/handoff_store.py); a fake harness posts one with

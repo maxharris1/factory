@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from lib.dispatch.helpers import _scope
+from lib.dispatch.helpers import _comment_link, _scope
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -16,9 +16,9 @@ class ResumeAfterCapMixin:
 
         One transaction raises cap_extra by 1, moves the ticket to fixing
         and queues the fix, keyed on the go comment so every go Max relays
-        queues exactly one fix. None when the ticket is not capped. With the
-        GitHub App switch on, only an approver's go counts; any other wakes
-        Grok once with go-not-from-approver and changes nothing (#122).
+        queues exactly one fix. None when the ticket is not capped. A go
+        _may_lift_cap refuses wakes Grok once with go-not-from-approver and
+        changes nothing (#122, #174).
         """
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
@@ -45,13 +45,27 @@ class ResumeAfterCapMixin:
             if row is None or row["workflow_state"] != "capped":
                 connection.commit()
                 return None
-            if not self._may_approve_go(comment.author):
+            if not self._may_lift_cap(comment.author):
                 connection.commit()
                 self._wake_comment_problem(
                     ticket, comment, "go-not-from-approver", "go-not-from-approver"
                 )
                 return True, "go-not-from-approver"
             cap_extra = int(row["cap_extra"]) + 1
+            capping = connection.execute(
+                """
+                SELECT comment_id FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND outcome = 'capped-review'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchone()
+            verdict = None
+            if capping is not None:
+                verdict = next(
+                    (_comment_link(item) for item in ticket.comments if item.id == capping["comment_id"]),
+                    f"comment:{capping['comment_id']}",
+                )
             self._enqueue_step(
                 connection,
                 ticket,
@@ -71,6 +85,7 @@ class ResumeAfterCapMixin:
                         head=ticket.current_head,
                         round_number=int(row["review_round"]) + 1,
                         cap=self._config_cap(ticket) + cap_extra,
+                        instruction=verdict,
                         resume=True,
                     ),
                 ),

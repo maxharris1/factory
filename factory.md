@@ -10,6 +10,7 @@ review:
     low: 1
     high: 3
   verify: none
+  followup_from_round: 4
 ship: handoff
 finish_line: merge
 skills: []
@@ -31,7 +32,7 @@ hold:
 ---
 
 ## Review
-One reviewer from a different model family than the builder (Codex Bot) gives the verdict. `review.verify` is `none`; the reviewer reads the diff and the CI result. Low-risk changes get one round. High-risk changes (anything touching ship, handoff, trust or the poller install) get up to three rounds; every extra round needs Max's own words.
+One reviewer from a different model family than the builder (Codex Bot) gives the verdict. `review.verify` is `none`; the reviewer reads the diff and the CI result. Low-risk changes get one round. High-risk changes (anything touching ship, handoff, trust or the poller install) get up to three rounds; every extra round needs Max's own words. From round 4 (`review.followup_from_round`), a variant of a rule an earlier round already raised is a `[follow-up]` finding, not a blocker: the PR can ship and the poller files the follow-ups as one new `urgent` ticket blocked by the PR.
 
 ## Ship
 `ship: handoff`, `finish_line: merge`. On APPROVE of the covered head with green CI, the poller marks a draft PR ready and labels it `orch:state/merge-queue`. It then keeps watching the PR until it merges or closes. When the PR conflicts with `main`, the poller queues a Claude `update-from-main` job; an update that only takes one side of each conflict (or both sides, in a `shared_paths` file) keeps the approval, and any other update goes back to Codex for review. The poller squash-merges approved PRs one at a time, oldest approval first, and wakes Grok Bot (Factory) with a `done` wake once a PR is merged. Do not merge these PRs by hand. Two failed updates mark the ticket stuck (`update-failed-2`) and ask Max.

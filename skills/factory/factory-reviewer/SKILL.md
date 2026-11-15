@@ -34,6 +34,8 @@ The same problem means the same acceptance criterion or the same finding as an e
 repeat=ac-2
 ```
 
+When the brief's Review rules show the `[follow-up]` rule (factory.md `review.followup_from_round`), a repeat of an earlier round's rule is a `[follow-up]` finding, not a `repeat=` stop. Name the rule it breaks. A real new failure still blocks.
+
 ## BLOCKED
 
 Use `verdict=BLOCKED` only when you could not review at all, such as a missing head, an unreadable diff, or a check you could not run. Say what you need, tell Max, and stop. A failed criterion is REVISE, not BLOCKED.
