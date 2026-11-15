@@ -212,6 +212,31 @@ def test_live_text_wraps_inside_the_panel_at_375px(tmp_path: Path) -> None:
         browser.close()
 
 
+ARTBOARD_LINE_HEIGHT = {"lr-task": 1.35, "lr-kind": 1.6, "lr-tile b": 1.25}
+
+
+@needs_chrome
+def test_live_text_keeps_the_artboard_line_heights(tmp_path: Path) -> None:
+    browser = Browser()
+    try:
+        browser.open(_page_with_status_stub(_snapshot(tmp_path, LIVE_ROW), "job.html"), 1440)
+        browser.eval("""new Promise(function (done) { location.hash = '#job-h-review'; (function wait() {
+          if (document.querySelector('#jobview .lr-desc')) done(true); else setTimeout(wait, 50); })(); })""")
+        rows = browser.eval("""[].filter.call(document.querySelectorAll('#jobview .lr *'), function (e) {
+            return [].some.call(e.childNodes, function (n) { return n.nodeType === 3 && n.data.trim(); });
+          }).map(function (e) {
+            var s = getComputedStyle(e), owner = e.closest('[class]');
+            var name = owner.className.split(' ')[0] + (owner === e ? '' : ' ' + e.localName);
+            return [name, s.lineHeight, parseFloat(s.fontSize)];
+          })""")
+    finally:
+        browser.close()
+    assert {"lr-text", "lr-desc", "lr-task", "lr-kind", "lr-tile b"} <= {cls for cls, _, _ in rows}
+    wrong = [(cls, height, size) for cls, height, size in rows
+             if height == "normal" or abs(float(height[:-2]) / size - ARTBOARD_LINE_HEIGHT.get(cls, 1.5)) > 0.01]
+    assert not wrong, wrong
+
+
 def test_compact_rounds_half_up_like_the_script() -> None:
     assert [compact(n) for n in (0, 999, 1000, 1250, 6890, 9999, 10000, 184321, 999499, 1_250_000)] == [
         "0", "999", "1.0k", "1.3k", "6.9k", "10.0k", "10k", "184k", "999k", "1.3M"]

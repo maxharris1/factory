@@ -135,7 +135,7 @@ CSS = """\
 .lr-plan{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px}
 .lr-plan li{display:flex;align-items:baseline;gap:10px;padding:2px 6px}
 .lr-mark{flex:0 0 8px;height:8px;box-sizing:border-box;border:1px solid var(--line-hi)}
-.lr-text{flex:1 1 auto;min-width:0;font:400 13px var(--sans);color:var(--muted);overflow-wrap:anywhere}
+.lr-text{flex:1 1 auto;min-width:0;font:400 13px/1.5 var(--sans);color:var(--muted);overflow-wrap:anywhere}
 .lr-tag{font-size:11px;white-space:nowrap;color:var(--muted)}
 .lr-plan .done .lr-mark{background:var(--ok);border-color:var(--ok)}.lr-plan .done .lr-text{color:var(--text-2)}
 .lr-plan .now{background:var(--panel)}
@@ -145,7 +145,7 @@ CSS = """\
 .lr-agent{display:flex;flex-direction:column;background:var(--dim);box-shadow:var(--elev)}
 .lr-agent-body{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;padding:6px 10px 8px}
 .lr-kind{min-width:0;padding:0 6px;border:1px solid var(--line-hi);color:var(--text-2);font-size:11px;line-height:1.6;overflow-wrap:anywhere}
-.lr-desc{flex:1 1 200px;min-width:0;font:13px var(--sans);color:var(--text);overflow-wrap:anywhere}
+.lr-desc{flex:1 1 200px;min-width:0;font:13px/1.5 var(--sans);color:var(--text);overflow-wrap:anywhere}
 .lr-status{font-size:11px;white-space:nowrap}
 .lr-status.running{color:var(--accent)}.lr-status.finished{color:var(--ok)}.lr-status.failed{color:var(--bad)}
 .lr-tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
