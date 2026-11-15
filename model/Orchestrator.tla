@@ -322,7 +322,7 @@ T7Blocked ==
   /\ flags' = flags
   /\ counts' = [counts EXCEPT !.deaths = 0]
 
-\* T4. APPROVE head=<sha> on the current head. A later patch diff sends it back.
+\* T4. APPROVE ac=met head=<sha> on the current head. A later patch diff sends it back.
 T4Approve ==
   /\ "T4" \notin Omit
   /\ state = "review"

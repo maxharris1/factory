@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import replace
 
 from lib.dispatch.constants import FINISHED_STATES
 from lib.dispatch.helpers import (
@@ -23,6 +24,14 @@ from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
 from lib.state_backup import RESTORED
+
+_REFUSED_VERDICT_OUTCOMES = (
+    "rejected-",
+    "stale-",
+    "superseded-",
+    "refused-",
+    "woke-grok-unparsed",
+)
 
 
 class QuestionsMixin:
@@ -365,6 +374,8 @@ class QuestionsMixin:
             else:
                 continue
             job = _job(row)
+            if job.request.action == "review" and self._open_fix_for_head(job):
+                continue
             if source is None or self._answered_by(
                 ticket,
                 source,
@@ -390,6 +401,77 @@ class QuestionsMixin:
                     f"requeued {job.request.action} ({reason}) "
                     f"({ticket.repo}#{ticket.ticket_id})"
                 )
+
+    def _requeue_refused_reviews(self, ticket: TrackedTicket) -> None:
+        ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
+        state, review_round = self._review_context(ticket)
+        if (
+            self._is_stuck(ticket)
+            or state not in ("review", "awaiting-ok")
+            or ticket.current_head is None
+        ):
+            return
+        sources = {comment.id: comment for comment in ticket.comments}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
+                  AND recipient != 'grok'
+                ORDER BY created_at, id
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        retry_prefix = f"review-refused:{_scope(ticket.repo, ticket.ticket_id)}:"
+        owed: tuple[Job, Comment] | None = None
+        for row in rows:
+            job = _job(row)
+            if job.state in ("queued", "running"):
+                return
+            if (
+                _detail_round_number(job.request.detail) != review_round + 1
+                or _matching_head(job.request.head or "", ticket.current_head) is None
+            ):
+                continue
+            if job.dedupe_key.startswith(retry_prefix):
+                return
+            source = sources.get(job.request.source_comment_id)
+            outcome = self._handled_outcome(ticket, job.handoff_comment_id or "")
+            if (
+                job.state != "done"
+                or source is None
+                or outcome is None
+                or not outcome.startswith(_REFUSED_VERDICT_OUTCOMES)
+                or self._answered_by(
+                    ticket,
+                    source,
+                    job.request.action,
+                    job.request.recipient,
+                    head=job.request.head,
+                    round_number=review_round + 1,
+                )
+                is not None
+            ):
+                continue
+            owed = (job, source)
+        if owed is None or self._open_fix_for_head(owed[0]):
+            return
+        job, source = owed
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._enqueue_step(
+                connection,
+                ticket,
+                source,
+                replace(job.request, attempt=1),
+                dedupe_key=f"{retry_prefix}{job.handoff_comment_id}",
+            )
+            connection.commit()
+        if self.log is not None:
+            self.log(
+                f"requeued review (verdict-refused:{job.handoff_comment_id}) "
+                f"({ticket.repo}#{ticket.ticket_id})"
+            )
 
     def _cancel_answered(
         self,
