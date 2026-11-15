@@ -34,12 +34,14 @@ when its body has an `Acceptance criteria` section with at least one
 builder criterion, a `Risk: low|high` line, a `Plan first: yes|no` line and
 a `Depends on:` line. Risk is never defaulted to low. A criterion about
 other PRs' state (SF-5, the N-02 case) is refused: PR order belongs in
-`Blocked by` / `Conflicts with`. A criterion that needs an operator action
-is not refused; it goes into the brief's separate ops step. A ticket that
-fails is `refused-intake` with its reasons, takes no room and no holds,
-posts nothing, raises needs-attention (`intake-refused`) and queues one
-Grok `refused` wake per distinct defect set. It is re-checked every poll,
-so a fixed ticket feeds. A ticket already feeding or fed is not re-checked.
+`Blocked by` / `Conflicts with`. Inline Markdown is ignored when
+classifying a criterion; the brief keeps it as written. A criterion that
+needs an operator action is not refused; it goes into the brief's separate
+ops step. A ticket that fails is `refused-intake` with its reasons, takes
+no room and no holds, posts nothing, raises needs-attention
+(`intake-refused`) and queues one Grok `refused` wake per distinct defect
+set. It is re-checked every poll, so a fixed ticket feeds. A ticket already
+feeding or fed is not re-checked.
 
 It is idempotent, keyed on (repo, ticket): `feeder_items` records each step
 (branch, PR, comment ids) before the next, a PR already open on the branch
@@ -80,6 +82,7 @@ GitHub and Linear clients it is given; tests pass fakes.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import sqlite3
@@ -192,6 +195,7 @@ _OTHER_PRS = (
     re.compile(r"\b(?:PRs?|pull\s+requests?)\s*(?:#|number\s+|no\.\s*)?\d+\b", re.IGNORECASE),
     re.compile(r"/pull/\d+\b"),
 )
+_INLINE_MARKUP = re.compile(r"</?[A-Za-z][^>]*>|\\(?=[!-/:-@\[-`{-~])|[*`~]+|(?<!\w)_+|_+(?!\w)")
 _OPS_TAG = re.compile(r"^(?:ops\s*:|\(ops\)|\[ops\])\s*", re.IGNORECASE)
 _OPS_ACTION = re.compile(
     r"^(?:manually|by\s+hand)\b|^(?:restart|install|reboot|rotate)\s+the\b|\bon\s+the\s+box\b|"
@@ -294,7 +298,8 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
             "with at least one item the builder can meet",
         ))
     for item in criteria:
-        if any(pattern.search(item) for pattern in _OTHER_PRS):
+        plain = html.unescape(_INLINE_MARKUP.sub("", item))
+        if any(pattern.search(plain) for pattern in _OTHER_PRS):
             defects.append(Defect(
                 "other-prs-criterion",
                 f"criterion about other PRs' state ({item!r}): move PR order into "
