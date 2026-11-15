@@ -21,6 +21,23 @@ class ResumeMixin:
         _may_lift_cap refuses wakes Grok once with go-not-from-approver and
         changes nothing (#122, #174).
         """
+        lifted = self._lift_cap(ticket, comment)
+        if lifted is None:
+            return None
+        outcome, queued = lifted
+        if outcome == "go-not-from-approver":
+            self._wake_comment_problem(ticket, comment, outcome, outcome)
+            return True, outcome
+        if queued:
+            self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
+        self._write_state_label(ticket, "fixing")
+        return True, outcome
+
+    def _lift_cap(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> tuple[str, bool] | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -33,8 +50,7 @@ class ResumeMixin:
             ).fetchone()
             if prior is not None:
                 connection.commit()
-                self._write_state_label(ticket, "fixing")
-                return True, str(prior["outcome"])
+                return str(prior["outcome"]), False
             row = connection.execute(
                 """
                 SELECT workflow_state, review_round, cap_extra, generation
@@ -48,10 +64,7 @@ class ResumeMixin:
                 return None
             if not self._may_lift_cap(comment.author):
                 connection.commit()
-                self._wake_comment_problem(
-                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
-                )
-                return True, "go-not-from-approver"
+                return "go-not-from-approver", False
             cap_extra = int(row["cap_extra"]) + 1
             capping = connection.execute(
                 """
@@ -109,9 +122,7 @@ class ResumeMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment.id),
             )
             connection.commit()
-        self.clear_attention(ticket.repo, ticket.ticket_id, "ready-after-cap")
-        self._write_state_label(ticket, "fixing")
-        return True, "queued-fix"
+        return "queued-fix", True
 
     def _resume_after_blocked(
         self,
@@ -124,6 +135,20 @@ class ResumeMixin:
         on the go. None when the ticket is not blocked. A go _may_lift_cap
         refuses wakes Grok once with go-not-from-approver and changes nothing.
         """
+        outcome = self._queue_blocked_review(ticket, comment)
+        if outcome is None:
+            return None
+        if outcome == "go-not-from-approver":
+            self._wake_comment_problem(ticket, comment, outcome, outcome)
+            return True, outcome
+        self._write_state_label(ticket, "review")
+        return True, outcome
+
+    def _queue_blocked_review(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+    ) -> str | None:
         scope = _scope(ticket.repo, ticket.ticket_id)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -137,8 +162,7 @@ class ResumeMixin:
             ).fetchone()
             if prior is not None:
                 connection.commit()
-                self._write_state_label(ticket, "review")
-                return True, str(prior["outcome"])
+                return str(prior["outcome"])
             row = connection.execute(
                 """
                 SELECT workflow_state, review_round, generation
@@ -152,10 +176,7 @@ class ResumeMixin:
                 return None
             if not self._may_lift_cap(comment.author):
                 connection.commit()
-                self._wake_comment_problem(
-                    ticket, comment, "go-not-from-approver", "go-not-from-approver"
-                )
-                return True, "go-not-from-approver"
+                return "go-not-from-approver"
             blocking = connection.execute(
                 """
                 SELECT comment_id FROM review_events
@@ -208,8 +229,7 @@ class ResumeMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment.id),
             )
             connection.commit()
-        self._write_state_label(ticket, "review")
-        return True, "queued-blocked-review"
+        return "queued-blocked-review"
 
     def _resume_unsatisfiable(
         self,

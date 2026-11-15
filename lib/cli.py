@@ -685,7 +685,7 @@ def _poll(argv: list[str]) -> int:
                 create=False,
                 machines_path=args.machines,
             )
-            pusher = _dashboard_pusher(path, args.orch)
+            pusher, push_seconds = _dashboard_pusher(path, args.orch)
             after_poll = _AfterPoll(
                 CycleBackup(
                     path,
@@ -707,7 +707,14 @@ def _poll(argv: list[str]) -> int:
                     watcher.start()
                 # Heartbeats (#92): the poller's own row and the per-device
                 # SSH reachability probe, each in its own daemon thread.
-                beats = health.poller_beats(path, args.machines).start()
+                beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
+                push_timer = (
+                    health._Loop("dashboard-push-timer", push_seconds,
+                                 lambda: pusher.on_timer(push_seconds), block_signals=False)
+                    if pusher is not None else None
+                )
+                if push_timer is not None:
+                    push_timer.start()
                 signal.signal(signal.SIGTERM, stopper.on_term)
                 try:
                     loop.run(
@@ -717,6 +724,8 @@ def _poll(argv: list[str]) -> int:
                         after_poll=after_poll,
                     )
                 finally:
+                    if push_timer is not None:
+                        push_timer.stop()
                     if watcher is not None:
                         watcher.stop()
                     beats.stop()
@@ -775,8 +784,9 @@ def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], 
     )
 
 
-def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:
-    """The poll loop's dashboard push hook, or None when push is not set.
+def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> tuple[PollPusher | None, float]:
+    """The poll loop's dashboard push hook (None when push is not set) and
+    its push interval in seconds.
 
     `_runtime` has already validated the file strictly; this reads only its
     dashboard section. Placeholders elsewhere do not matter here.
@@ -784,7 +794,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     config_path = orch_path if orch_path is not None else ROOT / "orch.yml"
     config, findings = load_orch_yml(config_path, allow_placeholders=True)
     if config is None or any(item.severity == "error" for item in findings):
-        return None
+        return None, 0.0
     push = config.dashboard.push
     # How often a push starts while all is well: the dashboard writer's interval.
     every = (push.every_minutes or 0) * 60
@@ -793,7 +803,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     def log(line: str) -> None:
         print(line, file=sys.stderr, flush=True)
 
-    return poll_pusher_for(
+    pusher = poll_pusher_for(
         push,
         db=db_path,
         orch=orch_path,
@@ -802,6 +812,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
         poll_seconds=config.poll_seconds,
         record=lambda ok: health.push_result(db_path, ok, interval=interval, log=log),
     )
+    return pusher, float(interval)
 
 
 def _init_db(argv: list[str]) -> int:

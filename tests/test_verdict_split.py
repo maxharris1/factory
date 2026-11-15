@@ -22,6 +22,7 @@ NAMES_BEFORE_SPLIT = (
 
 RULE_MODULE = {
     "_t3": "t3",
+    "_record_revise": "t3",
     "_t3_unsat": "t3",
     "_criterion_text": "t3",
     "_revise_ci_gate": "t3",
