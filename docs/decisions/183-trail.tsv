@@ -7,3 +7,6 @@ the ship re-drive guard	drop the policy == merge condition, keep self._held	_hel
 old-rule tests	narrowed to after: or flipped, not deleted	they encoded "a hold never applies on handoff", which this ticket reverses; tests/test_factory_hold.py's own docstring said to flip it at T05c
 statechart	add T4HoldOkQueue (awaiting-ok to merge-queue) and T4HoldOkHandoff (awaiting-ok to handed-off), regenerate model/chart.mmd	a held handoff PR now leaves awaiting-ok for the queue or handed-off, not merged; model/check.sh passes all 7 steps
 docs/state-chart.svg	left as is	nothing references or generates it since the first commit
+edited approver ok (round 1 f-1)	lib/hold._approver_ok skips a comment with edited_at, so decide() never clears on it	decide() is the one boundary T4, the ship re-drive and the merge queue all read; the bug also hit ship: merge, so the fix is not handoff-only
+eval reporter edges (round 1 f-2)	add awaiting-ok to merge-queue and awaiting-ok to handed-off to lib/eval_report.CHART_TRANSITIONS	the chart gained both edges; the reporter flagged legal runs as illegal-transition
+dashboard golden	re-record tests/test_dashboard_pages_golden.py digests with its own recorder	the served page script embeds the chart, so every page changed with the two new edges and the relabelled T4Hold step
