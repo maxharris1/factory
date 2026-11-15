@@ -763,9 +763,51 @@ def collect_snapshot(
         "statechart": chart,
         "telemetry": telemetry["rollup"],
         "projects": _projects(orch, rules, now),
+        "rules": rules_and_limits(chart),
         "usage": usage,
     }
     return _scrub(snapshot)  # type: ignore[return-value]
+
+
+_CHART_RULES = (
+    ("stuck", (("building", "stuck"),), lambda labels: labels[0]),
+    ("plan-check", (("plan-check", "planning"), ("plan-check", "stuck")),
+     lambda labels: f"sends work back when {labels[0]}; {labels[1]} → stuck"),
+    ("rounds", (("review", "fixing"), ("review", "capped"), ("capped", "fixing")),
+     lambda labels: f"{labels[0]} → fixing; {labels[1]} → capped ({labels[2]})"),
+    ("ship", (("ship", "merged"), ("ship", "handed-off"), ("ship", "waiting-external")),
+     lambda labels: "{}, {}, or {}".format(*(label.removeprefix("ship = ") for label in labels))),
+    ("approver", (("waiting-external", "stuck"),),
+     lambda labels: f"{labels[0]} from an external approver → stuck"),
+)
+
+
+def rules_and_limits(chart: dict | None) -> list[dict]:
+    """Each value is read from lib/health.py, the Linear budget or the chart's
+    edge labels, never copied."""
+    beat = f"{component_health.BEAT_SECONDS:g}"
+    probe = f"{component_health.PROBE_SECONDS:g}"
+    rows = [
+        {"key": "heartbeat", "text": f"every {beat} s (device probes every {probe} s)"},
+        {"key": "liveness", "text": f"up within {component_health.STALE_BEATS} intervals, "
+                                    f"stale within {component_health.DOWN_BEATS}, down older"},
+    ]
+    edges = (
+        {} if chart is None
+        else {(edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]}
+    )
+    for key, wanted, join in _CHART_RULES:
+        labels = [edges.get(pair) for pair in wanted]
+        if chart is None:
+            text = "chart unavailable"
+        elif None in labels:
+            text = "not in the chart"
+        else:
+            text = join(labels)
+        rows.append({"key": key, "text": text})
+    rows.append({"key": "linear", "text": f"budget {LINEAR_BUDGET_REQUESTS_PER_HOUR:,} req/h and "
+                                          f"{LINEAR_BUDGET_COMPLEXITY_PER_HOUR:,} complexity/h"})
+    return rows
 
 
 def _ticket_ref(

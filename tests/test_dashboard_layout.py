@@ -317,7 +317,7 @@ def test_lane_uses_running_when_more_than_held(tmp_path: Path) -> None:
 # --- activity page -------------------------------------------------------------------------
 
 
-def test_activity_page_has_handoffs_verdicts_log_and_attention(tmp_path: Path) -> None:
+def test_activity_page_has_handoffs_verdicts_and_attention(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         connection.execute(
@@ -326,15 +326,14 @@ def test_activity_page_has_handoffs_verdicts_log_and_attention(tmp_path: Path) -
         )
         connection.execute("UPDATE jobs SET finished_at = ? WHERE id = 'd-codex-review-1'", (NOW - 100,))
     html = _no_script(render_pages(collect_snapshot(db, log, now=NOW))["activity.html"])
-    for panel in ("attention", "handoffs", "verdicts", "log"):
+    for panel in ("attention", "handoffs", "verdicts"):
         assert f'id="{panel}"' in html, panel
     assert "queued-review-fix" in _text(_section(html, "verdicts"))
     assert "scripted" in _text(_section(html, "handoffs"))
-    assert "cycle line 79" in _text(_section(html, "log"))
     attention = _text(_section(html, "attention"))
     assert "AUT-7" in attention and "job-timeout" in attention
     assert "cleffy#14" in attention and "tracy-harris-coaching#5" in attention
-    for panel in ("lanes", "queue", "health", "savings", "tickets"):
+    for panel in ("lanes", "queue", "health", "savings", "log", "tickets"):
         assert f'id="{panel}"' not in html, panel
 
 
@@ -352,11 +351,11 @@ def test_job_page_has_the_board_and_the_tickets_table(tmp_path: Path) -> None:
 # --- efficiency page --------------------------------------------------------------------------
 
 
-def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: Path) -> None:
-    html = _no_script(_pages(tmp_path, last_cycle_at=NOW - 4)["efficiency.html"])
-    for panel in ("health", "savings"):
-        assert f'id="{panel}"' in html, panel
-    health = _text(_section(html, "health"))
+def test_efficiency_page_has_savings_and_a_one_line_definition(tmp_path: Path) -> None:
+    pages = _pages(tmp_path, last_cycle_at=NOW - 4)
+    html = _no_script(pages["efficiency.html"])
+    assert 'id="savings"' in html
+    health = _text(_section(_no_script(pages["health.html"]), "health"))
     assert "OK" in health and "1,250 req/h" in health
     savings = _section(html, "savings")
     line = re.search(r'<p class="definition" id="share-definition">(.*?)</p>', savings, re.S)
@@ -367,7 +366,7 @@ def test_efficiency_page_has_budget_savings_and_a_one_line_definition(tmp_path: 
     assert definition.lower().startswith("scripted share")
     assert len(definition) <= 200
     assert "50%" in _text(savings)
-    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log"):
+    for panel in ("lanes", "queue", "handoffs", "verdicts", "tickets", "log", "health"):
         assert f'id="{panel}"' not in html, panel
 
 
@@ -600,6 +599,7 @@ class Node {
     this.children = kids; kids.forEach(c => { c.parentNode = this; }); this._text = ''; }
   get isConnected() { let n = this; while (n.parentNode) n = n.parentNode; return n === body; }
   focus() { global.document.activeElement = this; }
+  scrollIntoView() {}
   setAttribute(k, v) { if (k === 'class') { this.className = String(v); return; }
     this.attrs[k] = String(v); if (k === 'id') ids[v] = this; }
   getAttribute(k) { if (k === 'class') return this.className; return k in this.attrs ? this.attrs[k] : null; }
@@ -770,14 +770,15 @@ def test_script_renders_the_main_page_live(tmp_path: Path) -> None:
 def test_script_renders_the_activity_and_efficiency_pages(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path, last_cycle_at=NOW - 4)
     activity = _run_page(tmp_path, snapshot, "activity",
-                         BAR + ["hud", "attention", "handoffs", "verdicts", "log"])
+                         BAR + ["hud", "attention", "handoffs", "verdicts"])
     text = activity["text"]
     assert "AUT-7" in text["attention"] and "tracy-harris-coaching#5" in text["attention"]
     assert text["attention"].count("AUT-7") == 1
-    assert "cycle line 79" in text["log"]
-    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings"])
+    system = _run_page(tmp_path, snapshot, "health", BAR + ["hud", "health", "log"])
+    assert "cycle line 79" in system["text"]["log"]
+    assert "OK" in system["text"]["health"]
+    efficiency = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "savings"])
     text = efficiency["text"]
-    assert "OK" in text["health"]
     assert dashboard.SCRIPTED_SHARE_DEFINITION in text["savings"]
     assert "50%" in text["savings"]
 
