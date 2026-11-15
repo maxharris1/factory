@@ -27,11 +27,10 @@ Confirm that each earlier blocker is closed, by its id. Review the delta from th
 
 ## Same problem twice
 
-The same problem means the same acceptance criterion or the same finding as an earlier round's blocker. Do not loop. Write `verdict=REVISE` with the brief's other header keys, make `repeat=<id>` the first body line, ask Max what to do, and stop. `repeat` is not a header key, so it stays in the body. Example, with a made-up head:
+The same problem means the same acceptance criterion or the same finding as an earlier round's blocker. Do not loop. Write `verdict=REVISE` with `repeat=<id>` in the header, ask Max what to do, and stop. A criterion the PR cannot satisfy sets `unsat=<id>` in the header the same way. Example, with a made-up head:
 
 ```
-<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/3 head=3f9c2ab ac=unmet verdict=REVISE risk=high -->
-repeat=ac-2
+<!-- orch:v1 kind=verdict from=codex-bot role=reviewer round=2/3 head=3f9c2ab ac=unmet verdict=REVISE risk=high repeat=ac-2 -->
 ```
 
 When the brief's Review rules show the `[follow-up]` rule (factory.md `review.followup_from_round`), a repeat of an earlier round's rule is a `[follow-up]` finding, not a `repeat=` stop. Name the rule it breaks. A real new failure still blocks.

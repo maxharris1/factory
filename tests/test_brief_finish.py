@@ -9,7 +9,7 @@ import pytest
 from lib.github_actions import TOKEN_VARIABLES
 from tests.regenerate_brief_snapshots import CASES, render_snapshot
 
-BUILDER_KINDS = sorted(kind for kind in CASES if kind != "review")
+BUILDER_KINDS = sorted(kind for kind in CASES if CASES[kind][0] != "review")
 QUESTIONS_LINES = (
     "If something left open needs a decision, post a `questions` handoff.",
     "If the ticket lists a dependency that has not merged, post `questions` before any work.",
@@ -73,7 +73,8 @@ def test_builder_briefs_carry_both_questions_lines(kind: str) -> None:
             assert line in text
 
 
-def test_the_review_brief_carries_no_builder_questions_lines() -> None:
-    for text in _briefs("review"):
+@pytest.mark.parametrize("kind", ["review", "review-round-3"])
+def test_the_review_brief_carries_no_builder_questions_lines(kind: str) -> None:
+    for text in _briefs(kind):
         for line in QUESTIONS_LINES:
             assert line not in text
