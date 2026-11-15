@@ -524,6 +524,19 @@ def pid_alive(pid: int | None, start: str | None) -> bool:
     return _live_owner(data) is not None
 
 
+def pid_gone(pid: int, start: str | None) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    if start is None:
+        return False
+    current = _process_start(pid)
+    return current is not None and current != start
+
+
 def parent_pid(pid: int) -> int | None:
     """A pid's parent, from /proc/<pid>/stat (field 4); None if unknown."""
     try:

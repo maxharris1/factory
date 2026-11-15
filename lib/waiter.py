@@ -136,7 +136,7 @@ from lib.wait import (
     lock_backoff,
     retry_locked,
 )
-from lib.worktrees import pid_alive, process_start
+from lib.worktrees import pid_alive, pid_gone, process_start
 
 GH_ARGV_PREFIX = ("gh", "api", "-X", "GET")
 GH_TIMEOUT_SECONDS = 30.0
@@ -447,13 +447,13 @@ class AdoptedRun:
         pid: int,
         start: str | None,
         job_dir: Path,
-        alive: Callable[[int, str | None], bool],
+        gone: Callable[[int, str | None], bool],
     ):
         self.pid = pid
         self.start = start
         self.status_path = job_dir / STATUS_FILE
         self.lock_path = job_dir / RUN_LOCK
-        self.alive = alive
+        self.gone = gone
 
     def poll(self) -> int | None:
         code = read_status(self.status_path)
@@ -468,7 +468,7 @@ class AdoptedRun:
         try:
             fd = os.open(self.lock_path, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
-            return self.alive(self.pid, self.start)
+            return not self.gone(self.pid, self.start)
         except OSError:
             return True
         try:
@@ -519,6 +519,7 @@ class Waiter:
         log: Log = lambda line: print(line, file=sys.stderr, flush=True),
         environ: Mapping[str, str] | None = None,
         alive: Callable[[int | None, str | None], bool] = pid_alive,
+        gone: Callable[[int, str | None], bool] = pid_gone,
         approvals: Approvals | None = None,
         drain: Path | None = None,
         version: str = LOADED_VERSION,
@@ -547,6 +548,7 @@ class Waiter:
         except ApproverProfileExposed as exc:
             raise WaiterError(str(exc)) from exc
         self.alive = alive
+        self.gone = gone
         self._children: dict[str, Child] = {}
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
@@ -822,7 +824,7 @@ class Waiter:
             if state != ("running", self.recipient):
                 path.unlink(missing_ok=True)
                 continue
-            self._children[job_id] = AdoptedRun(pid, start, job_dir, self.alive)
+            self._children[job_id] = AdoptedRun(pid, start, job_dir, self.gone)
             self._remote[job_id] = (job_dir, offset)
             self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
         self._recovered = True

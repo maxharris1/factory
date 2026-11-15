@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from lib import worktrees
 from tests.handoff_store import serve_job
 from tests.test_waiter import FakeSpawn, enqueue
 from tests.test_waiter_remote import make_waiter, remote_machines
@@ -130,9 +131,92 @@ def test_a_run_started_before_the_lock_existed_is_judged_by_its_pid(tmp_path: Pa
     machines, runner, db, job_id, job_dir = _restart(tmp_path)
     runner.end_runners()
     (job_dir / "run.lock").unlink()
-    second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=lambda *_: True)
+    second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), gone=lambda *_: False)
     second.step()
     assert second.running() == {job_id}
-    third, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=lambda *_: False)
+    third, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), gone=lambda *_: True)
     third.step()
     assert _row(db, job_id) == ("failed", None)
+
+
+def test_a_live_run_from_before_the_lock_outlives_an_unreadable_start_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    machines = remote_machines(tmp_path, box_enabled=False)
+    go = tmp_path / "go"
+    runs: list[subprocess.Popen] = []
+
+    def older_waiter_spawn(argv, **kwargs):
+        kwargs.pop("pass_fds")
+        job_dir = Path(kwargs["cwd"])
+        run = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib, sys, time\n"
+                "go, job_dir = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+                "while not go.exists(): time.sleep(0.02)\n"
+                "print('ORCH-HANDOFF: 4242', flush=True)\n"
+                "(job_dir / 'exit').write_text('0\\n')\n",
+                str(go),
+                str(job_dir),
+            ],
+            **kwargs,
+        )
+        runs.append(run)
+        return run
+
+    first, queue, db = make_waiter(tmp_path, machines, older_waiter_spawn)
+    job_id = enqueue(queue, "a")
+    assert first.step() == job_id
+    job_dir = tmp_path / "state" / "jobs" / job_id
+    (job_dir / "run.lock").unlink()
+    run = runs[0]
+    try:
+        real_start = worktrees._process_start
+        monkeypatch.setattr(
+            worktrees, "_process_start", lambda pid: None if pid == run.pid else real_start(pid)
+        )
+        log: list[str] = []
+        second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), log=log)
+        second.step()
+        second.step()
+        assert run.poll() is None
+        assert second.running() == {job_id}
+        assert _row(db, job_id) == ("running", None)
+        assert (job_dir / "remote.json").exists()
+
+        serve_job(db, job_id, "4242")
+        go.touch()
+        assert run.wait(timeout=30) == 0
+        second.step()
+    finally:
+        run.kill()
+        run.wait()
+    assert _row(db, job_id) == ("done", "4242")
+    assert not any("255" in line for line in log)
+    assert [line for line in log if "orch job done" in line] == [
+        f"job {job_id}: ran orch job done on the box: done, handoff 4242"
+    ]
+
+
+def test_only_proof_of_exit_makes_a_pid_gone(monkeypatch) -> None:
+    run = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        monkeypatch.setattr(worktrees, "_process_start", lambda pid: "1")
+        assert not worktrees.pid_gone(run.pid, "1")
+        assert not worktrees.pid_gone(run.pid, None)
+        assert worktrees.pid_gone(run.pid, "2")
+        monkeypatch.setattr(worktrees, "_process_start", lambda pid: None)
+        assert not worktrees.pid_gone(run.pid, "1")
+
+        def no_permission(pid, signal):
+            raise PermissionError
+
+        monkeypatch.setattr(worktrees.os, "kill", no_permission)
+        assert not worktrees.pid_gone(run.pid, "1")
+        monkeypatch.undo()
+    finally:
+        run.kill()
+        run.wait()
+    assert worktrees.pid_gone(run.pid, "1")
