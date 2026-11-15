@@ -711,11 +711,13 @@ def slots_in_use(
     return _used(connection, config)
 
 
-def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
-    """#218: the device job_id's latest run lost its link to, or None.
+def link_drop_detail(device: str, minutes: str) -> str:
+    """The link-drop job_events detail; `_link_dropped_on` reads the device back."""
+    return f"{device}: no certain answer for {minutes}"
 
-    lib/placed_run.py ended() writes the link-drop detail as "<device>: ...".
-    """
+
+def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """#218: the device job_id's latest run lost its link to, or None."""
     table = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'job_events'"
     ).fetchone()
@@ -731,7 +733,7 @@ def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:
     ).fetchone()
     if row is None or row[0] != "link-drop":
         return None
-    return str(row[1]).split(":", 1)[0]
+    return str(row[1]).split(": no certain answer for ", 1)[0]
 
 
 def _used(

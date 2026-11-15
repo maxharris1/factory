@@ -8,3 +8,5 @@ device preference	choose_device(avoid=) ranks the dropped device last; claim rea
 lib/remote.py, lib/remote_follow.py untouched	no change	FollowEnd(LOST) already carries the fact needed
 status and dashboard history	out of scope, follow-up	neither renders job_events today; that is a new view outside the Touches line
 model/check.sh	not run locally: java is not installed on this device; CI's statechart job runs it	the same-row requeue is a stutter step like the claimed requeue; the TLA model is unchanged
+device-offline vs the settle time	_device_offline always leaves a link-dropped job to _check_job_states	the test helper found _check_devices runs before _check_job_states, so skipping only before the settle time stuck the job device-offline in the very poll B2 should fail it; B2 is bounded by the settle time, so the job still never loops
+settle margin	KILL_GRACE_SECONDS moved to lib/job_state.py (job_run imports it) plus a named DEVICE_CLOCK_SKEW_SECONDS	comment-sicko: a bare 5-minute margin hid the kill grace

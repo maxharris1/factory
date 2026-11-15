@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from lib.device_pool import free_slots, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
@@ -52,6 +53,16 @@ from lib.queue import (
     retire_requeued,
 )
 from lib.schema import HARNESSES
+
+
+@dataclass(frozen=True)
+class _LinkDrop:
+    detail: str
+    used: int
+
+    @property
+    def spent(self) -> str:
+        return f"link-drop on {self.detail} ({self.used} free requeues spent)"
 
 
 class JobsMixin:
@@ -520,8 +531,8 @@ class JobsMixin:
         One transaction: the job leaves running (failure already handled, so
         T6 never retries it) and the ticket's stuck flag wakes Grok Bot once.
         The job is never done, and its slot stays held. #218: a link-dropped
-        job is left to `_check_job_states` until its worker is past its
-        device-enforced deadline.
+        job is left to `_check_job_states`, which fails it once its worker
+        is past its device-enforced deadline.
         """
         now = self.queue.now()
         with self._connect() as connection:
@@ -534,10 +545,7 @@ class JobsMixin:
                 connection.commit()
                 return
             job = _job(row)
-            dropped = link_drop_end(connection, job_id)
-            if dropped is not None and now < link_drop_settled_at(
-                dropped[1], job.request.timeout_seconds
-            ):
+            if link_drop_end(connection, job_id) is not None:
                 connection.commit()
                 return
             connection.execute(
@@ -616,8 +624,9 @@ class JobsMixin:
             return
         if self._restored_failure_waits(job):
             return
-        link_drop = self._link_drop_requeue(job)
-        if link_drop is True:
+        link_drop = self._link_drop(job)
+        if link_drop is not None and link_drop.used < MAX_LINK_DROP_REQUEUES:
+            self._requeue_link_dropped(job, link_drop)
             return
         if job.request.action == "update-from-main":
             # #130: a failed update counts toward update-failed-2 in place of
@@ -669,7 +678,7 @@ class JobsMixin:
                 {
                     "project_bot": _detail_project_bot(job.request.detail),
                     "detail": f"{job.request.action} job failed twice"
-                    + (f"; last failure {link_drop}" if link_drop else ""),
+                    + (f"; last failure {link_drop.spent}" if link_drop else ""),
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -677,17 +686,9 @@ class JobsMixin:
         )
         self.queue.mark_failure_handled(job.id)
 
-    def _link_drop_requeue(self, job: Job) -> bool | str | None:
-        """#218: requeue a link-dropped job's same row for free, after its backoff.
-
-        True when T6 does no more with the job now: requeued, or waiting out
-        its backoff with the failure still unhandled. A string names the
-        link drop once the row's budget is spent, for the stuck detail; T6
-        then retries or calls the ticket stuck as for any failure. None when
-        the job's latest run did not end in a link drop, or it is a review
-        whose head this poll read as replaced (T6 drops that retry).
-        """
-        now = self.queue.now()
+    def _link_drop(self, job: Job) -> _LinkDrop | None:
+        """#218: the job's latest run ended in a link drop, unless it is a
+        review whose head this poll read as replaced (T6 drops that retry)."""
         with self._connect() as connection:
             dropped = link_drop_end(connection, job.id)
             used = link_drop_requeues(connection, job.id)
@@ -701,27 +702,29 @@ class JobsMixin:
             and _matching_head(job.request.head or "", ticket.current_head) is None
         ):
             return None
+        link_drop = _LinkDrop(dropped[0], used)
         if used >= MAX_LINK_DROP_REQUEUES:
-            spent = f"link-drop on {dropped[0]} ({used} free requeues spent)"
-            self._record_job_event_once(job, "link-drop-budget-spent", spent)
-            return spent
-        due = (job.finished_at or now) + LINK_DROP_BACKOFF_SECONDS[used]
-        if now < due:
+            self._record_job_event_once(job, "link-drop-budget-spent", link_drop.spent)
+        return link_drop
+
+    def _requeue_link_dropped(self, job: Job, link_drop: _LinkDrop) -> None:
+        """Requeue the same row once its backoff from the failure has passed;
+        until then the failure stays unhandled."""
+        now = self.queue.now()
+        backoff = LINK_DROP_BACKOFF_SECONDS[link_drop.used]
+        if now < (job.finished_at or now) + backoff:
             self._record_job_event_once(
-                job,
-                "requeue-deferred",
-                f"link drop; T6 requeues it after a {LINK_DROP_BACKOFF_SECONDS[used]} s backoff",
+                job, "requeue-deferred", f"link drop; T6 requeues it after a {backoff} s backoff"
             )
-            return True
+            return
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             result = requeue_link_drop(
-                connection, job.id, now=now, reason=f"link drop on {dropped[0]}"
+                connection, job.id, now=now, reason=f"link drop on {link_drop.detail}"
             )
             connection.commit()
         if result is not None:
             self._log_job_event(job, *result)
-        return True
 
     def _restored_failure_waits(self, job: Job) -> bool:
         """#108: settle a failed job restore() marked against its thread

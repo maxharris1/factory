@@ -80,7 +80,7 @@ from typing import IO, BinaryIO
 
 from lib.codex_sandbox import for_device
 from lib.device_monitor import remote_target
-from lib.device_pool import DevicePool, Placement, read_autostart
+from lib.device_pool import DevicePool, Placement, link_drop_detail, read_autostart
 from lib.job_run import OUTPUT_GRACE_SECONDS, Budget
 from lib.job_state import (
     LINK_DROP,
@@ -388,7 +388,7 @@ class PlacedRun:
                             connection,
                             job_id,
                             LINK_DROP,
-                            f"{self.device.name}: no certain answer for {minutes}",
+                            link_drop_detail(self.device.name, minutes),
                             now,
                         )
                 connection.commit()

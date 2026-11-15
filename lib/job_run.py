@@ -56,7 +56,7 @@ from pathlib import Path
 from types import FrameType
 from typing import IO
 
-from lib.job_state import HEARTBEAT_SECONDS, MAX_HEARTBEAT_SECONDS
+from lib.job_state import HEARTBEAT_SECONDS, KILL_GRACE_SECONDS, MAX_HEARTBEAT_SECONDS
 from lib.queue import QueueError
 
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
@@ -65,7 +65,6 @@ FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 OUTPUT_GRACE_SECONDS = 5.0
 TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 # #199: how long a command past its budget has between SIGTERM and SIGKILL.
-KILL_GRACE_SECONDS = 30.0
 WALL_CLOCK = "wall-clock"
 # #199 r1: every process of a local run carries this tag in its environment.
 RUN_TAG_ENV = "ORCH_RUN_TAG"

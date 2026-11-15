@@ -75,6 +75,7 @@ HEARTBEAT_SECONDS = 15.0
 # stale threshold orch.yml allows (1 minute), so even a beat that lands late
 # never shows a live job as stale, and far below the 2-minute default.
 MAX_HEARTBEAT_SECONDS = 30.0
+KILL_GRACE_SECONDS = 30.0
 
 Alive = Callable[[int | None, str | None], bool]
 # True: the remote worker is confirmed gone. False: it still runs.
@@ -420,28 +421,16 @@ def requeue_unstarted(
     return outcome, detail
 
 
-# --- #218: a remote run whose SSH link dropped, and its own requeue budget ----
-
-# `orch job run` writes LINK_DROP right after RUN_DIED when its follow got no
-# certain answer from the device for the whole grace window (FollowEnd LOST).
-# T6 then requeues the same job row with REQUEUED_LINK_DROP, at most
-# MAX_LINK_DROP_REQUEUES times per row, each after its backoff from the
-# failure. The budget is apart from MAX_FREE_REQUEUES.
 LINK_DROP = "link-drop"
 REQUEUED_LINK_DROP = "requeued-link-drop"
 MAX_LINK_DROP_REQUEUES = 6
 LINK_DROP_BACKOFF_SECONDS = (60, 120, 300, 600, 600, 600)
-# The device kills a worker `grace` (30 s) past its budget; this also covers
-# clock skew between the box and the device.
-LINK_DROP_SETTLE_MARGIN_SECONDS = 5 * 60
+DEVICE_CLOCK_SKEW_SECONDS = 4.5 * 60
 
 
 def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, float] | None:
-    """(detail, recorded_at) when the job row's latest run ended in a link drop.
-
-    Only run ends recorded after the row's latest REQUEUED_LINK_DROP count,
-    so an earlier run's drop never speaks for a later run.
-    """
+    """(detail, recorded_at) when the row's latest run end since its last
+    REQUEUED_LINK_DROP is a link drop."""
     if not has_job_events(connection):
         return None
     row = connection.execute(
@@ -468,13 +457,14 @@ def link_drop_requeues(connection: sqlite3.Connection, job_id: str) -> int:
 
 
 def link_drop_settled_at(recorded_at: float, timeout_seconds: float) -> float:
-    """When the device has stopped the dropped run's worker on its own.
-
-    Every launch came before the run end, the device refuses a launch
-    delivered past LAUNCH_TTL_SECONDS, and it kills a delivered worker past
-    its budget (at most timeout_seconds) plus grace (#199 r1).
-    """
-    return recorded_at + LAUNCH_TTL_SECONDS + timeout_seconds + LINK_DROP_SETTLE_MARGIN_SECONDS
+    """When the device has killed the dropped run's worker on its own (#199 r1)."""
+    return (
+        recorded_at
+        + LAUNCH_TTL_SECONDS
+        + timeout_seconds
+        + KILL_GRACE_SECONDS
+        + DEVICE_CLOCK_SKEW_SECONDS
+    )
 
 
 def requeue_link_drop(
