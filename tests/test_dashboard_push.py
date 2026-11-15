@@ -317,13 +317,30 @@ def test_transport_for_unconfigured_is_the_noop() -> None:
     assert isinstance(transport_for(PushConfig()), NoopTransport)
 
 
-# #106: a dead link fails in seconds, not after the 60 s send timeout.
-OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
+# #224: connect and keepalive timeouts come from the host's ssh_config.
+OPTIONS = ["-o", "BatchMode=yes"]
 CONFIG_OPTIONS = ["-F", "/home/box/.ssh/config", *OPTIONS]
 RENAME_BOTH = (
     "cd -- {dir} && mv -f -- .status.json.push-tmp status.json"
     " && mv -f -- .index.html.push-tmp index.html"
 )
+
+
+@pytest.mark.parametrize("method", ["scp", "rsync"])
+@pytest.mark.parametrize("ssh_config", [None, "/home/box/.ssh/config"])
+def test_push_argv_leaves_connect_and_keepalive_timeouts_to_ssh_config(
+    tmp_path: Path, method: str, ssh_config: str | None
+) -> None:
+    runner = Recorder()
+    SshTransport(
+        TARGET, "factory-dashboard", method=method, ssh_config=ssh_config, runner=runner
+    ).send(files(tmp_path))
+    assert len(runner.calls) == 3
+    for argv, _ in runner.calls:
+        joined = " ".join(argv)
+        for option in ("ConnectTimeout", "ServerAliveInterval", "ServerAliveCountMax"):
+            assert option not in joined
+        assert "BatchMode=yes" in joined
 
 
 def test_rsync_uploads_to_temp_names_then_renames_both_in_one_ssh(tmp_path: Path) -> None:

@@ -165,8 +165,8 @@ assumes a device is reachable: the poller checks it (below).
 moves the first queued job for that harness, in claim order (a ticket marked
 urgent, then a job resuming a paused step, then a ticket marked bug, then the
 oldest; issue #85), to running and holds a slot on the least-loaded device
-(the most free slots; a tie goes to the earlier device in `machines.yml`)
-that is enabled, has no placeholder and lists the harness. Slots are generic: any
+(the lowest utilization, slots held over `slot_max`; a tie goes to a remote
+device before the local box, remotes in `machines.yml` order; issue #223) that is enabled, has no placeholder and lists the harness. Slots are generic: any
 free slot on an eligible device takes any harness. The job update and the
 `device_slots` row commit in one `BEGIN IMMEDIATE` transaction in the
 dispatcher database, so two claims cannot take the same last slot. With no
@@ -1059,10 +1059,27 @@ sourcing its env files (`run-poller.sh --print-db`), else the caller's
 `ORCH_DB`: while it is held, a poller runs even if its pid is
 not visible from this shell, so they launch nothing (`start` says
 `orch poll already running (poll lock held)`).
-[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh), started by
-hand, runs `poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
+[`deploy/poller-ensure-loop.sh`](deploy/poller-ensure-loop.sh) runs
+`poller-service.sh ensure` every `ORCH_POLL_ENSURE_SEC` seconds
 (default 60). It holds `poller-ensure-loop.lock` for its whole life and exits
-0 at once when another copy holds it.
+0 at once when another copy holds it. With `poller-autostart` on and no
+`crontab` (issue #248), `ensure` starts it unless it already runs, and logs
+`crontab not found` once per state directory; it can also be started by hand.
+A loop that `ensure` started exits at its next pass once `remove-autostart`
+has removed `poller-autostart`, and that pass launches nothing; a loop started
+by hand keeps running.
+
+Every `ensure`, held stopped or not, also runs `waiter-service.sh <bot>
+ensure` for each `~/.config/factory/waiter-autostart-<bot>` (logging to
+`waiter-<bot>-service.log`), so whatever keeps the poller alive keeps the
+autostarted waiters alive too, even with a `profile.sh` older than #80.
+
+Before restoring a missing `orch.db`, `start` and `ensure` wait for a box
+copy-in still restoring files: while `ORCH_COPY_IN_STATUS` (default
+`/tmp/sand-copy-in-status.json`) exists and its `"phase"` is not `"done"`,
+they check every `ORCH_COPY_IN_POLL_SEC` (default 5) for up to
+`ORCH_COPY_IN_WAIT` seconds (default 600). An `orch.db` the copy-in brings
+back is kept; after the wait runs out the restore goes ahead.
 
 ## Status
 
@@ -1610,9 +1627,9 @@ names. An interrupted upload leaves the published set as it was; the
 renames run back to back on the remote host with no network round-trip
 between them, so a reader never sees a half-written file and the set is
 mismatched for at most the instants between local `rename(2)` calls. The static server
-never serves the temp names. `<options>` are `-o BatchMode=yes -o
-ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2`, so a
-dead link fails in seconds (issue #106). Every command is an argv list (no
+never serves the temp names. `<options>` are `-o BatchMode=yes`; connect
+and keepalive timeouts are left to the host's ssh_config (issue #224), and
+the 20-second per-command timeout still bounds a dead link (issue #106). Every command is an argv list (no
 local shell) with a 20-second timeout; the remote shell sees only the validated
 `remote_dir` and fixed file names. The config holds no secrets: `host` is a
 bare alias or tailnet name (no `user@`, no options); `remote_dir` is a plain
@@ -1625,7 +1642,8 @@ ssh_config file itself. `check-config` validates the section.
 
 *When a push fails* (issue #106), `orch poll` reads the push child's exit
 status. After the k-th failure in a row it starts no push until
-min(30·2^(k-1), 600) seconds after the failed one started, with one
+min(30·2^(k-1), 60) seconds after the failed one started (30 seconds after
+the first failure, then 60; issue #224), with one
 `dashboard push: failed (exit N), k in a row; pushes paused for Ss` line;
 a success clears the backoff. A live push's pending change waits and goes
 out when the backoff ends. Each push's outcome is the `dashboard-push`

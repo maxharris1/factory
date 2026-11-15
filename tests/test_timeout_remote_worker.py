@@ -146,7 +146,7 @@ def test_an_unreachable_device_past_the_timeout_goes_stuck_without_a_retry(
 
 
 def test_a_box_job_keeps_the_plain_timeout(tmp_path: Path) -> None:
-    poller = Poller(tmp_path, box_slots=3)  # ties with the PC: the box comes first
+    poller = Poller(tmp_path, box_slots=3, pc=False)  # pc off: the box
     job_id = poller.review(timeout=TIMEOUT)
     assert poller.claim().device == "box"
     # Started (#91: a placed job with no worker never started), its runner

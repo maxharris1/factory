@@ -35,11 +35,11 @@ arrives meanwhile is pushed as soon as both allow, so the last change is
 never dropped. The full set (the pages too) still goes out at the
 `PollPusher` cadence.
 
-#106: a dead link fails fast. SSH gives up connecting after 5 s and drops a
-silent connection after about 10 s, and each upload or rename is killed
-after SEND_TIMEOUT_SECONDS (20). Both pushers read each push child's exit
+#106: a dead link fails fast. Connect and keepalive timeouts come from the
+host's ssh_config (#224), and each upload or rename is killed after
+SEND_TIMEOUT_SECONDS (20). Both pushers read each push child's exit
 status. After the k-th failure in a row they start no push until
-`backoff_seconds(k)` (30 s doubling up to 10 min) after the failed one
+`backoff_seconds(k)` (30 s, then 60 s for every later failure) after the failed one
 started, with one log line per failure; a success clears it. A live
 pusher's pending change is kept, so it goes out once the backoff ends.
 With `record`, each push's outcome goes to the `dashboard-push` Health
@@ -74,12 +74,7 @@ NOT_CONFIGURED = (
     "dashboard push: not configured (dashboard.push.transport is none); "
     "nothing pushed"
 )
-SSH_OPTIONS = (
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=5",
-    "-o", "ServerAliveInterval=5",
-    "-o", "ServerAliveCountMax=2",
-)
+SSH_OPTIONS = ("-o", "BatchMode=yes")
 SEND_TIMEOUT_SECONDS = 20
 RSYNC_IO_TIMEOUT_SECONDS = 10
 TEMP_SUFFIX = ".push-tmp"
@@ -276,7 +271,7 @@ CHILD_ENV = (
 )
 STILL_RUNNING = "dashboard push: previous push still running; skipped this cycle"
 BACKOFF_FIRST_SECONDS = 30.0
-BACKOFF_MAX_SECONDS = 600.0
+BACKOFF_MAX_SECONDS = 60.0
 BACKOFF_MAX_DOUBLINGS = math.ceil(math.log2(BACKOFF_MAX_SECONDS / BACKOFF_FIRST_SECONDS))
 
 Spawn = Callable[..., object]
