@@ -19,7 +19,7 @@ from lib.dashboard_pages.lanes import _just_happened_and_intake, _kpis, lane_dev
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE,
 )
-from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
+from lib.dashboard_pages.ticket_detail import _jobview
 from lib.dashboard_pages.tickets import _board, _tickets
 
 
@@ -327,6 +327,7 @@ PX_SCRIPT = r"""
   var FPS = 20;
   var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst', 'still'];
   var STRIPS = new Map();
+  var HOOKS = [];
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   var sysStill = !!(mq && mq.matches);
   var io = typeof IntersectionObserver === 'function' ? new IntersectionObserver(seen) : null;
@@ -695,7 +696,13 @@ PX_SCRIPT = r"""
       paint(s, now);
       if (!s._dead && s._sig === null) live = true;
     });
+    HOOKS.forEach(function (fn) { if (fn(now)) live = true; });
     if (live) start();
+  }
+
+  function onFrame(fn) {
+    if (HOOKS.indexOf(fn) < 0) HOOKS.push(fn);
+    start();
   }
 
   function seen(entries) {
@@ -816,7 +823,7 @@ PX_SCRIPT = r"""
     else if (mq.addListener) mq.addListener(onMotion);
   }
 
-  return {bind: bind, state: state, strip: strip, jobStrip: jobStrip, frame: frame, strips: function () { return STRIPS; }, Strip: Strip, table: TABLE};
+  return {bind: bind, onFrame: onFrame, state: state, strip: strip, jobStrip: jobStrip, frame: frame, strips: function () { return STRIPS; }, Strip: Strip, table: TABLE};
 })()
 """
 
@@ -893,6 +900,7 @@ PX_STATE: dict[str, dict[str, str | float]] = {
     **{name: {"effect": "static", "tint": _PX_BAD} for name in PX_BROKEN},
     "idle": {"effect": "twinkle", "tint": PX_FALLBACK},
     "held": {"effect": "off", "tint": PX_FALLBACK, "frame": "px-held"},
+    "waiting": {"effect": "static", "tint": "#ff9e64"},
     "unknown": {"effect": "off", "tint": PX_FALLBACK},
     # #139: the brand caret per link state (rate 1 blinks at 1 Hz, 0 is solid).
     **{f"link-{name}": {"effect": "caret", "tint": tint, "rate": rate} for name, (tint, rate) in _PX_LINK.items()},
@@ -1260,8 +1268,6 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
-    # The job page copies the full chart from here.
-    extra = _flow_template(snapshot) if name == "job.html" else ""
     return "\n".join(
         [
             "<!doctype html>",
@@ -1280,7 +1286,6 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
             _topbar(snapshot, name),
             f'<main id="hud">{panels}</main>',
             _statusline(snapshot),
-            extra,
             f"<script>{script}</script>",
             "</body></html>",
         ]

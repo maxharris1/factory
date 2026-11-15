@@ -1113,6 +1113,7 @@ def _read_db(
                     "job_state": job_state,
                     "round": _detail_round(row["detail"]),
                     "heartbeat_age_seconds": age,
+                    "heartbeat_at": float(row["last_activity_at"]),
                     "timeout_seconds": timeout,
                     "overdue": age > timeout,
                     "device": device,
