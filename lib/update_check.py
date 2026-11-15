@@ -22,7 +22,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.feeder_gates import shared_path_matches
+from lib.feeder_gates import path_matches
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
@@ -84,7 +84,7 @@ def _check(
     both = False
     for path, stages in sorted(conflicts.items()):
         both |= _check_conflict(
-            clone, path, stages, new_head, shared_path_matches(shared_paths, path)
+            clone, path, stages, new_head, path_matches(shared_paths, path)
         )
     if not conflicts:
         return "clean merge of base"

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from lib.factory_md import parse_factory_md
-from lib.feeder_gates import shared_path_matches
+from lib.feeder_gates import path_matches
 from lib.update_check import classify
 from tests.merge_queue_support import Board, sha
 from tests.test_feeder import FACTORY_MD, make_feeder
@@ -77,7 +77,7 @@ def test_bad_shared_paths_are_refused(value: str, message: str) -> None:
     ],
 )
 def test_shared_path_matches(patterns, path: str, matches: bool) -> None:
-    assert shared_path_matches(patterns, path) is matches
+    assert path_matches(patterns, path) is matches
 
 
 # --- the feeder ---------------------------------------------------------------

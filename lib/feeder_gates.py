@@ -1,7 +1,8 @@
 """Feeder gates: `Blocked by`, `Depends on`, `Touches:` and `Conflicts with` lines (issue #156).
 
 A ticket that carries its project's intake signal is fed only once every
-blocker it names is done and nothing in flight shares a path or a
+blocker it names is done, fewer than its project's limit of tickets in
+flight hold each of its paths, and nothing in flight shares a
 conflicts-with edge with it. This module parses the lines and makes every
 gate decision. It does no I/O: lib/feeder.py reads the statuses and writes
 the rows.
@@ -17,6 +18,12 @@ Paths on a `Touches:` line split on commas and spaces. Prose is never read: a re
 A `Touches:` path that matches the project's factory.md `shared_paths`
 (issue #261) never causes a collision wait; a `Conflicts with` edge still
 holds.
+
+Up to the project's factory.md `feeder.max_holders_per_path` tickets may
+hold colliding paths at once (issue #269). The limit is counted on both
+sides of a collision, so a held directory never gets more holders than the
+limit either. A path matching `feeder.exclusive_paths` keeps one holder,
+and a `Conflicts with` edge always does.
 """
 
 from __future__ import annotations
@@ -152,9 +159,10 @@ def paths_collide(first: str, second: str) -> bool:
     return second.endswith("/") and first.startswith(second)
 
 
-def shared_path_matches(patterns: Iterable[str], path: str) -> bool:
-    """Whether path matches a shared_paths pattern: a glob with hold.paths
-    rules, where a trailing / names a directory and everything under it."""
+def path_matches(patterns: Iterable[str], path: str) -> bool:
+    """Whether path matches a shared_paths or exclusive_paths pattern: a glob
+    with hold.paths rules, where a trailing / names a directory and
+    everything under it."""
     path = path.removesuffix("/")
     for pattern in patterns:
         if pattern.endswith("/"):
@@ -308,6 +316,15 @@ def _shortest_loop(start: Ref, edges: Mapping[Ref, list[Ref]]) -> list[Ref]:
     return [start, start]
 
 
+@dataclass(frozen=True)
+class PathPolicy:
+    """A project's factory.md settings for the `Touches:` gate."""
+
+    shared: tuple[str, ...] = ()
+    exclusive: tuple[str, ...] = ()
+    max_holders: int = 1
+
+
 @dataclass
 class Holds:
     """Paths and conflicts-with edges held by tickets in flight.
@@ -318,7 +335,7 @@ class Holds:
     """
 
     held: list[tuple[Ref, frozenset[Ref], GateLines, str]] = field(default_factory=list)
-    shared: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    policies: Mapping[str, PathPolicy] = field(default_factory=dict)
 
     def take(
         self, holder: Ref, aliases: Iterable[Ref], lines: GateLines, note: str = "conflicts with it"
@@ -337,19 +354,61 @@ class Holds:
     def collision(self, ref: Ref, lines: GateLines, aliases: Iterable[Ref] = ()) -> Wait | None:
         """Why ref waits on a holder; aliases are other refs it goes by (its PR)."""
         own = frozenset({ref, *aliases})
-        shared = self.shared.get(ref.repo, ())
+        policy = self.policies.get(ref.repo, PathPolicy())
         for holder, names, held, note in self.held:
             if names & own:
                 continue
             for path in sorted(lines.touches) if holder.repo == ref.repo else ():
+                if path_matches(policy.shared, path):
+                    continue
                 for other in sorted(held.touches):
-                    if shared_path_matches(shared, path) or shared_path_matches(shared, other):
+                    if path_matches(policy.shared, other) or not paths_collide(path, other):
                         continue
-                    if paths_collide(path, other):
-                        longer = path if len(path) >= len(other) else other
-                        return Wait(
-                            f"waiting on file {longer} held by {holder.label(ref.repo)}"
-                        )
+                    exclusive = path_matches(policy.exclusive, path) or path_matches(
+                        policy.exclusive, other
+                    )
+                    limit = 1 if exclusive else policy.max_holders
+                    groups = ({holder},) if limit == 1 else (
+                        self._holders_on(ref.repo, own, path, policy),
+                        self._holders_on(ref.repo, own, other, policy),
+                    )
+                    for group in groups:
+                        if len(group) >= limit:
+                            longer = path if len(path) >= len(other) else other
+                            return Wait(
+                                f"waiting on file {longer} held by {labels(group, ref.repo)}"
+                            )
             if lines.conflicts_with & names or own & held.conflicts_with:
                 return Wait(f"waiting on {holder.label(ref.repo)} ({note})")
         return None
+
+    def co_holders(self, ref: Ref, lines: GateLines) -> dict[str, tuple[Ref, ...]]:
+        """The other holders of each of ref's paths that are not shared."""
+        own = frozenset({ref})
+        policy = self.policies.get(ref.repo, PathPolicy())
+        found: dict[str, tuple[Ref, ...]] = {}
+        for path in sorted(lines.touches):
+            if path_matches(policy.shared, path):
+                continue
+            group = self._holders_on(ref.repo, own, path, policy)
+            if group:
+                found[path] = tuple(sorted(group, key=Ref.sort_key))
+        return found
+
+    def _holders_on(
+        self, repo: str, own: frozenset[Ref], path: str, policy: PathPolicy
+    ) -> set[Ref]:
+        return {
+            holder
+            for holder, names, held, _note in self.held
+            if holder.repo == repo
+            and not names & own
+            and any(
+                paths_collide(path, other) and not path_matches(policy.shared, other)
+                for other in held.touches
+            )
+        }
+
+
+def labels(refs: Iterable[Ref], home: str) -> str:
+    return ", ".join(item.label(home) for item in sorted(refs, key=Ref.sort_key))
