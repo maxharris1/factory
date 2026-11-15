@@ -606,6 +606,16 @@ def _tables(connection: sqlite3.Connection) -> set[str]:
     }
 
 
+_VERDICT_TIMES = (
+    ("jobs", "MIN", "created_at", "source_comment_id"),
+    ("jobs", "MAX", "finished_at", "handoff_comment_id"),
+    ("ticket_state", "MAX", "approved_at", "approve_comment_id"),
+    ("ship_holds", "MAX", "held_at", "approve_comment_id"),
+    ("ticket_retries", "MAX", "recorded_at", "comment_id"),
+    ("followup_filings", "MAX", "created_at", "comment_id"),
+)
+
+
 def collect_snapshot(
     db_path: Path,
     log_path: Path,
@@ -1353,27 +1363,15 @@ def _read_db(
     verdicts = None
     if "handled_comments" in tables:
         verdicts = []
-        same_ticket = "lower({t}.repo) = lower(h.repo) AND {t}.ticket_id = h.ticket_id"
-        times = []
-        if jobs:
-            times += [
-                f"SELECT MIN(job.created_at) FROM jobs AS job WHERE {same_ticket.format(t='job')} "
-                "AND job.source_comment_id = h.comment_id",
-                f"SELECT MAX(job.finished_at) FROM jobs AS job WHERE {same_ticket.format(t='job')} "
-                "AND job.handoff_comment_id = h.comment_id",
-            ]
-        if "ticket_state" in tables and {"approved_at", "approve_comment_id"} <= {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(ticket_state)")
-        }:
-            times.append(
-                f"SELECT s.approved_at FROM ticket_state AS s WHERE {same_ticket.format(t='s')} "
-                "AND s.approve_comment_id = h.comment_id"
-            )
-        if "ship_holds" in tables:
-            times.append(
-                f"SELECT hold.held_at FROM ship_holds AS hold WHERE {same_ticket.format(t='hold')} "
-                "AND hold.approve_comment_id = h.comment_id"
-            )
+        same_ticket = "lower(t.repo) = lower(h.repo) AND t.ticket_id = h.ticket_id"
+        times = [
+            f"SELECT {when}(t.{column}) FROM {table} AS t "
+            f"WHERE {same_ticket} AND t.{comment} = h.comment_id"
+            for table, when, column, comment in _VERDICT_TIMES
+            if table in tables
+            and {column, comment}
+            <= {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+        ]
         recorded = f"COALESCE({', '.join(f'({q})' for q in times)}, NULL)" if times else "NULL"
         for row in connection.execute(
             f"SELECT h.rowid AS seq, h.repo, h.ticket_id, h.outcome, {recorded} AS recorded_at "

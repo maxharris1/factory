@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 
 import lib.dashboard_page as page
-from lib.dashboard import collect_snapshot, render_pages
+from lib.dashboard import _VERDICT_TIMES, collect_snapshot, render_pages
 from tests import test_dashboard_layout as layout
 from tests import test_dashboard_tickets_board as board
 from tests.test_dashboard import NOW, add_job, seeded
+from tests.test_dispatcher import retry, seed_state, setup, ticket
 
 IDS = layout.BAR + ["hud", "attention", "relay"]
 PANELS = ["attention", "relay"]
@@ -128,6 +129,57 @@ def test_a_verdict_carries_the_approval_time_recorded_for_its_comment(tmp_path: 
     verdicts = {row["ticket_id"]: row["age_seconds"]
                 for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
     assert verdicts == {"42": None, "44": None, "43": None}
+
+
+def test_a_retry_with_no_job_carries_the_time_the_dispatcher_recorded(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path, now=[NOW - 5])
+    seed_state(queue, state="waiting-max", stuck=1, stuck_reason="t7-stuck")
+    with queue.connect() as connection:
+        add_job(connection, "old-handoff", repo="owner/repo", ticket_id="42", state="done",
+                handoff_comment_id="old-ready")
+        _finish(connection, "old-handoff", NOW - 100)
+    dispatcher.process(ticket(retry("retry-42")))
+    with queue.connect() as connection:
+        assert not connection.execute(
+            "SELECT 1 FROM jobs WHERE source_comment_id = 'retry-42'").fetchall()
+
+    snapshot = collect_snapshot(tmp_path / "d.db", tmp_path / "poller.log", now=NOW)
+    (verdict,) = [v for v in snapshot["poller"]["verdicts"] if v["outcome"] == "retried-no-job"]
+    assert verdict["age_seconds"] == 5
+    (thread,) = [t for t in page.relay_threads(snapshot) if t["ref"]["ticket_id"] == "42"]
+    assert [(step["type"], step["at"]) for step in thread["steps"]] == [
+        ("handoff", 100), ("verdict", 5)]
+
+
+def test_a_verdict_carries_the_time_its_follow_up_filing_recorded(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT INTO followup_filings (repo, ticket_id, comment_id, round, title, body, labels, "
+            "status, created_at) VALUES ('maxharris1/cleffy', '42', 'v-42', 1, 't', 'b', '[]', "
+            "'pending', ?)", (NOW - 40,))
+        _handled(connection, ("maxharris1/cleffy", "42", "v-42", "queued-ship"))
+    verdicts = {row["ticket_id"]: row["age_seconds"]
+                for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
+    assert verdicts == {"42": 40}
+
+    with sqlite3.connect(db) as connection:
+        connection.execute("DROP TABLE followup_filings")
+    verdicts = {row["ticket_id"]: row["age_seconds"]
+                for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
+    assert verdicts == {"42": None}
+
+
+def test_every_table_that_times_a_comment_feeds_the_verdict_time(tmp_path: Path) -> None:
+    db, _ = seeded(tmp_path)
+    timed = set()
+    with sqlite3.connect(db) as connection:
+        for (table,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
+            columns = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+            if any(c.endswith("comment_id") for c in columns) and any(
+                    c.endswith("_at") for c in columns):
+                timed.add(table)
+    assert timed == {table for table, *_ in _VERDICT_TIMES}
 
 
 def test_a_new_approval_leads_the_relay_ahead_of_an_older_handoff(tmp_path: Path) -> None:
