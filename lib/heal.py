@@ -108,7 +108,6 @@ SKIP = "skip"
 DEFER = "defer"
 DRAIN = "drain"
 ESCALATE = "escalate"
-HELD_SKIP = "not restarting: "
 DRAIN_ESCALATE_SECONDS = 2 * 60 * 60
 ACK_POLLS = 20
 ACK_POLL_SECONDS = 0.5
@@ -185,6 +184,10 @@ def service_log(service: str, state_dir: Path) -> Path:
     return state_dir / f"waiter-{service.split(':', 1)[1]}-service.log"
 
 
+def port_held(item: Mapping) -> bool:
+    return item.get("state") == health.DOWN and str(item.get("reason") or "").startswith(health.PORT_HELD)
+
+
 def _recent(times: Sequence[float], now: float) -> list[float]:
     return [t for t in times if now - t < WINDOW_SECONDS]
 
@@ -240,10 +243,10 @@ def decide(
             if need is not None:
                 actions.append(act(SKIP, "held stopped"))
             continue
-        if item.get("state") == health.DOWN and str(item.get("reason") or "").startswith(health.PORT_HELD):
+        if port_held(item):
             if key.alerted != item["reason"]:
                 actions.append(act(ESCALATE, item["reason"]))
-            actions.append(act(SKIP, f"{HELD_SKIP}{item['reason']}"))
+            actions.append(act(SKIP, f"not restarting: {item['reason']}"))
             continue
         escalation = _escalation(key, attempts, now, broken=need is not None)
         if escalation is not None:
@@ -502,11 +505,11 @@ def heal(
                 drain_path(state_dir, bot).unlink(missing_ok=True)
                 drain_ack_path(state_dir, bot).unlink(missing_ok=True)
     acted = {action.label for action in actions}
-    port_held = {a.label for a in actions if a.kind == SKIP and a.reason.startswith(HELD_SKIP)}
+    held_port = {item.get("label") for item in report.get("components") or () if port_held(item)}
     for label, key in states.items():
         if label not in acted:
             key.last = None
-        if label not in port_held:
+        if label not in held_port:
             key.alerted = None
     escalations = [a for a in actions if a.kind == ESCALATE]
     if escalations and not dry_run:
@@ -515,7 +518,7 @@ def heal(
         for action in escalations:
             key = states.setdefault(action.label, KeyState())
             key.escalated_at = now
-            if action.label in port_held and not outcome.startswith("escalation failed"):
+            if action.label in held_port and not outcome.startswith("escalation failed"):
                 key.alerted = action.reason
             log(f"escalate {action.label} ({action.reason}) {outcome}")
     for key in states.values():
