@@ -110,7 +110,6 @@ def test_a_running_job_gets_its_counters_and_no_step_feed(tmp_path: Path) -> Non
                    '<b class="bad">40 / 1</b><span>tests pass / fail</span>',
                    "<b>24,763 / 1,220</b><span>tokens in / out</span>", "4m 50s"):
         assert needle in article, needle
-    # #146: the job page shows no step feed and no per-tool counts.
     for gone in ("shell ×7", "file_change", "mcp:github.get_pr", "edit 2 files", "tele-steps", "tele-tools"):
         assert gone not in article, gone
 

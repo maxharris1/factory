@@ -115,7 +115,6 @@ def _who_tint(who: object) -> str:
 
 
 def _detail_model(row: dict, chart: dict | None) -> dict:
-    """The one structure every panel reads. detailModel in SCRIPT builds the same."""
     flow = row.get("flow") or {}
     phases = ticket_phases(chart)
     visits = [
@@ -627,7 +626,7 @@ _SCRIPT = r"""
     legendItem(legend, 'off', JOURNEY.tint.script, 'off-chart jump');
     legendItem(legend, 'now', null, 'now');
     legendItem(legend, 'next', null, 'can come next');
-    if (box.addEventListener) box.addEventListener('toggle', function () { openDetails[key] = box.open; });
+    box.addEventListener('toggle', function () { openDetails[key] = box.open; });
     return {sec: box, canvas: canvas};
   }
 
@@ -661,7 +660,6 @@ _SCRIPT = r"""
     drawOne(j, Date.now());
   }
   function placeHits(j) {
-    if (typeof journeyBars !== 'function') return;
     var bars = journeyBars(j.m, SEL[j.r.job].scale);
     var buttons = j.hitButtons;
     for (var k = 0; k < buttons.length && k < bars.length; k++) {
@@ -676,7 +674,7 @@ _SCRIPT = r"""
   }
   function drawOne(j, now) {
     var s = SEL[j.r.job];
-    if (j.canvas && j.canvas.getContext && typeof drawJourney === 'function') {
+    if (j.canvas.getContext) {
       var ctx = j.canvas.getContext('2d');
       if (ctx) {
         var flash = s.flashAt === null || reducedMotion ? 0 : Math.max(0, 1 - (now - s.flashAt) / 260);
@@ -686,7 +684,7 @@ _SCRIPT = r"""
           startClock: j.startClock, nowClock: j.nowClock});
       }
     }
-    if (j.flow && j.flow.open !== false && j.flowCanvas && j.flowCanvas.getContext && typeof drawFlowMap === 'function' && FLOWMAP) {
+    if (j.flowCanvas && j.flow.open && j.flowCanvas.getContext && FLOWMAP) {
       var fctx = j.flowCanvas.getContext('2d');
       if (fctx) drawFlowMap(fctx, FLOWMAP, {visits: j.m.visits, state: j.m.state, next: j.m.next.map(function (n) { return n.to; })},
                             {t: reducedMotion ? 0 : now / 1000, reduced: reducedMotion});
@@ -723,19 +721,17 @@ _SCRIPT = r"""
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
     var j = {r: r, m: m, logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: starts.length ? clock(Math.min.apply(null, starts)) : '', nowClock: clock(generated)};
-    if (art.addEventListener) {
-      art.addEventListener('click', function (ev) {
-        var t = ev.target && ev.target.closest ? ev.target.closest('button') : null;
-        if (!t) return;
-        if (t.hasAttribute('data-visit')) pick(j, Number(t.getAttribute('data-visit')), hitButtons.indexOf(t) >= 0);
-        else if (t.hasAttribute('data-scale')) {
-          s.scale = t.getAttribute('data-scale');
-          s.tPlay = Date.now();
-          scales.forEach(function (b) { b.setAttribute('aria-pressed', b === t ? 'true' : 'false'); });
-          placeHits(j);
-        } else if (t.hasAttribute('data-replay')) s.tPlay = Date.now();
-      });
-    }
+    art.addEventListener('click', function (ev) {
+      var t = ev.target.closest('button');
+      if (!t) return;
+      if (t.hasAttribute('data-visit')) pick(j, Number(t.getAttribute('data-visit')), hitButtons.indexOf(t) >= 0);
+      else if (t.hasAttribute('data-scale')) {
+        s.scale = t.getAttribute('data-scale');
+        s.tPlay = Date.now();
+        scales.forEach(function (b) { b.setAttribute('aria-pressed', b === t ? 'true' : 'false'); });
+        placeHits(j);
+      } else if (t.hasAttribute('data-replay')) s.tPlay = Date.now();
+    });
     journeys.push(j);
     return art;
   }

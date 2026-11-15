@@ -382,7 +382,6 @@ FLOWMAP_TINT = {
     "grok": "#73daca",
     "human": "#ff9e64",
 }
-# FlowMap.dc.html's places (column, row) for the states it knew.
 FLOWMAP_PLACES = {
     "intake": (0, 0), "questions": (0, 1), "waiting-max": (0, 2),
     "planning": (1, 0), "plan-check": (1, 1),
@@ -427,9 +426,6 @@ def _flowmap_places(chart: dict) -> dict[str, tuple[int, int]]:
 
 
 def _route(a: dict, b: dict, nodes: Sequence[dict]) -> list[list[int]]:
-    """Corner cells of an orthogonal wire from node a to node b. Wires leave
-    and enter through the gutters between columns and the channels between
-    rows, so no segment crosses a node (FlowMap.dc.html _route)."""
     nw, nh = FM_NODE_W, FM_NODE_H
     ax, ay0, bx, by0 = a["x"], a["y"], b["x"], b["y"]
     if a is b:

@@ -82,7 +82,6 @@ function journeyLayout(model, scale) {
   }
   var toScale = scale === 'scale' && !!model.all_durations_known && total > 0;
   var even = Math.max(6, Math.min(24, Math.floor(PW / Math.max(1, n))));
-  /* past 29 visits the artboard's 6-cell minimum runs off the canvas */
   if (even * n > PW) even = Math.max(1, Math.floor(PW / n));
   var w = [], sum = 0, big = 0;
   for (i = 0; i < n; i++) {
@@ -147,7 +146,6 @@ function drawJourney(ctx, model, opts) {
   var L = journeyLayout(model, opts.scale);
   var bars = L.bars, n = bars.length, cur = L.cur, bay = JOURNEY_BAYER;
   var reduced = !!opts.reduced;
-  /* broken never moves and done settles (SPEC 2), so a stopped or finished ticket draws still */
   var still = reduced || !!model.terminal || (n > 0 && bars[cur].stop);
   var lively = !still && !opts.calm;
   var t = Math.max(0, Number(opts.t) || 0);

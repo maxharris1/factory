@@ -213,7 +213,6 @@ def test_clicking_a_lane_slot_opens_the_job_modal_and_it_closes_cleanly(tmp_path
     modal = opened["modal"]
     assert "[role=dialog]" in modal
     assert "cleffy#40" in opened["text"] and "round 2 of 3" in opened["text"]
-    # The same ticket page as job.html.
     runlog = modal[modal.index("ol.runlog"):modal.index("ol.journey")]
     assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == TICKET_40_PATH
     assert "Full state chart" in opened["text"]
