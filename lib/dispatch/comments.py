@@ -23,6 +23,11 @@ from lib.dispatch.types import (
 )
 from lib.handoff import HandoffError, parse_comment
 
+_RECOVERS_EDITED = {
+    "ready": frozenset({"queued-review", "answered-review", "queued-ci-fix"}),
+    "verdict": frozenset({"answered-fix", "approve-ci-red-fix"}),
+}
+
 
 class CommentsMixin:
     def process(self, ticket: TrackedTicket) -> None:
@@ -214,9 +219,9 @@ class CommentsMixin:
             if handled:
                 if outcome.startswith("rejected-"):
                     self._wake_comment_problem(ticket, comment, "rejected", outcome)
-                if (
-                    kind == "ready" and outcome in ("queued-review", "answered-review")
-                ) or (kind == "verdict" and _acted_verdict(outcome)):
+                if outcome in _RECOVERS_EDITED.get(kind, ()) or (
+                    kind == "verdict" and _acted_verdict(outcome)
+                ):
                     self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
 

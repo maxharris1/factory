@@ -6218,6 +6218,53 @@ def test_clean_ready_after_edited_ready_queues_review_and_clears_attention(
     assert _attention(queue) == []
 
 
+def test_clean_ready_on_red_ci_after_edited_ready_queues_ci_fix_and_clears_attention(
+    tmp_path: Path,
+) -> None:
+    dispatcher, queue = setup(tmp_path)
+    seed_builder_job(queue)
+    head = "a" * 40
+    clean = comment(
+        "ready-clean", READY.format(head=head), author="claude-login", created_at=2
+    )
+
+    dispatcher.process(
+        ticket(_edited_ready(head), clean, head=head, ci={head: CIResult("failure")})
+    )
+
+    assert handled_outcome(queue, "ready-clean") == "queued-ci-fix"
+    assert _attention(queue) == []
+
+
+def test_clean_approve_on_red_ci_after_edited_approve_queues_ci_fix_and_clears_attention(
+    tmp_path: Path,
+) -> None:
+    actions = FakeReviewActions()
+    dispatcher, queue = setup(tmp_path, review_actions=actions)
+    head = "a" * 40
+    seed_review_job(dispatcher, queue, head)
+    body = VERDICT.format(round=1, head=head, verdict="APPROVE", risk="high")
+    edited = replace(
+        comment("verdict-edited", body, author="codex-login", created_at=2),
+        edited_at=5,
+    )
+    clean = comment("verdict-clean", body, author="codex-login", created_at=3)
+
+    dispatcher.process(
+        ticket(
+            edited,
+            clean,
+            head=head,
+            ci={head: CIResult("failure")},
+            factory_config=replace(factory(ship="handoff"), start_before_ci=True),
+        )
+    )
+
+    assert handled_outcome(queue, "verdict-clean") == "approve-ci-red-fix"
+    assert actions.handoffs == []
+    assert _attention(queue) == []
+
+
 def test_rejected_repost_after_edited_ready_leaves_attention(tmp_path: Path) -> None:
     dispatcher, queue = setup(tmp_path)
     seed_builder_job(queue)
