@@ -621,10 +621,10 @@ ENV_FILE = "env"
 
 # The run's handoff, by the box's rule for what it relays: a line that is a
 # JSON object is a stream event (lib/telemetry.py), whose final message
-# (`result`, or a completed `agent_message`) gives its ORCH-HANDOFF line
-# (telemetry.handoff_line) at the next end event (`result`,
-# `turn.completed`) or the end of the log; any other non-blank line is
-# relayed as is. Prints the last line relayed when it is an ORCH-HANDOFF line.
+# (`result`, or a completed `agent_message`) gives its deciding marker line
+# at the next end event (`result`, `turn.completed`) or the end of the log;
+# any other line is relayed as is. Prints the marker line that decides the
+# relayed lines. Both choices follow lib/handoff_marker.py's rule, in awk.
 HANDOFF_AWK = r"""
 function value(line, key,    i, n, c, h, out) {
     found = 0
@@ -647,28 +647,33 @@ function value(line, key,    i, n, c, h, out) {
     }
     return ""
 }
-function handoff(text,    parts, k, line) {
+function strip(line) { sub(/^[ \t\r]+/, "", line); sub(/[ \t\r]+$/, "", line); return line }
+function kept(line) { return line != "" && index(line, "orch job run: ") != 1 && line !~ /^```[A-Za-z0-9_-]*$/ }
+function candidate(line) { return line ~ /^`*ORCH-HANDOFF:/ }
+function handoff(text,    parts, k, n, line) {
     gsub(/\r/, "\n", text)
-    for (k = split(text, parts, "\n"); k > 0; k--) {
-        line = parts[k]
-        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
-        if (line != "") break
+    n = 0
+    for (k = split(text, parts, "\n"); k > 0 && n < 20; k--) {
+        line = strip(parts[k])
+        if (!kept(line)) continue
+        n++
+        if (candidate(line)) return substr(line, 1, 120)
     }
-    return (k > 0 && line ~ /^ORCH-HANDOFF:/ && length(line) <= 113) ? line : ""
+    return ""
 }
-function emit(line) { if (line != "") { last = line; ok = 1 } }
+function relay(line) { line = strip(line); if (kept(line)) seen[count++ % 20] = line }
 /^[ \t]*\{.*\}[ \t\r]*$/ {
     if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
     else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
     else found = 0
     if (found) { final = text; pending = 1 }
-    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { emit(handoff(final)); pending = 0 }
+    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { relay(handoff(final)); pending = 0 }
     next
 }
-NF { last = $0; ok = 0 }
+{ relay($0) }
 END {
-    if (pending) emit(handoff(final))
-    if (ok || last ~ /^[ \t]*ORCH-HANDOFF: /) print last
+    if (pending) relay(handoff(final))
+    for (k = count - 1; k >= 0 && k >= count - 20; k--) if (candidate(seen[k % 20])) { print seen[k % 20]; exit }
 }
 """
 

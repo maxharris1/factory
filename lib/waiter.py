@@ -117,6 +117,7 @@ from lib.machines_yml import Device, MachinesConfig
 from lib.harness_env import ApproverProfileExposed, harness_environ
 from lib.handoff_check import ReadError, expected_for, gh_reader
 from lib.handoff_check import problems as handoff_problems
+from lib.handoff_marker import handoff_marker
 from lib.health import LOADED_VERSION
 from lib.orch_yml import Approvals, OrchConfig, load_orch_yml
 from lib.pstack_pin import ROOT as FACTORY_CHECKOUT
@@ -150,17 +151,7 @@ _CONFIG_KEYS = frozenset({"bot", "command"})
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+$")
 _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
-# The remote harness's last word: a GitHub comment id, a Linear comment id
-# (a UUID), or failed. Read from the tail of run.log only.
-_MARKER = re.compile(
-    r"^ORCH-HANDOFF: ([0-9]{1,20}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|failed)$"
-)
 MARKER_TAIL_BYTES = 64 * 1024
-MARKER_PREFIX = "ORCH-HANDOFF:"
-MARKER_SEARCH_LINES = 20
-_FENCE = re.compile(r"^```[A-Za-z0-9_-]*$")
-# Lines `orch job run` itself writes to run.log (lib/cli.py _job_run log()).
-RUNNER_LOG_PREFIX = "orch job run: "
 # Per remote job, in its job directory: what a restarted waiter needs to
 # finish the run (#87 F1.4), and the exit status `orch job run` leaves.
 REMOTE_RECORD = "remote.json"
@@ -314,32 +305,6 @@ def job_run_argv(
     if status_file is not None:
         argv += ["--status-file", str(status_file)]
     return [*argv, "--", *command]
-
-
-def handoff_marker(text: str) -> str | None:
-    """The run's last `ORCH-HANDOFF: <id|failed>` line, or None (#87 F1.5, #192).
-
-    The marker is looked for in the last MARKER_SEARCH_LINES lines of the
-    harness's output, bare or in one pair of backticks. Blank lines, code
-    fences and the box runner's own `orch job run: ...` lines (it logs after
-    the harness exits) are skipped and do not count toward those lines. The
-    last line there that starts like a marker decides: a malformed one means
-    there is no completion.
-    """
-    lines: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(RUNNER_LOG_PREFIX) or _FENCE.fullmatch(stripped):
-            continue
-        lines.append(stripped)
-    for line in reversed(lines[-MARKER_SEARCH_LINES:]):
-        if line.startswith("`") and line.endswith("`") and len(line) > 1:
-            line = line[1:-1]
-        if not line.startswith(MARKER_PREFIX):
-            continue
-        match = _MARKER.fullmatch(line)
-        return match.group(1) if match is not None else None
-    return None
 
 
 def local_only(config: MachinesConfig) -> MachinesConfig:
@@ -849,8 +814,9 @@ class Waiter:
     def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
         """`orch job done` on the box for a remote run, from its marker line.
 
-        Done needs both: `orch job run` exited 0, and the last line of this
-        run's output (after `offset` in run.log) is a comment-id marker.
+        Done needs both: `orch job run` exited 0, and the marker that decides
+        this run's output (after `offset` in run.log, lib/handoff_marker.py)
+        names a comment id.
         Anything else fails the job for T6 (#87 F1.5), but only when no
         remote worker was started: once one was, the job stays running
         until the poller's device check confirms the worker gone and fails
@@ -898,6 +864,10 @@ class Waiter:
             return
         self._forget_remote(job_dir)
         if handoff:
+            try:
+                retry_locked(lambda: self.queue.clear_invalid_handoff(job_id))
+            except (sqlite3.Error, OSError) as exc:
+                self.log(f"job {job_id}: its submitted-invalid flag stays ({_one_line(exc)})")
             how = f"handoff {handoff}"
         elif refused is not None:
             how = f"failed ({refused})"

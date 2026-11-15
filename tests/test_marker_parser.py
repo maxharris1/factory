@@ -8,13 +8,21 @@ on the comment it names before the job is done.
 
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
+import subprocess
+import tempfile
 from pathlib import Path
 
+import pytest
+
+from lib import remote
+from lib.handoff_marker import MARKER_SEARCH_LINES, handoff_marker
 from lib.queue import job_from_row
-from lib.waiter import MARKER_SEARCH_LINES, handoff_marker
 from tests.handoff_store import env_store, serve_handoff, serve_job
 from tests.test_waiter import FakeSpawn, enqueue
+from tests.test_telemetry import _session
 from tests.test_waiter_remote import _finish_run, make_waiter, remote_machines
 
 
@@ -103,6 +111,106 @@ def test_a_marker_15_lines_from_the_end_finishes_a_remote_run(tmp_path: Path) ->
     _finish_run(tmp_path, job_id, spawn, "working\nORCH-HANDOFF: 4242\n" + summary)
     waiter.step()
     assert _row(db, job_id) == ("done", "4242")
+
+
+# --- one rule for the waiter, the telemetry relay and the device ------------
+
+_UUID = "0b8f5c2e-1d2a-4c3b-9e8f-1234567890ab"
+_RULE = [
+    ("done\nORCH-HANDOFF: 4242", "4242"),
+    ("done\n`ORCH-HANDOFF: 4242`\n", "4242"),
+    (f"`ORCH-HANDOFF: {_UUID}`", _UUID),
+    ("```\nORCH-HANDOFF: failed\n```\n", "failed"),
+    ("ORCH-HANDOFF: 4242\n" + "summary\n" * 14, "4242"),
+    ("ORCH-HANDOFF: 4242\n" + "summary\n" * 19, "4242"),
+    ("ORCH-HANDOFF: 4242\n" + "summary\n" * 20, None),
+    ("ORCH-HANDOFF: 4242\n" + "\n\n" * 30 + "summary\n", "4242"),
+    ("ORCH-HANDOFF: 1\nprose\nORCH-HANDOFF: 2\nprose", "2"),
+    ("ORCH-HANDOFF: 4242\n`ORCH-HANDOFF: failed\n", None),
+    ("ORCH-HANDOFF: 4242\n``ORCH-HANDOFF: failed``\n", None),
+    ("ORCH-HANDOFF: 4242\nORCH-HANDOFF: failed`\n", None),
+    ("ORCH-HANDOFF: 4242\n`ORCH-HANDOFF: <comment-id>`\nprose", None),
+    ("ORCH-HANDOFF: 4242\nORCH-HANDOFF: " + "9" * 200, None),
+    ("ORCH-HANDOFF: 4242\nORCH-HANDOFF: 42 and more " + "9" * 200, None),
+    ("say `ORCH-HANDOFF: 4242`", None),
+    ("no marker at all", None),
+]
+
+
+def _relayed(stream: bytes) -> str:
+    """What the box's telemetry relay writes to run.log for `stream`."""
+    with tempfile.TemporaryDirectory() as directory:
+        session, _, out, _ = _session(Path(directory))
+        session.consume(io.BytesIO(stream))
+        session.finish(0)
+        return out.getvalue().decode()
+
+
+def _device(log: bytes) -> str:
+    """What the device's HANDOFF_AWK writes to the run's handoff file."""
+    return subprocess.run(
+        ["awk", remote.HANDOFF_AWK], input=log, capture_output=True, check=True
+    ).stdout.decode()
+
+
+def _events(harness: str, text: str) -> bytes:
+    if harness == "claude":
+        events = [{"type": "result", "subtype": "success", "result": text}]
+    else:
+        events = [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+            {"type": "turn.completed", "usage": {}},
+        ]
+    return b"".join(json.dumps(event).encode() + b"\n" for event in events)
+
+
+@pytest.mark.parametrize(("text", "expected"), _RULE)
+def test_every_reader_of_the_marker_follows_one_rule(text: str, expected: str | None) -> None:
+    assert handoff_marker(text) == expected
+    assert handoff_marker(_device(text.encode())) == expected, "device, text mode"
+    for harness in ("claude", "codex"):
+        stream = _events(harness, text)
+        assert handoff_marker(_relayed(stream)) == expected, f"relay, {harness}"
+        assert handoff_marker(_device(stream)) == expected, f"device, {harness}"
+
+
+@pytest.mark.parametrize(
+    "later", ["`ORCH-HANDOFF: failed", "``ORCH-HANDOFF: failed``", "`ORCH-HANDOFF: 4343"]
+)
+def test_a_malformed_later_marker_does_not_complete_a_remote_run(
+    tmp_path: Path, later: str
+) -> None:
+    waiter, spawn, db, job_id = _remote(tmp_path)
+    serve_job(db, job_id, "4242")
+    _finish_run(tmp_path, job_id, spawn, f"ORCH-HANDOFF: 4242\n{later}\n")
+    waiter.step()
+    assert _row(db, job_id) == ("failed", None)
+
+
+def test_a_remote_run_that_completes_clears_the_tickets_invalid_handoff_flag(
+    tmp_path: Path,
+) -> None:
+    machines = remote_machines(tmp_path, box_enabled=False)
+    spawn = FakeSpawn()
+    waiter, queue, db = make_waiter(tmp_path, machines, spawn)
+    first = enqueue(queue, "a")
+    waiter.step()
+    _finish_run(tmp_path, first, spawn, "ORCH-HANDOFF: 4242\n")
+    waiter.step()
+    assert _row(db, first) == ("failed", None)
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT reason FROM needs_attention").fetchall() == [
+            ("submitted-invalid",)
+        ]
+    retry = enqueue(queue, "b", source_comment_id="c-2")
+    waiter.step()
+    serve_job(db, retry, "4343")
+    (tmp_path / "state" / "jobs" / retry / "run.log").write_text("ORCH-HANDOFF: 4343\n")
+    spawn.children[-1].returncode = 0
+    waiter.step()
+    assert _row(db, retry) == ("done", "4343")
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT reason FROM needs_attention").fetchall() == []
 
 
 # --- T17a's checks on the remote path ----------------------------------------
