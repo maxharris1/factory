@@ -281,3 +281,74 @@ def test_a_replacement_waiter_never_claims_into_a_restart_its_predecessor_acknow
     calls = heal_with_waiter(tmp_path, db, on_service=claim_during_poller_restart)
     assert ("waiter-service.sh", 0) in calls
     assert busy_restarts(calls) == []
+
+
+# --- #309: a drained waiter restarts on its ack, with its runs still going ---------------------
+
+
+def test_a_drained_waiter_with_a_running_remote_job_restarts_in_the_same_pass(
+        tmp_path: Path) -> None:
+    from lib.waiter import REMOTE_RECORD
+    from tests.handoff_store import serve_job
+    from tests.test_waiter import FakeSpawn, enqueue, state
+    from tests.test_waiter_remote import Liveness, _done_row, make_waiter, remote_machines
+
+    machines = remote_machines(tmp_path, box_enabled=False)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    for flag in ("waiter-autostart-claude-bot", "poller-autostart"):
+        (state_dir / flag).touch()
+
+    def start_waiter(version: str, **options):
+        waiter, queue, db = make_waiter(tmp_path, machines, FakeSpawn(), **options)
+        waiter.drain, waiter.version = heal.drain_path(state_dir, "claude-bot"), version
+        return waiter, queue, db
+
+    old, queue, db = start_waiter("aaaaaaaaaaaa")
+    running = enqueue(queue, "running")
+    assert old.step() == running
+    queued = enqueue(queue, "queued")
+    alive = Liveness()
+    log: list[str] = []
+    waiters = {}
+    restarts: list[list[str]] = []
+
+    def service(argv, env, log_path):
+        if Path(argv[0]).name == "waiter-service.sh":
+            assert (state(db, running), state(db, queued)) == ("running", "queued")
+            assert old.step() is None
+            heal.drain_path(state_dir, "claude-bot").unlink(missing_ok=True)
+            heal.drain_ack_path(state_dir, "claude-bot").unlink(missing_ok=True)
+            waiters["new"] = start_waiter(CHECKOUT, alive=alive, log=log)[0]
+            restarts.append(list(argv))
+        return 0
+
+    heal.heal(stale_pair(), facts=heal.facts_for("box", state_dir, state_dir, db, NOW),
+              state_dir=state_dir, deploy=Path("deploy"), webhook=heal.Webhook(), environ={},
+              now=NOW, run=service,
+              refresh=lambda: heal.facts_for("box", state_dir, state_dir, db, NOW),
+              sleep=lambda _seconds: old.step())
+    assert restarts == [["deploy/waiter-service.sh", "claude-bot", "restart"]]
+    assert state(db, running) == "running"
+
+    new = waiters["new"]
+    assert new.step() == queued
+    assert any("adopted the remote run" in line and running in line for line in log)
+    assert new.running() == {running, queued}
+
+    serve_job(db, running, "4242")
+    job_dir = state_dir / "jobs" / running
+    with open(job_dir / "run.log", "a", encoding="utf-8") as handle:
+        handle.write("ORCH-HANDOFF: 4242\n")
+    (job_dir / "exit").write_text("0\n", encoding="utf-8")
+    alive.running = False
+    new.step()
+    new.step()
+    assert _done_row(db, running) == ("done", "4242")
+    assert len([line for line in log if "orch job done" in line and running in line]) == 1
+    assert not (job_dir / REMOTE_RECORD).exists()
+
+    third_log: list[str] = []
+    third = start_waiter(CHECKOUT, alive=Liveness(), log=third_log)[0]
+    third.step()
+    assert not any("orch job done" in line and running in line for line in third_log)
