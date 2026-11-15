@@ -25,6 +25,7 @@ from lib.dispatcher import (
 from lib.factory_md import FactoryConfig, HoldConfig, parse_factory_md
 from lib.hold import decide, glob_matches
 from lib.hook_t8 import T8Hook
+from lib.poll_source import IntakeRisks
 from lib.queue import SQLiteJobQueue
 from lib.status import SQLiteStatusReader, build_status, render
 from tests.test_dispatcher import (
@@ -459,6 +460,7 @@ def test_a_revise_after_a_held_approve_supersedes_it(
     same_poll: bool,
 ) -> None:
     dispatcher, queue, actions = setup(tmp_path)
+    IntakeRisks(dispatcher.state_path).keep("owner/repo", "42", risk)
     ready(dispatcher, queue)
     files = ("src/view/Board.tsx",)
     dispatcher.process(snapshot(approve(), files=files, risk=risk))
