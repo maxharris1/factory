@@ -103,7 +103,7 @@ is_supervisor_argv() {
 }
 
 stateless_supervisor_is_own() {
-    local pid="$1" kv home="" state="" command
+    local pid="$1" kv home="" state="" waiter
     local -a environ=()
     if [[ -d "$PROC" ]]; then
         mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
@@ -116,13 +116,8 @@ stateless_supervisor_is_own() {
         [[ -n "$state" || -n "$home" ]] || return 1
         [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
     else
-        command=" $(ps -E -ww -p "$pid" -o command= 2>/dev/null) " || return 1
-        if [[ "$command" == *" ORCH_STATE_DIR="[!\ ]* ]]; then
-            [[ "$command" == *" ORCH_STATE_DIR=${STATE} "* ]]
-        else
-            [[ "$STATE" == */.local/state/factory &&
-                "$command" == *" HOME=${STATE%/.local/state/factory} "* ]]
-        fi
+        waiter="$(waiter_pid)" || return 1
+        [[ "$(ps -p "$waiter" -o ppid= 2>/dev/null | tr -d ' ')" == "$pid" ]]
     fi
 }
 
