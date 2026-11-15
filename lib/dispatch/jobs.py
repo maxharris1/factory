@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -997,10 +996,7 @@ class JobsMixin:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
         queued_at = self._first_queued_at(job)
         for item in comments:
-            if not update and (
-                item.created_at < math.floor(queued_at)
-                or self._handled_before(ticket, item.id, queued_at)
-            ):
+            if not update and self._predates(ticket, item, queued_at):
                 continue
             try:
                 fields = parse_comment(item.body).as_dict()

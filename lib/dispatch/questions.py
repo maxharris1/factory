@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -287,10 +286,7 @@ class QuestionsMixin:
                 _matching_head(reported, head) is not None
                 or (
                     _matching_head(reported, source_head) is not None
-                    and (
-                        item.created_at < math.floor(queued_at)
-                        or self._handled_before(ticket, item.id, queued_at)
-                    )
+                    and self._predates(ticket, item, queued_at)
                 )
             ):
                 continue
