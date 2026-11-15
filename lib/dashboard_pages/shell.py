@@ -14,13 +14,13 @@ from lib.health import CODE_COMPONENTS
 from lib.pr_title import label
 from lib.dashboard_pages.activity import _ATTENTION, _attention, _handoffs, _health_link, _verdicts
 from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
-from lib.dashboard_pages.efficiency import _savings
+from lib.dashboard_pages.efficiency import _headroom, rounds_row, savings_row
 from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _health, _log, _no_waiter, _POLL_STATE,
 )
 from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
-from lib.dashboard_pages.tickets import _jobs, _tickets
+from lib.dashboard_pages.tickets import _board, _tickets
 
 
 CSS = """\
@@ -325,7 +325,7 @@ PX_SCRIPT = r"""
 (function () {
   var TABLE = __PX__;
   var FPS = 20;
-  var DATA = ['progress', 'load', 'seed', 'speed', 'used', 'slots', 'rate', 'done', 'burst'];
+  var DATA = ['progress', 'load', 'seed', 'cell', 'speed', 'used', 'slots', 'rate', 'done', 'burst'];
   var STRIPS = new Map();
   var mq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   var sysStill = !!(mq && mq.matches);
@@ -781,6 +781,8 @@ PX_SCRIPT = r"""
     if (rate !== null && rate !== undefined) el.setAttribute('data-rate', String(Number(rate)));
     var seed = opts.seed !== null && opts.seed !== undefined ? opts.seed : entry.seed;
     if (seed !== null && seed !== undefined) el.setAttribute('data-seed', String(Number(seed)));
+    if (opts.cell !== null && opts.cell !== undefined) el.setAttribute('data-cell', String(Math.max(2, Math.min(16, Math.floor(Number(opts.cell) || 4)))));
+    if (opts.done) el.setAttribute('data-done', 'true');
     el.setAttribute('data-px-key', String(key));
     el.setAttribute('aria-hidden', 'true');
     el.setAttribute('style', style + 'height:' + height + 'px');
@@ -957,6 +959,8 @@ def px_strip(
     load: float | None = None,
     rate: float | None = None,
     seed: float | None = None,
+    cell: int | None = None,
+    done: bool = False,
     height: int = 16,
 ) -> str:
     """A PixelStrip canvas (the script draws it; without script its CSS
@@ -992,6 +996,10 @@ def px_strip(
         attrs.append(("data-rate", f"{float(rate):g}"))
     if seed is not None:
         attrs.append(("data-seed", f"{float(seed):g}"))
+    if cell is not None:
+        attrs.append(("data-cell", str(max(2, min(16, int(cell))))))
+    if done:
+        attrs.append(("data-done", "true"))
     attrs += [("data-px-key", str(key)), ("aria-hidden", "true"), ("style", f"{style}height:{height}px")]
     return "<canvas " + " ".join(f'{name}="{_e(value)}"' for name, value in attrs) + "></canvas>"
 
@@ -1223,10 +1231,10 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
-    "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
-    "efficiency.html": (_health, _savings, rollup_panel),
+    "activity.html": (_attention, _handoffs, _verdicts, _log),
+    "efficiency.html": (savings_row, rounds_row, _headroom, rollup_panel, _health),
     "health.html": (_components, _no_waiter),
-    "job.html": (_jobs, _jobview),
+    "job.html": (_board, _tickets, _jobview),
 }
 
 

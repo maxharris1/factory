@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from lib import remote
+from lib.handoff_marker import handoff_marker
 from lib.remote_follow import EXITED
 from tests.test_detached_remote import Clock, Script, Stop, follower, launched, polled
 from tests.test_detached_remote_cli import run_dirs
@@ -43,36 +44,46 @@ def test_the_worker_environment_report_never_stays_in_a_device_file(
     assert "ORCH-WORKER-ENV" not in run.stdout and run.stdout.endswith("plain worker line\n")
 
 
-_FINAL = "Done: said \"ok\".\nORCH-HANDOFF: 123456"
-_STREAMS = {
-    "codex": ("--json", ["exec", "-"], [
-        {"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": _FINAL}},
-        {"type": "turn.completed", "usage": {}},
-    ]),
-    "claude": ("--output-format", ["-p"], [
-        {"type": "result", "subtype": "success", "result": _FINAL, "session_id": "s"},
-    ]),
+_FINALS = {
+    "bare": ("Done: said \"ok\".\nORCH-HANDOFF: 123456", "123456"),
+    "backticked": ("Done.\n`ORCH-HANDOFF: 123456`", "123456"),
+    "summary after": ("ORCH-HANDOFF: 123456\n" + "summary\n" * 14, "123456"),
+    "malformed later": ("ORCH-HANDOFF: 123456\n`ORCH-HANDOFF: failed", None),
 }
 
 
+def _streams(final: str) -> dict[str, tuple[str, list[str], list[dict]]]:
+    return {
+        "codex": ("--json", ["exec", "-"], [
+            {"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": final}},
+            {"type": "turn.completed", "usage": {}},
+        ]),
+        "claude": ("--output-format", ["-p"], [
+            {"type": "result", "subtype": "success", "result": final, "session_id": "s"},
+        ]),
+    }
+
+
+@pytest.mark.parametrize("form", sorted(_FINALS))
 @pytest.mark.parametrize("telemetry", ["off", "on"])
 @pytest.mark.parametrize("harness", ["claude", "codex"])
-def test_the_device_records_the_final_handoff_in_text_and_stream_mode(
-    tmp_path: Path, harness: str, telemetry: str
+def test_the_device_and_the_box_read_the_final_handoff_in_text_and_stream_mode(
+    tmp_path: Path, harness: str, telemetry: str, form: str
 ) -> None:
+    final, expected = _FINALS[form]
     machines, queue, _, job_id, ssh = remote_setup(tmp_path, harness)
     home = tmp_path / "worker-home"
     home.mkdir()
     worker_bin = tmp_path / "worker-bin"
     worker_bin.mkdir()
     (home / ".bash_profile").write_text(f"export PATH={shlex.quote(str(worker_bin))}:$PATH\n")
-    flag, args, stream = _STREAMS[harness]
+    flag, args, stream = _streams(final)[harness]
     cli = worker_bin / harness
     cli.write_text(
         f"#!{sys.executable}\nimport sys\n"
         f"if {flag!r} in sys.argv:\n"
         + "".join(f"    print({json.dumps(event)!r})\n" for event in stream)
-        + f"else:\n    print({_FINAL!r})\n"
+        + f"else:\n    print({final!r})\n"
     )
     cli.chmod(0o755)
     result = _orch(
@@ -82,9 +93,9 @@ def test_the_device_records_the_final_handoff_in_text_and_stream_mode(
              "ORCH_TELEMETRY": telemetry},
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.endswith("ORCH-HANDOFF: 123456\n")
+    assert handoff_marker(result.stdout) == expected
     [rundir] = run_dirs(tmp_path, f"{harness}-bot", job_id)
-    assert (rundir / "handoff").read_text() == "ORCH-HANDOFF: 123456\n"
+    assert handoff_marker((rundir / "handoff").read_text()) == expected
 
 
 def _event(**fields) -> str:
@@ -95,26 +106,28 @@ def _event(**fields) -> str:
     ("lines", "expected"),
     [
         (["working", "ORCH-HANDOFF: 7", ""], "ORCH-HANDOFF: 7"),
-        (["  ORCH-HANDOFF: 7  "], "  ORCH-HANDOFF: 7  "),
-        (["ORCH-HANDOFF: 7", "more text"], ""),
+        (["  ORCH-HANDOFF: 7  "], "ORCH-HANDOFF: 7"),
+        (["ORCH-HANDOFF: 7", "more text"], "ORCH-HANDOFF: 7"),
+        (["ORCH-HANDOFF: 7", *["more text"] * 20], ""),
+        (["ORCH-HANDOFF: 7", "`ORCH-HANDOFF: 8", "more text"], "`ORCH-HANDOFF: 8"),
         ([], ""),
         ([_event(type="item.completed", item={"type": "agent_message", "text": "a\nORCH-HANDOFF: 9 \n"}),
           _event(type="turn.completed")], "ORCH-HANDOFF: 9"),
         ([_event(type="item.completed", item={"type": "agent_message", "text": "ORCH-HANDOFF: 9\nbye"}),
-          _event(type="turn.completed")], ""),
+          _event(type="turn.completed")], "ORCH-HANDOFF: 9"),
         ([_event(type="item.completed", item={"type": "agent_message", "text": "ORCH-HANDOFF: 1"}),
           _event(type="item.completed", item={"type": "agent_message", "text": "ORCH-HANDOFF: 2"}),
           _event(type="turn.completed")], "ORCH-HANDOFF: 2"),
         ([_event(type="item.completed", item={"type": "agent_message", "text": "ORCH-HANDOFF: 1"}),
           _event(type="item.completed", item={"type": "command_execution", "text": "ORCH-HANDOFF: 3"})],
          "ORCH-HANDOFF: 1"),
-        ([_event(type="result", result="ORCH-HANDOFF: 5"), "plain text after"], ""),
+        ([_event(type="result", result="ORCH-HANDOFF: 5"), "plain text after"], "ORCH-HANDOFF: 5"),
         (["plain", _event(type="result", is_error=False, result="q \"x\\\" \\u00e9\r\nORCH-HANDOFF: failed",
                                 session_id="s")], "ORCH-HANDOFF: failed"),
         ([_event(type="result", result="ORCH-HANDOFF: 5"), _event(type="assistant", message={})],
          "ORCH-HANDOFF: 5"),
         ([_event(type="assistant", message={"content": [{"type": "text", "text": "ORCH-HANDOFF: 4"}]})], ""),
-        ([_event(type="result", result="ORCH-HANDOFF: " + "x" * 101)], ""),
+        ([_event(type="result", result="ORCH-HANDOFF: " + "x" * 200)], ("ORCH-HANDOFF: " + "x" * 200)[:120]),
     ],
 )
 def test_the_handoff_rule_matches_the_box_for_text_and_events(

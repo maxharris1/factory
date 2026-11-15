@@ -22,11 +22,11 @@ stdout on a pipe and hands the pipe to a `Session` here:
   kept. The raw log never leaves the machine. Lines that are not JSON
   objects are also copied to this process's stdout (the waiter's run.log),
   as before; JSON events are not, so run.log stays small. One exception
-  keeps a remote run's handoff (#87): the last line of the CLI's final
-  message (Claude Code's `result`, Codex's last
-  `agent_message`) is copied there if it is an `ORCH-HANDOFF: ...` line, as
-  text mode would have printed it, so the waiter on the box still reads it
-  as run.log's last line. It is copied at the CLI's end event (`result`,
+  keeps a remote run's handoff (#87): the marker line that decides
+  the CLI's final message (Claude Code's `result`, Codex's last
+  `agent_message`) by lib/handoff_marker.py's rule is copied there, so the
+  waiter on the box reads the same marker text mode would have given it.
+  It is copied at the CLI's end event (`result`,
   `turn.completed`), else when the stream ends, and only once.
 * Each JSON event updates a `Summary`: turns, tool calls by type, files
   touched, commands run, the last test run's pass and fail counts, tokens
@@ -115,6 +115,7 @@ from pathlib import Path
 from typing import IO, Any, NamedTuple
 
 from lib.codex_sandbox import exec_index
+from lib.handoff_marker import marker_line
 from lib.job_token import PROOF_ENV
 from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
@@ -1268,13 +1269,6 @@ def exit_reason(code: int | None, cli_reason: str | None) -> str:
     return f"{cli_reason}; {status}" if cli_reason else status
 
 
-# A remote harness ends its final message with `ORCH-HANDOFF: <id|failed>`, and
-# the waiter on the box reads it as the last line of run.log (#87,
-# lib/waiter.py handoff_marker). In stream mode that message is inside a JSON
-# event, which is not copied to run.log, so a session copies the last line of
-# the run's final message there at the end of the run, only when it is such a
-# line. No other assistant text reaches run.log.
-_HANDOFF_LINE = re.compile(r"ORCH-HANDOFF:[^\r\n]{0,100}")
 # The CLI's own end of a run: the line goes out then (and at the end of the
 # stream otherwise), so a process left holding the pipe cannot keep it back.
 _END_EVENTS = frozenset({"result", "turn.completed"})
@@ -1297,16 +1291,6 @@ def final_message(event: dict) -> str | None:
             text = item.get("text")
             return text if isinstance(text, str) else None
     return None
-
-
-def handoff_line(text: str | None) -> str | None:
-    """The last non-blank line of `text` when it is an ORCH-HANDOFF line."""
-    if not text:
-        return None
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines or not _HANDOFF_LINE.fullmatch(lines[-1]):
-        return None
-    return lines[-1]
 
 
 # --- the session: one run's tee, summary and table row ------------------------------
@@ -1519,7 +1503,7 @@ class Session:
         if self._final_sent:
             return
         self._final_sent = True
-        line = handoff_line(self._final)
+        line = marker_line(self._final)
         if line is not None:
             self._passthrough(line.encode("utf-8", errors="replace") + b"\n")
 

@@ -608,11 +608,11 @@ def _pages(tmp_path: Path) -> dict[str, str]:
 
 
 def test_every_page_shows_only_the_shell_strips(tmp_path: Path) -> None:
-    """#139: the caret, the band and (with something to attend to) the
-    attention block; the page tickets place the rest."""
     for name, html in _pages(tmp_path).items():
         keys = re.findall(r'<canvas class="px"[^>]*data-px-key="([^"]+)"', html)
-        assert keys == ["caret", "band", "attention"], name
+        assert keys[:3] == ["caret", "band", "attention"], name
+        board = [key for key in keys[3:] if key.startswith(("phase-", "job-", "ticket-"))]
+        assert keys[3:] == (board if name == "job.html" else []), name
         assert 'class="px-held"' not in html, name
 
 

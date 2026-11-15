@@ -25,6 +25,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import SQLiteJobQueue
 from lib.remote_follow import EXITED, KILL_AFTER_SECONDS, STOPPED, FollowEnd
 from lib.waiter import HarnessCommand, Waiter
+from tests.handoff_store import serve_job
 from tests.test_detached_remote import HARNESS
 from tests.test_job_state import Poller
 from tests.test_liveness_requeue import _remote
@@ -131,6 +132,7 @@ def test_a_remote_job_survives_a_forced_ssh_kill_and_completes(tmp_path: Path) -
         environ={"HOME": str(tmp_path), **ssh.env()},
     )
     job_id = enqueue(queue, "a")
+    serve_job(db, job_id, "123456")
     assert waiter.step() == job_id
     first = started_harness(count)
     try:

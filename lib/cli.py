@@ -56,7 +56,7 @@ from lib.orch_yml import (
     load_orch_yml,
     parse_bind,
 )
-from lib.poll_source import LivePollSource, PollSourceError
+from lib.poll_source import IntakeRisks, LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
 from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
@@ -627,6 +627,7 @@ def _wait_autostart(
             log=log,
             approvals=policy,
             drain=waiter.drain_marker(args.bot),
+            orch_yml=orch_path,
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -883,7 +884,7 @@ def _runtime(
         auth_env=config.grok.webhook_auth_env,
     )
     t8 = T8Hook()
-    source = LivePollSource(config)
+    source = LivePollSource(config, risks=None if create else IntakeRisks(path))
     devices = None
     machines = None
     if not create:
