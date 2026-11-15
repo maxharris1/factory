@@ -1351,3 +1351,52 @@ def test_a_restore_before_the_last_round_repeats_no_work(
     assert pool.claim("claude") is None
     assert pool.claim("codex") is None
     assert [state for _, state in _harness_jobs(flow.queue) if state == "queued"] == []
+
+
+def test_a_replayed_plan_rejected_while_waiting_resumes_once_over_separate_polls(
+    tmp_path: Path,
+) -> None:
+    flow = Flow(tmp_path)
+    flow.add("go-1", GO.format(state="planning"), "grok-login")
+    flow.add("questions-1", QUESTIONS, "claude-login")
+    flow.add("stale-plan", PLAN.format(round=1, ac="met"), "claude-login")
+    flow.dispatcher.process(flow.snapshot())
+    assert ("plan", "queued") not in _harness_jobs(flow.queue)
+    flow.add("answers-1", ANSWERS, "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-plan"
+    assert _claimed_steps(flow, "claude") == [("plan", "answers-1")]
+
+
+def test_a_restored_review_paused_by_questions_resumes_once_over_separate_polls(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    flow = Flow(state)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[0][:6]}")
+    assert flow.ready(HEADS[0]) == "queued-review"
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    flow.finish("codex", "review-q")
+    flow.add(
+        "review-q",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer "
+        "state=waiting-max -->\nWhich head should I review?\n",
+        "codex-login",
+    )
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+    flow.dispatcher.process(flow.snapshot())
+    assert ("review", "queued") not in _harness_jobs(flow.queue)
+    flow.add("answers-1", ANSWERS, "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-review"
+    assert _claimed_steps(flow, "codex") == [("review", "answers-1")]
