@@ -358,7 +358,7 @@ def test_a_comment_handled_before_a_retry_never_answers_the_retried_review(
 
 
 @pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
-def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
+def test_a_blocked_verdict_still_answers_its_review_and_stops_the_ticket(
     tmp_path: Path, missing: str
 ) -> None:
     board = board_with(tmp_path, on=True)
@@ -368,7 +368,7 @@ def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
     blocked = VERDICT.format(round="1/3", head=pr.head, verdict="BLOCKED", risk="high")
     board.post(pr, "blocked-review", blocked, "codex-login")
     board.poll()
-    assert board.outcome("blocked-review") == "woke-grok-blocked"
+    assert board.outcome("blocked-review") == "blocked-review"
     pr.comments.remove(next(item for item in pr.comments if item.id == "blocked-review"))
     _upgrade_from(board, missing)
     _restart(board, tmp_path)
@@ -377,9 +377,9 @@ def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
     board.ready(pr, pr.head, "red-ready")
     board.poll()
 
-    fix = board.queue.claim("claude")
-    assert board.outcome("red-ready") == "queued-ci-fix"
-    assert fix is not None and fix.request.source_comment_id == "red-ready"
+    assert board.state("42")["workflow_state"] == "blocked"
+    assert [job["state"] for job in board.jobs("review")] == ["done"]
+    assert board.queue.claim("claude") is None
 
 
 @pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])

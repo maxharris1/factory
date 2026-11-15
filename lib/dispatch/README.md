@@ -21,7 +21,8 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 
 The verdict rules live in the `verdict/` package the same way, one module per
 rule. For a change to one rule, name its module in `Touches:`: `verdict/t3.py`
-for a REVISE, `verdict/t4.py` for an APPROVE, `verdict/record.py` for how an
+for a REVISE, `verdict/t4.py` for an APPROVE, `verdict/blocked.py` for a
+BLOCKED, `verdict/record.py` for how an
 approval is recorded, `verdict/coverage.py` for whether an approval covers a
 head, `verdict/shipped.py`, `verdict/preview.py` or `verdict/latest.py` for
 those lookups. Write the full path, for example `lib/dispatch/verdict/t4.py`.
@@ -39,9 +40,10 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
-| Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the seven rule mixins below and re-exports the old `verdict.py` names |
+| Verdicts: composition | `verdict/__init__.py` (`VerdictMixin`) | composes the eight rule mixins below and re-exports the old `verdict.py` names |
 | Verdicts: REVISE (T3) | `verdict/t3.py` (`T3Mixin`) | `ReviseCIGate`, `_t3`, `_revise_ci_gate` |
 | Verdicts: APPROVE (T4) | `verdict/t4.py` (`T4Mixin`) | `_t4`, `_approve_ci_red_fix` |
+| Verdicts: BLOCKED | `verdict/blocked.py` (`BlockedMixin`) | `_t_blocked`: stop the ticket and wake Grok once. `_blocked_by_another`: whether a verdict other than this comment blocked the ticket |
 | Verdicts: approval recording | `verdict/record.py` (`ApprovalRecordMixin`) | `_record_approval`: the covering APPROVE the merge queue orders and gates on |
 | Verdicts: approval coverage | `verdict/coverage.py` (`ApprovalCoverageMixin`) | `_approval_covers`: whether an APPROVE covers a head, by T4's rule |
 | Verdicts: shipped approval | `verdict/shipped.py` (`ShippedApprovalMixin`) | `_shipped_approval`: the APPROVE whose ship intent completed last (T2) |
@@ -49,7 +51,7 @@ Never name the directory `lib/dispatch/verdict/`. A ticket that changes how
 | Verdicts: latest verdict | `verdict/latest.py` (`LatestVerdictMixin`) | `_latest_review_verdict` |
 | Caps: composition | `caps/__init__.py` (`CapsMixin`) | composes the five rule mixins below and re-exports the old `caps.py` names |
 | Caps: go (T1) | `caps/t1.py` (`T1Mixin`) | `_t1`: route a go, resume a capped ticket, clarify, queue the plan or build |
-| Caps: resume after a cap | `caps/resume.py` (`ResumeAfterCapMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix |
+| Caps: resume after a cap or BLOCKED | `caps/resume.py` (`ResumeMixin`) | `_resume_after_cap`: raise `cap_extra` and queue the fix. `_resume_after_blocked`: queue a fresh review at the same round |
 | Caps: effective cap | `caps/effective.py` (`EffectiveCapMixin`) | `_over_cap`, `_config_cap`, `_effective_cap` |
 | Caps: capped wake | `caps/wake.py` (`CappedWakeMixin`) | `_wake_capped` |
 | Caps: auto extra round | `caps/auto_extra.py` (`AutoExtraMixin`) | `_auto_granted_cap_extra`, `_record_auto_extra` (T3), `_drain_auto_extra`: the poller grants factory.md `review.auto_extra_rounds` rounds at the cap and posts one comment per grant (issue #263) |
