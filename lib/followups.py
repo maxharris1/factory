@@ -21,6 +21,9 @@ ISSUE_BODY_LIMIT = 65536
 _MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
+_CITED_FILE = re.compile(
+    r"(?<![\w/.:-])(?=[\w./-]*[A-Za-z])(?:[\w.-]+/)+[\w.-]*[\w-](?![\w/#-])|" + FILE_PATH.pattern
+)
 
 
 def followups_active(followup_from: int | None, round_number: int | None) -> bool:
@@ -64,7 +67,7 @@ def followup_issue(
     risk: str,
 ) -> tuple[str, str]:
     title = f"Follow-ups from #{pr} r{round_number}"
-    files = dict.fromkeys(match.group(1) for finding in findings for match in FILE_PATH.finditer(finding))
+    files = dict.fromkeys(match.group(0) for finding in findings for match in _CITED_FILE.finditer(finding))
     touches = f"Touches: {', '.join(files)}\n" if files else ""
     criteria = "".join(f"- Finding {n} below is fixed.\n" for n in range(1, len(findings) + 1))
     head = (
