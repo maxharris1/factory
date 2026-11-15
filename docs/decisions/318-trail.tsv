@@ -1,0 +1,7 @@
+decision	choice	why
+what ends an adopted run	its exit status file, or its pid reads gone and its job has not sent a heartbeat for ADOPTED_SILENCE_SECONDS	the box logged five live adopted runs as exited 255 in the second they were adopted, so the pid check alone misread them; the heartbeat comes from orch job run itself and does not depend on pid namespaces or /proc visibility
+silence threshold	3 x MAX_HEARTBEAT_SECONDS (90 s)	orch job run sends a heartbeat at most every 30 s (15 s by default); three missed heartbeats tolerate a locked orch.db without letting a dead run hold its slot for long
+orch.db unreadable	count the run as running	the next step reads again; ending a live run loses its handoff, while waiting costs one poll
+gone without a status file but with a marker	keep #87: failed, or left to the device check once a remote worker started	AC2 asks for --failed only when there is no handoff; a run that leaves a marker writes its status file in a finally, so this case is only a killed runner, and #87 chose not to trust the marker without exit 0
+root cause of the pid misread	left open	no access to the box; candidates are a /proc read the restarted waiter cannot see (start mismatch) or a different pid namespace; the heartbeat check holds for either
+pid_alive itself	unchanged	worktree locks and slot checks share it; changing what an unreadable start means there has a wider blast radius than this ticket
