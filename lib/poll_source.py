@@ -2205,13 +2205,14 @@ def _sql_statements_risk(
     their words but never end a statement. #292: a whole file that ends inside
     a comment or quote, or a lone hunk that ends inside a changed statement,
     cannot be classified."""
-    text, changed, risky = "", False, False
+    text, changed, risky, bare_cr_or_escape_string = "", False, False, False
     depth, quote, close = 0, None, ""
     states: list[SqlLexState] = []
     for index, line in enumerate(lines):
         states.append(SqlLexState(depth, None if quote is None else quote.pattern))
         mine = line.startswith(mark) or index in also_changed
         changed = changed or mine
+        bare_cr_or_escape_string = bare_cr_or_escape_string or "\r" in line.removesuffix("\r")
         code, at = line[1:] + "\n", 0
         while at < len(code):
             if depth:
@@ -2248,10 +2249,14 @@ def _sql_statements_risk(
             elif token == "/*":
                 depth = 1
             else:
+                bare_cr_or_escape_string = bare_cr_or_escape_string or token in ("e'", "E'")
                 quote, close = _sql_quote(token)
                 text += token
     if risky or (changed and RISKY_CHANGE.search(text)):
         return True, states
+    realtime_possible = not whole or any(RISKY_CHANGE.search(line) for line in lines)
+    if bare_cr_or_escape_string and realtime_possible:
+        return None, states
     unfinished = bool(depth) or quote is not None
     begun = changed and (unfinished or bool(text.strip()))
     return (None if (unfinished if whole else begun) else False), states

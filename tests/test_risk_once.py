@@ -532,14 +532,13 @@ def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str
 def git_change(before: str, after: str) -> dict:
     with TemporaryDirectory() as directory:
         old, new = Path(directory) / "old.sql", Path(directory) / "new.sql"
-        old.write_text(before)
-        new.write_text(after)
+        old.write_bytes(before.encode())
+        new.write_bytes(after.encode())
         result = subprocess.run(
-            ["git", "diff", "--no-index", "--", str(old), str(new)],
-            capture_output=True, text=True,
+            ["git", "diff", "--no-index", "--", str(old), str(new)], capture_output=True
         )
     assert result.returncode == 1, result.stderr
-    return {"filename": "db/schema.sql", "changes": 2, "patch": result.stdout}
+    return {"filename": "db/schema.sql", "changes": 2, "patch": result.stdout.decode()}
 
 
 NOTES = "".join(f"  note {n};\n" for n in range(30))
@@ -809,3 +808,64 @@ def test_a_non_ascii_dollar_quote_tag_hides_no_comment_delimiter(tag: str, case:
     assert "supabase_realtime" not in item["patch"]
     ticket, _ = linear_ticket(labels=[], files=[item])
     assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+
+
+ESCAPE_CONTINUED = f"SELECT E'a'\n'\\'/*';\n{NOTE_LINES}{REALTIME}{NOTE_LINES}-- */\n"
+CR_MEMBER = (
+    " SELECT 1; -- prefix\rALTER PUBLICATION supabase_realtime ADD TABLE /*\n"
+    f"{NOTE_LINES} comment;\n -- */ public.messages,\n    public.events;\n"
+)
+CR_IN_COMMENT = f" SELECT 1; /* a\r*/ {REALTIME}{NOTE_LINES} SELECT 1;\n"
+
+
+def git_source_change(before: str, after: str) -> dict:
+    return with_source(git_change(before, after), after)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        sql_change(f"/*\n{ESCAPE_CONTINUED}*/\n", ESCAPE_CONTINUED, source=True),
+        sql_change(ESCAPE_CONTINUED, f"/*\n{ESCAPE_CONTINUED}*/\n", source=True),
+        sql_change(
+            f"/*\n{ESCAPE_CONTINUED.replace('E', 'e', 1)}*/\n",
+            ESCAPE_CONTINUED.replace("E", "e", 1),
+            source=True,
+        ),
+        git_source_change(CR_MEMBER, CR_MEMBER.replace("public.events;", "public.new_events;")),
+        git_source_change(CR_IN_COMMENT, CR_IN_COMMENT.replace("SELECT 1;\n", "SELECT 2;\n")),
+    ],
+    ids=[
+        "activate-escape-continuation",
+        "deactivate-escape-continuation",
+        "lowercase-escape-continuation",
+        "partial-comment-after-a-bare-carriage-return",
+        "bare-carriage-return-anywhere-near-a-publication",
+    ],
+)
+def test_an_escape_string_or_bare_carriage_return_near_a_publication_fails_high(
+    item: dict,
+) -> None:
+    assert "supabase_realtime" not in item["patch"]
+    ticket, _ = linear_ticket(labels=[], files=[item])
+    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+
+
+CRLF_STATEMENTS = STATEMENTS.replace("\n", "\r\n")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        sql_change(
+            f"SELECT E'a\\'b';\n{STATEMENTS}SELECT 1;\n",
+            f"SELECT E'a\\'b';\n{STATEMENTS}SELECT 2;\n",
+            source=True,
+        ),
+        git_source_change(f"{CRLF_STATEMENTS}SELECT 1;\r\n", f"{CRLF_STATEMENTS}SELECT 2;\r\n"),
+    ],
+    ids=["escape-string-with-no-publication", "crlf-line-endings"],
+)
+def test_an_escape_string_or_crlf_file_with_no_publication_stays_low(item: dict) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[item])
+    assert ticket.risk == "low"
