@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,6 +100,8 @@ import os
 import signal
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from tests.procs import alive
 
@@ -226,3 +230,47 @@ def test_a_signal_the_main_thread_blocks_waits_for_it():
 def test_harness_threads_leave_process_signals_to_the_main_thread(tmp_path: Path) -> None:
     result = _run_guarded(tmp_path, MASKED_SIGNAL_TEST)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+SCOPED_FIXTURE = '''
+import os
+import subprocess
+import pytest
+
+
+@pytest.fixture(scope="{scope}")
+def loop():
+    child = subprocess.Popen(["sleep", "60"], env={{"PATH": os.environ["PATH"]}}, start_new_session=True)
+    open({record!r}, "w").write(str(child.pid))
+    yield
+    {stop}
+
+
+def test_one(loop):
+    pass
+
+
+def test_two(loop):
+    pass
+'''
+
+
+@pytest.mark.parametrize("scope", ["module", "session"])
+def test_the_guard_fails_a_broader_fixture_that_leaves_its_loop(tmp_path: Path, scope: str) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, SCOPED_FIXTURE.format(scope=scope, record=str(record), stop="pass"))
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert f"{scope}-scoped fixture 'loop' left processes running" in result.stdout
+    assert f"{pid} HOME= sleep 60" in result.stdout
+    assert "2 passed, 1 error" in result.stdout
+    assert not alive(pid)
+
+
+def test_the_guard_passes_a_broader_fixture_that_stops_its_loop(tmp_path: Path) -> None:
+    record = tmp_path / "pid"
+    stop = "child.kill(); child.wait()"
+    result = _run_guarded(tmp_path, SCOPED_FIXTURE.format(scope="module", record=str(record), stop=stop))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+    assert not alive(int(record.read_text(encoding="utf-8")))

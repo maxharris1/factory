@@ -177,19 +177,56 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory):
     """#358. pytest orders a module's autouse fixtures by name, so `_0_` is set
     up first and torn down last, after the test's own cleanup."""
-    from tests import child_reaper, subreaper
+    from tests import child_reaper
 
     before = set(child_reaper._table())
     yield
     root = tmp_path_factory.getbasetemp()
     tag = request.node.stash.get(child_reaper._tag, "")
+    _fail_on_survivors("test", before, lambda: child_reaper.leaked(before, tag, root))
+
+
+def _fail_on_survivors(owner: str, before: set[int], survivors) -> None:
+    from tests import child_reaper, subreaper
+
     deadline = time.monotonic() + 3
-    while (leftovers := child_reaper.leaked(before, tag, root)) and time.monotonic() < deadline:
+    while (leftovers := survivors()) and time.monotonic() < deadline:
         time.sleep(0.1)
     if leftovers:
         described = [subreaper._describe(pid) for pid in sorted(leftovers)]
         child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
-        pytest.fail("test left processes running:\n" + "\n".join(described), pytrace=False)
+        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+
+
+_broad_fixture_processes: dict[pytest.FixtureDef, dict[int, str | None]] = {}
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest):
+    if fixturedef.scope == "function":
+        return (yield)
+    from lib.worktrees import process_start
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    try:
+        return (yield)
+    finally:
+        root = request.config._tmp_path_factory.getbasetemp()
+        claimed = set().union(*_broad_fixture_processes.values())
+        started = child_reaper.leaked(before, os.environ.get(child_reaper.TAG, ""), root) - claimed
+        _broad_fixture_processes[fixturedef] = {pid: process_start(pid) for pid in started}
+
+
+def pytest_fixture_post_finalizer(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest) -> None:
+    from lib.worktrees import process_start
+    from tests.procs import alive
+
+    started = _broad_fixture_processes.pop(fixturedef, {})
+    if started:
+        _fail_on_survivors(f"{fixturedef.scope}-scoped fixture {fixturedef.argname!r}", set(),
+                           lambda: {pid for pid, start in started.items()
+                                    if alive(pid) and process_start(pid) == start})
 
 
 @pytest.fixture(autouse=True)
