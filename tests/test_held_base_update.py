@@ -308,3 +308,26 @@ def test_a_reposted_approve_after_the_held_update_is_a_duplicate_not_stale(
     assert board.outcome(duplicate) == "duplicate-verdict"
     assert board.wakes("stale") == []
     assert len(_merge_only_jobs(board)) == 1
+
+
+def test_a_ready_accepted_before_the_update_was_needed_does_not_cancel_it(
+    tmp_path: Path,
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    ready = board.ready(pr, sha(1), comment_id="ready-repost")
+    board.poll()
+    board.poll()
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert board.outcome(ready) is not None
+
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    for _ in range(4):
+        board.poll()
+
+    assert board.outcome(approve) == "held-base-update"
+    assert [(job["head"], job["state"]) for job in _merge_only_jobs(board)] == [
+        (sha(2), "queued")
+    ]
+    assert board.state("42")["workflow_state"] == "fixing"

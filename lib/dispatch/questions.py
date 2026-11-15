@@ -246,8 +246,8 @@ class QuestionsMixin:
         action job comment queues for recipient, or None (#108, #66).
 
         Only the answer that job's step accepts counts: a plan for a plan, a
-        ready for a build or fix (at a new head when the job has one, as
-        _posted_handoff reads it), and for a review a REVISE or APPROVE
+        ready for a build or fix (at a head other than the job's and the
+        source comment's when the job has one), and for a review a REVISE or APPROVE
         naming head at round_number. It must come from a login trusted for recipient's bot
         and role, and not have been handled as rejected. With an intact
         database no such answer exists yet when a comment is handled; it is
@@ -256,6 +256,11 @@ class QuestionsMixin:
         """
         kind, role = _ANSWERS[action]
         after = _comment_order(comment)
+        try:
+            source_head = parse_comment(comment.body).as_dict().get("head")
+        except HandoffError:
+            source_head = None
+        predating_heads = () if head is None else (head, source_head)
         for item in sorted(ticket.comments, key=_comment_order):
             if _comment_order(item) <= after:
                 continue
@@ -277,7 +282,7 @@ class QuestionsMixin:
                     # #71: T3 and T4 act on no other verdict (BLOCKED), so
                     # it answers no review (Codex PR #112 r5 F1).
                     continue
-            elif head is not None and _matching_head(reported, head) is not None:
+            elif any(_matching_head(reported, old) for old in predating_heads):
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
