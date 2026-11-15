@@ -668,6 +668,12 @@ Filesystem     1024-blocks     Used Available Capacity Mounted on
 Filesystem      Inodes   IUsed  IFree IUse% Mounted on
 /dev/vdb       2048000 1740800 307200   85% /
 """
+GNU_DF_OVERFULL = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/vdb 4000 3960 -40 102% /work
+Filesystem Inodes IUsed IFree IUse% Mounted on
+/dev/vdb 1000 900 100 90% /work
+"""
 GNU_DF_WRAPPED = """\
 Filesystem     1024-blocks     Used Available Capacity Mounted on
 /dev/mapper/a-very-long-volume-name 1000 900 100 90% /srv
@@ -680,6 +686,12 @@ Filesystem 1024-blocks      Used Available Capacity Mounted on
 /dev/disk3s5 971350180 400000000 571350180    42% /System/Volumes/Data
 Filesystem   512-blocks      Used  Available Capacity  iused     ifree %iused  Mounted on
 /dev/disk3s5 1942700360 800000000 1142700360    42% 1000000 9000000   10%   /System/Volumes/Data
+"""
+BSD_DF_OVERFULL = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/disk4s1 4000 3960 -40 102% /Volumes/Work
+Filesystem 512-blocks Used Available Capacity iused ifree %iused Mounted on
+/dev/disk4s1 8000 7920 -80 102% 900 100 90% /Volumes/Work
 """
 
 BSD_DF_SPACED_MOUNT = """\
@@ -698,8 +710,10 @@ Filesystem      Inodes IUsed IFree IUse% Mounted on
 
 @pytest.mark.parametrize("text, expected", [
     (GNU_DF, (48, 85)),
+    (GNU_DF_OVERFULL, (102, 90)),
     (GNU_DF_WRAPPED, (90, 50)),
     (BSD_DF, (42, 10)),
+    (BSD_DF_OVERFULL, (102, 90)),
     (BSD_DF_SPACED_MOUNT, (30, 90)),
     (GNU_DF_SPACED_NAMES, (30, 86)),
     ("df: /nowhere: No such file or directory\n", (None, None)),

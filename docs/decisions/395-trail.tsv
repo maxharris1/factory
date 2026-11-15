@@ -6,3 +6,4 @@ unreachable device	storage shows unknown with the df exit, no alert	reachability
 orch status and dashboard	unchanged: no SSH in load_report	the dashboard and orch status read the report often; an SSH round trip per device there would slow every refresh
 proof	real orch health on the box: storage box / inodes 85% alert, pc 7%, exit 3, 0.5 s	matches df -i / (85%) at the same moment
 mount names with spaces (round 1 f-1)	parse_df matches exactly as many value tokens as the header names between Filesystem and Mounted on, followed by an absolute mount path	right-aligning to the header broke when the mount name held spaces; both the filesystem and the mount name may hold spaces, but only the mount must start with /
+negative df counters (round 2 f-1)	parse_df accepts a signed integer in every value column	GNU and BSD df print a negative Available on an over-full filesystem (102%); an unsigned pattern dropped the whole row and the disk read as unknown

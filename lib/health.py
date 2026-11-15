@@ -1313,7 +1313,7 @@ def parse_df(text: str) -> tuple[int | None, int | None]:
         names = lines[0].lower().split()[1:-2]
         if not names:
             continue
-        value = r"(?:\d+%?|-)"
+        value = r"(?:-?\d+%?|-)"
         row = re.match(rf".*?\s({value}(?:\s+{value}){{{len(names) - 1}}})\s+/",
                        " ".join(lines[1].split()))
         if row is None:
