@@ -1,0 +1,8 @@
+decision	choice	why
+where the backoff lives	the waiter fails the row unhandled with preflight-lagging; T6 holds it through the backoff and requeues the same row, as #218's link-drop path does	the claim SQL in queue.claim and DevicePool.claim stays untouched, and the poller already owns the clock and the stuck decision
+what a refusal charges	no free requeue, no round, no attempt	a lagging checkout is a transient device condition; the free-requeue budget is what turned a deploy window into job-failed-2
+how the row's lagging state is stored	derived from job_events (preflight-lagging, requeued-lagging, bounded by the last run-died or run-exited); no new column or table	no schema change; the same events show in history
+the bound	15 minutes from the first refusal (device_sync.SYNC_GRACE_SECONDS)	the repo's only deploy timeout: health already flags a device lagging or deploying that long; the job timeout (60 min) was the rejected alternative, a later alarm
+the backoff	30, 60, 120, then 240 s	a deploy normally lands within one heal cycle; the short first step lets the job start soon after the checkout catches up
+which device is marked lagging	the box's own device_sync row when the box lags origin/main, whichever device the job was placed on	the box lag blocks every device; marking the placed remote let heal flip it back to synced and the next claim refused at once
+proof	tests/test_lagging_requeue.py drives the real waiter preflight against a git checkout behind origin/main and the real dispatcher T6 on a fake clock	each acceptance criterion is a test; with lib/waiter.py reverted to main, the ac-1 and ac-3 tests fail (queued instead of failed)
