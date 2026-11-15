@@ -16,8 +16,8 @@ Reads:
   that label (`issues/<n>/events`). That lookup is cached on the issue's
   updated_at, which GitHub bumps on every label change;
 * linear_intake: issues in any of a repo's projects and in the workflow
-  state, every page of them, and for each, who moved it there: the actor of the latest history
-  entry whose toState is that state.
+  state, every page of them, and for each, who moved it there: the actor of
+  the latest history entry whose toState is that state.
 
 Writes (each one exactly once per call; the feeder makes them idempotent):
 the empty start commit (git data API: the base commit's tree, one parent),

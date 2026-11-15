@@ -1,5 +1,3 @@
-"""One repo takes tickets from several Linear projects (issue #132)."""
-
 from __future__ import annotations
 
 import json
@@ -41,9 +39,6 @@ def load(tmp_path: Path, projects: str):
 
 def errors(findings) -> list[str]:
     return [item.message for item in findings if item.severity == "error"]
-
-
-# --- schema ------------------------------------------------------------------
 
 
 def test_a_project_can_name_two_linear_projects(tmp_path: Path) -> None:
@@ -151,9 +146,6 @@ def test_check_config_end_to_end(
     assert message in result.stdout + result.stderr
 
 
-# --- feeder and intake -------------------------------------------------------
-
-
 TWO_PROJECT_ORCH = """
 poll_seconds: 60
 linear:
@@ -174,9 +166,7 @@ projects:
 """
 
 
-class ProjectLinear(FakeLinear):
-    """Intake that serves each issue only from the project it sits in."""
-
+class LinearByIssueProject(FakeLinear):
     def __init__(self) -> None:
         super().__init__()
         self.where: dict[str, str] = {}
@@ -187,7 +177,7 @@ class ProjectLinear(FakeLinear):
 
 
 def test_the_feeder_feeds_a_ticket_from_either_project_once(tmp_path: Path) -> None:
-    linear = ProjectLinear()
+    linear = LinearByIssueProject()
     linear.issues = [intake_issue("AUT-7")]
     linear.where["AUT-7"] = "proj-2"
     feeder, queue, _, _ = make_feeder(
@@ -206,7 +196,7 @@ def test_the_feeder_feeds_a_ticket_from_either_project_once(tmp_path: Path) -> N
 
 
 def test_an_untrusted_move_in_the_second_project_is_not_fed(tmp_path: Path) -> None:
-    linear = ProjectLinear()
+    linear = LinearByIssueProject()
     linear.issues = [intake_issue("AUT-8", applied_by="someone-else")]
     linear.where["AUT-8"] = "proj-2"
     feeder, _, _, _ = make_feeder(
@@ -257,9 +247,6 @@ def test_cli_maps_every_linear_id_to_its_repo(tmp_path: Path) -> None:
         "proj-b": "acme/app",
         "proj-c": "acme/solo",
     }
-
-
-# --- poll_source ------------------------------------------------------------
 
 
 def two_projects():
@@ -360,9 +347,6 @@ def test_single_project_poll_still_refuses_the_other_project() -> None:
 
     assert source.tracked_tickets((TicketRef("acme/widgets", "AUT-42", "linear"),)) == ()
     assert len(errors) == 1
-
-
-# --- webhook ----------------------------------------------------------------
 
 
 @pytest.fixture
