@@ -23,6 +23,8 @@ from dataclasses import replace
 from itertools import count
 from pathlib import Path
 
+import pytest
+
 from lib import placed_run
 from lib.dispatcher import CIResult
 from lib.job_state import link_drop_end, link_drop_settled_at, record_job_event
@@ -447,6 +449,37 @@ def test_a_dropped_review_waits_for_an_open_fix_for_its_head(tmp_path: Path) -> 
     assert "retry-deferred" in names(poller, review)
     assert "requeued-link-drop" not in names(poller, review)
     assert poller.pool.claim("codex") is None, "the review is not claimable beside the fix"
+
+
+@pytest.mark.parametrize("spent", [False, True], ids=["free-requeues-left", "budget-spent"])
+def test_a_review_held_behind_an_open_fix_frees_its_settled_slot_for_the_fix(
+    tmp_path: Path, spent: bool
+) -> None:
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE)
+    poller.config = replace(poller.config, devices=tuple(
+        replace(device, slot_max=1) if device.name == "pc" else device
+        for device in poller.config.devices
+    ))
+    poller.pool.config = poller.dispatcher.devices.config = poller.config
+    review = poller.review(timeout=TIMEOUT)
+    if spent:
+        _spend_budget(poller, review)
+    poller.claim()
+    dropped = dropped_run(poller, review)
+    fix = poller.queue.enqueue(
+        JobRequest(
+            repo="maxharris1/factory", ticket_id="72", action="fix", recipient="claude",
+            source_comment_id="verdict-r1", timeout_seconds=TIMEOUT, head="a" * 40,
+        ),
+        dedupe_key="fix-r1",
+    ).id
+    poll(poller, dropped + SETTLE)
+    poll(poller, dropped + SETTLE + 60)
+    assert poller.row(review)["state"] == "failed", "held while the fix is open"
+    assert "retry-deferred" in names(poller, review)
+    assert poller.pool.placement(review) is None, "the settled run's slot is freed"
+    claimed = poller.pool.claim("claude")
+    assert claimed is not None and claimed[0].id == fix, "the fix takes the only slot"
 
 
 def test_a_link_drop_requeue_prefers_another_device_with_a_free_slot(tmp_path: Path) -> None:
