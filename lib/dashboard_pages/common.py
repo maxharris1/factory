@@ -98,7 +98,6 @@ CSS_MISC = """\
 CSS_TAIL = """\
 @keyframes px-march{to{background-position:16px 0,-16px 100%,100% 16px,0 -16px}}
 @keyframes shimmer{from{background-position:100% 0}to{background-position:-100% 0}}
-@keyframes breathe{0%,100%{opacity:.18;stroke:var(--accent);stroke-width:3}50%{opacity:.8;stroke:var(--accent);stroke-width:7}}
 @keyframes flash{from{box-shadow:0 0 0 1px var(--brand),0 0 0 4px var(--brand-soft)}to{box-shadow:var(--elev)}}
 @media (max-width:1100px){.panel,#lanes,#queue,#handoffs,#verdicts{grid-column:1/-1}}
 @media (max-width:640px){.top-row{padding:8px 14px}.attn{padding:6px 14px}main{padding:14px 12px 24px;gap:12px}
@@ -106,7 +105,6 @@ CSS_TAIL = """\
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation: none !important;transition: none !important;scroll-behavior:auto !important}
 .fresh{outline:2px solid var(--brand);outline-offset:-2px}
-.flow .visit.breathe .halo{animation:none;opacity:.45}
 .px-held::after{animation:none}}
 """
 
@@ -134,8 +132,7 @@ SCRIPT_HEAD = r"""
 (function () {
   'use strict';
   var POLL_MS = __POLL_MS__;
-  // The job view's simplified diagram (lib/dashboard_flow.py path_geometry).
-  var FLOW = __FLOW__;
+  var FLOWMAP = __FLOWMAP__;
   var PX = __PIXELSTRIP__;
   // The shell's link table and the components that carry a code version.
   var SHELL = __SHELL__;

@@ -19,7 +19,7 @@ from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
 from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE,
 )
-from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
+from lib.dashboard_pages.ticket_detail import _jobview
 from lib.dashboard_pages.tickets import _board, _tickets
 
 
@@ -1242,8 +1242,6 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
     page, label = _PAGE_NAMES[name]
     refresh = int(snapshot["refresh_seconds"])
     panels = "".join(draw(snapshot) for draw in _PANELS[name])
-    # The job page and the lanes page's job modal copy the full chart from here.
-    extra = _flow_template(snapshot) if name in ("job.html", "index.html") else ""
     return "\n".join(
         [
             "<!doctype html>",
@@ -1262,7 +1260,6 @@ def _page(snapshot: dict, name: str, *, css: str, script: str) -> str:
             _topbar(snapshot, name),
             f'<main id="hud">{panels}</main>',
             _statusline(snapshot),
-            extra,
             f"<script>{script}</script>",
             "</body></html>",
         ]
