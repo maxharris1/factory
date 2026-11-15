@@ -25,10 +25,12 @@
 # the supervisor is killed (SIGKILL), its waiter lives on holding the lock:
 # a new supervisor's waiter then refuses and is retried with backoff, and
 # stop also stops that waiter (the lock's pid, checked to be this bot's
-# `orch wait <bot> --autostart`). stop also stops every other supervisor
-# for this bot and state directory owned by this user, and a supervisor
-# whose pid is no longer in the pidfile exits instead of starting another
-# waiter (#295). A waiter that exits is
+# `orch wait <bot> --autostart` and not a live supervisor's child). stop
+# also stops every other supervisor for this bot and state directory owned
+# by this user, and a supervisor whose pid is no longer in the pidfile exits
+# instead of starting another waiter (#295). Without /proc, a supervisor
+# started before the state argv counts as this state's only when lsof shows
+# its stdout is this state's log (#328). A waiter that exits is
 # started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
 # keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
 #
@@ -85,8 +87,9 @@ START_WAIT="${ORCH_WAITER_START_WAIT:-15}"
 STOP_WAIT="${ORCH_WAITER_STOP_WAIT:-60}"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 PROC="${ORCH_PROC_DIR:-/proc}"
-# cron and fresh shells have a minimal PATH; the waiter needs orch, gh and git.
-export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
+# cron and fresh shells have a minimal PATH; the waiter needs orch, gh and git,
+# and stop needs lsof (/usr/sbin on macOS).
+export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
 
 say() { printf '%s waiter-service %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BOT" "$*"; }
 
@@ -103,7 +106,7 @@ is_supervisor_argv() {
 }
 
 stateless_supervisor_is_own() {
-    local pid="$1" kv home="" state="" waiter
+    local pid="$1" kv home="" state="" log
     local -a environ=()
     if [[ -d "$PROC" ]]; then
         mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
@@ -116,8 +119,8 @@ stateless_supervisor_is_own() {
         [[ -n "$state" || -n "$home" ]] || return 1
         [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
     else
-        waiter="$(waiter_pid)" || return 1
-        [[ "$(ps -p "$waiter" -o ppid= 2>/dev/null | tr -d ' ')" == "$pid" ]]
+        log="$(lsof -a -p "$pid" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p')" || return 1
+        [[ -n "$log" && "$log" -ef "$LOG" ]]
     fi
 }
 
@@ -164,23 +167,27 @@ owns_pidfile() {
     [[ "$(head -n 1 "$PIDFILE" 2>/dev/null || true)" == "$$" ]]
 }
 
-# Print the pid of this bot's running supervisor, or fail.
-running_pid() {
-    local pid command
+is_live_supervisor() {
+    local pid="$1" command
     local -a argv=()
-    [[ -r "$PIDFILE" ]] || return 1
-    pid="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
     if [[ -d "$PROC" ]]; then
         [[ -r "${PROC}/${pid}/cmdline" ]] || return 1
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
-        is_supervisor_argv "${argv[@]}" || return 1
     else
         command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
-        is_supervisor_argv "${argv[@]}" || return 1
     fi
+    is_supervisor_argv "${argv[@]}"
+}
+
+# Print the pid of this bot's running supervisor, or fail.
+running_pid() {
+    local pid
+    [[ -r "$PIDFILE" ]] || return 1
+    pid="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
+    is_live_supervisor "$pid" || return 1
     printf '%s\n' "$pid"
 }
 
@@ -224,8 +231,13 @@ waiter_pid() {
 }
 
 stop_waiter() {
-    local pid i
+    local pid parent i
     pid="$(waiter_pid)" || return 0
+    parent="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')"
+    if is_live_supervisor "$parent"; then
+        say "waiter (pid ${pid}) belongs to supervisor ${parent} of another state; leaving it"
+        return 0
+    fi
     kill -TERM "$pid" 2>/dev/null || return 0
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
