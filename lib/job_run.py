@@ -20,7 +20,13 @@ same process that runs the command:
   then SIGKILL after KILL_GRACE_SECONDS, and run returns only once the
   child is reaped, so its death is confirmed before the job can fail and
   T6 can retry it. A remote run's Control is stopped instead, and
-  lib/placed_run.py confirms its worker gone on the device.
+  lib/placed_run.py confirms its worker gone on the device; a run past its
+  budget returns a failing status even when its command exited 0;
+* every process the command started dies with it (#199 r1): the command
+  runs with RUN_TAG_ENV set to a fresh tag, run tracks its process tree
+  while it runs, and once it has exited run stops (SIGSTOP), then kills
+  (SIGKILL), every live process that carries the tag or descends from a
+  tracked one, and returns only when none is left.
 
 `run` never finishes the job: `orch job done` stays the bot's call.
 """
@@ -29,6 +35,7 @@ from __future__ import annotations
 
 import math
 import os
+import secrets
 import signal
 import sqlite3
 import subprocess
@@ -36,6 +43,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import IO
@@ -51,6 +59,10 @@ TRANSIENT_ERRORS = (sqlite3.Error, OSError)
 # #199: how long a command past its budget has between SIGTERM and SIGKILL.
 KILL_GRACE_SECONDS = 30.0
 WALL_CLOCK = "wall-clock"
+# #199 r1: every process of a local run carries this tag in its environment.
+RUN_TAG_ENV = "ORCH_RUN_TAG"
+# How often run looks at the command's process tree while it runs.
+TRACK_SECONDS = 1.0
 
 Beat = Callable[[], object]
 Log = Callable[[str], None]
@@ -239,6 +251,8 @@ def run(
         if pending:
             log(f"not starting {argv[0]}: got signal {pending[0]}")
             return 128 + pending[0]
+        tag = secrets.token_hex(16)
+        tagged = {**(dict(env) if env is not None else os.environ), RUN_TAG_ENV: tag}
         spawn = list(argv)
         read_end = write_end = report_read = report_write = -1
         if started is not None:
@@ -251,7 +265,7 @@ def run(
             child = subprocess.Popen(
                 spawn,
                 cwd=cwd,
-                env=dict(env) if env is not None else None,
+                env=tagged,
                 pass_fds=(read_end, report_write) if started is not None else (),
                 stdout=subprocess.PIPE if output is not None else None,
             )
@@ -303,7 +317,12 @@ def run(
         for signum in pending:  # arrived while the command was being spawned
             if child.poll() is None:
                 child.send_signal(signum)
-        code = _wait(child, budget, argv[0], log)
+        tree = Tree(child.pid, tag)
+        try:
+            code = _wait(child, budget, argv[0], log, tree)
+        finally:
+            tree.end(log)
+        code = _past_budget(code if code >= 0 else 128 - code, budget)
     finally:
         if reader is not None:
             reader.join(OUTPUT_GRACE_SECONDS)
@@ -312,31 +331,195 @@ def run(
             signal.signal(signum, handler)  # type: ignore[arg-type]
         if prepared and teardown is not None:
             teardown()
-    return code if code >= 0 else 128 - code
+    return code
+
+
+def _past_budget(code: int, budget: Budget | None) -> int:
+    """#199 r1: a run stopped past its budget fails, whatever status its command gave."""
+    if budget is None or not budget.expired or code != 0:
+        return code
+    return 128 + (budget.signum or signal.SIGTERM)
 
 
 def _wait(
-    child: subprocess.Popen[bytes], budget: Budget | None, name: str, log: Log
+    child: subprocess.Popen[bytes], budget: Budget | None, name: str, log: Log, tree: Tree
 ) -> int:
-    """child.wait(), stopping the child once the budget runs out; returns once it is reaped."""
-    if budget is None:
-        return child.wait()
-    try:
-        return child.wait(timeout=budget.remaining())
-    except subprocess.TimeoutExpired:
-        pass
+    """child.wait(), stopping the child once the budget runs out; returns once it is reaped.
+
+    While it waits it tracks the child's process tree every TRACK_SECONDS.
+    """
+    while True:
+        tree.track()
+        timeout = TRACK_SECONDS if budget is None else min(TRACK_SECONDS, budget.remaining())
+        try:
+            return child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        if budget is not None and budget.remaining() <= 0:
+            break
+    assert budget is not None
     budget.expired = True
     log(f"{name} ran past its {budget.describe()}; stopping pid {child.pid} (SIGTERM)")
     budget.signum = signal.SIGTERM
+    tree.track()
     child.send_signal(signal.SIGTERM)
-    try:
-        return child.wait(timeout=budget.grace)
-    except subprocess.TimeoutExpired:
-        pass
+    grace = time.monotonic() + budget.grace
+    while True:
+        tree.track()
+        try:
+            return child.wait(timeout=max(0.0, min(0.2, grace - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+        if time.monotonic() >= grace:
+            break
     log(f"{name} (pid {child.pid}) ignored SIGTERM for {budget.grace:g}s; killing it (SIGKILL)")
     budget.signum = signal.SIGKILL
+    tree.track()
     child.kill()
     return child.wait()
+
+
+@dataclass(frozen=True)
+class Process:
+    pid: int
+    ppid: int
+    start: str
+    tagged: bool
+
+
+def processes(tag: str) -> dict[int, Process]:
+    """This machine's live processes (zombies left out), and which carry `tag`.
+
+    From /proc where there is one, else from `ps` (macOS: no tag is read,
+    so only the process tree counts there).
+    """
+    if os.path.isdir("/proc/self"):
+        return _proc_processes(tag)
+    return _ps_processes()
+
+
+def _proc_processes(tag: str) -> dict[int, Process]:
+    mark = f"{RUN_TAG_ENV}={tag}".encode()
+    found: dict[int, Process] = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                stat = handle.read().decode(errors="replace")
+        except OSError:
+            continue
+        fields = stat[stat.rfind(")") + 2:].split()
+        if len(fields) < 20 or fields[0] in ("Z", "X"):
+            continue
+        try:
+            with open(f"/proc/{name}/environ", "rb") as handle:
+                tagged = mark in handle.read().split(b"\0")
+        except OSError:
+            tagged = False
+        found[int(name)] = Process(int(name), int(fields[1]), fields[19], tagged)
+    return found
+
+
+def _ps_processes() -> dict[int, Process]:
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
+            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"}, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    found: dict[int, Process] = {}
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        if parts[2].startswith("Z"):
+            continue
+        found[int(parts[0])] = Process(int(parts[0]), int(parts[1]), parts[3].strip(), False)
+    return found
+
+
+class Tree:
+    """Every process of one local run (#199 r1): its tag, and its process tree.
+
+    A process belongs to the run when it carries the run's tag, or its parent
+    belongs to it; once seen it stays a member (by pid and start time) after
+    its parent exits.
+    """
+
+    def __init__(
+        self,
+        root: int,
+        tag: str,
+        *,
+        scan: Callable[[str], dict[int, Process]] = processes,
+        signal_pid: Callable[[int, int], None] = os.kill,
+    ):
+        self.root = root
+        self.tag = tag
+        self.scan = scan
+        self.signal_pid = signal_pid
+        self.known: dict[int, str] = {}
+        self.foreign: set[int] = set()
+
+    def track(self) -> dict[int, Process]:
+        """Look again: the run's live processes, the root's own process included."""
+        listing = self.scan(self.tag)
+        me = os.getpid()
+        members = {
+            pid: listing[pid]
+            for pid, start in self.known.items()
+            if pid in listing and listing[pid].start == start and pid not in self.foreign
+        }
+        root = self.root not in self.foreign
+        if root and self.root in listing and (self.root not in self.known or self.root in members):
+            members[self.root] = listing[self.root]
+        grown = True
+        while grown:
+            grown = False
+            for process in listing.values():
+                if process.pid in members or process.pid == me or process.pid in self.foreign:
+                    continue
+                if process.tagged or process.ppid in members:
+                    members[process.pid] = process
+                    grown = True
+        self.known = {pid: process.start for pid, process in members.items()}
+        return members
+
+    def end(self, log: Log) -> None:
+        """Kill every live process of the run; return once none is left.
+
+        Each round stops every member (SIGSTOP: none can fork), looks again
+        until no new member shows up, then kills them all (SIGKILL). A
+        process this user may not signal is not the run's.
+        """
+        said = time.monotonic()
+        while True:
+            members = self.track()
+            if not members:
+                return
+            stopped: set[int] = set()
+            while set(members) - stopped:
+                for pid in set(members) - stopped:
+                    self._send(pid, signal.SIGSTOP)
+                    stopped.add(pid)
+                members = self.track()
+            for pid in members:
+                self._send(pid, signal.SIGKILL)
+            if time.monotonic() - said >= KILL_GRACE_SECONDS:
+                log(f"processes {sorted(members)} of the run still live after SIGKILL; waiting")
+                said = time.monotonic()
+            time.sleep(0.05)
+
+    def _send(self, pid: int, signum: int) -> None:
+        try:
+            self.signal_pid(pid, signum)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            self.foreign.add(pid)
+            self.known.pop(pid, None)
 
 
 class Control:
@@ -407,7 +590,7 @@ def follow(
             timer = threading.Timer(budget.remaining(), _out_of_budget, (budget, control, log))
             timer.daemon = True
             timer.start()
-        return body(control)
+        return _past_budget(body(control), budget)
     finally:
         if timer is not None:
             timer.cancel()

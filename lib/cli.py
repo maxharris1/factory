@@ -1463,6 +1463,7 @@ def _job_run_command(argv: list[str]) -> int:
                     control,
                     report_env=session is not None,
                     output=session.consume if session is not None else None,
+                    budget=budget,
                 ),
                 beat=beat,
                 interval=interval,

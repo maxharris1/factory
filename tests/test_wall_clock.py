@@ -259,8 +259,8 @@ def test_a_remote_worker_that_ignores_sigterm_is_killed_past_its_budget(tmp_path
     try:
         worker = started_harness(count, proc)
         _, err = proc.communicate(timeout=180)
-        assert "killing it" in err, err
-        assert gone(worker)
+        assert proc.returncode != 0, err
+        assert gone(worker), err
         assert poller.pool.placement(job_id) is None
     finally:
         kill_quietly(worker)
@@ -276,3 +276,186 @@ def test_threads_left_by_a_budget_do_not_outlive_follow() -> None:
     time.sleep(0.1)
     alive = [t for t in threading.enumerate() if t.name not in before and t.is_alive()]
     assert alive == []
+
+
+# --- review round 1: every process of the job, the remote exit status, the detached deadline -
+
+
+WRITER = (
+    "import sys, time\n"
+    "f = open(sys.argv[1], 'a')\n"
+    "while True:\n"
+    "    f.write('x'); f.flush(); time.sleep(0.05)\n"
+)
+LEAVES_WRITER = (
+    "import os, subprocess, sys, time; "
+    "env = None if sys.argv[4] == 'keep' else {'PATH': os.environ.get('PATH', '')}; "
+    "p = subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[2]], env=env, "
+    "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+    "open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(float(sys.argv[5]))"
+)
+
+
+def _still_writes(ticks: Path) -> bool:
+    before = ticks.stat().st_size
+    time.sleep(0.3)
+    return ticks.stat().st_size != before
+
+
+def _leave_writer(
+    tmp_path: Path, budget: Budget | None, *, env: str = "keep", sleep: float = 600
+) -> tuple[int, int, Path]:
+    pid_file, ticks = tmp_path / "writer.pid", tmp_path / "ticks"
+    code = job_run.run(
+        [sys.executable, "-c", LEAVES_WRITER, str(pid_file), str(ticks), WRITER, env, str(sleep)],
+        beat=lambda: None, interval=0.1, log=lambda _m: None, budget=budget,
+    )
+    return code, int(pid_file.read_text()), ticks
+
+
+def test_a_child_the_harness_left_is_dead_when_run_returns_past_the_budget(tmp_path: Path) -> None:
+    writer = None
+    try:
+        code, writer, ticks = _leave_writer(tmp_path, Budget(1.0, grace=5))
+        assert code == 128 + signal.SIGTERM
+        assert not _alive(writer) and not _still_writes(ticks)
+    finally:
+        kill_quietly(writer)
+
+
+def test_a_child_that_dropped_the_environment_is_dead_when_run_returns(tmp_path: Path) -> None:
+    writer = None
+    try:
+        code, writer, ticks = _leave_writer(tmp_path, Budget(1.0, grace=5), env="scrub")
+        assert code == 128 + signal.SIGTERM
+        assert not _alive(writer) and not _still_writes(ticks)
+    finally:
+        kill_quietly(writer)
+
+
+def test_a_child_left_by_a_harness_that_exited_in_time_is_dead_when_run_returns(
+    tmp_path: Path,
+) -> None:
+    writer = None
+    try:
+        code, writer, ticks = _leave_writer(tmp_path, Budget(60), sleep=0.5)
+        assert code == 0
+        assert not _alive(writer) and not _still_writes(ticks)
+    finally:
+        kill_quietly(writer)
+
+
+def test_an_old_child_does_not_run_beside_the_retry(tmp_path: Path) -> None:
+    poller, job_id = _box(tmp_path, timeout=2)
+    pid_file, ticks = tmp_path / "pid", tmp_path / "ticks"
+    writer = None
+    try:
+        code, err = _job_run(
+            poller, job_id, sys.executable, "-c", LEAVES_WRITER,
+            str(pid_file), str(ticks), WRITER, "keep", "600",
+        )
+        writer = int(pid_file.read_text())
+        assert code == 128 + signal.SIGTERM, err
+        assert poller.row(job_id)["state"] == "failed"
+        poller.now[0] = time.time()
+        poller.queue.clock = lambda: poller.now[0]
+        poller.dispatcher.reconcile_jobs()
+        retry = poller.claim()
+        observed = tmp_path / "observed"
+        watch = (
+            "from pathlib import Path; import sys, time; "
+            "p = Path(sys.argv[1]); before = p.stat().st_size; time.sleep(0.3); "
+            "Path(sys.argv[2]).write_text(f'{before} {p.stat().st_size}')"
+        )
+        _job_run(poller, retry.job_id, sys.executable, "-c", watch, str(ticks), str(observed))
+        before, after = map(int, observed.read_text().split())
+        assert after == before, "the old child still wrote during the retry"
+    finally:
+        kill_quietly(writer)
+
+
+def test_a_remote_run_past_its_budget_fails_even_when_its_body_returns_0() -> None:
+    def body(control: job_run.Control) -> int:
+        deadline = time.monotonic() + 10
+        while control.signum is None and time.monotonic() < deadline:
+            control.wait(0.05)
+        return 0
+
+    budget = Budget(0.3)
+    code = job_run.follow(body, beat=lambda: None, interval=0.1, log=lambda _m: None, budget=budget)
+    assert budget.expired and code == 128 + signal.SIGTERM
+
+
+def test_an_expired_remote_job_whose_harness_exits_0_on_sigterm_fails(tmp_path: Path) -> None:
+    import subprocess
+
+    from lib.device_pool import DevicePool
+    from lib.machines_yml import load_machines_yml
+    from lib.queue import SQLiteJobQueue
+    from lib.waiter import HarnessCommand, Waiter
+    from tests.test_waiter import FakeContext, enqueue
+    from tests.test_waiter_remote import ORCH, remote_machines
+
+    machines = remote_machines(tmp_path, box_enabled=False)
+    ssh = Ssh(tmp_path)
+    db = Poller(tmp_path / "schema").path
+    queue = SQLiteJobQueue(db, clock=time.time)
+    config, _ = load_machines_yml(machines, allow_placeholders=True)
+    pid_file = tmp_path / "pid"
+    script = (
+        "import os, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); "
+        "open(sys.argv[1], 'w').write(str(os.getpid())); "
+        "print('ORCH-HANDOFF: 123456', flush=True); time.sleep(600)"
+    )
+    waiter = Waiter(
+        bot="claude-bot", queue=queue, pool=DevicePool(queue, config),
+        harness=HarnessCommand(bot="claude-bot", command=(sys.executable, "-c", script, str(pid_file))),
+        context=FakeContext(), state_dir=tmp_path / "state", db=db, machines=machines,
+        orch=(sys.executable, str(ORCH)), spawn=subprocess.Popen,
+        environ={"HOME": str(tmp_path), **ssh.env()},
+    )
+    job_id = enqueue(queue, "timeout", timeout_seconds=3)
+    try:
+        assert waiter.step() == job_id
+        deadline = time.monotonic() + 60
+        while waiter.running() and time.monotonic() < deadline:
+            time.sleep(0.1)
+            waiter.step()
+        assert not waiter.running()
+        with queue.connect() as connection:
+            row = connection.execute(
+                "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert (row["state"], row["handoff_comment_id"]) == ("failed", None)
+    finally:
+        if pid_file.exists():
+            kill_quietly(int(pid_file.read_text()))
+
+
+def test_a_detached_remote_worker_keeps_its_deadline_when_its_runner_dies(tmp_path: Path) -> None:
+    poller, job_id, ssh = _remote(tmp_path, timeout=3)
+    count = tmp_path / "count"
+    proc = orch(
+        "job", "run", "codex-bot", job_id, "--db", str(poller.path),
+        "--machines", str(poller.machines), "--", *harness(count, 6000, 0.1),
+        env=ssh.env(),
+    )
+    worker = None
+    try:
+        worker = started_harness(count, proc)
+        proc.kill()
+        proc.communicate(timeout=10)
+        deadline = time.monotonic() + 3 + job_run.KILL_GRACE_SECONDS + 30
+        while not gone(worker) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert gone(worker), "the detached worker outlived its budget with no runner"
+        [rundir] = run_dirs(tmp_path, "codex-bot", job_id)
+        exit_file = rundir / "exit"
+        while not exit_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert exit_file.read_text().strip() == str(128 + signal.SIGTERM)
+    finally:
+        kill_quietly(worker)
+        if proc.poll() is None:
+            proc.kill()
