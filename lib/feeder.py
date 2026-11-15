@@ -815,6 +815,7 @@ class Feeder:
                         "project_bot": candidate.project.grok_bot,
                         "detail": detail,
                         "ticket_url": issue.url,
+                        "link": issue.url,
                         "defects": codes,
                     },
                     sort_keys=True,
