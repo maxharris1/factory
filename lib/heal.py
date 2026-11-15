@@ -521,8 +521,9 @@ USAGE = """\
 orch heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
           [--machines PATH] [--orch PATH] [--device NAME] [--dry-run]
 orch heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
-orch heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH] [--dry-run]
                  [--device NAME] [--dry-run]
+orch heal devices [--state DIR] [--db PATH] [--checkout DIR] [--machines PATH]
+                  [--orch PATH] [--dry-run]
 """
 
 

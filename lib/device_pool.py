@@ -700,7 +700,6 @@ def box_device(config: MachinesConfig | None) -> str:
 
 
 def sync_blocks(queue: SQLiteJobQueue) -> Blocked:
-    """Where device_sync forbids placement now (#297)."""
     with queue.connect() as connection:
         return sync_blocked(connection)
 

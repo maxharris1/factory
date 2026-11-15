@@ -197,9 +197,6 @@ def forget_except(connection: sqlite3.Connection, keep: Iterable[tuple[str, str]
             )
 
 
-# --- the pure decision --------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Observed:
     """One target as the pass saw it. sha None with reachable True: no checkout."""
@@ -220,7 +217,6 @@ DEPLOY = "deploy"
 
 
 def step(observed: Observed, target: str) -> str:
-    """What one observation calls for: nothing, a deploy, or a note that it is unreachable."""
     if not observed.reachable:
         return OBSERVE_UNREACHABLE
     if observed.sha == target and observed.branch == "main" and observed.skills_ok:
@@ -229,5 +225,4 @@ def step(observed: Observed, target: str) -> str:
 
 
 def waiting_state(observed: Observed) -> str:
-    """The state a target that needs a deploy holds until its device is idle."""
     return MISSING if observed.missing else LAGGING

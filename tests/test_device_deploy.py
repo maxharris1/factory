@@ -7,7 +7,6 @@ the device, so the clone, fetch, refusal and checkout paths all run for real.
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 import subprocess
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -19,7 +18,7 @@ from lib.device_pool import DevicePool
 from lib.heal import Webhook
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
-from lib.remote import Called
+from lib.remote import SSH_UNREACHABLE, Called
 from lib.skill_preflight import Pinned
 
 ORCH_SCRIPT = '#!/bin/sh\necho "$PWD" >> "$HOME/install.log"\n'
@@ -59,8 +58,6 @@ class Origin:
 
 
 class LocalTransport:
-    """Runs the ssh argv's script on this machine; aliases in `offline` exit 255."""
-
     def __init__(self, home: Path):
         self.home = home
         self.offline: set[str] = set()
@@ -70,7 +67,7 @@ class LocalTransport:
         alias, script = argv[-2], argv[-1]
         self.scripts.append((alias, script))
         if alias in self.offline:
-            return Called(255, "", "")
+            return Called(SSH_UNREACHABLE, "", "")
         done = subprocess.run(
             ["sh", "-c", script], input=input or b"", capture_output=True, timeout=timeout,
             env={"HOME": str(self.home), "PATH": "/usr/local/bin:/usr/bin:/bin"},

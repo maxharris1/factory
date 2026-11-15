@@ -1228,7 +1228,7 @@ def read_device_sync(db: Path) -> list[device_sync.Row]:
             return device_sync.read(connection)
         finally:
             connection.close()
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+    except (sqlite3.Error, OSError, ValueError):
         return []
 
 

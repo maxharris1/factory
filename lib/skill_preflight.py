@@ -72,13 +72,10 @@ HEAD_MARK = "@head"
 # Reads one path per line on stdin, absolute or relative to $HOME, and prints
 # `<sha256> <path>`, or `- <path>` when the path is not a readable regular
 # file (a symlink to one counts: local installs link).
-# $1 is the checkout. The first line printed is `@head <sha> <branch>`
-# (`-` for no sha or a detached HEAD), or `@head missing` when $1 is not a
-# directory.
 _SCRIPT = (
-    'c=$1; if [ ! -d "$c" ]; then echo "@head missing"; '
-    "elif h=$(git -C \"$c\" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
-    'b=$(git -C "$c" symbolic-ref -q --short HEAD 2>/dev/null) || b=-; '
+    'checkout=$1; if [ ! -d "$checkout" ]; then echo "@head missing"; '
+    "elif h=$(git -C \"$checkout\" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null); then "
+    'b=$(git -C "$checkout" symbolic-ref -q --short HEAD 2>/dev/null) || b=-; '
     'echo "@head $h $b"; '
     'else echo "@head - -"; fi; '
     "if command -v sha256sum >/dev/null 2>&1; then s=sha256sum; "

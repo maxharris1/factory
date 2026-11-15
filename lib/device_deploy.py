@@ -90,37 +90,35 @@ PROBE_JOB = "device-sync"
 SYNC_MARK = "orch-sync:"
 _HARNESS_BOT = {harness: bot for bot, harness in OWNING_BOTS.items()}
 
-# $1 checkout, $2 git URL, $3 target sha. Prints `orch-sync: ok <sha>`, or
-# `orch-sync: <reason>` and exits 3 having written nothing it refused over.
 _DEPLOY = (
-    'r=$1; u=$2; t=$3; '
+    'checkout=$1; url=$2; target=$3; '
     f"fail() {{ printf '{SYNC_MARK} %s\\n' \"$*\"; exit 3; }}; "
     "export GIT_TERMINAL_PROMPT=0; "
     "fresh=; "
-    'if [ ! -e "$r/.git" ]; then '
-    'if [ -e "$r" ] && [ -n "$(ls -A "$r" 2>/dev/null)" ]; then fail "not a git checkout and not empty"; fi; '
-    'mkdir -p -- "$(dirname -- "$r")" || fail "cannot make the parent directory"; '
-    'git clone -q --no-checkout "$u" "$r" || fail "git clone exited $?"; '
+    'if [ ! -e "$checkout/.git" ]; then '
+    'if [ -e "$checkout" ] && [ -n "$(ls -A "$checkout" 2>/dev/null)" ]; then fail "not a git checkout and not empty"; fi; '
+    'mkdir -p -- "$(dirname -- "$checkout")" || fail "cannot make the parent directory"; '
+    'git clone -q --no-checkout "$url" "$checkout" || fail "git clone exited $?"; '
     "fresh=1; "
     "fi; "
-    'cd -- "$r" || fail "cannot enter the checkout"; '
+    'cd -- "$checkout" || fail "cannot enter the checkout"; '
     'if [ -z "$fresh" ]; then '
     'git fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main || fail "git fetch exited $?"; '
     "fi; "
-    'git cat-file -e "$t^{commit}" 2>/dev/null || fail "target commit not on origin"; '
+    'git cat-file -e "$target^{commit}" 2>/dev/null || fail "target commit not on origin"; '
     'if [ -z "$fresh" ]; then '
     "g=$(git rev-parse --git-dir) || fail \"cannot read .git\"; "
     "for x in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do "
     '[ -e "$g/$x" ] && fail "a merge or rebase is in progress"; done; '
     "if h=$(git rev-parse -q --verify 'HEAD^{commit}'); then "
     'git diff --quiet HEAD -- || fail "tracked files have local changes"; '
-    'git merge-base --is-ancestor "$h" "$t" || fail "HEAD has commits not on origin/main"; '
+    'git merge-base --is-ancestor "$h" "$target" || fail "HEAD has commits not on origin/main"; '
     "fi; "
     "if m=$(git rev-parse -q --verify 'refs/heads/main^{commit}'); then "
-    'git merge-base --is-ancestor "$m" "$t" || fail "local main has commits not on origin/main"; '
+    'git merge-base --is-ancestor "$m" "$target" || fail "local main has commits not on origin/main"; '
     "fi; "
     "fi; "
-    'git checkout -q -B main "$t" || fail "git checkout exited $?"; '
+    'git checkout -q -B main "$target" || fail "git checkout exited $?"; '
     'git branch -q --set-upstream-to=origin/main main || fail "cannot set the upstream"; '
     './bin/orch install-skills >/dev/null 2>&1 || fail "install-skills exited $?"; '
     f"printf '{SYNC_MARK} ok %s\\n' \"$(git rev-parse HEAD)\""
@@ -242,7 +240,6 @@ def run_pass(
     now: Callable[[], float] = time.time,
     dry_run: bool = False,
 ) -> list[Result]:
-    """One pass over every target; returns each target's final state."""
     found = targets(config)
     seen = dict(zip((t.key for t in found), _each(lambda t: observe(transport, t, pinned), found)))
     results: dict[tuple[str, str], Result] = {}

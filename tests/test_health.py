@@ -1519,7 +1519,6 @@ def test_a_restarted_pollers_failure_outranks_the_old_pollers_success(tmp_path: 
     assert (item.state, item.reason) == ("stale", "push failing, last pushed 20s ago")
 
 
-# --- device sync (#297) ----------------------------------------------------------------------
 
 HEAD_SHA = "1a2b3c4d5e6f" + "0" * 28
 MAIN_SHA = "9f8e7d6c5b4a" + "1" * 28
