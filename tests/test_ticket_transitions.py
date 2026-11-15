@@ -34,6 +34,7 @@ WRITERS = {
     "plan-gap": "lib/dispatch/plan.py",
     "t3": "lib/dispatch/verdict.py",
     "cap-resume": "lib/dispatch/caps/resume.py",
+    "retry": "lib/dispatch/retry.py",
 }
 
 RAW_WRITE = re.compile(
