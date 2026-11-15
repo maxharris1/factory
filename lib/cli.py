@@ -310,9 +310,12 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   live waiter on an eligible device ("no waiter for <harness>"). A
   component machines.yml or orch.yml expects that has never beaten is
   down. A poller, waiter or listener whose heartbeat names another commit
-  than the checkout shows "stale code". Reads orch.health.db beside the
-  database. Exits 3 when a component is down or a queued job has no
-  waiter, 1 when orch.health.db cannot be read, else 0.
+  than the checkout shows "stale code". Also measures disk and inode use
+  of the box's filesystems and, over SSH, of each probed device's
+  workdir_root, with an inode alert at 85%. Reads orch.health.db beside
+  the database. Exits 3 when a component is down, a queued job has no
+  waiter or inode use is at 85% or more, 1 when orch.health.db cannot be
+  read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
 
