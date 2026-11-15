@@ -1911,7 +1911,25 @@ def test_a_tunnel_whose_port_another_owner_holds_says_so(tmp_path: Path) -> None
     assert [(c.state, c.reason) for c in _tunnel(report)] == [
         ("down", "port held by another owner: 8788 on pc-wsl-cursor-bot")]
     store(db, NOW - 1).beat("tunnel", "box", pid=7)
+    assert [(c.state, c.reason) for c in _tunnel(health.load_report(db, NOW))] == [
+        ("down", "port held by another owner: 8788 on pc-wsl-cursor-bot")], (
+        "a 405 from whoever holds the port is not this tunnel")
+    (db.parent / "linear-webhook-tunnel.held").unlink()
     assert [(c.state, c.reason) for c in _tunnel(health.load_report(db, NOW))] == [("up", "")]
+
+
+def test_a_held_port_shows_on_a_tunnel_that_never_reported() -> None:
+    registry = health.Expected((health.Slot("tunnel", ("box",)),), frozenset({"tunnel"}))
+    report = health.build_report([], NOW, expected=registry, tunnel_held="8787 on pc-wsl-cursor-bot")
+    assert [(c.state, c.reason) for c in _tunnel(report)] == [
+        ("down", "port held by another owner: 8787 on pc-wsl-cursor-bot")]
+
+
+def test_a_held_record_names_any_host_the_service_accepts(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    host = "user@" + "a" * 30 + "." + "b" * 30 + ".com"
+    (db.parent / "linear-webhook-tunnel.held").write_text(f"8787 {host}\n")
+    assert health.read_tunnel_held(db) == f"8787 on {host}"
 
 
 def test_a_malformed_held_record_is_ignored(tmp_path: Path) -> None:

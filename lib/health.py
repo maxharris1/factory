@@ -20,11 +20,11 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   device that answered counts as seen;
 * `tunnel`: the Linear listener's Funnel, from a GET the listener sends to
   `linear_webhook.public_url` every BEAT_SECONDS; only the listener's own
-  405 for that path counts as seen. While the tunnel is not up and the
-  tunnel loop has given up on a port another owner holds on the tunnel host
-  (`linear-webhook-tunnel.held` beside orch.db, written by
-  deploy/linear-webhook-service.sh, issue #427), its reason is
-  "port held by another owner: PORT on HOST".
+  405 for that path counts as seen. While the tunnel loop has given up on a
+  port another owner holds on the tunnel host (`linear-webhook-tunnel.held`
+  beside orch.db, written by deploy/linear-webhook-service.sh, issue #427),
+  it runs no ssh, so the tunnel is down whatever answers the public URL, with
+  the reason "port held by another owner: PORT on HOST".
 
 A row is (component, device, bot, pid, started_at, last_seen, version,
 interval_seconds, stopped_at, checked_at), one per process: the key holds
@@ -127,7 +127,7 @@ TUNNEL_TIMEOUT = 10.0
 TUNNEL_SEEN = 405
 TUNNEL_HELD = "linear-webhook-tunnel.held"
 PORT_HELD = "port held by another owner"
-_HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]{0,63})")
+_HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]*)")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
 DEFAULT_DEVICE = "box"
@@ -1165,8 +1165,6 @@ def build_report(
     best: dict[tuple[str, str, str], Component] = {}
     for row in _latest_checks(rows):
         state, reason = classify(row, now)
-        if row.component == TUNNEL and state != UP and tunnel_held:
-            reason = f"{PORT_HELD}: {tunnel_held}"
         item = Component(
             component=row.component,
             device=row.device,
@@ -1190,6 +1188,9 @@ def build_report(
                    and c.device in slot.devices for c in components):
             components.append(Component(slot.component, slot.devices[0], slot.bot, None, DOWN,
                                         _never(slot.component), None, None, "unknown"))
+    if tunnel_held:
+        components = [replace(c, state=DOWN, reason=f"{PORT_HELD}: {tunnel_held}")
+                      if c.component == TUNNEL else c for c in components]
     components.sort(key=lambda c: (COMPONENTS.index(c.component), c.bot, c.device))
     jobs: dict[str, list[str]] = {}
     for job_id, recipient in queued:

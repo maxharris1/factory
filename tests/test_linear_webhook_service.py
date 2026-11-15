@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from lib import heal
+from lib import heal, health
 from lib.queue import SQLiteJobQueue
 from tests.procs import alive
 
@@ -896,3 +896,19 @@ def test_the_device_port_file_sets_both_ends_of_the_tunnel_and_the_listener(home
     _wait_for(lambda: _calls(home, "ssh") and _calls(home, "orch"), what="ssh and serve")
     assert f"-R 127.0.0.1:{port}:127.0.0.1:{port} test-host" in _calls(home, "ssh")[0]
     assert _calls(home, "orch")[0] == f"linear-webhook serve --bind 127.0.0.1:{port}"
+
+
+def test_the_held_record_lands_where_health_reads_it_under_an_orch_db_override(
+    home: Path, tmp_path: Path,
+) -> None:
+    db = tmp_path / "database" / "orch.db"
+    db.parent.mkdir()
+    settings = dict(FAKE_SSH_FORWARD_FAIL="1", LINEAR_WEBHOOK_REFUSED_LIMIT="1",
+                    LINEAR_WEBHOOK_RETRY_SEC="0.1", LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2",
+                    ORCH_DB=str(db))
+    assert _service(home, "ensure", **settings).returncode == 0
+    _wait_for(lambda: health.read_tunnel_held(db) is not None, timeout=20,
+              what="health to read the held record")
+    assert health.read_tunnel_held(db) == f"{_port_of(home)} on test-host"
+    assert _service(home, "start", **settings).returncode == 0
+    _wait_for(lambda: len(_calls(home, "ssh")) > 1, timeout=20, what="ssh after start")

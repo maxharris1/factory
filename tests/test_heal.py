@@ -403,3 +403,25 @@ def test_a_tunnel_whose_port_another_owner_holds_alerts_once_and_is_not_restarte
         actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=later)
         assert kinds(actions) == [(SKIP, "tunnel @ box")]
         assert runs.calls == [] and posts.calls == []
+
+
+def test_a_dry_run_leaves_the_port_held_alert_to_the_next_live_pass(tmp_path: Path) -> None:
+    actions, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), dry_run=True)
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert posts.calls == []
+    actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 120)
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert runs.calls == [] and len(posts.calls) == 1
+
+
+def test_a_port_held_again_after_it_was_freed_alerts_again(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL))
+    run_heal(tmp_path, report(component("tunnel", bot="")), now=NOW + 120)
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 240)
+    assert len(posts.calls) == 1
+
+
+def test_a_failed_port_held_alert_is_sent_again_on_the_next_pass(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL), posts=Posts(status=500))
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 120)
+    assert len(posts.calls) == 1

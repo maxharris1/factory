@@ -645,9 +645,10 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
   127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
   `forward refused: port PORT already forwarded on HOST; retry in Ns`.
   After `LINEAR_WEBHOOK_REFUSED_LIMIT` refusals in a row (default 3), the
-  loop writes `linear-webhook-tunnel.held` (`PORT HOST`) and starts no
-  more ssh for that port and host (issue #427). `orch health` then shows the
-  tunnel down with `port held by another owner: PORT on HOST`, and self-heal
+  loop writes `linear-webhook-tunnel.held` (`PORT HOST`) beside `ORCH_DB`
+  (default: the state directory's `orch.db`) and starts no more ssh for that
+  port and host (issue #427). `orch health` then shows the tunnel down, whatever
+  answers the public URL, with `port held by another owner: PORT on HOST`, and self-heal
   raises one alert and does not restart it. Free the port and run `start`,
   or move this device to another port and run `restart`.
 - After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`

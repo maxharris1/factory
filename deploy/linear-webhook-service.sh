@@ -57,7 +57,8 @@
 # LINEAR_WEBHOOK_RETRY_MAX_SEC (default 60), and resets after a longer run.
 # A tunnel refused with "remote port forwarding failed" is logged as such.
 # After LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row (default 3) the loop
-# writes linear-webhook-tunnel.held (`PORT HOST`) and starts no more ssh for that
+# writes linear-webhook-tunnel.held (`PORT HOST`) beside ORCH_DB (default
+# STATE/orch.db), where orch health reads it, and starts no more ssh for that
 # port and host: health reports "port held by another owner" and self-heal
 # raises one alert instead of restarting (issue #427). A loop started on
 # another port or host removes the record; on the same port and host it waits
@@ -90,7 +91,6 @@
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
 # linear-webhook-{listener,tunnel}-child.{lock,pid},
-# linear-webhook-tunnel.held (see above),
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
 # (serializes start/stop/ensure) and linear-webhook-service.log (autostart).
 #
@@ -130,7 +130,7 @@ if [[ -z "$PORT" && -r "$PORT_FILE" ]]; then
     read -r PORT <"$PORT_FILE" || true
 fi
 PORT="${PORT:-8787}"
-HELD="${STATE}/linear-webhook-tunnel.held"
+HELD="$(dirname "${ORCH_DB:-${STATE}/orch.db}")/linear-webhook-tunnel.held"
 REFUSED_LIMIT="${LINEAR_WEBHOOK_REFUSED_LIMIT:-3}"
 TUNNEL_HOST="${LINEAR_WEBHOOK_TUNNEL_HOST-pc-wsl-cursor-bot}"
 RETRY="${LINEAR_WEBHOOK_RETRY_SEC:-5}"

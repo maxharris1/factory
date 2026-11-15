@@ -108,6 +108,7 @@ SKIP = "skip"
 DEFER = "defer"
 DRAIN = "drain"
 ESCALATE = "escalate"
+HELD_SKIP = "not restarting: "
 DRAIN_ESCALATE_SECONDS = 2 * 60 * 60
 ACK_POLLS = 20
 ACK_POLL_SECONDS = 0.5
@@ -152,6 +153,7 @@ class KeyState:
     observed_at: float | None = None
     escalated_at: float | None = None
     last: str | None = None
+    alerted: str | None = None
 
 
 def service_of(component: str, bot: str) -> str | None:
@@ -181,11 +183,6 @@ def service_log(service: str, state_dir: Path) -> Path:
     if service == LISTENER_SERVICE:
         return state_dir / "linear-webhook-service.log"
     return state_dir / f"waiter-{service.split(':', 1)[1]}-service.log"
-
-
-def note(action: Action) -> str:
-    """A skip, deferral or drain as logged; repeated passes log it once."""
-    return f"{action.kind} {action.label} ({action.reason})"
 
 
 def _recent(times: Sequence[float], now: float) -> list[float]:
@@ -244,10 +241,9 @@ def decide(
                 actions.append(act(SKIP, "held stopped"))
             continue
         if item.get("state") == health.DOWN and str(item.get("reason") or "").startswith(health.PORT_HELD):
-            skip = act(SKIP, f"not restarting: {item['reason']}")
-            if key.last != note(skip):
+            if key.alerted != item["reason"]:
                 actions.append(act(ESCALATE, item["reason"]))
-            actions.append(skip)
+            actions.append(act(SKIP, f"{HELD_SKIP}{item['reason']}"))
             continue
         escalation = _escalation(key, attempts, now, broken=need is not None)
         if escalation is not None:
@@ -473,10 +469,10 @@ def heal(
     for action in actions:
         key = states.setdefault(action.label, KeyState())
         if action.kind in (SKIP, DEFER, DRAIN):
-            line = note(action)
-            if key.last != line:
-                log(line)
-            key.last = line
+            note = f"{action.kind} {action.label} ({action.reason})"
+            if key.last != note:
+                log(note)
+            key.last = note
             continue
         if action.kind == ESCALATE:
             continue
@@ -506,15 +502,21 @@ def heal(
                 drain_path(state_dir, bot).unlink(missing_ok=True)
                 drain_ack_path(state_dir, bot).unlink(missing_ok=True)
     acted = {action.label for action in actions}
+    port_held = {a.label for a in actions if a.kind == SKIP and a.reason.startswith(HELD_SKIP)}
     for label, key in states.items():
         if label not in acted:
             key.last = None
+        if label not in port_held:
+            key.alerted = None
     escalations = [a for a in actions if a.kind == ESCALATE]
     if escalations and not dry_run:
         outcome = escalate(escalations, device=facts.device, now=now, webhook=webhook,
                            environ=environ, post=post)
         for action in escalations:
-            states.setdefault(action.label, KeyState()).escalated_at = now
+            key = states.setdefault(action.label, KeyState())
+            key.escalated_at = now
+            if action.label in port_held and not outcome.startswith("escalation failed"):
+                key.alerted = action.reason
             log(f"escalate {action.label} ({action.reason}) {outcome}")
     for key in states.values():
         key.attempts = _recent(key.attempts, now)
