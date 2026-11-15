@@ -75,6 +75,14 @@ class _LinkDrop:
         return f"link-drop on {self.detail} ({self.used} free requeues spent)"
 
 
+def _harnesses_a_lagging_box_refuses_everywhere(
+    rows: list[device_sync.Row], box: str
+) -> frozenset[str]:
+    return frozenset(
+        row.harness for row in rows if row.device == box and row.state == device_sync.LAGGING
+    )
+
+
 class JobsMixin:
     def _t5_abandoned(
         self,
@@ -124,25 +132,19 @@ class JobsMixin:
         )
 
     def _lag_blocked_recipients(self) -> frozenset[str]:
-        """Harnesses no checkout can start a job for now: every eligible device
-        is sync-blocked, or the box's own checkout lags its origin/main, which
-        refuses every placement (lib/skill_preflight.py)."""
         config = getattr(self.devices, "config", None)
         if config is None:
             return frozenset()
         with self.queue.connect() as connection:
             rows = device_sync.read(connection)
         blocked = device_sync.blocked_by(rows)
-        box = box_device(config)
-        box_lagging = {
-            row.harness for row in rows if row.device == box and row.state == device_sync.LAGGING
-        }
+        refused_everywhere = _harnesses_a_lagging_box_refuses_everywhere(rows, box_device(config))
         return frozenset(
             harness
             for harness in HARNESSES
             if any(device.eligible(harness) for device in config.devices)
             and (
-                harness in box_lagging
+                harness in refused_everywhere
                 or all(
                     blocked.blocks(device.name, harness)
                     for device in config.devices
