@@ -489,7 +489,7 @@ def test_a_sibling_session_without_the_runs_environment_cannot_finish_the_job(
         and token.encode() in path.read_bytes()
     )
     assert found == []
-    for path in sorted(job_dir.iterdir()):
+    for path in sorted(path for path in job_dir.rglob("*") if path.is_file()):
         for name in ("ORCH_JOB_PROOF_FILE", PROOF):
             value = str(path) if name.endswith("_FILE") else path.read_text(errors="replace")
             result = orch("job", "done", "claude-bot", job_id, "--db", str(db), *outcome,

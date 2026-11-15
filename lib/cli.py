@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -1635,15 +1636,17 @@ def _job_run_command(argv: list[str]) -> int:
     }
 
     scratch = telemetry.state_dir(args.job_id, args.bot, database, environment) / "tmp"
+    created: list[Path] = []
 
     def setup() -> Path | None:
         if placed.remote:
             # #128: the brief is the detached harness's stdin on the device.
             brief.append(_read_brief(box_brief) or _stdin_brief())
         else:
-            scratch.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            scratch.parent.mkdir(mode=0o700, exist_ok=True)
-            scratch.mkdir(mode=0o700, exist_ok=True)
+            for path in (scratch.parent.parent, scratch.parent, scratch):
+                if not path.exists():
+                    path.mkdir(mode=0o700, parents=True)
+                    created.append(path)
             environment.update(dict.fromkeys(("TMPDIR", "TMP", "TEMP"), str(scratch)))
         if args.worktree and placed.remote:
             # #94: the same --worktree, on the placed device: preflight and
@@ -1674,8 +1677,10 @@ def _job_run_command(argv: list[str]) -> int:
         return made.path
 
     def teardown() -> None:
-        if not placed.remote:
-            shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+        for path in reversed(created):
+            with contextlib.suppress(OSError):
+                path.rmdir()
         if checkout:
             try:
                 worktrees.finish(checkout[0], log)

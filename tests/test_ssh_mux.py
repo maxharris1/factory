@@ -289,7 +289,7 @@ def test_a_timeout_through_a_master_is_unreachable_and_resets_it(
     t = target(tmp_path)
     transport = remote.SshTransport()
     assert remote.probe_device(transport, t)
-    exchanged = transport.exchange(remote.ssh_argv(t, "sleep 5"), timeout=1)
+    exchanged = transport.exchange(remote.ssh_argv(t, "sleep 2"), timeout=1)
     assert exchanged.code == remote.SSH_UNREACHABLE
     assert ops(ssh)[-1] == ("stop", 0)
 
