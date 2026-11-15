@@ -100,7 +100,22 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "skills": skill_paths(detail.get("repo_skill_paths")),
         "source": source,
         "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
+        "update": _update_scope(detail) if job.request.action == "review" else None,
     }
+
+
+def _update_scope(detail: dict[str, object]) -> dict | None:
+    last = detail.get("last_reviewed_head")
+    merge = detail.get("update_merge")
+    commits = detail.get("update_commits")
+    if (
+        detail.get("kind") != "update"
+        or not all(isinstance(sha, str) and _HEAD.fullmatch(sha) for sha in (last, merge))
+        or not isinstance(commits, list)
+        or not all(isinstance(sha, str) and _HEAD.fullmatch(sha) for sha in commits)
+    ):
+        return None
+    return {"last_reviewed_head": last, "merge": merge, "commits": commits}
 
 
 def _pr_number(value: object) -> int | None:

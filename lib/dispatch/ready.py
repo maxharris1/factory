@@ -17,6 +17,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
+from lib.update_check import UpdateScope
 
 
 class ReadyMixin:
@@ -50,10 +51,12 @@ class ReadyMixin:
         reported_head = fields["head"]
         reentry: int | None = None
         rereview = False
+        update: UpdateScope | None = None
         if state == "updating":
             settled = self._settle_update(ticket, comment, reported_head)
-            if settled is not None:
+            if isinstance(settled, tuple):
                 return settled
+            update = settled
             ticket = self._polled.get((ticket.repo.lower(), ticket.ticket_id), ticket)
             rereview = True
         elif state in ("handed-off", "merge-queue"):
@@ -130,7 +133,7 @@ class ReadyMixin:
         generation = self._generation(ticket.repo, ticket.ticket_id)
         if recorded_status in ("pending", "success"):
             queued, answered = self._queue_review(
-                ticket, comment, head=head, generation=generation
+                ticket, comment, head=head, generation=generation, update=update
             )
             if not queued:
                 return True, "capped-ready"
@@ -428,6 +431,7 @@ class ReadyMixin:
         head: str,
         generation: int,
         detail: str | None = None,
+        update: UpdateScope | None = None,
     ) -> tuple[bool, Comment | None]:
         """Queue the next review round for comment, with the later trusted
         verdict that already answered it (_enqueue_step); (False, None), with
@@ -461,6 +465,7 @@ class ReadyMixin:
                     head=head,
                     round_number=review_round,
                     instruction=detail,
+                    update=update,
                 ),
             ),
             dedupe_key=self._review_dedupe_key(ticket, head, review_round),

@@ -49,6 +49,13 @@ The reviewer runs `verify-cleffy`.
 
 CI_LOG = "FAILED tests/test_pricing.py::test_start_free - AssertionError\n```\ntraceback\n```"
 
+UPDATE: dict[str, object] = {
+    "kind": "update",
+    "last_reviewed_head": "a" * 40,
+    "update_merge": "b" * 40,
+    "update_commits": [],
+}
+
 # kind: (action, recipient, attempt, head, detail extras)
 CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "plan": ("plan", "claude", 1, None, {}),
@@ -71,6 +78,12 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
+    "review-update": ("review", "codex", 1, HEAD, {"round": "1/3", **UPDATE}),
+    "review-update-commits": ("review", "codex", 1, HEAD, {
+        "round": "1/3",
+        **UPDATE,
+        "update_commits": ["c" * 40, "d" * 40],
+    }),
 }
 
 FACTORY_MDS = {
