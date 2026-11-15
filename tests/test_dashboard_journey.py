@@ -12,7 +12,7 @@ from tests.test_dashboard_layout import CHART, _snapshot, seeded
 from tests.merge_queue_support import Board, sha
 
 FIXTURE = [
-    "intake", "questions", "planning", "plan-check", "building",
+    "intake", "planning", "plan-check", "building",
     "planning", "review", "fixing", "stuck", "fixing",
 ]
 OFF_CHART = "no direct transition on the chart"
@@ -50,16 +50,15 @@ def test_visits_match_path_in_length_and_order() -> None:
 def test_fixture_visit_fields() -> None:
     visits = _fixture_flow()["visits"]
     assert [visit["who"] for visit in visits] == [
-        "script", "script", "claude", "script", "claude",
+        "script", "claude", "script", "claude",
         "claude", "codex", "claude", "script", "claude",
     ]
     assert [visit["off_chart"] for visit in visits] == [
-        False, False, False, False, False, True, True, False, False, True,
+        False, True, False, False, True, True, False, False, True,
     ]
     assert [visit["reason"] for visit in visits] == [
         None,
-        "brief and acceptance criteria posted",
-        "kind=go, queue plan",
+        OFF_CHART,
         "trusted builder posts kind=plan",
         "every acceptance criterion mapped",
         OFF_CHART,
@@ -68,14 +67,13 @@ def test_fixture_visit_fields() -> None:
         "device offline 60 minutes or job dies twice (T6) or CI red three times",
         OFF_CHART,
     ]
-    assert [visit["current"] for visit in visits] == [False] * 9 + [True]
+    assert [visit["current"] for visit in visits] == [False] * 8 + [True]
 
 
 def test_fixture_times_are_known_only_where_a_job_backs_the_visit() -> None:
     result = _fixture_flow()
     times = [(v["started_at"], v["duration_seconds"], v["time_known"]) for v in result["visits"]]
     assert times == [
-        (None, None, False),
         (None, None, False),
         (NOW - 7000, None, False),
         (None, None, False),
@@ -204,7 +202,6 @@ def test_snapshot_flow_carries_visits(tmp_path: Path) -> None:
     visits = job["flow"]["visits"]
     assert [v["state"] for v in visits] == job["flow"]["path"]
     assert [(v["who"], v["started_at"], v["duration_seconds"]) for v in visits] == [
-        ("script", None, None),
         ("script", None, None),
         ("claude", NOW - 5000, 1000),
         ("codex", NOW - 4000, 1000),
@@ -372,7 +369,6 @@ def test_first_row_back_through_a_script_only_state_leaves_the_old_visit_its_job
     result = flow.job_flow(_chart(), jobs, "review", NOW, rows, None)
     assert [(v["state"], v["who"], v["started_at"]) for v in result["visits"]] == [
         ("intake", "script", None),
-        ("questions", "script", None),
         ("building", "claude", NOW - 5000),
         ("review", "codex", NOW - 4000),
         ("ship", "script", None),
@@ -661,7 +657,6 @@ def test_partial_record_keeps_the_leading_visits_job_derived() -> None:
     result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, rows, NOW - 9000)
     assert [(v["state"], v["started_at"], v["duration_seconds"]) for v in result["visits"]] == [
         ("intake", None, None),
-        ("questions", None, None),
         ("building", NOW - 5000, 1000),
         ("review", NOW - 4000, 900),
         ("fixing", NOW - 3100, 1000),
@@ -745,7 +740,6 @@ def test_snapshot_without_the_transitions_table(tmp_path: Path) -> None:
     assert [(v["state"], v["started_at"], v["duration_seconds"])
             for v in job["flow"]["visits"]] == [
         ("intake", None, None),
-        ("questions", None, None),
         ("building", NOW - 2000, 1000),
         ("review", NOW - 1000, 1000),
     ]

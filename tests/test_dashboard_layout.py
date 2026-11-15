@@ -495,11 +495,9 @@ def test_the_default_chart_keeps_its_one_row_rail() -> None:
 
 def test_job_path_follows_its_history_through_the_chart() -> None:
     chart = flow.load_chart(CHART)
-    # intake has no edge to building: the chart's one-step bridge (questions)
-    # is filled in; every later step is a real transition.
     assert flow.chart_path(
         chart, ["intake", "building", "review", "fixing", "review"]
-    ) == ["intake", "questions", "building", "review", "fixing", "review"]
+    ) == ["intake", "building", "review", "fixing", "review"]
     # Repeats collapse; unknown states are skipped.
     assert flow.chart_path(chart, ["intake", "questions", "questions", "other", "planning"]) == [
         "intake", "questions", "planning",
@@ -522,16 +520,14 @@ def test_running_job_carries_its_flow(tmp_path: Path) -> None:
             "reason", "current")
     assert job["flow"] == {
         "state": "review",
-        "path": ["intake", "questions", "building", "review", "fixing", "review"],
+        "path": ["intake", "building", "review", "fixing", "review"],
         "state_age_seconds": 2000,
         # #78: the chart's direct successors of review, and review is not finished.
         "next": ["blocked", "ship", "stuck", "fixing", "capped"],
         "terminal": False,
         "visits": [dict(zip(keys, row)) for row in (
             ("intake", "script", None, None, False, False, None, False),
-            ("questions", "script", None, None, False, False,
-             "brief and acceptance criteria posted", False),
-            ("building", "claude", NOW - 5000, 1000, True, False, "kind=go, queue build", False),
+            ("building", "claude", NOW - 5000, 1000, True, True, flow.OFF_CHART, False),
             ("review", "codex", NOW - 4000, 1000, True, False, "ready, CI green", False),
             ("fixing", "claude", NOW - 3000, 1000, True, False, "REVISE, under the round cap",
              False),
@@ -547,12 +543,12 @@ def test_job_page_shows_the_path_and_current_state(tmp_path: Path) -> None:
     article = _section(html, "job-h-review")
     runlog = re.search(r'<ol class="runlog">(.*?)</ol>', article, re.S).group(1)
     assert re.findall(r'data-state="([^"]+)"', runlog) == [
-        "intake", "questions", "building", "review", "fixing", "review"]
+        "intake", "building", "review", "fixing", "review"]
     assert re.findall(r'data-state="([^"]+)"[^>]*class="now', runlog) == ["review"]
     text = _text(article)
     assert "round 2 of 3" in text
     assert "33m 20s in review" in text
-    assert "intake → questions → building → review → fixing → review" in article
+    assert "intake → building → review → fixing → review" in article
     assert "codex" in text and "cleffy#40" in text
 
 
@@ -579,7 +575,7 @@ def test_a_job_with_no_ticket_state_still_gets_a_run_log(tmp_path: Path) -> None
     job = next(row for row in snapshot["queued"] if row["ticket_id"] == "99")
     assert job["round"] is None
     assert job["flow"]["state"] is None
-    assert job["flow"]["path"] == ["intake", "questions", "building"]
+    assert job["flow"]["path"] == ["intake", "building"]
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-orphan-b")
     (runlog,) = re.findall(r'<ol class="runlog">.*?</ol>', article, re.S)
     assert 'class="now' not in runlog
@@ -863,7 +859,7 @@ def test_script_shows_the_selected_jobs_path(tmp_path: Path) -> None:
     assert "33m 2" in out["text"]["jobview"]  # time in state, ticking from 33m 20s
     runlog = view[view.index("ol.runlog"):view.index("ol.journey")]
     assert re.findall(r"button[.a-z]*\[data-state=([^\]]+)\]", runlog) == [
-        "intake", "questions", "building", "review", "fixing", "review"]
+        "intake", "building", "review", "fixing", "review"]
     assert re.findall(r"button\.now\[data-state=([^\]]+)\]", runlog) == ["review"]
     # Only the selected job is shown.
     assert "cleffy#13" not in out["text"]["jobview"]

@@ -145,3 +145,33 @@ def test_script_is_safe_to_splice():
 
 def test_tint_is_keyed_by_who():
     assert set(flow.FLOWMAP_TINT) == {"script", "claude", "codex", "cursor", "grok", "human"}
+
+
+HUMAN_WAITS = {"waiting-max", "questions", "awaiting-ok", "waiting-external"}
+
+
+def test_bridges_before_the_first_row_add_no_human_wait_visit():
+    jobs = [
+        flow.JobStep("plan", "claude", 1000.0, None, None),
+        flow.JobStep("build", "claude", 2000.0, None, None),
+        flow.JobStep("fix", "claude", 3000.0, None, None),
+        flow.JobStep("review", "codex", 4000.0, None, None),
+    ]
+    rows = [flow.Transition("building", "review", 4000.0, "set-state")]
+    result = flow.job_flow(CHART, jobs, "review", 5000.0, rows, None)
+    assert HUMAN_WAITS.isdisjoint(result["path"]), result["path"]
+
+
+def test_a_lone_build_job_draws_the_start_hop_off_chart():
+    jobs = [flow.JobStep("build", "claude", 1000.0, None, None)]
+    result = flow.job_flow(CHART, jobs, None, 2000.0)
+    assert result["path"] == ["intake", "building"]
+    assert result["visits"][1]["off_chart"] is True
+
+
+def test_a_bridge_never_passes_through_a_human_wait_state():
+    names = [state["name"] for state in CHART["states"]]
+    for a in names:
+        for b in names:
+            path = flow.chart_path(CHART, [a, b])
+            assert HUMAN_WAITS.isdisjoint(path[1:-1]), (a, b, path)
