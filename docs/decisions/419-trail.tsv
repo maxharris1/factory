@@ -1,0 +1,8 @@
+decision	choice	why
+legacy-row classifier (f-2)	allow-list VERDICT_OUTCOMES and _verdict_outcome replace the READY_OUTCOMES deny-list in _verdict_handled	the deny-list failed twice (builder ready in #391 r1, orchestrator go deduped-build in r4); any non-verdict kind left off it answered the review
+stall side of the allow-list	tests/test_verdict_outcomes.py walks the AST of _t3, _t4, _revise_ci_gate and the helpers they return through, plus the verdict branch of _process_comments, and requires every outcome to pass _verdict_outcome	a new verdict outcome left off the list would stall a red ready; the test turns that into a CI failure
+shared outcomes	go/plan/ready/questions/answers/retry outcomes may overlap verdict outcomes only in stuck-ci-red-3, asserted exactly	a stuck ticket queues nothing, so a legacy ready marked stuck-ci-red-3 counting as an answer is harmless; any new overlap fails the test
+floor rule (f-3)	schema writes the floor when verdict_heads or verdict_heads_floor did not exist before this startup	a missing floor table is the signature of a pre-floor schema; the verdict_heads arm keeps the existing missing-table upgrade test passing
+order	allow-list commit before floor commit	widening the floor alone would expose legacy go rows to the f-2 bug on existing-table upgrades
+no backfill	databases already upgraded by #391 schema code keep an empty floor	nothing separates them from a fresh database that has since gathered rows
+comment-sicko reshape flags	declined: extract a predicate from the _verdict_handled ternary; split _handled_outcomes into named matchers	pre-existing structure and a short test helper; both deleted comments were the only prose
