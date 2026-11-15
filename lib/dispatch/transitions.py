@@ -1,0 +1,73 @@
+"""The one writer of ticket_state.workflow_state (issue #150).
+
+Every state change appends a ticket_transitions row in the caller's
+transaction, so a failed insert rolls back the state write with it.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Mapping, Sequence
+
+
+def write_workflow_state(
+    connection: sqlite3.Connection,
+    repo: str,
+    ticket_id: str,
+    state: str,
+    *,
+    source: str,
+    at: float,
+    also: Mapping[str, object] | None = None,
+    guard: str | None = None,
+    guard_args: Sequence[object] = (),
+    insert: Mapping[str, object] | None = None,
+) -> bool:
+    """Set the ticket's workflow_state and record the transition.
+
+    `also` holds extra columns the update sets. `guard` is extra WHERE
+    SQL for the update. When the row is missing, `insert` gives the new
+    row's other columns; without it nothing is written. True when a row
+    was written. A write that keeps the state records no transition.
+    """
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+    key = (repo.lower(), ticket_id)
+    row = connection.execute(
+        "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+        key,
+    ).fetchone()
+    if row is None:
+        if insert is None:
+            return False
+        columns = {**insert, "workflow_state": state}
+        connection.execute(
+            f"""
+            INSERT INTO ticket_state (repo, ticket_id, {", ".join(columns)})
+            VALUES (?, ?, {", ".join("?" for _ in columns)})
+            """,
+            (*key, *columns.values()),
+        )
+        prior = None
+    else:
+        updates = {"workflow_state": state, **(also or {})}
+        written = connection.execute(
+            f"""
+            UPDATE ticket_state SET {", ".join(f"{name} = ?" for name in updates)}
+            WHERE repo = ? AND ticket_id = ?{f" AND ({guard})" if guard else ""}
+            """,
+            (*updates.values(), *key, *guard_args),
+        ).rowcount
+        if not written:
+            return False
+        prior = row[0]
+    if prior != state:
+        connection.execute(
+            """
+            INSERT INTO ticket_transitions (
+                repo, ticket_id, from_state, to_state, at, source
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (*key, prior, state, at, source),
+        )
+    return True

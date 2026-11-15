@@ -13,6 +13,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import _comment_order, _is_full_sha, _ship_state, ship_mode
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import (
     AlreadyMergedShip,
     Comment,
@@ -136,12 +137,13 @@ class ShipMixin:
                     policy,
                 ),
             )
-            connection.execute(
-                """
-                UPDATE ticket_state SET workflow_state = 'ship'
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "ship",
+                source="ship-intent",
+                at=self.queue.now(),
             )
             connection.commit()
         return "pending", False
@@ -161,12 +163,14 @@ class ShipMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             )
-            connection.execute(
-                f"""
-                UPDATE ticket_state SET workflow_state = 'ship'
-                WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "ship",
+                source="ship-hold",
+                at=self.queue.now(),
+                guard=_NOT_FINISHED,
             )
             connection.commit()
 
@@ -424,12 +428,14 @@ class ShipMixin:
         if state == "merged":
             self._enter_merged(connection, repo, ticket_id, "shipped")
             return
-        connection.execute(
-            f"""
-            UPDATE ticket_state SET workflow_state = ?
-            WHERE repo = ? AND ticket_id = ? AND {_NOT_FINISHED}
-            """,
-            (state, repo.lower(), ticket_id),
+        write_workflow_state(
+            connection,
+            repo,
+            ticket_id,
+            state,
+            source="ship-state",
+            at=self.queue.now(),
+            guard=_NOT_FINISHED,
         )
 
     def _has_completed_ship_at(
@@ -483,12 +489,13 @@ class ShipMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id),
             ).rowcount
             if changed == 1:
-                connection.execute(
-                    """
-                    UPDATE ticket_state SET workflow_state = 'review'
-                    WHERE repo = ? AND ticket_id = ?
-                    """,
-                    (ticket.repo.lower(), ticket.ticket_id),
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "review",
+                    source="ship-discard",
+                    at=self.queue.now(),
                 )
             connection.commit()
 

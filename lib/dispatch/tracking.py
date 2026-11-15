@@ -5,8 +5,14 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping
 
-from lib.dispatch.constants import STOPPED_POLL_SECONDS, STOPPED_STATES, WATCHED_STATES
+from lib.dispatch.constants import (
+    _NOT_FINISHED,
+    STOPPED_POLL_SECONDS,
+    STOPPED_STATES,
+    WATCHED_STATES,
+)
 from lib.dispatch.helpers import _matching_head, _spread
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, PollSource, TicketRef, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.pr_title import SOURCES_TABLE, TITLE_LIMIT, prefixed
@@ -65,17 +71,15 @@ class TrackingMixin:
                 entered = self._enter_merged(connection, repo, ticket_id, "observed")
             else:
                 entered = False
-                connection.execute(
-                    """
-                    INSERT INTO ticket_state (
-                        repo, ticket_id, gate_count, stuck, workflow_state
-                    ) VALUES (?, ?, 0, 0, ?)
-                    ON CONFLICT(repo, ticket_id)
-                    DO UPDATE SET workflow_state = excluded.workflow_state
-                    WHERE COALESCE(ticket_state.workflow_state, '')
-                          NOT IN ('merged', 'done')
-                    """,
-                    (repo.lower(), ticket_id, state),
+                write_workflow_state(
+                    connection,
+                    repo,
+                    ticket_id,
+                    state,
+                    source="terminal",
+                    at=self.queue.now(),
+                    guard=_NOT_FINISHED,
+                    insert={"gate_count": 0, "stuck": 0},
                 )
             connection.commit()
         if not entered:
@@ -109,24 +113,25 @@ class TrackingMixin:
             "SELECT workflow_state FROM ticket_state WHERE repo = ? AND ticket_id = ?",
             key,
         ).fetchone()
-        connection.execute(
-            """
-            INSERT INTO ticket_state (
-                repo, ticket_id, gate_count, stuck, workflow_state
-            ) VALUES (?, ?, 0, 0, 'merged')
-            ON CONFLICT(repo, ticket_id) DO UPDATE SET
-                workflow_state = 'merged',
-                stuck = 0,
-                stuck_reason = NULL,
-                stuck_source_comment_id = NULL,
-                stuck_wake_job_id = NULL,
-                paused_action = NULL,
-                paused_recipient = NULL,
-                paused_head = NULL,
-                paused_generation = NULL,
-                paused_question_id = NULL
-            """,
-            key,
+        write_workflow_state(
+            connection,
+            repo,
+            ticket_id,
+            "merged",
+            source="enter-merged",
+            at=self.queue.now(),
+            also={
+                "stuck": 0,
+                "stuck_reason": None,
+                "stuck_source_comment_id": None,
+                "stuck_wake_job_id": None,
+                "paused_action": None,
+                "paused_recipient": None,
+                "paused_head": None,
+                "paused_generation": None,
+                "paused_question_id": None,
+            },
+            insert={"gate_count": 0, "stuck": 0},
         )
         connection.execute(
             "DELETE FROM needs_attention WHERE repo = ? AND ticket_id = ?", key

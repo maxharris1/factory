@@ -18,6 +18,7 @@ from lib.dispatch.helpers import (
     _scope,
     _state_for_action,
 )
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import Job, JobRequest, _job
@@ -61,32 +62,27 @@ class QuestionsMixin:
                     self._write_state_label(ticket, "waiting-max")
                     return True, "waiting-max"
                 return True, "already-waiting-max"
-            connection.execute(
-                """
-                INSERT INTO ticket_state (
-                    repo, ticket_id, gate_count, stuck, generation,
-                    workflow_state, paused_action, paused_recipient,
-                    paused_head, paused_generation, paused_question_id
-                ) VALUES (?, ?, 0, 0, ?, 'waiting-max', ?, ?, ?, ?, ?)
-                ON CONFLICT(repo, ticket_id)
-                DO UPDATE SET
-                    workflow_state = 'waiting-max',
-                    paused_action = excluded.paused_action,
-                    paused_recipient = excluded.paused_recipient,
-                    paused_head = excluded.paused_head,
-                    paused_generation = excluded.paused_generation,
-                    paused_question_id = excluded.paused_question_id
-                """,
-                (
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                    generation,
-                    action,
-                    recipient,
-                    head,
-                    generation,
-                    comment.id,
-                ),
+            paused = {
+                "paused_action": action,
+                "paused_recipient": recipient,
+                "paused_head": head,
+                "paused_generation": generation,
+                "paused_question_id": comment.id,
+            }
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "waiting-max",
+                source="t5-questions",
+                at=self.queue.now(),
+                also=paused,
+                insert={
+                    "gate_count": 0,
+                    "stuck": 0,
+                    "generation": generation,
+                    **paused,
+                },
             )
             self.queue.enqueue_in_transaction(
                 connection,
@@ -193,15 +189,20 @@ class QuestionsMixin:
             connection.commit()
         resumed_state = _state_for_action(action)
         with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET workflow_state = ?, paused_action = NULL,
-                    paused_recipient = NULL, paused_head = NULL,
-                    paused_generation = NULL, paused_question_id = NULL
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (resumed_state, ticket.repo.lower(), ticket.ticket_id),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                resumed_state,
+                source="t5-answers",
+                at=self.queue.now(),
+                also={
+                    "paused_action": None,
+                    "paused_recipient": None,
+                    "paused_head": None,
+                    "paused_generation": None,
+                    "paused_question_id": None,
+                },
             )
         self._write_state_label(ticket, resumed_state)
         return True, f"resumed-{action}"
