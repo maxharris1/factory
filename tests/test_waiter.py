@@ -385,8 +385,32 @@ def test_reaping_a_run_removes_a_job_tmpdir_its_harness_locked(tmp_path: Path) -
             (locked / "deep").chmod(0o700)
 
 
+def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    log: list[str] = []
+    waiter = make_waiter(tmp_path, queue, db, spawn, log=log)
+    waiter.step()
+    scratch = tmp_path / "state" / "jobs" / job_id / "tmp"
+    scratch.mkdir()
+    (scratch / "needed").write_text("scratch")
+    spawn.children[0].returncode = 0
+    scratch.parent.chmod(0o500)
+    try:
+        waiter._reap()
+        waiter._reap()
+        assert scratch.exists()
+    finally:
+        scratch.parent.chmod(0o700)
+    assert sum("could not remove" in line for line in log) == 1
+    waiter._reap()
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["same-waiter", "replaced-waiter"])
 def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
-    tmp_path: Path,
+    tmp_path: Path, restart: bool
 ) -> None:
     from tests.test_job_run import _orch
 
@@ -418,9 +442,13 @@ def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
         assert alive(worker)
         assert state(db, job_id) == "running"
         assert (job_dir / "tmp" / "needed").is_file()
+        if restart:
+            waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+            waiter.step()
+            assert (job_dir / "tmp" / "needed").is_file()
         release.touch()
         _wait_for(lambda: result.exists() and not alive(worker), 10)
-        waiter._reap()
+        waiter.step()
         assert result.read_text() == "scratch"
         assert not (job_dir / "tmp").exists()
     finally:

@@ -577,7 +577,7 @@ class Waiter:
         # job id -> (its job directory, run.log size when the run started),
         # for runs placed on a remote device
         self._remote: dict[str, tuple[Path, int]] = {}
-        self._scratch_awaiting_exit: set[str] = set()
+        self._scratch_last_failure: dict[str, str | None] = {}
         self._locked = 0
         self._recovered = False
         self._claimer = (os.getpid(), process_start(os.getpid()))
@@ -968,14 +968,19 @@ class Waiter:
         Each remote run leaves remote.json in its job directory until the
         box finishes it. A job still running for this bot is watched again
         (its status file gives the exit status); any other record is stale
-        and is removed.
+        and is removed. Every job directory still holding a tmp dir has that
+        scratch removed once no runner or worker of the job is alive.
         """
         jobs = self.state_dir / "jobs"
         try:
+            scratch = sorted(jobs.glob("*/tmp")) if jobs.is_dir() else []
             records = sorted(jobs.glob(f"*/{REMOTE_RECORD}")) if jobs.is_dir() else []
         except OSError as exc:
-            self.log(f"cannot look for remote runs to adopt: {_one_line(exc)}")
+            self.log(f"cannot look for runs to adopt in {jobs}: {_one_line(exc)}")
             return
+        for path in scratch:
+            if _JOB_ID.fullmatch(path.parent.name):
+                self._scratch_last_failure.setdefault(path.parent.name, None)
         for path in records:
             job_dir = path.parent
             job_id = job_dir.name
@@ -1026,7 +1031,7 @@ class Waiter:
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
-                self._scratch_awaiting_exit.add(job_id)
+                self._scratch_last_failure.setdefault(job_id, None)
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
                     self._finish_remote(job_id, remote[0], code, offset=remote[1])
@@ -1035,9 +1040,8 @@ class Waiter:
         self._remove_scratch_once_workers_exit()
 
     def _remove_scratch_once_workers_exit(self) -> None:
-        for job_id in sorted(self._scratch_awaiting_exit):
+        for job_id in sorted(self._scratch_last_failure):
             if job_id in self._children:
-                self._scratch_awaiting_exit.discard(job_id)
                 continue
             try:
                 placement = self.pool.placement(job_id)
@@ -1050,9 +1054,11 @@ class Waiter:
                                    (placement.worker_pid, placement.worker_start))
             ):
                 continue
-            self._scratch_awaiting_exit.discard(job_id)
             failure = remove_scratch(self.state_dir / "jobs" / job_id / "tmp")
-            if failure is not None:
+            if failure is None:
+                del self._scratch_last_failure[job_id]
+            elif failure != self._scratch_last_failure[job_id]:
+                self._scratch_last_failure[job_id] = failure
                 self.log(f"job {job_id}: {failure}")
 
     def _finish_remote(self, job_id: str, job_dir: Path, code: int, *, offset: int = 0) -> None:
