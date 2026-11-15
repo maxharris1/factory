@@ -14,6 +14,7 @@ from lib.dispatch.constants import (
     GITHUB_STATE_LABEL_PREFIX,
     LINEAR_HANDOFF_QUERY,
     OFF_LOOP_VERIFY_READS,
+    POLL_ERROR_RETENTION_SECONDS,
     POLL_ERROR_STREAK,
     SHIP_ERROR_LIMIT,
     _UNVERIFIED_HANDOFF,
@@ -105,6 +106,7 @@ class PollMixin:
         finally:
             self._read_started = None
         self._record_factory_reads(source)
+        self._prune_poll_errors()
         failed = "poll cycle failed: " + ", ".join(self._cycle_failures)
         try:
             if end is not None:
@@ -219,6 +221,16 @@ class PollMixin:
                 project_rules.record_reads(connection, cycle, self.queue.now())
         except Exception as exc:
             self.record_poll_error("factory", "-", type(exc).__name__)
+
+    def _prune_poll_errors(self) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM poll_errors WHERE recorded_at < ?",
+                    (self.queue.now() - POLL_ERROR_RETENTION_SECONDS,),
+                )
+        except sqlite3.Error as exc:
+            self.record_poll_error("prune", "-", type(exc).__name__)
 
     def _record_reads(self, keys: set[tuple[str, str]], at: float) -> None:
         with self._connect() as connection:

@@ -361,6 +361,10 @@ class SchemaMixin:
             }:
                 connection.execute("ALTER TABLE poll_errors ADD COLUMN detail TEXT")
             connection.execute(
+                "CREATE INDEX IF NOT EXISTS poll_errors_recorded_at "
+                "ON poll_errors (recorded_at)"
+            )
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ticket_reads (
                     repo TEXT NOT NULL,

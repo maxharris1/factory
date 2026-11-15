@@ -137,3 +137,30 @@ def test_the_poll_loop_keeps_polling_after_a_failed_source(tmp_path: Path) -> No
     )
 
     assert [type(error) for error in errors] == [PollCycleFailed, PollCycleFailed]
+
+
+def test_poll_errors_older_than_seven_days_are_pruned_each_cycle(tmp_path: Path) -> None:
+    day = 86400.0
+    now = [30 * day]
+    dispatcher, queue = setup(tmp_path, now)
+    with queue.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO poll_errors (repo, ticket_id, error, recorded_at)
+            VALUES ('owner/repo', '42', ?, ?)
+            """,
+            [
+                ("old", now[0] - 8 * day),
+                ("edge", now[0] - 7 * day + 1),
+                ("fresh", now[0]),
+            ],
+        )
+
+    def errors_after_a_cycle() -> list[str]:
+        dispatcher.poll_once(BrokenSource())
+        return [error for _, _, error in poll_error_rows(queue)]
+
+    assert errors_after_a_cycle() == ["edge", "fresh"]
+    assert errors_after_a_cycle() == ["edge", "fresh"]
+    now[0] += 2
+    assert errors_after_a_cycle() == ["fresh"]
