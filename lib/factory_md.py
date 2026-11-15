@@ -28,6 +28,10 @@ already raised is a [follow-up] finding, not a blocker, and the poller
 files a trusted verdict's [follow-up] findings as one new ticket. Absent,
 the policy is off. Refused with tickets: linear, which has no filer.
 
+review.start_before_ci is optional (issue #262): a boolean, default false.
+True queues the review as soon as a trusted ready lands, whatever CI is
+doing on that head. Ship still needs green CI on the approved head.
+
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It only acts on ship: merge; on any
@@ -142,6 +146,7 @@ class FactoryConfig:
     finish_line: str | None = None
     shared_paths: tuple[str, ...] = ()
     followup_from_round: int | None = None
+    start_before_ci: bool = False
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -205,7 +210,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     tickets = _choice(data, "tickets", TICKETS, findings)
     builder_harness, builder_model = _actor(data, "builder", findings, unknown)
     reviewer_harness, reviewer_model = _actor(data, "reviewer", findings, unknown)
-    rounds_low, rounds_high, verify, followup_from_round = _review(
+    rounds_low, rounds_high, verify, followup_from_round, start_before_ci = _review(
         data, findings, unknown
     )
     ship = _ship(data, findings)
@@ -278,6 +283,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         finish_line=finish_line,
         shared_paths=shared_paths,
         followup_from_round=followup_from_round,
+        start_before_ci=start_before_ci,
     )
     return config, findings
 
@@ -352,18 +358,23 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None]:
+) -> tuple[int | None, int | None, str | None, int | None, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None
+        return None, None, None, None, False
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None
+        return None, None, None, None, False
     findings.extend(
-        _unknown(review, {"rounds", "verify", "followup_from_round"}, "review", unknown)
+        _unknown(
+            review,
+            {"rounds", "verify", "followup_from_round", "start_before_ci"},
+            "review",
+            unknown,
+        )
     )
     low: int | None = None
     high: int | None = None
@@ -388,7 +399,21 @@ def _review(
             findings.append(
                 Finding("error", "review.verify must be a skill name or none")
             )
-    return low, high, verify, _followup_from_round(review, findings, unknown)
+    return (
+        low,
+        high,
+        verify,
+        _followup_from_round(review, findings, unknown),
+        _start_before_ci(review, findings, unknown),
+    )
+
+
+def _start_before_ci(review: dict, findings: list[Finding], unknown: str) -> bool:
+    value = review.get("start_before_ci", False)
+    if not isinstance(value, bool):
+        findings.append(Finding(unknown, "review.start_before_ci must be true or false"))
+        return False
+    return value
 
 
 def _followup_from_round(
