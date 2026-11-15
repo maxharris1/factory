@@ -326,10 +326,14 @@ class Feeder(Protocol):
 
     feed_once opens a draft PR plus brief and go handoffs for each eligible
     ticket that fits the free capacity and returns a report whose `fed`
-    lists the tickets it fed this poll as TicketRefs.
+    lists the tickets it fed this poll as TicketRefs. hold_stacked_review
+    holds a ready's review, with the same Grok wake, while the ready's head
+    carries another open PR's commits, and says whether it did.
     """
 
     def feed_once(self) -> object: ...
+
+    def hold_stacked_review(self, ticket: TrackedTicket, head: str) -> bool: ...
 
 
 # (repo, base branch, approved head, updated head, shared_paths) -> whether the update is

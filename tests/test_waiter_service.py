@@ -10,6 +10,7 @@ installs or starts anything outside a temporary HOME.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -201,8 +202,9 @@ def test_ensure_brings_back_a_killed_supervisor(home: Path) -> None:
     _wait_for(lambda: len(_starts(home)) == 2)
 
 
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
 def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
-    home: Path,
+    home: Path, tmp_path: Path, proc: str
 ) -> None:
     # Codex PR #82 r1 F1.6: SIGKILL only the supervisor. Its waiter lives on
     # holding the bot's lock; the next supervisor's waiter is refused (there
@@ -224,7 +226,7 @@ def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
     lock = home / ".local/state/factory/waiter-claude-bot.lock"
     assert lock.read_text().strip() == str(orphan)
 
-    stopped = _service(home, "claude-bot", "stop")
+    stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
     assert stopped.returncode == 0, stopped.stderr
     assert "stopped orphaned waiter" in stopped.stdout
     _wait_for(lambda: not alive(orphan))
@@ -259,15 +261,16 @@ def _supervisors(home: Path, bot: str = "claude-bot") -> list[int]:
     return sorted(pid for pid in pids - forks if alive(pid))
 
 
-def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False) -> int:
+def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False,
+           script: Path = SERVICE, **extra: str) -> int:
     """Detached so that init reaps it."""
-    state = home / ".local/state/factory"
+    state = Path(extra.get("ORCH_STATE_DIR") or home / ".local/state/factory")
     state.mkdir(parents=True, exist_ok=True)
     tail = "" if legacy else ' "$2"'
     started = subprocess.run(
         ["bash", "-c", f'nohup bash "$0" "$1" _supervise{tail} >>"$3" 2>&1 </dev/null & echo $!',
-         str(SERVICE), bot, str(state), str(state / f"waiter-{bot}.log")],
-        env=_env(home), text=True, capture_output=True, check=True,
+         str(script), bot, str(state), str(state / f"waiter-{bot}.log")],
+        env=_env(home, **extra), text=True, capture_output=True, check=True,
     )
     return int(started.stdout)
 
@@ -282,6 +285,20 @@ done
 exec /bin/ps "${args[@]}"
 """
 
+LSOF_SHIM = """#!/bin/bash
+[[ "$(uname)" == Darwin ]] && exec /usr/sbin/lsof "$@"
+pid="" fd=""
+while (($#)); do
+    case "$1" in
+        -p) pid="$2"; shift ;;
+        -d) fd="$2"; shift ;;
+    esac
+    shift
+done
+name="$(readlink "/proc/${pid}/fd/${fd}")" || exit 1
+printf 'p%s\\nf%s\\nn%s\\n' "$pid" "$fd" "$name"
+"""
+
 
 def _proc_or_ps_shim_env(tmp_path: Path, proc: str) -> dict[str, str]:
     if proc == "/proc":
@@ -290,6 +307,9 @@ def _proc_or_ps_shim_env(tmp_path: Path, proc: str) -> dict[str, str]:
     shim.parent.mkdir(exist_ok=True)
     shim.write_text(PS_SHIM, encoding="utf-8")
     shim.chmod(0o755)
+    lsof = shim.parent / "lsof"
+    lsof.write_text(LSOF_SHIM, encoding="utf-8")
+    lsof.chmod(0o755)
     return {
         "ORCH_PROC_DIR": str(tmp_path / "no-proc"),
         "COLUMNS": "80",
@@ -414,6 +434,164 @@ def test_stop_spares_a_legacy_supervisor_under_another_state_directory(
             os.kill(legacy, signal.SIGTERM)
         except OSError:
             pass
+
+
+@pytest.mark.parametrize("variable", ["HOME", "ORCH_STATE_DIR"])
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_a_legacy_supervisor_whose_state_only_shares_a_prefix(
+    tmp_path: Path, proc: str, variable: str
+) -> None:
+    if variable == "HOME":
+        own, other = _make_home(tmp_path / "home"), _make_home(tmp_path / "home other")
+        own_env, other_env = {"ORCH_STATE_DIR": ""}, {"ORCH_STATE_DIR": ""}
+    else:
+        own, other = _make_home(tmp_path / "own"), _make_home(tmp_path / "other")
+        own_env = {"ORCH_STATE_DIR": str(tmp_path / "state")}
+        other_env = {"ORCH_STATE_DIR": str(tmp_path / "state other")}
+    legacy = None
+    try:
+        legacy = _stray(other, legacy=True, **other_env)
+        other_waiter = _wait_for(lambda: _starts(other))[0]
+        assert _service(own, "claude-bot", "start", **own_env).returncode == 0
+        own_waiter = _wait_for(lambda: _starts(own))[0]
+        stopped = _service(own, "claude-bot", "stop",
+                           **{**_proc_or_ps_shim_env(tmp_path, proc), **own_env})
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"pid {legacy}" not in stopped.stdout
+        _wait_for(lambda: not alive(own_waiter))
+        time.sleep(0.4)
+        assert alive(legacy) and alive(other_waiter)
+    finally:
+        _service(own, "claude-bot", "stop", **own_env)
+        _service(other, "claude-bot", "stop", **other_env)
+        _cleanup(own)
+        _cleanup(other)
+        if legacy and alive(legacy):
+            os.kill(legacy, signal.SIGTERM)
+
+
+@pytest.mark.parametrize("variable", ["HOME", "ORCH_STATE_DIR"])
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_another_states_legacy_supervisor_on_a_shared_database(
+    tmp_path: Path, proc: str, variable: str
+) -> None:
+    own, other = _make_home(tmp_path / "home"), _make_home(tmp_path / "home other")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    common = {"ORCH_DB": str(shared / "orch.db")}
+    if variable == "HOME":
+        own_env = other_env = {**common, "ORCH_STATE_DIR": ""}
+    else:
+        own_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state")}
+        other_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state other")}
+    legacy = None
+    try:
+        legacy = _stray(other, legacy=True, **other_env)
+        other_waiter = _wait_for(lambda: _starts(other))[0]
+        _wait_for(lambda: (shared / "waiter-claude-bot.lock").exists())
+        assert _service(own, "claude-bot", "start", **own_env).returncode == 0
+        _wait_for(lambda: (own / "refused-claude-bot").exists())
+        stopped = _service(own, "claude-bot", "stop",
+                           **{**_proc_or_ps_shim_env(tmp_path, proc), **own_env})
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"pid {legacy}" not in stopped.stdout
+        assert _supervisors(own) == []
+        time.sleep(0.4)
+        assert alive(legacy) and alive(other_waiter)
+    finally:
+        _service(own, "claude-bot", "stop", **own_env)
+        _service(other, "claude-bot", "stop", **other_env)
+        _cleanup(own)
+        _cleanup(other)
+        if legacy and alive(legacy):
+            os.kill(legacy, signal.SIGTERM)
+
+
+@pytest.mark.parametrize("variable", ["HOME", "ORCH_STATE_DIR"])
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_another_states_orphaned_waiter_on_a_shared_database(
+    tmp_path: Path, proc: str, variable: str
+) -> None:
+    own, other = _make_home(tmp_path / "home"), _make_home(tmp_path / "home other")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    common = {"ORCH_DB": str(shared / "orch.db")}
+    if variable == "HOME":
+        own_env = other_env = {**common, "ORCH_STATE_DIR": ""}
+    else:
+        own_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state")}
+        other_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state other")}
+    orphan = None
+    try:
+        legacy = _stray(other, legacy=True, **other_env)
+        orphan = _wait_for(lambda: _starts(other))[0]
+        _wait_for(lambda: (shared / "waiter-claude-bot.lock").exists())
+        os.kill(legacy, signal.SIGKILL)
+        _wait_for(lambda: not alive(legacy))
+        assert _service(own, "claude-bot", "start", **own_env).returncode == 0
+        _wait_for(lambda: (own / "refused-claude-bot").exists())
+        stopped = _service(own, "claude-bot", "stop",
+                           **{**_proc_or_ps_shim_env(tmp_path, proc), **own_env})
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"waiter (pid {orphan}) does not write to" in stopped.stdout
+        time.sleep(0.4)
+        assert alive(orphan)
+    finally:
+        _service(own, "claude-bot", "stop", **own_env)
+        _cleanup(own)
+        _cleanup(other)
+        if orphan and alive(orphan):
+            os.kill(orphan, signal.SIGKILL)
+
+
+def _pre_295_service(tmp_path: Path) -> Path:
+    script = SERVICE.read_text(encoding="utf-8")
+    check = """        if ! owns_pidfile; then
+            say "${PIDFILE} no longer names this supervisor (pid $$); exiting"
+            break
+        fi
+"""
+    assert check in script
+    deploy = shutil.copytree(SERVICE.parent, tmp_path / "pre-295")
+    legacy = deploy / SERVICE.name
+    legacy.write_text(script.replace(check, ""), encoding="utf-8")
+    return legacy
+
+
+@pytest.mark.parametrize("home", ["home", "home with spaces"], indirect=True)
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_restart_and_stop_reach_a_legacy_supervisor_waiting_to_restart_its_waiter(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
+    old_db, new_db = tmp_path / "old-db", tmp_path / "new-db"
+    old_db.mkdir()
+    new_db.mkdir()
+    env = {**_proc_or_ps_shim_env(tmp_path, proc), "ORCH_DB": str(new_db / "orch.db")}
+    legacy = _stray(home, legacy=True, script=_pre_295_service(tmp_path),
+                    ORCH_DB=str(old_db / "orch.db"), ORCH_WAITER_RESTART_SEC="3")
+    try:
+        first = _wait_for(lambda: _starts(home))[0]
+        _wait_for(lambda: (old_db / "waiter-claude-bot.lock").exists())
+        os.kill(first, signal.SIGTERM)
+        log = home / ".local/state/factory/waiter-claude-bot.log"
+        _wait_for(lambda: "restarting in 3s" in log.read_text())
+        _stray(home, ORCH_DB=str(new_db / "orch.db"))
+        _wait_for(lambda: (new_db / "waiter-claude-bot.lock").exists())
+
+        restarted = _service(home, "claude-bot", "restart", **env)
+        assert restarted.returncode == 0, restarted.stderr
+        assert f"stopped stray waiter supervisor (pid {legacy})" in restarted.stdout
+        assert not alive(legacy)
+        time.sleep(3.4)
+        live = [pid for pid in _starts(home) if alive(pid)]
+        assert len(live) == 1
+
+        stopped = _service(home, "claude-bot", "stop", **env)
+        assert stopped.returncode == 0, stopped.stderr
+        _wait_for(lambda: not [pid for pid in _starts(home) if alive(pid)])
+    finally:
+        if alive(legacy):
+            os.kill(legacy, signal.SIGTERM)
 
 
 def test_a_waiter_that_keeps_failing_is_retried_with_backoff(home: Path) -> None:

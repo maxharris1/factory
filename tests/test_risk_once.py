@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import sqlite3
 import subprocess
 from difflib import unified_diff
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 from lib import cli
 from lib.dispatcher import Comment, Dispatcher, TicketRef
 from lib.github_actions import GhResult
+from lib.intake_risk import INTAKE_RISK_SCHEMA
 from lib.poll_source import LINEAR_ISSUE_QUERY, HTTPResult, IntakeRisks, LivePollSource, _risk
 from tests.test_live_poll import FACTORY, FakeGh, config, linear_issue
 from tests.test_live_poll_no_webhook import _dispatcher
@@ -34,6 +36,15 @@ def said(author: str, body: str, number: int, *, edited: bool = False) -> Commen
         created_at=number,
         edited_at=number + 0.5 if edited else None,
     )
+
+
+def cap_over_stored_low(ticket) -> int:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(INTAKE_RISK_SCHEMA)
+    connection.execute(
+        "INSERT INTO intake_risk VALUES (?, ?, 'low')", (ticket.repo.lower(), ticket.ticket_id)
+    )
+    return Dispatcher._config_cap(None, ticket, connection)
 
 
 def test_a_later_trusted_risk_high_does_not_move_a_stored_low() -> None:
@@ -126,7 +137,7 @@ def test_editing_the_intake_comment_never_moves_the_stored_risk(
     source.begin_cycle()
     (after,) = source.tracked_tickets(GITHUB_REF)
     assert (before.risk, after.risk) == (expected, expected)
-    assert Dispatcher._config_cap(None, after) == Dispatcher._config_cap(None, before)
+    assert cap_over_stored_low(after) == cap_over_stored_low(before)
 
 
 def test_the_stored_risk_survives_a_poller_restart(tmp_path) -> None:
@@ -283,7 +294,7 @@ def realtime_patch(line: str) -> dict:
 def test_a_linear_realtime_table_change_outside_a_realtime_path_is_high(line: str) -> None:
     ticket, _ = linear_ticket(labels=[], files=["src/app.ts", realtime_patch(line)])
     assert ticket.risk == "high"
-    assert Dispatcher._config_cap(None, ticket) == 3
+    assert cap_over_stored_low(ticket) == 3
 
 
 def test_a_realtime_word_only_in_unchanged_sql_context_fails_high() -> None:
@@ -426,7 +437,7 @@ def test_a_sql_change_inside_a_realtime_or_unclassifiable_statement_is_high(
 ) -> None:
     ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
     assert ticket.risk == "high"
-    assert Dispatcher._config_cap(None, ticket) == 3
+    assert cap_over_stored_low(ticket) == 3
 
 
 @pytest.mark.parametrize(
@@ -504,7 +515,7 @@ def test_a_sql_change_near_a_publication_or_in_an_unparsed_comment_fails_high(
 ) -> None:
     ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
     assert ticket.risk == "high"
-    assert Dispatcher._config_cap(None, ticket) == 3
+    assert cap_over_stored_low(ticket) == 3
 
 
 @pytest.mark.parametrize(
@@ -570,7 +581,7 @@ def test_sql_context_in_a_git_hunk_header_fails_high(before: str, header: str) -
     item = git_change(before, before.replace("  note 15;\n", "  changed note 15;\n"))
     assert header in item["patch"]
     ticket, _ = linear_ticket(labels=[], files=[item])
-    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+    assert (ticket.risk, cap_over_stored_low(ticket)) == ("high", 3)
 
 
 def test_an_ordinary_git_hunk_header_stays_low() -> None:
@@ -606,7 +617,7 @@ FILTERED = (
 @pytest.mark.parametrize("name", PROBE)
 def test_codex_round_4_probe_is_high_from_the_whole_file(name: str) -> None:
     ticket, _ = linear_ticket(labels=[], files=[sql_change(*PROBE[name], source=True)])
-    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+    assert (ticket.risk, cap_over_stored_low(ticket)) == ("high", 3)
 
 
 @pytest.mark.parametrize(
@@ -666,7 +677,7 @@ def test_a_publication_change_outside_the_hunk_is_high_from_the_whole_file(
     item = sql_change(before, after, source=True)
     assert "supabase_realtime" not in item["patch"]
     ticket, _ = linear_ticket(labels=[], files=[item])
-    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+    assert (ticket.risk, cap_over_stored_low(ticket)) == ("high", 3)
 
 
 @pytest.mark.parametrize(
@@ -807,7 +818,7 @@ def test_a_non_ascii_dollar_quote_tag_hides_no_comment_delimiter(tag: str, case:
     item = sql_change(*dollar_quote_cases(tag)[case], source=True)
     assert "supabase_realtime" not in item["patch"]
     ticket, _ = linear_ticket(labels=[], files=[item])
-    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+    assert (ticket.risk, cap_over_stored_low(ticket)) == ("high", 3)
 
 
 ESCAPE_CONTINUED = f"SELECT E'a'\n'\\'/*';\n{NOTE_LINES}{REALTIME}{NOTE_LINES}-- */\n"
@@ -848,7 +859,7 @@ def test_an_escape_string_or_bare_carriage_return_near_a_publication_fails_high(
 ) -> None:
     assert "supabase_realtime" not in item["patch"]
     ticket, _ = linear_ticket(labels=[], files=[item])
-    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+    assert (ticket.risk, cap_over_stored_low(ticket)) == ("high", 3)
 
 
 CRLF_STATEMENTS = STATEMENTS.replace("\n", "\r\n")

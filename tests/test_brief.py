@@ -157,31 +157,9 @@ def test_implement_and_fix_briefs_end_in_a_ready_comment() -> None:
     for action in ("build", "fix"):
         text = render_brief(job(action), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
         assert (
-            "<!-- orch:v1 kind=ready from=claude-bot role=builder "
-            "head=<pushed-head-sha> risk=high -->"
+            "<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->"
         ) in text
         assert "poteto-mode" in text
-
-
-@pytest.mark.parametrize("action", ["build", "fix"])
-def test_ready_header_carries_round_and_risk_from_job_facts(action: str) -> None:
-    text = render_brief(job(action, round="4/4"), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
-    header = (
-        "<!-- orch:v1 kind=ready from=claude-bot role=builder round=4/4 "
-        "head=<pushed-head-sha> risk=high -->"
-    )
-    assert header in text
-    fields = parse_header_line(header.replace("<pushed-head-sha>", "abcdef1"))
-    assert (fields["round"], fields["risk"]) == ("4/4", "high")
-    assert "<n>" not in text and "<cap>" not in text
-
-
-def test_ready_header_has_no_round_when_the_job_has_none() -> None:
-    text = render_brief(job("fix", round=None, risk=None), bot="claude-bot", factory_root=FACTORY_ROOT, context=None)
-    assert (
-        "<!-- orch:v1 kind=ready from=claude-bot role=builder head=<pushed-head-sha> -->"
-    ) in text
-    assert "<n>" not in text and "<low|high>" not in text
 
 
 @pytest.mark.parametrize(

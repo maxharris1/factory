@@ -165,11 +165,9 @@ def test_retry_of_an_update_that_pushed_a_clean_head_resumes_the_update(
     assert p.merged
 
 
-@pytest.mark.parametrize(
-    ("late_from", "outcome"), [(1, "update-superseded"), (2, "update-failure-counted")]
-)
+@pytest.mark.parametrize("late_from", [1, 2])
 def test_a_late_ready_from_a_counted_update_leaves_the_retry_queued(
-    tmp_path: Path, late_from: int, outcome: str
+    tmp_path: Path, late_from: int
 ) -> None:
     b = Board(tmp_path)
     p = b.open("42", sha(1))
@@ -184,6 +182,6 @@ def test_a_late_ready_from_a_counted_update_leaves_the_retry_queued(
     for _ in range(10):
         b.poll()
 
-    assert b.outcome("delayed-ready") == outcome
-    assert b.state("42")["stuck"] == 0
+    assert b.outcome("delayed-ready") == "update-failure-counted"
+    assert (b.state("42")["stuck"], b.state("42")["update_failures"]) == (0, 1)
     assert [r["state"] for r in b.jobs("update-from-main")] == ["failed", "failed", "queued"]

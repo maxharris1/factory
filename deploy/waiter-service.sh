@@ -25,17 +25,21 @@
 # the supervisor is killed (SIGKILL), its waiter lives on holding the lock:
 # a new supervisor's waiter then refuses and is retried with backoff, and
 # stop also stops that waiter (the lock's pid, checked to be this bot's
-# `orch wait <bot> --autostart`). stop also stops every other supervisor
-# for this bot and state directory owned by this user, and a supervisor
-# whose pid is no longer in the pidfile exits instead of starting another
-# waiter (#295). A waiter that exits is
-# started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
-# keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
+# `orch wait <bot> --autostart` whose stdout is this state's log, since two
+# states can share ORCH_DB). stop also stops every other supervisor for this
+# bot and state directory owned by this user, and a supervisor whose pid is
+# no longer in the pidfile exits instead of starting another waiter (#295).
+# Without /proc, a supervisor started before the state argv counts as this
+# state's only when lsof shows its stdout is this state's log (#328). A
+# waiter that exits is started again after ORCH_WAITER_RESTART_SEC (default
+# 5) seconds; when it keeps exiting within 30 seconds the pause doubles, up
+# to 60 seconds.
 #
 # Drain (#219): self-heal writes waiter-<bot>.drain in the state directory
-# when this bot's waiter runs stale code with jobs in flight; the waiter
-# (told the path by ORCH_WAITER_DRAIN) then claims nothing, acknowledges in
-# waiter-<bot>.drain.ack, and self-heal restarts it after its last job.
+# when this bot's waiter runs stale code; the waiter (told the path by
+# ORCH_WAITER_DRAIN) then claims nothing, acknowledges in
+# waiter-<bot>.drain.ack, and self-heal restarts it at once (#309); its
+# running jobs keep going and the new waiter adopts the remote ones.
 # start removes the marker and the ack.
 #
 # Environment: ~/.config/factory/waiter.env, if present, is read for the
@@ -89,8 +93,9 @@ START_WAIT="${ORCH_WAITER_START_WAIT:-15}"
 STOP_WAIT="${ORCH_WAITER_STOP_WAIT:-60}"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 PROC="${ORCH_PROC_DIR:-/proc}"
-# cron and fresh shells have a minimal PATH; the waiter needs orch, gh and git.
-export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin"
+# cron and fresh shells have a minimal PATH; the waiter needs orch, gh and git,
+# and stop needs lsof (/usr/sbin on macOS).
+export PATH="${HOME}/.local/bin${PATH:+:${PATH}}:/usr/local/bin:/usr/bin:/bin:/usr/sbin"
 
 say() { printf '%s waiter-service %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$BOT" "$*"; }
 
@@ -106,8 +111,18 @@ is_supervisor_argv() {
     return 1
 }
 
+stdout_is_state_log() {
+    local log
+    if [[ -d "$PROC" ]]; then
+        log="${PROC}/$1/fd/1"
+    else
+        log="$(lsof -a -p "$1" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p')" || return 1
+    fi
+    [[ -n "$log" && "$log" -ef "$LOG" ]]
+}
+
 stateless_supervisor_is_own() {
-    local pid="$1" kv home="" state="" command
+    local pid="$1" kv home="" state=""
     local -a environ=()
     if [[ -d "$PROC" ]]; then
         mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
@@ -120,13 +135,7 @@ stateless_supervisor_is_own() {
         [[ -n "$state" || -n "$home" ]] || return 1
         [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
     else
-        command=" $(ps -E -ww -p "$pid" -o command= 2>/dev/null) " || return 1
-        if [[ "$command" == *" ORCH_STATE_DIR="[!\ ]* ]]; then
-            [[ "$command" == *" ORCH_STATE_DIR=${STATE} "* ]]
-        else
-            [[ "$STATE" == */.local/state/factory &&
-                "$command" == *" HOME=${STATE%/.local/state/factory} "* ]]
-        fi
+        stdout_is_state_log "$pid"
     fi
 }
 
@@ -235,6 +244,10 @@ waiter_pid() {
 stop_waiter() {
     local pid i
     pid="$(waiter_pid)" || return 0
+    if ! stdout_is_state_log "$pid"; then
+        say "waiter (pid ${pid}) does not write to ${LOG}; leaving it"
+        return 0
+    fi
     kill -TERM "$pid" 2>/dev/null || return 0
     for ((i = 0; i < STOP_WAIT * 10; i++)); do
         if ! kill -0 "$pid" 2>/dev/null; then
