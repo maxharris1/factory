@@ -93,6 +93,9 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
+
 from lib import attention
 from lib.device_pool import free_slots, slots_in_use
 from lib.dispatcher import Comment, TicketRef, safe_ship_error
@@ -203,6 +206,7 @@ _OTHER_PRS = (
     re.compile(r"\b(?:PRs?|pull\s+requests?)\s*(?:#|number\s+|no\.\s*)?\d+\b", re.IGNORECASE),
     re.compile(r"/pull/\d+\b"),
 )
+_MARKDOWN = MarkdownIt("commonmark").enable("strikethrough")
 _OPS_TAG = re.compile(r"^(?:ops\s*:|\(ops\)|\[ops\])\s*", re.IGNORECASE)
 _OPS_ACTION = re.compile(
     r"^(?:manually|by\s+hand)\b|^(?:restart|install|reboot|rotate)\s+the\b|\bon\s+the\s+box\b|"
@@ -248,6 +252,28 @@ def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
         if match:
             return match.group("value").strip("*_ ").strip()
     return None
+
+
+def _prose_and_link_targets(item: str, document: dict[str, object]) -> tuple[str, ...]:
+    words: list[str] = []
+    targets: list[str] = []
+
+    def walk(tokens: Sequence[Token]) -> None:
+        for token in tokens:
+            if token.type in ("text", "code_inline"):
+                words.append(token.content)
+            elif token.type in ("softbreak", "hardbreak"):
+                words.append(" ")
+            elif token.type == "link_open":
+                targets.append(str(token.attrs["href"]))
+            elif token.type == "image":
+                targets.append(str(token.attrs["src"]))
+            elif token.type == "html_inline":
+                targets.append(token.content)
+            walk(token.children or ())
+
+    walk(_MARKDOWN.parseInline(item, document))
+    return ("".join(words), *targets)
 
 
 def _criteria_items(lines: Sequence[str]) -> list[str]:
@@ -304,8 +330,11 @@ def parse_intake(body: str, labels: Collection[str]) -> IntakeTemplate:
             "no builder acceptance criteria: add an `## Acceptance criteria` section "
             "with at least one item the builder can meet",
         ))
+    document: dict[str, object] = {}
+    _MARKDOWN.parse(body or "", document)
     for item in criteria:
-        if any(pattern.search(item) for pattern in _OTHER_PRS):
+        if any(pattern.search(text) for text in _prose_and_link_targets(item, document)
+               for pattern in _OTHER_PRS):
             defects.append(Defect(
                 "other-prs-criterion",
                 f"criterion about other PRs' state ({item!r}): move PR order into "
