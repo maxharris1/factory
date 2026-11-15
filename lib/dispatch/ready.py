@@ -150,7 +150,7 @@ class ReadyMixin:
             result,
             review_round,
             generation,
-            dedupe_key=f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}",
+            dedupe_key=self._ci_fix_dedupe_key(ticket, head, generation),
         )
         if rereview:
             self._leave_merge_queue(ticket, "update-ci-red")
@@ -490,11 +490,37 @@ class ReadyMixin:
             ).fetchone()
         return key if fix is None else f"{key}:after-{fix['id']}"
 
+    def _ci_fix_dedupe_key(self, ticket: TrackedTicket, head: str, generation: int) -> str:
+        key = f"t2:{_scope(ticket.repo, ticket.ticket_id)}:{head}:g{generation}"
+        repeat = f"{key}:after-"
+        with self._connect() as connection:
+            latest = connection.execute(
+                """
+                SELECT keyed.dedupe_key, (
+                    SELECT later.id FROM jobs AS later
+                    WHERE lower(later.repo) = lower(keyed.repo)
+                      AND later.ticket_id = keyed.ticket_id
+                      AND later.action IN ('review', 'fix') AND later.state != 'cancelled'
+                      AND later.rowid > keyed.rowid
+                    ORDER BY later.rowid DESC LIMIT 1
+                ) AS later_id
+                FROM jobs AS keyed
+                WHERE keyed.dedupe_key = ? OR substr(keyed.dedupe_key, 1, ?) = ?
+                ORDER BY keyed.rowid DESC LIMIT 1
+                """,
+                (key, len(repeat), repeat),
+            ).fetchone()
+        if latest is None:
+            return key
+        if latest["later_id"] is None:
+            return str(latest["dedupe_key"])
+        return f"{repeat}{latest['later_id']}"
+
     def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state FROM jobs
+                SELECT action, state, source_comment_id, detail FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
                   AND action IN ('review', 'fix') AND state != 'cancelled'
                 ORDER BY state IN ('queued', 'running') DESC, rowid DESC
@@ -502,10 +528,34 @@ class ReadyMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, head),
             ).fetchone()
-        return row is not None and (
-            row["state"] in ("queued", "running")
-            or (row["action"], row["state"]) == ("review", "done")
+        if row is None:
+            return False
+        if row["state"] in ("queued", "running"):
+            return True
+        return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
+            ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])
         )
+
+    def _verdict_handled(
+        self, ticket: TrackedTicket, head: str, review_round: int | None, ready_id: str
+    ) -> bool:
+        self._remember_verdicts(ticket, ticket.comments)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT recorded.head FROM handled_comments AS verdict
+                JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
+                WHERE verdict.repo = ? AND verdict.ticket_id = ?
+                  AND verdict.outcome != 'rejected-edited' AND recorded.review_round = ?
+                  AND verdict.rowid > COALESCE((
+                      SELECT ready.rowid FROM handled_comments AS ready
+                      WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
+                        AND ready.comment_id = ?
+                  ), 0)
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, review_round, ready_id),
+            ).fetchall()
+        return any(_matching_head(str(row["head"]), head) is not None for row in rows)
 
     def _flag_ready_after_cap(
         self,

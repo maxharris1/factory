@@ -10,7 +10,7 @@ import yaml
 
 from lib.dispatcher import CIResult
 from lib.factory_md import load_factory_md, parse_factory_md
-from tests.merge_queue_support import PR, Board, sha
+from tests.merge_queue_support import APPROVE, PR, VERDICT, Board, sha
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID = {
@@ -488,3 +488,210 @@ def test_on_each_red_approve_at_the_same_head_queues_a_runnable_ci_fix(
         review = board.finish("codex")
         assert json.loads(review.request.detail)["round"].startswith("1/")
     assert [job["state"] for job in board.jobs("fix")] == ["done", "done"]
+
+
+def test_on_a_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    [moved_fix] = board.jobs("fix")
+    assert moved_fix["head"] == sha(2)
+    board.finish("claude")
+
+    pr.push(older, ci="failure")
+    ready = board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+
+    assert board.outcome(ready) == "queued-ci-fix"
+    fix = board.queue.claim("claude")
+    assert fix is not None, "the ready back at the older head left no runnable CI fix"
+    assert fix.request.head == older
+    assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+
+
+def test_each_red_ready_back_at_an_older_reviewed_head_queues_a_runnable_ci_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    for cycle in (1, 2, 3):
+        pr.push(older, ci="pending")
+        board.ready(pr, older, f"pending-review-{cycle}")
+        board.poll()
+        board.finish("codex")
+        pr.push(sha(2), ci="failure")
+        board.post(
+            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
+        )
+        board.poll()
+        board.finish("claude")
+
+        pr.push(older, ci="failure")
+        ready = board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
+        board.poll()
+
+        assert board.outcome(ready) == "queued-ci-fix"
+        fix = board.queue.claim("claude")
+        assert fix is not None, f"return {cycle} left no runnable CI fix"
+        assert fix.request.head == older
+        assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+        board.queue.finish(fix.id, owner="claude", handoff_comment_id=f"ci-fix-{cycle}")
+
+
+def test_a_reposted_red_ready_after_a_finished_ci_fix_queues_no_second_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=False)
+    pr = built_with_ci_pending(board, sha(1))
+    pr.push(sha(1), ci="failure")
+    board.ready(pr, sha(1), "red-ready")
+    board.poll()
+    board.finish("claude")
+
+    board.ready(pr, sha(1), "red-ready-again")
+    board.poll()
+
+    assert [job["state"] for job in board.jobs("fix")] == ["done"]
+    assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_before_a_finished_reviews_verdict_is_read_waits_for_one_combined_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    board.ready(pr, older)
+    board.poll()
+    older_review = board.claim("codex")
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, sha(2))
+    board.poll()
+    board.post(
+        pr,
+        "revise-older",
+        VERDICT.format(round="1/3", head=older, verdict="REVISE", risk="high"),
+        "codex-login",
+    )
+    unread_verdict = pr.comments.pop()
+    board.queue.finish(older_review.id, owner="codex", handoff_comment_id="revise-older")
+
+    pr.push(older, ci="failure")
+    ready = board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+    assert board.outcome(ready) == "ci-red-in-flight"
+
+    pr.comments.append(unread_verdict)
+    board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
+    assert fix["source_comment_id"] == "revise-older"
+    assert CI_LOG in instruction(fix)
+    board.queue.finish(board.claim("claude").id, owner="claude", handoff_comment_id="fix")
+    assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_after_an_edited_verdict_waits_for_the_corrected_verdicts_combined_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    revise = VERDICT.format(round="1/3", head=pr.head, verdict="REVISE", risk="high")
+    board.post(pr, "revise-edited", revise, "codex-login")
+    pr.comments[-1] = replace(pr.comments[-1], edited_at=board.now[0] + 1)
+    board.poll()
+    assert board.outcome("revise-edited") == "rejected-edited"
+
+    board.post(pr, "revise-corrected", revise, "codex-login")
+    unread_verdict = pr.comments.pop()
+    pr.ci[pr.head] = "failure"
+    ready = board.ready(pr, pr.head, "ready-red-before-corrected-verdict")
+    board.poll()
+    assert board.outcome(ready) == "ci-red-in-flight"
+
+    pr.comments.append(unread_verdict)
+    board.poll()
+
+    [fix] = [job for job in board.jobs("fix") if job["state"] != "cancelled"]
+    assert fix["source_comment_id"] == "revise-corrected"
+    assert CI_LOG in instruction(fix)
+
+
+def test_a_reposted_red_ready_after_two_returns_to_an_older_head_queues_no_extra_fix(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    for cycle in (1, 2):
+        pr.push(older, ci="pending")
+        board.ready(pr, older, f"pending-review-{cycle}")
+        board.poll()
+        board.finish("codex")
+        pr.push(sha(2), ci="failure")
+        board.post(
+            pr, f"approve-older-{cycle}", APPROVE.format(round="1/3", head=older), "codex-login"
+        )
+        board.poll()
+        board.finish("claude")
+        pr.push(older, ci="failure")
+        board.ready(pr, older, f"ready-back-at-older-head-{cycle}")
+        board.poll()
+        board.finish("claude")
+    fixes = len(board.jobs("fix"))
+
+    for repost in (1, 2, 3):
+        board.ready(pr, older, f"red-ready-again-{repost}")
+        board.poll()
+        assert len(board.jobs("fix")) == fixes, f"repost {repost} queued another fix"
+        assert board.queue.claim("claude") is None
+
+
+def test_a_red_ready_back_at_an_older_head_queues_a_ci_fix_while_the_handled_verdict_is_unseen(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    assert board.outcome("approve-older") == "approve-ci-red-fix"
+    board.finish("claude")
+
+    pr.push(older, ci="failure")
+    handled_verdict = next(item for item in pr.comments if item.id == "approve-older")
+    pr.comments.remove(handled_verdict)
+    board.ready(pr, older, "ready-back-at-older-head")
+    board.poll()
+    pr.comments.append(handled_verdict)
+    board.poll()
+
+    fix = board.queue.claim("claude")
+    assert fix is not None, "the ready back at the older head left no runnable CI fix"
+    assert fix.request.head == older
+    assert CI_LOG in json.loads(fix.request.detail)["instruction"]
+
+
+def test_remembering_verdict_heads_keeps_handled_comments_four_columns_wide(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    with board.queue.connect() as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(handled_comments)")]
+        connection.execute(
+            "INSERT INTO handled_comments VALUES ('owner/repo', '9', 'c9', 'handled')"
+        )
+    assert columns == ["repo", "ticket_id", "comment_id", "outcome"]
