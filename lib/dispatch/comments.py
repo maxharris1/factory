@@ -63,6 +63,7 @@ class CommentsMixin:
         comments: list[Comment],
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        self._remember_links(ticket, comments)
         for comment in comments:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
@@ -77,8 +78,6 @@ class CommentsMixin:
                 fields = parse_comment(comment.body).as_dict()
             except HandoffError:
                 fields = None
-            if fields is not None:
-                self._remember_link(ticket, comment)
             if self._after_finish(ticket, comment):
                 continue
             if (
@@ -310,18 +309,21 @@ class CommentsMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _remember_link(self, ticket: TrackedTicket, comment: Comment) -> None:
+    def _remember_links(self, ticket: TrackedTicket, comments: list[Comment]) -> None:
         with self._connect() as connection:
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT OR IGNORE INTO comment_links (
                     repo, ticket_id, comment_id, link
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                    comment.id,
-                    comment.url or ticket.ticket_url,
-                ),
+                [
+                    (
+                        ticket.repo.lower(),
+                        ticket.ticket_id,
+                        comment.id,
+                        comment.url or ticket.ticket_url,
+                    )
+                    for comment in comments
+                ],
             )

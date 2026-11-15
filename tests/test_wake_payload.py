@@ -7,6 +7,7 @@ import pytest
 from lib.dispatcher import Comment
 from lib.poll_source import _linear_comment
 from lib.queue import Job
+from tests.merge_queue_support import Board, sha
 from tests.test_hooks import (
     HEAD_A,
     VERDICT,
@@ -179,10 +180,14 @@ def test_clarify_wakes_for_questions_and_answers_link_their_comment(
     assert detail(wake)["link"] == cause.url
 
 
-@pytest.mark.parametrize("failing_state_label", [None, "building"])
+@pytest.mark.parametrize(
+    ("failing_state_label", "queued_before_rollout"),
+    [(None, False), ("building", False), (None, True)],
+)
 def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
     tmp_path: Path,
     failing_state_label: str | None,
+    queued_before_rollout: bool,
 ) -> None:
     now = [100.0]
     actions = FakeReviewActions()
@@ -191,6 +196,11 @@ def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
     dispatcher, queue = setup(tmp_path, now=now, actions=actions)
     go = linked(say("909", GO.format(state=" state=building"), "grok-login", 1))
     dispatcher.poll_once(FakeSource(on_pr(go)))
+    if queued_before_rollout:
+        with queue.connect() as connection:
+            connection.execute("DELETE FROM comment_links")
+        dispatcher, queue = setup(tmp_path, now=now)
+        dispatcher.poll_once(FakeSource(on_pr(go)))
     for at in (110.0, 130.0):
         now[0] = at
         build = queue.claim("claude")
@@ -238,3 +248,17 @@ def test_done_wake_on_linear_falls_back_to_the_ticket_url(tmp_path: Path) -> Non
     [wake] = [job for job in FakeBot(queue, "grok").drain() if job.request.action == "done"]
     assert detail(wake)["follow_up_owner"] == "project-bot"
     assert detail(wake)["link"] == LINEAR_URL
+
+
+def test_failed_update_wake_names_the_failed_job(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr, mergeable=False)
+    board.fail("claude")
+    board.poll()
+    board.poll()
+    failed = board.fail("claude")
+    board.poll()
+
+    [wake] = board.wakes("stuck")
+    assert wake["job_id"] == failed.id

@@ -18,7 +18,7 @@ another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
 | Error text | `errors_text.py` | `_redact*`, `poll_error_detail`, `poll_error_text`, `safe_ship_error`, `scrub_detail` |
 | Shared functions | `helpers.py` | `trusted_bots`, `_spread`, `_scope`, rounds, `_matching_head`, `_holds`, `ship_mode`, `_comment_order`, questions text, state names |
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
-| Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_after_finish`, `_reject_edited`, `_remember_link`, handled-comment bookkeeping |
+| Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |
 | Verdicts (T3, T4) | `verdict.py` (`VerdictMixin`) | `_t3`, `_t4`, `_record_approval`, `_approval_covers` |
 | Caps (T1) | `caps.py` (`CapsMixin`) | `_t1`, `_resume_after_cap`, `_over_cap`, `_effective_cap`, `_wake_capped` |
