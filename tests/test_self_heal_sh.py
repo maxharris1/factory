@@ -377,12 +377,13 @@ def _loops(home: Path) -> list[int]:
     return sorted(found)
 
 
-def _spawn_loop(home: Path, seconds: str) -> subprocess.Popen:
+def _spawn_loop(home: Path, seconds: str, state: str = "", cwd: Path | None = None,
+                ) -> subprocess.Popen:
     with (home / "loops.log").open("a") as out:
-        return subprocess.Popen(["bash", str(SCRIPT), "_loop", str(home / STATE)],
+        return subprocess.Popen(["bash", str(SCRIPT), "_loop", state or str(home / STATE)],
                                 env={"HOME": str(home), "PATH": "/usr/bin:/bin",
                                      "ORCH_HEAL_SECONDS": seconds},
-                                stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+                                cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=out)
 
 
 def _loops_log(home: Path) -> str:
@@ -440,6 +441,55 @@ def test_start_and_ensure_refuse_a_second_loop_whatever_the_pidfile_says(
     assert result.returncode == 0, result.stderr
     assert f"self-heal loop already running (pid {pid})" in result.stdout
     assert _loops(home) == [pid]
+
+
+def _spellings(home: Path, spelling: str) -> tuple[str, Path | None]:
+    state = home / STATE
+    if spelling == "trailing slash":
+        return f"{state}/", None
+    if spelling == "dot segments":
+        return f"{state}/../factory/.", None
+    if spelling == "symlink":
+        link = home / "state-link"
+        if not link.exists():
+            link.symlink_to(state, target_is_directory=True)
+        return str(link), None
+    return str(STATE), home
+
+
+@pytest.mark.parametrize("command", ["start", "ensure"])
+@pytest.mark.parametrize("spelling", ["trailing slash", "dot segments", "symlink", "relative"])
+@pytest.mark.parametrize("side", ["caller", "loop"])
+def test_any_spelling_of_the_state_dir_finds_the_loop_on_it(
+    home: Path, command: str, spelling: str, side: str,
+) -> None:
+    (home / STATE).mkdir(parents=True)
+    other, cwd = _spellings(home, spelling)
+    loop_state, caller_state = (str(home / STATE), other) if side == "caller" else (other, "")
+    loop = _spawn_loop(home, "60", loop_state, cwd if side == "loop" else None)
+    try:
+        assert _wait_for(lambda: len(_calls(home)) == 1)
+        (home / STATE / "self-heal.pid").unlink()
+        extra = {"ORCH_STATE_DIR": caller_state} if caller_state else {}
+        run_cwd = cwd if side == "caller" else None
+
+        result = subprocess.run(["bash", str(SCRIPT), command], cwd=run_cwd, text=True,
+                                capture_output=True, timeout=60, check=False,
+                                env={"HOME": str(home), "PATH": "/usr/bin:/bin",
+                                     "ORCH_HEAL_SECONDS": "60", **extra})
+
+        assert result.returncode == 0, result.stderr
+        assert f"self-heal loop already running (pid {loop.pid})" in result.stdout
+        assert not (home / STATE / "self-heal.pid").exists()
+
+        stopped = subprocess.run(["bash", str(SCRIPT), "stop"], cwd=run_cwd, text=True,
+                                 capture_output=True, timeout=60, check=False,
+                                 env={"HOME": str(home), "PATH": "/usr/bin:/bin", **extra})
+        assert stopped.returncode == 0, stopped.stderr
+        loop.wait(timeout=5)
+    finally:
+        loop.kill()
+        loop.wait()
 
 
 def test_a_loop_started_before_368_counts_by_its_environment(home: Path, tmp_path: Path) -> None:

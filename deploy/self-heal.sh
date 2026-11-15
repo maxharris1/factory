@@ -144,6 +144,12 @@ legacy_loop_state() {
     LOOP_STATE="${LOOP_STATE:-${home}/.local/state/factory}"
 }
 
+same_state() {
+    local dir="$1"
+    [[ "$dir" == /* ]] || dir="$2/$dir"
+    [[ "$dir" -ef "$STATE" ]]
+}
+
 # Print the pid of every live loop on this state dir, whatever the pidfile says.
 loop_pids() {
     local dir pid command
@@ -154,13 +160,15 @@ loop_pids() {
             mapfile -d '' -t argv 2>/dev/null <"${dir}/cmdline" || continue
             is_loop_argv "${argv[@]}" || continue
             [[ -n "$LOOP_STATE" ]] || legacy_loop_state "$pid" || continue
-            [[ "$LOOP_STATE" != "$STATE" ]] || printf '%s\n' "$pid"
+            same_state "$LOOP_STATE" "${dir}/cwd" || continue
+            printf '%s\n' "$pid"
         done
     else
         while read -r pid command; do
             read -r -a argv <<<"$command"
             is_loop_argv "${argv[@]}" || continue
-            [[ "$LOOP_STATE" != "$STATE" ]] || printf '%s\n' "$pid"
+            same_state "$LOOP_STATE" . || continue
+            printf '%s\n' "$pid"
         done < <(ps -axo pid=,command= 2>/dev/null)
     fi
 }
