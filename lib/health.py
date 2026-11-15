@@ -165,22 +165,24 @@ def health_path(db: Path) -> Path:
     return db.with_name(f"{stem}.health.db")
 
 
-def factory_version(root: Path = ROOT) -> str:
-    """The checkout's commit as 12 hex digits, read from .git without running git."""
+def checkout_sha(root: Path = ROOT, ref: str = "HEAD") -> str | None:
+    """The full sha a ref of the checkout names, read from .git without running git."""
     try:
         git = root / ".git"
         if git.is_file():
             text = git.read_text(encoding="utf-8").strip()
             if not text.startswith("gitdir:"):
-                return "unknown"
+                return None
             git = (root / text.split(":", 1)[1].strip()).resolve()
-        head = (git / "HEAD").read_text(encoding="utf-8").strip()
-        sha = head
-        if head.startswith("ref: "):
-            ref = head[5:].strip()
-            common = git
-            if (git / "commondir").is_file():
-                common = (git / (git / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        common = git
+        if (git / "commondir").is_file():
+            common = (git / (git / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        sha = ref
+        if ref == "HEAD":
+            sha = (git / "HEAD").read_text(encoding="utf-8").strip()
+            if sha.startswith("ref: "):
+                ref = sha[5:].strip()
+        if not _SHA.fullmatch(sha):
             sha = ""
             for base in (git, common):
                 if (base / ref).is_file():
@@ -195,10 +197,16 @@ def factory_version(root: Path = ROOT) -> str:
                             sha = parts[0]
                             break
         if _SHA.fullmatch(sha):
-            return sha[:12]
+            return sha
     except (OSError, UnicodeDecodeError):
         pass
-    return "unknown"
+    return None
+
+
+def factory_version(root: Path = ROOT) -> str:
+    """The checkout's commit as 12 hex digits, or "unknown"."""
+    sha = checkout_sha(root)
+    return sha[:12] if sha is not None else "unknown"
 
 
 LOADED_VERSION = factory_version()
