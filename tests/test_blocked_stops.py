@@ -187,6 +187,41 @@ def test_one_blocked_wake_carries_the_verdict_link(tmp_path: Path) -> None:
     assert link("blocked-1") in wakes[0]["detail"]
 
 
+class Killed(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("head_index", [1, 2])
+def test_a_blocked_stop_killed_before_its_wake_wakes_once_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, head_index: int
+) -> None:
+    flow = blocked_flow(tmp_path)
+
+    def kill(*args: object, **kwargs: object) -> None:
+        raise Killed
+
+    with monkeypatch.context() as patch:
+        patch.setattr(flow.dispatcher, "wake_grok_once", kill)
+        with pytest.raises(Killed):
+            flow.verdict("blocked-1", "BLOCKED")
+    assert flow.outcome("blocked-1") is None
+    assert flow.state()["workflow_state"] == "blocked"
+
+    flow.head = HEADS[head_index]
+    restarted = with_t7_hook(flow.dispatcher)
+    restarted.process(flow.snapshot())
+    restarted.process(flow.snapshot())
+
+    assert flow.outcome("blocked-1") == "blocked-review"
+    assert flow.state()["workflow_state"] == "blocked"
+    wakes = flow.wakes()
+    assert [(row["action"], row["source_comment_id"]) for row in wakes] == [
+        ("blocked", "blocked-1")
+    ]
+    assert link("blocked-1") in wakes[0]["detail"]
+    assert HEADS[1] in wakes[0]["detail"]
+
+
 # --- AC3: only an approver's go leaves blocked -------------------------------------
 
 

@@ -22,16 +22,54 @@ class BlockedMixin:
         """
         if not self._trusted_reviewer(ticket, comment, fields):
             return True, "rejected-blocked-author"
-        registration = self._registration(ticket, comment, "verdict")
-        if registration is Registration.UNREGISTERED:
-            return True, "rejected-unregistered-verdict"
-        if registration is Registration.PENDING:
-            return False, "verdict-awaiting-registration"
         reported_round = _round_number(fields.get("round"))
-        if self._over_cap(ticket, reported_round):
-            return True, "rejected-over-cap"
-        if _matching_head(fields.get("head") or "", ticket.current_head) is None:
-            return True, "stale-blocked"
+        reported_head = fields.get("head") or ""
+        if not self._blocked_review_recorded(ticket, comment):
+            registration = self._registration(ticket, comment, "verdict")
+            if registration is Registration.UNREGISTERED:
+                return True, "rejected-unregistered-verdict"
+            if registration is Registration.PENDING:
+                return False, "verdict-awaiting-registration"
+            if self._over_cap(ticket, reported_round):
+                return True, "rejected-over-cap"
+            if _matching_head(reported_head, ticket.current_head) is None:
+                return True, "stale-blocked"
+            if not self._record_blocked_review(ticket, comment, reported_round):
+                return True, "stale-blocked"
+        head = _matching_head(reported_head, ticket.current_head) or reported_head
+        self.wake_grok_once(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            reason="blocked",
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            detail=self._project_wake_detail(
+                ticket,
+                f"verdict=BLOCKED {_comment_link(comment)} from "
+                f"{ticket.factory.reviewer_harness}-bot on {head} "
+                f"round {reported_round}",
+            ),
+            head=head,
+            once_key=comment.id,
+        )
+        self._write_state_label(ticket, "blocked")
+        return True, "blocked-review"
+
+    def _blocked_review_recorded(self, ticket: TrackedTicket, comment: Comment) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM review_events
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ?
+                  AND outcome = 'blocked-review'
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment.id),
+            ).fetchone()
+        return row is not None
+
+    def _record_blocked_review(
+        self, ticket: TrackedTicket, comment: Comment, reported_round: int | None
+    ) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -55,7 +93,7 @@ class BlockedMixin:
                     or reported_round != int(state["review_round"]) + 1
                 ):
                     connection.commit()
-                    return True, "stale-blocked"
+                    return False
                 write_workflow_state(
                     connection,
                     ticket.repo,
@@ -72,24 +110,7 @@ class BlockedMixin:
                     (ticket.repo.lower(), ticket.ticket_id, comment.id),
                 )
             connection.commit()
-        head = ticket.current_head
-        self.wake_grok_once(
-            repo=ticket.repo,
-            ticket_id=ticket.ticket_id,
-            reason="blocked",
-            source_comment_id=comment.id,
-            timeout_seconds=ticket.job_timeout_minutes * 60,
-            detail=self._project_wake_detail(
-                ticket,
-                f"verdict=BLOCKED {_comment_link(comment)} from "
-                f"{ticket.factory.reviewer_harness}-bot on {head} "
-                f"round {reported_round}",
-            ),
-            head=head,
-            once_key=comment.id,
-        )
-        self._write_state_label(ticket, "blocked")
-        return True, "blocked-review"
+        return True
 
     def _blocked_by_another(self, ticket: TrackedTicket, comment: Comment) -> bool:
         with self._connect() as connection:

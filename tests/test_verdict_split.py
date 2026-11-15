@@ -27,6 +27,8 @@ RULE_MODULE = {
     "_approve_ci_red_fix": "t4",
     "_t_blocked": "blocked",
     "_blocked_by_another": "blocked",
+    "_blocked_review_recorded": "blocked",
+    "_record_blocked_review": "blocked",
     "_record_approval": "record",
     "_approval_covers": "coverage",
     "_shipped_approval": "shipped",
