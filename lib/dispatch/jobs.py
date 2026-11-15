@@ -26,6 +26,7 @@ from lib.dispatch.helpers import (
     _merge_only,
     _queue_state,
     _retry_detail,
+    _round_number,
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
@@ -64,6 +65,7 @@ from lib.queue import (
     Job,
     JobRequest,
     _job,
+    plan_round,
     restored_claim,
     retire_requeued,
 )
@@ -958,6 +960,7 @@ class JobsMixin:
             queued_at=self._first_queued_at(job),
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
+            plan_round=plan_round(job.request.detail) if job.request.action == "plan" else None,
         )
         if answer is None:
             return False
@@ -1046,9 +1049,10 @@ class JobsMixin:
         its ready is matched by TU's attribution, not by time.
 
         A review's is a verdict from the job's recipient for the job's head
-        (as a prefix, like every head compare) and round; a review job with
-        no round or no head takes none. A builder's is from the job's
-        recipient; its questions count unless T5 found none in them. A build
+        (as a prefix, like every head compare) and round, or its questions;
+        a review job with no round or no head takes none. A builder's is from
+        the job's recipient. Questions count unless T5 found none in them. A
+        plan job's plan is for the job's own round (plan_round). A build
         or fix job's ready is at a new head: one other than the job's own, or
         any head for a job that has none. That ready counts once T2 routed
         it, or while it waits on CI at the polled PR head. One T2 left
@@ -1110,6 +1114,9 @@ class JobsMixin:
                 if _matching_head(head, job.request.head) is None:
                     continue
                 if fields.get("round") != round_field:
+                    continue
+            elif kind == "plan":
+                if _round_number(fields.get("round")) != plan_round(job.request.detail):
                     continue
             elif job.request.head is not None and _matching_head(head, job.request.head):
                 continue

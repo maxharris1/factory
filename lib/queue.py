@@ -752,6 +752,17 @@ def is_resume(detail: str | None) -> bool:
     return isinstance(value, dict) and value.get("resume") is True
 
 
+def plan_round(detail: str | None) -> int:
+    if not detail:
+        return 1
+    try:
+        value = json.loads(detail)
+    except ValueError:
+        return 1
+    instruction = value.get("instruction") if isinstance(value, dict) else None
+    return 2 if str(instruction or "").startswith("round=2/2") else 1
+
+
 def claim_order(
     connection: sqlite3.Connection, recipient: str, *, now: float
 ) -> list[sqlite3.Row]:

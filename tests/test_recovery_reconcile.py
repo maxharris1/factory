@@ -381,7 +381,7 @@ def test_a_failed_grok_wake_in_waiting_max_is_still_retried(tmp_path: Path) -> N
     assert retried == 1, "the clarify wake that asks Max is still retried"
 
 
-def test_a_cached_read_from_before_the_failure_does_not_retry_a_posted_plan(tmp_path: Path) -> None:
+def _cached_plan_poll(tmp_path: Path, plan_round: int) -> tuple[Dispatcher, object, SQLiteJobQueue, float]:
     clock = Clock()
     value = issue("AUT-1")
     first = value["comments"]["nodes"][0]
@@ -420,7 +420,7 @@ def test_a_cached_read_from_before_the_failure_does_not_retry_a_posted_plan(tmp_
     posted["comments"]["nodes"].append(
         {
             "id": "posted-plan",
-            "body": PLAN.format(round=1, ac="met"),
+            "body": PLAN.format(round=plan_round, ac="met"),
             "createdAt": _stamp(clock.now),
             "user": {"id": "builder"},
         }
@@ -434,15 +434,160 @@ def test_a_cached_read_from_before_the_failure_does_not_retry_a_posted_plan(tmp_
         failed_at = connection.execute(
             "SELECT finished_at FROM jobs WHERE id = ?", (plan_job.id,)
         ).fetchone()[0]
-        rows = [
+    assert cached_at < failed_at, "the poll's Linear document predates the failure"
+    return dispatcher, source, queue, failed_at
+
+
+def _claude_jobs(queue: SQLiteJobQueue) -> list[tuple]:
+    with queue.connect() as connection:
+        return [
             tuple(row)
             for row in connection.execute(
                 "SELECT action, state, attempt, handoff_comment_id FROM jobs "
                 "WHERE recipient = 'claude' ORDER BY created_at, rowid"
             )
         ]
-    assert cached_at < failed_at, "the poll's Linear document predates the failure"
-    assert rows == [("plan", "done", 1, "posted-plan")], rows
+
+
+def test_a_cached_read_from_before_the_failure_does_not_retry_a_posted_plan(tmp_path: Path) -> None:
+    _, _, queue, _ = _cached_plan_poll(tmp_path, plan_round=1)
+    assert _claude_jobs(queue) == [("plan", "done", 1, "posted-plan")]
+
+
+def test_a_plan_for_another_round_does_not_settle_a_failed_plan_job(tmp_path: Path) -> None:
+    dispatcher, source, queue, _ = _cached_plan_poll(tmp_path, plan_round=2)
+    dispatcher.poll_once(source)
+    with queue.connect() as connection:
+        outcome = connection.execute(
+            "SELECT outcome FROM handled_comments WHERE comment_id = 'posted-plan'"
+        ).fetchone()
+    assert outcome is not None and outcome[0] == "stale-plan"
+    assert _claude_jobs(queue) == [("plan", "failed", 1, None), ("plan", "queued", 2, None)]
+
+
+def test_the_gap_report_that_queued_a_round_2_plan_does_not_settle_it(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    first = board.start("planning")
+    board.comments.append(
+        comment("plan-1", PLAN.format(round=1, ac="unmet"), author="claude-login", created_at=200.0)
+    )
+    board.now[0] = 200.25
+    board.queue.finish(first, owner="claude", handoff_comment_id="plan-1")
+    board.dispatcher.poll_once(FakeSource(board.snapshot(), github=(board.snapshot(),)))
+    second = board.queue.claim("claude")
+    assert second is not None and second.request.action == "plan"
+    assert second.created_at == 200.25 and "round=2/2" in str(second.request.detail)
+    board.now[0] = 200.5
+    board.fail(second.id)
+    board.now[0] = 201.0
+    board.dispatcher.poll_once(FakeSource(board.snapshot(), github=(board.snapshot(),)))
+    assert board.rows("plan") == [("done", 1), ("failed", 1), ("queued", 2)]
+    assert "done-from-plan" not in board.events(second.id)
+    assert board.workflow_state() == "planning"
+
+
+def test_a_round_2_plan_job_that_posted_its_round_2_plan_is_done_from_plan(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    first = board.start("planning")
+    board.post("plan-1", PLAN.format(round=1, ac="unmet"))
+    board.queue.finish(first, owner="claude", handoff_comment_id="plan-1")
+    board.poll()
+    second = board.queue.claim("claude")
+    assert second is not None and "round=2/2" in str(second.request.detail)
+    board.post("plan-2", PLAN.format(round=2, ac="met"))
+    board.fail(second.id)
+    board.poll()
+    assert board.rows("plan") == [("done", 1), ("done", 1)], "control: its own round settles it"
+    assert "done-from-plan" in board.events(second.id)
+
+
+
+def test_a_restored_plan_job_is_not_settled_by_a_plan_for_another_round(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    plan_job = board.start("planning")
+    with board.queue.connect() as connection:
+        record_job_event(connection, plan_job, "restored-claim", "restored", board.now[0])
+        connection.commit()
+    cached = board.snapshot()
+    board.post("plan-2", PLAN.format(round=2, ac="met"))
+    board.fail(plan_job)
+    board.dispatcher.poll_once(FreshSource(cached, board.now, board.snapshot()))
+    assert "done-from-plan" not in board.events(plan_job)
+    assert board.rows("plan") == [("failed", 1), ("queued", 2)]
+
+
+REVIEWER_WAITING_MAX = (
+    "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
+    "Questions.\n"
+)
+
+
+class FreshSource(Source):
+    def __init__(self, snapshot: TrackedTicket, now: list[float], fresh: TrackedTicket):
+        super().__init__(snapshot, now)
+        self.fresh = fresh
+
+    def fresh_ticket(self, ref: TicketRef) -> TrackedTicket:
+        return self.fresh
+
+
+def _failed_review(tmp_path: Path, *, questions: bool) -> tuple[Board, str, TrackedTicket]:
+    board = Board(tmp_path)
+    build = board.start("building")
+    box = Device(
+        name="box",
+        slot_max=2,
+        harnesses={"claude": "claude-bot", "codex": "codex-bot"},
+        local=True,
+    )
+    DevicePool(board.queue, MachinesConfig(devices=(box,)))
+    board.post("ready-seed", READY.format(head=HEAD))
+    board.queue.finish(build, owner="claude", handoff_comment_id="ready-seed")
+    green = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(Source(green, board.now))
+    assert board.workflow_state() == "review"
+    review = board.queue.claim("codex")
+    assert review is not None
+    before_questions = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    if questions:
+        board.post("review-q", REVIEWER_WAITING_MAX, bot="codex")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=None)
+    return board, review.id, before_questions
+
+
+def _answer(board: Board) -> None:
+    board.post("review-a", ANSWERS, bot="grok")
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+
+
+def test_a_cached_read_that_misses_reviewer_questions_leaves_one_review_after_answers(
+    tmp_path: Path,
+) -> None:
+    board, review, cached = _failed_review(tmp_path, questions=True)
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(cached, board.now, fresh))
+    assert board.rows("review") == [("done", 1)], "the questions are the review's result"
+    assert "done-from-questions" in board.events(review)
+    _answer(board)
+    assert board.rows("review") == [("done", 1), ("queued", 1)], "answers resume one review"
+
+
+def test_an_ordinary_read_of_reviewer_questions_leaves_one_review_after_answers(
+    tmp_path: Path,
+) -> None:
+    board, _, _ = _failed_review(tmp_path, questions=True)
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+    _answer(board)
+    assert [row for row in board.rows("review") if row[0] == "queued"] == [("queued", 1)]
+
+
+def test_a_failed_review_with_no_questions_or_verdict_still_gets_its_retry(tmp_path: Path) -> None:
+    board, _, _ = _failed_review(tmp_path, questions=False)
+    fresh = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.dispatcher.poll_once(FreshSource(fresh, board.now, fresh))
+    assert board.rows("review") == [("failed", 1), ("queued", 2)], "control: T6 still retries"
 
 
 def test_answers_beside_a_detached_failed_step_queue_one_step(tmp_path: Path) -> None:

@@ -244,6 +244,7 @@ class QuestionsMixin:
         queued_at: float,
         head: str | None = None,
         round_number: int | None = None,
+        plan_round: int | None = None,
     ) -> Comment | None:
         """The first later trusted orch:v1 comment that already answered the
         action job comment queues for recipient, or None (#108, #66).
@@ -272,6 +273,8 @@ class QuestionsMixin:
             if fields["kind"] != kind:
                 continue
             if not self._trusted(ticket, item, fields, f"{recipient}-bot", role=role):
+                continue
+            if plan_round is not None and _round_number(fields.get("round")) != plan_round:
                 continue
             reported = fields.get("head", "")
             if action == "review":

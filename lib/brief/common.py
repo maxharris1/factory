@@ -10,7 +10,7 @@ from lib.brief.skills import skill_paths
 from lib.factory_md import FactoryContext
 from lib.github_actions import TOKEN_VARIABLES
 from lib.pr_title import SOURCE
-from lib.queue import Job
+from lib.queue import Job, plan_round
 
 GH = "env " + " ".join(f"-u {name}" for name in TOKEN_VARIABLES) + " gh"
 NO_EDIT_RULE = (
@@ -99,7 +99,7 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
         "plan": plan if isinstance(plan, str) and _URL.fullmatch(plan) else None,
         "skills": skill_paths(detail.get("repo_skill_paths")),
         "source": source,
-        "plan_round": 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1,
+        "plan_round": plan_round(job.request.detail),
         "update": _update_scope(detail) if job.request.action == "review" else None,
         "rebase": _rebase_scope(detail) if job.request.action == "review" else None,
     }
