@@ -374,6 +374,45 @@ def test_a_ready_accepted_in_the_updates_own_second_does_not_cancel_it(
     ]
 
 
+@pytest.mark.parametrize("historical_second_offset", [-1, 0])
+def test_a_ready_accepted_before_a_held_update_does_not_settle_its_failure(
+    tmp_path: Path, historical_second_offset: int
+) -> None:
+    board = held_board(tmp_path)
+    pr, _ = _held(board)
+    board.now[0] += 10
+    second = int(board.now[0])
+    pr.comments.append(
+        Comment(
+            id="ready-repost",
+            author="claude-login",
+            body=READY.format(head=sha(1)),
+            created_at=float(second + historical_second_offset),
+        )
+    )
+    for offset in (0.1, 0.2):
+        board.now[0] = second + offset
+        board.dispatcher.poll_once(board)
+    assert board.outcome("ready-repost") == "queued-review"
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+
+    pr.push(sha(2), state="dirty")
+    del pr.ci[sha(2)]
+    board.now[0] = second + 0.3
+    board.dispatcher.poll_once(board)
+    [queued] = _merge_only_jobs(board)
+    job = board.claim("claude")
+    assert job.id == queued["id"]
+    board.queue.finish(job.id, owner="claude", handoff_comment_id=None)
+    board.now[0] = second + 1.3
+    board.dispatcher.poll_once(board)
+
+    assert [
+        (row["attempt"], row["state"], row["handoff_comment_id"])
+        for row in _merge_only_jobs(board)
+    ] == [(1, "failed", None), (2, "queued", None)]
+
+
 def _red_fix(tmp_path: Path, fraction: float = 0.0):
     board = Board(tmp_path / "state", finish_line=None)
     board.factory = replace(board.factory, start_before_ci=True)
