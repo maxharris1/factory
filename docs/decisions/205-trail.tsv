@@ -1,0 +1,7 @@
+when	step	hypothesis	result	verdict
+2026-11-14	read #156 gates	parse_gate_lines reads Depends on	only blocked by, conflicts with, touches	gap confirmed
+2026-11-14	read PR #131	its branch carried another open PR	merged factory/issue-108 (#113) into factory/issue-130	case confirmed
+2026-11-14	tests first	new tests fail before code	collection error, no lib/branch_stack.py	VERIFIED red
+2026-11-14	Depends on via #156 parser	one regex kind, same blocker graph	tests pass, cycle with Blocked by flagged	VERIFIED
+2026-11-14	stacked hold in _feed	held with one wake, feeds after merge	tests pass	VERIFIED
+2026-11-14	live reads on GitHub	compare and commits/sha/pulls shapes match	c10638d -> [332], own excluded -> ()	VERIFIED
