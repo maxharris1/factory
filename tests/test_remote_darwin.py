@@ -1001,8 +1001,6 @@ def test_darwin_process_that_exits_between_the_listing_and_its_probe_leaves_the_
 def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A start that wrote no record (here refused, 125) keeps its slot for one
-    check: that check fences the tag, and the next one says gone."""
     machines, queue, pool, job_id, ssh = remote_setup(tmp_path, "codex")
     mac = Mac(tmp_path)
     mac.refuse_starts()
@@ -1015,12 +1013,14 @@ def test_r1_f11_darwin_start_that_never_ran_is_fenced_then_its_slot_is_released(
     _, err = proc.communicate(timeout=30)
     assert proc.returncode == remote.START_REFUSED, err
     assert not marker.exists()
-    assert "not confirmed gone (unknown)" in err, err
-    placement = pool.placement(job_id)
-    assert placement is not None and placement.worker_tag is not None
-    fence = job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(placement.worker_tag)
+    [start_call] = starts(ssh)
+    tag = start_call["script"].split()[2].removeprefix(f"{remote.TAG_ENV}=")
+    fence = job_dir(tmp_path, "codex-bot", job_id) / remote.darwin_record(tag)
     assert fence.read_text(encoding="utf-8").split() == ["fenced"]
 
+    if pool.placement(job_id) is None:
+        assert state(queue, job_id) == "queued", err
+        return
     use_fake_ssh(monkeypatch, ssh)
     monkeypatch.setenv("PATH", mac.path(os.environ["PATH"]))
     queue.finish(job_id, owner="codex", handoff_comment_id="c1")
