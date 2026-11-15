@@ -7,9 +7,11 @@ import copy
 import pytest
 import yaml
 
-from lib.factory_md import parse_factory_md
+from lib.brief import render_brief
+from lib.factory_md import parse_factory_context, parse_factory_md
 from lib.feeder_gates import github_ref, parse_gate_lines
 from lib.followups import followup_findings, followup_issue
+from tests import regenerate_brief_snapshots as snapshots
 
 VALID = {
     "base_branch": "main",
@@ -122,3 +124,48 @@ def test_follow_up_ticket_body_fits_github_limit() -> None:
     assert len(body) <= 65536
     assert "Blocked by: #42" in body.splitlines()
     assert body.splitlines()[-1] == "<!-- orch-followup verdict=99 -->"
+
+
+def review_brief(round_text: str, followup: int | None) -> str:
+    action, recipient, attempt, head, extra = snapshots.CASES["review"]
+    job = snapshots._job(action, recipient, attempt, head, {**extra, "round": round_text})
+    text = snapshots.FACTORY_MD
+    if followup is not None:
+        text = text.replace("  verify: verify-cleffy\n", f"  verify: verify-cleffy\n  followup_from_round: {followup}\n")
+    context, findings = parse_factory_context(text)
+    assert context is not None, findings
+    assert context.config.followup_from_round == followup
+    return render_brief(
+        job, bot="codex-bot", context=context, context_ref="dev", factory_root=snapshots.BOX_FACTORY_ROOT
+    )
+
+
+FOLLOWUP_STEP = "4. Mark a finding `[follow-up]` instead of `[blocking]`"
+FOLLOWUP_RULES = (
+    "- From round 4 (`review.followup_from_round`), variants of an already-raised rule are follow-ups, "
+    "not blockers. A real new failure still blocks at any round.",
+    "- A verdict whose only findings are `[follow-up]` or `[minor]` is `APPROVE` with `ac=met`; "
+    "the poller files the `[follow-up]` findings as one ticket. Builders do not fix `[follow-up]` findings.",
+)
+
+
+def test_review_brief_without_the_key_is_the_snapshot() -> None:
+    snapshot = (snapshots.SNAPSHOTS / "review.txt").read_text(encoding="utf-8")
+    box = snapshot.split("===== box =====\n", 1)[1].split("===== remote", 1)[0]
+    assert review_brief("2/3", None) == box
+    assert review_brief("2/3", 4) == box
+
+
+def test_review_brief_before_the_follow_up_round_is_unchanged() -> None:
+    assert review_brief("3/5", 4) == review_brief("3/5", None)
+    assert "[follow-up]" not in review_brief("3/5", 4)
+
+
+@pytest.mark.parametrize("round_text", ["4/5", "5/5"])
+def test_review_brief_from_the_follow_up_round_defines_the_tag(round_text: str) -> None:
+    brief = review_brief(round_text, 4)
+    assert FOLLOWUP_STEP in brief
+    assert "5. Pick `ac` and the verdict" in brief
+    assert "`[blocking]`, `[follow-up]` or `[minor]`" in brief
+    for rule in FOLLOWUP_RULES:
+        assert rule in brief.splitlines()

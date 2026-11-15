@@ -77,6 +77,8 @@ def facts_of(job: Job, detail: dict[str, object], context: FactoryContext | None
     return {
         "risk": risk,
         "round": round_text if round_match is not None else None,
+        "round_number": int(round_match.group(1)) if round_match is not None else None,
+        "followup_from": context.config.followup_from_round if context is not None else None,
         "cap": cap,
         "head": head if isinstance(head, str) and _HEAD.fullmatch(head) else None,
         "pr": pr,
