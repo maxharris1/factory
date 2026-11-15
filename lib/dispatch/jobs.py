@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import device_sync, skill_preflight
+from lib import device_sync, lane_limit, skill_preflight
 from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
 from lib.dispatch.constants import STUCK_WAKE_FAILURE_LIMIT, _ABANDONED_JOB_DETAIL
 from lib.dispatch.helpers import (
@@ -53,7 +54,9 @@ from lib.job_state import (
     requeue_lagging,
     requeue_link_drop,
     requeue_unstarted,
+    requeue_usage_limited,
     unstarted_too_long,
+    usage_limit_end,
 )
 from lib.orch_yml import DEFAULT_JOB_TIMEOUT_MINUTES
 from lib.queue import (
@@ -161,13 +164,13 @@ class JobsMixin:
             )
         )
 
-    def _fail_lag_blocked_past_wait(self, job: Job, now: float) -> bool:
+    def _fail_lag_blocked_past_wait(self, job: Job, now: float, paused: float) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             lagging = lagging_requeue(connection, job.id)
             failed = (
                 lagging is not None
-                and lagging.past_wait(now)
+                and lagging.past_wait(now, since=paused)
                 and fail_lag_blocked(
                     connection,
                     job.id,
@@ -200,18 +203,28 @@ class JobsMixin:
         now = self.queue.now()
         busy = self._busy_recipients()
         lag_blocked = self._lag_blocked_recipients()
+        with self._connect() as connection:
+            limited = {limit.recipient for limit in lane_limit.all_active(connection, now)}
+            paused = lane_limit.paused_through(connection, now)
         for job in self.queue.outstanding():
-            if (
-                job.state == "queued"
-                and job.request.recipient in lag_blocked
-                and self._fail_lag_blocked_past_wait(job, now)
-            ):
+            if job.state == "queued" and job.request.recipient in limited:
+                self._restart_queue_wait(job, now)
                 continue
             # A queued job's last_activity_at is its queue-wait start: when
             # it was queued, or when a claim that never started was released
             # (#77 F1.2), so a release never times out a job for the wait
             # before its claim. A running job's is its last heartbeat.
-            if now - job.last_activity_at >= job.request.timeout_seconds:
+            waited_since = job.last_activity_at
+            if job.state == "queued" and paused.get(job.request.recipient, 0.0) > waited_since:
+                waited_since = paused[job.request.recipient]
+                self._restart_queue_wait(job, waited_since)
+            if (
+                job.state == "queued"
+                and job.request.recipient in lag_blocked
+                and self._fail_lag_blocked_past_wait(job, now, paused.get(job.request.recipient, 0.0))
+            ):
+                continue
+            if now - waited_since >= job.request.timeout_seconds:
                 if job.state == "queued" and job.request.recipient in busy:
                     self._restart_queue_wait(job, now)
                     continue
@@ -707,6 +720,8 @@ class JobsMixin:
         )
         if not queue_owned and self._lagging_handled(job):
             return
+        if not queue_owned and self._usage_limit_handled(job):
+            return
         link_drop = self._link_drop(job)
         if link_drop is not None:
             with self._connect() as connection:
@@ -787,14 +802,18 @@ class JobsMixin:
         """#357: a start refused because a checkout lags requeues the same row
         after a backoff, and sticks the ticket device-lagging if it still lags
         past the wait. True when T6 handled the job."""
+        now = self.queue.now()
         with self._connect() as connection:
             lagging = lagging_end(connection, job.id)
+            paused = lane_limit.paused_through(connection, now).get(job.request.recipient, 0.0)
         if lagging is None:
             return False
         if job.request.action == "review" and self._review_retry_waits(job):
             return True
-        now = self.queue.now()
-        if lagging.past_wait(now) and job.request.recipient in self._lag_blocked_recipients():
+        if (
+            lagging.past_wait(now, since=paused)
+            and job.request.recipient in self._lag_blocked_recipients()
+        ):
             self._mark_stuck_and_wake(
                 repo=job.request.repo,
                 ticket_id=job.request.ticket_id,
@@ -827,6 +846,30 @@ class JobsMixin:
             connection.execute("BEGIN IMMEDIATE")
             result = requeue_lagging(
                 connection, job.id, now=now, reason=f"preflight lagging: {lagging.detail}"
+            )
+            connection.commit()
+        if result is not None:
+            self._log_job_event(job, *result)
+        return True
+
+    def _usage_limit_handled(self, job: Job) -> bool:
+        """#367: a run that hit its account's usage limit requeues the same
+        row at once with nothing charged; the lane gate in claim_order holds
+        it until the limit lifts. True when T6 handled the job."""
+        with self._connect() as connection:
+            detail = usage_limit_end(connection, job.id)
+            limit = lane_limit.active(connection, job.request.recipient, self.queue.now())
+        if detail is None:
+            return False
+        if job.request.action == "review" and self._review_retry_waits(job):
+            return True
+        if limit is not None:
+            self._record_job_event_once(job, "requeue-deferred", lane_limit.label(limit))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            release_link_dropped(connection, job.id)
+            result = requeue_usage_limited(
+                connection, job.id, now=self.queue.now(), reason=detail
             )
             connection.commit()
         if result is not None:
@@ -904,6 +947,7 @@ class JobsMixin:
             source,
             job.request.action,
             job.request.recipient,
+            queued_at=self._first_queued_at(job),
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
         )
@@ -916,7 +960,7 @@ class JobsMixin:
         """The handoff a failed review, build, fix or update job already posted.
 
         Read from the ticket this poll fetched (None when it fetched none),
-        posted no earlier than the job was queued, from a login trusted for
+        posted no earlier than its first attempt was queued, from a login trusted for
         its `from` and `role`, and not already rejected when it was handled
         (stale, superseded, ...). A ready stale only because its review
         already answered (#71 stale-ready-verdict) still counts. An update
@@ -950,8 +994,9 @@ class JobsMixin:
         ids = [item.id for item in comments]
         if update and job.request.source_comment_id in ids:
             comments = comments[ids.index(job.request.source_comment_id) + 1 :]
+        queued_at = math.floor(self._first_queued_at(job))
         for item in comments:
-            if not update and item.created_at < job.created_at:
+            if not update and item.created_at < queued_at:
                 continue
             try:
                 fields = parse_comment(item.body).as_dict()

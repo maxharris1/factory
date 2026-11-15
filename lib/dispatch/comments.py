@@ -331,6 +331,17 @@ class CommentsMixin:
             ).fetchone()
         return None if row is None else str(row["outcome"])
 
+    def _handled_before(self, ticket: TrackedTicket, comment_id: str, when: float) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM handled_times
+                WHERE repo = ? AND ticket_id = ? AND comment_id = ? AND handled_at < ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, comment_id, when),
+            ).fetchone()
+        return row is not None
+
     def _is_handled(self, ticket: TrackedTicket, comment_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -356,6 +367,10 @@ class CommentsMixin:
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO handled_times VALUES (?, ?, ?, ?)",
+                (ticket.repo.lower(), ticket.ticket_id, comment_id, self.queue.now()),
             )
 
     def _remember_verdicts(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:

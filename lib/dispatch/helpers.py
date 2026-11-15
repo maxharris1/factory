@@ -175,6 +175,16 @@ def _retry_detail(job: Job) -> str | None:
     return json.dumps(context, separators=(",", ":"), sort_keys=True)
 
 
+def _retry_of(detail: str | None) -> str | None:
+    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
+    try:
+        value = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    retry_of = value.get("retry_of") if isinstance(value, dict) else None
+    return retry_of if isinstance(retry_of, str) else None
+
+
 def _append_detail(detail: str, note: str) -> str:
     try:
         context = json.loads(detail)
@@ -282,8 +292,7 @@ def _redrive_eligible(exc: BaseException, policy: str) -> bool:
 
 
 def _holds(ticket: TrackedTicket) -> bool:
-    """Issue #86: the hold applies only on a ship: merge repo."""
-    return ticket.factory.ship == "merge" and ticket.factory.hold is not None
+    return ticket.factory.hold_applies
 
 
 def ship_mode(policy: str) -> str:

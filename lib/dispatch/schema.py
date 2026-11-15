@@ -127,6 +127,17 @@ class SchemaMixin:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS handled_times (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    handled_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
             connection.commit()
             _add_missing_columns(connection, "verdict_heads", {"posted_at": "REAL"})
             _add_missing_columns(

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import builtins
 import configparser
+import io
 import os
 import re
 import signal
@@ -14,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import child_reaper
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -241,3 +244,22 @@ def test_a_timeout_in_any_phase_kills_only_the_tests_own_children(tmp_path: Path
         if probe.poll() is None:
             probe.kill()
         probe.communicate(timeout=5)
+
+
+@pytest.mark.skipif(not Path("/proc/self/task").is_dir(), reason="the orphan reaper runs only on Linux")
+def test_the_orphan_reaper_reads_proc_past_a_tests_open_and_path_patches(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a test patched file reads")
+
+    child = subprocess.Popen(["sleep", "5"])
+    try:
+        for target, name in ((builtins, "open"), (io, "open"), (os, "open"), (os, "read"), (os, "listdir"),
+                             (Path, "open"), (Path, "read_text"), (Path, "read_bytes"), (Path, "iterdir")):
+            monkeypatch.setattr(target, name, refuse)
+        assert child.pid in child_reaper._children()
+        assert not child_reaper._zombie(child.pid)
+        child_reaper.reap_orphans()
+    finally:
+        monkeypatch.undo()
+        child.kill()
+        child.wait()

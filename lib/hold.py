@@ -1,9 +1,9 @@
-"""Per-PR human hold before a ship: merge (issue #86, docs/SPEC.md 4.2 T4H).
+"""Per-PR human hold before a ship: merge or handoff (issues #86, #183, T4H).
 
 factory.md's optional hold: names a label (default factory:hold), an
 approver (default max, a GitHub login that must also be a trusted_logins
-key) and paths (globs). On a ship: merge repo, a covered APPROVE with
-green CI does not merge while the PR is held:
+key) and paths (globs). On a ship: merge or handoff repo, a covered APPROVE
+with green CI does not ship while the PR is held:
 
 - label: the PR carries the hold label, or the label's latest labeled /
   unlabeled event is a removal by someone other than the approver (a
@@ -12,9 +12,10 @@ green CI does not merge while the PR is held:
   the current head on every poll, so a PR that grows into those files
   gets held.
 
-The hold clears on a kind=ok head=<40-char sha> comment from the approver
-whose head covers the current head by the ship rule (the same commit, or
-an equal git patch-id --stable), or, for a label-only hold, by the
+The hold clears on a comment from the approver, either kind=ok
+head=<40-char sha> or a first line of /ok <40-char sha>, whose
+head covers the current head by the ship rule (the same commit, or an
+equal git patch-id --stable), or, for a label-only hold, by the
 approver removing the label. An ok does not clear a label hold whose
 label was labeled at or after the latest covering ok: a label put back
 after the ok holds the PR again, and still holds it once someone other
@@ -38,6 +39,7 @@ from lib.factory_md import HoldConfig
 from lib.handoff import HandoffError, parse_comment
 
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SLASH_OK = re.compile(r"/ok[ \t]+([0-9a-f]{40})")
 
 
 _GLOB_REGEX = {"**/": "(?:[^/]+/)*", "**": ".*", "*": "[^/]*", "?": "[^/]"}
@@ -162,7 +164,7 @@ def decide(
 ) -> HoldDecision:
     """Whether the hold blocks a merge of the current head.
 
-    comments are dispatcher Comments (id, author, body). covers(head) says
+    comments are dispatcher Comments; an edited one never clears. covers(head) says
     whether an ok naming head covers the current head by the ship rule.
     """
     if labels is None:
@@ -212,18 +214,24 @@ def _approver_ok(
     for item in newest_first:
         if str(getattr(item, "author", "")).casefold() != approver:
             continue
-        try:
-            fields = parse_comment(str(getattr(item, "body", ""))).as_dict()
-        except HandoffError:
+        if getattr(item, "edited_at", None) is not None:
             continue
-        if fields["kind"] != "ok":
-            continue
-        head = fields.get("head", "")
-        if _FULL_SHA.fullmatch(head) is None:
-            continue
-        if covers(head):
+        head = _ok_head(str(getattr(item, "body", "")))
+        if head is not None and _FULL_SHA.fullmatch(head) and covers(head):
             return float(getattr(item, "created_at", 0))
     return None
+
+
+def _ok_head(body: str) -> str | None:
+    lines = body.strip().splitlines()
+    slash = _SLASH_OK.fullmatch(lines[0].strip()) if lines else None
+    if slash is not None:
+        return slash.group(1)
+    try:
+        fields = parse_comment(body).as_dict()
+    except HandoffError:
+        return None
+    return fields.get("head") if fields["kind"] == "ok" else None
 
 
 def _latest_label_event(

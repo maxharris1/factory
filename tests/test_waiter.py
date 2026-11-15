@@ -835,6 +835,9 @@ while not go.exists() and not crash.exists() and time.time() < deadline:
     time.sleep(0.05)
 if crash.exists():
     sys.exit(1)  # a harness that dies before `orch job done`
+linger = out / f"{job}.linger"
+if linger.exists():
+    time.sleep(float(linger.read_text()))
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
                 os.environ["ORCH_JOB_BOT"], job, "--handoff", subprocess.check_output([sys.executable, os.environ["FAKE_POST_HANDOFF"], os.environ["ORCH_DB"], job], text=True).strip()], check=True)
 """
@@ -925,6 +928,7 @@ def autostart(tmp_path: Path):
         "GIT_CONFIG_NOSYSTEM": "1",
     }
     env.pop("ORCH_DB", None)
+    before = descendants(os.getpid())
     proc = subprocess.Popen(
         [sys.executable, str(ORCH), "wait", "claude-bot", "--autostart",
          "--db", str(db), "--machines", str(MACHINES), "--orch", str(orch_yml),
@@ -945,9 +949,12 @@ def autostart(tmp_path: Path):
                 proc.wait(10)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        for go in harness_dir.glob("*.json"):
-            (harness_dir / (go.stem + ".go")).touch()
-        time.sleep(0.3)
+        runs = descendants(os.getpid()) - before
+        deadline = time.monotonic() + 60
+        while any(alive(pid) for pid in runs) and time.monotonic() < deadline:
+            for go in harness_dir.glob("*.json"):
+                (harness_dir / (go.stem + ".go")).touch()
+            time.sleep(0.05)
 
 
 def _running(db: Path, job_id: str) -> bool:
@@ -1024,6 +1031,13 @@ def test_the_autostart_waiter_exits_cleanly_on_sigterm_and_leaves_its_job_runnin
     assert state(db, job_id) == "running"
     (autostart["harness_dir"] / f"{job_id}.go").touch()
     _wait_for(lambda: state(db, job_id) == "done", 20)
+
+
+def test_the_autostart_fixture_outwaits_a_run_still_finishing_at_teardown(autostart: dict) -> None:
+    proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
+    job_id = enqueue(queue, "a", head=None)
+    _wait_for(lambda: _running(db, job_id), 20, proc)
+    (autostart["harness_dir"] / f"{job_id}.linger").write_text("5", encoding="utf-8")
 
 
 def test_autostart_refuses_to_start_without_a_valid_harness_config(tmp_path: Path) -> None:

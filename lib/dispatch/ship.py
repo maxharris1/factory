@@ -316,10 +316,10 @@ class ShipMixin:
             if ci.status != "success":
                 self._set_redrive(ticket, comment_id, "spent", "eligible")
                 continue
-            if policy == "merge" and self._held(ticket, head):
+            if self._held(ticket, head):
                 # Issue #86 on the #83 re-drive: a hold that applies at this
                 # head (a label put back after the OK, or an unread hold
-                # input) keeps the merge waiting; the re-drive is kept.
+                # input) keeps the ship waiting; the re-drive is kept.
                 continue
             if not self._set_redrive(ticket, comment_id, "spent", "eligible"):
                 continue
@@ -411,6 +411,10 @@ class ShipMixin:
                 DELETE FROM handled_comments
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ?
                 """,
+                (*scope, comment_id),
+            )
+            connection.execute(
+                "DELETE FROM handled_times WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
                 (*scope, comment_id),
             )
             connection.commit()
