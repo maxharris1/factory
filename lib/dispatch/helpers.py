@@ -89,36 +89,6 @@ ACTED_VERDICT_OUTCOMES = frozenset(
 )
 
 
-VERDICT_OUTCOMES = ACTED_VERDICT_OUTCOMES | frozenset(
-    {
-        "answered-fix",
-        "approve-ci-red",
-        "approve-ci-red-fix",
-        "capped-patch-review",
-        "stuck-ci-red-3",
-        "refused-ship-head",
-        "stale-approve",
-        "stale-revise",
-        "superseded-approve",
-        "rejected-approve-author",
-        "rejected-revise-author",
-        "rejected-over-cap",
-        "rejected-unregistered-verdict",
-        "duplicate-verdict",
-        "after-handoff",
-        "rejected-blocked-author",
-        "woke-grok-blocked",
-    }
-)
-
-
-def _verdict_outcome(outcome: str) -> bool:
-    return (
-        outcome in VERDICT_OUTCOMES
-        or outcome.startswith(("ship-already-completed-", "failed-verdict-"))
-    )
-
-
 def _acted_verdict(outcome: str | None) -> bool:
     return outcome is not None and (
         outcome in ACTED_VERDICT_OUTCOMES
@@ -237,17 +207,6 @@ def _detail_round(detail: str | None) -> str | None:
     except ValueError:
         return None
     value = context.get("round") if isinstance(context, dict) else None
-    return value if isinstance(value, str) else None
-
-
-def _detail_retry_comment(detail: str | None) -> str | None:
-    if not detail:
-        return None
-    try:
-        context = json.loads(detail)
-    except ValueError:
-        return None
-    value = context.get("retry_comment") if isinstance(context, dict) else None
     return value if isinstance(value, str) else None
 
 

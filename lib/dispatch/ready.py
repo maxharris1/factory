@@ -9,13 +9,11 @@ from lib.dispatch.helpers import (
     _acted_verdict,
     _comment_link,
     _comment_order,
-    _detail_retry_comment,
     _detail_round_number,
     _has_questions,
     _matching_head,
     _round_number,
     _scope,
-    _verdict_outcome,
 )
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
@@ -544,7 +542,7 @@ class ReadyMixin:
             row = connection.execute(
                 """
                 SELECT id, action, state, source_comment_id, detail, created_at,
-                       state IN ('queued', 'running')
+                       handoff_comment_id, state IN ('queued', 'running')
                        OR (state = 'failed' AND failure_handled = 0) AS open
                 FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
@@ -568,8 +566,9 @@ class ReadyMixin:
             ticket,
             head,
             _detail_round_number(row["detail"]),
-            (str(row["source_comment_id"]), _detail_retry_comment(row["detail"])),
+            str(row["source_comment_id"]),
             float(row["created_at"]),
+            row["handoff_comment_id"],
         )
 
     def _verdict_handled(
@@ -577,14 +576,15 @@ class ReadyMixin:
         ticket: TrackedTicket,
         head: str,
         review_round: int | None,
-        queued_by: tuple[str, str | None],
+        ready_id: str,
         review_queued_at: float,
+        handoff_id: str | None,
     ) -> bool:
         self._remember_verdicts(ticket, ticket.comments)
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT verdict.comment_id, verdict.outcome, recorded.head
+                SELECT verdict.comment_id, recorded.head
                 FROM handled_comments AS verdict
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
@@ -592,14 +592,14 @@ class ReadyMixin:
                   AND NOT COALESCE(recorded.posted_at < ?, 0)
                   AND (
                       recorded.review_round = ?
-                      OR recorded.head IS NULL AND verdict.rowid <= (
+                      OR recorded.head IS NULL AND verdict.comment_id = ? AND verdict.rowid <= (
                           SELECT MAX(handled_rowid) FROM verdict_heads_floor
                       )
                   )
                   AND verdict.rowid > COALESCE((
-                      SELECT MAX(queued.rowid) FROM handled_comments AS queued
-                      WHERE queued.repo = verdict.repo AND queued.ticket_id = verdict.ticket_id
-                        AND queued.comment_id IN (?, ?)
+                      SELECT ready.rowid FROM handled_comments AS ready
+                      WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
+                        AND ready.comment_id = ?
                   ), 0)
                 """,
                 (
@@ -607,14 +607,15 @@ class ReadyMixin:
                     ticket.ticket_id,
                     review_queued_at,
                     review_round,
-                    *queued_by,
+                    handoff_id,
+                    ready_id,
                 ),
             ).fetchall()
         visible = {comment.id for comment in ticket.comments}
         return any(
             _matching_head(str(row["head"]), head) is not None
             if row["head"] is not None
-            else row["comment_id"] not in visible and _verdict_outcome(str(row["outcome"]))
+            else row["comment_id"] not in visible
             for row in rows
         )
 

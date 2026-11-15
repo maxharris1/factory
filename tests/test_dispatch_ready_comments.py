@@ -18,6 +18,13 @@ from tests.test_review_before_ci import (
 from tests.test_retry_resume import REASON
 
 
+def _reviewed_with_handoff(board, pr, head: str, handoff: str) -> None:
+    pr.push(head, ci="pending")
+    board.ready(pr, head)
+    board.poll()
+    board.queue.finish(board.claim("codex").id, owner="codex", handoff_comment_id=handoff)
+
+
 @pytest.mark.parametrize("mode", ["interrupt", "upgrade", "existing-table"])
 def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_never_recorded(
     tmp_path: Path, mode: str
@@ -25,7 +32,7 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    reviewed_at_pending_ci(board, pr, older)
+    _reviewed_with_handoff(board, pr, older, "approve-older")
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
     if mode == "upgrade":
@@ -85,7 +92,7 @@ def test_a_stale_verdict_handled_late_does_not_answer_the_newer_review(
     board = board_with(tmp_path, on=True)
     older = sha(1)
     pr = built_with_ci_pending(board, older)
-    reviewed_at_pending_ci(board, pr, older)
+    _reviewed_with_handoff(board, pr, older, "approve-older")
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
     board.poll()
@@ -307,7 +314,7 @@ def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
     board = board_with(tmp_path, on=True)
     board.dispatcher.hooks = (T7Hook(),)
     pr = built_with_ci_pending(board, sha(1))
-    reviewed_at_pending_ci(board, pr, pr.head)
+    _reviewed_with_handoff(board, pr, pr.head, "blocked-review")
     blocked = VERDICT.format(round="1/3", head=pr.head, verdict="BLOCKED", risk="high")
     board.post(pr, "blocked-review", blocked, "codex-login")
     board.poll()
@@ -323,3 +330,77 @@ def test_a_blocked_verdict_handled_by_a_hook_still_answers_its_review(
     fix = board.queue.claim("claude")
     assert board.outcome("red-ready") == "queued-ci-fix"
     assert fix is not None and fix.request.source_comment_id == "red-ready"
+
+
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+def test_a_blocked_report_handled_by_a_hook_never_answers_the_review(
+    tmp_path: Path, missing: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    blocked = "<!-- orch:v1 kind=stuck from=claude-bot role=builder state=blocked -->\nBlocked."
+    board.post(pr, "builder-blocked", blocked, "claude-login")
+    board.poll()
+    assert board.outcome("builder-blocked") == "woke-grok-blocked"
+    pr.comments.remove(next(item for item in pr.comments if item.id == "builder-blocked"))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    board.dispatcher.hooks = (T7Hook(),)
+    pr.push(pr.head, ci="failure")
+    board.ready(pr, pr.head, "red-ready")
+    board.poll()
+    board.revise(pr, "1/3")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
+    assert CI_LOG in instruction(fixes[0])
+
+
+def test_an_interrupted_retry_never_takes_the_earlier_attempts_verdict(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    board.ready(pr, pr.head, "review-ready")
+    board.poll()
+    stale = VERDICT.format(round="1/3", head=sha(9), verdict="REVISE", risk="high")
+    board.post(pr, "stale-revise", stale, "codex-login")
+    board.poll()
+    assert board.outcome("stale-revise") == "stale-revise"
+    board.fail("codex")
+    board.poll()
+    board.now[0] += STOPPED_POLL_SECONDS
+    board.poll()
+    board.fail("codex")
+    board.poll()
+    assert board.state("42")["stuck_reason"] == "job-failed-2"
+    pr.comments.remove(next(item for item in pr.comments if item.id == "stale-revise"))
+    _upgrade_from(board, "verdict_heads")
+    _restart(board, tmp_path)
+    board.post(pr, "retry-review", REASON, "grok-login")
+    original = board.dispatcher._mark_handled
+
+    def stop_before_retry_is_marked(ticket, comment_id, outcome):
+        if comment_id == "retry-review":
+            raise KeyboardInterrupt()
+        return original(ticket, comment_id, outcome)
+
+    board.dispatcher._mark_handled = stop_before_retry_is_marked
+    board.now[0] += STOPPED_POLL_SECONDS
+    with pytest.raises(KeyboardInterrupt):
+        board.poll()
+    assert board.outcome("retry-review") is None
+    assert board.jobs("review")[-1]["state"] == "queued"
+    pr.comments.remove(next(item for item in pr.comments if item.id == "retry-review"))
+    _restart(board, tmp_path)
+    board.finish("codex")
+    pr.push(pr.head, ci="failure")
+    board.ready(pr, pr.head, "red-ready")
+    board.poll()
+    board.revise(pr, "1/3")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert board.outcome("red-ready") == "ci-red-in-flight"
+    assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
