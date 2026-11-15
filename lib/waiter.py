@@ -42,7 +42,9 @@ left alone.
 A remote run is recorded in `<job-dir>/remote.json` (pid, process start,
 run.log offset) and started with `--status-file <job-dir>/exit`, so a
 restarted waiter adopts every remote run still running for its bot and
-finishes it from the status file when it ends (gone without one: failed).
+finishes it from the status file when it ends. It ends only once that
+file exists, or its pid is gone and its job has stopped beating (gone
+without a status file: failed, #318).
 The record is removed once the job is finished, so no run is finished twice.
 
 `orch job run` sends the first heartbeat before the harness starts and
@@ -104,6 +106,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
@@ -115,6 +118,7 @@ from lib.factory_md import FactoryContext, parse_factory_context
 from lib.load import load_yaml
 from lib.machines_yml import Device, MachinesConfig
 from lib.harness_env import ApproverProfileExposed, harness_environ
+from lib.job_state import MAX_HEARTBEAT_SECONDS
 from lib.handoff_check import ReadError, expected_for, gh_reader
 from lib.handoff_check import problems as handoff_problems
 from lib.handoff_marker import handoff_marker
@@ -156,6 +160,7 @@ MARKER_TAIL_BYTES = 64 * 1024
 # finish the run (#87 F1.4), and the exit status `orch job run` leaves.
 REMOTE_RECORD = "remote.json"
 STATUS_FILE = "exit"
+ADOPTED_SILENCE_SECONDS = 3 * MAX_HEARTBEAT_SECONDS
 
 Log = Callable[[str], None]
 
@@ -786,11 +791,28 @@ class Waiter:
                 path.unlink(missing_ok=True)
                 continue
             self._children[job_id] = AdoptedRun(
-                pid, start, job_dir / STATUS_FILE, self.alive
+                pid, start, job_dir / STATUS_FILE, partial(self._adopted_alive, job_id)
             )
             self._remote[job_id] = (job_dir, offset)
             self.log(f"job {job_id}: adopted the remote run (pid {pid}) of an earlier waiter")
         self._recovered = True
+
+    def _adopted_alive(self, job_id: str, pid: int, start: str | None) -> bool:
+        return self.alive(pid, start) or self._maybe_beating(job_id)
+
+    def _maybe_beating(self, job_id: str) -> bool:
+        try:
+            with self.queue.connect() as connection:
+                row = connection.execute(
+                    "SELECT state, last_activity_at FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+        except (QueueError, sqlite3.Error, OSError):
+            return True
+        return (
+            row is not None
+            and row[0] == "running"
+            and self.queue.now() - float(row[1]) < ADOPTED_SILENCE_SECONDS
+        )
 
     def _job_state(self, job_id: str) -> tuple[str, str] | None:
         with self.queue.connect() as connection:

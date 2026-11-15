@@ -355,6 +355,11 @@ class Liveness:
         return self.running
 
 
+def silence(db: Path, job_id: str) -> None:
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE jobs SET last_activity_at = 0 WHERE id = ?", (job_id,))
+
+
 def test_a_remote_run_records_what_a_restarted_waiter_needs(tmp_path: Path) -> None:
     waiter, spawn, db, job_id = _remote_run(tmp_path)
     waiter.step()
@@ -409,6 +414,7 @@ def test_a_restarted_waiter_fails_a_remote_run_whose_runner_died_without_a_statu
     first.step()
     alive = Liveness()
     alive.running = False
+    silence(db, job_id)
     job_dir = tmp_path / "state" / "jobs" / job_id
     (job_dir / "run.log").write_text("ORCH-HANDOFF: 4242\n", encoding="utf-8")
     second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=alive)
@@ -470,6 +476,7 @@ def test_a_restarted_waiter_leaves_a_started_remote_run_to_the_device_check(
     _started_remotely(first, job_id)
     alive = Liveness()
     alive.running = False
+    silence(db, job_id)
     second, _, _ = make_waiter(tmp_path, machines, FakeSpawn(), alive=alive)
     second.step()
     assert _done_row(db, job_id) == ("running", None)
