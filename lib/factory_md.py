@@ -37,6 +37,11 @@ globs, a trailing / naming a directory. A Touches: path that matches never
 causes a feeder collision wait, and in a matching file a conflict hunk kept
 as both sides still counts as a trivial update. Absent, it is empty.
 
+Unknown fields are errors by default, as check-config reads them. The
+poller, feeder and waiter read factory.md with strict=False (issue #288):
+an unknown field is a warning there, so a just-merged factory.md naming a
+field this code does not know yet still polls.
+
 parse_factory_context keeps the prose after the front block (Review, Ship,
 Context) for the waiter's standard brief (#80): the brief appends it as an
 additional-context section. Project-specific behavior lives there, not in
@@ -100,6 +105,7 @@ _TOP_KEYS = {
     "shared_paths",
 }
 _HOLD_KEYS = {"label", "approver", "paths"}
+_UNKNOWN = "unknown field "
 
 
 @dataclass(frozen=True)
@@ -149,8 +155,10 @@ class FactoryContext:
     truncated: bool = False
 
 
-def parse_factory_context(text: str) -> tuple[FactoryContext | None, list[Finding]]:
-    config, findings = parse_factory_md(text)
+def parse_factory_context(
+    text: str, *, strict: bool = True
+) -> tuple[FactoryContext | None, list[Finding]]:
+    config, findings = parse_factory_md(text, strict=strict)
     if config is None:
         return None, findings
     _raw, body = split_front_matter(text)
@@ -169,7 +177,9 @@ def load_factory_md(path: Path) -> tuple[FactoryConfig | None, list[Finding]]:
     return parse_factory_md(path.read_text(encoding="utf-8"))
 
 
-def parse_factory_md(text: str) -> tuple[FactoryConfig | None, list[Finding]]:
+def parse_factory_md(
+    text: str, *, strict: bool = True
+) -> tuple[FactoryConfig | None, list[Finding]]:
     try:
         raw, _body = split_front_matter(text)
         data = load_yaml(raw)
@@ -177,10 +187,10 @@ def parse_factory_md(text: str) -> tuple[FactoryConfig | None, list[Finding]]:
         return None, [Finding("error", _yaml_message(exc))]
     if not isinstance(data, dict):
         return None, [Finding("error", "front matter must be a mapping")]
-    return _validate(data)
+    return _validate(data, strict)
 
 
-def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
+def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Finding]]:
     findings: list[Finding] = []
     findings.extend(_unknown(data, _TOP_KEYS, ""))
 
@@ -221,6 +231,11 @@ def _validate(data: dict) -> tuple[FactoryConfig | None, list[Finding]]:
             Finding("warning", "hold has no effect unless ship is merge")
         )
 
+    if not strict:
+        findings = [
+            Finding("warning", item.message) if item.message.startswith(_UNKNOWN) else item
+            for item in findings
+        ]
     if any(item.severity == "error" for item in findings):
         return None, findings
     assert base_branch is not None
@@ -261,7 +276,7 @@ def _unknown(data: dict, allowed: set[str], prefix: str) -> list[Finding]:
     for key in sorted(data, key=lambda item: str(item)):
         if key not in allowed:
             dotted = f"{prefix}.{key}" if prefix else str(key)
-            findings.append(Finding("error", f"unknown field {dotted!r}"))
+            findings.append(Finding("error", f"{_UNKNOWN}{dotted!r}"))
     return findings
 
 

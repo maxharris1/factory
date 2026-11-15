@@ -559,6 +559,90 @@ def test_failing_project_does_not_stop_healthy_project() -> None:
     )
 
 
+def _factory_payload(text: str) -> dict:
+    return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
+
+
+def _with_unknown_field(text: str) -> str:
+    return text.replace("skills: []\n", "skills: []\nnew_field: [docs/]\n")
+
+
+def test_unknown_factory_field_still_polls_and_feeds() -> None:
+    text = _with_unknown_field(FACTORY.format(tickets="github", ship="merge"))
+    assert "new_field" in text
+    gh = FakeGh(text)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.begin_cycle()
+
+    (ticket,) = source.github_candidates("orch:state/")
+    context = source.factory_context(source.config.projects[0])
+
+    assert ticket.repo == "acme/widgets"
+    assert context.config.ship == "merge"
+    assert errors == []
+
+
+def test_bad_factory_md_keeps_the_last_good_config_and_warns_once() -> None:
+    good = FACTORY.format(tickets="github", ship="merge")
+    gh = FakeGh(good)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    warnings: list[str] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.warning_sink = warnings.append
+    project = source.config.projects[0]
+    source.begin_cycle()
+    assert len(source.github_candidates("orch:state/")) == 1
+    source.factory_context(project)
+
+    gh.factory = _factory_payload(good.replace("ship: merge", "ship: yolo"))
+    for _cycle in range(3):
+        source.begin_cycle()
+        (ticket,) = source.github_candidates("orch:state/")
+        assert ticket.repo == "acme/widgets"
+        assert source.factory_context(project).config.ship == "merge"
+
+    assert errors == []
+    assert warnings == [
+        "acme/widgets factory.md: ship must be merge, handoff, or after:<approver>; "
+        "keeping the last good factory.md"
+    ]
+
+    gh.factory = _factory_payload(good)
+    source.begin_cycle()
+    source.github_candidates("orch:state/")
+    gh.factory = _factory_payload(good.replace("ship: merge", "ship: yolo"))
+    source.begin_cycle()
+    source.github_candidates("orch:state/")
+    assert len(warnings) == 2
+
+
+def test_bad_factory_md_with_no_last_good_config_is_still_an_error() -> None:
+    gh = FakeGh(FACTORY.format(tickets="github", ship="yolo"))
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    source.begin_cycle()
+
+    assert source.github_candidates("orch:state/") == ()
+    assert [repo for repo, _ticket, _error in errors] == ["acme/widgets"]
+    with pytest.raises(PollSourceError):
+        source.factory_context(source.config.projects[0])
+
+
 def test_gh_timeout_is_retried_with_backoff_and_a_short_timeout() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="merge"))
     timeouts: list[float] = []
