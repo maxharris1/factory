@@ -196,7 +196,7 @@ class QuestionsMixin:
                 ),
                 instruction=_comment_link(comment),
                 resume=True,
-                update=UpdateScope.from_detail(prior or {}),
+                update=UpdateScope.from_detail(prior or {}, head),
             ),
         )
         with self._connect() as connection:

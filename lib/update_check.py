@@ -38,8 +38,10 @@ class UpdateScope:
     commits: tuple[str, ...]
 
     @classmethod
-    def from_detail(cls, detail: dict[str, object]) -> UpdateScope | None:
-        if detail.get("kind") != "update":
+    def from_detail(
+        cls, detail: dict[str, object], head: str | None
+    ) -> UpdateScope | None:
+        if detail.get("kind") != "update" or detail.get("head") != head:
             return None
         return cls(
             str(detail["last_reviewed_head"]),

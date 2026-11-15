@@ -211,3 +211,45 @@ def test_an_update_review_keeps_its_scope_when_it_resumes_after_an_answer(
     )
     assert "--remerge-diff" in brief
     assert "Read the whole diff" not in brief
+
+
+def test_a_resumed_review_at_a_newer_head_does_not_inherit_an_older_update_scope(
+    tmp_path: Path,
+) -> None:
+    board, pr, _approve = conflicted(tmp_path)
+    board.verdict = UpdateClass(
+        False, "merge resolution", UpdateScope(sha(1), sha(2), ())
+    )
+    board.finish("claude")
+    pr.push(sha(2))
+    board.ready(pr, sha(2))
+    board.poll()
+    merge_only = board.claim("codex")
+    pr.push(sha(4))
+    ready = board.ready(pr, sha(4))
+    board.poll()
+    assert board.outcome(ready) == "queued-review"
+    assert "kind" not in json.loads(board.jobs("review")[-1]["detail"])
+    board.post(
+        pr,
+        "late-question",
+        "<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\nWhich behavior?",
+        "codex-login",
+    )
+    board.queue.finish(merge_only.id, owner="codex", handoff_comment_id="late-question")
+    board.poll()
+    board.post(pr, "answer", ANSWERS, "grok-login")
+    board.poll()
+
+    assert board.outcome("answer") == "resumed-review"
+    row = board.jobs("review")[-1]
+    assert row["head"] == sha(4)
+    detail = json.loads(row["detail"])
+    assert detail["resume"] is True
+    assert "kind" not in detail
+    assert "update_merge" not in detail
+    brief = render_brief(
+        queue_job(row), bot="codex-bot", context=None, factory_root=BOX_FACTORY_ROOT
+    )
+    assert "Read the whole diff" in brief
+    assert "--remerge-diff" not in brief
