@@ -1,9 +1,5 @@
-"""Split the suite into N stable slices so CI can run them as parallel jobs (#311).
-
-Loaded from pytest.ini with `-p tests.shard`. `--shard K/N` keeps the tests
-whose node id hashes (crc32, so every process agrees) to slice K of N and
-deselects the rest. Every xdist worker deselects the same set, so their
-collections still match. Without `--shard`, nothing changes.
+"""Node ids hash with crc32, so every process agrees. Every xdist worker
+deselects the same set, so their collections still match.
 """
 
 from __future__ import annotations

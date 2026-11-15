@@ -437,7 +437,6 @@ def test_ci_runs_once_per_push() -> None:
 
 
 def test_ci_cancels_superseded_pr_runs_and_runs_every_shard_and_serial_test() -> None:
-    """#311: PR runs cancel each other, main runs never do; shards plus the serial pass cover the suite."""
     import yaml
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
@@ -447,11 +446,11 @@ def test_ci_cancels_superseded_pr_runs_and_runs_every_shard_and_serial_test() ->
 
     test = workflow["jobs"]["test"]
     shards = test["strategy"]["matrix"]["shard"]
-    assert shards == [1, 2, 3]
+    assert shards == list(range(1, len(shards) + 1))
     pytest_runs = [step["run"] for step in test["steps"] if "pytest" in step.get("run", "")]
     assert len(pytest_runs) == 1
     assert '-m "not serial"' in pytest_runs[0]
-    assert f"--shard ${{{{ matrix.shard }}}}/{len(shards)}" in pytest_runs[0]
+    assert "--shard ${{ matrix.shard }}/${{ strategy.job-total }}" in pytest_runs[0]
 
     runs = [step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"]]
     assert "pytest -m serial -p no:xdist" in runs

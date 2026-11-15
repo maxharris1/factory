@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.shard }}/3)
+    name: test (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
-      - run: pytest -n $(( $(nproc) * 2 )) -m "not serial" --shard ${{ matrix.shard }}/3
+      - run: pytest -n $(( $(nproc) * 2 )) -m "not serial" --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
   checks:
     runs-on: ubuntu-latest
