@@ -204,20 +204,47 @@ def _stop_survivors(before: set[int], survivors) -> list[str]:
     return described
 
 
+def _collection_leak(config: pytest.Config, before: set[int], owner: str) -> str:
+    from tests import child_reaper
+
+    root = config._tmp_path_factory.getbasetemp()
+    tag = os.environ.get(child_reaper.TAG, "")
+    described = _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))
+    return f"{owner} left processes running:\n" + "\n".join(described) if described else ""
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_make_collect_report(collector: pytest.Collector):
     from tests import child_reaper
 
     before = set(child_reaper._table())
-    report = yield
-    root = collector.config._tmp_path_factory.getbasetemp()
-    tag = os.environ.get(child_reaper.TAG, "")
-    described = _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))
-    if described:
-        leak = f"{collector.nodeid} left processes running:\n" + "\n".join(described)
+    try:
+        report = yield
+    except BaseException as interrupted:
+        if leak := _collection_leak(collector.config, before, collector.nodeid):
+            interrupted.add_note(leak)
+        raise
+    if leak := _collection_leak(collector.config, before, collector.nodeid):
         report.longrepr = f"{report.longrepr}\n\n{leak}" if report.failed else leak
         report.outcome = "failed"
     return report
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_collection(session: pytest.Session):
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    plugins = set(session.config.pluginmanager.get_plugins())
+    try:
+        return (yield)
+    finally:
+        loaded = sorted(os.path.relpath(plugin.__file__, session.config.rootpath)
+                        for plugin in session.config.pluginmanager.get_plugins() - plugins
+                        if getattr(plugin, "__file__", None))
+        owner = f"collection hooks in {', '.join(loaded)}" if loaded else "collection"
+        if leak := _collection_leak(session.config, before, owner):
+            session.ihook.pytest_collectreport(report=pytest.CollectReport("", "failed", leak, []))
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}

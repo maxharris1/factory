@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests.procs import alive
 from tests.test_conftest_isolation import _run_guarded
 
@@ -46,4 +48,44 @@ def test_a_module_that_leaks_and_then_fails_to_import_keeps_both_errors(tmp_path
     assert result.returncode != 0, result.stdout + result.stderr
     assert "ModuleNotFoundError" in result.stdout
     assert "test_leak.py left processes running" in result.stdout
+    assert not alive(pid)
+
+
+@pytest.mark.parametrize("stop", ["raise KeyboardInterrupt('collection interrupted')", "raise SystemExit(0)"])
+def test_a_module_that_leaks_and_then_interrupts_collection_names_the_leak(tmp_path: Path, stop: str) -> None:
+    result, pid = _import_loop(tmp_path, stop)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test_leak.py left processes running" in result.stdout + result.stderr
+    assert not alive(pid)
+
+
+HOOK_LOOP = '''
+import os
+import subprocess
+
+pytest_plugins = [__name__]
+
+
+def {hook}(session):
+    child = subprocess.Popen(["sleep", "60"], env={{"PATH": os.environ["PATH"]}}, start_new_session=True)
+    open({record!r}, "w").write(str(child.pid))
+
+
+def test_passes():
+    pass
+'''
+
+
+@pytest.mark.parametrize("hook", ["pytest_collection_modifyitems", "pytest_collection_finish"])
+@pytest.mark.parametrize("extra", [[], ["--collect-only"]])
+def test_a_module_whose_collection_hook_leaves_a_loop_running_fails_the_run(
+    tmp_path: Path, hook: str, extra: list[str]
+) -> None:
+    record = tmp_path / "pid"
+    result = _run_guarded(tmp_path, HOOK_LOOP.format(hook=hook, record=str(record)), *extra)
+    pid = int(record.read_text(encoding="utf-8"))
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "test_leak.py" in result.stdout and "left processes running" in result.stdout
+    assert f"{pid} HOME= sleep 60" in result.stdout
+    assert "1 passed" not in result.stdout
     assert not alive(pid)
