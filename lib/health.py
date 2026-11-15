@@ -1304,9 +1304,7 @@ def df_script(directory: str) -> str:
 
 
 def parse_df(text: str) -> tuple[int | None, int | None]:
-    """The filesystem and mount names may both hold spaces, and GNU df may
-    wrap the row after a long filesystem name. The header names the value
-    columns between them, and the mount is the absolute path after them."""
+    """The filesystem and mount names may both hold spaces."""
     columns: dict[str, str] = {}
     for table in re.split(r"^(?=Filesystem)", text, flags=re.MULTILINE):
         lines = table.split("\n", 1)
