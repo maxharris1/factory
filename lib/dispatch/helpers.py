@@ -89,6 +89,15 @@ ACTED_VERDICT_OUTCOMES = frozenset(
 )
 
 
+QUESTIONS_OUTCOMES = frozenset(
+    {"rejected-questions-author", "no-questions", "waiting-max", "already-waiting-max"}
+)
+
+
+def _questions_outcome(outcome: str) -> bool:
+    return outcome in QUESTIONS_OUTCOMES or outcome.startswith("failed-questions-")
+
+
 def _acted_verdict(outcome: str | None) -> bool:
     return outcome is not None and (
         outcome in ACTED_VERDICT_OUTCOMES

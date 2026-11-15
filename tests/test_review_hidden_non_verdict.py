@@ -138,3 +138,57 @@ def test_a_hidden_unregistered_ready_never_answers_the_review(tmp_path: Path) ->
     fixes = _active_fixes(board)
     assert [job["source_comment_id"] for job in fixes] == ["verdict-real"]
     assert CI_LOG in instruction(fixes[0])
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("upgrade", ["missing-table", "existing-table"])
+@pytest.mark.parametrize(
+    ("body", "outcome"),
+    [("None.", "no-questions"), ("1. Should the retry cap be 3?", "waiting-max")],
+)
+def test_a_hidden_registered_questions_handoff_never_answers_the_review(
+    tmp_path: Path, upgrade: str, body: str, outcome: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = board.open("42", older)
+    pr.push(older, ci="pending")
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    board.queue.finish(build.id, owner="claude", handoff_comment_id="ready-older")
+    board.ready(pr, older, "ready-older")
+    board.poll()
+    review = board.claim("codex")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id="review-questions")
+    pr.push(sha(2), ci="pending")
+    board.post(
+        pr,
+        "review-questions",
+        f"<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\n## Questions\n{body}\n",
+        "codex-login",
+    )
+    board.poll()
+    assert board.outcome("review-questions") == outcome
+    _hide(pr, "review-questions")
+    _upgrade(board, tmp_path, upgrade, "review-questions")
+    pr.push(older, ci="failure")
+    board.queue.enqueue(
+        JobRequest(
+            repo=pr.repo,
+            ticket_id=pr.number,
+            action="build",
+            recipient="claude",
+            source_comment_id="build2",
+            timeout_seconds=5400,
+            head=older,
+        ),
+        dedupe_key="build2",
+    )
+    rebuild = board.claim("claude")
+    board.queue.finish(rebuild.id, owner="claude", handoff_comment_id="red-ready")
+    board.ready(pr, older, "red-ready")
+    board.poll()
+
+    assert _active_fixes(board) == []
+    assert board.outcome("red-ready") == "ci-red-in-flight"
