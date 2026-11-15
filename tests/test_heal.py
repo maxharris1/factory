@@ -387,3 +387,19 @@ def test_health_help_names_only_subcommands_the_parser_accepts(capsys, tmp_path)
         err = capsys.readouterr().err
         assert f"unrecognized arguments: {verb}" not in err, line
         assert "invalid choice" not in err, line
+
+
+HELD_TUNNEL = component("tunnel", bot="", state="down",
+                        reason="port held by another owner: 8787 on pc-wsl-cursor-bot")
+
+
+def test_a_tunnel_whose_port_another_owner_holds_alerts_once_and_is_not_restarted(
+    tmp_path: Path,
+) -> None:
+    actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL))
+    assert kinds(actions) == [(ESCALATE, "tunnel @ box"), (SKIP, "tunnel @ box")]
+    assert runs.calls == [] and len(posts.calls) == 1
+    for later in (NOW + 120, NOW + 3 * heal.WINDOW_SECONDS):
+        actions, runs, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=later)
+        assert kinds(actions) == [(SKIP, "tunnel @ box")]
+        assert runs.calls == [] and posts.calls == []

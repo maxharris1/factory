@@ -644,11 +644,20 @@ checkout's file, so a `git pull` never rewrites a script a running loop reads.
 - `_tunnel-loop` runs `ssh -N -o ExitOnForwardFailure=yes -R
   127.0.0.1:PORT:127.0.0.1:PORT HOST`. A refused forward is logged as
   `forward refused: port PORT already forwarded on HOST; retry in Ns`.
+  After `LINEAR_WEBHOOK_REFUSED_LIMIT` refusals in a row (default 3), the
+  loop writes `linear-webhook-tunnel.held` (`PORT HOST`) and starts no
+  more ssh for that port and host (issue #427). `orch health` then shows the
+  tunnel down with `port held by another owner: PORT on HOST`, and self-heal
+  raises one alert and does not restart it. Free the port and run `start`,
+  or move this device to another port and run `restart`.
 - After a run shorter than 30 seconds, both wait `LINEAR_WEBHOOK_RETRY_SEC`
   (default 5), doubling up to `LINEAR_WEBHOOK_RETRY_MAX_SEC` (default 60). A
   longer run resets the wait.
-- `LINEAR_WEBHOOK_PORT` defaults to 8787 and `LINEAR_WEBHOOK_TUNNEL_HOST` to
-  `pc-wsl-cursor-bot`; an empty host runs no tunnel.
+- `LINEAR_WEBHOOK_PORT` is the port `serve` binds and the tunnel forwards,
+  the same on the box and on the tunnel host. It defaults to the number in
+  `~/.config/factory/linear-webhook.port` (this device's setting), else 8787.
+  `LINEAR_WEBHOOK_TUNNEL_HOST` defaults to `pc-wsl-cursor-bot`; an empty host
+  runs no tunnel. The Funnel on the tunnel host must point at the same port.
 
 Each loop is a singleton per state directory: it holds an exclusive `flock`
 on `linear-webhook-listener.lock` or `linear-webhook-tunnel.lock` for its

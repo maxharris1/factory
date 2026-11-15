@@ -1894,3 +1894,27 @@ def test_devices_out_of_sync_leave_orch_health_exit_alone(tmp_path: Path, capsys
     after = health.main(argv, clock=lambda: NOW)
     assert json.loads(capsys.readouterr().out)["devices_out_of_sync"] >= 1
     assert after == before
+
+
+def _tunnel(report: health.HealthReport) -> list[health.Component]:
+    return [c for c in report.components if c.component == "tunnel"]
+
+
+def test_a_tunnel_whose_port_another_owner_holds_says_so(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    store(db, NOW - 600).beat("tunnel", "box", pid=7)
+    store(db, NOW - 5).checked("tunnel", "box", pid=7)
+    assert [c.reason for c in _tunnel(health.load_report(db, NOW))] == [
+        "unreachable, last reached 10m ago"]
+    (db.parent / "linear-webhook-tunnel.held").write_text("8788 pc-wsl-cursor-bot\n")
+    report = health.load_report(db, NOW)
+    assert [(c.state, c.reason) for c in _tunnel(report)] == [
+        ("down", "port held by another owner: 8788 on pc-wsl-cursor-bot")]
+    store(db, NOW - 1).beat("tunnel", "box", pid=7)
+    assert [(c.state, c.reason) for c in _tunnel(health.load_report(db, NOW))] == [("up", "")]
+
+
+def test_a_malformed_held_record_is_ignored(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    (db.parent / "linear-webhook-tunnel.held").write_text("8787 $(evil)\n")
+    assert health.read_tunnel_held(db) is None

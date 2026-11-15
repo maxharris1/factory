@@ -5,7 +5,7 @@
 # ~/.local/share/factory/linear-webhook-service.sh.
 #
 #   linear-webhook-service.sh start              start both loops unless running;
-#                                                clears a stop
+#                                                clears a stop and a held port
 #   linear-webhook-service.sh stop               stop every loop and hold them stopped
 #   linear-webhook-service.sh restart            stop, then start
 #   linear-webhook-service.sh status             exit 0 if every loop runs, 3 if not
@@ -56,6 +56,12 @@
 # LINEAR_WEBHOOK_RETRY_SEC (default 5) doubles up to
 # LINEAR_WEBHOOK_RETRY_MAX_SEC (default 60), and resets after a longer run.
 # A tunnel refused with "remote port forwarding failed" is logged as such.
+# After LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row (default 3) the loop
+# writes linear-webhook-tunnel.held (`PORT HOST`) and starts no more ssh for that
+# port and host: health reports "port held by another owner" and self-heal
+# raises one alert instead of restarting (issue #427). A loop started on
+# another port or host removes the record; on the same port and host it waits
+# until `start` removes it. restart keeps it.
 #
 # stop finds every loop for this state directory: each process whose argv is
 # `.../linear-webhook-service.sh _listener-loop|_tunnel-loop` (any copy of the
@@ -69,7 +75,12 @@
 # from another PID namespace, stop says so and exits 1, and so does restart.
 #
 # Settings, from the environment:
-#   LINEAR_WEBHOOK_PORT          listener and forwarded port (default 8787)
+#   LINEAR_WEBHOOK_PORT          the port serve binds and the tunnel forwards,
+#                                the same on both ends of the tunnel; default:
+#                                the number in ~/.config/factory/linear-webhook.port
+#                                (this device's setting), else 8787
+#   LINEAR_WEBHOOK_REFUSED_LIMIT refusals in a row before the tunnel gives up
+#                                (default 3)
 #   LINEAR_WEBHOOK_TUNNEL_HOST   ssh alias for the tunnel (default
 #                                pc-wsl-cursor-bot; empty runs no tunnel)
 #   LINEAR_WEBHOOK_RETRY_SEC, LINEAR_WEBHOOK_RETRY_MAX_SEC   backoff (above)
@@ -79,6 +90,7 @@
 #
 # Files in the state directory: linear-webhook-{listener,tunnel}.{lock,pid,log},
 # linear-webhook-{listener,tunnel}-child.{lock,pid},
+# linear-webhook-tunnel.held (see above),
 # linear-webhook.stopped (the stop hold), linear-webhook-service.lock
 # (serializes start/stop/ensure) and linear-webhook-service.log (autostart).
 #
@@ -112,7 +124,14 @@ SERVICE_LOG="${STATE}/linear-webhook-service.log"
 MARKER="# factory-linear-webhook"
 CRONTAB="${ORCH_CRONTAB:-crontab}"
 ORCH="${ORCH_BIN:-${HOME}/.local/bin/orch}"
-PORT="${LINEAR_WEBHOOK_PORT:-8787}"
+PORT_FILE="${CONFIG}/linear-webhook.port"
+PORT="${LINEAR_WEBHOOK_PORT:-}"
+if [[ -z "$PORT" && -r "$PORT_FILE" ]]; then
+    read -r PORT <"$PORT_FILE" || true
+fi
+PORT="${PORT:-8787}"
+HELD="${STATE}/linear-webhook-tunnel.held"
+REFUSED_LIMIT="${LINEAR_WEBHOOK_REFUSED_LIMIT:-3}"
 TUNNEL_HOST="${LINEAR_WEBHOOK_TUNNEL_HOST-pc-wsl-cursor-bot}"
 RETRY="${LINEAR_WEBHOOK_RETRY_SEC:-5}"
 RETRY_MAX="${LINEAR_WEBHOOK_RETRY_MAX_SEC:-60}"
@@ -147,8 +166,8 @@ need_flock() {
 check_settings() {
     local number='^[0-9]+([.][0-9]+)?$'
     if ! [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ && "$RETRY" =~ $number && "$RETRY_MAX" =~ $number &&
-        "$START_WAIT" =~ ^[0-9]+$ && "$STOP_WAIT" =~ ^[0-9]+$ ]]; then
-        say "LINEAR_WEBHOOK_PORT, *_SEC and *_WAIT must be numbers" >&2
+        "$START_WAIT" =~ ^[0-9]+$ && "$STOP_WAIT" =~ ^[0-9]+$ && "$REFUSED_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+        say "LINEAR_WEBHOOK_PORT (or ${PORT_FILE}), *_SEC, *_WAIT and *_LIMIT must be numbers" >&2
         exit 2
     fi
     if [[ -n "$TUNNEL_HOST" && ! "$TUNNEL_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]*$ ]]; then
@@ -286,15 +305,27 @@ listener_loop() {
     done
 }
 
+held_here() {
+    [[ "$(cat "$HELD" 2>/dev/null)" == "${PORT} ${TUNNEL_HOST}" ]]
+}
+
 tunnel_loop() {
-    local delay="$RETRY" started errors
+    local delay="$RETRY" started errors refused=0 waiting=""
     [[ -n "$TUNNEL_HOST" ]] || {
         say "LINEAR_WEBHOOK_TUNNEL_HOST is empty; no tunnel" >&2
         exit 1
     }
     become_loop tunnel
     errors="${STATE}/linear-webhook-tunnel.stderr"
+    held_here || rm -f "$HELD"
     while ! stopping; do
+        if held_here; then
+            [[ -n "$waiting" ]] || say "port ${PORT} on ${TUNNEL_HOST} is held by another owner; not starting ssh until start clears ${HELD}"
+            waiting=1
+            pause "$RETRY_MAX"
+            continue
+        fi
+        waiting=""
         started="$SECONDS"
         say "starting ssh -R 127.0.0.1:${PORT}:127.0.0.1:${PORT} ${TUNNEL_HOST}"
         if ! run_locked tunnel ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
@@ -310,8 +341,16 @@ tunnel_loop() {
         stopping && break
         ((SECONDS - started < HEALTHY_RUN)) || delay="$RETRY"
         if grep -q "remote port forwarding failed" "$errors" 2>/dev/null; then
+            refused=$((refused + 1))
+            if ((refused >= REFUSED_LIMIT)); then
+                printf '%s %s\n' "$PORT" "$TUNNEL_HOST" >"$HELD"
+                say "forward refused ${refused} times: port ${PORT} on ${TUNNEL_HOST} is held by another owner; giving up (free the port or set ${PORT_FILE}, then run start)"
+                refused=0
+                continue
+            fi
             say "forward refused: port ${PORT} already forwarded on ${TUNNEL_HOST}; retry in ${delay}s"
         else
+            refused=0
             say "ssh exited ${STATUS}; retry in ${delay}s"
         fi
         pause "$delay"
@@ -611,6 +650,8 @@ status() {
         pid="$(head -n 1 "$(pid_file "$mode")" 2>/dev/null || true)"
         if lock_held "$mode"; then
             echo "${mode}: running (lock held; pidfile names ${pid:-nothing})"
+            [[ "$mode" != tunnel ]] || ! held_here ||
+                echo "tunnel: port ${PORT} on ${TUNNEL_HOST} held by another owner; run start once it is free"
         else
             echo "${mode}: not running"
             status=3
@@ -694,7 +735,7 @@ remove_autostart() {
 case "$COMMAND" in
     _listener-loop) factory_host_pidns_or_refuse _listener-loop && check_settings && need_flock && listener_loop ;;
     _tunnel-loop) factory_host_pidns_or_refuse _tunnel-loop && check_settings && need_flock && tunnel_loop ;;
-    start) factory_host_pidns_or_refuse start && check_settings && need_flock && service_lock && start ;;
+    start) factory_host_pidns_or_refuse start && check_settings && need_flock && service_lock && rm -f "$HELD" && start ;;
     stop) factory_host_pidns_or_refuse stop && need_flock && service_lock && stop ;;
     restart) factory_host_pidns_or_refuse restart && check_settings && need_flock && service_lock && restart ;;
     status) need_flock && status ;;

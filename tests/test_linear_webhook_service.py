@@ -278,7 +278,7 @@ def test_refused_forward_backs_off_doubling_to_the_cap(home: Path, tmp_path: Pat
         loop = subprocess.Popen(
             ["bash", str(SERVICE), "_tunnel-loop"],
             env=_env(
-                home, FAKE_SSH_FORWARD_FAIL="1",
+                home, FAKE_SSH_FORWARD_FAIL="1", LINEAR_WEBHOOK_REFUSED_LIMIT="10",
                 LINEAR_WEBHOOK_RETRY_SEC="0.25", LINEAR_WEBHOOK_RETRY_MAX_SEC="1",
             ),
             stdout=sink,
@@ -840,3 +840,59 @@ def test_ensure_is_silent_while_everything_runs(home: Path) -> None:
     _wait_for(lambda: set(_children(home)) == {"serve", "ssh"}, what="serve and ssh")
     result = _service(home, "ensure")
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def _ssh_calls_settle(home: Path, count: int) -> None:
+    _wait_for(lambda: len(_calls(home, "ssh")) == count, timeout=20, what=f"{count} ssh calls")
+    time.sleep(0.5)
+    assert len(_calls(home, "ssh")) == count
+
+
+def test_a_refused_forward_gives_up_after_the_limit_as_port_held_by_another_owner(
+    home: Path,
+) -> None:
+    port = _port_of(home)
+    settings = dict(FAKE_SSH_FORWARD_FAIL="1", LINEAR_WEBHOOK_REFUSED_LIMIT="2",
+                    LINEAR_WEBHOOK_RETRY_SEC="0.1", LINEAR_WEBHOOK_RETRY_MAX_SEC="0.2")
+    held = _state(home) / "linear-webhook-tunnel.held"
+    assert _service(home, "ensure", **settings).returncode == 0
+
+    _wait_for(held.exists, timeout=20, what="the held record")
+    assert held.read_text() == f"{port} test-host\n"
+    _ssh_calls_settle(home, 2)
+    assert all("ExitOnForwardFailure=yes" in call for call in _calls(home, "ssh"))
+    log = (_state(home) / "linear-webhook-tunnel.log").read_text()
+    assert f"forward refused 2 times: port {port} on test-host is held by another owner" in log
+    status = _service(home, "status", **settings)
+    assert f"port {port} on test-host held by another owner" in status.stdout
+
+    assert _service(home, "restart", **settings).returncode == 0
+    _ssh_calls_settle(home, 2)
+    assert held.exists(), "restart keeps the held record"
+
+    assert _service(home, "start", **settings).returncode == 0
+    _wait_for(lambda: len(_calls(home, "ssh")) > 2, timeout=20, what="ssh after start")
+
+
+def test_a_tunnel_on_another_port_drops_the_held_record(home: Path) -> None:
+    held = _state(home) / "linear-webhook-tunnel.held"
+    held.parent.mkdir(parents=True)
+    held.write_text("1 test-host\n")
+    assert _service(home, "ensure").returncode == 0
+    _wait_for(lambda: _forward_owner(home) is not None, what="the forward")
+    assert not held.exists()
+
+
+def test_the_device_port_file_sets_both_ends_of_the_tunnel_and_the_listener(home: Path) -> None:
+    port = _free_port()
+    config = home / ".config" / "factory"
+    config.mkdir(parents=True)
+    (config / "linear-webhook.port").write_text(f"{port}\n")
+    env = _env(home)
+    del env["LINEAR_WEBHOOK_PORT"]
+    result = subprocess.run(["bash", str(SERVICE), "ensure"], env=env, text=True,
+                            capture_output=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    _wait_for(lambda: _calls(home, "ssh") and _calls(home, "orch"), what="ssh and serve")
+    assert f"-R 127.0.0.1:{port}:127.0.0.1:{port} test-host" in _calls(home, "ssh")[0]
+    assert _calls(home, "orch")[0] == f"linear-webhook serve --bind 127.0.0.1:{port}"

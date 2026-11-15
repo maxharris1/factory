@@ -20,7 +20,11 @@ Every long-running part writes one heartbeat row every BEAT_SECONDS (15):
   device that answered counts as seen;
 * `tunnel`: the Linear listener's Funnel, from a GET the listener sends to
   `linear_webhook.public_url` every BEAT_SECONDS; only the listener's own
-  405 for that path counts as seen.
+  405 for that path counts as seen. While the tunnel is not up and the
+  tunnel loop has given up on a port another owner holds on the tunnel host
+  (`linear-webhook-tunnel.held` beside orch.db, written by
+  deploy/linear-webhook-service.sh, issue #427), its reason is
+  "port held by another owner: PORT on HOST".
 
 A row is (component, device, bot, pid, started_at, last_seen, version,
 interval_seconds, stopped_at, checked_at), one per process: the key holds
@@ -121,6 +125,9 @@ BUSY_SECONDS = 0.5
 DB_BUSY_SECONDS = 5.0
 TUNNEL_TIMEOUT = 10.0
 TUNNEL_SEEN = 405
+TUNNEL_HELD = "linear-webhook-tunnel.held"
+PORT_HELD = "port held by another owner"
+_HELD_RECORD = re.compile(r"([1-9][0-9]{0,4}) ([A-Za-z0-9][A-Za-z0-9._@-]{0,63})")
 MIN_INTERVAL = 5.0
 MAX_INTERVAL = EVERY_MINUTES_MAX * 60.0
 DEFAULT_DEVICE = "box"
@@ -1138,6 +1145,7 @@ def build_report(
     expected: Expected | None = None,
     checkout_version: str = "unknown",
     devices: Sequence[DeviceSync] = (),
+    tunnel_held: str | None = None,
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
 
@@ -1146,7 +1154,8 @@ def build_report(
     the registry of components that should be running (default: the poller
     on the box); `checkout_version` is the checkout's commit: a poller,
     waiter or listener whose row names another known commit runs stale
-    code; `devices` are the factory checkouts' sync states."""
+    code; `devices` are the factory checkouts' sync states; `tunnel_held`
+    is the `PORT on HOST` the tunnel loop gave up on, if any."""
     checkout = checkout_version
     checkouts = tuple(devices)
     if rows is None:
@@ -1156,6 +1165,8 @@ def build_report(
     best: dict[tuple[str, str, str], Component] = {}
     for row in _latest_checks(rows):
         state, reason = classify(row, now)
+        if row.component == TUNNEL and state != UP and tunnel_held:
+            reason = f"{PORT_HELD}: {tunnel_held}"
         item = Component(
             component=row.component,
             device=row.device,
@@ -1226,7 +1237,18 @@ def load_report(
                             code_version=factory_version(), devices=devices)
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
                         expected=expected_components(machines, orch),
-                        checkout_version=factory_version(), devices=devices)
+                        checkout_version=factory_version(), devices=devices,
+                        tunnel_held=read_tunnel_held(db))
+
+
+def read_tunnel_held(db: Path) -> str | None:
+    """`PORT on HOST` from the tunnel loop's held record beside orch.db, if any."""
+    try:
+        text = (db.parent / TUNNEL_HELD).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    match = _HELD_RECORD.fullmatch(text)
+    return f"{match[1]} on {match[2]}" if match else None
 
 
 def read_device_sync(db: Path) -> list[device_sync.Row]:

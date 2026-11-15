@@ -25,6 +25,10 @@ Per component (its health label), in order:
    considered, so one account never acts on another user's services.
 2. A component held stopped (its *.stopped marker) is skipped: self-heal
    never overrides an operator's stop.
+2a. A tunnel down because another owner holds its port on the tunnel host
+   (health's "port held by another owner", issue #427) is not restarted:
+   a restart cannot win the port. It escalates once when it enters that
+   state, then is skipped quietly until it leaves it.
 3. A component restarted under SETTLE_SECONDS ago is left to come up.
 4. Down: restart. Stale code (its heartbeat names another commit than the
    checkout): restart once idle. The Linear listener is busy while a
@@ -179,6 +183,11 @@ def service_log(service: str, state_dir: Path) -> Path:
     return state_dir / f"waiter-{service.split(':', 1)[1]}-service.log"
 
 
+def note(action: Action) -> str:
+    """A skip, deferral or drain as logged; repeated passes log it once."""
+    return f"{action.kind} {action.label} ({action.reason})"
+
+
 def _recent(times: Sequence[float], now: float) -> list[float]:
     return [t for t in times if now - t < WINDOW_SECONDS]
 
@@ -233,6 +242,12 @@ def decide(
         if service in facts.held:
             if need is not None:
                 actions.append(act(SKIP, "held stopped"))
+            continue
+        if item.get("state") == health.DOWN and str(item.get("reason") or "").startswith(health.PORT_HELD):
+            skip = act(SKIP, f"not restarting: {item['reason']}")
+            if key.last != note(skip):
+                actions.append(act(ESCALATE, item["reason"]))
+            actions.append(skip)
             continue
         escalation = _escalation(key, attempts, now, broken=need is not None)
         if escalation is not None:
@@ -458,10 +473,10 @@ def heal(
     for action in actions:
         key = states.setdefault(action.label, KeyState())
         if action.kind in (SKIP, DEFER, DRAIN):
-            note = f"{action.kind} {action.label} ({action.reason})"
-            if key.last != note:
-                log(note)
-            key.last = note
+            line = note(action)
+            if key.last != line:
+                log(line)
+            key.last = line
             continue
         if action.kind == ESCALATE:
             continue
