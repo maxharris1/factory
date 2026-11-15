@@ -525,7 +525,7 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT action, state, source_comment_id, detail,
+                SELECT id, action, state, source_comment_id, detail,
                        state IN ('queued', 'running')
                        OR (state = 'failed' AND failure_handled = 0) AS open
                 FROM jobs
@@ -538,6 +538,9 @@ class ReadyMixin:
             ).fetchone()
         if row is None:
             return False
+        if (row["action"], row["state"]) == ("fix", "failed") and row["open"]:
+            failed = next(job for job in self.queue.unhandled_failures() if job.id == row["id"])
+            return self._posted_handoff(failed) is None
         if row["open"]:
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(

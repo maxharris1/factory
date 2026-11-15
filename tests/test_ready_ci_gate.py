@@ -69,3 +69,29 @@ def test_a_red_ready_before_t6_retries_a_failed_fix_leaves_one_fix(
     board.poll()
 
     assert claims(board) == [(verdict_id, 2)]
+
+
+@pytest.mark.parametrize("verdict", ["revise", "approve"])
+def test_a_red_ready_after_a_failed_fix_readied_another_head_queues_a_fix(
+    tmp_path: Path, verdict: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    getattr(board, verdict)(pr, "1/3")
+    board.poll()
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, pr.head, "ready-b")
+    board.poll()
+    assert board.outcome("ready-b") == "queued-review"
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    pr.push(sha(1), ci="failure")
+    board.ready(pr, pr.head, "ready-back-on-a")
+    board.poll()
+    board.now[0] += 600
+    board.poll()
+
+    assert board.outcome("ready-back-on-a") == "queued-ci-fix"
+    assert claims(board) == [("ready-back-on-a", 1)]
