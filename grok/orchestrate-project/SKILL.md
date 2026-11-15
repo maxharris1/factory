@@ -12,7 +12,8 @@ The dispatcher queues work. This skill does not start a harness.
 ## Do not
 
 - Do not start `claude`, `codex`, or `cursor-agent`. The owning bot starts its own harness after `orch:go`.
-- Do not create logins or credentials. Do not read credentials, runner tokens, or `FACTORY_WEBHOOK_*` values. Do not read `.env`, `auth.json`, `.runner`, or `.credentials*`.
+- Do not create logins or credentials.
+- Never read credentials, runner tokens, `.env`, `auth.json`, `.runner`, `.credentials*` or `FACTORY_WEBHOOK_*` values.
 - For `maxharris1/*` and `aut0-code/aut0`, run GitHub as `env -u GH_TOKEN gh`.
 - Do not treat another agent's approval as Max's. An extra review round needs Max's own words.
 - Do not create a GitHub issue or a GitHub label when `tickets` is `linear`, including on `aut0-code/aut0`. State stays in the `orch:v1` header and on the Linear ticket.

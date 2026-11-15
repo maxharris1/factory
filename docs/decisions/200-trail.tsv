@@ -1,0 +1,7 @@
+decision	choice	why
+where tokens are dropped	harness_environ, the one function that builds the environment the waiter hands to orch job run (lib/waiter.py Waiter.__init__)	every harness run on the box inherits that dict; remote runs get an explicit remote_env and never inherit the box environment
+denylist of the four names, not a full allowlist of kept names	drop GH_TOKEN, GITHUB_TOKEN, GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN; pass every other variable through	the waiter test fixtures pass FAKE_SSH_*, FAKE_GH_STORE and harness login variables through this dict; a name allowlist would have to admit test-only names or break the box harness logins (CLAUDE_*, CODEX_HOME, provider keys) we cannot enumerate from the repo
+switch on or off	drop always, App switch on or off	every gh call already runs as env -u GH_TOKEN ... gh, so no run depended on the variables; T02c gives the token through its credential and gh helpers
+token file still readable	no change to HOME or the broker; test runs the broker credential helper under the cleaned environment	AC 2; the helper reads an explicit --dir, HOME stays
+one secret rule	SECRET_RULE in lib/brief/rules.py, rendered into every brief; the Grok skill carries the same line, and a test pins both	ticket What; the union of both old wordings, adding .credentials* to the brief
+TOKEN_VARIABLES source	import lib.github_app_token.TOKEN_VARIABLES	comment-sicko flagged a seventh copy; github_app_token is stdlib-only at import, so harness_env stays light; the other five copies stay (out of Touches)

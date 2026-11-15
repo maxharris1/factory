@@ -28,6 +28,7 @@ from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.waiter import HarnessCommand, Waiter, handoff_marker
 from lib.worktrees import pid_alive
+from tests.handoff_store import serve_job
 from tests.test_brief import FACTORY_ROOT, detail
 from tests.test_remote_start import Ssh
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, slots, state
@@ -121,6 +122,7 @@ def test_the_waiter_runs_orch_job_done_on_the_box_from_the_handoff_marker(tmp_pa
     waiter, queue, db = make_waiter(tmp_path, machines, spawn, log=log)
     job_id = enqueue(queue, "a")
     waiter.step()
+    serve_job(db, job_id, "4242")
     _finish_run(tmp_path, job_id, spawn, "working...\nORCH-HANDOFF: not-this\nORCH-HANDOFF: 4242\n")
     waiter.step()
     with sqlite3.connect(db) as connection:
@@ -247,6 +249,7 @@ def test_remote_autostart_end_to_end_over_fake_ssh(tmp_path: Path) -> None:
         environ=env,
     )
     job_id = enqueue(queue, "a")
+    serve_job(db, job_id, "5150")
     assert waiter.step() == job_id
     deadline = time.monotonic() + 30
     while waiter.running() and time.monotonic() < deadline:
@@ -323,6 +326,7 @@ def test_a_marker_from_an_earlier_run_in_the_log_does_not_count(tmp_path: Path) 
 def test_a_clean_last_line_marker_before_the_runners_own_lines_is_done(tmp_path: Path) -> None:
     waiter, spawn, db, job_id = _remote_run(tmp_path)
     waiter.step()
+    serve_job(db, job_id, "4242")
     _finish_run(tmp_path, job_id, spawn, (
         "working\nORCH-HANDOFF: 4242\n\n"
         f"orch job run: released pc slot of job {job_id}\n"
@@ -331,8 +335,9 @@ def test_a_clean_last_line_marker_before_the_runners_own_lines_is_done(tmp_path:
     assert _done_row(db, job_id) == ("done", "4242")
 
 
-def test_handoff_marker_is_the_final_harness_line_only() -> None:
-    assert handoff_marker("ORCH-HANDOFF: 1\nmore output") is None
+def test_handoff_marker_is_the_last_marker_line_of_the_harness() -> None:
+    # #192: prose may follow the marker (tests/test_marker_parser.py).
+    assert handoff_marker("ORCH-HANDOFF: 1\nmore output") == "1"
     assert handoff_marker("ORCH-HANDOFF: 1\norch job run: released pc slot of job x\n") == "1"
     assert handoff_marker("ORCH-HANDOFF: 1\nORCH-HANDOFF: $(id)") is None
 
@@ -377,6 +382,7 @@ def test_a_restarted_waiter_finishes_a_remote_run_once(tmp_path: Path) -> None:
     assert second.running() == {job_id}
     assert _done_row(db, job_id) == ("running", None)
 
+    serve_job(db, job_id, "4242")
     job_dir = tmp_path / "state" / "jobs" / job_id
     with open(job_dir / "run.log", "a", encoding="utf-8") as handle:
         handle.write("ORCH-HANDOFF: 4242\n")

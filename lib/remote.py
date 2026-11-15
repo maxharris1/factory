@@ -109,9 +109,12 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   fences the start it follows.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
-password prompt), a connect timeout and server keepalives. Tests replace
-it, or put a fake `ssh` first on PATH; nothing here contacts a real host
-on its own.
+password prompt), a connect timeout and server keepalives. `SshTransport`
+sends each call through one ControlMaster per alias and bot user (#222,
+lib/ssh_mux.py): a stale master is rebuilt inside the call, a device that
+cannot be reached still ends 255, and `ORCH_SSH_MUX=off` turns reuse off.
+Tests replace it, or put a fake `ssh` first on PATH; nothing here contacts
+a real host on its own.
 """
 
 from __future__ import annotations
@@ -124,6 +127,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from lib.handoff_marker import MARKER_LINE_LIMIT, MARKER_PREFIX, MARKER_SEARCH_LINES, RUNNER_LOG_PREFIX
+from lib.ssh_mux import Multiplexer
 
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
@@ -621,11 +627,14 @@ ENV_FILE = "env"
 
 # The run's handoff, by the box's rule for what it relays: a line that is a
 # JSON object is a stream event (lib/telemetry.py), whose final message
-# (`result`, or a completed `agent_message`) gives its ORCH-HANDOFF line
-# (telemetry.handoff_line) at the next end event (`result`,
-# `turn.completed`) or the end of the log; any other non-blank line is
-# relayed as is. Prints the last line relayed when it is an ORCH-HANDOFF line.
-HANDOFF_AWK = r"""
+# (`result`, or a completed `agent_message`) gives its deciding marker line
+# at the next end event (`result`, `turn.completed`) or the end of the log;
+# any other line is relayed as is. Prints the marker line that decides the
+# relayed lines.
+HANDOFF_AWK = (
+    f'BEGIN {{ lines = {MARKER_SEARCH_LINES}; limit = {MARKER_LINE_LIMIT}; '
+    f'runner = "{RUNNER_LOG_PREFIX}"; prefix = "{MARKER_PREFIX}" }}'
+) + r"""
 function value(line, key,    i, n, c, h, out) {
     found = 0
     if (!match(line, "\"" key "\"[ \t]*:[ \t]*\"")) return ""
@@ -647,28 +656,33 @@ function value(line, key,    i, n, c, h, out) {
     }
     return ""
 }
-function handoff(text,    parts, k, line) {
+function strip(line) { sub(/^[ \t\r]+/, "", line); sub(/[ \t\r]+$/, "", line); return line }
+function kept(line) { return line != "" && index(line, runner) != 1 && line !~ /^```[A-Za-z0-9_-]*$/ }
+function candidate(line) { sub(/^`+/, "", line); return index(line, prefix) == 1 }
+function handoff(text,    parts, k, n, line) {
     gsub(/\r/, "\n", text)
-    for (k = split(text, parts, "\n"); k > 0; k--) {
-        line = parts[k]
-        sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
-        if (line != "") break
+    n = 0
+    for (k = split(text, parts, "\n"); k > 0 && n < lines; k--) {
+        line = strip(parts[k])
+        if (!kept(line)) continue
+        n++
+        if (candidate(line)) return substr(line, 1, limit)
     }
-    return (k > 0 && line ~ /^ORCH-HANDOFF:/ && length(line) <= 113) ? line : ""
+    return ""
 }
-function emit(line) { if (line != "") { last = line; ok = 1 } }
+function relay(line) { line = strip(line); if (kept(line)) seen[count++ % lines] = line }
 /^[ \t]*\{.*\}[ \t\r]*$/ {
     if ($0 ~ /"type"[ \t]*:[ \t]*"result"/) text = value($0, "result")
     else if ($0 ~ /"type"[ \t]*:[ \t]*"item\.completed"/ && $0 ~ /"type"[ \t]*:[ \t]*"agent_message"/) text = value($0, "text")
     else found = 0
     if (found) { final = text; pending = 1 }
-    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { emit(handoff(final)); pending = 0 }
+    if (pending && $0 ~ /"type"[ \t]*:[ \t]*"(result|turn\.completed)"/) { relay(handoff(final)); pending = 0 }
     next
 }
-NF { last = $0; ok = 0 }
+{ relay($0) }
 END {
-    if (pending) emit(handoff(final))
-    if (ok || last ~ /^[ \t]*ORCH-HANDOFF: /) print last
+    if (pending) relay(handoff(final))
+    for (k = count - 1; k >= 0 && k >= count - lines; k--) if (candidate(seen[k % lines])) { print seen[k % lines]; exit }
 }
 """
 
@@ -1032,16 +1046,43 @@ class ByteTransport(Transport, Protocol):
 
 
 class SshTransport:
-    """The real transport: the `ssh` on PATH, argv only, never a shell."""
+    """The real transport: the `ssh` on PATH, argv only, never a shell.
+
+    Calls built by `ssh_argv` go through one ControlMaster per alias and
+    bot user (`lib/ssh_mux.py`, issue #222); any other argv runs as given.
+    """
+
+    def __init__(self, mux: Multiplexer | None = None):
+        self.mux = mux or Multiplexer(binary=SSH_BINARY, options=SSH_OPTIONS)
+
+    def _spawn(
+        self, argv: Sequence[str], *, timeout: float, input: bytes | None, capture: bool
+    ) -> subprocess.CompletedProcess:
+        """Run argv; a timeout or a failed spawn raises, after the mux is told."""
+        prepared = self.mux.prepare(argv)
+        code: int | None = None
+        try:
+            if capture:
+                completed = subprocess.run(
+                    prepared.argv, input=input or b"", capture_output=True,
+                    timeout=timeout, check=False,
+                )
+            else:
+                completed = subprocess.run(
+                    prepared.argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=timeout, check=False,
+                )
+            code = completed.returncode
+            return completed
+        finally:
+            self.mux.settle(prepared, code)
 
     def exchange(
         self, argv: Sequence[str], *, timeout: float, input: bytes = b""
     ) -> Exchanged:
         """Run argv with input on stdin; a timeout or a failed spawn is unreachable."""
         try:
-            completed = subprocess.run(
-                list(argv), input=input, capture_output=True, timeout=timeout, check=False
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
         except OSError as exc:
@@ -1052,14 +1093,7 @@ class SshTransport:
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         try:
-            completed = subprocess.run(
-                list(argv),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=None, capture=False)
         except subprocess.TimeoutExpired:
             return SSH_UNREACHABLE
         except OSError:
@@ -1071,13 +1105,7 @@ class SshTransport:
     ) -> Called:
         """Run argv, feeding input (else /dev/null) and capturing its output."""
         try:
-            completed = subprocess.run(
-                list(argv),
-                input=input if input is not None else b"",
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Called(124, "", f"{_CHECKOUT_MARK} timed out after {timeout:g} seconds")
         except OSError as exc:
