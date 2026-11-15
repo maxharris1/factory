@@ -395,6 +395,23 @@ def test_active_jobs_count_their_tickets_accepted_retries(tmp_path: Path) -> Non
     assert all("retries" not in row for row in snapshot["queued"])
 
 
+def test_the_job_page_shows_its_tickets_retries(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(RETRIES_TABLE)
+        connection.execute(
+            "INSERT INTO ticket_retries VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("maxharris1/cleffy", "14", "c1", "job-failed-2", "fix", "j1",
+             "queued-retry-fix", NOW - 900),
+        )
+    snapshot = collect_snapshot(db, log, now=NOW)
+    page = dashboard.render_pages(snapshot)["job.html"]
+    assert "retried 1x" in page
+    running = next(row for row in snapshot["running"] if row["ticket_id"] == "14")
+    running["retries"] = 999
+    assert "retried 999x" in dashboard.render_pages(snapshot)["job.html"]
+
+
 # --- read-only open -------------------------------------------------------
 
 

@@ -524,6 +524,34 @@ def test_a_stuck_ticket_shows_its_accepted_retries(tmp_path: Path) -> None:
     )
 
 
+def test_a_resumed_tickets_job_shows_its_retries(tmp_path: Path) -> None:
+    path = tmp_path / "queue.sqlite3"
+    create_database(path)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            UPDATE ticket_state SET workflow_state = 'fixing', paused_action = NULL;
+            CREATE TABLE ticket_retries (
+                repo TEXT NOT NULL, ticket_id TEXT NOT NULL, comment_id TEXT NOT NULL,
+                stuck_reason TEXT, resumed_action TEXT, job_id TEXT,
+                outcome TEXT NOT NULL, recorded_at REAL NOT NULL,
+                PRIMARY KEY (repo, ticket_id, comment_id)
+            );
+            INSERT INTO ticket_retries VALUES
+                ('owner/repo', '42', 'c1', 'job-failed-2', 'build', 'queued', 'queued-retry-build', 760);
+            """
+        )
+    reader = SQLiteStatusReader(path)
+
+    output = render(build_status(reader, reader, clock=lambda: 1000))
+
+    assert "Paused (0)" in output
+    assert (
+        "  owner/repo#42 build -> claude queued 16m retried 1x (job-failed-2 -> build, 4m ago)"
+        in output
+    )
+
+
 @pytest.mark.parametrize("journal", ["delete", "wal"])
 def test_status_connections_cannot_write(tmp_path: Path, journal: str) -> None:
     path = tmp_path / "queue.sqlite3"

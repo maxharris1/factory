@@ -85,6 +85,7 @@ class JobRow:
     job_state: str | None = None
     source: str | None = None
     pr_number: str | None = None
+    retried: Retried | None = None
 
 
 @dataclass(frozen=True)
@@ -367,6 +368,7 @@ class SQLiteStatusReader:
                 created_at=float(row["created_at"]),
                 last_activity_at=float(row["last_activity_at"]),
                 **_source(sources, row),
+                retried=retried.get((str(row["repo"]).casefold(), str(row["ticket_id"]))),
             )
             for row in job_rows
         )
@@ -712,7 +714,7 @@ def render(status: Status) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _retried(row: TrackerRow, observed_at: float) -> str:
+def _retried(row: TrackerRow | JobRow, observed_at: float) -> str:
     retried = row.retried
     if retried is None:
         return ""
@@ -813,6 +815,7 @@ def _job_line(row: JobRow, observed_at: float, since: float) -> str:
     return (
         f"  {_label(row)} {row.action} -> {row.recipient} "
         f"{row.job_state or row.state} {_age(observed_at, since)}"
+        f"{_retried(row, observed_at)}"
     )
 
 
