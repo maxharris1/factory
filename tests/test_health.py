@@ -884,6 +884,19 @@ def test_df_reads_english_headers_whatever_the_devices_locale(tmp_path: Path) ->
     assert health.parse_df(run.stdout) == (48, 85)
 
 
+
+@pytest.mark.parametrize("variable", ["DF_BLOCK_SIZE", "BLOCK_SIZE", "BLOCKSIZE"])
+def test_df_reports_inode_use_when_the_device_asks_for_human_readable_sizes(
+        tmp_path: Path, variable: str) -> None:
+    st = os.statvfs(tmp_path)
+    expected = health._df_percent(st.f_files - st.f_ffree, st.f_ffree)
+    if expected is None:
+        pytest.skip("this filesystem reports no inode counts")
+    env = {**os.environ, variable: "human-readable"}
+    run = subprocess.run(["sh", "-c", health.df_script(str(tmp_path))], env=env,
+                         capture_output=True, text=True, check=True)
+    assert health.parse_df(run.stdout)[1] == expected
+
 # --- the components wire their heartbeats in ------------------------------------------------
 
 

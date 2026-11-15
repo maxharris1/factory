@@ -1300,7 +1300,7 @@ def box_storage(device: str, paths: Iterable[Path],
 
 def df_script(directory: str) -> str:
     path = shlex.quote(directory)
-    return f"exec env LC_ALL=C sh -c {shlex.quote(f'df -Pk {path} && df -i {path}')}"
+    return f"exec env -u DF_BLOCK_SIZE -u BLOCK_SIZE -u BLOCKSIZE LC_ALL=C sh -c {shlex.quote(f'df -Pk {path} && df -i {path}')}"
 
 
 def parse_df(text: str) -> tuple[int | None, int | None]:
