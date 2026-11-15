@@ -557,7 +557,9 @@ class ReadyMixin:
             return False
         if (row["action"], row["state"]) == ("fix", "failed") and row["open"]:
             failed = next(job for job in self.queue.unhandled_failures() if job.id == row["id"])
-            handoff = self._posted_handoff(failed)
+            handoff = self._posted_handoff(
+                failed, self._polled.get((ticket.repo.lower(), ticket.ticket_id))
+            )
             return handoff if handoff is _HANDOFF_UNREAD else handoff is None
         if row["open"]:
             return True
