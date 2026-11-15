@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import (
+    _HANDOFF_UNREAD,
     _acted_verdict,
     _comment_link,
     _comment_order,
@@ -144,7 +145,10 @@ class ReadyMixin:
         assert result is not None
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
-        if ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head):
+        carried = ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head)
+        if carried is _HANDOFF_UNREAD:
+            return False, "ci-red-handoff-unread"
+        if carried:
             return True, "ci-red-in-flight"
         self._queue_ci_fix(
             ticket,
@@ -521,7 +525,7 @@ class ReadyMixin:
             return str(latest["dedupe_key"])
         return f"{repeat}{latest['later_id']}"
 
-    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
+    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool | object:
         with self._connect() as connection:
             row = connection.execute(
                 """
@@ -540,7 +544,8 @@ class ReadyMixin:
             return False
         if (row["action"], row["state"]) == ("fix", "failed") and row["open"]:
             failed = next(job for job in self.queue.unhandled_failures() if job.id == row["id"])
-            return self._posted_handoff(failed) is None
+            handoff = self._posted_handoff(failed)
+            return handoff if handoff is _HANDOFF_UNREAD else handoff is None
         if row["open"]:
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(

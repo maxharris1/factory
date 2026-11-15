@@ -95,3 +95,37 @@ def test_a_red_ready_after_a_failed_fix_readied_another_head_queues_a_fix(
 
     assert board.outcome("ready-back-on-a") == "queued-ci-fix"
     assert claims(board) == [("ready-back-on-a", 1)]
+
+
+@pytest.mark.parametrize("verdict", ["revise", "approve"])
+def test_a_red_ready_waits_while_a_failed_fixs_ready_is_unread(
+    tmp_path: Path, verdict: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    verdict_id = getattr(board, verdict)(pr, "1/3")
+    board.poll()
+    fix = board.claim("claude")
+    pr.push(sha(2), ci="pending")
+    board.ready(pr, pr.head, "ready-b")
+    board.queue.finish(fix.id, owner="claude", handoff_comment_id=None)
+    pr.push(sha(1), ci="failure")
+    board.ready(pr, pr.head, "ready-back-on-a")
+    fresh_ticket = board.fresh_ticket
+
+    def unavailable(ref):
+        raise RuntimeError("temporary PR read failure")
+
+    board.fresh_ticket = unavailable
+    board.poll()
+    assert board.outcome("ready-back-on-a") is None
+    board.fresh_ticket = fresh_ticket
+    board.now[0] += 600
+    board.poll()
+    board.poll()
+
+    assert board.outcome("ready-b") == "stale-ready-head"
+    assert board.outcome("ready-back-on-a") == "ci-red-in-flight"
+    assert claims(board) == [(verdict_id, 2)]
