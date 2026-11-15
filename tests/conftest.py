@@ -187,15 +187,81 @@ def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pyt
 
 
 def _fail_on_survivors(owner: str, before: set[int], survivors) -> None:
+    if described := _stop_survivors(before, survivors):
+        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+
+
+def _stop_survivors(before: set[int], survivors) -> list[str]:
     from tests import child_reaper, subreaper
 
     deadline = time.monotonic() + 3
     while (leftovers := survivors()) and time.monotonic() < deadline:
         time.sleep(0.1)
-    if leftovers:
-        described = [subreaper._describe(pid) for pid in sorted(leftovers)]
-        child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
-        pytest.fail(f"{owner} left processes running:\n" + "\n".join(described), pytrace=False)
+    if not leftovers:
+        return []
+    described = [subreaper._describe(pid) for pid in sorted(leftovers)]
+    child_reaper.kill(leftovers, before | {os.getpid()}, child_reaper._table())
+    return described
+
+
+_collection_leaked = pytest.StashKey[bool]()
+_registered_by = pytest.StashKey[dict[object, Path]]()
+
+
+def _collection_leak(config: pytest.Config, before: set[int], owner: str) -> str:
+    from tests import child_reaper
+
+    root = config._tmp_path_factory.getbasetemp()
+    tag = os.environ.get(child_reaper.TAG, "")
+    if not (described := _stop_survivors(before, lambda: child_reaper.leaked(before, tag, root))):
+        return ""
+    config.stash[_collection_leaked] = True
+    return f"{owner} left processes running:\n" + "\n".join(described)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_make_collect_report(collector: pytest.Collector):
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    plugins = set(collector.config.pluginmanager.get_plugins())
+    try:
+        report = yield
+    except BaseException as interrupted:
+        if leak := _collection_leak(collector.config, before, collector.nodeid):
+            interrupted.add_note(leak)
+        raise
+    finally:
+        if module := collector.getparent(pytest.Module):
+            registered = collector.config.stash.setdefault(_registered_by, {})
+            registered.update(dict.fromkeys(collector.config.pluginmanager.get_plugins() - plugins, module.path))
+    if leak := _collection_leak(collector.config, before, collector.nodeid):
+        report.longrepr = f"{report.longrepr}\n\n{leak}" if report.failed else leak
+        report.outcome = "failed"
+    return report
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_collection(session: pytest.Session):
+    from tests import child_reaper
+
+    before = set(child_reaper._table())
+    plugins = set(session.config.pluginmanager.get_plugins())
+    try:
+        return (yield)
+    finally:
+        registered = session.config.stash.get(_registered_by, {})
+        sources = {getattr(plugin, "__file__", None) or registered.get(plugin)
+                   for plugin in session.config.pluginmanager.get_plugins() - plugins}
+        loaded = sorted(os.path.relpath(source, session.config.rootpath) for source in sources if source)
+        owner = f"collection hooks in {', '.join(loaded)}" if loaded else "collection"
+        if leak := _collection_leak(session.config, before, owner):
+            session.ihook.pytest_collectreport(report=pytest.CollectReport("", "failed", leak, []))
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    if session.config.stash.get(_collection_leaked, False) and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 _broad_fixtures: dict[pytest.FixtureDef, tuple[set[int], dict[int, str | None]]] = {}
