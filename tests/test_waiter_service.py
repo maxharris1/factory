@@ -76,8 +76,8 @@ def _cleanup(home: Path) -> None:
 
 
 @pytest.fixture
-def home(tmp_path: Path):
-    home = _make_home(tmp_path / "home")
+def home(tmp_path: Path, request):
+    home = _make_home(tmp_path / getattr(request, "param", "home"))
     yield home
     _cleanup(home)
 
@@ -267,7 +267,35 @@ def _stray(home: Path, bot: str = "claude-bot", *, legacy: bool = False) -> int:
     return int(started.stdout)
 
 
-def test_stop_reaches_a_supervisor_started_before_the_state_argv(home: Path) -> None:
+PS_SHIM = """#!/bin/bash
+[[ "$(uname)" == Darwin ]] && exec /bin/ps "$@"
+args=()
+for arg in "$@"; do
+    [[ "$arg" == -E ]] && arg=e
+    args+=("$arg")
+done
+exec /bin/ps "${args[@]}"
+"""
+
+
+def _proc_or_ps_shim_env(tmp_path: Path, proc: str) -> dict[str, str]:
+    if proc == "/proc":
+        return {"ORCH_PROC_DIR": "/proc", "COLUMNS": "80"}
+    shim = tmp_path / "ps-shim" / "ps"
+    shim.parent.mkdir(exist_ok=True)
+    shim.write_text(PS_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return {
+        "ORCH_PROC_DIR": str(tmp_path / "no-proc"),
+        "COLUMNS": "80",
+        "PATH": f"{shim.parent}:/usr/bin:/bin",
+    }
+
+
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_reaches_a_supervisor_started_before_the_state_argv(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
     legacy = _stray(home, legacy=True)
     waiter = _wait_for(lambda: _starts(home))[0]
     named = _stray(home)
@@ -275,7 +303,7 @@ def test_stop_reaches_a_supervisor_started_before_the_state_argv(home: Path) -> 
     _wait_for(lambda: (home / "refused-claude-bot").exists())
     assert alive(legacy) and alive(waiter)
 
-    stopped = _service(home, "claude-bot", "stop")
+    stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
     assert stopped.returncode == 0, stopped.stderr
     assert f"stopped stray waiter supervisor (pid {legacy})" in stopped.stdout
     assert not alive(legacy) and not alive(named)
@@ -314,11 +342,12 @@ def test_a_supervisor_the_pidfile_does_not_name_exits(home: Path) -> None:
     assert f"no longer names this supervisor (pid {stray})" in log
 
 
+@pytest.mark.parametrize("home", ["home", "home with spaces"], indirect=True)
 @pytest.mark.parametrize("proc", ["/proc", "no-proc"])
 def test_restart_after_a_pidfile_mismatch_leaves_one_supervisor_and_one_waiter(
-    home: Path, proc: str
+    home: Path, tmp_path: Path, proc: str
 ) -> None:
-    proc_env = {"ORCH_PROC_DIR": proc if proc == "/proc" else str(home / proc), "COLUMNS": "80"}
+    proc_env = _proc_or_ps_shim_env(tmp_path, proc)
     assert _service(home, "claude-bot", "start", **proc_env).returncode == 0
     old_waiter = _wait_for(lambda: _starts(home))[0]
     old_supervisor = _supervisor(home)
@@ -357,6 +386,29 @@ def test_stop_spares_a_supervisor_under_another_state_directory(
         assert alive(other_supervisor) and alive(other_waiter)
     finally:
         _cleanup(other)
+
+
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_a_legacy_supervisor_under_another_state_directory(
+    home: Path, tmp_path: Path, proc: str
+) -> None:
+    other = _make_home(tmp_path / "other")
+    try:
+        legacy = _stray(other, legacy=True)
+        other_waiter = _wait_for(lambda: _starts(other))[0]
+        assert _service(home, "claude-bot", "start").returncode == 0
+        _wait_for(lambda: _starts(home))
+        stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"pid {legacy}" not in stopped.stdout
+        time.sleep(0.4)
+        assert alive(legacy) and alive(other_waiter)
+    finally:
+        _cleanup(other)
+        try:
+            os.kill(legacy, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def test_a_waiter_that_keeps_failing_is_retried_with_backoff(home: Path) -> None:
