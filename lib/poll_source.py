@@ -28,6 +28,7 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
+from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatch.cycle_clock import CycleClock
 from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
 from lib.github_actions import (
@@ -124,6 +125,7 @@ RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGN
 SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 LINEAR_PROCESS_HEADROOM = 2
+HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
@@ -280,8 +282,8 @@ class LivePollSource:
         self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
         self.cycle_clock: CycleClock | None = None
-        self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str], Any]] = {}
-        self._head_reads_used: set[tuple[str, str, str]] = set()
+        self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
+        self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
         self._backoff_until = 0.0
@@ -354,7 +356,6 @@ class LivePollSource:
     def begin_cycle(self) -> None:
         self._factory_cache.clear()
         self._ticket_cache.clear()
-        self._head_reads_used = set()
         self._linear_issue_cache.clear()
         self._linear_due = self._cycles_until_linear <= 0
         if self._linear_due:
@@ -425,10 +426,16 @@ class LivePollSource:
         )
 
     def end_cycle(self) -> None:
+        now = self.clock()
+        self._head_read_last_used = {
+            key: used
+            for key, used in self._head_read_last_used.items()
+            if now - used < HEAD_READ_IDLE_SECONDS
+        }
         self._head_reads = {
             key: value
             for key, value in self._head_reads.items()
-            if key in self._head_reads_used
+            if key in self._head_read_last_used
         }
         if self._dirty_fetched and self.linear_dirty is not None:
             fetched = tuple(self._dirty_fetched.values())
@@ -1374,12 +1381,10 @@ class LivePollSource:
         pull: Mapping[str, Any],
         read: Callable[[], Any],
     ) -> Any:
-        """`read()` once per PR head and base (#440); a None or a raise is
-        not kept, so the next cycle reads again."""
         key = (kind, repo.lower(), number)
-        self._head_reads_used.add(key)
-        base = _object(pull.get("base") or {}, "GitHub pull request base").get("ref")
-        version = (_pr_head(pull, repo, number), str(base))
+        self._head_read_last_used[key] = self.clock()
+        base = _object(pull.get("base") or {}, "GitHub pull request base")
+        version = (_pr_head(pull, repo, number), str(base.get("ref")), str(base.get("sha")))
         cached = self._head_reads.get(key)
         if cached is not None and cached[0] == version:
             return cached[1]

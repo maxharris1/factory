@@ -89,6 +89,7 @@ class CountingGh(FakeGh):
         super().__init__(HOLD_FACTORY.format(ship="handoff", hold="hold:\n  paths: ['src/**']\n"))
         self.files = [{"filename": "lib/a.py", "status": "modified"}]
         self.heads = {number: "a" * 40 for number in PRS}
+        self.bases = {number: "c" * 40 for number in PRS}
         self.fail_files: set[str] = set()
         self.routes: Counter[str] = Counter()
 
@@ -101,7 +102,11 @@ class CountingGh(FakeGh):
             return GhResult(1, "", "failed (HTTP 502)")
         if number in self.heads and endpoint.endswith(f"/pulls/{number}"):
             self.calls.append(list(argv))
-            return GhResult(0, json.dumps({"head": {"sha": self.heads[number]}}), "")
+            pull = {
+                "head": {"sha": self.heads[number]},
+                "base": {"ref": "main", "sha": self.bases[number]},
+            }
+            return GhResult(0, json.dumps(pull), "")
         return super().__call__(argv, timeout)
 
     def simulated_seconds(self) -> float:
@@ -135,6 +140,45 @@ def test_pr_files_are_read_once_per_head_not_once_per_cycle() -> None:
     gh.heads["15"] = "b" * 40
     cycle(source, gh)
     assert files_calls(gh) == len(PRS) + 1
+
+
+def test_a_base_branch_advance_reads_the_files_again() -> None:
+    gh = CountingGh()
+    source = LivePollSource(config(), gh_runner=gh)
+    cycle(source, gh)
+
+    gh.bases["15"] = "d" * 40
+    gh.files = [
+        {"filename": "lib/a.py", "status": "modified"},
+        {"filename": "src/held.py", "status": "modified"},
+    ]
+    cycle(source, gh)
+    source.begin_cycle()
+    ticket = source.fresh_ticket(TicketRef("acme/widgets", "15", "github"))
+
+    assert files_calls(gh) == len(PRS) + 1
+    assert ticket.changed_files == ("lib/a.py", "src/held.py")
+
+
+def test_cycles_that_skip_a_stopped_ticket_keep_its_files(tmp_path) -> None:
+    from tests.test_dispatcher import setup
+    from tests.test_live_poll import _handed_off
+
+    now = [1000.0]
+    dispatcher, queue = setup(tmp_path, now)
+    _handed_off(queue, "github", list(PRS))
+    with queue.connect() as connection:
+        connection.executemany(
+            "INSERT INTO ticket_reads VALUES ('acme/widgets', ?, 0)", [(n,) for n in PRS]
+        )
+    gh = CountingGh()
+    source = LivePollSource(config(), gh_runner=gh)
+
+    for timestamp in (1000.0, 1060.0, 1300.0):
+        now[0] = timestamp
+        dispatcher.poll_once(source)
+
+    assert files_calls(gh) == len(PRS)
 
 
 def test_a_failed_files_read_is_read_again_next_cycle() -> None:
