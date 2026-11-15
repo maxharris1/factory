@@ -89,30 +89,13 @@ ACTED_VERDICT_OUTCOMES = frozenset(
 )
 
 
-READY_OUTCOMES = frozenset(
-    {
-        "capped-ready",
-        "ready-already-shipped",
-        "ready-after-cap",
-        "ready-on-merged-pr",
-        "ready-on-closed-pr",
-        "stale-ready-head",
-        "stale-ready-verdict",
-        "stale-ready",
-        "queued-review",
-        "answered-review",
-        "ci-red-in-flight",
-        "queued-ci-fix",
-    }
+QUESTIONS_OUTCOMES = frozenset(
+    {"no-questions", "waiting-max", "already-waiting-max", "rejected-questions-author"}
 )
 
 
-def _ready_outcome(outcome: str) -> bool:
-    return (
-        outcome in READY_OUTCOMES
-        or outcome.startswith("rejected-ready-")
-        or outcome.startswith("update-")
-    )
+def _questions_outcome(outcome: str) -> bool:
+    return outcome in QUESTIONS_OUTCOMES or outcome.startswith("failed-questions-")
 
 
 def _acted_verdict(outcome: str | None) -> bool:
