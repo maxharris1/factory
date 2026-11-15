@@ -19,6 +19,7 @@ import signal
 import sqlite3
 import sys
 import time
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
 
@@ -381,6 +382,71 @@ def test_device_offline_waits_for_the_link_drop_settle_time(tmp_path: Path) -> N
     poll(other, started + 1)
     poll(other, started + 61 * 60)
     assert stuck(other, "maxharris1/factory", "72") == (1, "device-offline")
+
+
+def test_a_takeover_after_a_drop_is_never_failed_on_the_old_runs_deadline(tmp_path: Path) -> None:
+    poller, job_id = remote_review(tmp_path)
+    dropped = dropped_run(poller, job_id)
+    poller.transport.check = GONE
+    takeover = placed_run.prepare(
+        poller.pool, poller.config, job_id=job_id, bot="codex-bot", owner="codex", worktree=False,
+        log=lambda _: None, transport=poller.transport, alive=lambda *_: False,
+        pid=next(RUNNERS),
+    )
+    takeover.before_start()
+    assert takeover.target is not None
+    poller.transport.check = UNREACHABLE
+
+    poll(poller, dropped + 1)
+    poll(poller, dropped + SETTLE + 1)
+    poll(poller, dropped + SETTLE + BACKOFF[0] + 1)
+    slot = poller.pool.placement(job_id)
+    assert slot is not None and slot.worker_tag == takeover.target.tag, "the takeover's slot held"
+    assert poller.row(job_id)["state"] != "queued", "never requeued beside the takeover's worker"
+    assert "requeued-link-drop" not in names(poller, job_id)
+    assert not any("link drop" in detail for detail in details(poller, job_id, "dead"))
+    assert poller.pool.claim("codex") is None, "the row is not started a second time"
+
+
+def test_a_spent_budget_frees_the_settled_slot_so_attempt_2_runs_on_a_one_slot_device(
+    tmp_path: Path,
+) -> None:
+    poller = Poller(tmp_path, box=False, check=UNREACHABLE)
+    poller.config = replace(poller.config, devices=tuple(
+        replace(device, slot_max=1) if device.name == "pc" else device
+        for device in poller.config.devices
+    ))
+    poller.pool.config = poller.dispatcher.devices.config = poller.config
+    first = poller.review(timeout=TIMEOUT)
+    _spend_budget(poller, first)
+    _settle_cycle(poller, first)
+    [(second, attempt, _generation)] = retries(poller)
+    assert attempt == 2
+    assert poller.pool.placement(first) is None, "the settled run's slot is freed"
+    assert poller.claim().job_id == second, "attempt 2 takes the only slot"
+
+
+def test_a_dropped_review_waits_for_an_open_fix_for_its_head(tmp_path: Path) -> None:
+    poller = Poller(tmp_path, box=True, check=UNREACHABLE)
+    review = poller.review()
+    poller.claim()
+    dropped_run(poller, review)
+    fix = poller.queue.enqueue(
+        JobRequest(
+            repo="maxharris1/factory", ticket_id="72", action="fix", recipient="claude",
+            source_comment_id="verdict-r1", timeout_seconds=TIMEOUT, head="a" * 40,
+        ),
+        dedupe_key="fix-r1",
+    ).id
+    poller.transport.check = GONE
+    failed_at = poller.now[0] + 5
+    poll(poller, failed_at)
+    poll(poller, failed_at + BACKOFF[0])
+    assert poller.row(review)["state"] == "failed", "held while the fix is open"
+    assert poller.row(fix)["state"] == "queued"
+    assert "retry-deferred" in names(poller, review)
+    assert "requeued-link-drop" not in names(poller, review)
+    assert poller.pool.claim("codex") is None, "the review is not claimable beside the fix"
 
 
 def test_a_link_drop_requeue_prefers_another_device_with_a_free_slot(tmp_path: Path) -> None:
