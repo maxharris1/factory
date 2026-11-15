@@ -34,7 +34,10 @@ itself is behind its fetched origin/main (`preflight-lagging: box ...`), so
 a busy or refused box deploy never lets a remote run the old commit. On the
 box the checkout's HEAD is compared with its own fetched origin/main
 instead: a box HEAD behind it (self-deploy has not moved it yet, say a job
-was running) fails the same way, until it deploys.
+was running) fails the same way, until it deploys. A box factory_root other
+than the box checkout (a per-account checkout, #345) must also sit at the
+box HEAD, the same rule as a remote, and is refused while the box checkout
+lags its origin/main; the waiter's idle sync moves it.
 A box HEAD with commits origin/main lacks is not refused here; self-deploy
 escalates it and health flags it.
 
@@ -300,6 +303,18 @@ def box_behind_origin(device: str, bot: str, checkout: str) -> str | None:
             f"origin/main at {upstream[:12]}")
 
 
+def refuse_configured_checkout_behind_box(name: str, bot: str, checkout: str, root: Path) -> None:
+    if Path(checkout).resolve() == root.resolve():
+        return
+    lagging = box_behind_origin("box", bot, str(root.resolve()))
+    if lagging is not None:
+        raise CheckoutLagging(lagging, box_behind_origin=True)
+    head = Head(exists=Path(checkout).is_dir(), sha=checkout_sha(Path(checkout)), branch=None)
+    lagging = lag(name, bot, checkout, head, checkout_sha(root))
+    if lagging is not None:
+        raise CheckoutLagging(lagging)
+
+
 def home_install_stale(expected: dict[str, str], found: dict[str, str]) -> bool:
     return any(found.get(path) != digest for path, digest in expected.items()
                if path.startswith(HOME_PREFIX))
@@ -348,6 +363,7 @@ def check(
         lagging = box_behind_origin(name, bot, checkout)
         if lagging is not None:
             raise CheckoutLagging(lagging, box_behind_origin=True)
+        refuse_configured_checkout_behind_box(name, bot, checkout, root)
         found = local_hashes(home, paths)
         if home_install_stale(expected, found):
             install_errors = install_into_home(Path(checkout), home)

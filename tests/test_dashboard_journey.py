@@ -291,8 +291,23 @@ def test_unusable_telemetry_finish_leaves_the_duration_unknown(
     )
 
 
-def _row(from_state, to_state, at):
-    return flow.Transition(from_state, to_state, at)
+def _row(from_state, to_state, at, source="set-state"):
+    return flow.Transition(from_state, to_state, at, source)
+
+
+def _recorded(board: Board) -> tuple[list[flow.JobStep], list[flow.Transition]]:
+    with board.queue.connect() as connection:
+        jobs = [
+            flow.JobStep(
+                row["action"], row["recipient"], row["created_at"], None, None, row["attempt"]
+            )
+            for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
+        ]
+        rows = [
+            flow.Transition(row["from_state"], row["to_state"], row["at"], row["source"])
+            for row in connection.execute("SELECT * FROM ticket_transitions ORDER BY id")
+        ]
+    return jobs, rows
 
 
 RECORDED_JOBS = [
@@ -398,15 +413,7 @@ def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path
     board.ready(pr, pr.head, "new-ready")
     board.poll()
     assert board.outcome("new-ready") == "queued-review"
-    with board.queue.connect() as connection:
-        jobs = [
-            flow.JobStep(row["action"], row["recipient"], row["created_at"], None, None)
-            for row in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
-        ]
-        rows = [
-            flow.Transition(row["from_state"], row["to_state"], row["at"])
-            for row in connection.execute("SELECT * FROM ticket_transitions ORDER BY id")
-        ]
+    jobs, rows = _recorded(board)
     old, new = [job.created_at for job in jobs if job.action == "review"]
     assert new < rows[0].at
     result = flow.job_flow(_chart(), jobs, "review", board.now[0], rows)
@@ -414,6 +421,154 @@ def test_first_row_after_a_ready_keeps_both_reviews_on_their_own_visits(tmp_path
         ("codex", old),
         ("codex", rows[0].at),
     ]
+
+
+@pytest.mark.parametrize("delay", [1, 100])
+def test_script_only_first_row_leaves_the_old_visit_its_retried_review(
+    tmp_path: Path, delay: int
+) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, pr.head)
+    board.poll()
+    failed = board.fail("codex")
+    board.now[0] += 100
+    board.poll()
+    retry = board.finish("codex")
+    assert failed.request.action == retry.request.action == "review"
+    ticket = board.snapshot(pr)
+    board.dispatcher._prepare_ship_intent(ticket, "approval", pr.head, "handoff")
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += delay
+    board.dispatcher._discard_pending_ship_intent(ticket, "approval")
+    jobs, rows = _recorded(board)
+    assert [(job.action, job.created_at) for job in jobs][-2:] == [
+        ("review", failed.created_at),
+        ("review", retry.created_at),
+    ]
+    assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
+    result = flow.job_flow(_chart(), jobs, "review", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"] == [
+        ("codex", failed.created_at),
+        ("script", rows[0].at),
+    ]
+
+
+def test_script_only_first_row_leaves_an_older_completed_review_to_its_visit(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    board.now[0] += 1000
+    pr.push(sha(2))
+    board.ready(pr, pr.head, "second-ready")
+    board.poll()
+    assert board.outcome("second-ready") == "queued-review"
+    board.finish("codex")
+    ticket = board.snapshot(pr)
+    board.dispatcher._prepare_ship_intent(ticket, "second-approval", pr.head, "handoff")
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 100
+    board.dispatcher._discard_pending_ship_intent(ticket, "second-approval")
+    jobs, rows = _recorded(board)
+    first, second = [job.created_at for job in jobs if job.action == "review"]
+    assert [job.attempt for job in jobs if job.action == "review"] == [1, 1]
+    assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
+    result = flow.job_flow(_chart(), jobs, "review", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "review"] == [
+        ("codex", first),
+        ("script", rows[0].at),
+    ]
+    assert second < rows[0].at
+
+
+def test_first_row_written_polls_after_its_review_was_queued_owns_that_review(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.build_and_approve(pr)
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 1000
+    pr.push(sha(2))
+    board.ready(pr, pr.head, "new-ready")
+    board.actions.state_failures.add((pr.repo, "review"))
+    board.poll()
+    board.now[0] += 1000
+    board.actions.state_failures.clear()
+    board.poll()
+    assert board.outcome("new-ready") == "queued-review"
+    with board.queue.connect() as connection:
+        old, new = [
+            row["created_at"]
+            for row in connection.execute(
+                "SELECT created_at FROM jobs WHERE action = 'review' ORDER BY created_at"
+            )
+        ]
+        (at,) = [row["at"] for row in connection.execute("SELECT at FROM ticket_transitions")]
+    assert new < at - 60
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "missing.log", now=board.now[0])
+    job = next(job for job in snapshot["queued"] if job["ticket_id"] == "42")
+    assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "review"] == [
+        ("codex", old),
+        ("codex", at),
+    ]
+
+
+PLAN = "<!-- orch:v1 kind=plan from=claude-bot role=builder round={round}/2 ac={ac} -->\nPlan.\n"
+
+
+def test_legacy_plan_gap_first_row_leaves_the_old_plan_to_its_visit() -> None:
+    jobs = [_step("plan", "claude", 111.0), _step("plan", "claude", 126.0)]
+    rows = [_row("plan-check", "planning", 127.0, "plan-gap")]
+    result = flow.job_flow(_chart(), jobs, "planning", 200.0, rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "planning"] == [
+        ("claude", 111.0),
+        ("claude", 127.0),
+    ]
+
+
+def test_resumed_plan_gap_first_row_owns_the_plan_it_queued(tmp_path: Path) -> None:
+    board = Board(tmp_path, finish_line=None)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go", state="planning")
+    board.poll()
+    board.finish("claude")
+    board.post(pr, "plan-1", PLAN.format(round=1, ac="unmet"), "claude-login")
+    board.actions.state_failures.add((pr.repo, "plan-check"))
+    board.poll()
+    assert board.state("42")["workflow_state"] == "plan-check"
+    with board.queue.connect() as connection:
+        connection.execute("DELETE FROM ticket_transitions")
+    board.now[0] += 100
+    board.actions.state_failures.clear()
+
+    def ticking() -> float:
+        board.now[0] += 1
+        return board.now[0]
+
+    board.queue.clock = ticking
+    board.poll()
+    assert board.outcome("plan-1") == "queued-plan-gap"
+    jobs, rows = _recorded(board)
+    old, new = [job.created_at for job in jobs if job.action == "plan"]
+    assert [(row.from_state, row.to_state, row.source) for row in rows] == [
+        ("plan-check", "planning", "plan-gap")
+    ]
+    assert old < new < rows[0].at
+    expected = [("claude", old), ("claude", rows[0].at)]
+    result = flow.job_flow(_chart(), jobs, "planning", board.now[0], rows)
+    assert [(v["who"], v["started_at"]) for v in result["visits"] if v["state"] == "planning"] == expected
+    snapshot = collect_snapshot(board.queue.path, tmp_path / "missing.log", now=board.now[0])
+    job = next(job for job in snapshot["queued"] if job["ticket_id"] == "42")
+    assert [(v["who"], v["started_at"]) for v in job["flow"]["visits"] if v["state"] == "planning"] == expected
 
 
 @pytest.mark.parametrize(

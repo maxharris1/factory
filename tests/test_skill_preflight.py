@@ -632,3 +632,60 @@ def test_a_box_checkout_behind_its_origin_main_fails_for_t6_and_marks_the_box_la
     assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
     assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
     assert any("failed for T6 to requeue after a backoff" in line for line in device.log)
+
+
+def configured_behind_box(lock_root: Path, configured: Path) -> tuple[str, str]:
+    deploy(lock_root)
+    old = commit_checkout(lock_root)
+    subprocess.run([*git_in(lock_root), "update-ref", "refs/remotes/origin/main", old], check=True)
+    subprocess.run(["git", "clone", "-q", str(lock_root), str(configured)], check=True)
+    (lock_root / "new-code.py").write_text("version = 2\n", encoding="utf-8")
+    subprocess.run([*git_in(lock_root), "add", "new-code.py"], check=True)
+    subprocess.run([*git_in(lock_root), "commit", "-qm", "new factory code"], check=True)
+    new = subprocess.run([*git_in(lock_root), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    subprocess.run([*git_in(lock_root), "update-ref", "refs/remotes/origin/main", new], check=True)
+    return old, new
+
+
+def test_a_configured_box_checkout_behind_the_box_head_is_refused_as_lagging(
+    tmp_path: Path, lock_root: Path
+) -> None:
+    configured = tmp_path / "configured"
+    old, new = configured_behind_box(lock_root, configured)
+    home = tmp_path / "home"
+    install(home)
+
+    with pytest.raises(skill_preflight.CheckoutLagging) as refused:
+        skill_preflight.check(bot="claude-bot", placement=None, device=None, transport=None,
+                              home=home, checkout=str(configured), root=lock_root)
+
+    assert str(refused.value) == (
+        f"preflight-lagging: box claude-bot {configured} at {old[:12]}, box at {new[:12]}")
+
+
+@pytest.mark.parametrize("current", [False, True], ids=["behind", "fast-forwarded"])
+def test_a_waiter_starts_on_a_configured_box_checkout_only_at_the_box_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, current: bool
+) -> None:
+    configured = tmp_path / "configured"
+    old, new = configured_behind_box(lock_root, configured)
+    if current:
+        subprocess.run([*git_in(configured), "pull", "-q", "--ff-only"], check=True)
+    device = Device(tmp_path, monkeypatch, remote=False, box_root=configured)
+    install(device.home)
+
+    job_id, started = device.run_one()
+
+    if current:
+        assert started == job_id
+        assert len(device.spawn.calls) == 1
+        assert sync_rows(device.db) == []
+        return
+    assert len(device.spawn.calls) == 0
+    assert started is None
+    assert state(device.db, job_id) == "failed"
+    error = f"preflight-lagging: box claude-bot {configured} at {old[:12]}, box at {new[:12]}"
+    assert detail_of(device.db, job_id)["skill_preflight"]["error"] == error
+    assert sync_rows(device.db) == [("box", "claude-bot", "lagging", error)]
+    assert any("failed for T6 to requeue after a backoff" in line for line in device.log)

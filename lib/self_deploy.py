@@ -13,7 +13,13 @@ here calls an LLM.
 One pass, in order; the first guard that fails ends it:
 
 1. Only the account that owns the checkout and can write to it pulls;
-   any other account exits at once and logs nothing.
+   any other account exits at once and logs nothing. A pass holds
+   self-deploy.lock in the state directory, in the checkout's git
+   directory and, when ORCH_DB names a file, beside the file it resolves
+   to for its device, to its end, so two passes that share any of them
+   never overlap, whatever --state, ORCH_STATE_DIR or link to orch.db
+   each was given; a pass that finds one held returns
+   `skipped` at once and writes nothing.
 2. The checkout is left alone (logged, escalated once) when it is not on
    main, has a merge, rebase, cherry-pick or revert in progress, has
    staged changes, has a KEPT path (or a parent of one) that is not a
@@ -68,6 +74,7 @@ Each pass logs to self-heal.log; a repeated outcome is logged once.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -78,6 +85,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -107,6 +115,7 @@ KEPT = ("machines.yml", "orch.yml", "deploy/install.sh")
 INSTALL_PATHS = ("deploy/", "requirements.txt")
 SKILLS_PATHS = ("skills/",)
 STATE_NAME = "self-deploy.state.json"
+LOCK_NAME = "self-deploy.lock"
 BACKUP_DIR = "self-deploy"
 INSTALL_LOG = "self-deploy-install.log"
 FETCH_TIMEOUT = 60
@@ -588,7 +597,7 @@ def _stale_homes(checkout: Path, homes: Sequence[Path]) -> list[Path]:
         try:
             if pstack_pin.installed_errors(checkout, home):
                 stale.append(home)
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, RuntimeError, ValueError, UnicodeError):
             stale.append(home)
     return stale
 
@@ -614,6 +623,19 @@ def _install_skills(
     return first_failure, clock() - started
 
 
+def _lock_paths(checkout: Path, state_dir: Path, db: Path | None, device: str,
+                env: Mapping[str, str]) -> list[Path]:
+    paths = [state_dir / LOCK_NAME]
+    try:
+        paths.append(checkout / Git(checkout, env).text("rev-parse", "--git-common-dir")
+                     / LOCK_NAME)
+    except GitError:
+        pass
+    if db is not None:
+        paths.append(db.with_name(f"{db.name}.{device}.{LOCK_NAME}"))
+    return paths
+
+
 def deploy(
     checkout: Path,
     state_dir: Path,
@@ -634,75 +656,84 @@ def deploy(
     if not owner(checkout):
         return Outcome(SKIPPED, "not the checkout owner")
     state_dir.mkdir(parents=True, exist_ok=True)
+    name = environ.get("ORCH_DB")
+    db = Path(name).resolve() if name and Path(name).is_file() else None
+    with ExitStack() as held:
+        for path in _lock_paths(checkout, state_dir, db, device, git_env(environ, webhook)):
+            lock = held.enter_context(open(path, "a"))
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return Outcome(SKIPPED, "another deploy pass is running")
 
-    def log(line: str) -> None:
-        with open(state_dir / LOG_NAME, "a", encoding="utf-8") as out:
-            out.write(f"{stamp(now)} self-deploy: {line}\n")
+        def log(line: str) -> None:
+            with open(state_dir / LOG_NAME, "a", encoding="utf-8") as out:
+                out.write(f"{stamp(now)} self-deploy: {line}\n")
 
-    state_path = state_dir / STATE_NAME
-    state = load_state(state_path)
-    db = environ.get("ORCH_DB")
-    queue = SQLiteJobQueue(Path(db), clock=lambda: now) if db and Path(db).is_file() else None
-    outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
-                              install=install, clock=clock, dry_run=dry_run, queue=queue,
-                              device=device, machines=machines,
-                              homes=own_home(environ) if homes is None else homes)
-    escalation: str | None = None
-    key: str | None = None
-    if outcome.kind == FETCH_FAILED:
-        since = state.get("fetch_failed_since")
-        since = float(since) if isinstance(since, (int, float)) else now
-        state["fetch_failed_since"] = since
-        if now - since >= FETCH_ESCALATE_SECONDS:
-            key = "fetch"
-            escalation = f"{outcome.detail} for {int((now - since) // 60)}m"
-    else:
-        state.pop("fetch_failed_since", None)
-    if outcome.kind in (REFUSED, CONFLICT):
-        key = f"{outcome.kind}:{outcome.detail}"
-        escalation = outcome.detail
-    if outcome.kind == ROLLED_BACK:
-        key = f"{outcome.kind}:{outcome.new}"
-        escalation = outcome.detail
-    if outcome.kind == DEPLOYED and "install" in extra and extra["install"][0] != 0:
-        key = f"install:{outcome.new}"
-        escalation = f"deploy/install.sh --update exited {extra['install'][0]}"
-    elif outcome.kind in (DEPLOYED, INSTALL_FAILED) and "skills" in extra and extra["skills"][0] != 0:
-        key = f"install-skills:{outcome.new}"
-        escalation = f"orch install-skills exited {extra['skills'][0]}"
+        state_path = state_dir / STATE_NAME
+        state = load_state(state_path)
+        queue = SQLiteJobQueue(db, clock=lambda: now) if db is not None else None
+        outcome, extra = run_pass(checkout, state_dir, environ=environ, webhook=webhook, now=now,
+                                  install=install, clock=clock, dry_run=dry_run, queue=queue,
+                                  device=device, machines=machines,
+                                  homes=own_home(environ) if homes is None else homes)
+        escalation: str | None = None
+        key: str | None = None
+        if outcome.kind == FETCH_FAILED:
+            since = state.get("fetch_failed_since")
+            since = float(since) if isinstance(since, (int, float)) else now
+            state["fetch_failed_since"] = since
+            if now - since >= FETCH_ESCALATE_SECONDS:
+                key = "fetch"
+                escalation = f"{outcome.detail} for {int((now - since) // 60)}m"
+        else:
+            state.pop("fetch_failed_since", None)
+        if outcome.kind in (REFUSED, CONFLICT):
+            key = f"{outcome.kind}:{outcome.detail}"
+            escalation = outcome.detail
+        if outcome.kind == ROLLED_BACK:
+            key = f"{outcome.kind}:{outcome.new}"
+            escalation = outcome.detail
+        if outcome.kind == DEPLOYED and "install" in extra and extra["install"][0] != 0:
+            key = f"install:{outcome.new}"
+            escalation = f"deploy/install.sh --update exited {extra['install'][0]}"
+        elif (outcome.kind in (DEPLOYED, INSTALL_FAILED) and "skills" in extra
+              and extra["skills"][0] != 0):
+            key = f"install-skills:{outcome.new}"
+            escalation = f"orch install-skills exited {extra['skills'][0]}"
 
-    if outcome.kind == DEPLOYED:
-        line = (f"deployed {outcome.detail} kept={extra['kept']} merged={extra['merged']} "
-                f"{extra['seconds']:.1f}s")
-        log(line)
-        if "install" in extra:
-            code, seconds = extra["install"]
-            log(f"install.sh --update exit={code} {seconds:.1f}s")
-        if "skills" in extra:
-            code, seconds = extra["skills"]
-            log(f"install-skills exit={code} {seconds:.1f}s")
-        state["last"] = None
-    else:
-        note = {
-            UP_TO_DATE: f"up to date at {outcome.new[:12]}",
-            WOULD_DEPLOY: f"would deploy {outcome.detail}",
-        }.get(outcome.kind, f"{outcome.kind}: {outcome.detail}")
-        if outcome.kind == ROLLED_BACK or state.get("last") != note:
-            log(note)
-        state["last"] = note
-        if "skills" in extra:
-            code, seconds = extra["skills"]
-            log(f"install-skills exit={code} {seconds:.1f}s")
-    if outcome.kind in (UP_TO_DATE, DEPLOYED) and key is None:
-        state.pop("escalated", None)
-    if key is not None and state.get("escalated") != key and not dry_run:
-        action = Action(ESCALATE, f"deploy @ {device}", "deploy", escalation or outcome.kind)
-        result = escalate([action], device=device, now=now, webhook=webhook, environ=environ,
-                          post=post)
-        log(f"escalate deploy @ {device} ({action.reason}) {result}")
-        state["escalated"] = key
-    save_state(state_path, state)
-    return outcome
+        if outcome.kind == DEPLOYED:
+            line = (f"deployed {outcome.detail} kept={extra['kept']} merged={extra['merged']} "
+                    f"{extra['seconds']:.1f}s")
+            log(line)
+            if "install" in extra:
+                code, seconds = extra["install"]
+                log(f"install.sh --update exit={code} {seconds:.1f}s")
+            if "skills" in extra:
+                code, seconds = extra["skills"]
+                log(f"install-skills exit={code} {seconds:.1f}s")
+            state["last"] = None
+        else:
+            note = {
+                UP_TO_DATE: f"up to date at {outcome.new[:12]}",
+                WOULD_DEPLOY: f"would deploy {outcome.detail}",
+            }.get(outcome.kind, f"{outcome.kind}: {outcome.detail}")
+            if outcome.kind == ROLLED_BACK or state.get("last") != note:
+                log(note)
+            state["last"] = note
+            if "skills" in extra:
+                code, seconds = extra["skills"]
+                log(f"install-skills exit={code} {seconds:.1f}s")
+        if outcome.kind in (UP_TO_DATE, DEPLOYED) and key is None:
+            state.pop("escalated", None)
+        if key is not None and state.get("escalated") != key and not dry_run:
+            action = Action(ESCALATE, f"deploy @ {device}", "deploy", escalation or outcome.kind)
+            result = escalate([action], device=device, now=now, webhook=webhook, environ=environ,
+                              post=post)
+            log(f"escalate deploy @ {device} ({action.reason}) {result}")
+            state["escalated"] = key
+        save_state(state_path, state)
+        return outcome
 
 
 # --- the poller's post-merge kick ------------------------------------------------------------
