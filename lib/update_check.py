@@ -3,8 +3,10 @@
 The merge queue carries an approval to an update only when the update is
 the approved head merged with base and nothing more: every conflict hunk
 resolved by taking exactly one side, and every other path exactly as git's
-own merge leaves it. Anything else, or any doubt, is non-trivial and goes
-back to review.
+own merge leaves it. In a file matching the project's `shared_paths`
+(issue #261), a hunk may also keep both sides, ours then theirs or theirs
+then ours, byte for byte. Anything else, or any doubt, is non-trivial and
+goes back to review.
 
 The check runs on a bare clone that already holds the three commits, with
 git plumbing only (`git merge-tree --write-tree`, git 2.38 or newer). It
@@ -19,6 +21,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from lib.feeder_gates import shared_path_matches
 
 MARKER_SIZE = 61
 _MARKER_RUN = re.compile(rb"([<|=>])\1*")
@@ -37,17 +41,31 @@ class _NotTrivial(Exception):
     pass
 
 
-def classify(clone: Path, approved_head: str, new_head: str, base_ref: str) -> UpdateClass:
+def classify(
+    clone: Path,
+    approved_head: str,
+    new_head: str,
+    base_ref: str,
+    shared_paths: tuple[str, ...] = (),
+) -> UpdateClass:
     """Whether new_head is a trivial update of approved_head from base_ref."""
     try:
-        return UpdateClass(True, _check(clone, approved_head, new_head, base_ref))
+        return UpdateClass(
+            True, _check(clone, approved_head, new_head, base_ref, shared_paths)
+        )
     except _NotTrivial as exc:
         return UpdateClass(False, str(exc))
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError) as exc:
         return UpdateClass(False, f"check failed: {type(exc).__name__}")
 
 
-def _check(clone: Path, approved_head: str, new_head: str, base_ref: str) -> str:
+def _check(
+    clone: Path,
+    approved_head: str,
+    new_head: str,
+    base_ref: str,
+    shared_paths: tuple[str, ...],
+) -> str:
     approved = _rev(clone, f"{approved_head}^{{commit}}")
     parents = _git(clone, "rev-list", "--parents", "-n", "1", new_head).split()
     if len(parents) != 3 or parents[1] != approved:
@@ -63,10 +81,18 @@ def _check(clone: Path, approved_head: str, new_head: str, base_ref: str) -> str
     extra = sorted(set(filter(None, listed.split("\0"))) - set(conflicts))
     if extra:
         raise _NotTrivial("edits outside conflict resolution: " + ", ".join(extra[:5]))
+    both = False
     for path, stages in sorted(conflicts.items()):
-        _check_conflict(clone, path, stages, new_head)
+        both |= _check_conflict(
+            clone, path, stages, new_head, shared_path_matches(shared_paths, path)
+        )
     if not conflicts:
         return "clean merge of base"
+    if both:
+        return (
+            f"{len(conflicts)} conflicted file(s), each hunk resolved to one side"
+            " or, in a shared path, both"
+        )
     return f"{len(conflicts)} conflicted file(s), each hunk resolved to one side"
 
 
@@ -89,7 +115,10 @@ def _check_conflict(
     path: str,
     stages: dict[int, tuple[str, str]],
     new_head: str,
-) -> None:
+    shared: bool = False,
+) -> bool:
+    """Raises unless every hunk took one side (or, when shared, both);
+    returns whether some hunk needed both sides."""
     if 2 not in stages or 3 not in stages:
         raise _NotTrivial(f"{path}: not a content conflict")
     modes = {mode for mode, _oid in stages.values()}
@@ -105,8 +134,12 @@ def _check_conflict(
     if any(b"\0" in blob for blob in blobs.values()):
         raise _NotTrivial(f"{path}: binary conflict")
     segments = _conflict_segments(blobs[2], blobs[1], blobs[3])
-    if not _one_side_each(segments, _blob(clone, parts[2])):
-        raise _NotTrivial(f"{path}: a conflict hunk was not resolved to exactly one side")
+    resolved = _blob(clone, parts[2])
+    if _one_side_each(segments, resolved):
+        return False
+    if shared and _one_side_each(segments, resolved, both=True):
+        return True
+    raise _NotTrivial(f"{path}: a conflict hunk was not resolved to exactly one side")
 
 
 def _conflict_segments(ours: bytes, base: bytes, theirs: bytes) -> list[tuple[bytes, ...]]:
@@ -129,7 +162,22 @@ def _conflict_segments(ours: bytes, base: bytes, theirs: bytes) -> list[tuple[by
         )
     if not 0 <= result.returncode < 128:
         raise _NotTrivial("git merge-file failed")
-    return _parse_markers(result.stdout, size)
+    return _restore_final_newlines(_parse_markers(result.stdout, size), ours, theirs)
+
+
+def _restore_final_newlines(
+    segments: list[tuple[bytes, ...]], ours: bytes, theirs: bytes
+) -> list[tuple[bytes, ...]]:
+    """git merge-file ends a hunk side with LF before the next marker even
+    when that side is the end of a file with no final LF; drop that byte so
+    every side is the file's own bytes."""
+    if len(segments) < 2 or segments[-1] != (b"",) or len(segments[-2]) != 2:
+        return segments
+    sides = tuple(
+        side[:-1] if side.endswith(b"\n") and blob and not blob.endswith(b"\n") else side
+        for side, blob in zip(segments[-2], (ours, theirs))
+    )
+    return [*segments[:-2], sides, segments[-1]]
 
 
 def _marker_size(*texts: bytes) -> int:
@@ -184,13 +232,18 @@ def _is_marker(line: bytes, marker: bytes) -> bool:
     return line == marker or line.startswith(marker + b" ")
 
 
-def _one_side_each(segments: list[tuple[bytes, ...]], resolved: bytes) -> bool:
+def _one_side_each(
+    segments: list[tuple[bytes, ...]], resolved: bytes, both: bool = False
+) -> bool:
     positions = {0}
-    for options in segments:
+    for segment in segments:
+        options = set(segment)
+        if both and len(segment) == 2:
+            options |= {segment[0] + segment[1], segment[1] + segment[0]}
         positions = {
             position + len(option)
             for position in positions
-            for option in set(options)
+            for option in options
             if resolved.startswith(option, position)
         }
         if not positions:

@@ -544,9 +544,9 @@ class Feeder(Protocol):
     def feed_once(self) -> object: ...
 
 
-# (repo, base branch, approved head, updated head) -> whether the update is
+# (repo, base branch, approved head, updated head, shared_paths) -> whether the update is
 # trivial, and why (lib/update_check.py).
-UpdateClassifier = Callable[[str, str, str, str], UpdateClass]
+UpdateClassifier = Callable[[str, str, str, str, tuple[str, ...]], UpdateClass]
 
 
 class Dispatcher:
@@ -2524,7 +2524,11 @@ class Dispatcher:
             return UpdateClass(False, "no update check is configured")
         try:
             return self.update_classifier(
-                ticket.repo, ticket.factory.base_branch, approved_head, head
+                ticket.repo,
+                ticket.factory.base_branch,
+                approved_head,
+                head,
+                ticket.factory.shared_paths,
             )
         except Exception as exc:
             return UpdateClass(False, f"check failed: {type(exc).__name__}")

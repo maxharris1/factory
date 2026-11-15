@@ -31,5 +31,7 @@ def _approved_note(job: Job) -> list[str]:
     return [
         "The PR is approved. Resolve each conflict hunk by taking exactly one side when you "
         "can, and change nothing else: the poller then carries the approval to your merge "
-        "commit. Any other edit sends the PR back to review."
+        "commit. In a file the project's factory.md lists under `shared_paths`, keeping both "
+        "sides of a hunk, one after the other and unchanged, also carries the approval. Any "
+        "other edit sends the PR back to review."
     ]

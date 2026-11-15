@@ -46,7 +46,8 @@ than it has free slots.
 Gates (#156, lib/feeder_gates.py): a ticket not started yet is fed only
 once every ticket or PR its `Blocked by` lines (and, on Linear, its blocks
 relations) name is done, and nothing in flight shares a `Touches:` path or a
-`Conflicts with` edge with it. In flight is a fed ticket whose PR is still
+`Conflicts with` edge with it (a `Touches:` path in the project's
+`shared_paths` never collides). In flight is a fed ticket whose PR is still
 open, or one selected earlier in this poll. A ticket that waits is
 `waiting-blocked` with its reason and takes no room; it is re-checked every
 poll. Blocker and holder statuses come from one batched, cached read per
@@ -600,7 +601,9 @@ class Feeder:
         for blocker, pull in via.items():
             if _progress(statuses, pull) is Progress.DONE:
                 statuses[blocker] = statuses[pull]
-        holds = Holds()
+        holds = Holds(shared={
+            c.ref.repo: c.context.config.shared_paths for c in candidates
+        })
         released: list[Ref] = []
         capped = self._capped({row.ticket for row in holders.values() if row.ticket})
         flips: list[tuple[Ref, bool]] = []
