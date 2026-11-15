@@ -1,8 +1,4 @@
-"""The one writer of ticket_state.workflow_state (issue #150).
-
-Every state change appends a ticket_transitions row in the caller's
-transaction, so a failed insert rolls back the state write with it.
-"""
+"""The one writer of ticket_state.workflow_state and its ticket_transitions log."""
 
 from __future__ import annotations
 
@@ -23,13 +19,6 @@ def write_workflow_state(
     guard_args: Sequence[object] = (),
     insert: Mapping[str, object] | None = None,
 ) -> bool:
-    """Set the ticket's workflow_state and record the transition.
-
-    `also` holds extra columns the update sets. `guard` is extra WHERE
-    SQL for the update. When the row is missing, `insert` gives the new
-    row's other columns; without it nothing is written. True when a row
-    was written. A write that keeps the state records no transition.
-    """
     if not connection.in_transaction:
         connection.execute("BEGIN IMMEDIATE")
     key = (repo.lower(), ticket_id)
