@@ -17,7 +17,7 @@ from lib.dashboard_pages import (
     activity, common, efficiency, lanes, shell, system, ticket_detail, tickets,
 )
 from lib.dashboard_pages.activity import (  # noqa: F401
-    _ATTENTION, _HANDOFF, _HEALTH_LINK, _VERDICT, _attention, _handoffs, _health_link, _verdicts,
+    _ATTENTION, _HEALTH_LINK, _VERDICT, _attention, _health_link, _relay, relay_threads,
 )
 from lib.dashboard_pages.common import (  # noqa: F401
     _BOTS, _JOB_STATE, LIST_MAX, _b, _bot, _chip, _e, _feed, _job_kind, _job_label, _num, _panel,
@@ -62,7 +62,7 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
+    system.CSS, ticket_detail.CSS, tickets.CSS, common.CSS_MISC, efficiency.CSS, activity.CSS, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((
