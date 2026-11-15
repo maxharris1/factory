@@ -116,6 +116,9 @@ class ReadyMixin:
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
             return False, "ci-pending"
+        if result.status == "success" and self.feeder is not None:
+            if self.feeder.hold_stacked_review(ticket, head):
+                return False, "stacked-held"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
                 return True, "stale-ready"
