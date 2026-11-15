@@ -101,6 +101,8 @@ class FakeGh:
         self.calls: list[list[str]] = []
         self.fail_factory = False
         self.pull: dict = {}
+        self.files: list[dict] = []
+        self.label_events: list[dict] = []
 
     def __call__(self, argv, timeout):
         del timeout
@@ -117,6 +119,16 @@ class FakeGh:
             value = self.factory
         elif endpoint.endswith("/issues?state=open&per_page=100"):
             value = self.issues
+        elif endpoint.endswith("/files?per_page=100"):
+            value = self.files
+        elif endpoint.endswith("/labels?per_page=100"):
+            number = int(endpoint.split("/")[-2])
+            value = next(
+                (issue["labels"] for issue in self.issues if issue["number"] == number),
+                [],
+            )
+        elif endpoint.endswith("/events?per_page=100"):
+            value = self.label_events
         elif "/pulls/" in endpoint:
             value = {**self.pull, "head": {"sha": self.head, **self.pull.get("head", {})}}
         elif endpoint.endswith("/comments?per_page=100"):

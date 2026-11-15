@@ -150,10 +150,22 @@ def test_follow_up_ticket_passes_feeder_intake(risk: str) -> None:
     assert len(intake.criteria) == 2
 
 
-@pytest.mark.parametrize("path", ["bin/orch", "deploy/orch-poll.service", "lib/a.py", "factory.md"])
-def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "bin/orch",
+        "deploy/orch-poll.service",
+        "deploy/orch-waiter@.service",
+        ".gitignore",
+        ".gitattributes",
+        "lib/a.py",
+        "factory.md",
+    ],
+)
+@pytest.mark.parametrize("citation", ["{}:10", "[source]({}#L3)", "[source]({}#L3-L5)"])
+def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str, citation: str) -> None:
     finding = (
-        f"1. [follow-up] {path}:10 drops the exit status (round 4/5, owner/repo#7, "
+        f"1. [follow-up] {citation.format(path)} drops the exit status (round 4/5, owner/repo#7, "
         "https://github.com/owner/repo/pull/7, /home/bot/x.py, lib.followups)."
     )
     _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (finding,), "low")
@@ -163,6 +175,15 @@ def test_every_cited_file_is_touched_and_collides_with_its_holder(path: str) -> 
 
     assert gates.touches == frozenset({path})
     assert holds.collision(github_ref("owner/repo", 101), gates) is not None
+
+
+def test_unit_templates_and_root_dotfiles_appear_exactly_in_touches() -> None:
+    finding = (
+        "1. [follow-up] deploy/orch-waiter@.service:3 and .gitignore miss the new path; "
+        "so does .gitattributes."
+    )
+    _title, body = followup_issue("owner/repo", 42, 4, "https://x", "99", (finding,), "low")
+    assert "Touches: deploy/orch-waiter@.service, .gitignore, .gitattributes" in body.splitlines()
 
 
 def test_follow_up_ticket_without_cited_files_has_no_touches_line() -> None:

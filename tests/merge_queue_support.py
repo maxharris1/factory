@@ -82,6 +82,7 @@ class Board:
         finish_line: str | None = "merge",
         hold: HoldConfig | None = None,
         classifier=None,
+        trusted_logins=TRUSTED_LOGINS,
     ):
         self.now = [100.0]
         self.actions = BoardActions(self)
@@ -103,7 +104,7 @@ class Board:
         self.dispatcher = Dispatcher(
             path,
             self.queue,
-            trusted_logins=TRUSTED_LOGINS,
+            trusted_logins=trusted_logins,
             review_actions=self.actions,
             grok_delivery=self.grok,
             update_classifier=default_classifier if classifier is None else classifier,
