@@ -14,8 +14,9 @@ from __future__ import annotations
 import re
 
 ISSUE_BODY_LIMIT = 65536
-_ITEM = re.compile(r"^\s*\d+[.)]\s")
+_ITEM = re.compile(r"^( *)\d+[.)]\s")
 _HEADING = re.compile(r"^#{1,6}\s")
+_FENCE = re.compile(r"^\s*(```|~~~)")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
 
@@ -29,9 +30,18 @@ def followups_active(followup_from: int | None, round_number: int | None) -> boo
 def followup_findings(body: str) -> tuple[str, ...]:
     items: list[list[str]] = []
     current: list[str] | None = None
+    indent = 0
+    fenced = False
     for line in (body or "").splitlines():
-        if _ITEM.match(line):
+        fence = _FENCE.match(line)
+        item = _ITEM.match(line)
+        if fenced or fence:
+            fenced = fenced != bool(fence)
+            if current is not None:
+                current.append(line)
+        elif item and (current is None or len(item.group(1)) <= indent):
             current = [line]
+            indent = len(item.group(1))
             items.append(current)
         elif _HEADING.match(line):
             current = None
