@@ -121,6 +121,8 @@ from lib.remote import TAG_ENV, WORKER_ENV_END, WORKER_ENV_MARK
 from lib.codex_rollout import THREAD_ID
 from lib.codex_rollout import latest as rollout_latest
 from lib.codex_rollout import default_home as codex_home
+from lib import lane_limit
+from lib.job_state import USAGE_LIMIT, record_job_event
 from lib.usage_readings import Reading, parse_codex, store
 
 TABLE = "job_telemetry"
@@ -1348,6 +1350,8 @@ class Session:
         self._final: str | None = None  # the run's last final message (#87 handoff line)
         self._final_sent = True
         self._worker_env = worker_env  # a remote start's environment report is still to come
+        self._limit: lane_limit.UsageLimit | None = None
+        self._limit_recorded = False
 
     # Runs on the reader thread until the command's stdout closes.
     def consume(self, stream: IO[bytes]) -> None:
@@ -1405,6 +1409,10 @@ class Session:
                     self.summary.feed(event, self.clock())
                 except Exception as exc:  # a malformed event never stops the tee
                     self._warn("parse", f"telemetry: skipped an event ({type(exc).__name__})")
+            if self._limit is None:
+                self._limit = lane_limit.detect(self.harness, event, self.clock())
+                if self._limit is not None:
+                    self.flush()
             try:
                 message = final_message(event)
             except Exception:
@@ -1454,6 +1462,8 @@ class Session:
         lost = self._slot_hours_lost
         if lost is not None:
             cli_reason = f"wall-clock ({lost:.2f} slot-hours lost)"
+        elif self._limit is not None:
+            cli_reason = lane_limit.USAGE_LIMIT_REASON
         now = self.clock()
         data.update(
             {
@@ -1494,8 +1504,26 @@ class Session:
                         job_id=self.job_id,
                         readings=readings,
                     )
+                    self._record_limit(connection)
         except Exception as exc:  # telemetry never stops the heartbeat or the job's cleanup
             self._warn("write", f"telemetry: summary not written ({type(exc).__name__}: {exc})")
+
+    def _record_limit(self, connection: sqlite3.Connection) -> None:
+        """#367: pause the job's lane once, in the summary's transaction."""
+        if self._limit is None or self._limit_recorded:
+            return
+        now = self.clock()
+        held = lane_limit.record(
+            connection,
+            job_id=self.job_id,
+            harness=self.harness,
+            bot=self.bot,
+            limit=self._limit,
+            now=now,
+        )
+        if held is not None:
+            record_job_event(connection, self.job_id, USAGE_LIMIT, lane_limit.label(held), now)
+        self._limit_recorded = True
 
     def add_usage(self, readings: list[Reading]) -> None:
         """Keep each window's newest reading; the next flush stores them (#151)."""

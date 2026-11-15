@@ -454,10 +454,10 @@ def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, flo
     row = connection.execute(
         f"""
         SELECT event, detail, recorded_at FROM {JOB_EVENTS_TABLE}
-        WHERE job_id = ? AND event IN (?, ?, ?, ?)
+        WHERE job_id = ? AND event IN (?, ?, ?, ?, ?)
         ORDER BY id DESC LIMIT 1
         """,
-        (job_id, RUN_DIED, RUN_EXITED, LINK_DROP, REQUEUED_LINK_DROP),
+        (job_id, RUN_DIED, RUN_EXITED, LINK_DROP, REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT),
     ).fetchone()
     if row is None or row[0] != LINK_DROP:
         return None
@@ -648,7 +648,7 @@ def _lag_since_run(
     if not has_job_events(connection):
         return None
     ends = (PREFLIGHT_LAGGING, LAG_BLOCKED, REQUEUED_LAGGING, RUN_DIED, RUN_EXITED, LINK_DROP,
-            REQUEUED_LINK_DROP)
+            REQUEUED_LINK_DROP, REQUEUED_USAGE_LIMIT)
     marks = ", ".join("?" for _ in ends)
     rows = connection.execute(
         f"""
@@ -674,3 +674,55 @@ def _lag_since_run(
     if first_refused_at is None or detail is None:
         return None
     return LaggingEnd(detail, first_refused_at, requeues)
+
+
+# --- #367: a run that hit its harness account's usage limit -------------------
+
+USAGE_LIMIT = "usage-limit"
+REQUEUED_USAGE_LIMIT = "requeued-usage-limit"
+_USAGE_LIMIT_RESETS = (
+    REQUEUED_USAGE_LIMIT,
+    REQUEUED_LAGGING,
+    REQUEUED_LINK_DROP,
+    REQUEUED_EARLY_EXIT,
+    RELEASED_UNSTARTED,
+    PREFLIGHT_LAGGING,
+    LAG_BLOCKED,
+    LINK_DROP,
+)
+
+
+def usage_limit_end(connection: sqlite3.Connection, job_id: str) -> str | None:
+    """The usage-limit detail when the row's latest run reported its
+    account's usage limit, or None. The run's own end events come after the
+    limit and are passed over."""
+    if not has_job_events(connection):
+        return None
+    events = (USAGE_LIMIT, *_USAGE_LIMIT_RESETS)
+    marks = ", ".join("?" for _ in events)
+    row = connection.execute(
+        f"""
+        SELECT event, detail FROM {JOB_EVENTS_TABLE}
+        WHERE job_id = ? AND event IN ({marks}) ORDER BY id DESC LIMIT 1
+        """,
+        (job_id, *events),
+    ).fetchone()
+    if row is None or row[0] != USAGE_LIMIT:
+        return None
+    return str(row[1])
+
+
+def requeue_usage_limited(
+    connection: sqlite3.Connection, job_id: str, *, now: float, reason: str
+) -> tuple[str, str] | None:
+    """Requeue a failed, unhandled usage-limited row as itself in the
+    caller's write transaction: no round, attempt or free requeue charged.
+    The lane gate in claim_order holds it until the limit lifts."""
+    return _requeue_failed(
+        connection,
+        job_id,
+        now=now,
+        reason=reason,
+        event=REQUEUED_USAGE_LIMIT,
+        detail=f"{reason}; requeued, no round or attempt charged",
+    )

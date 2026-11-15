@@ -198,7 +198,8 @@ SCRIPT = r"""
     var resets = ['five_hour', 'seven_day'].filter(function (w) { return e[w].state === 'ok' && e[w].resets_at !== null; })
       .map(function (w) { return e[w].resets_at; });
     cells.push(resets.length ? ['in ' + dur(Math.min.apply(null, resets) - now), null] : ['—', 'muted']);
-    if (e.headroom !== null) cells.push([pct(e.headroom), usageLevel(e.headroom)]);
+    if (e.limit_label) cells.push([e.limit_label, 'bad']);
+    else if (e.headroom !== null) cells.push([pct(e.headroom), usageLevel(e.headroom)]);
     else if (e.state === 'stale' && e.age_seconds !== null) cells.push(['reading ' + dur(e.age_seconds) + ' old', 'muted']);
     else if (e.age_seconds === null) cells.push(['no reading yet', 'muted']);
     else cells.push([e.state, 'muted']);
@@ -416,7 +417,9 @@ def _usage_cells(entry: dict, now: float) -> list[tuple[str, str | None]]:
               if entry[w]["state"] == "ok" and entry[w]["resets_at"] is not None]
     cells.append((f"in {duration(min(resets) - now)}", None) if resets else ("—", "muted"))
     room = entry["headroom"]
-    if room is not None:
+    if entry.get("limit_label"):
+        cells.append((entry["limit_label"], "bad"))
+    elif room is not None:
         level = "ok" if room >= 0.5 else "warn" if room >= 0.2 else "bad"
         cells.append((f"{_half_up(room * 100)}%", level))
     elif state == "stale" and entry["age_seconds"] is not None:

@@ -252,7 +252,7 @@ class DevicePool:
             row = next(
                 (
                     item
-                    for item in claim_order(connection, harness)
+                    for item in claim_order(connection, harness, now=now)
                     if str(item["id"]) not in excluded
                 ),
                 None,
