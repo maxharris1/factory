@@ -81,6 +81,7 @@ class CommentsMixin:
         comments: list[Comment],
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        self._remember_verdicts(ticket, comments)
         for comment in comments:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
@@ -235,7 +236,6 @@ class CommentsMixin:
                 ):
                     self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
-        self._remember_verdicts(ticket, comments)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
         if comment.edited_at is not None:
@@ -397,11 +397,19 @@ class CommentsMixin:
                         comment.id,
                         fields.get("head") or "",
                         _round_number(fields.get("round")),
+                        comment.created_at,
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO verdict_heads VALUES (?, ?, ?, ?, ?)", rows
+                """
+                INSERT INTO verdict_heads (
+                    repo, ticket_id, comment_id, head, review_round, posted_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
+                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at)
+                """,
+                rows,
             )
 
     def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
