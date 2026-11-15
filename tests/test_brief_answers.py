@@ -128,12 +128,14 @@ def test_resumed_answers_are_quoted_once() -> None:
     assert f"Max's answers ({resumed})" in text
 
 
-def linear_node(identifier: str, body: str, second: int, **extra: str) -> dict[str, object]:
+def linear_node(
+    identifier: str, body: str, second: int, user: str = "user-1", **extra: str
+) -> dict[str, object]:
     return dict(
         id=identifier,
         body=body,
         createdAt=f"2026-11-11T12:00:{second:02d}Z",
-        user={"id": "user-1"},
+        user={"id": user},
         **extra,
     )
 
@@ -155,10 +157,12 @@ def linear_build(tmp_path: Path, nodes: list[dict[str, object]]):
 def test_latest_linear_brief_from_newest_first_comments(tmp_path: Path) -> None:
     newest = BRIEF.replace("Brief.", "Newest scope.")
     oldest = BRIEF.replace("Brief.", "Oldest scope.")
+    stranger = BRIEF.replace("Brief.", "Stranger scope.")
     job = linear_build(
         tmp_path,
         [
-            linear_node("go", GO.format(state="building"), 4),
+            linear_node("go", GO.format(state="building"), 5),
+            linear_node("stranger", stranger, 4, user="user-2"),
             linear_node("new", newest, 3),
             linear_node("old", oldest, 1),
         ],
