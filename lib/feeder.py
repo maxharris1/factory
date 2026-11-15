@@ -76,6 +76,7 @@ from typing import Protocol
 
 from lib import attention
 from lib.device_pool import free_slots, slots_in_use
+from lib.device_sync import blocked as sync_blocked
 from lib.dispatcher import Comment, TicketRef, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
@@ -720,8 +721,9 @@ class Feeder:
         with self.queue.connect() as connection:
             # Held slots, plus running jobs with no placement on the box (#90).
             used = slots_in_use(connection, self.machines)
+            blocked = sync_blocked(connection)
             for harness in harnesses:
-                free = free_slots(self.machines, harness, used) if self.machines else 0
+                free = free_slots(self.machines, harness, used, blocked) if self.machines else 0
                 queued = connection.execute(
                     "SELECT COUNT(*) FROM jobs WHERE state = 'queued' AND recipient = ?",
                     (harness,),

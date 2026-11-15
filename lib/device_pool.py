@@ -48,6 +48,8 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from fractions import Fraction
 
+from lib.device_sync import NOTHING_BLOCKED, Blocked
+from lib.device_sync import blocked as sync_blocked
 from lib.machines_yml import Device, MachinesConfig, shared_tailscale_names
 from lib.queue import (
     SLOTS_TABLE,
@@ -115,16 +117,18 @@ def choose_device(
     config: MachinesConfig,
     harness: str,
     used: Mapping[str, int],
+    blocked: Blocked = NOTHING_BLOCKED,
 ) -> Device | None:
     """The schedulable device listing harness with the lowest utilization, or None.
 
     Utilization is slots held over slot_max, compared exactly. A tie goes to
     a remote device before the local box, remotes in machines.yml order
-    (issue #223). A full device is never chosen.
+    (issue #223). A full device is never chosen, nor one whose factory
+    checkout for harness is out of sync or being updated (#297).
     """
     candidates = []
     for index, device in enumerate(config.devices):
-        if not device.eligible(harness):
+        if not device.eligible(harness) or blocked.blocks(device.name, harness):
             continue
         assert device.slot_max is not None
         held = used.get(device.name, 0)
@@ -135,11 +139,16 @@ def choose_device(
     return min(candidates, key=lambda candidate: candidate[0])[1]
 
 
-def free_slots(config: MachinesConfig, harness: str, used: Mapping[str, int]) -> int:
-    """Free slots, summed over every schedulable device listing harness."""
+def free_slots(
+    config: MachinesConfig,
+    harness: str,
+    used: Mapping[str, int],
+    blocked: Blocked = NOTHING_BLOCKED,
+) -> int:
+    """Free slots, summed over every schedulable device listing harness that choose_device may pick."""
     total = 0
     for device in config.devices:
-        if device.eligible(harness):
+        if device.eligible(harness) and not blocked.blocks(device.name, harness):
             assert device.slot_max is not None
             total += max(0, device.slot_max - used.get(device.name, 0))
     return total
@@ -231,7 +240,9 @@ class DevicePool:
                 WHERE job_id IN (SELECT id FROM jobs WHERE state = 'queued')
                 """
             )
-            device = choose_device(self.config, harness, _used(connection, self.config))
+            device = choose_device(
+                self.config, harness, _used(connection, self.config), sync_blocked(connection)
+            )
             if device is None:
                 connection.commit()
                 return None
@@ -686,6 +697,12 @@ def box_device(config: MachinesConfig | None) -> str:
             if device.local:
                 return device.name
     return "box"
+
+
+def sync_blocks(queue: SQLiteJobQueue) -> Blocked:
+    """Where device_sync forbids placement now (#297)."""
+    with queue.connect() as connection:
+        return sync_blocked(connection)
 
 
 def used_slots(queue: SQLiteJobQueue, config: MachinesConfig | None) -> dict[str, int]:
