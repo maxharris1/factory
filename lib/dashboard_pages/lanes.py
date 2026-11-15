@@ -17,10 +17,10 @@ from lib.dashboard_pages.common import (
 CSS = """\
 #hud #lanes{grid-column:1/-1}
 .kpis{display:flex;flex-wrap:wrap;gap:12px}
-.kpi{flex:1 1 140px;min-width:0;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
+.kpi{position:relative;flex:1 1 140px;min-width:0;padding:10px 14px 12px;background:var(--bg);box-shadow:var(--elev)}
 .kpi b{display:block;font:600 30px/1.15 var(--mono);letter-spacing:-.03em;color:var(--text);font-variant-numeric:tabular-nums;white-space:pre}
-.kpi span{font:500 12px/1.3 var(--mono);color:var(--muted)}
-.kpi .px{height:8px}
+.kpi span{display:block;font:500 12px/1.3 var(--mono);color:var(--muted)}
+.kpi .px{position:absolute;top:0;left:0;width:100%;height:8px}
 .kpi.ok b{color:var(--ok)}.kpi.bad b{color:var(--bad)}
 .lanes{display:flex;flex-direction:column;gap:10px}
 .lane{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:flex-start;padding:12px;background:var(--bg);box-shadow:var(--elev)}
@@ -95,9 +95,6 @@ font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--muted)}
 """
 
 
-CSS_LINKS = ""
-
-
 # --- tables shared with the script (LANES) -------------------------------------------------
 
 # A job tile per PX state (shell.PX_STATE carries the strip). `verbs` rotate while the job
@@ -112,6 +109,7 @@ TILE_STATE: dict[str, dict] = {
     "stale": {"text": "no heartbeat", "tone": "warn", "chip": ["stale", "warn"], "hb": "warn"},
     "dead": {"text": "runner dead", "tone": "bad", "chip": ["dead", "bad"], "hb": "bad", "bad": True},
     "overdue": {"text": "overdue", "tone": "bad", "hb": "bad", "bad": True},
+    "stuck": {"text": "ticket stuck", "tone": "bad", "chip": ["stuck", "bad"], "hb": "bad", "bad": True},
     "unknown": {"text": None, "tone": "", "hb": "live"},
 }
 

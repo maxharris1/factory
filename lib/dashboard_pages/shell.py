@@ -741,6 +741,7 @@ PX_SCRIPT = r"""
     if (!row) return 'unknown';
     if (row.job_state === 'dead') return 'dead';
     if (row.overdue) return 'overdue';
+    if (row.stuck) return 'stuck';
     if (row.job_state === 'stale') return 'stale';
     if (row.job_state === 'claimed') return 'claimed';
     if (row.job_state === 'running' && TABLE.actions.hasOwnProperty(row.action)) return TABLE.actions[row.action];
@@ -922,6 +923,8 @@ def px_state(row: dict) -> str:
         return "dead"
     if row.get("overdue"):
         return "overdue"
+    if row.get("stuck"):
+        return "stuck"
     if job_state in ("stale", "claimed"):
         return str(job_state)
     if job_state == "running" and row.get("action") in PX_ACTIONS:
