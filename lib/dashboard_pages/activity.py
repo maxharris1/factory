@@ -1,5 +1,3 @@
-"""activity.html (Activity): Needs attention and the Relay threads (Activity.dc.html)."""
-
 from __future__ import annotations
 
 import re
@@ -252,7 +250,6 @@ def _thread_key(row: dict) -> str:
 
 
 def _job_hrefs(snapshot: dict) -> dict[str, str]:
-    """Each ticket's job view: its running job with the least elapsed time, else its first queued job."""
     best: dict[str, dict] = {}
     for row in snapshot["running"]:
         key = _thread_key(row)
@@ -263,19 +260,16 @@ def _job_hrefs(snapshot: dict) -> dict[str, str]:
     return {key: f"job.html#{anchor(row['job'])}" for key, row in best.items()}
 
 
+def _place_untimed(ordered: list[dict], verdicts: list[dict]) -> None:
+    for index, step in enumerate(verdicts):
+        if step["at"] is not None:
+            continue
+        previous = verdicts[index - 1] if index else None
+        at = next(i for i, s in enumerate(ordered) if s is previous) + 1 if previous else 0
+        ordered.insert(at, step)
+
+
 def relay_threads(snapshot: dict) -> list[dict]:
-    """Every handoff and verdict in the snapshot, grouped into one thread per ticket.
-
-    The ordering rule (the script's relayThreads is the same rule):
-
-    1. Each handoff and verdict lands in exactly one thread, keyed by repo (any case) and ticket id.
-    2. In a thread, timed steps go oldest first. On a tie a handoff goes before a verdict, because the
-       poller handles a comment after the job that posted it; two verdicts tie-break by handled order
-       (`seq`), two handoffs by the snapshot's order.
-    3. A verdict with no recorded time goes directly after the verdict the poller handled just before it
-       in the thread, or first when it is the thread's first verdict.
-    4. Threads go newest timed step first. Threads with no timed step go last, newest handled verdict first.
-    """
     threads: dict[str, dict] = {}
 
     def thread(row: dict) -> dict:
@@ -293,10 +287,7 @@ def relay_threads(snapshot: dict) -> list[dict]:
             key=lambda step: (-step["at"], step["type"] == "verdict", step["tie"]),
         )
         verdicts = sorted((step for step in item["steps"] if step["type"] == "verdict"), key=lambda s: s["row"]["seq"])
-        for index, step in enumerate(verdicts):
-            if step["at"] is None:
-                at = next(i for i, s in enumerate(ordered) if s is verdicts[index - 1]) + 1 if index else 0
-                ordered.insert(at, step)
+        _place_untimed(ordered, verdicts)
         timed = [step["at"] for step in ordered if step["at"] is not None]
         kinds = {(step["type"], step["row"]["kind"]) for step in ordered}
         found.append({

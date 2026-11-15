@@ -10,8 +10,6 @@ efficiency pages.
   diagram drawn from model/chart.mmd (the statechart's checked-in chart),
   with the job's path and current state highlighted, its round and its time
   in that state.
-- Activity page (activity.html): needs attention and the Relay threads (#143).
-- System page (health.html): components, no-waiter and poller.log.
 - Efficiency page (efficiency.html): poll and Linear budget, handoff savings
   and a one-line definition of scripted share.
 - #63 FU-1: a lane counts max(held, running) slots.

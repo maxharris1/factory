@@ -1,5 +1,3 @@
-"""#143: the Activity page from Activity.dc.html: full-row Needs attention and the Relay threads."""
-
 from __future__ import annotations
 
 import copy
@@ -55,8 +53,6 @@ def _finish(connection: sqlite3.Connection, job_id: str, finished_at: float) -> 
 
 
 def activity_snapshot(tmp_path: Path) -> dict:
-    """Handoffs and verdicts across three tickets: one verdict queued a job, one is a job's handoff, one has
-    no job; the queued job's repo is stored in another case than handled_comments stores it."""
     db, log = seeded(tmp_path)
     with sqlite3.connect(db) as connection:
         _finish(connection, "d-claude-build-1", NOW - 400)
