@@ -627,6 +627,36 @@ def test_bad_factory_md_keeps_the_last_good_config_and_warns_once() -> None:
     assert len(warnings) == 2
 
 
+def test_a_rejected_base_branch_never_replaces_the_last_good_factory_md() -> None:
+    good = FACTORY.format(tickets="github", ship="merge")
+    gh = FakeGh(good)
+    gh.issues = [{"number": 12, "pull_request": {}, "labels": [{"name": "orch:state/intake"}]}]
+    errors: list[tuple[str, str, str]] = []
+    source = LivePollSource(
+        config(),
+        gh_runner=gh,
+        error_sink=lambda repo, ticket, error: errors.append((repo, ticket, error)),
+    )
+    project = source.config.projects[0]
+    counts = []
+    contexts = []
+    for text in (
+        good,
+        good.replace("base_branch: main", "base_branch: dev"),
+        good.replace("ship: merge", "ship: yolo"),
+    ):
+        gh.factory = _factory_payload(text)
+        source.begin_cycle()
+        counts.append(len(source.github_candidates("orch:state/")))
+        try:
+            contexts.append(source.factory_context(project).config.base_branch)
+        except PollSourceError:
+            contexts.append(None)
+
+    assert counts == [1, 0, 1]
+    assert contexts == ["main", None, "main"]
+
+
 def test_bad_factory_md_with_no_last_good_config_is_still_an_error() -> None:
     gh = FakeGh(FACTORY.format(tickets="github", ship="yolo"))
     errors: list[tuple[str, str, str]] = []

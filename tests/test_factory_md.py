@@ -524,6 +524,41 @@ def test_unknown_fields_warn_when_read_leniently(tmp_path: Path) -> None:
     assert context_findings == findings
 
 
+@pytest.mark.parametrize(
+    ("section", "extra"),
+    [
+        ("builder", {"model": "claude-opus"}),
+        ("reviewer", {"model": "gpt-5"}),
+        ("review", {}),
+        ("review.rounds", {}),
+        ("hold", {"approver": "max-login", "paths": ["src/**"], "label": "qa:hold"}),
+    ],
+)
+def test_lenient_read_drops_only_an_unknown_nested_key(
+    tmp_path: Path, section: str, extra: dict
+) -> None:
+    data = copy.deepcopy(VALID)
+    data.setdefault("hold", {})
+    parts = section.split(".")
+    cursor = data
+    for part in parts:
+        cursor = cursor[part]
+    cursor.update(extra)
+    known, known_findings = parse_factory_md(
+        write_factory(tmp_path, data).read_text(encoding="utf-8")
+    )
+    assert known is not None and known_findings == []
+    cursor["future_field"] = True
+    text = write_factory(tmp_path, data).read_text(encoding="utf-8")
+
+    config, findings = parse_factory_md(text, strict=False)
+
+    assert config == known
+    assert [(f.severity, f.message) for f in findings] == [
+        ("warning", f"unknown field '{section}.future_field'")
+    ]
+
+
 def test_lenient_read_still_refuses_a_bad_known_field(tmp_path: Path) -> None:
     data = copy.deepcopy(VALID)
     data["owner_bot"] = "grok"

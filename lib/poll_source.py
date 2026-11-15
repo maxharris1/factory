@@ -1071,16 +1071,18 @@ class LivePollSource:
             )
         try:
             factory = self._factory_at(project.repo, project.factory_ref)
+            fresh = True
         except FactoryParseError as exc:
             factory = self._last_good(identity, exc, self._last_good_factory)
-        else:
-            self._last_good_factory[identity] = factory
-            self._factory_warned.pop(identity, None)
+            fresh = False
         if factory.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {factory.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if fresh:
+            self._last_good_factory[identity] = factory
+            self._factory_warned.pop(identity, None)
         self._factory_cache[identity] = factory
         return factory
 
@@ -1111,8 +1113,8 @@ class LivePollSource:
             raise PollSourceError(f"{project.repo} has no projects[].factory_ref in orch.yml")
         identity = project.repo.lower()
         text = self._factory_text(project.repo, project.factory_ref)
-        context, findings = parse_factory_context(text, strict=False)
-        if context is None:
+        parsed, findings = parse_factory_context(text, strict=False)
+        if parsed is None:
             errors = [item.message for item in findings if item.severity == "error"]
             context = self._last_good(
                 identity,
@@ -1122,13 +1124,15 @@ class LivePollSource:
                 self._last_good_context,
             )
         else:
-            self._last_good_context[identity] = context
-            self._factory_warned.pop(identity, None)
+            context = parsed
         if context.config.base_branch != project.factory_ref:
             raise PollSourceError(
                 f"{project.repo} factory.md base_branch is {context.config.base_branch}, "
                 f"not configured factory_ref {project.factory_ref}"
             )
+        if parsed is not None:
+            self._last_good_context[identity] = parsed
+            self._factory_warned.pop(identity, None)
         return context
 
     def _last_good(self, identity: str, exc: FactoryParseError, cache: dict):
