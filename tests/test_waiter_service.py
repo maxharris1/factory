@@ -10,6 +10,7 @@ installs or starts anything outside a temporary HOME.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -513,8 +514,8 @@ def _pre_295_service(tmp_path: Path) -> Path:
         fi
 """
     assert check in script
-    legacy = tmp_path / "pre-295" / "waiter-service.sh"
-    legacy.parent.mkdir()
+    deploy = shutil.copytree(SERVICE.parent, tmp_path / "pre-295")
+    legacy = deploy / SERVICE.name
     legacy.write_text(script.replace(check, ""), encoding="utf-8")
     return legacy
 
