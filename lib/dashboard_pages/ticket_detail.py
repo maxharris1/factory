@@ -23,7 +23,7 @@ VERBS = {
 EFFECTS = {"plan": "dither", "build": "bricks", "review": "scanner", "fix": "patch"}
 NEXT_ORDER = {"normal": 0, "human": 1, "stop": 2}
 FIRST_REASON = "ticket arrives"
-STOP_TINT = "#f7768e"
+STOP_TINT = journey_canvas.STOP
 CHART_SUB = "· {n} states, with this ticket's path drawn on the whole machine"
 
 
@@ -760,4 +760,3 @@ _SCRIPT = r"""
     "__CHARTSUB__", json.dumps(CHART_SUB)
 )
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT
-CSS += journey_canvas.CSS

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from lib.dashboard_flow import FLOWMAP_TINT, STOP_RED
+
 LANE = {
     "intake": "ask",
     "questions": "ask",
@@ -29,18 +31,8 @@ LANE = {
     "blocked": "stop",
 }
 
-TINT = {
-    "script": "#a9b1d6",
-    "claude": "#e0af68",
-    "codex": "#7aa2f7",
-    "cursor": "#bb9af7",
-    "grok": "#73daca",
-    "human": "#ff9e64",
-}
-
-STOP = "#f7768e"
-
-CSS = ""
+TINT = FLOWMAP_TINT
+STOP = STOP_RED
 
 _SCRIPT = r"""
 var JOURNEY = __JOURNEY__;
