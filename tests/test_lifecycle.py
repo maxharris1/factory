@@ -1400,3 +1400,67 @@ def test_a_restored_review_paused_by_questions_resumes_once_over_separate_polls(
 
     assert outcome(flow.queue, "answers-1") == "resumed-review"
     assert _claimed_steps(flow, "codex") == [("review", "answers-1")]
+
+
+def _restore_into(flow: Flow, state: Path, saved: Path) -> None:
+    shutil.rmtree(state)
+    restore(saved, state / "d.db")
+    flow.dispatcher, flow.queue = setup(
+        state, flow.now, review_actions=flow.actions, grok_delivery=flow.grok
+    )
+
+
+@pytest.mark.parametrize("separate_polls", [False, True])
+def test_a_review_replayed_from_before_its_ready_resumes_once_after_answers(
+    tmp_path: Path, separate_polls: bool
+) -> None:
+    state = tmp_path / "state"
+    flow = Flow(state)
+    assert flow.go() == "queued-build"
+    flow.finish("claude", f"ready-{HEADS[0][:6]}")
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    assert flow.ready(HEADS[0]) == "queued-review"
+    flow.finish("codex", "review-q")
+    assert (
+        flow.post(
+            "review-q",
+            "<!-- orch:v1 kind=questions from=codex-bot role=reviewer "
+            "state=waiting-max -->\nWhich head should I review?\n",
+            "codex-login",
+        )
+        == "waiting-max"
+    )
+    _restore_into(flow, state, saved)
+    if separate_polls:
+        flow.dispatcher.process(flow.snapshot())
+        assert ("review", "queued") not in _harness_jobs(flow.queue)
+    flow.add("answers-1", ANSWERS, "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-review"
+    assert _claimed_steps(flow, "codex") == [("review", "answers-1")]
+
+
+@pytest.mark.parametrize("separate_polls", [False, True])
+def test_a_plan_replayed_from_before_its_go_resumes_once_after_answers(
+    tmp_path: Path, separate_polls: bool
+) -> None:
+    state = tmp_path / "state"
+    flow = Flow(state)
+    saved = tmp_path / "backup" / "orch.db"
+    backup(flow.queue.path, saved)
+    assert flow.post("go-1", GO.format(state="planning"), "grok-login") == "queued-plan"
+    flow.finish("claude", "questions-1")
+    assert flow.post("questions-1", QUESTIONS, "claude-login") == "waiting-max"
+    _restore_into(flow, state, saved)
+    if separate_polls:
+        flow.dispatcher.process(flow.snapshot())
+        assert ("plan", "queued") not in _harness_jobs(flow.queue)
+    flow.add("answers-1", ANSWERS, "grok-login")
+
+    flow.dispatcher.process(flow.snapshot())
+
+    assert outcome(flow.queue, "answers-1") == "resumed-plan"
+    assert _claimed_steps(flow, "claude") == [("plan", "answers-1")]
