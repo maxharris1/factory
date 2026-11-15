@@ -231,13 +231,15 @@ class DetailMixin:
             self._cancel_answered(connection, job, request, answered)
         return job, answered
 
-    def _reviewed_head(self, ticket: TrackedTicket, through_round: int) -> str | None:
+    def _reviewed_head(
+        self, ticket: TrackedTicket, comment: Comment, through_round: int
+    ) -> str | None:
         from lib.evidence.findings import findings_evidence
 
         with self._connect() as connection:
-            accepted = _accepted_comment_ids(connection, ticket)
+            comments = _verdict_sources(connection, ticket, comment)
         return findings_evidence(
-            comments=[item for item in ticket.comments if item.id in accepted],
+            comments=comments,
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
             current_round=through_round + 1,
@@ -268,11 +270,8 @@ class DetailMixin:
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
         scope = (ticket.repo.lower(), ticket.ticket_id)
-        accepted = _accepted_comment_ids(connection, ticket)
         findings = findings_evidence(
-            comments=[
-                item for item in ticket.comments if item.id == comment.id or item.id in accepted
-            ],
+            comments=_verdict_sources(connection, ticket, comment),
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
             current_round=(_detail_round_number(request.detail) or 1)
@@ -515,8 +514,10 @@ class DetailMixin:
         )
 
 
-def _accepted_comment_ids(connection: sqlite3.Connection, ticket: TrackedTicket) -> set[str]:
-    return {
+def _verdict_sources(
+    connection: sqlite3.Connection, ticket: TrackedTicket, comment: Comment
+) -> list[Comment]:
+    accepted = {
         row[0]
         for row in connection.execute(
             """
@@ -530,6 +531,7 @@ def _accepted_comment_ids(connection: sqlite3.Connection, ticket: TrackedTicket)
             (ticket.repo.lower(), ticket.ticket_id) * 4,
         )
     }
+    return [item for item in ticket.comments if item.id == comment.id or item.id in accepted]
 
 
 def _review_bases(details: list[str]) -> dict[int, str]:
