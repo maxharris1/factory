@@ -115,6 +115,7 @@ from lib.dispatcher import Comment, TicketRef, TrackedTicket, safe_ship_error
 from lib.factory_md import FactoryContext
 from lib.feeder_gates import (
     ATTENTION_REASONS,
+    FILE_PATH,
     GateLines,
     Holds,
     PathPolicy,
@@ -194,11 +195,6 @@ BODY_LIMIT = 20_000
 
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
-# A file path an issue names: a dotted file name, optionally under folders.
-_FILE = re.compile(
-    r"(?<![\w/.-])((?:[\w.-]+/)*[\w-][\w.-]*\.(?:py|md|mmd|yml|yaml|json|toml|ini|cfg|txt|"
-    r"sh|sql|ts|tsx|js|jsx|mjs|css|scss|html|go|rs|rb|java|kt|swift|tla|svg))(?![\w/-])"
-)
 
 Log = Callable[[str], None]
 
@@ -542,7 +538,7 @@ def go_state_for(body: str, plan_first: bool | None = None) -> str:
     distinct files, else building."""
     if plan_first:
         return "planning"
-    files = {match.group(1) for match in _FILE.finditer(body or "")}
+    files = {match.group(1) for match in FILE_PATH.finditer(body or "")}
     return "planning" if len(files) > PLANNING_FILE_COUNT else "building"
 
 

@@ -13,6 +13,7 @@ from lib.dispatch.constants import (
 )
 from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import (
+    _base_update_key,
     _comment_order,
     _matching_head,
     _merge_only,
@@ -58,7 +59,40 @@ class MergeQueueMixin:
         ready it posts gets CI and review as usual. It charges no round."""
         if self.queue.now() - comment.created_at < BASE_UPDATE_GRACE_SECONDS:
             return "ci-pending"
-        request = JobRequest(
+        self._enqueue_base_update(
+            ticket,
+            comment,
+            head,
+            review_round,
+            f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
+            f"ran no CI on {head}: merge {ticket.factory.base_branch} in.",
+        )
+        return "ci-pending-base-update"
+
+    def _enqueue_base_update(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+        instruction: str,
+    ) -> None:
+        self._enqueue_or_flag(
+            ticket,
+            comment,
+            self._base_update_request(ticket, comment, head, review_round, instruction),
+            dedupe_key=_base_update_key(ticket, head),
+        )
+
+    def _base_update_request(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        review_round: int,
+        instruction: str,
+    ) -> JobRequest:
+        return JobRequest(
             repo=ticket.repo,
             ticket_id=ticket.ticket_id,
             action="fix",
@@ -72,20 +106,10 @@ class MergeQueueMixin:
                 action="fix",
                 head=head,
                 round_number=review_round + 1,
-                instruction=(
-                    f"The PR conflicts with {ticket.factory.base_branch}, so GitHub "
-                    f"ran no CI on {head}: merge {ticket.factory.base_branch} in."
-                ),
+                instruction=instruction,
                 kind="merge-only",
             ),
         )
-        self._enqueue_or_flag(
-            ticket,
-            comment,
-            request,
-            dedupe_key=f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}",
-        )
-        return "ci-pending-base-update"
 
     def _settle_update(
         self,

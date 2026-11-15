@@ -27,6 +27,7 @@ WRITERS = {
     "ship-state": "lib/dispatch/ship.py",
     "ship-discard": "lib/dispatch/ship.py",
     "hold-gate": "lib/dispatch/holds.py",
+    "held-base-update": "lib/dispatch/holds.py",
     "update-settled": "lib/dispatch/merge_queue.py",
     "closed-unmerged": "lib/dispatch/merge_queue.py",
     "update-queued": "lib/dispatch/merge_queue.py",

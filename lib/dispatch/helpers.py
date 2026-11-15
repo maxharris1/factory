@@ -28,6 +28,10 @@ def _scope(repo: str, ticket_id: str) -> str:
     return f"{repo.lower()}\x1f{ticket_id}"
 
 
+def _base_update_key(ticket: TrackedTicket, head: str) -> str:
+    return f"base-update:{_scope(ticket.repo, ticket.ticket_id)}:{head}"
+
+
 def trusted_bots(
     trusted_logins: Mapping[str, Mapping[str, frozenset[str]]],
     author: str,
@@ -80,6 +84,7 @@ ACTED_VERDICT_OUTCOMES = frozenset(
         "waiting-external",
         "ship-unconfirmed",
         "ship-failed",
+        "held-base-update",
     }
 )
 
