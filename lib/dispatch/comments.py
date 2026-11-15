@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 
 from lib.approver_commands import parse_slash_go
@@ -80,6 +81,7 @@ class CommentsMixin:
         comments: list[Comment],
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
+        self._remember_verdicts(ticket, comments)
         for comment in comments:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
@@ -234,7 +236,6 @@ class CommentsMixin:
                 ):
                     self.clear_attention(ticket.repo, ticket.ticket_id, "edited-comment")
                 self._mark_handled(ticket, comment.id, outcome)
-        self._remember_verdicts(ticket, comments)
 
     def _slash_go(self, ticket: TrackedTicket, comment: Comment) -> str:
         if comment.edited_at is not None:
@@ -331,14 +332,19 @@ class CommentsMixin:
             ).fetchone()
         return None if row is None else str(row["outcome"])
 
-    def _handled_before(self, ticket: TrackedTicket, comment_id: str, when: float) -> bool:
+    def _predates(self, ticket: TrackedTicket, comment: Comment, queued_at: float) -> bool:
+        """True when comment came before work first queued at queued_at:
+        GitHub dates it to an earlier second, or the dispatcher handled it
+        first. GitHub stamps comments in whole seconds."""
+        if comment.created_at < math.floor(queued_at):
+            return True
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM handled_times
                 WHERE repo = ? AND ticket_id = ? AND comment_id = ? AND handled_at < ?
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, comment_id, when),
+                (ticket.repo.lower(), ticket.ticket_id, comment.id, queued_at),
             ).fetchone()
         return row is not None
 
@@ -391,11 +397,19 @@ class CommentsMixin:
                         comment.id,
                         fields.get("head") or "",
                         _round_number(fields.get("round")),
+                        comment.created_at,
                     )
                 )
         with self._connect() as connection:
             connection.executemany(
-                "INSERT OR IGNORE INTO verdict_heads VALUES (?, ?, ?, ?, ?)", rows
+                """
+                INSERT INTO verdict_heads (
+                    repo, ticket_id, comment_id, head, review_round, posted_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
+                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at)
+                """,
+                rows,
             )
 
     def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:

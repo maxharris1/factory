@@ -12,6 +12,7 @@ from lib.dispatch.helpers import (
     _detail_round_number,
     _has_questions,
     _matching_head,
+    _ready_outcome,
     _round_number,
     _scope,
 )
@@ -536,7 +537,7 @@ class ReadyMixin:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, action, state, source_comment_id, detail,
+                SELECT id, action, state, source_comment_id, detail, created_at,
                        state IN ('queued', 'running')
                        OR (state = 'failed' AND failure_handled = 0) AS open
                 FROM jobs
@@ -558,30 +559,52 @@ class ReadyMixin:
         if row["open"]:
             return True
         return (row["action"], row["state"]) == ("review", "done") and not self._verdict_handled(
-            ticket, head, _detail_round_number(row["detail"]), str(row["source_comment_id"])
+            ticket,
+            head,
+            _detail_round_number(row["detail"]),
+            str(row["source_comment_id"]),
+            float(row["created_at"]),
         )
 
     def _verdict_handled(
-        self, ticket: TrackedTicket, head: str, review_round: int | None, ready_id: str
+        self,
+        ticket: TrackedTicket,
+        head: str,
+        review_round: int | None,
+        ready_id: str,
+        review_queued_at: float,
     ) -> bool:
         self._remember_verdicts(ticket, ticket.comments)
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT recorded.head FROM handled_comments AS verdict
-                JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
+                SELECT verdict.comment_id, verdict.outcome, recorded.head
+                FROM handled_comments AS verdict
+                LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
                   AND verdict.outcome NOT IN ('rejected-edited', 'rejected-unregistered-verdict')
-                  AND recorded.review_round = ?
+                  AND NOT COALESCE(recorded.posted_at < ?, 0)
+                  AND (
+                      recorded.review_round = ?
+                      OR recorded.head IS NULL AND verdict.rowid <= (
+                          SELECT MAX(handled_rowid) FROM verdict_heads_floor
+                      )
+                  )
                   AND verdict.rowid > COALESCE((
                       SELECT ready.rowid FROM handled_comments AS ready
                       WHERE ready.repo = verdict.repo AND ready.ticket_id = verdict.ticket_id
                         AND ready.comment_id = ?
                   ), 0)
                 """,
-                (ticket.repo.lower(), ticket.ticket_id, review_round, ready_id),
+                (ticket.repo.lower(), ticket.ticket_id, review_queued_at, review_round, ready_id),
             ).fetchall()
-        return any(_matching_head(str(row["head"]), head) is not None for row in rows)
+        visible = {comment.id for comment in ticket.comments}
+        return any(
+            _matching_head(str(row["head"]), head) is not None
+            if row["head"] is not None
+            else row["comment_id"] not in visible and not _ready_outcome(str(row["outcome"]))
+            for row in rows
+        )
 
     def _flag_ready_after_cap(
         self,

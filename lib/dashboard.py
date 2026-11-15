@@ -614,6 +614,7 @@ _VERDICT_TIMES = (
     ("ticket_retries", "MAX", "recorded_at", "comment_id"),
     ("followup_filings", "MAX", "created_at", "comment_id"),
     ("auto_extra_comments", "MAX", "created_at", "comment_id"),
+    ("verdict_heads", "MAX", "posted_at", "comment_id"),
     ("handled_times", "MAX", "handled_at", "comment_id"),
 )
 
