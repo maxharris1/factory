@@ -30,6 +30,7 @@ import base64
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -173,6 +174,13 @@ def write_token(path: Path, stored: Stored, gid: int | None) -> None:
     _write_private(path, stored.payload(), mode=0o640 if gid is not None else 0o600, gid=gid)
 
 
+def _has_access(path: Path, gid: int | None) -> bool:
+    info = path.stat()
+    if gid is None:
+        return stat.S_IMODE(info.st_mode) == 0o600
+    return stat.S_IMODE(info.st_mode) == 0o640 and info.st_gid == gid
+
+
 def ensure(
     app: "GitHubApp",
     owner: str,
@@ -188,6 +196,8 @@ def ensure(
     stored = read_token(path)
     if not needs_refresh(stored, now):
         assert stored is not None
+        if not _has_access(path, gid):
+            write_token(path, stored, gid)
         return stored, False
     installation = _installation(app, owner)
     fresh = mint(app, installation, now)
@@ -534,6 +544,15 @@ def credential(directory: Path, operation: str, stdin: TextIO, stdout: TextIO, n
 
 _REPO_FLAGS = ("-R", "--repo")
 _FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field")
+_VALUE_FLAGS = frozenset(
+    {
+        "-b", "--body", "-t", "--title", "-F", "--body-file", "-n", "--notes", "--notes-file",
+        "--subject", "--message", "-q", "--jq", "--template", "-S", "--search", "--json",
+        "-B", "--base", "-H", "--head", "--header", "-X", "--method", "--input", "--preview",
+        "--cache", "--hostname", "-l", "--label", "--add-label", "--remove-label", "--assignee",
+        "--reviewer", "--milestone", "--project", "--author", "--commit", "--match-head-commit",
+    }
+)
 _GITHUB_TARGET = re.compile(
     r"^(?:https?://)?(?:www\.|api\.)?github\.com/(?:repos/|orgs/|users/)?([^/\s]+)/"
 )
@@ -541,8 +560,8 @@ _API_PATH = re.compile(r"^/?(?:repos|orgs|users)/([^/?\s]+)")
 _REPO_SLUG = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*)/[A-Za-z0-9._-]+$")
 
 
-def _owner_of_target(value: str, slug: bool) -> str | None:
-    match = _GITHUB_TARGET.match(value) or _API_PATH.match(value)
+def _owner_of_target(value: str, slug: bool, api_path: bool = True) -> str | None:
+    match = _GITHUB_TARGET.match(value) or (_API_PATH.match(value) if api_path else None)
     if match is None and slug:
         match = _REPO_SLUG.match(value)
     return match.group(1) if match else None
@@ -561,21 +580,47 @@ def _field_value(args: Sequence[str], index: int) -> str | None:
 
 
 def owner_from_args(args: Sequence[str]) -> str | None:
-    """The owner of the repo or org a gh command targets: -R/--repo, a
-    github.com URL, a REST path, an `owner=` GraphQL field, or the
-    OWNER/REPO positional of `gh repo <command>`."""
-    positional_repo = args[:1] == ["repo"]
-    for index, arg in enumerate(args):
-        owner = None
-        if arg in _REPO_FLAGS and index + 1 < len(args):
-            owner = _owner_of_target(args[index + 1], slug=True)
-        elif arg.startswith("--repo="):
-            owner = _owner_of_target(arg.split("=", 1)[1], slug=True)
-        elif (field := _field_value(args, index)) is not None:
-            if field.startswith("owner="):
-                owner = field.split("=", 1)[1] or None
-        elif not arg.startswith("-"):
-            owner = _owner_of_target(arg, slug=positional_repo and index > 1)
+    """The owner of the repo or org a gh command targets, in this order:
+    -R/--repo; for `gh api`, an `owner=` field, then the endpoint; else a
+    github.com URL positional or the OWNER/REPO positional of `gh repo
+    <command>`. No other option's value ever names the target."""
+    api = args[:1] == ["api"]
+    explicit: str | None = None
+    field_owner: str | None = None
+    positionals: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in _REPO_FLAGS:
+            if index + 1 < len(args) and explicit is None:
+                explicit = _owner_of_target(args[index + 1], slug=True) or ""
+            index += 2
+            continue
+        if arg.startswith("--repo="):
+            if explicit is None:
+                explicit = _owner_of_target(arg.split("=", 1)[1], slug=True) or ""
+            index += 1
+            continue
+        if api and (field := _field_value(args, index)) is not None:
+            if field.startswith("owner=") and field_owner is None:
+                field_owner = field.split("=", 1)[1] or None
+            index += 2 if arg in _FIELD_FLAGS else 1
+            continue
+        if arg in _VALUE_FLAGS:
+            index += 2
+            continue
+        if not arg.startswith("-"):
+            positionals.append(arg)
+        index += 1
+    if explicit is not None:
+        return explicit or None
+    if field_owner:
+        return field_owner
+    if api:
+        return _owner_of_target(positionals[1], slug=False) if len(positionals) > 1 else None
+    slug_from = 2 if args[:1] == ["repo"] else len(positionals)
+    for position, value in enumerate(positionals):
+        owner = _owner_of_target(value, slug=position >= slug_from, api_path=False)
         if owner:
             return owner
     return None

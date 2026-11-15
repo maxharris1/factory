@@ -180,6 +180,26 @@ def test_a_harness_running_as_the_box_user_gets_a_0600_file(shared_root: Path) -
     assert not broker.readable_by(token, os.getuid() + 54321, [os.getgid()])
 
 
+@pytest.mark.parametrize(
+    ("before", "after", "mode"),
+    [
+        (Holder(None, None), Holder("claude-bot", os.getgid()), 0o640),
+        (Holder("claude-bot", os.getgid()), Holder(None, None), 0o600),
+    ],
+)
+def test_a_fresh_cached_token_follows_the_holders_access_without_a_new_mint(
+    shared_root: Path, before: Holder, after: Holder, mode: int
+) -> None:
+    mint = FakeMint()
+    kw = dict(now=Clock(), mint=mint, remotes={}, out=io.StringIO())
+    broker.refresh([app()], shared_root, holders={"claude-bot": before}, **kw)
+    broker.refresh([app()], shared_root, holders={"claude-bot": after}, **kw)
+    token = shared_root / "claude-bot" / "maxharris1.json"
+    assert len(mint.calls) == 1
+    assert stat.S_IMODE(token.stat().st_mode) == mode
+    assert broker.readable_by(token, os.getuid() + 54321, [os.getgid()]) == (mode == 0o640)
+
+
 class Ssh:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bindir = tmp_path / "fake-bin"
@@ -328,6 +348,45 @@ def test_gh_uses_the_installation_of_the_commands_target_over_the_checkouts(
     subprocess.run(["git", "remote", "add", "origin", "https://github.com/maxharris1/factory"], check=True)
     assert broker.gh_env(tokens, args, {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_AUT0"
     assert broker.gh_env(tokens, ["pr", "view", "284"], {}, NOW).get("GH_TOKEN") == f"{SENTINEL}_MAX"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pr", "create", "--title", "t", "--body", "https://github.com/maxharris1/factory", "-R", "aut0-code/project"],
+        ["pr", "create", "--title", "https://github.com/maxharris1/factory", "--repo", "aut0-code/project"],
+        ["pr", "create", "-t", "https://github.com/maxharris1/x", "-b", "b", "--repo=aut0-code/project"],
+        ["pr", "create", "--body-file", "orgs/maxharris1/pr.md", "-R", "aut0-code/project"],
+        ["pr", "create", "-F", "repos/maxharris1/x/pr.md", "-R", "aut0-code/project"],
+        ["issue", "comment", "7", "--body", "github.com/maxharris1/factory/pull/1", "-R", "aut0-code/project"],
+        ["release", "create", "v1", "--notes", "https://github.com/maxharris1/x", "-R", "aut0-code/project"],
+        ["pr", "merge", "7", "--subject", "https://github.com/maxharris1/x", "-R", "aut0-code/project"],
+        ["pr", "view", "https://github.com/maxharris1/x/pull/1", "-R", "aut0-code/project"],
+        ["api", "repos/aut0-code/project/issues/1/comments", "-f", "body=https://github.com/maxharris1/x"],
+        ["api", "--input", "orgs/maxharris1/body.json", "repos/aut0-code/project/issues/1/comments"],
+        ["api", "-H", "https://github.com/maxharris1/x", "repos/aut0-code/project"],
+        ["api", "--jq", "https://github.com/maxharris1/x", "repos/aut0-code/project"],
+        ["api", "graphql", "-f", "owner=aut0-code", "-f", "query=https://github.com/maxharris1/x"],
+        ["issue", "create", "--body", "https://github.com/maxharris1/x", "--title", "x", "-R", "aut0-code/project"],
+    ],
+)
+def test_no_option_value_but_the_target_names_the_installation(args: list[str]) -> None:
+    assert broker.owner_from_args(args) == "aut0-code"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pr", "create", "--title", "t", "--body", "https://github.com/maxharris1/factory"],
+        ["pr", "create", "--body-file", "orgs/maxharris1/pr.md"],
+        ["pr", "create", "-F", "repos/maxharris1/x/pr.md"],
+        ["pr", "comment", "7", "--body", "https://github.com/maxharris1/factory/pull/1"],
+        ["pr", "view", "7", "--json", "url", "--jq", "https://github.com/maxharris1/x"],
+        ["pr", "create", "--head", "orgs/maxharris1/x"],
+    ],
+)
+def test_option_values_without_a_target_leave_the_owner_to_the_checkout(args: list[str]) -> None:
+    assert broker.owner_from_args(args) is None
 
 
 def test_gh_reads_no_owner_from_values_that_name_no_repo() -> None:
