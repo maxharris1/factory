@@ -552,9 +552,11 @@ class Waiter:
             self.pool.config.device(placement.device) if placement is not None else None
         )
         remote = device is not None and not device.local
+        factory_root = self._factory_root(device)
         try:
             skill_preflight.preflight(
-                self.queue, job, bot=self.bot, placement=placement, device=device
+                self.queue, job, bot=self.bot, placement=placement, device=device,
+                checkout=factory_root,
             )
             job_dir = self._job_dir(job.id)
             argv = job_run_argv(
@@ -570,7 +572,7 @@ class Waiter:
             brief = self._brief(
                 job,
                 remote_device=device.name if remote else None,
-                factory_root=self._factory_root(device),
+                factory_root=factory_root,
             )
             brief_path = job_dir / "brief.md"
             _write_private(brief_path, brief.encode("utf-8"))
@@ -614,11 +616,9 @@ class Waiter:
     def _factory_root(self, device: Device | None) -> str | None:
         """The placed device's deployed factory checkout, never the job's worktree.
 
-        A remote device names its own; the box falls back to this checkout."""
-        root = device.factory_root_for(self.recipient) if device is not None else None
-        if root is None and (device is None or device.local):
-            return str(FACTORY_CHECKOUT)
-        return root
+        A device names its own; the box falls back to this checkout. The
+        skill preflight checks this same checkout."""
+        return skill_preflight.checkout_root(device, self.recipient, FACTORY_CHECKOUT)
 
     def _brief(
         self, job: Job, *, remote_device: str | None = None, factory_root: str | None = None

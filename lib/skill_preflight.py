@@ -12,9 +12,10 @@ records, at both places the harness reads it from:
 * the device's deployed factory checkout holds the whole pinned tree,
   skills/pstack/, skills/factory/ and skills/cursor-team-kit/. The routers
   send the harness there for pstack's docs/ and agents/ and for
-  skills/factory/harness/, which are never installed. On a remote device the checkout is its factory_root
-  (machines.yml); on the box it is the checkout the waiter runs from, whose
-  lock it reads (deploy/install.sh points the orch wrapper there).
+  skills/factory/harness/, which are never installed. The checkout is the
+  one the brief names (checkout_root): the device's factory_root
+  (machines.yml), or on a box without one the checkout the waiter runs
+  from, whose lock it reads (deploy/install.sh points the orch wrapper there).
 
 The whole tree is checked, not a list of named files: the routers reach
 other skills by reference (interrogate runs arena; figure-it-out runs
@@ -141,12 +142,11 @@ def wanted(skills: str, checkout: str, pinned: Pinned) -> dict[str, str]:
     return paths
 
 
-def checkout_root(device: Device | None, placement: Placement | None, harness: str, root: Path) -> str:
-    if device is None or device.local or placement is None:
+def checkout_root(device: Device | None, harness: str, root: Path) -> str | None:
+    """The placed device's deployed factory checkout: its factory_root, else on the box root."""
+    configured = device.factory_root_for(harness) if device is not None else None
+    if configured is None and (device is None or device.local):
         return str(root.resolve())
-    configured = device.factory_root_for(harness)
-    if configured is None:
-        raise PreflightError(f"preflight: {device.name} has no factory_root for {harness}")
     return configured
 
 
@@ -208,6 +208,7 @@ def check(
     device: Device | None,
     transport: CaptureTransport,
     home: Path,
+    checkout: str | None,
     root: Path = ROOT,
 ) -> Report:
     skills = skills_dir(bot)
@@ -215,7 +216,9 @@ def check(
         pinned = pinned_files(root)
     except (OSError, ValueError, UnicodeError) as exc:
         raise PreflightError(f"preflight: cannot read skills.lock: {exc}") from exc
-    checkout = checkout_root(device, placement, OWNING_BOTS[bot], root)
+    if checkout is None:
+        name = device.name if device is not None else "box"
+        raise PreflightError(f"preflight: {name} has no factory_root for {OWNING_BOTS[bot]}")
     expected = wanted(skills, checkout, pinned)
     paths = sorted(expected)
     if device is None or device.local or placement is None:
@@ -267,11 +270,13 @@ def preflight(
     bot: str,
     placement: Placement | None,
     device: Device | None,
+    checkout: str | None,
     transport: CaptureTransport | None = None,
     home: Path | None = None,
     root: Path | None = None,
 ) -> Report:
-    """Check the pinned skills on the job's device and record the result. Raises PreflightError."""
+    """Check the pinned skills on the job's device, under the checkout the brief names,
+    and record the result. Raises PreflightError."""
     try:
         report = check(
             bot=bot,
@@ -279,6 +284,7 @@ def preflight(
             device=device,
             transport=transport if transport is not None else SshTransport(),
             home=home if home is not None else Path.home(),
+            checkout=checkout,
             root=root if root is not None else ROOT,
         )
     except PreflightError as exc:

@@ -27,6 +27,7 @@ from lib.machines_yml import Device as MachinesDevice, load_machines_yml
 from lib.pstack_pin import install_skills
 from lib.remote import SshTransport
 from lib.queue import SQLiteJobQueue
+from lib import waiter
 from lib.waiter import HarnessCommand, Waiter
 from tests.test_remote_start import Ssh
 from tests.test_waiter import FakeContext, FakeSpawn, enqueue, state
@@ -81,6 +82,7 @@ def lock_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (root / "skills").mkdir(parents=True)
     (root / "skills" / "skills.lock").write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(skill_preflight, "ROOT", root)
+    monkeypatch.setattr(waiter, "FACTORY_CHECKOUT", root)
     return root
 
 
@@ -133,7 +135,8 @@ class Device:
     """A waiter for claude-bot on the box or the fake-ssh pc, with a spawn that
     notes how many ssh calls had happened when the run started."""
 
-    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool):
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, remote: bool,
+                 box_root: Path | None = None):
         self.ssh = Ssh(tmp_path)
         for name, value in self.ssh.env().items():
             monkeypatch.setenv(name, value)
@@ -148,7 +151,10 @@ class Device:
         self.checkout = tmp_path / "pc-factory"
         text = machines.read_text(encoding="utf-8")
         line = "    factory_root: /srv/factory\n"
-        machines.write_text(text.replace(line, f"    factory_root: {self.checkout}\n"), encoding="utf-8")
+        text = text.replace(line, f"    factory_root: {self.checkout}\n")
+        if box_root is not None:
+            text = text.replace("    local: true\n", f"    local: true\n    factory_root: {box_root}\n", 1)
+        machines.write_text(text, encoding="utf-8")
         self.db = tmp_path / "orch.db"
         self.queue = SQLiteJobQueue(self.db, clock=time.time)
         config, findings = load_machines_yml(machines, allow_placeholders=True)
@@ -179,6 +185,10 @@ class Device:
     def run_one(self) -> tuple[str, str | None]:
         job_id = enqueue(self.queue, "a")
         return job_id, self.waiter.step()
+
+    def brief(self) -> str:
+        [stdin] = self.spawn.stdin
+        return stdin.decode("utf-8")
 
 
 def test_the_pinned_set_is_every_installed_skill_file_and_the_whole_checkout(lock_root: Path) -> None:
@@ -226,7 +236,8 @@ def test_a_real_install_with_a_router_dependency_missing_or_changed_fails(
     home = tmp_path / "home"
     assert install_skills(root, home, "local") == []
     report = skill_preflight.check(bot="claude-bot", placement=None, device=None,
-                                   transport=SshTransport(), home=home, root=root)
+                                   transport=SshTransport(), home=home,
+                                   checkout=str(root.resolve()), root=root)
     assert report.error is None
     target = root / rel
     if defect == "missing":
@@ -235,7 +246,8 @@ def test_a_real_install_with_a_router_dependency_missing_or_changed_fails(
         target.write_text("changed adapter\n", encoding="utf-8")
 
     report = skill_preflight.check(bot="claude-bot", placement=None, device=None,
-                                   transport=SshTransport(), home=home, root=root)
+                                   transport=SshTransport(), home=home,
+                                   checkout=str(root.resolve()), root=root)
 
     assert report.error == f"preflight-{defect}: {root.resolve()}/{rel}"
 
@@ -355,8 +367,9 @@ def test_a_remote_without_a_factory_root_fails_without_ssh(tmp_path: Path, lock_
             raise AssertionError("no ssh without a factory_root")
 
     with pytest.raises(skill_preflight.PreflightError, match="^preflight: pc has no factory_root for claude$"):
-        skill_preflight.check(bot="claude-bot", placement=placement, device=pc,
-                              transport=NoSsh(), home=tmp_path, root=lock_root)
+        skill_preflight.check(bot="claude-bot", placement=placement, device=pc, transport=NoSsh(),
+                              home=tmp_path, checkout=skill_preflight.checkout_root(pc, "claude", lock_root),
+                              root=lock_root)
 
 
 def test_an_unreachable_remote_fails_before_launch(
@@ -441,19 +454,60 @@ def test_a_symlinked_skill_dir_counts(tmp_path: Path, lock_root: Path) -> None:
     assert skill_preflight.compare(expected, found) is None
 
 
-def test_the_box_checks_the_checkout_it_runs_from_whatever_factory_root_names(
-    tmp_path: Path, lock_root: Path
-) -> None:
+def test_the_box_checkout_is_its_factory_root_when_machines_yml_names_one(lock_root: Path) -> None:
     config, findings = load_machines_yml(REPO / "machines.yml", allow_placeholders=True)
     assert config is not None, findings
     box = next(device for device in config.devices if device.local)
-    assert box.factory_root_for("claude") not in (None, str(lock_root.resolve()))
-    install(tmp_path / "home")
+    named = box.factory_root_for("claude")
+    assert named not in (None, str(lock_root.resolve()))
+
+    assert skill_preflight.checkout_root(box, "claude", lock_root) == named
+    assert skill_preflight.checkout_root(None, "claude", lock_root) == str(lock_root.resolve())
+
+
+@pytest.mark.parametrize(
+    "defect, rel",
+    [("missing", "skills/pstack/docs/harness/claude-code.md"),
+     ("hash", "skills/pstack/docs/harness/claude-code.md"),
+     ("missing", "skills/factory/factory-builder/SKILL.md"),
+     ("hash", "skills/cursor-team-kit/LICENSE")],
+)
+def test_the_box_checks_the_factory_root_it_names_in_the_brief(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, defect: str, rel: str
+) -> None:
+    configured = tmp_path / "configured-factory"
+    device = Device(tmp_path, monkeypatch, remote=False, box_root=configured)
+    install(device.home)
     deploy(lock_root)
-    placement = Placement(job_id="j", device=box.name, harness="claude", os_user="claude-bot", placed_at=0.0)
+    deploy(configured, **({"skip": rel} if defect == "missing" else {"change": rel}))
 
-    report = skill_preflight.check(bot="claude-bot", placement=placement, device=box,
-                                   transport=SshTransport(), home=tmp_path / "home", root=lock_root)
+    job_id, started = device.run_one()
 
-    assert report.checkout == str(lock_root.resolve())
-    assert report.error is None
+    assert started is None
+    assert device.spawn.calls == []
+    assert state(device.db, job_id) == "failed"
+    error = f"preflight-{defect}: {configured}/{rel}"
+    assert any(error in line for line in device.log)
+    entry = detail_of(device.db, job_id)["skill_preflight"]
+    assert entry["checkout"] == str(configured)
+    assert entry["error"] == error
+
+
+@pytest.mark.parametrize("where", ["box", "box-configured", "pc"])
+def test_the_checkout_preflight_checks_is_the_one_the_brief_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path, where: str
+) -> None:
+    configured = tmp_path / "configured-factory"
+    device = Device(tmp_path, monkeypatch, remote=where == "pc",
+                    box_root=configured if where == "box-configured" else None)
+    install(device.home)
+    for checkout in (lock_root, configured, device.checkout):
+        deploy(checkout)
+
+    job_id, started = device.run_one()
+
+    assert started == job_id
+    checkout = detail_of(device.db, job_id)["skill_preflight"]["checkout"]
+    assert checkout == {"box": str(lock_root.resolve()), "box-configured": str(configured),
+                        "pc": str(device.checkout)}[where]
+    assert f"{checkout}/skills/factory/factory-builder/SKILL.md" in device.brief()
