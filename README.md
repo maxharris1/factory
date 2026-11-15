@@ -1880,7 +1880,15 @@ The last 20% of a verified usage cycle is a reserve. A non-urgent job moves to t
 bin/orch eval-report --input tests/fixtures/eval/week
 ```
 
-The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear.
+The report reads `orch:v1` comments, `dispatcher.log`, `orch.yml`, and each run's `factory.md` from that directory. Each `dispatcher.log` row names `ticket=<id>` (a GitHub number or a Linear id), with an optional `pr=`, so a ticket's Intake, Questions and Planning rows log before a PR exists. Every input must sit inside the directory; a symlink out of it is refused. `--since` and `--until` (`YYYY-MM-DDTHH:MM:SSZ`, inclusive) select a week. The whole log is measured and then clipped to the window, so a state that crosses either bound counts only its time inside, and a state still open at the end of the log is measured to `--until` or listed under open states. A verdict whose risk can't be found is reported `cap-unverified`; a round over the cap is `round-extra-authorized` when a `capped` to `fixing` step (Max's extra round) allows it, and `round-over-cap` otherwise. A missing `model-findings.txt` is reported as none supplied. A later weekly run passes the directory that holds that week's logs. The command does not contact GitHub or Linear. `--json` prints the same report as JSON.
+
+A bot that hands work to another bot by hand, instead of through an `orch:v1` handoff, logs it:
+
+```sh
+bin/orch log-message --repo maxharris1/factory --pr 443 --from grok-bot --to codex-bot
+```
+
+That appends `TIMESTAMP repo=<owner/name> pr=<n> message from=<bot> to=<bot> kind=handoff` to `dispatcher.log` (`--log`, else beside `$ORCH_DB`). It refuses a repo that is not `owner/name`, a non-numeric pr, or an empty bot, and writes nothing. The report counts these manual messages against scripted handoffs (the `comment` rows) per repo and ISO week. No input records a per-message token count yet, so it prints no token-savings figure.
 
 ```sh
 bin/orch eval-report --db ~/.local/share/factory/backup/orch.db --baseline o4-orch.db
