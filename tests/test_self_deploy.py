@@ -761,7 +761,8 @@ def test_an_up_to_date_pass_keeps_each_waiters_own_box_row(repo: Repo, tmp_path:
             ("claude-bot", "refused"), ("cursor-bot", "synced")]
 
 
-@pytest.mark.parametrize("second_pass", ["same state", "other state", "other checkout"])
+@pytest.mark.parametrize("second_pass", ["same state", "other state", "other checkout",
+                                         "linked db"])
 def test_an_overlapping_deploy_pass_leaves_the_active_pass_and_its_placement_guard_alone(
     tmp_path: Path, box_behind_new_pin: tuple[Path, Path], second_pass: str
 ) -> None:
@@ -795,11 +796,16 @@ def test_an_overlapping_deploy_pass_leaves_the_active_pass_and_its_placement_gua
         assert ready.wait(30)
         assert box_rows(queue) == [("box", "deploying")]
 
-        if second_pass == "other checkout":
+        if second_pass in ("other checkout", "linked db"):
             other = tmp_path / "other-box"
             git(tmp_path, "clone", "-q", "--branch", "main", str(tmp_path / "origin.git"),
                 str(other))
-            second = self_deploy.deploy(other, tmp_path / "other-state", **kw)
+            if second_pass == "linked db":
+                alias = tmp_path / "alias.db"
+                alias.symlink_to(queue.path)
+                environ = {**environ, "ORCH_DB": str(alias)}
+            second = self_deploy.deploy(other, tmp_path / "other-state",
+                                        **{**kw, "environ": environ})
         else:
             state = "state" if second_pass == "same state" else "other-state"
             second = self_deploy.deploy(box, tmp_path / state, **kw)

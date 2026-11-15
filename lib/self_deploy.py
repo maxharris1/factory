@@ -15,10 +15,10 @@ One pass, in order; the first guard that fails ends it:
 1. Only the account that owns the checkout and can write to it pulls;
    any other account exits at once and logs nothing. A pass holds
    self-deploy.lock in the state directory, in the checkout's git
-   directory and, when ORCH_DB names a file, beside it for its device,
-   to its end, so two passes
-   that share any of them never overlap, whatever --state or
-   ORCH_STATE_DIR each was given; a pass that finds one held returns
+   directory and, when ORCH_DB names a file, beside the file it resolves
+   to for its device, to its end, so two passes that share any of them
+   never overlap, whatever --state, ORCH_STATE_DIR or link to orch.db
+   each was given; a pass that finds one held returns
    `skipped` at once and writes nothing.
 2. The checkout is left alone (logged, escalated once) when it is not on
    main, has a merge, rebase, cherry-pick or revert in progress, has
@@ -657,7 +657,7 @@ def deploy(
         return Outcome(SKIPPED, "not the checkout owner")
     state_dir.mkdir(parents=True, exist_ok=True)
     name = environ.get("ORCH_DB")
-    db = Path(name) if name and Path(name).is_file() else None
+    db = Path(name).resolve() if name and Path(name).is_file() else None
     with ExitStack() as held:
         for path in _lock_paths(checkout, state_dir, db, device, git_env(environ, webhook)):
             lock = held.enter_context(open(path, "a"))
