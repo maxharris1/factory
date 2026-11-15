@@ -139,6 +139,8 @@ class ReadyMixin:
         assert result is not None
         if self._mark_stuck_on_third_red(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
+        if ticket.factory.start_before_ci and self._ci_failure_carried(ticket, head):
+            return True, "ci-red-in-flight"
         self._queue_ci_fix(ticket, comment, head, result, review_round, generation)
         if rereview:
             self._leave_merge_queue(ticket, "update-ci-red")
@@ -452,12 +454,42 @@ class ReadyMixin:
                     instruction=detail,
                 ),
             ),
-            dedupe_key=(
-                f"review:{_scope(ticket.repo, ticket.ticket_id)}:"
-                f"{head}:r{review_round}"
-            ),
+            dedupe_key=self._review_dedupe_key(ticket, head, review_round),
         )
         return True, answered
+
+    def _review_dedupe_key(
+        self, ticket: TrackedTicket, head: str, review_round: int
+    ) -> str:
+        key = f"review:{_scope(ticket.repo, ticket.ticket_id)}:{head}:r{review_round}"
+        with self._connect() as connection:
+            fix = connection.execute(
+                """
+                SELECT fix.id FROM jobs AS review
+                JOIN jobs AS fix
+                  ON lower(fix.repo) = lower(review.repo)
+                 AND fix.ticket_id = review.ticket_id
+                 AND fix.action = 'fix' AND fix.head = review.head
+                 AND fix.rowid > review.rowid
+                WHERE review.dedupe_key = ?
+                ORDER BY fix.rowid DESC LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        return key if fix is None else f"{key}:after-{fix['id']}"
+
+    def _ci_failure_carried(self, ticket: TrackedTicket, head: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND head = ?
+                  AND action IN ('review', 'fix') AND state IN ('queued', 'running')
+                LIMIT 1
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, head),
+            ).fetchone()
+        return row is not None
 
     def _flag_ready_after_cap(
         self,

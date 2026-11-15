@@ -198,11 +198,7 @@ class VerdictMixin:
         reported_round: int | None,
     ) -> ReviseCIGate:
         state, completed = self._review_context(ticket)
-        if (
-            state not in ("review", "awaiting-ok")
-            or reported_round != completed + 1
-            or reported_round >= self._effective_cap(ticket)
-        ):
+        if state not in ("review", "awaiting-ok") or reported_round != completed + 1:
             return ReviseCIGate()
         head = ticket.current_head
         assert head is not None

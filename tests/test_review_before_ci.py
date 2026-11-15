@@ -306,3 +306,105 @@ def test_on_a_reentry_ready_with_pending_ci_queues_the_next_round(tmp_path: Path
     assert reviews[-1]["head"] == sha(2)
     assert json.loads(reviews[-1]["detail"])["round"].startswith("2/")
     assert board.state("42")["workflow_state"] == "review"
+
+
+def test_on_a_ci_only_fix_at_the_same_head_reviews_the_round_again(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    board.approve(pr)
+    board.poll()
+    board.finish("claude")
+
+    pr.ci[pr.head] = "success"
+    ready = board.ready(pr, pr.head, "ready-ci-rerun")
+    board.poll()
+    board.poll()
+
+    assert board.outcome(ready) == "queued-review"
+    rereview = board.finish("codex")
+    assert rereview.request.head == pr.head
+    assert json.loads(rereview.request.detail)["round"].startswith("1/")
+
+    board.ready(pr, pr.head, "ready-ci-rerun-again")
+    board.poll()
+    assert board.queue.claim("codex") is None
+
+    approve = board.approve(pr, "1/3", "approve-after-ci-fix")
+    board.poll()
+    assert board.outcome(approve) == "merge-queue"
+    assert board.actions.merges == [(True, pr.head)]
+
+
+def test_on_a_reposted_ready_after_a_red_revise_queues_no_second_fix(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    reviewed_at_pending_ci(board, pr, pr.head)
+    pr.ci[pr.head] = "failure"
+    board.revise(pr, "1/3")
+    board.poll()
+    ready = board.ready(pr, pr.head, "ready-reposted")
+    board.poll()
+
+    assert board.outcome(ready) == "ci-red-in-flight"
+    assert [job["source_comment_id"] for job in board.jobs("fix")] == ["revise-42-1/3"]
+
+
+def test_on_a_ready_reposted_during_the_review_leaves_red_ci_to_the_verdict(
+    tmp_path: Path,
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    pr.push(sha(1), ci="pending")
+    board.ready(pr, sha(1))
+    board.poll()
+    pr.ci[sha(1)] = "failure"
+    ready = board.ready(pr, sha(1), "ready-reposted")
+    board.poll()
+
+    assert board.outcome(ready) == "ci-red-in-flight"
+    assert board.jobs("fix") == []
+
+    board.finish("codex")
+    board.revise(pr, "1/3")
+    board.poll()
+    [fix] = board.jobs("fix")
+    assert fix["source_comment_id"] == "revise-42-1/3"
+    assert CI_LOG in instruction(fix)
+
+
+def test_on_the_third_red_at_the_round_cap_marks_the_ticket_stuck(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    for number in (1, 2, 3):
+        reviewed_at_pending_ci(board, pr, sha(number))
+        pr.ci[pr.head] = "failure"
+        board.revise(pr, f"{number}/3")
+        board.poll()
+        if number < 3:
+            board.finish("claude")
+
+    state = board.state("42")
+    assert (state["gate_count"], state["stuck"]) == (3, 1)
+    assert board.outcome("revise-42-3/3") == "stuck-ci-red-3"
+
+
+def test_on_a_green_revise_at_the_round_cap_resets_the_red_count(tmp_path: Path) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = built_with_ci_pending(board, sha(1))
+    for number, ci in ((1, "failure"), (2, "failure"), (3, "pending")):
+        reviewed_at_pending_ci(board, pr, sha(number))
+        pr.ci[pr.head] = ci
+        board.revise(pr, f"{number}/3")
+        board.poll()
+        if number < 3:
+            board.finish("claude")
+
+    assert board.outcome("revise-42-3/3") is None
+    pr.ci[pr.head] = "success"
+    board.poll()
+
+    state = board.state("42")
+    assert board.outcome("revise-42-3/3") == "capped-review"
+    assert (state["workflow_state"], state["gate_count"], state["stuck"]) == ("capped", 0, 0)
