@@ -11,6 +11,7 @@ review:
     high: 3
   verify: none
   followup_from_round: 4
+  auto_extra_rounds: 2
   start_before_ci: true
 ship: handoff
 finish_line: merge
@@ -33,7 +34,7 @@ hold:
 ---
 
 ## Review
-One reviewer from a different model family than the builder (Codex Bot) gives the verdict. `review.verify` is `none`; the reviewer reads the diff. With `review.start_before_ci: true`, the review starts when the builder's `ready` lands, without waiting for CI. The reviewer reads the CI result if it has finished and does not block or REVISE on CI status alone. Low-risk changes get one round. High-risk changes (anything touching ship, handoff, trust or the poller install) get up to three rounds; every extra round needs Max's own words. From round 4 (`review.followup_from_round`), a variant of a rule an earlier round already raised is a `[follow-up]` finding, not a blocker: the PR can ship and the poller files the follow-ups as one new `urgent` ticket blocked by the PR.
+One reviewer from a different model family than the builder (Codex Bot) gives the verdict. `review.verify` is `none`; the reviewer reads the diff. With `review.start_before_ci: true`, the review starts when the builder's `ready` lands, without waiting for CI. The reviewer reads the CI result if it has finished and does not block or REVISE on CI status alone. Low-risk changes get one round. High-risk changes (anything touching ship, handoff, trust or the poller install) get up to three rounds. At the cap, the poller grants the first two extra rounds itself (`review.auto_extra_rounds: 2`, issue #263; Max, 5:30 PM ET 2026-11-14: "Yes, turn on #259 (from round 4), #263 and #262 for the factory repo"). It never grants one for BLOCKED, `repeat=`, `unsat=` or a stuck ticket, and every round past those two needs Max's own words. From round 4 (`review.followup_from_round`), a variant of a rule an earlier round already raised is a `[follow-up]` finding, not a blocker: the PR can ship and the poller files the follow-ups as one new `urgent` ticket blocked by the PR.
 
 ## Ship
 `ship: handoff`, `finish_line: merge`. Nothing ships before CI is green on the approved head, even though the review may start before CI finishes. An APPROVE on red CI queues a CI fix instead, and that fix is a gate retry, not a review round. On APPROVE of the covered head with green CI, the poller marks a draft PR ready and labels it `orch:state/merge-queue`. It then keeps watching the PR until it merges or closes. When the PR conflicts with `main`, the poller queues a Claude `update-from-main` job; an update that only takes one side of each conflict (or both sides, in a `shared_paths` file) keeps the approval, and any other update goes back to Codex for review. The poller squash-merges approved PRs one at a time, oldest approval first, and wakes Grok Bot (Factory) with a `done` wake once a PR is merged. Do not merge these PRs by hand. Two failed updates mark the ticket stuck (`update-failed-2`) and ask Max.

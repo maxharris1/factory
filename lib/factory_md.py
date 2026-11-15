@@ -28,6 +28,11 @@ already raised is a [follow-up] finding, not a blocker, and the poller
 files a trusted verdict's [follow-up] findings as one new ticket. Absent,
 the policy is off. Refused with tickets: linear, which has no filer.
 
+review.auto_extra_rounds is optional (issue #263): a non-negative integer,
+default 0. A trusted REVISE at the cap gets an extra round from the poller
+itself while ticket_state.cap_extra is below it; after that the ticket
+waits for a person as before.
+
 review.start_before_ci is optional (issue #262): a boolean, default false.
 True queues the review as soon as a trusted ready lands while CI is still
 running on that head. Ship still needs green CI on the approved head.
@@ -146,6 +151,7 @@ class FactoryConfig:
     finish_line: str | None = None
     shared_paths: tuple[str, ...] = ()
     followup_from_round: int | None = None
+    auto_extra_rounds: int = 0
     start_before_ci: bool = False
 
     def __post_init__(self) -> None:
@@ -210,7 +216,14 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     tickets = _choice(data, "tickets", TICKETS, findings)
     builder_harness, builder_model = _actor(data, "builder", findings, unknown)
     reviewer_harness, reviewer_model = _actor(data, "reviewer", findings, unknown)
-    rounds_low, rounds_high, verify, followup_from_round, start_before_ci = _review(
+    (
+        rounds_low,
+        rounds_high,
+        verify,
+        followup_from_round,
+        auto_extra_rounds,
+        start_before_ci,
+    ) = _review(
         data, findings, unknown
     )
     ship = _ship(data, findings)
@@ -283,6 +296,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         finish_line=finish_line,
         shared_paths=shared_paths,
         followup_from_round=followup_from_round,
+        auto_extra_rounds=auto_extra_rounds,
         start_before_ci=start_before_ci,
     )
     return config, findings
@@ -358,20 +372,20 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None, int | None, bool]:
+) -> tuple[int | None, int | None, str | None, int | None, int, bool]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None, None, False
+        return None, None, None, None, 0, False
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None, None, False
+        return None, None, None, None, 0, False
     findings.extend(
         _unknown(
             review,
-            {"rounds", "verify", "followup_from_round", "start_before_ci"},
+            {"rounds", "verify", "followup_from_round", "auto_extra_rounds", "start_before_ci"},
             "review",
             unknown,
         )
@@ -404,6 +418,7 @@ def _review(
         high,
         verify,
         _followup_from_round(review, findings, unknown),
+        _auto_extra_rounds(review, findings, unknown),
         _start_before_ci(review, findings, unknown),
     )
 
@@ -427,6 +442,16 @@ def _followup_from_round(
             Finding(unknown, "review.followup_from_round must be an integer of at least 2")
         )
         return None
+    return int(value)
+
+
+def _auto_extra_rounds(review: dict, findings: list[Finding], unknown: str) -> int:
+    value = review.get("auto_extra_rounds", 0)
+    if not is_strict_int(value) or value < 0:
+        findings.append(
+            Finding(unknown, "review.auto_extra_rounds must be a non-negative integer")
+        )
+        return 0
     return int(value)
 
 

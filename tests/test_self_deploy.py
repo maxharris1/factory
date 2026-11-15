@@ -6,20 +6,23 @@ clone. Install runs and webhook posts are fakes that record their calls.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
-from lib import device_sync, heal, self_deploy
-from lib.device_pool import DevicePool
+from lib import device_sync, heal, pstack_pin, self_deploy
+from lib.device_pool import DevicePool, slots_in_use
 from lib.machines_yml import Device, MachinesConfig
 from lib.queue import JobRequest, SQLiteJobQueue
 from lib.grok_delivery import WebhookResult
-from lib.heal import Webhook
+from lib.heal import Webhook, run_service
+from tests.test_skills_reconcile import box_behind_new_pin
 
 NOW = 1_800_000_000.0
 SECRETS = {
@@ -756,3 +759,84 @@ def test_an_up_to_date_pass_keeps_each_waiters_own_box_row(repo: Repo, tmp_path:
     with queue.connect() as connection:
         assert [(r.bot, r.state) for r in device_sync.read(connection)] == [
             ("claude-bot", "refused"), ("cursor-bot", "synced")]
+
+
+@pytest.mark.parametrize("second_pass", ["same state", "other state", "other checkout",
+                                         "linked db"])
+def test_an_overlapping_deploy_pass_leaves_the_active_pass_and_its_placement_guard_alone(
+    tmp_path: Path, box_behind_new_pin: tuple[Path, Path], second_pass: str
+) -> None:
+    upstream, box = box_behind_new_pin
+    home = tmp_path / "home"
+    assert pstack_pin.install_skills(box, home, "cloud") == []
+    git(box, "pull", "-q", "--ff-only", "origin", "main")
+    queue, pool = box_queue(tmp_path)
+    temp = tmp_path / "elsewhere"
+    temp.mkdir()
+    environ = {"PATH": os.environ["PATH"], "HOME": str(home), "ORCH_DB": str(queue.path),
+               "TMPDIR": str(temp)}
+    kw = dict(device="box", environ=environ, webhook=Webhook(), now=NOW,
+              owner=lambda _: True, machines=pool.config, homes=(home,))
+    ready, resume = threading.Event(), threading.Event()
+    installs: list[tuple[dict, int]] = []
+    first: list[str] = []
+
+    def slow_installer(argv, env, log_path):
+        ready.set()
+        assert resume.wait(30)
+        with queue.connect() as connection:
+            busy = slots_in_use(connection, pool.config)
+        installs.append((busy, run_service(argv, env, log_path)))
+        return installs[-1][1]
+
+    thread = threading.Thread(target=lambda: first.append(
+        self_deploy.deploy(box, tmp_path / "state", install=slow_installer, **kw).kind))
+    thread.start()
+    try:
+        assert ready.wait(30)
+        assert box_rows(queue) == [("box", "deploying")]
+
+        if second_pass in ("other checkout", "linked db"):
+            other = tmp_path / "other-box"
+            git(tmp_path, "clone", "-q", "--branch", "main", str(tmp_path / "origin.git"),
+                str(other))
+            if second_pass == "linked db":
+                alias = tmp_path / "alias.db"
+                alias.symlink_to(queue.path)
+                environ = {**environ, "ORCH_DB": str(alias)}
+            second = self_deploy.deploy(other, tmp_path / "other-state",
+                                        **{**kw, "environ": environ})
+        else:
+            state = "state" if second_pass == "same state" else "other-state"
+            second = self_deploy.deploy(box, tmp_path / state, **kw)
+        enqueue(queue, "1")
+
+        assert pool.claim("codex") is None
+        assert box_rows(queue) == [("box", "deploying")]
+        assert (second.kind, second.detail) == ("skipped", "another deploy pass is running")
+    finally:
+        resume.set()
+        thread.join(30)
+    assert not thread.is_alive()
+    assert first == ["up-to-date"]
+    assert [(busy.get("box", 0), code) for busy, code in installs] == [(0, 0)]
+    assert box_rows(queue) == []
+    assert pool.claim("codex") is not None
+
+
+def test_a_deploy_pass_finding_the_lock_held_skips_and_writes_nothing(repo: Repo) -> None:
+    run(repo)
+    state_file = repo.state / "self-deploy.state.json"
+    before = state_file.read_bytes(), log(repo)
+    write(repo.upstream, "lib/code.py", "VERSION = 2\n")
+    repo.commit("code")
+    old = repo.head()
+
+    with open(repo.state / "self-deploy.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        outcome, runs, posts = run(repo)
+
+    assert (outcome.kind, outcome.detail) == ("skipped", "another deploy pass is running")
+    assert (state_file.read_bytes(), log(repo)) == before
+    assert repo.head() == old
+    assert runs.calls == [] and posts.calls == []

@@ -287,6 +287,19 @@ class SchemaMixin:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS auto_extra_comments (
+                    repo TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    comment_id TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'posted')),
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (repo, ticket_id, comment_id)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ticket_retries (
                     repo TEXT NOT NULL,
                     ticket_id TEXT NOT NULL,

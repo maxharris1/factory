@@ -42,6 +42,13 @@ def review_rules(facts: dict) -> str:
         if followups_active(followup_from, facts["round_number"])
         else ""
     )
+    auto_extra = facts["auto_extra"]
+    high_risk = (
+        f"Risk high: up to three rounds; the poller grants up to {auto_extra} more itself under factory.md "
+        "`review.auto_extra_rounds` (set by Max); each round past those needs Max's own words."
+        if auto_extra
+        else "Risk high: up to three rounds; every extra round needs Max's own words."
+    )
     return (
         "## Review rules (docs/SPEC.md section 8)\n"
         "- One reviewer, from a different model family than the builder, gives the final factory verdict.\n"
@@ -50,7 +57,7 @@ def review_rules(facts: dict) -> str:
         "only when they have run it and seen it fail.\n"
         "- There is no second factory reviewer and no factory Judge.\n"
         "- Risk low: one review round; leftover minors are batched into a follow-up ticket. "
-        "Risk high: up to three rounds; every extra round needs Max's own words.\n"
+        f"{high_risk}\n"
         "- Gate retries (CI red, then fix) are not review rounds. Three CI-red cycles in a row mark the ticket stuck.\n"
         f"{followup}"
         "- Ship is pinned to the covered head. A reviewer never merges.\n"

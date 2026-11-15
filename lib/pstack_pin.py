@@ -456,9 +456,16 @@ def _check_installed(root: Path, anchor: Path, mode: Mode) -> list[str]:
             errors.extend(_check_dest(anchor, src, dest, expected, prefix, harness, mode))
     if mode == "local":
         for src, dest in _claude_extras(root, anchor, load_pin(root)):
-            if not dest.is_symlink() or dest.resolve() != src.resolve():
+            if not dest.is_symlink() or _resolved(dest) != src.resolve():
                 errors.append(f"claude: did not load the pinned version ({dest} is not the pinned file)")
     return errors
+
+
+def _resolved(dest: Path) -> Path | None:
+    try:
+        return dest.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
 
 
 def _check_dest(
@@ -474,11 +481,7 @@ def _check_dest(
         if _symlinked_component(anchor, dest):
             return [f"{harness}: did not load the pinned version ({dest} must be a real copy)"]
     elif mode == "local" and dest.is_symlink():
-        try:
-            linked = dest.resolve(strict=True)
-        except OSError:
-            linked = None
-        if linked != src.resolve():
+        if _resolved(dest) != src.resolve():
             return [f"{harness}: did not load the pinned version ({dest} is not the pinned skill)"]
         return []
     elif mode != "local":
@@ -805,7 +808,7 @@ def _symlink_skills_dir_error(anchor: Path, skills_dir: Path) -> str | None:
             continue
         try:
             resolved = current.resolve(strict=True)
-        except OSError:
+        except (OSError, RuntimeError):
             return f"refusing to follow symlinked skills dir {current}"
         try:
             resolved.relative_to(anchor.resolve())
@@ -843,7 +846,7 @@ def _installer_owns(dest: Path, name: str, pinned: Mapping[str, str]) -> bool:
 def _symlink_into_source(dest: Path, name: str) -> bool:
     try:
         resolved = dest.resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError):
         target = Path(os.readlink(dest))
         return target.name == name and _source_parent(target.parts)
     return resolved.name == name and resolved.is_dir() and _source_parent(resolved.parts)

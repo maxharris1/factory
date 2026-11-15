@@ -104,7 +104,7 @@ class VerdictMixin:
             )
             state = connection.execute(
                 """
-                SELECT workflow_state, review_round, generation
+                SELECT workflow_state, review_round, generation, cap_extra, stuck
                 FROM ticket_state
                 WHERE repo = ? AND ticket_id = ?
                 """,
@@ -122,6 +122,13 @@ class VerdictMixin:
                     ticket, comment, "stale", "stale-revise"
                 )
                 return True, "stale-revise"
+            granted = (
+                self._auto_granted_cap_extra(ticket, fields, state)
+                if round_number >= cap
+                else None
+            )
+            if granted is not None:
+                cap += 1
             next_state = "capped" if round_number >= cap else "fixing"
             answered = None
             if next_state == "fixing":
@@ -159,7 +166,12 @@ class VerdictMixin:
                 next_state,
                 source="t3",
                 at=self.queue.now(),
-                also={"review_round": round_number},
+                also={
+                    "review_round": round_number,
+                    "cap_extra": (
+                        int(state["cap_extra"]) if granted is None else granted
+                    ),
+                },
             )
             outcome = (
                 "capped-review"
@@ -181,6 +193,8 @@ class VerdictMixin:
                     outcome,
                 ),
             )
+            if granted is not None:
+                self._record_auto_extra(connection, ticket, comment, granted)
             self._record_followups(connection, ticket, comment, round_number)
             connection.commit()
         if next_state == "capped":

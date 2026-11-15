@@ -170,6 +170,19 @@ def test_a_verdict_carries_the_time_its_follow_up_filing_recorded(tmp_path: Path
     assert verdicts == {"42": None}
 
 
+def test_a_verdict_carries_the_time_its_auto_extra_round_recorded(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "INSERT INTO auto_extra_comments (repo, ticket_id, comment_id, body, status, "
+            "created_at) VALUES ('maxharris1/cleffy', '42', 'v-42', 'b', 'pending', ?)",
+            (NOW - 30,))
+        _handled(connection, ("maxharris1/cleffy", "42", "v-42", "queued-fix"))
+    verdicts = {row["ticket_id"]: row["age_seconds"]
+                for row in collect_snapshot(db, log, now=NOW)["poller"]["verdicts"]}
+    assert verdicts == {"42": 30}
+
+
 def test_every_table_that_times_a_comment_feeds_the_verdict_time(tmp_path: Path) -> None:
     db, _ = seeded(tmp_path)
     timed = set()
