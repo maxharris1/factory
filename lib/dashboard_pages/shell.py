@@ -20,7 +20,7 @@ from lib.dashboard_pages.system import (
     _BUDGET_STATE, _components, _health, _log, _no_waiter, _POLL_STATE,
 )
 from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
-from lib.dashboard_pages.tickets import _jobs, _tickets
+from lib.dashboard_pages.tickets import _board, _tickets
 
 
 CSS = """\
@@ -1231,10 +1231,10 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
-    "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
+    "activity.html": (_attention, _handoffs, _verdicts, _log),
     "efficiency.html": (_health, _savings, rollup_panel),
     "health.html": (_components, _no_waiter),
-    "job.html": (_jobs, _jobview),
+    "job.html": (_board, _tickets, _jobview),
 }
 
 
