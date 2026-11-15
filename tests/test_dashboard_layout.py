@@ -443,6 +443,56 @@ def test_the_flowmap_draws_the_snapshots_chart(tmp_path: Path) -> None:
     assert "var FLOWMAP = null;" in render_pages(broken)["job.html"]
 
 
+def _wide_chart(path: Path, working: int, stops: int) -> Path:
+    names = [f"step-{i}" for i in range(working)] + [f"halt-{i}" for i in range(stops)]
+    lines = ["stateDiagram-v2", '  state "Legend" as legend {', "    lg0: Build", "    lg1: Stop", "  }",
+             "  class lg0 orange", "  class lg1 red"]
+    lines += [f"  s{i}: {name}" for i, name in enumerate(names)]
+    lines.append("  [*] --> s0")
+    lines += [f"  s{i} --> s{i + 1}: next" for i in range(working - 1)]
+    lines += [f"  s{working - 1} --> s{working + i}: halt" for i in range(stops)]
+    lines += [f"  class s{i} {'orange' if i < working else 'red'}" for i in range(len(names))]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _assert_drawable(layout: dict, names: set[str]) -> None:
+    nodes = layout["nodes"]
+    assert {node["name"] for node in nodes} == names
+    w, h, nw, nh = layout["grid"]["w"], layout["grid"]["h"], layout["node"]["w"], layout["node"]["h"]
+    for node in nodes:
+        assert 0 <= node["x"] and node["x"] + nw <= w and 0 <= node["y"] and node["y"] + nh <= h, node
+        if node["stop"]:
+            assert node["y"] > layout["rail"]["y"], node
+    spots = [(node["x"], node["y"]) for node in nodes]
+    assert len(set(spots)) == len(spots)
+    for key in layout["edges"]:
+        for x, y in layout["routes"][key]:
+            assert 0 <= x < w and 0 <= y < h, (key, x, y)
+
+
+@pytest.mark.parametrize("working,stops", [(1, 7), (2, 13), (30, 9)])
+def test_the_flowmap_places_every_state_of_a_chart_that_overflows_its_rail(
+    tmp_path: Path, working: int, stops: int,
+) -> None:
+    chart_path = _wide_chart(tmp_path / "wide.mmd", working, stops)
+    snapshot = _snapshot(tmp_path / "db", chart_path=chart_path)
+    names = {state["name"] for state in snapshot["statechart"]["states"]}
+    assert len(names) == working + stops
+    pages = render_pages(snapshot)
+    assert sorted(pages) == sorted(PAGES)
+    layout = json.loads(re.search(r"var FLOWMAP = (.*);", pages["job.html"]).group(1))
+    _assert_drawable(layout, names)
+    assert layout["grid"]["h"] > 88
+
+
+def test_the_default_chart_keeps_its_one_row_rail() -> None:
+    layout = flow.flowmap_layout(flow.load_chart(CHART))
+    assert layout["grid"] == {"w": 250, "h": 88, "cell": 4}
+    assert layout["stop_label"]["y"] == 314
+    _assert_drawable(layout, {state["name"] for state in flow.load_chart(CHART)["states"]})
+
+
 def test_job_path_follows_its_history_through_the_chart() -> None:
     chart = flow.load_chart(CHART)
     # intake has no edge to building: the chart's one-step bridge (questions)
