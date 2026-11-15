@@ -12,6 +12,7 @@ from lib.dispatch.helpers import (
     _ANSWERS,
     _HANDOFF_UNREAD,
     _REJECTED_OUTCOMES,
+    _append_detail,
     _comment_order,
     _detail_project_bot,
     _detail_round_number,
@@ -993,6 +994,29 @@ class JobsMixin:
             )
             connection.commit()
 
+    def _after_retries(
+        self,
+        connection: sqlite3.Connection,
+        repo: str,
+        ticket_id: str,
+        detail: str,
+    ) -> str:
+        """A stuck wake's detail, naming the retries Max already gave (TR)."""
+        retries = connection.execute(
+            """
+            SELECT comment_id FROM ticket_retries
+            WHERE repo = ? AND ticket_id = ? AND outcome NOT LIKE 'rejected-%'
+            ORDER BY recorded_at, rowid
+            """,
+            (repo.lower(), ticket_id),
+        ).fetchall()
+        if not retries:
+            return detail
+        return _append_detail(
+            detail,
+            f"after retry {len(retries)} (comment:{retries[-1]['comment_id']})",
+        )
+
     def _ensure_stuck_wake_in_transaction(
         self,
         connection: sqlite3.Connection,
@@ -1045,11 +1069,15 @@ class JobsMixin:
                 )
                 return
         generation = int(state["generation"]) + 1
-        reason = (
-            detail
-            or previous_detail
-            or str(state["stuck_reason"] or "ticket is stuck")
-        )
+        if detail is None and previous_detail is not None:
+            reason = previous_detail
+        else:
+            reason = self._after_retries(
+                connection,
+                repo,
+                ticket_id,
+                detail or str(state["stuck_reason"] or "ticket is stuck"),
+            )
         queued = self.queue.enqueue_in_transaction(
             connection,
             JobRequest(

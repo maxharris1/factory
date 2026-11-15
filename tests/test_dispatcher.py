@@ -7191,7 +7191,9 @@ def test_retry_resumes_failed_fix_on_same_head(tmp_path: Path) -> None:
 
     again = ticket_row(queue)
     assert (again["stuck"], again["stuck_reason"]) == (1, "job-failed-2")
-    assert jobs_of(queue, "stuck")[-1]["state"] == "queued"
+    second_wake = jobs_of(queue, "stuck")[-1]
+    assert second_wake["state"] == "queued"
+    assert "after retry 1 (comment:retry-1)" in json.loads(second_wake["detail"])["detail"]
 
 
 @pytest.mark.parametrize(
