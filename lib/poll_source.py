@@ -28,6 +28,8 @@ from lib.dispatcher import (
     scrub_detail,
     trusted_bots,
 )
+from lib.dispatch.constants import STOPPED_POLL_SECONDS
+from lib.dispatch.cycle_clock import CycleClock
 from lib.factory_md import FactoryConfig, FactoryContext, parse_factory_context, parse_factory_md
 from lib.github_actions import (
     GhResult,
@@ -123,6 +125,7 @@ RISKY_CHANGE = re.compile(r"realtime|\bpublication\b|replica\s+identity", re.IGN
 SQL_SUFFIXES = (".sql", ".psql", ".pgsql")
 BLOB_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 LINEAR_PROCESS_HEADROOM = 2
+HEAD_READ_IDLE_SECONDS = 12 * STOPPED_POLL_SECONDS
 LINEAR_SEARCH_MAX_PAGES = 2
 LINEAR_TRACKED_RESERVE = 7
 _HTTP_STATUS = re.compile(r"(?:\(|\b)HTTP\s+([0-9]{3})\)?")
@@ -278,6 +281,9 @@ class LivePollSource:
         self._last_good_context: dict[str, FactoryContext] = {}
         self._factory_warned: dict[str, str] = {}
         self._ticket_cache: dict[tuple[str, str, str], TrackedTicket] = {}
+        self.cycle_clock: CycleClock | None = None
+        self._head_reads: dict[tuple[str, str, str], tuple[tuple[str, str, str], Any]] = {}
+        self._head_read_last_used: dict[tuple[str, str, str], float] = {}
         self._linear_issue_cache: dict[str, dict[str, Any] | None] = {}
         self._etag_cache: dict[tuple[str, ...], tuple[str, str]] = {}
         self._backoff_until = 0.0
@@ -420,6 +426,17 @@ class LivePollSource:
         )
 
     def end_cycle(self) -> None:
+        now = self.clock()
+        self._head_read_last_used = {
+            key: used
+            for key, used in self._head_read_last_used.items()
+            if now - used < HEAD_READ_IDLE_SECONDS
+        }
+        self._head_reads = {
+            key: value
+            for key, value in self._head_reads.items()
+            if key in self._head_read_last_used
+        }
         if self._dirty_fetched and self.linear_dirty is not None:
             fetched = tuple(self._dirty_fetched.values())
             self._dirty_fetched = {}
@@ -722,51 +739,61 @@ class LivePollSource:
                     # Its repo left orch.yml: never read, so ack its dirty rows.
                     self._note_unread(ref.ticket_id)
                 continue
+            began = time.monotonic()
             try:
-                if ref.tracker == "linear":
-                    cached = ref.ticket_id in self._linear_issue_cache
-                    issue = None if cached else self._reusable_linear_issue(ref)
-                    if issue is None:
-                        if not cached and not self._linear_request_available(
-                            LINEAR_ISSUE_QUERY,
-                            reserve=LINEAR_PROCESS_HEADROOM,
-                        ):
-                            self._defer("Linear poll budget deferred tracked ticket")
-                            continue
-                        if not cached:
-                            self._linear_tracked_cursor = _linear_ref_key(ref)
-                        issue = self._linear_issue(ref.ticket_id)
-                    if issue is None:
-                        raise PollSourceError("Linear issue was not found")
-                    if not _matches_linear_project(issue, project):
-                        raise PollSourceError(
-                            "Linear issue is not in its configured project"
-                        )
-                    found.append(
-                        self._linear_ticket(
-                            project,
-                            issue,
-                            tracked=True,
-                            allow_merged=ref.allow_merged,
-                        )
-                    )
-                    continue
-                if ref.tracker != "github":
-                    continue
-                factory = self._factory(project)
-                found.append(
-                    self._github_ticket(
-                        project,
-                        factory,
-                        ref.ticket_id,
-                        allow_merged=ref.allow_merged,
-                    )
-                )
+                ticket = self._tracked_ticket(ref, project)
             except Exception as exc:
-                if isinstance(exc, _TerminalTicket):
-                    continue
-                self._record(ref.repo, ref.ticket_id, exc)
+                if not isinstance(exc, _TerminalTicket):
+                    self._record(ref.repo, ref.ticket_id, exc)
+            else:
+                if ticket is not None:
+                    found.append(ticket)
+            finally:
+                if self.cycle_clock is not None:
+                    self.cycle_clock.add_source(
+                        "linear" if ref.tracker == "linear" else ref.repo,
+                        time.monotonic() - began,
+                    )
         return tuple(found)
+
+    def _tracked_ticket(
+        self,
+        ref: TicketRef,
+        project: Project,
+    ) -> TrackedTicket | None:
+        if ref.tracker == "linear":
+            cached = ref.ticket_id in self._linear_issue_cache
+            issue = None if cached else self._reusable_linear_issue(ref)
+            if issue is None:
+                if not cached and not self._linear_request_available(
+                    LINEAR_ISSUE_QUERY,
+                    reserve=LINEAR_PROCESS_HEADROOM,
+                ):
+                    self._defer("Linear poll budget deferred tracked ticket")
+                    return None
+                if not cached:
+                    self._linear_tracked_cursor = _linear_ref_key(ref)
+                issue = self._linear_issue(ref.ticket_id)
+            if issue is None:
+                raise PollSourceError("Linear issue was not found")
+            if not _matches_linear_project(issue, project):
+                raise PollSourceError(
+                    "Linear issue is not in its configured project"
+                )
+            return self._linear_ticket(
+                project,
+                issue,
+                tracked=True,
+                allow_merged=ref.allow_merged,
+            )
+        if ref.tracker != "github":
+            return None
+        return self._github_ticket(
+            project,
+            self._factory(project),
+            ref.ticket_id,
+            allow_merged=ref.allow_merged,
+        )
 
     def _reusable_linear_issue(self, ref: TicketRef) -> dict[str, Any] | None:
         """Webhook mode: the last direct read of a clean tracked ticket.
@@ -1263,7 +1290,7 @@ class LivePollSource:
         if comments is None:
             comments = self.github.list_comments(project.repo, number)
         ticket = TrackedTicket(
-            **self._hold_inputs(project.repo, number, factory),
+            **self._hold_inputs(project.repo, number, factory, pull),
             repo=project.repo,
             ticket_id=number,
             factory=factory,
@@ -1317,19 +1344,24 @@ class LivePollSource:
         repo: str,
         number: str,
         factory: FactoryConfig,
+        pull: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Issue #86: labels, diff paths and label events for a hold.
 
-        Read only on a repo whose hold applies (FactoryConfig.hold_applies), uncached,
-        so a label or push from the last minute is seen. A read that fails
-        is recorded and left None, which T4 treats as held (no ship) while
-        every other row still runs.
+        Read only on a repo whose hold applies (FactoryConfig.hold_applies).
+        Labels and label events are read every cycle, so a label from the
+        last minute is seen. Diff paths change only with the head or base,
+        so they are read once per head (#440). A read that fails is recorded
+        and left None, which T4 treats as held (no ship) while every other
+        row still runs.
         """
         if not factory.hold_applies:
             return {}
         reads = {
             "labels": self.github.pull_labels,
-            "changed_files": self.github.pull_files,
+            "changed_files": lambda r, n: self._per_head(
+                "files", r, n, pull, lambda: self.github.pull_files(r, n)
+            ),
             "label_events": self.github.label_events,
         }
         found: dict[str, Any] = {}
@@ -1340,6 +1372,26 @@ class LivePollSource:
                 self._record(repo, number, exc)
                 found[name] = None
         return found
+
+    def _per_head(
+        self,
+        kind: str,
+        repo: str,
+        number: str,
+        pull: Mapping[str, Any],
+        read: Callable[[], Any],
+    ) -> Any:
+        key = (kind, repo.lower(), number)
+        self._head_read_last_used[key] = self.clock()
+        base = _object(pull.get("base") or {}, "GitHub pull request base")
+        version = (_pr_head(pull, repo, number), str(base.get("ref")), str(base.get("sha")))
+        cached = self._head_reads.get(key)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        value = read()
+        if value is not None:
+            self._head_reads[key] = (version, value)
+        return value
 
     def _github_pull(
         self,
@@ -1394,6 +1446,7 @@ class LivePollSource:
             fresh=fresh,
         )
         pull_facts: dict[str, Any] = {"merged": False}
+        pull: Mapping[str, Any] = {}
         if pr_number is not None:
             pull = self._github_pull(project.repo, pr_number, fresh=fresh)
             # #108: a cached discovery read still carries the merge.
@@ -1418,7 +1471,7 @@ class LivePollSource:
             )
         factory = self._factory(project)
         hold = (
-            self._hold_inputs(project.repo, pr_number, factory)
+            self._hold_inputs(project.repo, pr_number, factory, pull)
             if pr_number is not None
             else {}
         )
@@ -1430,7 +1483,7 @@ class LivePollSource:
             comments=comments,
             current_head=head,
             ci=ci,
-            risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number),
+            risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number, pull),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
             git_branch_name=_optional_string(issue.get("gitBranchName")),
@@ -1467,6 +1520,7 @@ class LivePollSource:
         issue: Mapping[str, Any],
         comments: Sequence[Comment],
         pr_number: str | None,
+        pull: Mapping[str, Any],
     ) -> str:
         """#195: the intake risk, raised to high for good by a `migrations`
         label or a migration or realtime change in the linked PR. Labels or
@@ -1477,7 +1531,17 @@ class LivePollSource:
         label = _linear_migrations_label(issue)
         if label is True:
             return self.risks.keep(repo, identifier, "high")
-        change = False if pr_number is None else self._risky_change(repo, identifier, pr_number)
+        change = (
+            False
+            if pr_number is None
+            else self._per_head(
+                "risk",
+                repo,
+                pr_number,
+                pull,
+                lambda: self._risky_change(repo, identifier, pr_number),
+            )
+        )
         if change is True:
             return self.risks.keep(repo, identifier, "high")
         return "low" if intake == "low" and label is False and change is False else "high"
