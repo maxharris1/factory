@@ -19,7 +19,7 @@ import pytest
 from lib import telemetry
 from lib.dashboard import collect_snapshot, redact, render_pages, write_snapshot_pages
 from tests.test_dashboard import GH_CLASSIC, NOW, seeded
-from tests.test_dashboard_layout import BAR, _no_script, _run_page, _section, needs_node
+from tests.test_dashboard_layout import BAR, JOB, _no_script, _run_page, _section, needs_node
 from tests.test_telemetry import readable
 
 STEPS = [
@@ -453,8 +453,7 @@ def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) ->
         updated_at=NOW - 100, exit_code=0, exit_reason="success; exit 0",
     )
     snapshot = collect_snapshot(db, log, now=NOW)
-    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
-                    hash_="#job-r-codex-")
+    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
     view = out["text"]["jobview"]
     for needle in ("telemetry", "last activity", "turns", "tool calls", "40 / 1", "24,763 / 1,220",
                    "shell ×7", "command", "mcp:github.get_pr"):
@@ -473,8 +472,7 @@ def test_script_draws_the_feed_on_the_job_page_and_the_rollup(tmp_path: Path) ->
 def test_script_shows_no_telemetry_for_a_job_without_a_row(tmp_path: Path) -> None:
     db, log = seeded(tmp_path)
     snapshot = collect_snapshot(db, log, now=NOW)
-    out = _run_page(tmp_path, snapshot, "job", BAR + ["hud", "jobs", "jobview", "flow-template"],
-                    hash_="#job-r-codex-")
+    out = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-r-codex-")
     assert "no telemetry" in out["text"]["jobview"]
     eff = _run_page(tmp_path, snapshot, "efficiency", BAR + ["hud", "health", "savings", "tokens"])
     assert "no telemetry" in eff["text"]["tokens"]

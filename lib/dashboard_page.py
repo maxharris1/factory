@@ -41,7 +41,7 @@ from lib.dashboard_pages.system import (  # noqa: F401
 from lib.dashboard_pages.ticket_detail import (  # noqa: F401
     _TRAIL_LEGEND, _flow_template, _job_article, _jobview, _legend, _meta,
 )
-from lib.dashboard_pages.tickets import _active_jobs, _jobs, _tickets  # noqa: F401
+from lib.dashboard_pages.tickets import _active_jobs, _board, _tickets  # noqa: F401
 from lib.dashboard_telemetry import (  # noqa: F401
     TELEMETRY_CSS, TELEMETRY_SCRIPT, job_block, rollup_panel,
 )
@@ -61,12 +61,12 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    lanes.CSS_LINKS, system.CSS, ticket_detail.CSS, lanes.CSS_MODAL, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
+    lanes.CSS_LINKS, system.CSS, ticket_detail.CSS, tickets.CSS, lanes.CSS_MODAL, common.CSS_MISC, efficiency.CSS, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((
     common.SCRIPT_HEAD, shell.SCRIPT, lanes.SCRIPT, activity.SCRIPT, tickets.SCRIPT_TICKETS,
-    system.SCRIPT_LOG, system.SCRIPT_HEALTH, efficiency.SCRIPT, tickets.SCRIPT_JOBS,
+    system.SCRIPT_LOG, system.SCRIPT_HEALTH, efficiency.SCRIPT,
     ticket_detail.SCRIPT, lanes.SCRIPT_MODAL, common.SCRIPT_TELEMETRY, system.SCRIPT_COMPONENTS,
     common.SCRIPT_TAIL,
 ))
@@ -98,6 +98,7 @@ def page_script() -> str:
         .replace("__SHELL__", json.dumps(shell_table(), separators=(",", ":")))
         .replace("__POLL_MS__", str(POLL_MS))
         .replace("__FLOW__", json.dumps(path_geometry(), separators=(",", ":")))
+        .replace("__BOARD__", json.dumps(tickets.board_constants(), separators=(",", ":")).replace("<", "\\u003c"))
         .replace("__FONTS__", font_faces())
     )
 

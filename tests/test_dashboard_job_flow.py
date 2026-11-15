@@ -24,6 +24,7 @@ from lib.dashboard import collect_snapshot, render_pages
 from tests.test_dashboard import NOW, add_job, add_ticket
 from tests.test_dashboard_layout import (
     BAR,
+    JOB,
     CHART,
     MINI,
     _chart_source,
@@ -319,8 +320,7 @@ def test_clicking_a_queued_job_opens_its_modal(tmp_path: Path) -> None:
 
 @needs_node
 def test_script_draws_the_simplified_flow_on_the_job_page(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _snapshot(tmp_path), "job",
-                    BAR + ["hud", "jobs", "jobview", "flow-template"], hash_="#job-h-review")
+    out = _run_page(tmp_path, _snapshot(tmp_path), "job", JOB, hash_="#job-h-review")
     view = out["dump"]["jobview"]
     visits = re.findall(r"g\.visit[.a-z]*\[data-state=([^\]]+)\]\[data-step=(\d+)\]", view)
     assert visits == [(state, str(i)) for i, state in enumerate(TICKET_40_PATH)]
@@ -338,8 +338,7 @@ def test_script_draws_the_simplified_flow_on_the_job_page(tmp_path: Path) -> Non
 
 @needs_node
 def test_script_does_not_breathe_a_finished_job(tmp_path: Path) -> None:
-    out = _run_page(tmp_path, _with_finished_tickets(tmp_path), "job",
-                    BAR + ["hud", "jobs", "jobview", "flow-template"], hash_="#job-t-done-1")
+    out = _run_page(tmp_path, _with_finished_tickets(tmp_path), "job", JOB, hash_="#job-t-done-1")
     view = out["dump"]["jobview"]
     assert re.search(r"g\.visit\.current\[data-state=done\]", view)
     assert "breathe" not in view

@@ -20,15 +20,10 @@ Name the module in a ticket's `Touches:` line.
 | every page: helpers and script runtime | `common.py` | `_e`, `duration`, `_chip`, `_panel`, `_feed`, `_state_chip`, …; the base CSS, the script head (fonts, helpers), the `__TELEMETRY__` slot and the script tail (renderers per page, poll loop) | none (shared) |
 | `index.html` (Lanes) | `lanes.py` | `_kpis`, `_feeder`, `_linear_webhook`, `_slot`, `lane_devices`, `_lanes`, `_queue`; their CSS, script and the job modal script | #140 |
 | `health.html` (System) | `system.py` | `_components` (matrix and process details), `_drift`, `_health`, `_log`, `_rules`, `_no_waiter`; `_drift_row` and `_log_row` wrap two panels each in a `sys-row` | none |
-| `job.html` (Tickets) | `tickets.py` | `_active_jobs`, `_jobs`, and `_tickets` (see below) | #142 |
+| `job.html` (Tickets) | `tickets.py` | `_board` (filter row, Pipeline columns, Shipped shelf and Stopped group, from `board` and `phase_table`), `_tickets` (the table view), `_active_jobs` | #142 |
 | `activity.html` (Activity) | `activity.py` | `_attention`, `_handoffs`, `_verdicts`, `_health_link` | #143 |
 | `efficiency.html` (Efficiency) | `efficiency.py` | `_savings` (tokens and cost: `rollup_panel` in `lib/dashboard_telemetry.py`) | #144 |
 | `job.html#job-<id>` (ticket detail) | `ticket_detail.py` | `_job_article`, `_jobview`, `_flow_template`, `_legend`, `_meta`; the job page and flow CSS and script | #146, #149 |
-
-One panel sits in the module of the ticket that moves it, not of the page
-that shows it today:
-
-- `_tickets` shows on `activity.html`; it is in `tickets.py` for #142.
 
 `_PANELS` in `shell.py` lists the panels each page draws, and `PAGES` in the
 script tail (`common.py`) lists each page's script renderers.
@@ -55,4 +50,13 @@ other Mission Control ticket.
 Imports run one way: `common` ← the page modules ← `shell` ← the facade. A
 page module may import a sibling (`lanes` uses `activity._health_link`,
 `ticket_detail` uses `tickets._active_jobs`). Nothing in the package imports
-`lib.dashboard_page`.
+`lib.dashboard_page`. `shell` imports the page modules for `_PANELS`, so a
+page module that draws a PixelStrip reaches `px_strip` through a
+function-local import (`tickets._px`).
+
+The board's phases come from the chart (`lib/dashboard_flow.py`
+`ticket_phases`). The script derives the same table from each snapshot's
+`statechart` (`phaseTable`, fed the constants from `tickets.board_constants`),
+so a page built while the chart was missing recovers when it returns. The
+server/script parity tests in `tests/test_dashboard_tickets_board.py` hold the
+two derivations together.
