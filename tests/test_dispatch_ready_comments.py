@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from lib.dispatch.helpers import _non_verdict_outcome
 from lib.dispatcher import Dispatcher
-from tests.merge_queue_support import APPROVE, TRUSTED_LOGINS, VERDICT, sha
+from tests.merge_queue_support import APPROVE, GO, READY, TRUSTED_LOGINS, VERDICT, sha
+from tests.test_dispatcher import ANSWERS, PLAN, RETRY
 from tests.test_review_before_ci import (
     CI_LOG,
     board_with,
@@ -15,7 +17,7 @@ from tests.test_review_before_ci import (
 )
 
 
-@pytest.mark.parametrize("mode", ["interrupt", "upgrade"])
+@pytest.mark.parametrize("mode", ["interrupt", "upgrade", "existing-table"])
 def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_never_recorded(
     tmp_path: Path, mode: str
 ) -> None:
@@ -25,7 +27,7 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
     reviewed_at_pending_ci(board, pr, older)
     pr.push(sha(2), ci="failure")
     board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
-    if mode == "interrupt":
+    if mode in ("interrupt", "existing-table"):
         original = board.dispatcher._mark_handled
 
         def stop_after_handled(ticket, comment_id, outcome):
@@ -36,6 +38,11 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
         board.dispatcher._mark_handled = stop_after_handled
         with pytest.raises(KeyboardInterrupt):
             board.poll()
+        if mode == "existing-table":
+            with board.queue.connect() as connection:
+                connection.execute("DELETE FROM verdict_heads WHERE comment_id = 'approve-older'")
+                connection.execute("ALTER TABLE verdict_heads DROP COLUMN posted_at")
+                connection.execute("DROP TABLE verdict_heads_floor")
     else:
         board.poll()
         with board.queue.connect() as connection:
@@ -66,10 +73,15 @@ def test_a_red_ready_back_at_an_older_head_recovers_when_the_verdict_head_was_ne
     assert CI_LOG in instruction({"detail": fix.request.detail})
 
 
-def test_a_fresh_database_notes_no_verdict_head_floor(tmp_path: Path) -> None:
+def test_a_fresh_database_puts_no_handled_comment_under_the_verdict_head_floor(
+    tmp_path: Path,
+) -> None:
     board = board_with(tmp_path, on=True)
+    _restart(board, tmp_path)
     with board.queue.connect() as connection:
-        assert connection.execute("SELECT * FROM verdict_heads_floor").fetchall() == []
+        assert [tuple(row) for row in connection.execute("SELECT * FROM verdict_heads_floor")] == [
+            (0,)
+        ]
 
 
 def test_a_stale_verdict_handled_late_does_not_answer_the_newer_review(
@@ -227,3 +239,74 @@ def test_an_upgrade_never_counts_a_handled_builder_ready_as_the_reviews_verdict(
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
     assert CI_LOG in instruction(fixes[0])
+
+
+ORCHESTRATOR_QUESTIONS = (
+    "<!-- orch:v1 kind=questions from=grok-bot role=orchestrator -->\nQuestions.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "author", "outcome"),
+    [
+        (GO.format(state="building"), "grok-login", "deduped-build"),
+        (PLAN.format(round=1, ac="met"), "claude-login", "rejected-plan-without-plan-job"),
+        (ORCHESTRATOR_QUESTIONS, "grok-login", "no-questions"),
+        (ANSWERS, "grok-login", "rejected-answers-without-question"),
+        (RETRY.format(reason="Try again."), "grok-login", "rejected-retry-not-stuck"),
+        (READY.format(head=sha(3)), "claude-login", "stale-ready-head"),
+    ],
+    ids=["duplicate-go", "plan", "questions", "answers", "retry", "wrong-head-ready"],
+)
+def test_a_hidden_handled_non_verdict_comment_never_answers_the_review(
+    tmp_path: Path, body: str, author: str, outcome: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    pr.push(sha(2), ci="pending")
+    board.post(pr, "non-verdict", body, author)
+    board.poll()
+    assert board.outcome("non-verdict") == outcome
+    pr.comments.remove(next(item for item in pr.comments if item.id == "non-verdict"))
+    with board.queue.connect() as connection:
+        connection.execute("DROP TABLE verdict_heads")
+    _restart(board, tmp_path)
+    pr.push(older, ci="failure")
+    board.ready(pr, older, "red-ready-before-verdict")
+    board.poll()
+    board.revise(pr, "1/3")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
+    assert CI_LOG in instruction(fixes[0])
+    assert _non_verdict_outcome(outcome)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "ticket-stuck",
+        "ticket-abandoned",
+        "after-merge",
+        "after-handoff",
+        "duplicate-verdict",
+        "failed-verdict-RuntimeError",
+        "ship-failed",
+        "woke-grok-blocked",
+        "rejected-blocked-author",
+        "approve-ci-red-fix",
+        "answered-fix",
+        "queued-review-fix",
+        "capped-review",
+        "stale-revise",
+        "stale-approve",
+        "held-base-update",
+        "merge-queue",
+        "ship-already-completed-merge",
+    ],
+)
+def test_an_outcome_a_verdict_can_store_is_never_a_non_verdict_outcome(outcome: str) -> None:
+    assert not _non_verdict_outcome(outcome)
