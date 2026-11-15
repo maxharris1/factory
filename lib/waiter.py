@@ -81,15 +81,16 @@ is refused while it does. A waiter that dies between a claim and the start leave
 claimed job, which the poller requeues after release_claimed_minutes (#77).
 
 Drain (#219): while the drain marker (`drain`, the state directory's
-waiter-<bot>.drain, which self-heal writes when this waiter runs stale code
-with jobs in flight) names another commit than the one this waiter loaded,
-it reaps and recovers as usual but claims nothing, and writes
-waiter-<bot>.drain.ack naming that commit from a step that has already
-decided not to claim. Self-heal restarts it only with that ack and no
-running job. A waiter already on that commit ignores the marker until an
-ack names it: then it too claims nothing, so an ack stays true when the
-service respawns the waiter that wrote it, until a service start or
-self-heal removes the marker (once the waiter no longer runs stale code).
+waiter-<bot>.drain, which self-heal writes when this waiter runs stale
+code) names another commit than the one this waiter loaded, it reaps and
+recovers as usual but claims nothing, and writes waiter-<bot>.drain.ack
+naming that commit from a step that has already decided not to claim.
+Self-heal restarts it once that ack exists; its runs keep going and the
+replacement adopts the remote ones (#309). A waiter already on that commit
+ignores the marker until an ack names it: then it too claims nothing, so
+an ack stays true when the service respawns the waiter that wrote it,
+until a service start or self-heal removes the marker (once the waiter no
+longer runs stale code).
 """
 
 from __future__ import annotations
