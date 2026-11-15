@@ -181,7 +181,7 @@ class CommentsMixin:
                     elif verdict == "APPROVE":
                         handled, outcome = self._t4(ticket, comment, fields)
                     else:
-                        continue
+                        handled, outcome = self._t_blocked(ticket, comment, fields)
                 elif kind == "questions":
                     handled, outcome = self._t5_questions(ticket, comment, fields)
                 else:
@@ -251,8 +251,10 @@ class CommentsMixin:
         if self._is_stuck(ticket):
             self._ensure_stuck_wake(ticket.repo, ticket.ticket_id)
             return "ticket-stuck"
-        resumed = self._resume_after_cap(ticket, comment) or self._resume_paused(
-            ticket, comment
+        resumed = (
+            self._resume_after_blocked(ticket, comment)
+            or self._resume_after_cap(ticket, comment)
+            or self._resume_paused(ticket, comment)
         )
         return "slash-go-no-target" if resumed is None else resumed[1]
 

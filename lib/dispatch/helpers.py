@@ -76,6 +76,7 @@ ACTED_VERDICT_OUTCOMES = frozenset(
     {
         "queued-review-fix",
         "capped-review",
+        "blocked-review",
         "queued-patch-review",
         "merged",
         "merge-confirmed",

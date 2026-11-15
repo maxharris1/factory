@@ -35,6 +35,8 @@ class T3Mixin:
         verdict_head = fields.get("head")
         if _matching_head(verdict_head or "", ticket.current_head) is None:
             return True, "stale-revise"
+        if self._review_context(ticket)[0] == "blocked":
+            return True, "verdict-while-blocked"
         instruction = _comment_link(comment)
         if ticket.factory.start_before_ci:
             gate = self._revise_ci_gate(ticket, comment, reported_round)
