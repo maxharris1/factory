@@ -25,6 +25,10 @@ Per component (its health label), in order:
    considered, so one account never acts on another user's services.
 2. A component held stopped (its *.stopped marker) is skipped: self-heal
    never overrides an operator's stop.
+2a. A tunnel down because another owner holds its port on the tunnel host
+   (health's "port held by another owner", issue #427) is not restarted:
+   a restart cannot win the port. It escalates once when it enters that
+   state, then is skipped quietly until it leaves it.
 3. A component restarted under SETTLE_SECONDS ago is left to come up.
 4. Down: restart. Stale code (its heartbeat names another commit than the
    checkout): restart once idle. The Linear listener is busy while a
@@ -148,6 +152,7 @@ class KeyState:
     observed_at: float | None = None
     escalated_at: float | None = None
     last: str | None = None
+    alerted: str | None = None
 
 
 def service_of(component: str, bot: str) -> str | None:
@@ -177,6 +182,10 @@ def service_log(service: str, state_dir: Path) -> Path:
     if service == LISTENER_SERVICE:
         return state_dir / "linear-webhook-service.log"
     return state_dir / f"waiter-{service.split(':', 1)[1]}-service.log"
+
+
+def port_held(item: Mapping) -> bool:
+    return item.get("state") == health.DOWN and str(item.get("reason") or "").startswith(health.PORT_HELD)
 
 
 def _recent(times: Sequence[float], now: float) -> list[float]:
@@ -233,6 +242,11 @@ def decide(
         if service in facts.held:
             if need is not None:
                 actions.append(act(SKIP, "held stopped"))
+            continue
+        if port_held(item):
+            if key.alerted != item["reason"]:
+                actions.append(act(ESCALATE, item["reason"]))
+            actions.append(act(SKIP, f"not restarting: {item['reason']}"))
             continue
         escalation = _escalation(key, attempts, now, broken=need is not None)
         if escalation is not None:
@@ -491,15 +505,21 @@ def heal(
                 drain_path(state_dir, bot).unlink(missing_ok=True)
                 drain_ack_path(state_dir, bot).unlink(missing_ok=True)
     acted = {action.label for action in actions}
+    held_port = {item.get("label") for item in report.get("components") or () if port_held(item)}
     for label, key in states.items():
         if label not in acted:
             key.last = None
+        if report.get("known") and label not in held_port:
+            key.alerted = None
     escalations = [a for a in actions if a.kind == ESCALATE]
     if escalations and not dry_run:
         outcome = escalate(escalations, device=facts.device, now=now, webhook=webhook,
                            environ=environ, post=post)
         for action in escalations:
-            states.setdefault(action.label, KeyState()).escalated_at = now
+            key = states.setdefault(action.label, KeyState())
+            key.escalated_at = now
+            if action.label in held_port and outcome == "escalated":
+                key.alerted = action.reason
             log(f"escalate {action.label} ({action.reason}) {outcome}")
     for key in states.values():
         key.attempts = _recent(key.attempts, now)
