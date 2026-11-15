@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from collections.abc import Mapping, Sequence
 
 from lib.approver_commands import parse_slash_go
@@ -400,10 +401,19 @@ class CommentsMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
-            connection.execute(
-                "INSERT OR IGNORE INTO handled_times VALUES (?, ?, ?, ?)",
-                (ticket.repo.lower(), ticket.ticket_id, comment_id, self.queue.now()),
-            )
+            self._record_handled_time(connection, ticket, comment_id, self.queue.now())
+
+    def _record_handled_time(
+        self,
+        connection: sqlite3.Connection,
+        ticket: TrackedTicket,
+        comment_id: str,
+        handled_at: float,
+    ) -> None:
+        connection.execute(
+            "INSERT OR IGNORE INTO handled_times VALUES (?, ?, ?, ?)",
+            (ticket.repo.lower(), ticket.ticket_id, comment_id, handled_at),
+        )
 
     def _remember_verdicts(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
         reviewer = f"{ticket.factory.reviewer_harness}-bot"
