@@ -50,8 +50,9 @@ adopts the remote ones as after a crash. The ack holds across a respawn: a
 waiter on the marked commit honours an acknowledged marker too
 (lib/waiter.py), so its replacement cannot claim before the restart.
 Writing a new marker removes the old ack. A pass that finds a waiter
-without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for it, so the
-waiter restarts in the same pass. A drain longer than
+without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for it, so a
+waiter that acknowledges in that time restarts in the same pass. A drain
+longer than
 DRAIN_ESCALATE_SECONDS escalates once per window and kills nothing. The
 marker and ack of owned waiters no longer draining are removed, and the
 waiter's service start removes both.
