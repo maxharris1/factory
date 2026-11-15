@@ -202,8 +202,9 @@ def test_ensure_brings_back_a_killed_supervisor(home: Path) -> None:
     _wait_for(lambda: len(_starts(home)) == 2)
 
 
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
 def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
-    home: Path,
+    home: Path, tmp_path: Path, proc: str
 ) -> None:
     # Codex PR #82 r1 F1.6: SIGKILL only the supervisor. Its waiter lives on
     # holding the bot's lock; the next supervisor's waiter is refused (there
@@ -225,7 +226,7 @@ def test_a_supervisor_only_kill_leaves_one_waiter_and_stop_still_reaches_it(
     lock = home / ".local/state/factory/waiter-claude-bot.lock"
     assert lock.read_text().strip() == str(orphan)
 
-    stopped = _service(home, "claude-bot", "stop")
+    stopped = _service(home, "claude-bot", "stop", **_proc_or_ps_shim_env(tmp_path, proc))
     assert stopped.returncode == 0, stopped.stderr
     assert "stopped orphaned waiter" in stopped.stdout
     _wait_for(lambda: not alive(orphan))
@@ -504,6 +505,43 @@ def test_stop_spares_another_states_legacy_supervisor_on_a_shared_database(
         _cleanup(other)
         if legacy and alive(legacy):
             os.kill(legacy, signal.SIGTERM)
+
+
+@pytest.mark.parametrize("variable", ["HOME", "ORCH_STATE_DIR"])
+@pytest.mark.parametrize("proc", ["/proc", "no-proc"])
+def test_stop_spares_another_states_orphaned_waiter_on_a_shared_database(
+    tmp_path: Path, proc: str, variable: str
+) -> None:
+    own, other = _make_home(tmp_path / "home"), _make_home(tmp_path / "home other")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    common = {"ORCH_DB": str(shared / "orch.db")}
+    if variable == "HOME":
+        own_env = other_env = {**common, "ORCH_STATE_DIR": ""}
+    else:
+        own_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state")}
+        other_env = {**common, "ORCH_STATE_DIR": str(tmp_path / "state other")}
+    orphan = None
+    try:
+        legacy = _stray(other, legacy=True, **other_env)
+        orphan = _wait_for(lambda: _starts(other))[0]
+        _wait_for(lambda: (shared / "waiter-claude-bot.lock").exists())
+        os.kill(legacy, signal.SIGKILL)
+        _wait_for(lambda: not alive(legacy))
+        assert _service(own, "claude-bot", "start", **own_env).returncode == 0
+        _wait_for(lambda: (own / "refused-claude-bot").exists())
+        stopped = _service(own, "claude-bot", "stop",
+                           **{**_proc_or_ps_shim_env(tmp_path, proc), **own_env})
+        assert stopped.returncode == 0, stopped.stderr
+        assert f"waiter (pid {orphan}) does not write to" in stopped.stdout
+        time.sleep(0.4)
+        assert alive(orphan)
+    finally:
+        _service(own, "claude-bot", "stop", **own_env)
+        _cleanup(own)
+        _cleanup(other)
+        if orphan and alive(orphan):
+            os.kill(orphan, signal.SIGKILL)
 
 
 def _pre_295_service(tmp_path: Path) -> Path:

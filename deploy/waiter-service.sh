@@ -25,14 +25,15 @@
 # the supervisor is killed (SIGKILL), its waiter lives on holding the lock:
 # a new supervisor's waiter then refuses and is retried with backoff, and
 # stop also stops that waiter (the lock's pid, checked to be this bot's
-# `orch wait <bot> --autostart` and not a live supervisor's child). stop
-# also stops every other supervisor for this bot and state directory owned
-# by this user, and a supervisor whose pid is no longer in the pidfile exits
-# instead of starting another waiter (#295). Without /proc, a supervisor
-# started before the state argv counts as this state's only when lsof shows
-# its stdout is this state's log (#328). A waiter that exits is
-# started again after ORCH_WAITER_RESTART_SEC (default 5) seconds; when it
-# keeps exiting within 30 seconds the pause doubles, up to 60 seconds.
+# `orch wait <bot> --autostart` whose stdout is this state's log, since two
+# states can share ORCH_DB). stop also stops every other supervisor for this
+# bot and state directory owned by this user, and a supervisor whose pid is
+# no longer in the pidfile exits instead of starting another waiter (#295).
+# Without /proc, a supervisor started before the state argv counts as this
+# state's only when lsof shows its stdout is this state's log (#328). A
+# waiter that exits is started again after ORCH_WAITER_RESTART_SEC (default
+# 5) seconds; when it keeps exiting within 30 seconds the pause doubles, up
+# to 60 seconds.
 #
 # Drain (#219): self-heal writes waiter-<bot>.drain in the state directory
 # when this bot's waiter runs stale code with jobs in flight; the waiter
@@ -109,8 +110,18 @@ is_supervisor_argv() {
     return 1
 }
 
+stdout_is_state_log() {
+    local log
+    if [[ -d "$PROC" ]]; then
+        log="${PROC}/$1/fd/1"
+    else
+        log="$(lsof -a -p "$1" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p')" || return 1
+    fi
+    [[ -n "$log" && "$log" -ef "$LOG" ]]
+}
+
 stateless_supervisor_is_own() {
-    local pid="$1" kv home="" state="" log
+    local pid="$1" kv home="" state=""
     local -a environ=()
     if [[ -d "$PROC" ]]; then
         mapfile -d '' -t environ 2>/dev/null <"${PROC}/${pid}/environ" || return 1
@@ -123,8 +134,7 @@ stateless_supervisor_is_own() {
         [[ -n "$state" || -n "$home" ]] || return 1
         [[ "${state:-${home}/.local/state/factory}" == "$STATE" ]]
     else
-        log="$(lsof -a -p "$pid" -d 1 -Fn 2>/dev/null | sed -n 's/^n//p')" || return 1
-        [[ -n "$log" && "$log" -ef "$LOG" ]]
+        stdout_is_state_log "$pid"
     fi
 }
 
@@ -171,27 +181,23 @@ owns_pidfile() {
     [[ "$(head -n 1 "$PIDFILE" 2>/dev/null || true)" == "$$" ]]
 }
 
-is_live_supervisor() {
-    local pid="$1" command
+# Print the pid of this bot's running supervisor, or fail.
+running_pid() {
+    local pid command
     local -a argv=()
+    [[ -r "$PIDFILE" ]] || return 1
+    pid="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
     if [[ -d "$PROC" ]]; then
         [[ -r "${PROC}/${pid}/cmdline" ]] || return 1
         mapfile -d '' -t argv <"${PROC}/${pid}/cmdline" || return 1
+        is_supervisor_argv "${argv[@]}" || return 1
     else
         command="$(ps -ww -p "$pid" -o command= 2>/dev/null)" || return 1
         read -r -a argv <<<"$command"
+        is_supervisor_argv "${argv[@]}" || return 1
     fi
-    is_supervisor_argv "${argv[@]}"
-}
-
-# Print the pid of this bot's running supervisor, or fail.
-running_pid() {
-    local pid
-    [[ -r "$PIDFILE" ]] || return 1
-    pid="$(head -n 1 "$PIDFILE" 2>/dev/null || true)"
-    is_live_supervisor "$pid" || return 1
     printf '%s\n' "$pid"
 }
 
@@ -235,11 +241,10 @@ waiter_pid() {
 }
 
 stop_waiter() {
-    local pid parent i
+    local pid i
     pid="$(waiter_pid)" || return 0
-    parent="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')"
-    if is_live_supervisor "$parent"; then
-        say "waiter (pid ${pid}) belongs to supervisor ${parent} of another state; leaving it"
+    if ! stdout_is_state_log "$pid"; then
+        say "waiter (pid ${pid}) does not write to ${LOG}; leaving it"
         return 0
     fi
     kill -TERM "$pid" 2>/dev/null || return 0
