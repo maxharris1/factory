@@ -18,7 +18,9 @@ import pytest
 
 from lib.cli import main as cli_main
 from lib.queue import MAX_INVALID_HANDOFFS, SUBMITTED_INVALID, JobRequest, SQLiteJobQueue
+from lib.job_token import PROOF_ENV
 from tests.handoff_store import HEAD, serve_handoff
+from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF
 
 REPO = "owner/repo"
 OTHER_HEAD = "b" * 40
@@ -50,7 +52,7 @@ def running_job(tmp_path: Path, *, action: str = "build", recipient: str = "clau
         ),
         dedupe_key=f"{action}-{recipient}",
     )
-    claimed = queue.claim(recipient)
+    claimed = queue.claim(recipient, token_hash=CLAIM_HASH)
     assert claimed is not None and claimed.id == job.id
     return db, queue, claimed
 
@@ -89,6 +91,11 @@ def invalid_events(db: Path, job_id: str) -> list[str]:
                 (job_id, SUBMITTED_INVALID),
             )
         ]
+
+
+@pytest.fixture(autouse=True)
+def claim_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
 
 
 @pytest.fixture

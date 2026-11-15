@@ -110,6 +110,7 @@ class JobQueue(Protocol):
         recipient: str,
         *,
         excluded_job_ids: Collection[str] = (),
+        token_hash: str | None = None,
     ) -> Job | None: ...
 
     def release(self, job_id: str, *, owner: str) -> Job: ...
@@ -247,6 +248,7 @@ class SQLiteJobQueue:
         recipient: str,
         *,
         excluded_job_ids: Collection[str] = (),
+        token_hash: str | None = None,
     ) -> Job | None:
         if recipient not in RECIPIENTS:
             raise QueueError(f"unknown recipient {recipient!r}")
@@ -268,10 +270,10 @@ class SQLiteJobQueue:
             changed = connection.execute(
                 """
                 UPDATE jobs
-                SET state = 'running', last_activity_at = ?
+                SET state = 'running', last_activity_at = ?, claim_token_hash = ?
                 WHERE id = ? AND state = 'queued'
                 """,
-                (now, row["id"]),
+                (now, token_hash, row["id"]),
             ).rowcount
             if changed != 1:
                 raise QueueError(f"job {row['id']} is no longer queued")
@@ -653,10 +655,13 @@ class SQLiteJobQueue:
                         last_activity_at REAL NOT NULL,
                         finished_at REAL,
                         handoff_comment_id TEXT,
-                        failure_handled INTEGER NOT NULL DEFAULT 0
+                        failure_handled INTEGER NOT NULL DEFAULT 0,
+                        claim_token_hash TEXT
                     )
                     """
                 )
+                if "claim_token_hash" not in _columns(connection, "jobs"):
+                    connection.execute("ALTER TABLE jobs ADD COLUMN claim_token_hash TEXT")
                 ensure_priority_table(connection)
         except sqlite3.DatabaseError as exc:
             raise QueueError("database file is not valid SQLite") from exc

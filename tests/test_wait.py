@@ -31,7 +31,7 @@ from lib.wait import (
     wait_for_job,
 )
 from tests.handoff_store import env_store, serve_handoff
-from tests.pool_helpers import pool_claim
+from tests.pool_helpers import CLAIM_HASH, CLAIM_PROOF, pool_claim
 
 
 class QueuePool:
@@ -43,7 +43,7 @@ class QueuePool:
     def __init__(self, queue):
         self.queue = queue
 
-    def claim(self, recipient: str):
+    def claim(self, recipient: str, token_hash: str | None = None):
         job = self.queue.claim(recipient)
         return None if job is None else (job, None)
 
@@ -241,8 +241,8 @@ def test_job_done_finishes_with_the_handoff_comment_and_repeats_idempotently(
     unclaimed = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db)
     assert unclaimed.returncode == 1
     assert "running" in unclaimed.stderr
-    run(["wait", "claude-bot"], db)
-    done = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db)
+    proof = json.loads(run(["wait", "claude-bot"], db).stdout)["proof"]
+    done = run(["job", "done", "claude-bot", job.id, "--handoff", "1009"], db, ORCH_JOB_PROOF=proof)
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"done {job.id}\n"
     row = state_of(db, job.id)
@@ -256,8 +256,8 @@ def test_job_done_finishes_with_the_handoff_comment_and_repeats_idempotently(
 def test_job_done_failed_hands_the_job_to_t6(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
-    run(["wait", "claude-bot"], db)
-    failed = run(["job", "done", "claude-bot", job.id, "--failed"], db)
+    proof = json.loads(run(["wait", "claude-bot"], db).stdout)["proof"]
+    failed = run(["job", "done", "claude-bot", job.id, "--failed"], db, ORCH_JOB_PROOF=proof)
     assert failed.returncode == 0, failed.stderr
     assert failed.stdout == f"failed {job.id}\n"
     dispatcher_for(db).reconcile_jobs()
@@ -301,7 +301,7 @@ def test_heartbeat_keeps_a_running_job_out_of_t6(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     kept = queue.enqueue(request(), dedupe_key="a")
     lapsed = queue.enqueue(request(action="fix"), dedupe_key="b")
-    run(["wait", "claude-bot"], db)
+    proof = json.loads(run(["wait", "claude-bot"], db).stdout)["proof"]
     run(["wait", "claude-bot"], db)
     stale = time.time() - 5400 - 60
     with sqlite3.connect(db) as connection:
@@ -312,7 +312,7 @@ def test_heartbeat_keeps_a_running_job_out_of_t6(tmp_path: Path) -> None:
         for job in probe.outstanding()
     )
     before = time.time()
-    beat = run(["job", "heartbeat", "claude-bot", kept.id], db)
+    beat = run(["job", "heartbeat", "claude-bot", kept.id], db, ORCH_JOB_PROOF=proof)
     assert beat.returncode == 0, beat.stderr
     assert beat.stdout == f"heartbeat {kept.id}\n"
     assert state_of(db, kept.id)["last_activity_at"] >= before
@@ -325,9 +325,9 @@ def test_heartbeat_keeps_a_running_job_out_of_t6(tmp_path: Path) -> None:
 def test_heartbeat_on_a_finished_job_fails(tmp_path: Path) -> None:
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
-    run(["wait", "claude-bot"], db)
+    proof = json.loads(run(["wait", "claude-bot"], db).stdout)["proof"]
     serve_handoff(env_store(), job, "1001")
-    assert run(["job", "done", "claude-bot", job.id, "--handoff", "1001"], db).returncode == 0
+    assert run(["job", "done", "claude-bot", job.id, "--handoff", "1001"], db, ORCH_JOB_PROOF=proof).returncode == 0
     beat = run(["job", "heartbeat", "claude-bot", job.id], db)
     assert beat.returncode == 1
     assert "running" in beat.stderr
@@ -493,10 +493,11 @@ def test_wait_and_job_never_exec_a_harness(tmp_path: Path) -> None:
             proc.kill()
             proc.communicate()
     assert proc.returncode == 0, stderr
-    assert json.loads(stdout)["id"] == job.id
-    assert run(["job", "heartbeat", "cursor-bot", job.id], db, PATH=path).returncode == 0
+    line = json.loads(stdout)
+    assert line["id"] == job.id
+    assert run(["job", "heartbeat", "cursor-bot", job.id], db, PATH=path, ORCH_JOB_PROOF=line["proof"]).returncode == 0
     serve_handoff(env_store(), job, "1001")
-    assert run(["job", "done", "cursor-bot", job.id, "--handoff", "1001"], db, PATH=path).returncode == 0
+    assert run(["job", "done", "cursor-bot", job.id, "--handoff", "1001"], db, PATH=path, ORCH_JOB_PROOF=line["proof"]).returncode == 0
     assert not marker.exists()
     for name in ("wait.py", "cli.py"):
         assert _exec_calls(ROOT / "lib" / name) == []
@@ -520,7 +521,7 @@ def test_job_run_only_runs_the_command_its_owning_bot_passes(tmp_path: Path) -> 
     queue = SQLiteJobQueue(db, clock=time.time)
     job = queue.enqueue(request(recipient="cursor"), dedupe_key="a")
     assert pool_claim(queue, "cursor").id == job.id
-    result = run(["job", "run", "cursor-bot", job.id, "--", "true"], PATH=path, ORCH_DB=str(db))
+    result = run(["job", "run", "cursor-bot", job.id, "--", "true"], PATH=path, ORCH_DB=str(db), ORCH_JOB_PROOF=CLAIM_PROOF)
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
     for name in (
@@ -591,6 +592,7 @@ def test_job_run_execs_exactly_the_bots_command_and_only_git_besides(
         return real_popen(*args, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    monkeypatch.setenv("ORCH_JOB_PROOF", CLAIM_PROOF)
     command = [sys.executable, "-c", "pass"]
     extra = (
         ["--worktree", "--work-root", str(tmp_path / "work"),
@@ -1186,7 +1188,8 @@ def test_heartbeat_and_done_retry_a_held_write_lock(
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
     serve_handoff(env_store(), job, "1009")
-    assert queue.claim("claude") is not None
+    assert queue.claim("claude", token_hash=CLAIM_HASH) is not None
+    monkeypatch.setenv("ORCH_JOB_PROOF", CLAIM_PROOF)
     holder = hold_write_lock(db)
     sleeps: list[float] = []
 
@@ -1222,7 +1225,8 @@ def test_heartbeat_and_done_give_up_after_bounded_lock_retries(
     db, queue = make_db(tmp_path)
     job = queue.enqueue(request(), dedupe_key="a")
     serve_handoff(env_store(), job, "1009")
-    assert queue.claim("claude") is not None
+    assert queue.claim("claude", token_hash=CLAIM_HASH) is not None
+    monkeypatch.setenv("ORCH_JOB_PROOF", CLAIM_PROOF)
     holder = hold_write_lock(db)
     sleeps: list[float] = []
     monkeypatch.setattr(wait_module.time, "sleep", sleeps.append)

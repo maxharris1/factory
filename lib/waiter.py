@@ -613,7 +613,7 @@ class Waiter:
         self._locked = 0
         if claimed is None:
             return None
-        job, placement = claimed
+        job, placement, _proof = claimed
         return self._start(job, placement)
 
     def _reconcile_home(self) -> None:

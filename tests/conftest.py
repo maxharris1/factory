@@ -139,6 +139,15 @@ def _registration_gate(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
 
 
 @pytest.fixture(autouse=True)
+def _claim_proof(monkeypatch: pytest.MonkeyPatch):
+    """A bot holds its claim's proof (#127): pool_claim's claim."""
+    from lib.job_token import PROOF_ENV
+    from tests.pool_helpers import CLAIM_PROOF
+
+    monkeypatch.setenv(PROOF_ENV, CLAIM_PROOF)
+
+
+@pytest.fixture(autouse=True)
 def _end_fake_runners():
     yield
     from tests import fake_runner

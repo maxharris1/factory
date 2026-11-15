@@ -225,6 +225,7 @@ class DevicePool:
         *,
         excluded_job_ids: Collection[str] = (),
         autostart: tuple[int, str | None] | None = None,
+        token_hash: str | None = None,
     ) -> tuple[Job, Placement] | None:
         """Claim the oldest queued job for harness onto a free slot.
 
@@ -273,10 +274,10 @@ class DevicePool:
             changed = connection.execute(
                 """
                 UPDATE jobs
-                SET state = 'running', last_activity_at = ?
+                SET state = 'running', last_activity_at = ?, claim_token_hash = ?
                 WHERE id = ? AND state = 'queued'
                 """,
-                (now, row["id"]),
+                (now, token_hash, row["id"]),
             ).rowcount
             if changed != 1:
                 raise QueueError(f"job {row['id']} changed during claim")

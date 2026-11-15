@@ -1152,6 +1152,14 @@ def _job(argv: list[str]) -> int:
     except WaitError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
+    try:
+        refusal = _proof_refusal(queue, args.job_id)
+    except (QueueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    if refusal is not None:
+        print(f"{prog}: {refusal}", file=sys.stderr)
+        return 2
     if args.command == "done" and args.handoff != "":
         try:
             settled = _done_settled(queue, args.job_id, args.handoff)
@@ -1391,12 +1399,6 @@ def _done_settled(
 
     (0, line) when the same outcome is already recorded: a repeat is a no-op.
     (1, error) when a different outcome is recorded: nothing changes.
-    (2, error) when the job is an autostart waiter's and this process does
-    not hold its current `orch job run`'s secret token (#96): a bot turn
-    must not finish it. The token comes from ORCH_JOB_PROOF
-    (lib/job_token.py), and only its hash is compared. There is no
-    process-tree check: a sandbox in its own PID namespace (Codex) cannot
-    see the run, but it inherits the token.
     None when the job may be finished here.
     """
     target = "done" if handoff is not None else "failed"
@@ -1404,13 +1406,6 @@ def _done_settled(
         row = connection.execute(
             "SELECT state, handoff_comment_id FROM jobs WHERE id = ?", (job_id,)
         ).fetchone()
-        slot = (
-            connection.execute(
-                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
-            ).fetchone()
-            if _has_slots(connection)
-            else None
-        )
     if row is None:
         raise QueueError(f"unknown job {job_id!r}")
     state, recorded = str(row["state"]), row["handoff_comment_id"]
@@ -1422,32 +1417,67 @@ def _done_settled(
             f"job {job_id} is already {already}; refusing a different outcome, "
             "nothing changed"
         )
-    # Codex PR #82 r2 F2.4: this path never opens a DevicePool, so the slots
-    # table may predate the autostart columns (an update while a job runs).
-    # A missing column reads as NULL: no autostart waiter can have claimed a
-    # job in a table it could not record itself in.
-    # The same holds for run_token_hash (#96): a slot without the column has
-    # no token, and its autostart claim (if any) is refused below.
-    autostart = _slot_value(slot, "autostart_pid")
-    stored = _slot_value(slot, "run_token_hash")
-    if state != "running" or (autostart is None and stored is None):
+    return None
+
+
+def _proof_refusal(queue: SQLiteJobQueue, job_id: str) -> str | None:
+    """Why this process may not write to a running job, or None when it may (#127).
+
+    A running job takes heartbeat, done and job run only from a process
+    whose ORCH_JOB_PROOF (lib/job_token.py) matches the claim's token
+    (jobs.claim_token_hash) or its autostart run's token (the slot's
+    run_token_hash, #96). Only hashes are compared. There is no
+    process-tree check: a sandbox in its own PID namespace (Codex) cannot
+    see the run, but it inherits the token.
+    """
+    with queue.connect() as connection:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        slot = (
+            connection.execute(
+                f"SELECT * FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if _has_slots(connection)
+            else None
+        )
+    if row is None:
+        raise QueueError(f"unknown job {job_id!r}")
+    if row["state"] != "running":
         return None
+    # Codex PR #82 r2 F2.4: this path never opens a DevicePool or an
+    # initializing queue, so a column may predate this code; it reads as NULL.
+    claim_hash = _slot_value(row, "claim_token_hash")
+    run_hash = _slot_value(slot, "run_token_hash")
     token = job_token.presented(os.environ)
-    if job_token.matches(token, stored):
+    if job_token.matches(token, claim_hash) or job_token.matches(token, run_hash):
         return None
-    if stored is None:
+    autostart = _slot_value(slot, "autostart_pid")
+    if autostart is not None:
+        if run_hash is None:
+            why = (
+                "its claim has no run token (claimed before run tokens, #96, or its "
+                "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+            )
+        elif token is None:
+            why = "this process has no ORCH_JOB_PROOF from that run"
+        else:
+            why = "the ORCH_JOB_PROOF this process holds is not that run's"
+        return (
+            f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
+            "whose harness run finishes it; only that run may call orch job done, so a "
+            f"bot turn must not run or post for it; {why}. Nothing changed"
+        )
+    if claim_hash is None and run_hash is None:
         why = (
-            "its claim has no run token (claimed before run tokens, #96, or its "
-            "orch job run has not started), so no ORCH_JOB_PROOF can finish it"
+            "its claim has no token (claimed before claim tokens, #127), "
+            "so no ORCH_JOB_PROOF can prove it; T6 ends it"
         )
     elif token is None:
-        why = "this process has no ORCH_JOB_PROOF from that run"
+        why = "this process has no ORCH_JOB_PROOF"
     else:
-        why = "the ORCH_JOB_PROOF this process holds is not that run's"
-    return 2, (
-        f"job {job_id} was claimed by its autostart waiter (pid {autostart}), "
-        "whose harness run finishes it; only that run may call orch job done, so a bot "
-        f"turn must not run or post for it; {why}. Nothing changed"
+        why = "the ORCH_JOB_PROOF this process holds is not this claim's"
+    return (
+        f"job {job_id} is running under a claim this process cannot prove; run it "
+        f"with ORCH_JOB_PROOF set to the proof orch wait printed; {why}. Nothing changed"
     )
 
 
@@ -1566,12 +1596,18 @@ def _job_run_command(argv: list[str]) -> int:
         # #96: an autostart run proves itself to `orch job done` with a
         # fresh secret token; only its hash goes on the slot (in prepare).
         token, token_hash = job_token.mint() if checked_autostart is not None else (None, None)
+        refusal = None if checked_autostart is not None else _proof_refusal(queue, args.job_id)
     except placed_run.PlacementError as exc:
         print(f"{prog}: {' '.join(str(exc).split())}", file=sys.stderr)
         return 2
-    except (sqlite3.Error, OSError) as exc:
+    except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
+    if refusal is not None:
+        print(f"{prog}: {refusal}", file=sys.stderr)
+        return 2
+    if checked_autostart is None:
+        token = job_token.presented(os.environ)
     try:
         beat()  # a job that is not running is refused first (exit 1), as before F2-02
     except (QueueError, sqlite3.Error, OSError) as exc:
@@ -1612,6 +1648,7 @@ def _job_run_command(argv: list[str]) -> int:
     )
     if token is not None and not placed.remote:
         # Not sent to a remote device: it would be on the ssh command line.
+        # A plain claim's proof is passed on so its harness can finish the job.
         environment[job_token.PROOF_ENV] = token
     # #100 r8: the summary's scrubber knows the harness's own environment,
     # the proof included.
