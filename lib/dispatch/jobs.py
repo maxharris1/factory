@@ -904,6 +904,7 @@ class JobsMixin:
             source,
             job.request.action,
             job.request.recipient,
+            queued_at=job.created_at,
             head=job.request.head,
             round_number=_detail_round_number(job.request.detail),
         )

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from lib.queue import JobRequest
-from tests.merge_queue_support import Board, sha
+from lib.state_backup import backup, restore
+from tests.merge_queue_support import APPROVE, Board, sha
 from tests.test_hold_merge_queue import APPROVER, OK, held_board
 
 
@@ -331,3 +334,35 @@ def test_a_ready_accepted_before_the_update_was_needed_does_not_cancel_it(
         (sha(2), "queued")
     ]
     assert board.state("42")["workflow_state"] == "fixing"
+
+
+def test_a_ready_at_the_approved_head_posted_after_a_restored_fix_still_settles_it(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path / "state", finish_line=None)
+    board.factory = replace(board.factory, start_before_ci=True)
+    pr = board.open("42", sha(1))
+    board.go(pr, "go")
+    board.poll()
+    board.finish("claude")
+    board.ready(pr, sha(1))
+    board.poll()
+    board.finish("codex")
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-A", APPROVE.format(round="1/3", head=sha(1)), "codex-login")
+    board.poll()
+    assert board.outcome("approve-A") == "approve-ci-red-fix"
+    [fix] = board.jobs("fix")
+    assert fix["head"] == sha(2)
+    saved = tmp_path / "backup.db"
+    backup(board.queue.path, saved)
+    board.finish("claude")
+    pr.push(sha(1))
+    board.ready(pr, sha(1), "ready-rollback")
+    shutil.rmtree(board.queue.path.parent)
+    restore(saved, board.queue.path)
+    board.poll()
+    board.poll()
+
+    assert board.outcome("ready-rollback") == "queued-review"
+    assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
