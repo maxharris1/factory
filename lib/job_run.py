@@ -27,6 +27,9 @@ same process that runs the command:
   while it runs, and once it has exited run stops (SIGSTOP), then kills
   (SIGKILL), every live process that carries the tag or descends from a
   tracked one, and returns only when none is left;
+* death counts only once a look at this machine's processes succeeds and
+  finds none of the run left (#199 r4): while `ps` or /proc cannot be read,
+  run keeps beating and holds the job and its slot, so T6 cannot retry it;
 * on Linux, run is the command's child subreaper while it runs (#199 r2),
   so a descendant orphaned between two looks, even one that dropped the tag
   and left the session, is reparented to run rather than to init, and is
@@ -262,11 +265,15 @@ def run(
             return 128 + pending[0]
         tag = secrets.token_hex(16)
         me = os.getpid()
-        others = frozenset({
-            (pid, process.start)
-            for pid, process in processes(tag).items()
-            if process.ppid == me
-        })
+        try:
+            others = frozenset({
+                (pid, process.start)
+                for pid, process in processes(tag).items()
+                if process.ppid == me
+            })
+        except ProcessesUnknown as exc:
+            log(f"not starting {argv[0]}: {exc}")
+            return 127
         reaper = _subreaper(True)
         tagged = {**(dict(env) if env is not None else os.environ), RUN_TAG_ENV: tag}
         spawn = list(argv)
@@ -383,7 +390,7 @@ def _wait(
     While it waits it tracks the child's process tree every TRACK_SECONDS.
     """
     while True:
-        tree.track()
+        tree.track_if_listable()
         timeout = TRACK_SECONDS if budget is None else min(TRACK_SECONDS, budget.remaining())
         try:
             return child.wait(timeout=timeout)
@@ -395,11 +402,11 @@ def _wait(
     budget.expired = True
     log(f"{name} ran past its {budget.describe()}; stopping pid {child.pid} (SIGTERM)")
     budget.signum = signal.SIGTERM
-    tree.track()
+    tree.track_if_listable()
     child.send_signal(signal.SIGTERM)
     grace = time.monotonic() + budget.grace
     while True:
-        tree.track()
+        tree.track_if_listable()
         try:
             return child.wait(timeout=max(0.0, min(0.2, grace - time.monotonic())))
         except subprocess.TimeoutExpired:
@@ -408,9 +415,13 @@ def _wait(
             break
     log(f"{name} (pid {child.pid}) ignored SIGTERM for {budget.grace:g}s; killing it (SIGKILL)")
     budget.signum = signal.SIGKILL
-    tree.track()
+    tree.track_if_listable()
     child.kill()
     return child.wait()
+
+
+class ProcessesUnknown(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -434,8 +445,12 @@ def processes(tag: str) -> dict[int, Process]:
 
 def _proc_processes(tag: str) -> dict[int, Process]:
     mark = f"{RUN_TAG_ENV}={tag}".encode()
+    try:
+        names = os.listdir("/proc")
+    except OSError as exc:
+        raise ProcessesUnknown(f"cannot list /proc: {_one_line(exc)}") from exc
     found: dict[int, Process] = {}
-    for name in os.listdir("/proc"):
+    for name in names:
         if not name.isdigit():
             continue
         try:
@@ -461,8 +476,10 @@ def _ps_processes() -> dict[int, Process]:
             ["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="],
             capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"}, timeout=30,
         )
-    except (OSError, subprocess.SubprocessError):
-        return {}
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProcessesUnknown(f"cannot run ps: {_one_line(exc)}") from exc
+    if listing.returncode != 0:
+        raise ProcessesUnknown(f"ps exited {listing.returncode}: {' '.join(listing.stderr.split())}")
     found: dict[int, Process] = {}
     for line in listing.stdout.splitlines():
         parts = line.split(None, 3)
@@ -527,6 +544,12 @@ class Tree:
         self.known = {pid: process.start for pid, process in members.items()}
         return members
 
+    def track_if_listable(self) -> None:
+        try:
+            self.track()
+        except ProcessesUnknown:
+            pass
+
     def _adopted(self, process: Process, me: int) -> bool:
         return (
             self.adopts and process.ppid == me and (process.pid, process.start) not in self.others
@@ -539,24 +562,37 @@ class Tree:
         until no new member shows up, then kills them all (SIGKILL). A
         process this user may not signal is not the run's.
         """
-        said = time.monotonic()
+        said: float | None = None
         while True:
-            members = self.track()
+            try:
+                members = self._kill_round()
+            except ProcessesUnknown as exc:
+                if said is None or time.monotonic() - said >= KILL_GRACE_SECONDS:
+                    log(f"{exc}; holding the job until the run's processes are confirmed gone")
+                    said = time.monotonic()
+                time.sleep(0.5)
+                continue
             if not members:
                 return
-            stopped: set[int] = set()
-            while set(members) - stopped:
-                for pid in set(members) - stopped:
-                    self._send(pid, signal.SIGSTOP)
-                    stopped.add(pid)
-                members = self.track()
-            for pid in members:
-                self._send(pid, signal.SIGKILL)
-            self._reap(members)
-            if time.monotonic() - said >= KILL_GRACE_SECONDS:
+            if said is None:
+                said = time.monotonic()
+            elif time.monotonic() - said >= KILL_GRACE_SECONDS:
                 log(f"processes {sorted(members)} of the run still live after SIGKILL; waiting")
                 said = time.monotonic()
             time.sleep(0.05)
+
+    def _kill_round(self) -> dict[int, Process]:
+        members = self.track()
+        stopped: set[int] = set()
+        while set(members) - stopped:
+            for pid in set(members) - stopped:
+                self._send(pid, signal.SIGSTOP)
+                stopped.add(pid)
+            members = self.track()
+        for pid in members:
+            self._send(pid, signal.SIGKILL)
+        self._reap(members)
+        return members
 
     def _reap(self, members: dict[int, Process]) -> None:
         """Collect the killed processes this process adopted, so none is left a zombie."""
