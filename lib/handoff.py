@@ -4,7 +4,8 @@ The header is one HTML comment. Canonical key order is KEYS. v1 keys are
 the example keys plus state and builder, which GitHub-issue repos also
 show as labels and which Aut0 carries in the header instead, and reviewer.
 A go's builder and reviewer route that ticket (issue #206). A verdict may
-name repeat=<ac-n|f-n> and unsat=<ac-n>.
+name repeat=<ac-n|f-n> and unsat=<ac-n>. repeat_id also reads repeat= as the
+first non-empty body line, the migration form (issue #189).
 
 labels_for returns the labels a later dispatcher would apply. It does
 not write anything. tickets linear, and the Aut0 repo, return no labels.
@@ -188,6 +189,17 @@ def parse_comment(text: str) -> Handoff:
     first, _, rest = normalized.partition("\n")
     fields = parse_header_line(first)
     return Handoff(fields=tuple(fields.items()), body=rest)
+
+
+def repeat_id(handoff: Handoff) -> str | None:
+    """The verdict's repeat id: the header's repeat=, else a first body line
+    that is exactly repeat=<ac-n|f-n>."""
+    fields = handoff.as_dict()
+    if "repeat" in fields:
+        return fields["repeat"]
+    first = next((line.strip() for line in handoff.body.splitlines() if line.strip()), "")
+    key, _, value = first.partition("=")
+    return value if key == "repeat" and _REPEAT.fullmatch(value) else None
 
 
 def format_comment(handoff: Handoff, *, visible: bool = False) -> str:
