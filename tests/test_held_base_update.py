@@ -247,3 +247,64 @@ def test_a_failed_fixing_label_is_written_again_on_the_next_poll(tmp_path: Path)
     assert board.actions.states[-1] == "fixing"
     assert len(_merge_only_jobs(board)) == 1
     assert board.wakes("stale") == []
+
+
+@pytest.mark.parametrize("mergeable_state", ["dirty", "behind"])
+def test_a_held_pr_whose_head_moved_without_a_ready_updates_the_new_head(
+    tmp_path: Path, mergeable_state: str
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    cap_extra = board.state("42")["cap_extra"]
+    pr.push(sha(2), state=mergeable_state)
+    del pr.ci[sha(2)]
+
+    for _ in range(4):
+        board.poll()
+
+    [job] = _merge_only_jobs(board)
+    assert job["head"] == sha(2)
+    assert job["source_comment_id"] == approve
+    assert job["dedupe_key"] == f"base-update:owner/repo\x1f42:{sha(2)}"
+    assert json.loads(job["detail"])["round"] == "1/3"
+    assert board.outcome(approve) == "held-base-update"
+    assert board.state("42")["workflow_state"] == "fixing"
+    assert board.state("42")["review_round"] == 0
+    assert board.state("42")["cap_extra"] == cap_extra
+    assert board.wakes("stale") == []
+    assert board.actions.merges == []
+
+    board.finish("claude")
+    board.post(pr, "ok-old", OK.format(head=sha(1)), APPROVER)
+    pr.push(sha(3))
+    board.ready(pr, sha(3))
+    board.poll()
+    board.finish("codex")
+    board.approve(pr)
+    board.poll()
+    board.poll()
+
+    assert board.actions.merges == []
+    assert board.state("42")["workflow_state"] == "awaiting-ok"
+    assert _hold_head(board) == sha(3)
+
+    board.post(pr, "ok-new", OK.format(head=sha(3)), APPROVER)
+    board.poll()
+
+    assert board.actions.merges == [(True, sha(3))]
+
+
+def test_a_reposted_approve_after_the_held_update_is_a_duplicate_not_stale(
+    tmp_path: Path,
+) -> None:
+    board = held_board(tmp_path)
+    pr, approve = _held(board)
+    duplicate = board.approve(pr, comment_id="approve-reposted")
+    pr.conflict()
+
+    board.poll()
+
+    assert board.outcome(approve) == "held-base-update"
+    assert board.outcome(duplicate) == "duplicate-verdict"
+    assert board.wakes("stale") == []
+    assert len(_merge_only_jobs(board)) == 1

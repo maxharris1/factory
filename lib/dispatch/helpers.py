@@ -84,6 +84,7 @@ ACTED_VERDICT_OUTCOMES = frozenset(
         "waiting-external",
         "ship-unconfirmed",
         "ship-failed",
+        "held-base-update",
     }
 )
 

@@ -186,18 +186,6 @@ class HoldsMixin:
         self._write_state_label(ticket, self._review_context(ticket)[0])
         return True, _HELD_BASE_UPDATE
 
-    def _held_at(self, ticket: TrackedTicket, head: str) -> bool:
-        if self._held(ticket, head) is None:
-            return False
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT head FROM ship_holds WHERE repo = ? AND ticket_id = ?
-                """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchone()
-        return row is not None and row["head"] == head
-
     def _hold_decision(self, ticket: TrackedTicket, head: str) -> HoldDecision:
         hold = ticket.factory.hold
         assert hold is not None
