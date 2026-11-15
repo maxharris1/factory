@@ -22,7 +22,8 @@ _MARKDOWN = MarkdownIt("commonmark")
 _TAG = "[follow-up]"
 _CUT_NOTE = "Some findings were cut to fit GitHub's issue size limit; the verdict has them all."
 _CITED_FILE = re.compile(
-    r"(?<![\w/.:-])(?=[\w./-]*[A-Za-z])(?:[\w.-]+/)+[\w.-]*[\w-](?![\w/#-])|" + FILE_PATH.pattern
+    r"(?<![\w/.:@-])(?=[\w./@-]*[A-Za-z])(?:[\w.@-]+/)+[\w.@-]*[\w-](?![\w/#@-])|"
+    r"(?<![\w/.:@-])\.[A-Za-z](?:[\w.-]*[\w-])?(?![\w/#@-])|" + FILE_PATH.pattern
 )
 
 
