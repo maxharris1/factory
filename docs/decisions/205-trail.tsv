@@ -7,3 +7,5 @@ when	step	hypothesis	result	verdict
 2026-11-14	live reads on GitHub	compare and commits/sha/pulls shapes match	c10638d -> [332], own excluded -> ()	VERIFIED
 2026-11-15	r1 REVISE ac-1, f-1	new tests fail at a05887a	4 failed: resumed intake fed, review queued, one delivery key	VERIFIED red
 2026-11-15	recheck recorded PR's branch, hold_review before review, set in source id	reviewer repros and new tests pass	retry fed=[] state=waiting-blocked; review jobs=0 blocked wakes=1; keys 205:113 and 205:113,114	VERIFIED
+2026-11-15	r2 REVISE ac-1 (Linear linked PR)	new test fails at 748795e	ticket branch suggested/aut-42, expected actual/pr-branch	VERIFIED red
+2026-11-15	Linear ticket carries the linked PR head ref	reviewer repro and new tests pass	review jobs=0 blocked wakes=1, checked actual/pr-branch	VERIFIED

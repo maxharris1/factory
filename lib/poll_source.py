@@ -1398,6 +1398,7 @@ class LivePollSource:
         head = _latest_head(linear_comments)
         ci: dict[str, CIResult] = {}
         pr_title: str | None = None
+        branch = _optional_string(issue.get("gitBranchName"))
         pr_number = self._linked_pr_number(
             project.repo,
             identifier,
@@ -1412,6 +1413,7 @@ class LivePollSource:
             if pull_facts["merged"] and tracked:
                 self._linear_merged(project, identifier, allow_merged)
             head = _pr_head(pull, project.repo, pr_number)
+            branch = _optional_string(pull["head"].get("ref")) or branch
             pr_title = _open_title(pull)
             ci[head] = self.github.ci_status(project.repo, head)
             github_comments = self.github.list_comments(project.repo, pr_number)
@@ -1444,7 +1446,7 @@ class LivePollSource:
             risk=self._linear_risk(project.repo, identifier, issue, comments, pr_number),
             job_timeout_minutes=resolve_job_timeout(self.config, project.repo),
             ticket_url=_optional_string(issue.get("url")),
-            git_branch_name=_optional_string(issue.get("gitBranchName")),
+            git_branch_name=branch,
             pr_number=pr_number,
             brief=_brief(linear_comments),
             grok_bot=project.grok_bot,

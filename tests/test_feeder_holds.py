@@ -13,9 +13,11 @@ from lib.feeder_gates import Progress, RefStatus, blocker_waits, github_ref, par
 from lib.github_actions import GhResult, GitHubAdapterError
 from lib.handoff import Handoff, format_comment
 from lib.intake_live import GitHubIntakeClient
+from lib.poll_source import LivePollSource
 from tests.test_feeder import (
     LINEAR_FACTORY_MD,
     LINEAR_ORCH,
+    GITHUB_ORCH,
     FakeGitHub,
     FakeLinear,
     FeederSource,
@@ -27,6 +29,8 @@ from tests.test_feeder import (
 )
 from tests.test_dispatcher import TRUSTED_LOGINS, FakeGrokDelivery, FakeReviewActions
 from tests.test_github_actions import RecordedGh
+from tests.test_live_poll import FACTORY, FakeGh, config, linear_transport_for
+from tests.test_live_poll import linear_issue as live_linear_issue
 
 HOME = "owner/app"
 BRANCH = "factory/issue-205"
@@ -355,3 +359,45 @@ def test_each_stacked_set_reaches_grok_under_its_own_identity(tmp_path: Path) ->
 
     assert [json.loads(job.request.detail)["pulls"] for job in delivery.jobs] == [[113], [113, 114]]
     assert len(set(delivery.logical_keys)) == 2
+
+
+@pytest.mark.parametrize("pull_ref", ["actual/pr-branch", None], ids=["pr-head-ref", "no-ref"])
+def test_a_linked_linear_pr_is_held_on_its_own_branch(tmp_path: Path, pull_ref: str | None) -> None:
+    repo, suggested = "acme/widgets", "suggested/aut-42"
+    stacked_branch = pull_ref or suggested
+    gh = FakeGh(FACTORY.format(tickets="linear", ship="handoff"))
+    gh.head = C
+    gh.pull = {"state": "open", "title": "Fix login",
+               "head": {"ref": pull_ref} if pull_ref else {}}
+    item = live_linear_issue()
+    item["gitBranchName"] = suggested
+    source = LivePollSource(
+        config(linear=True), environ={"LINEAR_KEY": "test-value"},
+        gh_runner=gh, linear_transport=linear_transport_for(item),
+    )
+    source.begin_cycle()
+    ticket = source._linear_ticket(source.config.projects[0], item)
+    assert ticket.git_branch_name == stacked_branch
+
+    github = FakeGitHub()
+    github.branches[(repo, suggested)] = A
+    github.branches[(repo, stacked_branch)] = C
+    github.branch_commits[(repo, stacked_branch)] = (B, C)
+    github.branches[(repo, "upstream/pr-113")] = B
+    github.pulls[(repo, 12)] = {"head": stacked_branch, "base": "main"}
+    github.pulls[(repo, 113)] = {"head": "upstream/pr-113", "base": "main"}
+    feeder, queue, _, _ = make_feeder(
+        tmp_path, github=github, orch=GITHUB_ORCH.replace("owner/app", repo)
+    )
+    ready = Comment(
+        id="10001", author="maxharris1", created_at=10001.0,
+        body=format_comment(Handoff(
+            fields=(("kind", "ready"), ("from", "claude-bot"), ("role", "builder"), ("head", C)),
+            body="Ready.",
+        )),
+    )
+    dispatcher = dispatcher_for(tmp_path, queue, feeder=feeder)
+    dispatcher.process(replace(ticket, comments=(ready,), factory_md=ticket.factory))
+
+    assert reviews(queue) == []
+    assert [json.loads(wake["detail"])["pulls"] for wake in grok_wakes(tmp_path)] == [[113]]
