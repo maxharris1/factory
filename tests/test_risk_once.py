@@ -1,5 +1,7 @@
 """Issue #195: a ticket's risk is read once at intake and never silently low."""
 
+import base64
+import hashlib
 import json
 import subprocess
 from difflib import unified_diff
@@ -150,6 +152,11 @@ class FilesGh(FakeGh):
     def __init__(self, files: list | None) -> None:
         super().__init__(FACTORY.format(tickets="linear", ship="handoff"))
         self.files = files
+        self.blobs = {
+            item["sha"]: item["source"]
+            for item in files or ()
+            if isinstance(item, dict) and "source" in item
+        }
 
     def __call__(self, argv, timeout):
         endpoint = next(part for part in argv if part.startswith(("repos/", "search/")))
@@ -160,10 +167,18 @@ class FilesGh(FakeGh):
             entries = [
                 {"filename": item, "changes": 1, "patch": "@@ -0,0 +1 @@\n+export {};"}
                 if isinstance(item, str)
-                else item
+                else {key: value for key, value in item.items() if key != "source"}
                 for item in self.files
             ]
             return GhResult(0, json.dumps(entries), "")
+        if "/git/blobs/" in endpoint:
+            self.calls.append(list(argv))
+            source = self.blobs.get(endpoint.rsplit("/", 1)[1])
+            if source is None:
+                return GhResult(1, "", "failed (HTTP 404)")
+            encoded = base64.b64encode(source.encode()).decode()
+            lines = "\n".join(encoded[at : at + 60] for at in range(0, len(encoded), 60))
+            return GhResult(0, json.dumps({"encoding": "base64", "content": lines}), "")
         return super().__call__(argv, timeout)
 
 
@@ -276,13 +291,20 @@ def test_a_realtime_word_only_in_unchanged_sql_context_fails_high() -> None:
     assert linear_ticket(labels=[], files=[item])[0].risk == "high"
 
 
-def sql_change(before: str, after: str, path: str = "db/schema.sql") -> dict:
+def with_source(item: dict, source: str) -> dict:
+    return {**item, "sha": hashlib.sha1(source.encode()).hexdigest(), "source": source}
+
+
+def sql_change(
+    before: str, after: str, path: str = "db/schema.sql", *, source: bool = False
+) -> dict:
     patch = "".join(
         unified_diff(
             before.splitlines(True), after.splitlines(True), fromfile=f"a/{path}", tofile=f"b/{path}"
         )
     )
-    return {"filename": path, "changes": 2, "patch": patch}
+    item = {"filename": path, "changes": 2, "patch": patch}
+    return with_source(item, after) if source else item
 
 
 TABLES = "".join(f"    public.t{n},\n" for n in range(12))
@@ -503,7 +525,7 @@ def test_a_sql_change_near_a_publication_or_in_an_unparsed_comment_fails_high(
     ],
 )
 def test_a_sql_change_in_an_ordinary_statement_stays_low(before: str, after: str) -> None:
-    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after)])
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after, source=True)])
     assert ticket.risk == "low"
 
 
@@ -554,9 +576,154 @@ def test_sql_context_in_a_git_hunk_header_fails_high(before: str, header: str) -
 
 def test_an_ordinary_git_hunk_header_stays_low() -> None:
     before = STATEMENTS * 3
-    item = git_change(before, before.replace("SELECT 5;\n", "SELECT 50;\n", 2))
+    after = before.replace("SELECT 5;\n", "SELECT 50;\n", 2)
+    item = with_source(git_change(before, after), after)
     assert "@@ SELECT" in item["patch"]
     assert linear_ticket(labels=[], files=[item])[0].risk == "low"
+
+
+PROBE = {
+    "uncomment": (
+        "/*\nALTER PUBLICATION supabase_realtime ADD TABLE public.events;\n*/\n",
+        "ALTER PUBLICATION supabase_realtime ADD TABLE public.events;\n",
+    ),
+    "partial-comment-context": (
+        "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n"
+        "  existing\n  members\n  begin\n  comment;\n"
+        " -- */ public.messages,\n    public.events;\n",
+        "ALTER PUBLICATION supabase_realtime ADD TABLE /*\n"
+        "  existing\n  members\n  begin\n  comment;\n"
+        " -- */ public.messages,\n    public.new_events;\n",
+    ),
+}
+NOTE_LINES = "".join(f"-- note {n}\n" for n in range(6))
+REALTIME = f"ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}    public.last;\n"
+FILTERED = (
+    "ALTER PUBLICATION supabase_realtime ADD TABLE public.a WHERE (note <> 'x\n"
+    " a\n b\n c\n d\n foo;\n qux')\n"
+)
+
+
+@pytest.mark.parametrize("name", PROBE)
+def test_codex_round_4_probe_is_high_from_the_whole_file(name: str) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(*PROBE[name], source=True)])
+    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            f"{STATEMENTS}/*\n{NOTE_LINES}{REALTIME}*/\n{STATEMENTS}",
+            f"{STATEMENTS}{NOTE_LINES}{REALTIME}{STATEMENTS}",
+        ),
+        (
+            f"{STATEMENTS}{NOTE_LINES}{REALTIME}{STATEMENTS}",
+            f"{STATEMENTS}/*\n{NOTE_LINES}{REALTIME}*/\n{STATEMENTS}",
+        ),
+        (
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE /*\n{NOTE_LINES}"
+            "  members begin; here\n -- */ public.messages,\n    public.events;\n",
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE /*\n{NOTE_LINES}"
+            "  members begin; here\n -- */ public.messages,\n    public.new_events;\n",
+        ),
+        (
+            f"{STATEMENTS[:60]}{FILTERED} , public.events  -- don't drop\n ;\n",
+            f"{STATEMENTS[:60]}{FILTERED} , public.new_events  -- don't drop\n ;\n",
+        ),
+        (
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}"
+            "    public.last /* x */,\n    public.events;\n",
+            f"{STATEMENTS}ALTER PUBLICATION supabase_realtime ADD TABLE\n{TABLES}"
+            "    public.last /* x\n,    public.events; */ ;\n",
+        ),
+    ],
+    ids=[
+        "uncommented-publication-far-from-its-delimiters",
+        "commented-out-publication-far-from-its-delimiters",
+        "hunk-starts-inside-a-block-comment-with-a-line-comment-closer",
+        "hunk-starts-inside-a-row-filter-string",
+        "moved-comment-closer-drops-a-member",
+    ],
+)
+def test_a_publication_change_outside_the_hunk_is_high_from_the_whole_file(
+    before: str, after: str
+) -> None:
+    item = sql_change(before, after, source=True)
+    assert "supabase_realtime" not in item["patch"]
+    ticket, _ = linear_ticket(labels=[], files=[item])
+    assert (ticket.risk, Dispatcher._config_cap(None, ticket)) == ("high", 3)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            f"{STATEMENTS}/*\nSELECT 1;\n*/\n{STATEMENTS}",
+            f"{STATEMENTS}SELECT 1;\n{STATEMENTS}",
+        ),
+        (
+            f"/*\n{STATEMENTS}  note one\n  note two;\n*/ SELECT 1;\n",
+            f"/*\n{STATEMENTS}  note one\n  note three;\n*/ SELECT 1;\n",
+        ),
+        (
+            f"/*\n{STATEMENTS}  a\n  b; -- */ c\n  d\n*/ SELECT 1;\n",
+            f"/*\n{STATEMENTS}  a\n  b; -- */ c\n  e\n*/ SELECT 1;\n",
+        ),
+        (
+            f"CREATE TABLE a (\n{TABLES}    id int\n);\n",
+            f"CREATE TABLE a (\n{TABLES}    id bigint\n);\n",
+        ),
+        (
+            f"INSERT INTO a VALUES ('x\n{STATEMENTS}', 1);\nSELECT 1;\n",
+            f"INSERT INTO a VALUES ('x\n{STATEMENTS}', 2);\nSELECT 1;\n",
+        ),
+        (
+            f"{REALTIME}{STATEMENTS}SELECT 1;\n",
+            f"{REALTIME}{STATEMENTS}SELECT 2;\n",
+        ),
+    ],
+    ids=[
+        "removed-comment-delimiters",
+        "change-inside-a-block-comment",
+        "line-comment-inside-a-block-comment",
+        "statement-head-outside-the-hunk",
+        "hunk-starts-inside-an-ordinary-string",
+        "publication-earlier-in-the-file",
+    ],
+)
+def test_an_ordinary_change_is_low_from_the_whole_file(before: str, after: str) -> None:
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after, source=True)])
+    assert ticket.risk == "low"
+
+
+def test_a_whole_file_ending_inside_a_comment_fails_high() -> None:
+    before, after = f"{STATEMENTS}SELECT 1;\n{STATEMENTS}", f"{STATEMENTS}/*\nSELECT 1;\n{STATEMENTS}"
+    ticket, _ = linear_ticket(labels=[], files=[sql_change(before, after, source=True)])
+    assert ticket.risk == "high"
+
+
+def test_a_source_that_does_not_match_the_patch_fails_high() -> None:
+    before, after = f"{STATEMENTS}SELECT 1;\n", f"{STATEMENTS}SELECT 2;\n"
+    item = with_source(sql_change(before, after), after.replace("SELECT 2;", "SELECT 3;"))
+    assert linear_ticket(labels=[], files=[item])[0].risk == "high"
+
+
+def test_an_unread_source_fails_high_and_is_recorded() -> None:
+    before, after = f"{STATEMENTS}SELECT 1;\n", f"{STATEMENTS}SELECT 2;\n"
+    item = {**sql_change(before, after), "sha": "f" * 40}
+    errors: list = []
+    ticket, gh = linear_ticket(labels=[], files=[item], errors=errors)
+    assert ticket.risk == "high"
+    assert any("/git/blobs/" + "f" * 40 in part for call in gh.calls for part in call)
+    assert [(repo, ticket_id) for repo, ticket_id, _ in errors] == [("acme/widgets", "AUT-42")]
+
+
+def test_a_patch_from_line_one_reads_no_source() -> None:
+    item = sql_change("SELECT 1;\nSELECT 2;\n", "SELECT 1;\nSELECT 3;\n", source=True)
+    ticket, gh = linear_ticket(labels=[], files=[item])
+    assert ticket.risk == "low"
+    assert not any("/git/blobs/" in part for call in gh.calls for part in call)
 
 
 def test_a_non_sql_change_needs_no_statement_context() -> None:
