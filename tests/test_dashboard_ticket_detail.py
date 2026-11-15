@@ -64,7 +64,7 @@ def test_run_log_and_journey_render_from_one_list(tmp_path: Path) -> None:
 def test_default_selection_is_the_current_visit(tmp_path: Path) -> None:
     article = _article(_snapshot(tmp_path))
     for cls in ("runlog", "journey"):
-        assert [i for i, _, pressed in _buttons(article, cls) if pressed == "true"] == ["5"], cls
+        assert [i for i, _, pressed in _buttons(article, cls) if pressed == "true"] == ["4"], cls
 
 
 @needs_node
@@ -81,13 +81,13 @@ def test_script_renders_the_same_one_list_and_selection(tmp_path: Path) -> None:
 def test_picking_a_log_row_selects_its_bar_and_the_reverse(tmp_path: Path) -> None:
     snapshot = _snapshot(tmp_path)
     row = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "2"}}]])
+                    actions=[["click", {"attr": {"data-visit": "1"}}]])
     for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _buttons(row["html"]["jobview"], cls) if p == "true"] == ["2"], cls
+        assert [i for i, _, p in _buttons(row["html"]["jobview"], cls) if p == "true"] == ["1"], cls
     bar = _run_page(tmp_path, snapshot, "job", JOB, hash_="#job-h-review",
-                    actions=[["click", {"attr": {"data-visit": "3", "aria-label": "review"}}]])
+                    actions=[["click", {"attr": {"data-visit": "2", "aria-label": "review"}}]])
     for cls in ("runlog", "journey"):
-        assert [i for i, _, p in _buttons(bar["html"]["jobview"], cls) if p == "true"] == ["3"], cls
+        assert [i for i, _, p in _buttons(bar["html"]["jobview"], cls) if p == "true"] == ["2"], cls
 
 
 def test_to_scale_is_offered_only_when_every_duration_is_known(tmp_path: Path) -> None:
@@ -464,7 +464,7 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
         time.sleep(0.4)
         rebuilt = chrome.run(canvas)
         _click_canvas(chrome, 336, 140)
-        selected = chrome.run("document.querySelector('#job-h-review .runlog [aria-pressed=true]').dataset.visit")
+        selected = chrome.run("(b => [b.dataset.visit, b.dataset.state])(document.querySelector('#job-h-review .runlog [aria-pressed=true]'))")
         chrome.run("document.querySelector('#job-h-review details.jd-chart').open = true")
         time.sleep(0.2)
         chart = chrome.run(f"{PAINTED}('#job-h-review canvas.jd-flowmap')")
@@ -474,7 +474,7 @@ def test_under_reduced_motion_a_scale_change_repaints_the_bars_it_hit_tests(tmp_
     assert {"scale drawn": clicked != even, "same as a fresh to-scale paint": clicked == rebuilt,
             "review drawn at x=336 to scale": selected, "chart painted": chart > 0} == {
         "scale drawn": True, "same as a fresh to-scale paint": True,
-        "review drawn at x=336 to scale": "3", "chart painted": True}
+        "review drawn at x=336 to scale": ["2", "review"], "chart painted": True}
 
 
 CONTROL_STRIP = r"""

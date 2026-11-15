@@ -46,7 +46,7 @@ NAV = [
 ]
 # Ticket 40 (tests/test_dashboard_layout.py _history): built, reviewed,
 # revised once, now in its second review.
-TICKET_40_PATH = ["intake", "questions", "building", "review", "fixing", "review"]
+TICKET_40_PATH = ["intake", "building", "review", "fixing", "review"]
 
 
 def _successors(path: Path, state: str) -> set[str]:
@@ -103,7 +103,7 @@ def test_run_log_is_the_chronological_path_with_the_revisit_repeated(tmp_path: P
     assert job["flow"]["path"] == TICKET_40_PATH
     article = _section(_no_script(render_pages(snapshot)["job.html"]), "job-h-review")
     assert _visits(article, "runlog") == TICKET_40_PATH
-    assert re.findall(r'<button[^>]*data-visit="(\d+)"[^>]*class="now', article) == ["5"]
+    assert re.findall(r'<button[^>]*data-visit="(\d+)"[^>]*class="now', article) == ["4"]
 
 
 def test_next_steps_are_the_charts_direct_successors_of_the_current_state(tmp_path: Path) -> None:
