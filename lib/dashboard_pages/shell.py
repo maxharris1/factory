@@ -17,7 +17,7 @@ from lib.dashboard_pages.common import _chip, duration, _e, _span, _ticket
 from lib.dashboard_pages.efficiency import _savings
 from lib.dashboard_pages.lanes import _kpis, lane_devices, _lanes, _queue
 from lib.dashboard_pages.system import (
-    _BUDGET_STATE, _components, _health, _log, _no_waiter, _POLL_STATE,
+    _BUDGET_STATE, _components, _drift_row, _log_row, _no_waiter, _POLL_STATE,
 )
 from lib.dashboard_pages.ticket_detail import _flow_template, _jobview
 from lib.dashboard_pages.tickets import _jobs, _tickets
@@ -1090,9 +1090,9 @@ def _attention_strip(snapshot: dict) -> str:
 
 # Where each status-line segment links (System anchors or Lanes).
 STATUS_LINKS = {
-    "poll": "efficiency.html#health",
-    "poll-errors": "efficiency.html#health",
-    "linear": "efficiency.html#health",
+    "poll": "health.html#health",
+    "poll-errors": "health.html#health",
+    "linear": "health.html#health",
     "webhook": "index.html#linear-webhook",
     "feeder": "index.html#feeder",
     "components": "health.html#components",
@@ -1223,9 +1223,9 @@ def _statusline(snapshot: dict) -> str:
 
 _PANELS = {
     "index.html": (_kpis, _lanes, _queue),
-    "activity.html": (_attention, _handoffs, _verdicts, _tickets, _log),
-    "efficiency.html": (_health, _savings, rollup_panel),
-    "health.html": (_components, _no_waiter),
+    "activity.html": (_attention, _handoffs, _verdicts, _tickets),
+    "efficiency.html": (_savings, rollup_panel),
+    "health.html": (_components, _drift_row, _log_row, _no_waiter),
     "job.html": (_jobs, _jobview),
 }
 

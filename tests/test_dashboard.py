@@ -523,6 +523,7 @@ def test_snapshot_shape(tmp_path: Path) -> None:
         "statechart",
         "telemetry",
         "projects",  # per-project ship mode and round caps (#152)
+        "rules",
         "usage",  # subscription headroom per bot account (#151)
     }
     assert snapshot["feeder"] is None  # no backlog feeder has run on this database
@@ -1238,8 +1239,7 @@ def test_html_escapes_markup_from_the_database(tmp_path: Path) -> None:
     pages = dashboard.render_pages(collect_snapshot(db, log, now=NOW))
     for html in pages.values():
         assert "<script>alert(1)</script>" not in html
-    # Poll errors are on the Efficiency page now.
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in pages["efficiency.html"]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in pages["health.html"]
 
 
 def test_unknown_enum_values_are_not_echoed(tmp_path: Path) -> None:
