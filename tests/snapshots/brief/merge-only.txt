@@ -139,7 +139,7 @@ You are Claude Bot (claude-bot). `orch wait claude-bot --autostart` claimed this
 - attempt: 1
 - wall-clock budget: 60 minutes from the start of this run. Near it, push what you have and post `questions`. Past it, `orch job run` stops you and the job fails `wall-clock`.
 - repo skills: `.claude/skills/verify-cleffy/SKILL.md`
-- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`), empty at the start: clone owner/repo there with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone` and check out the branch the task names. This brief is on your stdin only.
+- working directory: this job's own directory on device mac (`$ORCH_JOB_WORKDIR`). It is not empty: the run's `.orch-worker*.pid` record is there, so clone into a subfolder with `env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh repo clone owner/repo repo`, then `cd repo` and check out the branch the task names. This brief is on your stdin only.
 
 ## What to do
 Merge-only job: bring `origin/dev` into the PR branch, nothing else.
