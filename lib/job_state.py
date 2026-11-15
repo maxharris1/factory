@@ -56,7 +56,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from lib.device_pool import Placement
+from lib.device_pool import LINK_DROP_TAG, Placement
 from lib.queue import SLOTS_TABLE, retire_requeued
 from lib.remote_follow import LAUNCH_TTL_SECONDS
 
@@ -430,7 +430,7 @@ DEVICE_CLOCK_SKEW_SECONDS = 4.5 * 60
 
 def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, float] | None:
     """(detail, recorded_at) when the row's latest run end since its last
-    REQUEUED_LINK_DROP is a link drop."""
+    REQUEUED_LINK_DROP is a link drop of the run its slot still names."""
     if not has_job_events(connection):
         return None
     row = connection.execute(
@@ -443,7 +443,28 @@ def link_drop_end(connection: sqlite3.Connection, job_id: str) -> tuple[str, flo
     ).fetchone()
     if row is None or row[0] != LINK_DROP:
         return None
-    return str(row[1]), float(row[2])
+    detail = str(row[1])
+    slot = connection.execute(
+        f"SELECT worker_tag FROM {SLOTS_TABLE} WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if slot is not None and detail.rpartition(LINK_DROP_TAG)[2] != slot[0]:
+        return None
+    return detail, float(row[2])
+
+
+def release_link_dropped(connection: sqlite3.Connection, job_id: str) -> None:
+    """Free a failed, unhandled link-dropped row's slot in the caller's write
+    transaction."""
+    if link_drop_end(connection, job_id) is None:
+        return
+    connection.execute(
+        f"""
+        DELETE FROM {SLOTS_TABLE} WHERE job_id = ? AND EXISTS (
+            SELECT 1 FROM jobs WHERE id = ? AND state = 'failed' AND failure_handled = 0
+        )
+        """,
+        (job_id, job_id),
+    )
 
 
 def link_drop_requeues(connection: sqlite3.Connection, job_id: str) -> int:

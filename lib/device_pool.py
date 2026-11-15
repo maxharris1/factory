@@ -711,9 +711,11 @@ def slots_in_use(
     return _used(connection, config)
 
 
-def link_drop_detail(device: str, minutes: str) -> str:
-    """The link-drop job_events detail; `_link_dropped_on` reads the device back."""
-    return f"{device}: no certain answer for {minutes}"
+LINK_DROP_TAG = "; worker tag "
+
+
+def link_drop_detail(device: str, minutes: str, tag: str) -> str:
+    return f"{device}: no certain answer for {minutes}{LINK_DROP_TAG}{tag}"
 
 
 def _link_dropped_on(connection: sqlite3.Connection, job_id: str) -> str | None:

@@ -364,11 +364,15 @@ class PlacedRun:
         event = RUN_EXITED if code == 0 else RUN_DIED
         detail = f"orch job run's command on {self.device.name}: {exit_reason(code)}"
         end = self.follow_end
-        dropped = end is not None and end.kind == LOST
         minutes = f"{self.grace / 60:g} minutes"
+        drop = (
+            link_drop_detail(self.device.name, minutes, self.target.tag)
+            if end is not None and end.kind == LOST and self.target is not None
+            else None
+        )
         if end is not None and end.kind == WORKER_GONE:
             detail = f"worker gone on {self.device.name} without an exit status"
-        elif dropped:
+        elif drop is not None:
             detail = (
                 f"lost contact with {self.device.name} for {minutes}; "
                 "worker not confirmed gone"
@@ -383,14 +387,8 @@ class PlacedRun:
                 if row is not None and row["state"] == "running":
                     now = self.pool.queue.now()
                     record_job_event(connection, job_id, event, detail, now)
-                    if dropped:
-                        record_job_event(
-                            connection,
-                            job_id,
-                            LINK_DROP,
-                            link_drop_detail(self.device.name, minutes),
-                            now,
-                        )
+                    if drop is not None:
+                        record_job_event(connection, job_id, LINK_DROP, drop, now)
                 connection.commit()
 
         try:
