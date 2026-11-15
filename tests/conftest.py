@@ -126,6 +126,19 @@ def _write_gh(directory: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _registration_gate(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    if request.node.get_closest_marker("job_bound") is None:
+        from lib.dispatch.core import DispatcherBase
+        from lib.dispatch.types import Registration
+
+        monkeypatch.setattr(
+            DispatcherBase,
+            "_registration",
+            lambda self, ticket, comment, kind: Registration.REGISTERED,
+        )
+
+
+@pytest.fixture(autouse=True)
 def _end_fake_runners():
     yield
     from tests import fake_runner

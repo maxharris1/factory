@@ -107,6 +107,11 @@ def _round_number(value: object) -> int | None:
 # _posted_handoff: a ready whose head T2 could not yet check against the PR.
 _HANDOFF_UNREAD = object()
 
+_REGISTERING_ACTIONS = {
+    "ready": ("build", "fix", "update-from-main"),
+    "verdict": ("review",),
+}
+
 # The handoff kind and role that answers each harness step (#108).
 _ANSWERS = {
     "plan": ("plan", "builder"),

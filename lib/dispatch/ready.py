@@ -15,7 +15,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import CIResult, Comment, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 from lib.update_check import UpdateScope
@@ -43,6 +43,15 @@ class ReadyMixin:
         expected = f"{builder_harness}-bot"
         if not self._trusted(ticket, comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
+        registration = (
+            Registration.REGISTERED
+            if ticket.ready_starts_review and self._job_builder_harness(ticket) is None
+            else self._registration(ticket, comment, "ready")
+        )
+        if registration is Registration.UNREGISTERED:
+            return True, "rejected-unregistered-ready"
+        if registration is Registration.PENDING:
+            return False, "ready-awaiting-registration"
         state, review_round = self._review_context(ticket)
         if state in ("planning", "plan-check"):
             return True, "rejected-ready-in-planning"

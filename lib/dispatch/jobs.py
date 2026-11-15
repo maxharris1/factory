@@ -28,7 +28,7 @@ from lib.dispatch.helpers import (
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
-from lib.dispatch.types import Comment, RouteError, TrackedTicket
+from lib.dispatch.types import Comment, HandoffCandidate, RouteError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.job_state import (
     DEAD,
@@ -973,6 +973,12 @@ class JobsMixin:
         at another head (its fresh PR read failed) may yet be stale:
         _HANDOFF_UNREAD when no counted handoff comes first.
         """
+        candidate = self._handoff_candidate(job)
+        if candidate is None:
+            return None
+        return _HANDOFF_UNREAD if candidate.unread else candidate.comment
+
+    def _handoff_candidate(self, job: Job) -> HandoffCandidate | None:
         ticket = self._polled.get((job.request.repo.lower(), job.request.ticket_id))
         if ticket is None:
             return None
@@ -1023,13 +1029,12 @@ class JobsMixin:
                 or self._update_job_before(ticket, item) != job.id
             ):
                 continue
-            if (
+            unread = (
                 kind == "ready"
                 and outcome is None
                 and _matching_head(head, ticket.current_head) is None
-            ):
-                return _HANDOFF_UNREAD
-            return item
+            )
+            return HandoffCandidate(item, unread)
         return None
 
     def _done_from_handoff(self, job: Job, handoff: Comment) -> None:

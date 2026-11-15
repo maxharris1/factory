@@ -13,6 +13,7 @@ from lib.dispatch.constants import (
     _NOT_FINISHED,
 )
 from lib.dispatch.helpers import (
+    _REGISTERING_ACTIONS,
     _detail_routing,
     _family_errors,
     _normalize_trusted_logins,
@@ -26,6 +27,7 @@ from lib.dispatch.types import (
     Feeder,
     GrokDelivery,
     Hook,
+    Registration,
     RetryableStateError,
     ReviewActions,
     RouteError,
@@ -142,6 +144,34 @@ class DispatcherBase:
             f"{ticket.factory.reviewer_harness}-bot",
             role="reviewer",
         )
+
+    def _registration(
+        self, ticket: TrackedTicket, comment: Comment, kind: str
+    ) -> Registration:
+        actions = _REGISTERING_ACTIONS[kind]
+        marks = ", ".join("?" for _ in actions)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, state, failure_handled, handoff_comment_id FROM jobs
+                WHERE lower(repo) = ? AND ticket_id = ? AND action IN ({marks})
+                """,
+                (ticket.repo.lower(), ticket.ticket_id, *actions),
+            ).fetchall()
+        if any(row["handoff_comment_id"] == comment.id for row in rows):
+            return Registration.REGISTERED
+        if any(row["state"] == "running" for row in rows):
+            return Registration.PENDING
+        failed = {
+            row["id"] for row in rows if row["state"] == "failed" and not row["failure_handled"]
+        }
+        for job in self.queue.unhandled_failures():
+            if job.id not in failed:
+                continue
+            candidate = self._handoff_candidate(job)
+            if candidate is not None and candidate.comment.id == comment.id:
+                return Registration.REGISTERED if candidate.unread else Registration.PENDING
+        return Registration.UNREGISTERED
 
     def _trusted_session(
         self,
