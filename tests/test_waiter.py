@@ -347,6 +347,22 @@ def test_a_finished_run_is_reaped_and_logged(tmp_path: Path) -> None:
     assert any(job_id in line and "exited 3" in line for line in log)
 
 
+def test_reaping_a_killed_run_removes_its_job_tmpdir(tmp_path: Path) -> None:
+    db, queue = make_queue(tmp_path)
+    job_id = enqueue(queue, "a")
+    spawn = FakeSpawn()
+    waiter = make_waiter(tmp_path, queue, db, spawn)
+    waiter.step()
+    scratch = tmp_path / "state" / "jobs" / job_id / "tmp"
+    (scratch / "venv").mkdir(parents=True)
+    (scratch / "venv" / "x").write_text("left by a run whose teardown never ran")
+    spawn.children[0].returncode = -9
+    waiter.step()
+    assert waiter.running() == set()
+    assert not scratch.exists()
+    assert (scratch.parent / "brief.md").is_file()
+
+
 def test_a_job_with_no_standard_brief_is_failed_for_t6_and_its_slot_freed(
     tmp_path: Path,
 ) -> None:

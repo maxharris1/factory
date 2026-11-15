@@ -115,6 +115,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -1024,6 +1025,8 @@ class Waiter:
             if code is not None:
                 del self._children[job_id]
                 self.log(f"job {job_id}: orch job run exited {code}")
+                # Teardown never ran if the run was killed.
+                shutil.rmtree(self.state_dir / "jobs" / job_id / "tmp", ignore_errors=True)
                 remote = self._remote.pop(job_id, None)
                 if remote is not None:
                     self._finish_remote(job_id, remote[0], code, offset=remote[1])
