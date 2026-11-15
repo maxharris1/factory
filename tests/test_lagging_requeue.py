@@ -364,3 +364,40 @@ def test_a_lagging_separate_box_checkout_leaves_a_current_remote_the_retry(
         factory.poll(START + 935)
     assert factory.jobs() == [(job_id, "running", 1)], "the same row starts on the pc"
     assert factory.stuck() == (0, None)
+
+
+def test_a_box_factory_root_that_links_to_the_source_checkout_still_refuses_every_placement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    alias = tmp_path / "factory-alias"
+    alias.symlink_to(factory.root, target_is_directory=True)
+    pool = factory.device.waiter.pool
+    config = replace(pool.config, devices=tuple(
+        replace(device, factory_root=str(alias)) if device.local else device
+        for device in pool.config.devices
+    ))
+    pool.config = config
+    factory.dispatcher.devices.config = config
+    job_id, started = factory.device.run_one()
+    assert started is None
+    with factory.device.queue.connect() as connection:
+        rows = device_sync.read(connection)
+    assert [(row.device, row.checkout, row.state) for row in rows] == [
+        ("box", str(alias), device_sync.LAGGING)
+    ]
+    factory.poll(START + 30)
+    config = replace(config, devices=tuple(replace(device, enabled=True) for device in config.devices))
+    pool.config = config
+    factory.dispatcher.devices.config = config
+    with pytest.raises(skill_preflight.CheckoutLagging) as refusal:
+        skill_preflight.check(
+            bot="claude-bot", placement=Placement(job_id, "pc", "claude", "claude-bot", START),
+            device=config.device("pc"), transport=SshTransport(), home=factory.device.home,
+            checkout=str(factory.device.checkout), root=factory.root,
+        )
+    assert refusal.value.box_behind_origin, "the pc is refused for the same source lag"
+
+    factory.poll(START + 935)
+    assert factory.jobs() == [(job_id, "failed", 1)]
+    assert factory.stuck() == (1, "device-lagging")

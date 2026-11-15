@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from lib import device_sync, skill_preflight
 from lib.device_pool import box_device, free_slots, sync_blocks, used_slots
@@ -79,11 +80,13 @@ class _LinkDrop:
 def _harnesses_a_lagging_source_checkout_refuses_everywhere(
     rows: list[device_sync.Row], box: str
 ) -> frozenset[str]:
-    source = str(skill_preflight.ROOT.resolve())
+    source = skill_preflight.ROOT.resolve()
     return frozenset(
         row.harness
         for row in rows
-        if row.device == box and row.checkout == source and row.state == device_sync.LAGGING
+        if row.device == box
+        and row.state == device_sync.LAGGING
+        and Path(row.checkout).resolve() == source
     )
 
 
