@@ -109,9 +109,12 @@ one file per start, `<workdir>/jobs/<job-id>/.orch-worker-<tag>.pid`:
   fences the start it follows.
 
 Every ssh call uses the `ssh` found on PATH with BatchMode (never a
-password prompt), a connect timeout and server keepalives. Tests replace
-it, or put a fake `ssh` first on PATH; nothing here contacts a real host
-on its own.
+password prompt), a connect timeout and server keepalives. `SshTransport`
+sends each call through one ControlMaster per alias and bot user (#222,
+lib/ssh_mux.py): a stale master is rebuilt inside the call, a device that
+cannot be reached still ends 255, and `ORCH_SSH_MUX=off` turns reuse off.
+Tests replace it, or put a fake `ssh` first on PATH; nothing here contacts
+a real host on its own.
 """
 
 from __future__ import annotations
@@ -124,6 +127,8 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+from lib.ssh_mux import Multiplexer
 
 SSH_BINARY = "ssh"
 SSH_OPTIONS = (
@@ -1032,16 +1037,43 @@ class ByteTransport(Transport, Protocol):
 
 
 class SshTransport:
-    """The real transport: the `ssh` on PATH, argv only, never a shell."""
+    """The real transport: the `ssh` on PATH, argv only, never a shell.
+
+    Calls built by `ssh_argv` go through one ControlMaster per alias and
+    bot user (`lib/ssh_mux.py`, issue #222); any other argv runs as given.
+    """
+
+    def __init__(self, mux: Multiplexer | None = None):
+        self.mux = mux or Multiplexer(binary=SSH_BINARY, options=SSH_OPTIONS)
+
+    def _spawn(
+        self, argv: Sequence[str], *, timeout: float, input: bytes | None, capture: bool
+    ) -> subprocess.CompletedProcess:
+        """Run argv; a timeout or a failed spawn raises, after the mux is told."""
+        prepared = self.mux.prepare(argv)
+        code: int | None = None
+        try:
+            if capture:
+                completed = subprocess.run(
+                    prepared.argv, input=input or b"", capture_output=True,
+                    timeout=timeout, check=False,
+                )
+            else:
+                completed = subprocess.run(
+                    prepared.argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=timeout, check=False,
+                )
+            code = completed.returncode
+            return completed
+        finally:
+            self.mux.settle(prepared, code)
 
     def exchange(
         self, argv: Sequence[str], *, timeout: float, input: bytes = b""
     ) -> Exchanged:
         """Run argv with input on stdin; a timeout or a failed spawn is unreachable."""
         try:
-            completed = subprocess.run(
-                list(argv), input=input, capture_output=True, timeout=timeout, check=False
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Exchanged(SSH_UNREACHABLE, b"", f"timed out after {timeout:g} seconds")
         except OSError as exc:
@@ -1052,14 +1084,7 @@ class SshTransport:
 
     def run(self, argv: Sequence[str], *, timeout: float) -> int:
         try:
-            completed = subprocess.run(
-                list(argv),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=None, capture=False)
         except subprocess.TimeoutExpired:
             return SSH_UNREACHABLE
         except OSError:
@@ -1071,13 +1096,7 @@ class SshTransport:
     ) -> Called:
         """Run argv, feeding input (else /dev/null) and capturing its output."""
         try:
-            completed = subprocess.run(
-                list(argv),
-                input=input if input is not None else b"",
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
+            completed = self._spawn(argv, timeout=timeout, input=input, capture=True)
         except subprocess.TimeoutExpired:
             return Called(124, "", f"{_CHECKOUT_MARK} timed out after {timeout:g} seconds")
         except OSError as exc:

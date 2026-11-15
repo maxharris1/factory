@@ -963,15 +963,24 @@ _REMOTE_EVENTS = {
 _PROFILES = {
     "newline": "echo welcome",
     "no-newline": "printf welcome",
-    "background": "(sleep 0.2; printf late) &",
+    "background": (
+        '(if [ -n "$ORCH_WORKER_TAG" ]; then w=0; '
+        'until [ -e "$HOME/box-done" ] || [ "$w" -ge 600 ]; do sleep 0.05; w=$((w + 1)); done; '
+        "else sleep 0.2; fi; printf late) &"
+    ),
     "traced": "set -x",
 }
 
 
-def _remote_run(tmp_path: Path, harness: str, env: dict | None = None, *, profile: str = "newline"):
+def _remote_run(
+    tmp_path: Path, harness: str, env: dict | None = None, *, profile: str = "newline",
+    link_delay: float = 0,
+):
     from tests.test_remote_start import remote_setup
 
     machines, queue, _, job_id, ssh = remote_setup(tmp_path, harness)
+    if link_delay:
+        ssh.fault(f"fakepc-{harness}-bot", "delay", link_delay)
     home = tmp_path / "worker-home"
     home.mkdir()
     worker_bin = tmp_path / "worker-bin"
@@ -996,6 +1005,7 @@ def _remote_run(tmp_path: Path, harness: str, env: dict | None = None, *, profil
         "--machines", str(machines), "--", str(cli), *args,
         env={"HOME": str(tmp_path), **ssh.env(), "FAKE_SSH_HOME": str(home), **(env or {})},
     )
+    (home / "box-done").touch()
     return run, queue.path, job_id
 
 
@@ -1025,6 +1035,17 @@ def test_a_secret_only_the_workers_login_profile_exports_is_never_published(
         assert "ORCH-WORKER-ENV" not in text and WORKER_SECRET.encode().hex() not in text
     for text in (run.stdout, run.stderr, json.dumps(row), status.read_text()):
         assert WORKER_SECRET not in text
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_a_profiles_background_output_stays_out_of_the_relay_on_a_slow_link(
+    tmp_path: Path, harness: str
+) -> None:
+    run, _, job_id = _remote_run(tmp_path, harness, profile="background", link_delay=0.3)
+    assert run.returncode == 0, run.stderr
+    raw = (tmp_path / f"telemetry-{harness}-bot" / job_id / "events.jsonl").read_text()
+    assert run.stdout.endswith("plain worker line\n") and raw.endswith("plain worker line\n")
+    assert "late" not in raw
 
 
 _TRACING = {
