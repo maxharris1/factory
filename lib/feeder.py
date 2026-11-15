@@ -613,7 +613,7 @@ def feeder_items(connection: sqlite3.Connection) -> list[dict[str, object]]:
     if last is None or not _has_table(connection, FEEDER_TABLE):
         return []
     present = {row[1] for row in connection.execute(f"PRAGMA table_info({FEEDER_TABLE})")}
-    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0"}
+    defaults = {"waiting_reason": "NULL", "tier": "NULL", "unblocks": "0", "fed_at": "NULL"}
     optional = ", ".join(name if name in present else f"{value} AS {name}" for name, value in defaults.items())
     cursor = connection.execute(
         f"""

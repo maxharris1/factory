@@ -683,9 +683,10 @@ def test_dashboard_page_renders_the_feeder_reason(tmp_path: Path) -> None:
     page = render_pages(
         collect_snapshot(tmp_path / "orch.db", tmp_path / "none.log", now=20_000.0)
     )["index.html"]
-    assert "owner/app#3 waiting on file lib/dashboard.py held by #1</li>" in page
+    assert ('<span class="ticket">app#3</span>'
+            '<span class="what">waiting on file lib/dashboard.py held by #1</span>') in page
     assert "waiting on blockers or files 4" in page
-    assert "item.reason || FEEDER_STATE[item.state]" in SCRIPT
+    assert "x.reason || FEEDER_STATE[x.state]" in SCRIPT
 
 
 def test_a_released_blocker_still_counts_through_its_merged_pr(tmp_path: Path) -> None:

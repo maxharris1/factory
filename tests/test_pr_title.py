@@ -287,7 +287,7 @@ def test_the_dashboard_drops_a_stored_source_that_is_not_an_issue_or_key() -> No
 def test_the_live_page_script_shows_the_issue_first_too(tmp_path: Path) -> None:
     _, snapshot = seeded(tmp_path)
 
-    queue = _run_page(tmp_path, snapshot, "main", ["queue"])["text"]["queue"]
+    queue = _run_page(tmp_path, snapshot, "main", ["lanes"])["text"]["lanes"]
     tickets = _run_page(tmp_path, snapshot, "job", ["tickets"])["text"]["tickets"]
 
     assert "repo#115 (PR #116)" in queue

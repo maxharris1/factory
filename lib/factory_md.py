@@ -22,6 +22,12 @@ family rule, also in the README, is fail closed:
 review.rounds.low is at most 1 and review.rounds.high is at most 3
 (SPEC section 8).
 
+review.followup_from_round is optional (issue #259): an integer of at
+least 2. From that review round on, a variant of a rule an earlier round
+already raised is a [follow-up] finding, not a blocker, and the poller
+files a trusted verdict's [follow-up] findings as one new ticket. Absent,
+the policy is off. Refused with tickets: linear, which has no filer.
+
 hold is optional (issue #86): a mapping with label (default
 factory:hold), approver (default max, a GitHub login) and paths (a list
 of repo-relative globs, default none). It only acts on ship: merge; on any
@@ -135,6 +141,7 @@ class FactoryConfig:
     # code gets the same default as one parsed from factory.md.
     finish_line: str | None = None
     shared_paths: tuple[str, ...] = ()
+    followup_from_round: int | None = None
 
     def __post_init__(self) -> None:
         if self.finish_line is None:
@@ -198,7 +205,9 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     tickets = _choice(data, "tickets", TICKETS, findings)
     builder_harness, builder_model = _actor(data, "builder", findings, unknown)
     reviewer_harness, reviewer_model = _actor(data, "reviewer", findings, unknown)
-    rounds_low, rounds_high, verify = _review(data, findings, unknown)
+    rounds_low, rounds_high, verify, followup_from_round = _review(
+        data, findings, unknown
+    )
     ship = _ship(data, findings)
     skills = _skills(data, findings)
     ci_runner = _optional_token(data, "ci_runner", findings)
@@ -224,6 +233,12 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
     if tickets == "linear" and github_labels is True:
         findings.append(
             Finding("error", "tickets is linear and github_labels is true")
+        )
+    if tickets == "linear" and followup_from_round is not None:
+        findings.append(
+            Finding(
+                "error", "tickets is linear and review.followup_from_round is set"
+            )
         )
 
     if hold is not None and ship is not None and ship != "merge":
@@ -262,6 +277,7 @@ def _validate(data: dict, strict: bool) -> tuple[FactoryConfig | None, list[Find
         hold=hold,
         finish_line=finish_line,
         shared_paths=shared_paths,
+        followup_from_round=followup_from_round,
     )
     return config, findings
 
@@ -336,17 +352,19 @@ def _review(
     data: dict,
     findings: list[Finding],
     unknown: str,
-) -> tuple[int | None, int | None, str | None]:
+) -> tuple[int | None, int | None, str | None, int | None]:
     if "review" not in data:
         findings.append(Finding("error", "missing required field 'review.rounds.low'"))
         findings.append(Finding("error", "missing required field 'review.rounds.high'"))
         findings.append(Finding("error", "missing required field 'review.verify'"))
-        return None, None, None
+        return None, None, None, None
     review = data["review"]
     if not isinstance(review, dict):
         findings.append(Finding("error", "review must be a mapping"))
-        return None, None, None
-    findings.extend(_unknown(review, {"rounds", "verify"}, "review", unknown))
+        return None, None, None, None
+    findings.extend(
+        _unknown(review, {"rounds", "verify", "followup_from_round"}, "review", unknown)
+    )
     low: int | None = None
     high: int | None = None
     if "rounds" not in review:
@@ -370,7 +388,21 @@ def _review(
             findings.append(
                 Finding("error", "review.verify must be a skill name or none")
             )
-    return low, high, verify
+    return low, high, verify, _followup_from_round(review, findings, unknown)
+
+
+def _followup_from_round(
+    review: dict, findings: list[Finding], unknown: str
+) -> int | None:
+    if "followup_from_round" not in review:
+        return None
+    value = review["followup_from_round"]
+    if not is_strict_int(value) or value < 2:
+        findings.append(
+            Finding(unknown, "review.followup_from_round must be an integer of at least 2")
+        )
+        return None
+    return int(value)
 
 
 def _round(rounds: dict, name: str, findings: list[Finding]) -> int | None:
