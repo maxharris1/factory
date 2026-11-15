@@ -11,7 +11,7 @@ from lib.dashboard_telemetry import job_block
 from lib.dashboard_pages.common import anchor, _bot, _chip, duration, _e, _job_kind, _job_label, _span, _state_chip
 from lib.dashboard_pages import journey_canvas
 from lib.dashboard_pages.journey_canvas import TINT
-from lib.dashboard_pages.tickets import _WAIT_TINT, WAITING, _active_jobs, _px
+from lib.dashboard_pages.tickets import WAITING, _active_jobs, _px
 
 
 VERBS = {
@@ -178,8 +178,6 @@ def _hero_line(row: dict, model: dict) -> str:
 
 
 def _motion(row: dict, model: dict) -> str:
-    """The PX_STATE key the hero strip shows, or "waiting" when the ticket
-    waits on a human. The Journey and chart move only when that strip does."""
     return "waiting" if model["state"] in WAITING else _px().px_state(row)
 
 
@@ -219,10 +217,7 @@ def _tiles(row: dict, model: dict, running: bool) -> str:
 def _hero(row: dict, model: dict, running: bool) -> str:
     motion = _motion(row, model)
     key = f"job-hero-{row['job']}"
-    if motion == "waiting":
-        strip = _px().px_strip(key, effect="static", tint=_WAIT_TINT, cell=4, height=40, seed=2)
-    else:
-        strip = _px().px_strip(key, state=motion, bot=row.get("recipient"), cell=4, height=40, seed=2)
+    strip = _px().px_strip(key, state=motion, bot=row.get("recipient"), cell=4, height=40, seed=2)
     kind = _job_kind(row)
     device = f"on {row['device']}" if running and row.get("device") else "queued" if not running else ""
     title = (
@@ -393,7 +388,7 @@ def _jobview(snapshot: dict) -> str:
 
 
 _SCRIPT = r"""
-  var DETAIL = {verbs: __VERBS__, waitTint: __WAITTINT__, order: {normal: 0, human: 1, stop: 2},
+  var DETAIL = {verbs: __VERBS__, order: {normal: 0, human: 1, stop: 2},
                 first: 'ticket arrives', stop: '#f7768e', who: ['script', 'claude', 'codex', 'cursor', 'grok'],
                 chartSub: __CHARTSUB__};
   var SEL = {};
@@ -451,12 +446,13 @@ _SCRIPT = r"""
     return b;
   }
   function motionOf(r, m) { return WAITING[m.state] ? 'waiting' : PX.state(r); }
+  function holdsStill(motion) {
+    return !PX.table.effects[(PX.table.states[motion] || PX.table.states.unknown).effect];
+  }
   function hero(r, m, running, motion) {
     var sec = el('section', 'jd-hero');
     var action = String(r.action || '');
-    add(sec, PX.strip('job-hero-' + r.job, motion === 'waiting'
-      ? {effect: 'static', tint: DETAIL.waitTint, cell: 4, height: 40, seed: 2}
-      : {state: motion, bot: r.recipient, cell: 4, height: 40, seed: 2}));
+    add(sec, PX.strip('job-hero-' + r.job, {state: motion, bot: r.recipient, cell: 4, height: 40, seed: 2}));
     var body = add(sec, el('div', 'body'));
     var who = add(body, el('div', 'who'));
     var title = add(who, el('div', 'title'));
@@ -726,7 +722,7 @@ _SCRIPT = r"""
     var cp = chartPanel(r, m, chart);
     add(right, cp.sec);
     var starts = m.visits.map(function (v) { return v.started_at; }).filter(function (t) { return t !== null && t !== undefined; });
-    var j = {r: r, m: m, still: motion === 'waiting' || !PX.table.effects[(PX.table.states[motion] || PX.table.states.unknown).effect], logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
+    var j = {r: r, m: m, still: holdsStill(motion), logButtons: logButtons, hitButtons: hitButtons, canvas: jp.canvas, flow: cp.sec, flowCanvas: cp.canvas,
              startClock: starts.length ? clock(Math.min.apply(null, starts)) : '', nowClock: clock(generated)};
     art.addEventListener('click', function (ev) {
       var t = ev.target.closest('button');
@@ -763,7 +759,7 @@ _SCRIPT = r"""
     if (!jobs.length) { add(root, el('p', 'empty', 'no running or queued jobs')); return; }
     jobs.forEach(function (j) { add(root, jobArticle(j.row, j.state, d)); });
   }
-""".replace("__VERBS__", json.dumps(VERBS)).replace("__WAITTINT__", json.dumps(_WAIT_TINT)).replace(
+""".replace("__VERBS__", json.dumps(VERBS)).replace(
     "__CHARTSUB__", json.dumps(CHART_SUB)
 )
 SCRIPT = journey_canvas.SCRIPT + FLOWMAP_SCRIPT + _SCRIPT

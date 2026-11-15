@@ -140,7 +140,6 @@ def test_a_hostile_reason_and_state_are_escaped(tmp_path: Path) -> None:
 
 
 def _hero_px(markup: str) -> dict[str, str]:
-    """The attributes of the hero's PixelStrip canvas (the first in the article)."""
     tag = re.search(r'<section class="jd-hero"><canvas[^>]*>', markup).group(0)
     return dict(re.findall(r'([a-z-]+)="([^"]*)"', tag))
 
@@ -151,22 +150,21 @@ def _human_wait(row: dict) -> None:
     row["flow"]["path"][-1] = "waiting-max"
 
 
-# (case, change to the h-review row, data-px, data-tint, shows a work verb)
+def _set(**fields):
+    return lambda row: row.update(fields)
+
+
 HERO = [
-    *[(action, {"action": action}, PX_STATE[action]["effect"], "codex", True) for action in PX_ACTIONS],
-    ("stale", {"job_state": "stale"}, "decay", "codex", False),
-    ("dead", {"job_state": "dead"}, "static", "#f7768e", False),
-    ("overdue", {"overdue": True}, "static", "#f7768e", False),
-    ("human wait", None, "static", "#ff9e64", False),
+    *[(action, _set(action=action), PX_STATE[action]["effect"], "codex", True) for action in PX_ACTIONS],
+    ("stale", _set(job_state="stale"), "decay", "codex", False),
+    ("dead", _set(job_state="dead"), "static", "#f7768e", False),
+    ("overdue", _set(overdue=True), "static", "#f7768e", False),
+    ("human wait", _human_wait, "static", "#ff9e64", False),
 ]
 
 
-def _hero_case(snapshot: dict, change: dict | None) -> None:
-    row = _review(snapshot)
-    if change is None:
-        _human_wait(row)
-    else:
-        row.update(change)
+def _hero_case(snapshot: dict, change) -> None:
+    change(_review(snapshot))
 
 
 @pytest.mark.parametrize(("case", "change", "effect", "tint", "verb"), HERO, ids=[c[0] for c in HERO])
@@ -266,7 +264,7 @@ STILL_PIXELS = r"""
 
 @pytest.mark.skipif(CHROME is None, reason="Chrome is not installed")
 def test_broken_jobs_and_human_waits_hold_the_journey_still(tmp_path: Path) -> None:
-    cases = {"working": {}, "stale": {"job_state": "stale"}, "dead": {"job_state": "dead"}, "human": None}
+    cases = {"working": _set(), "stale": _set(job_state="stale"), "dead": _set(job_state="dead"), "human": _human_wait}
     sites = {}
     for name, change in cases.items():
         (tmp_path / name).mkdir()

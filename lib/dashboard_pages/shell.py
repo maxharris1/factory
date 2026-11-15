@@ -894,6 +894,7 @@ PX_STATE: dict[str, dict[str, str | float]] = {
     **{name: {"effect": "static", "tint": _PX_BAD} for name in PX_BROKEN},
     "idle": {"effect": "twinkle", "tint": PX_FALLBACK},
     "held": {"effect": "off", "tint": PX_FALLBACK, "frame": "px-held"},
+    "waiting": {"effect": "static", "tint": "#ff9e64"},
     "unknown": {"effect": "off", "tint": PX_FALLBACK},
     # #139: the brand caret per link state (rate 1 blinks at 1 Hz, 0 is solid).
     **{f"link-{name}": {"effect": "caret", "tint": tint, "rate": rate} for name, (tint, rate) in _PX_LINK.items()},
