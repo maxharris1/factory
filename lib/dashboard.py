@@ -58,7 +58,7 @@ import yaml
 
 from lib import health as component_health
 from lib.dashboard_config import REFRESH_DEFAULT, REFRESH_MAX, REFRESH_MIN
-from lib.dashboard_flow import JobStep, job_flow, load_chart
+from lib.dashboard_flow import JobStep, Transition, job_flow, load_chart
 from lib.dashboard_telemetry import attach as attach_telemetry
 from lib.dashboard_telemetry import _number as _telemetry_time
 from lib.dashboard_telemetry import read_telemetry
@@ -1509,6 +1509,7 @@ def _add_job_tickets(
     # One read for every ticket with a running or queued job, oldest first.
     wanted = {(repo.casefold(), ticket_id) for _, repo, ticket_id in active}
     ids = sorted({ticket_id for _, ticket_id in wanted})
+    marks = ",".join("?" for _ in ids)
     histories: dict[tuple[str, str], list[JobStep]] = {key: [] for key in wanted}
     columns = (
         {str(row["name"]) for row in connection.execute("PRAGMA table_info(job_telemetry)")}
@@ -1524,7 +1525,7 @@ def _add_job_tickets(
         f"SELECT jobs.repo, jobs.ticket_id, jobs.action, jobs.recipient, jobs.created_at, {times} "
         "FROM jobs "
         + ("LEFT JOIN job_telemetry t ON t.job_id = jobs.id " if joined else "")
-        + f"WHERE jobs.ticket_id IN ({','.join('?' for _ in ids)}) "
+        + f"WHERE jobs.ticket_id IN ({marks}) "
         "ORDER BY jobs.created_at, jobs.rowid",
         ids,
     ):
@@ -1537,6 +1538,31 @@ def _add_job_tickets(
                 _telemetry_time(row["started_at"]),
                 _telemetry_time(row["finished_at"]),
             ))
+    recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in wanted}
+    if "ticket_transitions" in tables:
+        for row in connection.execute(
+            "SELECT repo, ticket_id, from_state, to_state, at FROM ticket_transitions "
+            f"WHERE ticket_id IN ({marks}) ORDER BY at, id",
+            ids,
+        ):
+            key = (str(row["repo"]).casefold(), str(row["ticket_id"]))
+            at = _telemetry_time(row["at"])
+            if key in recorded and at is not None:
+                recorded[key].append(Transition(
+                    None if row["from_state"] is None
+                    else _enum(row["from_state"], WORKFLOW_STATES),
+                    _enum(row["to_state"], WORKFLOW_STATES),
+                    float(at),
+                ))
+    tracked_at: dict[tuple[str, str], float] = {}
+    if "tracked_tickets" in tables:
+        for row in connection.execute(
+            f"SELECT repo, ticket_id, tracked_at FROM tracked_tickets WHERE ticket_id IN ({marks})",
+            ids,
+        ):
+            at = _telemetry_time(row["tracked_at"])
+            if at is not None:
+                tracked_at[(str(row["repo"]).casefold(), str(row["ticket_id"]))] = float(at)
     retries: dict[tuple[str, str], int] = {}
     if "ticket_retries" in tables:
         for row in connection.execute(
@@ -1552,7 +1578,9 @@ def _add_job_tickets(
         info = ticket_info.get(key, TicketInfo(None, False, None))
         item["tracker"] = info.tracker
         item["stuck"] = info.stuck
-        item["flow"] = job_flow(chart, histories[key], info.state, now)
+        item["flow"] = job_flow(
+            chart, histories[key], info.state, now, recorded[key], tracked_at.get(key)
+        )
         if key in retries:
             item["retries"] = retries[key]
 

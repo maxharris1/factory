@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import _comment_link, _round_number, _scope
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -72,13 +73,14 @@ class PlanMixin:
                 return True, "stale-plan"
             gap_count = int(state["plan_gap_count"])
             if not resuming:
-                connection.execute(
-                    """
-                    UPDATE ticket_state
-                    SET workflow_state = 'plan-check', plan_check_comment_id = ?
-                    WHERE repo = ? AND ticket_id = ?
-                    """,
-                    (comment.id, ticket.repo.lower(), ticket.ticket_id),
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "plan-check",
+                    source="plan-check",
+                    at=self.queue.now(),
+                    also={"plan_check_comment_id": comment.id},
                 )
             connection.commit()
         self._write_state_label(ticket, "plan-check")
@@ -191,19 +193,14 @@ class PlanMixin:
                         ),
                     ),
                 )
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET workflow_state = ?, plan_gap_count = ?,
-                    plan_check_comment_id = NULL
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (
-                    next_state,
-                    gap_count,
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                ),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                next_state,
+                source="plan-gap",
+                at=self.queue.now(),
+                also={"plan_gap_count": gap_count, "plan_check_comment_id": None},
             )
             connection.execute(
                 """

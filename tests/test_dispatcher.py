@@ -25,6 +25,7 @@ from lib.device_pool import DevicePool
 from lib.factory_md import FactoryConfig
 from lib.github_actions import GhResult, GitHubReviewActions
 from lib.handoff import parse_comment
+from lib.job_state import LAGGING_BACKOFF_SECONDS, LAGGING_WAIT_SECONDS, fail_lagging
 from lib.machines_yml import Device, MachinesConfig
 from lib.orch_yml import Approvals, load_orch_yml
 from lib.poll_source import IntakeRisks
@@ -6632,6 +6633,55 @@ def test_71_a_failed_review_of_a_replaced_head_is_not_retried(tmp_path: Path) ->
     with queue.connect() as connection:
         events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
     assert events == ["retry-skipped"]
+
+
+def _refuse_lagging(queue: SQLiteJobQueue, job_id: str, harness: str) -> None:
+    with queue.connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS device_slots (job_id TEXT PRIMARY KEY, device TEXT, "
+            "harness TEXT, os_user TEXT, placed_at REAL)"
+        )
+        connection.execute(
+            "INSERT INTO device_slots (job_id, device, harness, os_user, placed_at) "
+            "VALUES (?, 'box', ?, 'bot', ?)",
+            (job_id, harness, queue.now()),
+        )
+        assert fail_lagging(
+            connection,
+            job_id,
+            now=queue.now(),
+            reason="preflight-lagging: box behind origin/main",
+            slot_guard="harness = ?",
+            slot_params=(harness,),
+        )
+        connection.commit()
+
+
+@pytest.mark.parametrize(
+    "after",
+    [LAGGING_BACKOFF_SECONDS[0], LAGGING_WAIT_SECONDS],
+    ids=["lagging-requeue", "device-lagging-stuck"],
+)
+def test_357_a_lagging_review_of_a_replaced_head_is_not_retried(
+    tmp_path: Path, after: float
+) -> None:
+    now = [100.0]
+    _dispatcher, queue, poll = _poll_71(tmp_path, now)
+    ready = _ready_71("ready-1", HEAD_71, 100)
+    poll(ready)
+    review = queue.claim("codex")
+    assert review is not None
+    _refuse_lagging(queue, review.id, "codex")
+    now[0] += after
+    poll(ready, head=NEW_HEAD_71)
+    assert _reviews_71(queue) == [(HEAD_71, "failed", 1)]
+    assert queue.unhandled_failures() == ()
+    with queue.connect() as connection:
+        events = [str(row[0]) for row in connection.execute("SELECT event FROM job_events")]
+        stuck = connection.execute("SELECT COALESCE(MAX(stuck), 0) FROM ticket_state").fetchone()[0]
+    assert events == ["preflight-lagging", "retry-skipped"]
+    assert stuck == 0
 
 
 def _round_two_ready_then(tmp_path: Path, late: Comment) -> SQLiteJobQueue:

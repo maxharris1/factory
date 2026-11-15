@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 
 from lib.dispatch.helpers import _is_full_sha, ship_mode
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, ShipError, TrackedTicket
 from lib.hold import HoldDecision, decide
 
@@ -68,12 +69,13 @@ class HoldsMixin:
                         self.queue.now(),
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE ticket_state SET workflow_state = 'awaiting-ok'
-                    WHERE repo = ? AND ticket_id = ?
-                    """,
-                    scope,
+                write_workflow_state(
+                    connection,
+                    ticket.repo,
+                    ticket.ticket_id,
+                    "awaiting-ok",
+                    source="hold-gate",
+                    at=self.queue.now(),
                 )
                 connection.commit()
         self.wake_grok_once(

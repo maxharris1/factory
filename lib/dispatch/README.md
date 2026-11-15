@@ -5,7 +5,7 @@ facade: it re-exports every name it has always exported and composes
 `Dispatcher` from the mixins below, so `from lib.dispatcher import X` keeps
 working. In a ticket's `Touches:` line, name the module here, not
 `lib/dispatcher.py`. A ticket that also changes shared code adds `core.py`,
-`helpers.py`, `constants.py` or `types.py`.
+`helpers.py`, `constants.py`, `types.py` or `transitions.py`.
 
 No module here imports `lib.dispatcher` at run time, and no mixin imports
 another mixin: shared code lives in `core.py`, `helpers.py`, `constants.py`,
@@ -25,6 +25,7 @@ composed names `lib/dispatch/caps/__init__.py`. Inside `caps/`, only
 | Constants | `constants.py` | state sets, grace periods, wake reasons, poll and ship error limits |
 | Error text | `errors_text.py` | `_redact*`, `poll_error_detail`, `poll_error_text`, `safe_ship_error`, `scrub_detail` |
 | Shared functions | `helpers.py` | `trusted_bots`, `_spread`, `_scope`, rounds, `_matching_head`, `_holds`, `ship_mode`, `_comment_order`, questions text, state names |
+| State writes | `transitions.py` | `write_workflow_state`: the one writer of `ticket_state.workflow_state`, which appends a `ticket_transitions` row in the same transaction (#150) |
 | Shared methods | `core.py` (`DispatcherBase`) | `__init__`, `_trusted*`, `_app_may_post`, `_review_actions`, `_tracker`, state labels, `_generation`, stuck checks, `_run_hooks`, `_fresh_ticket`, `_latest_step` |
 | Comments | `comments.py` (`CommentsMixin`) | `process`, `_process_comments`, `_slash_go` (Max's plain `/go`), `_after_finish`, `_reject_edited`, `_remember_links`, handled-comment bookkeeping |
 | Ready (T2) | `ready.py` (`ReadyMixin`) | `_t2`, `_queue_review`, `_verdict_after`, `_reenter_after_handoff`, `_flag_ready_after_cap`, `_record_ci_result`, `_review_context` |

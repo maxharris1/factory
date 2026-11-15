@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from lib.dispatch.helpers import _comment_link, _scope
+from lib.dispatch.transitions import write_workflow_state
 from lib.dispatch.types import Comment, TrackedTicket
 from lib.queue import JobRequest
 
@@ -91,13 +92,14 @@ class ResumeAfterCapMixin:
                 ),
                 dedupe_key=f"t1:{scope}:fix:{comment.id}",
             )
-            connection.execute(
-                """
-                UPDATE ticket_state
-                SET cap_extra = ?, workflow_state = 'fixing'
-                WHERE repo = ? AND ticket_id = ?
-                """,
-                (cap_extra, ticket.repo.lower(), ticket.ticket_id),
+            write_workflow_state(
+                connection,
+                ticket.repo,
+                ticket.ticket_id,
+                "fixing",
+                source="cap-resume",
+                at=self.queue.now(),
+                also={"cap_extra": cap_extra},
             )
             connection.execute(
                 """
