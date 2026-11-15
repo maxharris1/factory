@@ -24,6 +24,7 @@ from lib.dispatch.types import (
     TrackedTicket,
 )
 from lib.handoff import HandoffError, parse_comment
+from lib.wait import is_locked
 
 _RECOVERS_EDITED = {
     "ready": frozenset({"queued-review", "answered-review", "queued-ci-fix"}),
@@ -197,6 +198,8 @@ class CommentsMixin:
                     raise
                 if isinstance(exc, RetryableStateError):
                     raise
+                if kind == "verdict" and fields["verdict"] == "BLOCKED" and is_locked(exc):
+                    raise RetryableStateError("blocked") from exc
                 if kind not in ("verdict", "questions", "answers"):
                     raise
                 error = safe_ship_error(exc)

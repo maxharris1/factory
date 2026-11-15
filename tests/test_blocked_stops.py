@@ -8,7 +8,11 @@ Dispatcher over a temp database with test_dispatcher's fakes.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import subprocess
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +21,7 @@ import pytest
 from lib.dispatcher import Dispatcher
 from lib.hook_t7 import T7Hook
 from lib.orch_yml import Approvals
+from lib.queue import BUSY_TIMEOUT_SECONDS
 from tests.test_approver_credential import APP_BOT, MAX, AppFlow
 from tests.test_dispatcher import (
     ANSWERS,
@@ -220,6 +225,50 @@ def test_a_blocked_stop_killed_before_its_wake_wakes_once_on_restart(
     ]
     assert link("blocked-1") in wakes[0]["detail"]
     assert HEADS[1] in wakes[0]["detail"]
+
+
+def test_a_blocked_stop_under_a_real_write_lock_wakes_once_when_it_clears(
+    tmp_path: Path,
+) -> None:
+    pause_points = ("_record_blocked_review", "wake_grok_once")
+    children = {}
+    for pause_at in pause_points:
+        root = tmp_path / pause_at
+        root.mkdir()
+        children[pause_at] = subprocess.Popen(
+            [sys.executable, "-m", "tests.blocked_contention_child", str(root), pause_at],
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    holders = []
+    try:
+        for child in children.values():
+            marker = json.loads(child.stdout.readline())
+            holder = sqlite3.connect(marker["db"])
+            holder.execute("BEGIN IMMEDIATE")
+            holders.append(holder)
+            child.stdin.write("continue\n")
+            child.stdin.flush()
+        time.sleep(BUSY_TIMEOUT_SECONDS + 5)
+    finally:
+        for holder in holders:
+            holder.rollback()
+            holder.close()
+    results = {}
+    for pause_at, child in children.items():
+        out, err = child.communicate(timeout=60)
+        assert child.returncode == 0, err
+        results[pause_at] = json.loads(out.splitlines()[-1])
+
+    for pause_at, result in results.items():
+        assert result["first"] == "retryable", (pause_at, result)
+        assert result["outcome"] == "blocked-review", pause_at
+        assert result["state"] == "blocked", pause_at
+        assert [wake[:2] for wake in result["wakes"]] == [["blocked", "blocked-1"]], pause_at
+        assert "blocked-1" in json.loads(result["wakes"][0][2])["link"], pause_at
 
 
 # --- AC3: only an approver's go leaves blocked -------------------------------------
