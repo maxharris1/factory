@@ -59,6 +59,14 @@ down for attention. It flags each queued harness job that has no live (up
 or stale) waiter for its bot on any device eligible for its harness as "no
 waiter for <harness>". The dashboard's Health tab, its needs-attention
 line, `orch status` and `orch health` all read the same report.
+
+Devices (#297): the report also lists each factory checkout's sync state,
+the box's own (HEAD against origin/main, `box_sync`) and every remote
+target's from orch.db's `device_sync` table (lib/device_sync.py). A remote
+target needs attention when missing or refused at once, or after
+SYNC_GRACE_SECONDS lagging or deploying; the box needs attention whenever its
+HEAD is not origin/main, since it has no `since` to wait on. Devices out of
+sync never change `orch health`'s exit status.
 """
 
 from __future__ import annotations
@@ -81,6 +89,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TextIO
 
+from lib import device_sync
 from lib.dashboard_config import EVERY_MINUTES_MAX
 from lib.device_monitor import remote_target
 from lib.machines_yml import MachinesConfig, load_machines_yml
@@ -950,12 +959,45 @@ class NoWaiter:
 
 
 @dataclass(frozen=True)
+class DeviceSync:
+    """One factory checkout's sync state: the box's, or a remote bot's."""
+
+    device: str
+    bot: str
+    checkout: str
+    sha: str | None
+    target: str | None
+    state: str
+    detail: str
+    since: float | None
+    needs_attention: bool
+
+    @classmethod
+    def of(cls, row: device_sync.Row, now: float) -> DeviceSync:
+        return cls(row.device, row.bot, row.checkout, row.sha, row.target, row.state,
+                   row.detail, row.since, row.needs_attention(now))
+
+
+def box_sync(device: str, root: Path = ROOT) -> DeviceSync | None:
+    """The box checkout's HEAD against its origin/main; None when either is unknown."""
+    head = checkout_sha(root)
+    target = checkout_sha(root, "refs/remotes/origin/main")
+    if head is None or target is None:
+        return None
+    synced = head == target
+    return DeviceSync(device, "", str(root), head, target,
+                      device_sync.SYNCED if synced else device_sync.LAGGING,
+                      "", None, not synced)
+
+
+@dataclass(frozen=True)
 class HealthReport:
     known: bool
     components: tuple[Component, ...] = ()
     no_waiter: tuple[NoWaiter, ...] = ()
     error: str | None = None
     code_version: str = "unknown"
+    devices: tuple[DeviceSync, ...] = ()
 
     @property
     def down(self) -> tuple[Component, ...]:
@@ -966,6 +1008,10 @@ class HealthReport:
     def stale_code(self) -> tuple[Component, ...]:
         """Configured components running code older than the checkout."""
         return tuple(c for c in self.components if c.stale_code and c.configured)
+
+    @property
+    def devices_out_of_sync(self) -> tuple[DeviceSync, ...]:
+        return tuple(d for d in self.devices if d.needs_attention)
 
     def no_waiter_for(self, harness: str) -> NoWaiter | None:
         return next((n for n in self.no_waiter if n.harness == harness), None)
@@ -1075,6 +1121,7 @@ def build_report(
     eligible: Mapping[str, Collection[str]] | None = None,
     expected: Expected | None = None,
     checkout_version: str = "unknown",
+    devices: Sequence[DeviceSync] = (),
 ) -> HealthReport:
     """Classify every row and flag queued jobs no live waiter can take.
 
@@ -1083,10 +1130,11 @@ def build_report(
     the registry of components that should be running (default: the poller
     on the box); `checkout_version` is the checkout's commit: a poller,
     waiter or listener whose row names another known commit runs stale
-    code."""
+    code; `devices` are the factory checkouts' sync states."""
     checkout = checkout_version
+    checkouts = tuple(devices)
     if rows is None:
-        return HealthReport(known=False, code_version=checkout)
+        return HealthReport(known=False, code_version=checkout, devices=checkouts)
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
@@ -1132,7 +1180,7 @@ def build_report(
         if not live:
             flags.append(NoWaiter(harness, bot, tuple(jobs[harness])))
     return HealthReport(known=True, components=tuple(components), no_waiter=tuple(flags),
-                        code_version=checkout)
+                        code_version=checkout, devices=checkouts)
 
 
 def _stale(component: str, version: str, checkout: str) -> bool:
@@ -1147,17 +1195,41 @@ def load_report(
     queued: Iterable[tuple[str, str]] = (),
     machines: MachinesConfig | None = None,
     orch: OrchConfig | None = None,
+    root: Path | None = None,
 ) -> HealthReport:
-    """`build_report` from the health file; an unreadable file is reported
-    (`error`, which needs attention), not raised."""
+    """`build_report` from the health file and orch.db's `device_sync` rows;
+    an unreadable health file is reported (`error`, which needs attention),
+    not raised."""
+    box = box_sync(local_device(machines), ROOT if root is None else root)
+    devices = ((box,) if box is not None else ()) + tuple(
+        DeviceSync.of(row, now) for row in read_device_sync(db))
     try:
         rows = read_heartbeats(db)
     except (sqlite3.Error, OSError) as exc:
         return HealthReport(known=False, error=f"cannot read {health_path(db).name}: {type(exc).__name__}",
-                            code_version=factory_version())
+                            code_version=factory_version(), devices=devices)
     return build_report(rows, now, queued=queued, eligible=eligible_devices(machines),
                         expected=expected_components(machines, orch),
-                        checkout_version=factory_version())
+                        checkout_version=factory_version(), devices=devices)
+
+
+def read_device_sync(db: Path) -> list[device_sync.Row]:
+    """orch.db's `device_sync` rows, read-only; none when the database or table is unreadable."""
+    if not db.is_file():
+        return []
+    # As `orch status` reads it: immutable while no writer holds a -wal, so a
+    # read never creates the -shm beside a WAL database.
+    query = "?mode=ro" if Path(f"{db}-wal").exists() else "?mode=ro&immutable=1"
+    try:
+        connection = sqlite3.connect(db.resolve().as_uri() + query, uri=True,
+                                     timeout=DB_BUSY_SECONDS)
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            return device_sync.read(connection)
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return []
 
 
 # --- text ------------------------------------------------------------------------------------
@@ -1197,13 +1269,16 @@ def age_text(seconds: float) -> str:
 
 def render_lines(report: HealthReport, now: float) -> list[str]:
     """The Health section of `orch status` and `orch health`."""
+    devices = [_device_line(d) for d in report.devices if d.state != device_sync.SYNCED]
     if report.error is not None:
-        return ["Health", f"  unknown: {report.error}"]
+        return ["Health", f"  unknown: {report.error}", *devices]
     if not report.known:
-        return ["Health", "  no heartbeats recorded yet"]
+        return ["Health", "  no heartbeats recorded yet", *devices]
     header = f"{len(report.components)} components, {len(report.down)} down"
     if report.stale_code:
         header += f", {len(report.stale_code)} stale code"
+    if report.devices_out_of_sync:
+        header += f", {len(report.devices_out_of_sync)} devices out of sync"
     lines = [f"Health ({header})"]
     for c in report.components:
         reason = f" ({c.reason})" if c.reason else ""
@@ -1220,7 +1295,17 @@ def render_lines(report: HealthReport, now: float) -> list[str]:
     for flag in report.no_waiter:
         count = len(flag.jobs)
         lines.append(f"  no waiter for {flag.harness}: {count} queued job{'' if count == 1 else 's'}")
-    return lines
+    return lines + devices
+
+
+def _device_line(d: DeviceSync) -> str:
+    who = f"{d.device} {d.bot}" if d.bot else d.device
+    line = f"  device {who} {d.state}"
+    if d.sha:
+        line += f" at {d.sha[:12]}"
+    if d.target:
+        line += f", target {d.target[:12]}"
+    return line + (f" ({d.detail})" if d.detail else "")
 
 
 def report_json(report: HealthReport, now: float) -> dict:
@@ -1254,6 +1339,13 @@ def report_json(report: HealthReport, now: float) -> dict:
              "anchor": n.anchor}
             for n in report.no_waiter
         ],
+        "devices": [
+            {"device": d.device, "bot": d.bot, "checkout": d.checkout, "sha": d.sha,
+             "target": d.target, "state": d.state, "since": d.since, "detail": d.detail,
+             "needs_attention": d.needs_attention}
+            for d in report.devices
+        ],
+        "devices_out_of_sync": len(report.devices_out_of_sync),
         "down": len(report.down),
         "stale_code": len(report.stale_code),
         "stale": sum(1 for c in report.components if c.state == STALE and c.configured),
