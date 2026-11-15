@@ -46,6 +46,25 @@ class T3Mixin:
             if gate.outcome is not None:
                 return gate.outcome
             instruction += gate.ci_failure
+        outcome, state = self._record_revise(
+            ticket, comment, fields, reported_round, instruction
+        )
+        if state is None:
+            self._wake_comment_problem(ticket, comment, "stale", outcome)
+            return True, outcome
+        if state == "capped":
+            self._wake_capped(ticket, comment)
+        self._write_state_label(ticket, state)
+        return True, outcome
+
+    def _record_revise(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        fields: Mapping[str, str],
+        reported_round: int | None,
+        instruction: str,
+    ) -> tuple[str, str | None]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
@@ -58,13 +77,9 @@ class T3Mixin:
             if prior is not None:
                 connection.commit()
                 outcome = str(prior["outcome"])
-                replay_state = (
+                return outcome, (
                     "capped" if outcome == "capped-review" else "fixing"
                 )
-                if replay_state == "capped":
-                    self._wake_capped(ticket, comment)
-                self._write_state_label(ticket, replay_state)
-                return True, outcome
             connection.execute(
                 """
                 INSERT OR IGNORE INTO ticket_state (
@@ -89,10 +104,7 @@ class T3Mixin:
                 or reported_round != round_number
             ):
                 connection.commit()
-                self._wake_comment_problem(
-                    ticket, comment, "stale", "stale-revise"
-                )
-                return True, "stale-revise"
+                return "stale-revise", None
             granted = (
                 self._auto_granted_cap_extra(ticket, state)
                 if round_number >= cap
@@ -168,10 +180,7 @@ class T3Mixin:
                 self._record_auto_extra(connection, ticket, comment, granted)
             self._record_followups(connection, ticket, comment, round_number)
             connection.commit()
-        if next_state == "capped":
-            self._wake_capped(ticket, comment)
-        self._write_state_label(ticket, next_state)
-        return True, outcome
+        return outcome, next_state
 
     def _t3_unsat(
         self,

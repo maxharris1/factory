@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -36,7 +37,15 @@ from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
 from lib.dispatch.helpers import _retry_of
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
-from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
+from lib.eval_report import (
+    EvalError,
+    append_message,
+    build_metrics,
+    build_report,
+    render,
+    render_json,
+    render_metrics,
+)
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
 from lib.github_actions import GitHubAdapterError, _status as gh_status
 from lib.grok_delivery import GrokDeliveryError, WebhookGrokDelivery
@@ -97,6 +106,7 @@ commands:
   doctor           canary the pinned poteto-mode skill
   doctor-runtime   check PyYAML and the shared dispatcher database
   eval-report      weekly eval report from a local log directory
+  log-message      log one manual bot-to-bot message to dispatcher.log
   poll             poll configured trackers and dispatch work
   init-db          create and initialize the dispatcher database
   backup-db        back up the dispatcher database (orch poll does each cycle)
@@ -135,12 +145,20 @@ doctor [--home PATH] [--project PATH] [--cloud]
   write. Exit 1 if any harness did not load that version.
   --print-canary prints the prompt and does not read replies.
 
-eval-report --input PATH [--since TIME] [--until TIME]
+eval-report --input PATH [--since TIME] [--until TIME] [--json]
 eval-report --db PATH --baseline PATH
   Print the weekly eval report for one directory of fixtures or
-  collected logs. It does not contact GitHub or Linear.
+  collected logs. It does not contact GitHub or Linear. --json prints
+  the --input report as JSON.
   --db prints the #209 metrics of a backed-up orch.db, opened read-only,
   beside those of the --baseline snapshot (O4's).
+
+log-message --repo OWNER/NAME [--pr N] --from BOT --to BOT [--kind KIND]
+            [--log PATH]
+  Append one line to dispatcher.log for a bot-to-bot message sent by hand
+  instead of a scripted handoff. eval-report counts these lines. --log
+  defaults to dispatcher.log beside $ORCH_DB; --kind defaults to handoff.
+  Exits 2 and writes nothing on a bad repo, pr, bot or kind.
 
 poll [--db PATH] [--orch PATH] [--machines PATH] [--once] [--pidfile PATH]
   Poll GitHub and Linear, apply dispatcher transitions, and deliver work.
@@ -389,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
         return _call(_doctor_runtime, argv[1:])
     if argv[0] == "eval-report":
         return _call(_eval_report, argv[1:])
+    if argv[0] == "log-message":
+        return _call(_log_message, argv[1:])
     if argv[0] == "poll":
         return _call(_poll, argv[1:])
     if argv[0] == "init-db":
@@ -508,12 +528,13 @@ def _eval_report(argv: list[str]) -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--since")
     parser.add_argument("--until")
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if args.db is not None:
         if args.baseline is None:
             parser.error("--db needs --baseline")
-        if args.since is not None or args.until is not None:
-            parser.error("--since and --until read --input only")
+        if args.since is not None or args.until is not None or args.json:
+            parser.error("--since, --until and --json read --input only")
         try:
             current, baseline = build_metrics(args.db), build_metrics(args.baseline)
         except EvalError as exc:
@@ -530,7 +551,38 @@ def _eval_report(argv: list[str]) -> int:
         return 1
     for warning in built.warnings:
         print(warning, file=sys.stderr)
-    print(render(built.report), end="")
+    print((render_json if args.json else render)(built.report), end="")
+    return 0
+
+
+def _log_message(argv: list[str]) -> int:
+    parser = _Parser(prog="orch log-message", add_help=True)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--pr")
+    parser.add_argument("--from", dest="sender", required=True)
+    parser.add_argument("--to", dest="recipient", required=True)
+    parser.add_argument("--kind", default="handoff")
+    parser.add_argument("--log", type=Path)
+    args = parser.parse_args(argv)
+    log = args.log
+    if log is None:
+        database = os.environ.get(DB_ENV)
+        if not database:
+            parser.error(f"pass --log or set {DB_ENV}")
+        log = Path(database).with_name("dispatcher.log")
+    try:
+        append_message(
+            log,
+            repo=args.repo,
+            pr=args.pr,
+            sender=args.sender,
+            recipient=args.recipient,
+            kind=args.kind,
+            at=datetime.now(timezone.utc),
+        )
+    except EvalError as exc:
+        print(f"orch log-message: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -685,7 +737,7 @@ def _poll(argv: list[str]) -> int:
                 create=False,
                 machines_path=args.machines,
             )
-            pusher = _dashboard_pusher(path, args.orch)
+            pusher, push_seconds = _dashboard_pusher(path, args.orch)
             after_poll = _AfterPoll(
                 CycleBackup(
                     path,
@@ -707,7 +759,14 @@ def _poll(argv: list[str]) -> int:
                     watcher.start()
                 # Heartbeats (#92): the poller's own row and the per-device
                 # SSH reachability probe, each in its own daemon thread.
-                beats = health.poller_beats(path, args.machines).start()
+                beats = health.poller_beats(path, args.machines, cycle=loop.cycle_state).start()
+                push_timer = (
+                    health._Loop("dashboard-push-timer", push_seconds,
+                                 lambda: pusher.on_timer(push_seconds), block_signals=False)
+                    if pusher is not None else None
+                )
+                if push_timer is not None:
+                    push_timer.start()
                 signal.signal(signal.SIGTERM, stopper.on_term)
                 try:
                     loop.run(
@@ -717,6 +776,8 @@ def _poll(argv: list[str]) -> int:
                         after_poll=after_poll,
                     )
                 finally:
+                    if push_timer is not None:
+                        push_timer.stop()
                     if watcher is not None:
                         watcher.stop()
                     beats.stop()
@@ -775,8 +836,9 @@ def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], 
     )
 
 
-def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:
-    """The poll loop's dashboard push hook, or None when push is not set.
+def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> tuple[PollPusher | None, float]:
+    """The poll loop's dashboard push hook (None when push is not set) and
+    its push interval in seconds.
 
     `_runtime` has already validated the file strictly; this reads only its
     dashboard section. Placeholders elsewhere do not matter here.
@@ -784,7 +846,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     config_path = orch_path if orch_path is not None else ROOT / "orch.yml"
     config, findings = load_orch_yml(config_path, allow_placeholders=True)
     if config is None or any(item.severity == "error" for item in findings):
-        return None
+        return None, 0.0
     push = config.dashboard.push
     # How often a push starts while all is well: the dashboard writer's interval.
     every = (push.every_minutes or 0) * 60
@@ -793,7 +855,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
     def log(line: str) -> None:
         print(line, file=sys.stderr, flush=True)
 
-    return poll_pusher_for(
+    pusher = poll_pusher_for(
         push,
         db=db_path,
         orch=orch_path,
@@ -802,6 +864,7 @@ def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | Non
         poll_seconds=config.poll_seconds,
         record=lambda ok: health.push_result(db_path, ok, interval=interval, log=log),
     )
+    return pusher, float(interval)
 
 
 def _init_db(argv: list[str]) -> int:

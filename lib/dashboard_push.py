@@ -22,7 +22,10 @@ mismatched set.
 poll cycle, at most every `every_minutes`, it starts `orch dashboard push
 --once` as a separate process with a scrubbed environment and does not wait
 for it. A push failure is that child's redacted log line; it never reaches
-the poll loop.
+the poll loop. `orch poll` also calls `on_timer` from its own thread every
+push interval (#440): it settles a finished push's exit status and starts a
+push when none started within the interval, so a long cycle neither leaves
+the dashboard stale nor holds back the `dashboard-push` record.
 
 `LivePusher` (`dashboard.push.live: true`) adds real-time pushes on top. A
 watcher thread stats orch.db and its WAL every WATCH_SECONDS; any committed
@@ -317,13 +320,34 @@ class PollPusher:
         self._last: float | None = None
         self._failures = 0
         self._retry_at: float | None = None
+        self._lock = threading.Lock()
 
     def __call__(self) -> None:
-        try:
-            self._tick()
-        except Exception as exc:  # a push never breaks polling
-            text = " ".join(str(exc).split()) or type(exc).__name__
-            self.log(f"dashboard push: {redact(text)}")
+        with self._lock:
+            try:
+                self._tick()
+            except Exception as exc:  # a push never breaks polling
+                self._error(exc)
+
+    def on_timer(self, every: float) -> None:
+        """`orch poll`'s push timer: settle a finished push, then start one
+        unless one started within `every` seconds."""
+        with self._lock:
+            try:
+                if self._running():
+                    return
+                if self._last is not None and self.clock() - self._last < every:
+                    return
+                self._due()
+            except Exception as exc:  # a push never breaks polling
+                self._error(exc)
+
+    def _due(self) -> None:
+        self._tick()
+
+    def _error(self, exc: BaseException) -> None:
+        text = " ".join(str(exc).split()) or type(exc).__name__
+        self.log(f"dashboard push: {redact(text)}")
 
     def _running(self) -> bool:
         """True while the last push runs; otherwise settle its exit status once."""
@@ -494,7 +518,6 @@ class LivePusher(PollPusher):
         self.wall = wall
         self.fingerprint = fingerprint
         self.min_interval = min_interval
-        self._lock = threading.Lock()
         self._pending_status = False
         self._pending_full = False
         self._last_full: float | None = None
@@ -512,11 +535,7 @@ class LivePusher(PollPusher):
         with self._lock:
             try:
                 self._last_cycle = self.wall()
-                self._pending_status = True
-                now = self.clock()
-                if self._last_full is None or now - self._last_full >= self.every_seconds:
-                    self._pending_full = True
-                self._pump()
+                self._due()
             except Exception as exc:  # a push never breaks polling
                 self._error(exc)
 
@@ -530,6 +549,12 @@ class LivePusher(PollPusher):
                 self._pump()
             except Exception as exc:  # a push never breaks polling
                 self._error(exc)
+
+    def _due(self) -> None:
+        self._pending_status = True
+        if self._last_full is None or self.clock() - self._last_full >= self.every_seconds:
+            self._pending_full = True
+        self._pump()
 
     def _pump(self) -> None:
         if not (self._pending_status or self._pending_full):
