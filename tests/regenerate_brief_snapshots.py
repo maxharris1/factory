@@ -78,6 +78,11 @@ CASES: dict[str, tuple[str, str, int, str | None, dict[str, object]]] = {
     "review": ("review", "codex", 1, HEAD, {"round": "1/3", "risk": "low"}),
     "review-round-3": ("review", "codex", 1, HEAD, {"round": "3/3"}),
     "review-before-ci": ("review", "codex", 1, HEAD, {"round": "2/3", "risk": "low"}),
+    "review-rebased": ("review", "codex", 1, HEAD, {"round": "2/3", "rebase": {
+        "last_reviewed_head": "a" * 40,
+        "reviewed_base": "e" * 40,
+        "base": "f" * 40,
+    }}),
     "review-update": ("review", "codex", 1, HEAD, {"round": "1/3", **UPDATE}),
     "review-update-commits": ("review", "codex", 1, HEAD, {
         "round": "1/3",

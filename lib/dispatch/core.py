@@ -30,6 +30,7 @@ from lib.dispatch.types import (
     Feeder,
     GrokDelivery,
     Hook,
+    RebaseClassifier,
     Registration,
     RetryableStateError,
     ReviewActions,
@@ -60,6 +61,7 @@ class DispatcherBase:
         log: Callable[[str], None] | None = None,
         feeder: Feeder | None = None,
         update_classifier: UpdateClassifier | None = None,
+        rebase_classifier: RebaseClassifier | None = None,
         approvals: Approvals | None = None,
     ):
         if state_path.resolve() != queue.path.resolve():
@@ -85,6 +87,7 @@ class DispatcherBase:
         # #130: decides whether an update-from-main kept the approval. None,
         # or any error, sends the update back to review (fail closed).
         self.update_classifier = update_classifier
+        self.rebase_classifier = rebase_classifier
         self.approvals = approvals if approvals is not None else Approvals()
         # #91: the tickets this poll read, so T6 can see a verdict a failed
         # review job already posted. Cleared at the start of each poll.

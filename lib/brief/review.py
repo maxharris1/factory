@@ -41,6 +41,16 @@ def _update_steps(
     return steps
 
 
+def _delta_line(rebase: dict | None, head: str) -> str:
+    if rebase is None:
+        return "Then review the delta from the last reviewed head (`git range-diff` when the branch was rebased). "
+    last = rebase["last_reviewed_head"]
+    return (
+        f"The branch was force-pushed: `{head}` does not descend from the last reviewed head `{last}`. "
+        f"Review the delta with `git range-diff {rebase['reviewed_base']}..{last} {rebase['base']}..{head}`. "
+    )
+
+
 def task_lines(facts: dict) -> list[str]:
     base = facts["base"] or "<base branch>"
     head = facts["head"] or "the PR head"
@@ -66,9 +76,9 @@ def task_lines(facts: dict) -> list[str]:
                     [
                         "Close the earlier rounds first: for each earlier finding by its `f-<n>` id, and each "
                         "earlier unmet `ac-<n>`, say whether this head closes it. List each finding it closes as a "
-                        "`[closed]` item in the form below. Then review the delta from the last reviewed head "
-                        "(`git range-diff` when the branch was rebased). A new finding in code the delta did not "
-                        "change is `[minor]` unless it fails a criterion."
+                        "`[closed]` item in the form below. "
+                        + _delta_line(facts["rebase"], head)
+                        + "A new finding in code the delta did not change is `[minor]` unless it fails a criterion."
                     ]
                     if later_round
                     else []

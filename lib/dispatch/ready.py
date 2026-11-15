@@ -19,7 +19,7 @@ from lib.dispatch.helpers import (
 from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
-from lib.update_check import UpdateScope
+from lib.update_check import RebaseScope, UpdateScope
 
 
 class ReadyMixin:
@@ -478,6 +478,11 @@ class ReadyMixin:
                     round_number=review_round,
                     instruction=detail,
                     update=update,
+                    rebase=(
+                        self._rebase_scope(ticket, comment, head, review_round)
+                        if review_round > 1 and update is None
+                        else None
+                    ),
                 ),
             ),
             dedupe_key=self._review_dedupe_key(ticket, head, review_round),
@@ -685,6 +690,22 @@ class ReadyMixin:
         if row is None or row["head"] is None:
             return None
         return str(row["head"])
+
+    def _rebase_scope(
+        self, ticket: TrackedTicket, comment: Comment, head: str, review_round: int
+    ) -> RebaseScope | None:
+        last = self._reviewed_head(ticket, comment, review_round)
+        if last is None or last == head or self.rebase_classifier is None:
+            return None
+        try:
+            return self.rebase_classifier(
+                ticket.repo, ticket.factory.base_branch, last, head
+            )
+        except Exception as exc:
+            self.record_poll_error(
+                ticket.repo, ticket.ticket_id, f"rebase-check:{type(exc).__name__}"
+            )
+            return None
 
     def _record_ci_result(
         self,
