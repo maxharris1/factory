@@ -560,8 +560,12 @@ def rollup_panel(snapshot: dict) -> str:
 
 TELEMETRY_CSS = (
     ".telemetry{margin:12px 0 4px;padding-top:8px;border-top:1px solid var(--line)}"
-    ".tele-head{margin:10px 0 6px;font:600 12px/1.4 var(--mono);color:var(--muted);"
-    "text-transform:uppercase;letter-spacing:.06em}"
+    ".tele-head{margin:14px 0 6px;font:500 11px/1.4 var(--mono);color:var(--muted);"
+    "text-transform:uppercase;letter-spacing:.08em}"
+    "#tokens .stats{display:flex;flex-wrap:wrap;gap:12px;margin:0 0 12px}"
+    "#tokens .stat{flex:1 1 140px;padding:10px 14px 12px}"
+    "#tokens .stat b{font:600 30px/1.15 var(--mono);letter-spacing:-.03em}"
+    "#tokens .stat span{font:500 12px/1.3 var(--mono)}"
     ".tele-tools{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}"
     ".tele-exit{display:flex;gap:8px;align-items:baseline;margin:4px 0}"
     ".tele-steps .what{font-family:var(--mono);overflow-wrap:anywhere}"

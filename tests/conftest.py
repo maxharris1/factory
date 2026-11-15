@@ -112,6 +112,26 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(autouse=True)
+def _a_ssh_control_dir():
+    """#222: each test gets its own short ControlMaster socket directory, so
+    no fake master outlives its test and a socket path stays bindable. It
+    takes no monkeypatch, so a test's own patches are undone before this
+    teardown runs. pytest orders same-scope autouse fixtures by name: the
+    `_a_` prefix keeps this one ahead of any autouse fixture that requests
+    monkeypatch (such as `_skill_preflight`), so monkeypatch is always set up
+    after it and undone before its teardown."""
+    directory = tempfile.mkdtemp(prefix="orch-ssh-", dir="/tmp")
+    previous = os.environ.get("ORCH_SSH_CONTROL_DIR")
+    os.environ["ORCH_SSH_CONTROL_DIR"] = directory
+    yield directory
+    if previous is None:
+        os.environ.pop("ORCH_SSH_CONTROL_DIR", None)
+    else:
+        os.environ["ORCH_SSH_CONTROL_DIR"] = previous
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
 def _skill_preflight(monkeypatch: pytest.MonkeyPatch):
     from lib import skill_preflight
 

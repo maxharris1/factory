@@ -1,0 +1,10 @@
+decision	choice	why
+module count	four rule modules (t1, resume, effective, wake) plus __init__	_over_cap, _config_cap and _effective_cap call each other and change together (#196, #263); splitting further buys no parallel work
+mixins, not free functions	one mixin per rule, composed by CapsMixin(T1Mixin, ResumeAfterCapMixin, EffectiveCapMixin, CappedWakeMixin)	free functions change self._x() call sites, which breaks the pure move
+how the move was made	a codemod slices each method's exact source lines out of caps/__init__.py into its rule module	build the lever: no hand-copied method bodies
+pure-move gate	script compares each method's dedented source and ast.dump against origin/main:lib/dispatch/caps.py	failed on an empty package first (6 missing), then VERIFIED 6/6 after the split
+git history	git mv caps.py caps/__init__.py as its own commit before the split	git log --follow keeps the file history
+Touches guidance	README says name the rule module, never the caps/ directory	lib/feeder_gates.py:149 treats a directory path as overlapping every file under it
+AC5 reading	rule modules import no lib.dispatch mixin, no sibling caps module and not lib.dispatcher; __init__ imports only its own four rule modules	same as lib/dispatcher.py composing lib/dispatch/; mutation check: three bad imports each fail the test
+local test env	ran tests with CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS unset	the builder session sets it, which fails test_rounds_and_caps codex case on main too; CI does not set it
+delegate	no poteto-agent; the codemod wrote the move and the AST gate judged it	a mechanical slice has no shape choices for a delegate to make; the gate gives the review separation
