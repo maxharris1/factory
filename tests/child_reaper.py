@@ -88,9 +88,6 @@ def _environ(pid: int) -> list[bytes]:
 
 
 def leaked(before: set[int], tag: str, root: Path) -> set[int]:
-    """Live pids started since `before` that descend from pytest, carry the
-    test's tag, or have HOME or ORCH_STATE_DIR under root: a loop started with
-    a scrubbed env and detached with nohup or setsid matches only the last."""
     table = _table()
     mine = descendants(os.getpid(), table)
     needle = f"{TAG}={tag}".encode()

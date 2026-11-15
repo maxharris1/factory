@@ -175,10 +175,8 @@ def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
 
 @pytest.fixture(autouse=True)
 def _0_no_leaked_processes(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory):
-    """#358: fail a test that leaves a process running, and kill it. Leaked
-    self-heal loops kept their test dirs alive for hours and filled the box's
-    inodes. `_0_` sorts ahead of every other autouse fixture, so this one is
-    set up first and torn down last, after the test's own cleanup."""
+    """#358. pytest orders a module's autouse fixtures by name, so `_0_` is set
+    up first and torn down last, after the test's own cleanup."""
     from tests import child_reaper, subreaper
 
     before = set(child_reaper._table())
