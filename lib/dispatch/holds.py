@@ -159,7 +159,7 @@ class HoldsMixin:
                 ticket.repo,
                 ticket.ticket_id,
                 "fixing",
-                source=_HELD_BASE_UPDATE,
+                source="held-base-update",
                 at=self.queue.now(),
                 guard=_NOT_FINISHED,
             )
