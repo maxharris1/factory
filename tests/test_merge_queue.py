@@ -4,6 +4,7 @@ oldest approval first."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,23 @@ def test_only_a_ready_entry_merges_out_of_turn(tmp_path: Path) -> None:
     assert board.actions.merges == [(True, ready.head)]
     for number in ("2", "3", "4", "5"):
         assert board.state(number)["workflow_state"] == "merge-queue"
+
+
+def test_no_entry_merges_past_an_updating_head_once_finish_line_is_not_merge(
+    tmp_path: Path,
+) -> None:
+    board = Board(tmp_path)
+    head, behind = _queue_of(board, "407", "418")
+    behind.ci[behind.head] = "pending"
+    head.conflict()
+    board.poll()
+    assert board.state("407")["workflow_state"] == "updating"
+
+    board.factory = replace(board.factory, finish_line="ready-for-review")
+    behind.ci[behind.head] = "success"
+    board.poll()
+    assert board.actions.merges == []
+    assert board.state("418")["workflow_state"] == "merge-queue"
 
 
 @pytest.mark.parametrize("head_waits", ["ci-red", "held", "mergeability"])

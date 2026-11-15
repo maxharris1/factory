@@ -380,6 +380,8 @@ class MergeQueueMixin:
                 ticket = self._fresh_ticket(polled)
                 if ticket is None or ticket.merged or ticket.closed:
                     continue
+                if ticket.factory.finish_line != "merge":
+                    return
                 current = ticket.current_head
                 if current is None or self._queue_head_wait_reason(ticket, row, current):
                     continue
