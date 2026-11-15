@@ -137,7 +137,7 @@ _NO_READ_SINCE_FAILURE = object()
 
 # The result kinds that settle each failed harness job, so T6 never retries it (#193).
 _SETTLING_KINDS = {
-    "review": ("verdict",),
+    "review": ("verdict", "questions"),
     "plan": ("plan", "questions"),
     "build": ("ready", "questions"),
     "fix": ("ready", "questions"),

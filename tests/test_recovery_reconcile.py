@@ -472,3 +472,47 @@ def test_a_detached_step_failing_after_answers_resumed_it_is_not_requeued(tmp_pa
     board.poll(at=board.now[0] + 61)
     assert [row for row in board.rows("build") if row[0] == "queued"] == [("queued", 1)]
     assert "resumed-by-answers" in board.events(build)
+
+
+REVIEWER_QUESTIONS = (
+    "<!-- orch:v1 kind=questions from=codex-bot role=reviewer state=waiting-max -->\n"
+    "Questions.\n"
+)
+
+
+def _review_paused_on_questions(tmp_path: Path, *, cached: bool) -> tuple[Board, str]:
+    board = Board(tmp_path)
+    build = board.start("building")
+    box = Device(
+        name="box", slot_max=2, harnesses={"claude": "claude-bot", "codex": "codex-bot"}, local=True
+    )
+    DevicePool(board.queue, MachinesConfig(devices=(box,)))
+    board.post("ready-1", READY.format(head=HEAD))
+    board.queue.finish(build, owner="claude", handoff_comment_id="ready-1")
+    board.dispatcher.poll_once(Source(replace(board.snapshot(), ci={HEAD: CIResult("success")}), board.now))
+    review = board.queue.claim("codex")
+    assert review is not None and board.workflow_state() == "review"
+    before = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.post("review-q", REVIEWER_QUESTIONS, bot="codex")
+    after = replace(board.snapshot(), ci={HEAD: CIResult("success")})
+    board.queue.finish(review.id, owner="codex", handoff_comment_id=None)
+
+    class Fresh(Source):
+        def fresh_ticket(self, ref: TicketRef) -> TrackedTicket:
+            return after
+
+    board.dispatcher.poll_once(Fresh(before if cached else after, board.now))
+    return board, review.id
+
+
+def test_a_failed_review_that_posted_questions_resumes_once_after_answers(tmp_path: Path) -> None:
+    for cached in (False, True):
+        board, review = _review_paused_on_questions(tmp_path / str(cached), cached=cached)
+        assert board.rows("review") == [("done", 1)], f"cached={cached}: {board.rows('review')}"
+        assert "done-from-questions" in board.events(review)
+        board.post("review-a", ANSWERS, bot="grok")
+        board.dispatcher.poll_once(
+            Source(replace(board.snapshot(), ci={HEAD: CIResult("success")}), board.now)
+        )
+        queued = [row for row in board.rows("review") if row[0] == "queued"]
+        assert queued == [("queued", 1)], f"cached={cached}: one resumed review, {board.rows('review')}"

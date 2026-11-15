@@ -1046,12 +1046,12 @@ class JobsMixin:
         its ready is matched by TU's attribution, not by time.
 
         A review's is a verdict from the job's recipient for the job's head
-        (as a prefix, like every head compare) and round; a review job with
-        no round or no head takes none. A builder's is from the job's
-        recipient; its questions count unless T5 found none in them. A build
-        or fix job's ready is at a new head: one other than the job's own, or
-        any head for a job that has none. That ready counts once T2 routed
-        it, or while it waits on CI at the polled PR head. One T2 left
+        (as a prefix, like every head compare) and round, or its questions; a
+        review job with no round or no head takes none. A builder's is from
+        the job's recipient; its questions count unless T5 found none in them.
+        A build or fix job's ready is at a new head: one other than the job's
+        own, or any head for a job that has none. That ready counts once T2
+        routed it, or while it waits on CI at the polled PR head. One T2 left
         unhandled at another head (its fresh PR read failed) may yet be
         stale: _HANDOFF_UNREAD when no counted handoff comes first.
         """
