@@ -481,7 +481,9 @@ def test_a_ready_github_dates_to_the_fixs_own_second_still_settles_it(
     assert [job["state"] for job in board.jobs("fix")] == ["cancelled"]
 
 
-def test_a_ready_that_settles_a_fix_settles_its_later_retry(tmp_path: Path) -> None:
+def test_a_ready_the_cached_read_missed_settles_the_failed_fix_without_a_retry(
+    tmp_path: Path,
+) -> None:
     board, pr, _ = _red_fix(tmp_path)
     fix = board.claim("claude")
     read = board.tracked_tickets
@@ -501,10 +503,7 @@ def test_a_ready_that_settles_a_fix_settles_its_later_retry(tmp_path: Path) -> N
     board.poll()
 
     assert board.outcome("ready-rollback") == "queued-review"
-    assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [
-        (1, "failed"),
-        (2, "cancelled"),
-    ]
+    assert [(job["attempt"], job["state"]) for job in board.jobs("fix")] == [(1, "done")]
     assert board.queue.claim("claude") is None
 
 

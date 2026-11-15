@@ -99,14 +99,14 @@ def test_retry_of_a_failed_plan_accepts_the_replacement_plan(tmp_path: Path) -> 
     b.go(p, "go", state="planning")
     b.poll()
     original = b.claim("claude")
-    b.actions.state_failures.add(("owner/repo", "plan-check"))
-    b.post(p, "plan-1", PLAN.format(round=1, ac="met"), "claude-login")
-    b.poll()
     b.queue.finish(original.id, owner="claude", handoff_comment_id=None)
     b.poll()
     b.fail("claude")
     b.poll()
     assert b.state("42")["stuck_reason"] == "job-failed-2"
+    b.actions.state_failures.add(("owner/repo", "plan-check"))
+    b.post(p, "plan-1", PLAN.format(round=1, ac="met"), "claude-login")
+    b.poll()
     b.actions.state_failures.clear()
 
     b.post(p, "retry-plan", REASON, "grok-login")
