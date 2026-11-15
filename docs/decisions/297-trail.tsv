@@ -10,3 +10,9 @@ dashboard refresh	self-heal starts orch dashboard push --once detached when heal
 fan-out placement	detached orch heal devices with its own flock	a slow clone never holds self-heal.lock
 health box entry	needs attention at once when HEAD != origin/main	no since to start a grace period from
 helper delegation	health slice delegated to a poteto-agent; the rest built in the main job	disjoint files after device_sync landed; job time cap of 60 minutes
+round 2: ignored files	git checkout --no-overwrite-ignore on the remote deploy	f-1: a plain checkout silently overwrote an ignored local file upstream began tracking; the flag refuses it with nothing written
+round 2: remote install-skills Python	the Python the installed ~/.local/bin/orch wrapper names, else python3	f-2: bin/orch's /usr/bin/env python3 lacks the venv's PyYAML; deploy/install.sh writes the venv path into that wrapper
+round 2: box busy guard	self-deploy counts box jobs and marks the box deploying in one BEGIN IMMEDIATE, held through install	ac-3: the box is not exempt; the same transaction DevicePool.claim reads keeps a job off the box while it moves
+round 2: box installed skills	orch install-skills from the new checkout when a box merge changes skills/	ac-2: the box only ran install.sh for deploy/ or requirements.txt; skills/ holds the pin and every pinned file
+round 2: box start gate	refuse a box start when HEAD is a strict ancestor of its fetched origin/main	ac-4: a busy box sits behind origin/main; plain inequality would also refuse a dev or PR-branch checkout that is ahead, which self-deploy already escalates
+round 2: box rows	self-deploy and the waiter own the box's device_sync rows; heal devices never forgets them	the device pass only knows remote targets and would otherwise drop the box's deploying mark mid-apply
