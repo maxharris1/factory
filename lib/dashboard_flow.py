@@ -12,7 +12,8 @@ then the ticket's current workflow state. Where two of those states have no
 direct transition, a bridge of at most MAX_BRIDGE steps through the chart is
 filled in (intake -> questions -> building, since questions is Grok Bot's
 step and has no job of its own); longer gaps are kept as a jump with no
-edge drawn.
+edge drawn. Once the ticket has rows in ticket_transitions, those rows are
+the path from the first one on, with their times and no bridge.
 
 The job view draws that path as a left-to-right chain, one node per visit
 (a ticket revised twice shows review, fixing, review, fixing, review), the
@@ -26,6 +27,7 @@ handed-off, ...); a finished job's current step does not breathe.
 from __future__ import annotations
 
 import html
+import math
 import re
 from collections import deque
 from collections.abc import Iterable, Sequence
@@ -170,6 +172,12 @@ class Visit(NamedTuple):
     steps: list[JobStep]
 
 
+class Transition(NamedTuple):
+    from_state: str | None
+    to_state: str
+    at: float
+
+
 def chart_visits(
     chart: dict | None, observed: Iterable[tuple[str | None, JobStep | None]]
 ) -> list[Visit]:
@@ -296,32 +304,85 @@ def _started_at(visit: Visit) -> float | None:
     return step.created_at if step.started_at is None else step.started_at
 
 
+def _recorded_walk(
+    chart: dict | None,
+    steps: Sequence[tuple[str, JobStep]],
+    current: str | None,
+    transitions: Sequence[Transition],
+    tracked_at: float | None,
+) -> tuple[list[Visit], list[float | None]]:
+    """The visits and their start times when the ticket has recorded
+    transitions. Before the first row the path is job-derived, unless that
+    row is the ticket's first write (from_state None): then only the start
+    state precedes it, started at tracked_at. Each row is one visit started
+    at its `at` and owning the jobs created before the next row."""
+    known = None if chart is None else {state["name"] for state in chart["states"]}
+    start = None if chart is None else chart["start"]
+    first = transitions[0]
+    if first.from_state is None:
+        walk = [] if start is None else [
+            Visit(start, [step for _, step in steps if step.created_at < first.at])
+        ]
+        opened = tracked_at if tracked_at is not None and tracked_at <= first.at else None
+        starts = [opened] * len(walk)
+    else:
+        before = [(state, step) for state, step in steps if step.created_at < first.at]
+        walk = chart_visits(chart, [(start, None), *before, (first.from_state, None)])
+        starts = [_started_at(visit) for visit in walk]
+    ends = [row.at for row in transitions[1:]] + [math.inf]
+    recorded = [
+        (row.to_state, row.at, [step for _, step in steps if row.at <= step.created_at < end])
+        for row, end in zip(transitions, ends)
+    ]
+    if current is not None and current != transitions[-1].to_state:
+        recorded.append((current, None, []))
+    for state, began, owned in recorded:
+        if known is not None and state not in known:
+            continue
+        if walk and walk[-1].state == state:
+            walk[-1].steps.extend(owned)
+            continue
+        walk.append(Visit(state, owned))
+        starts.append(began)
+    return walk, starts
+
+
 def job_flow(
     chart: dict | None,
     history: Sequence[JobStep],
     current: str | None,
     now: float,
+    transitions: Sequence[Transition] = (),
+    tracked_at: float | None = None,
 ) -> dict:
     """{state, path, state_age_seconds, next, terminal, visits,
     hops_to_shipped, all_durations_known} for a ticket whose jobs, oldest
-    first, are `history`. `next` is the chart's direct successors of the
-    current state; `terminal` says the current state is finished
-    (is_terminal). `visits` holds one entry per `path` state: {state, who,
-    started_at, duration_seconds, time_known, off_chart, reason, current}.
-    A visit ends when the next one starts, else when its last job finished;
-    the current visit counts up to `now`. Unknown times are None."""
+    first, are `history` and whose recorded state changes, oldest first,
+    are `transitions` (_recorded_walk). `next` is the chart's direct
+    successors of the current state; `terminal` says the current state is
+    finished (is_terminal). `visits` holds one entry per `path` state:
+    {state, who, started_at, duration_seconds, time_known, off_chart,
+    reason, current}. A visit ends when the next one starts, else when its
+    last job finished; the current visit counts up to `now`. Unknown times
+    are None."""
     steps = [(JOB_STATES[step.action], step) for step in history if step.action in JOB_STATES]
-    start = chart["start"] if chart is not None else None
-    walk = chart_visits(chart, [(start, None), *steps, (current, None)])
-    path = [visit.state for visit in walk]
     if chart is not None and current is not None and current not in {
         state["name"] for state in chart["states"]
     }:
         current = None
+    if transitions:
+        walk, starts = _recorded_walk(chart, steps, current, transitions, tracked_at)
+    else:
+        start = chart["start"] if chart is not None else None
+        walk = chart_visits(chart, [(start, None), *steps, (current, None)])
+        starts = [_started_at(visit) for visit in walk]
+    path = [visit.state for visit in walk]
     age = None
-    if current is not None and steps and steps[-1][0] == current:
+    if current is not None and transitions and transitions[-1].to_state == current:
+        age = int(max(0.0, now - transitions[-1].at))
+    elif current is not None and steps and steps[-1][0] == current:
         # Time in state counts from the first job of the run that is still
-        # in it (the database records no transition times).
+        # in it, when no recorded transition says when the state began.
         index = len(steps) - 1
         while index > 0 and steps[index - 1][0] == current:
             index -= 1
@@ -331,7 +392,6 @@ def job_flow(
     labels = {} if chart is None else {
         (edge["from"], edge["to"]): edge["label"] for edge in chart["edges"]
     }
-    starts = [_started_at(visit) for visit in walk]
     visits = []
     for i, visit in enumerate(walk):
         began = starts[i]

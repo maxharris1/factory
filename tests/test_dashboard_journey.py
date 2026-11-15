@@ -288,3 +288,158 @@ def test_unusable_telemetry_finish_leaves_the_duration_unknown(
     assert (visit["started_at"], visit["duration_seconds"], visit["time_known"]) == (
         NOW - 700, None, False
     )
+
+
+def _row(from_state, to_state, at):
+    return flow.Transition(from_state, to_state, at)
+
+
+RECORDED_JOBS = [
+    _step("build", "claude", NOW - 5000),
+    _step("review", "codex", NOW - 4000),
+    _step("fix", "claude", NOW - 3000),
+    _step("review", "codex", NOW - 2000),
+]
+RECORDED = [
+    _row(None, "questions", NOW - 6000),
+    _row("questions", "building", NOW - 5000),
+    _row("building", "review", NOW - 4000),
+    _row("review", "fixing", NOW - 3000),
+    _row("fixing", "review", NOW - 2000),
+]
+
+
+def test_fully_recorded_ticket_takes_every_time_from_the_rows() -> None:
+    result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, RECORDED, NOW - 7000)
+    assert [(v["state"], v["who"], v["started_at"], v["duration_seconds"]) for v in result["visits"]] == [
+        ("intake", "script", NOW - 7000, 1000),
+        ("questions", "script", NOW - 6000, 1000),
+        ("building", "claude", NOW - 5000, 1000),
+        ("review", "codex", NOW - 4000, 1000),
+        ("fixing", "claude", NOW - 3000, 1000),
+        ("review", "codex", NOW - 2000, 2000),
+    ]
+    assert [v["off_chart"] for v in result["visits"]] == [False] * 6
+    assert result["visits"][-1]["current"] is True
+    assert result["state_age_seconds"] == 2000
+    assert result["all_durations_known"] is True
+
+
+@pytest.mark.parametrize("tracked_at", [None, NOW - 5500], ids=["untracked", "after-first-row"])
+def test_start_state_has_no_time_without_a_tracked_at_before_the_first_row(tracked_at) -> None:
+    result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, RECORDED, tracked_at)
+    intake, questions = result["visits"][:2]
+    assert (intake["state"], intake["started_at"], intake["duration_seconds"]) == (
+        "intake", None, None
+    )
+    assert (questions["state"], questions["started_at"]) == ("questions", NOW - 6000)
+    assert result["all_durations_known"] is False
+
+
+def test_no_rows_gives_the_job_derived_flow() -> None:
+    history = [
+        _step("plan", "claude", NOW - 7000),
+        _step("build", "claude", NOW - 6000),
+        _step("plan", "claude", NOW - 5000),
+        _step("review", "codex", NOW - 4000),
+        _step("fix", "claude", NOW - 3000),
+        _step("stuck", "grok", NOW - 2000),
+        _step("fix", "claude", NOW - 1000),
+    ]
+    assert flow.job_flow(_chart(), history, "fixing", NOW, (), NOW - 9000) == _fixture_flow()
+
+
+def test_partial_record_keeps_the_leading_visits_job_derived() -> None:
+    rows = [_row("review", "fixing", NOW - 3100), _row("fixing", "review", NOW - 2100)]
+    result = flow.job_flow(_chart(), RECORDED_JOBS, "review", NOW, rows, NOW - 9000)
+    assert [(v["state"], v["started_at"], v["duration_seconds"]) for v in result["visits"]] == [
+        ("intake", None, None),
+        ("questions", None, None),
+        ("building", NOW - 5000, 1000),
+        ("review", NOW - 4000, 900),
+        ("fixing", NOW - 3100, 1000),
+        ("review", NOW - 2100, 2100),
+    ]
+    assert result["all_durations_known"] is False
+
+
+def test_off_chart_recorded_hop_is_not_bridged() -> None:
+    rows = [_row(None, "building", NOW - 3000), _row("building", "review", NOW - 2000)]
+    result = flow.job_flow(
+        _chart(),
+        [_step("build", "claude", NOW - 3000), _step("review", "codex", NOW - 2000)],
+        "review",
+        NOW,
+        rows,
+        NOW - 4000,
+    )
+    assert result["path"] == ["intake", "building", "review"]
+    assert [(v["off_chart"], v["reason"]) for v in result["visits"]] == [
+        (False, None),
+        (True, OFF_CHART),
+        (False, "ready, CI green"),
+    ]
+    assert result["all_durations_known"] is True
+
+
+def test_current_state_past_the_last_row_has_no_start() -> None:
+    rows = [*RECORDED[:-1], _row("fixing", "review", NOW - 2100)]
+    result = flow.job_flow(_chart(), RECORDED_JOBS, "ship", NOW, rows, NOW - 7000)
+    assert [v["state"] for v in result["visits"]][-2:] == ["review", "ship"]
+    assert (result["visits"][-1]["started_at"], result["visits"][-1]["current"]) == (None, True)
+    assert (result["visits"][-2]["started_at"], result["visits"][-2]["duration_seconds"]) == (
+        NOW - 2100, None
+    )
+    assert result["all_durations_known"] is False
+
+
+def _recorded_ticket(connection: sqlite3.Connection) -> None:
+    add_ticket(connection, "maxharris1/cleffy", "63", state="review")
+    add_job(connection, "r-build", action="build", state="done", ticket_id="63",
+            created_at=NOW - 2000)
+    add_job(connection, "r-review", action="review", recipient="codex", state="running",
+            ticket_id="63", created_at=NOW - 1000)
+    connection.executemany(
+        "INSERT INTO ticket_transitions (repo, ticket_id, from_state, to_state, at, source) "
+        "VALUES (?, '63', ?, ?, ?, 'test')",
+        [
+            ("maxharris1/cleffy", "building", "review", NOW - 1000),
+            ("maxharris1/cleffy", None, "questions", NOW - 3000),
+            ("maxharris1/cleffy", "questions", "building", NOW - 2000),
+            ("maxharris1/other", None, "planning", NOW - 2500),
+        ],
+    )
+
+
+def test_snapshot_reads_recorded_transitions(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _recorded_ticket(connection)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "63")
+    assert [(v["state"], v["who"], v["started_at"], v["duration_seconds"])
+            for v in job["flow"]["visits"]] == [
+        ("intake", "script", NOW - 3600, 600),
+        ("questions", "script", NOW - 3000, 1000),
+        ("building", "claude", NOW - 2000, 1000),
+        ("review", "codex", NOW - 1000, 1000),
+    ]
+    assert job["flow"]["state_age_seconds"] == 1000
+    assert job["flow"]["all_durations_known"] is True
+
+
+def test_snapshot_without_the_transitions_table(tmp_path: Path) -> None:
+    db, log = seeded(tmp_path)
+    with sqlite3.connect(db) as connection:
+        _recorded_ticket(connection)
+        connection.execute("DROP TABLE ticket_transitions")
+    snapshot = collect_snapshot(db, log, now=NOW)
+    job = next(row for row in snapshot["running"] if row["ticket_id"] == "63")
+    assert [(v["state"], v["started_at"], v["duration_seconds"])
+            for v in job["flow"]["visits"]] == [
+        ("intake", None, None),
+        ("questions", None, None),
+        ("building", NOW - 2000, 1000),
+        ("review", NOW - 1000, 1000),
+    ]
+    assert job["flow"]["all_durations_known"] is False
