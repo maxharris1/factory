@@ -1936,3 +1936,13 @@ def test_a_malformed_held_record_is_ignored(tmp_path: Path) -> None:
     db, _ = make_db(tmp_path)
     (db.parent / "linear-webhook-tunnel.held").write_text("8787 $(evil)\n")
     assert health.read_tunnel_held(db) is None
+
+
+def test_a_held_port_shows_before_any_component_has_reported(tmp_path: Path) -> None:
+    db, _ = make_db(tmp_path)
+    assert not health.health_path(db).exists()
+    (db.parent / "linear-webhook-tunnel.held").write_text("8787 pc-wsl-cursor-bot\n")
+    report = health.load_report(db, NOW, orch=orch(listener=True))
+    assert report.known
+    assert [(c.state, c.reason) for c in _tunnel(report)] == [
+        ("down", "port held by another owner: 8787 on pc-wsl-cursor-bot")]

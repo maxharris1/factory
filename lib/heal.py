@@ -509,7 +509,7 @@ def heal(
     for label, key in states.items():
         if label not in acted:
             key.last = None
-        if label not in held_port:
+        if report.get("known") and label not in held_port:
             key.alerted = None
     escalations = [a for a in actions if a.kind == ESCALATE]
     if escalations and not dry_run:
@@ -518,7 +518,7 @@ def heal(
         for action in escalations:
             key = states.setdefault(action.label, KeyState())
             key.escalated_at = now
-            if action.label in held_port and not outcome.startswith("escalation failed"):
+            if action.label in held_port and outcome == "escalated":
                 key.alerted = action.reason
             log(f"escalate {action.label} ({action.reason}) {outcome}")
     for key in states.values():

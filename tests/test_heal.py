@@ -425,3 +425,24 @@ def test_a_failed_port_held_alert_is_sent_again_on_the_next_pass(tmp_path: Path)
     run_heal(tmp_path, report(HELD_TUNNEL), posts=Posts(status=500))
     _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + 120)
     assert len(posts.calls) == 1
+
+
+def test_a_port_held_alert_skipped_for_a_missing_url_is_sent_once_configured(
+    tmp_path: Path,
+) -> None:
+    unconfigured = {"PATH": "/usr/bin", **SECRETS}
+    unconfigured.pop(WEBHOOK.url_env)
+    _, _, posts = run_heal(tmp_path, report(HELD_TUNNEL), environ=unconfigured)
+    assert posts.calls == []
+    sent = [len(run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + later)[2].calls)
+            for later in (120, 3600)]
+    assert sent == [1, 0]
+
+
+def test_an_unknown_report_does_not_end_a_port_held_episode(tmp_path: Path) -> None:
+    run_heal(tmp_path, report(HELD_TUNNEL))
+    run_heal(tmp_path, {"known": False, "error": "cannot read health: OperationalError"},
+             now=NOW + 60)
+    sent = [len(run_heal(tmp_path, report(HELD_TUNNEL), now=NOW + later)[2].calls)
+            for later in (120, 3600)]
+    assert sent == [0, 0]

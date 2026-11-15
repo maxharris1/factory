@@ -1158,12 +1158,12 @@ def build_report(
     is the `PORT on HOST` the tunnel loop gave up on, if any."""
     checkout = checkout_version
     checkouts = tuple(devices)
-    if rows is None:
+    if rows is None and not tunnel_held:
         return HealthReport(known=False, code_version=checkout, devices=checkouts)
     registry = expected if expected is not None else Expected(
         (Slot(POLLER, (DEFAULT_DEVICE,)),), frozenset({POLLER}))
     best: dict[tuple[str, str, str], Component] = {}
-    for row in _latest_checks(rows):
+    for row in _latest_checks(rows or ()):
         state, reason = classify(row, now)
         item = Component(
             component=row.component,
