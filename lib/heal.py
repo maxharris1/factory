@@ -39,20 +39,19 @@ Per component (its health label), in order:
    grok.webhook_url_env); the URL and auth values come from the environment
    and are never logged.
 
-Drain (#219): a waiter running stale code (and not down) is restarted
-only once it has stopped claiming and has no job in flight. Its marker
-waiter-<bot>.drain, naming the checkout's commit, makes the waiter stop
-claiming (lib/waiter.py); the waiter then writes waiter-<bot>.drain.ack
-naming the same commit, after its last claim. A pass reads the ack before
-it counts running jobs (orch.db, by harness; a count that cannot be read
-counts as busy), so a restart decided on an ack and a zero count cannot
-race a claim. The ack holds across a respawn: a waiter on the marked
-commit honours an acknowledged marker too (lib/waiter.py), so its
-replacement cannot claim before the restart. Writing a new marker removes
-the old ack. A pass that finds
-an idle waiter without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for
-it, so an idle waiter still restarts in the same pass; a busy one restarts
-on the first pass after its last job. A drain longer than
+Drain (#219, #309): a waiter running stale code (and not down) is
+restarted once it has stopped claiming. Its marker waiter-<bot>.drain,
+naming the checkout's commit, makes the waiter stop claiming
+(lib/waiter.py); the waiter then writes waiter-<bot>.drain.ack naming the
+same commit, from a step that has already decided not to claim, so any
+earlier claim has started and been recorded. The restart does not wait for
+running jobs: they run in their own session, and the replacement waiter
+adopts the remote ones as after a crash. The ack holds across a respawn: a
+waiter on the marked commit honours an acknowledged marker too
+(lib/waiter.py), so its replacement cannot claim before the restart.
+Writing a new marker removes the old ack. A pass that finds a waiter
+without an ack waits up to ACK_POLLS * ACK_POLL_SECONDS for it, so the
+waiter restarts in the same pass. A drain longer than
 DRAIN_ESCALATE_SECONDS escalates once per window and kills nothing. The
 marker and ack of owned waiters no longer draining are removed, and the
 waiter's service start removes both.
@@ -119,12 +118,10 @@ class Facts:
     owned: frozenset[str] = frozenset()
     held: frozenset[str] = frozenset()
     listener_busy: bool = False
-    # Running jobs per owned waiter bot; None when the count could not be read.
-    waiter_jobs: Mapping[str, int | None] = field(default_factory=dict)
     # When each bot's drain marker was written (its mtime).
     drain_since: Mapping[str, float] = field(default_factory=dict)
     # The commit each bot's waiter acknowledged draining for, when its ack
-    # matches the marker; read before waiter_jobs.
+    # matches the marker.
     drain_acked: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -244,21 +241,17 @@ def decide(
             continue
         if item.get("state") != health.DOWN and service.startswith("waiter:"):
             bot = service.split(":", 1)[1]
-            jobs = facts.waiter_jobs.get(bot, 0)
             acked = bool(report.get("code_version")) and (
                 facts.drain_acked.get(bot) == str(report.get("code_version")))
-            if jobs is None or jobs > 0 or not acked:
-                count = "unknown" if jobs is None else str(jobs)
-                state = (f"{count} running jobs" if jobs != 0
-                         else "waiting for the waiter to stop claiming")
-                actions.append(act(DRAIN, f"stale code, {state}"))
+            if not acked:
+                actions.append(act(DRAIN, "stale code, waiting for the waiter to stop claiming"))
                 since = facts.drain_since.get(bot)
                 if (escalation is None and since is not None
                         and now - since >= DRAIN_ESCALATE_SECONDS
                         and (key.escalated_at is None
                              or now - key.escalated_at >= WINDOW_SECONDS)):
                     actions.append(act(ESCALATE, f"draining for {int((now - since) // 60)}m, "
-                                                 f"{state}"))
+                                                 "waiting for the waiter to stop claiming"))
                 continue
         if len(attempts) >= MAX_ATTEMPTS:
             actions.append(act(SKIP, f"backoff: {len(attempts)} restarts in "
@@ -448,13 +441,12 @@ def heal(
         for action in actions:
             if action.kind == DRAIN:
                 _mark_drain(state_dir, action.service.split(":", 1)[1], version)
-        idle = {a.service.split(":", 1)[1] for a in actions
-                if a.kind == DRAIN and facts.waiter_jobs.get(a.service.split(":", 1)[1]) == 0}
-        if idle and refresh is not None:
+        unacked = {a.service.split(":", 1)[1] for a in actions if a.kind == DRAIN}
+        if unacked and refresh is not None:
             for _ in range(ACK_POLLS):
                 sleep(ACK_POLL_SECONDS)
                 facts = refresh()
-                if all(facts.drain_acked.get(bot) == version for bot in idle):
+                if all(facts.drain_acked.get(bot) == version for bot in unacked):
                     break
             actions = decide(report, states, facts, now)
     child_env = {k: v for k, v in environ.items() if k not in webhook.secret_names}
@@ -531,7 +523,6 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
         owned.add(POLLER_SERVICE)
     if (config_dir / "linear-webhook-autostart").is_file():
         owned.add(LISTENER_SERVICE)
-    jobs: dict[str, int | None] = {}
     drains: dict[str, float] = {}
     acked: dict[str, str] = {}
     for bot in health.OWNING_BOTS:
@@ -544,7 +535,6 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
             ack = _read(drain_ack_path(state_dir, bot))
             if ack is not None and ack == _read(drain_path(state_dir, bot)):
                 acked[bot] = ack
-            jobs[bot] = running_jobs(db, health.OWNING_BOTS[bot])
         if (state_dir / f"waiter-{bot}.stopped").exists():
             held.add(f"waiter:{bot}")
     if (state_dir / "poller.stopped").exists():
@@ -552,26 +542,7 @@ def facts_for(device: str, config_dir: Path, state_dir: Path, db: Path | None,
     if (state_dir / "linear-webhook.stopped").exists():
         held.add(LISTENER_SERVICE)
     return Facts(device, frozenset(owned), frozenset(held), _listener_busy(db, now),
-                 jobs, drains, acked)
-
-
-def running_jobs(db: Path | None, recipient: str) -> int | None:
-    """Jobs claimed or running for a harness (a claim moves a job to
-    running), or None when the queue cannot be read: never restart on doubt."""
-    if db is None or not db.is_file():
-        return None
-    try:
-        connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
-        try:
-            row = connection.execute(
-                "SELECT count(*) FROM jobs WHERE state = 'running' AND recipient = ?",
-                (recipient,),
-            ).fetchone()
-        finally:
-            connection.close()
-    except sqlite3.Error:
-        return None
-    return int(row[0]) if row else None
+                 drains, acked)
 
 
 def _listener_busy(db: Path | None, now: float) -> bool:
