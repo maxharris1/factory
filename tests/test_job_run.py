@@ -475,6 +475,28 @@ def test_cli_job_run_gives_the_command_a_job_tmpdir_and_removes_it(
     assert not (job_dir / "tmp").exists()
 
 
+def test_cli_job_run_removes_a_job_tmpdir_its_command_locked(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    job = _running_job(queue)
+    locked = tmp_path / "jobs" / job.id / "tmp" / "locked"
+    script = (
+        "import os, pathlib; locked = pathlib.Path(os.environ['TMPDIR'], 'locked'); "
+        "locked.mkdir(); (locked / 'x').write_text('scratch'); locked.chmod(0)"
+    )
+    proc = _orch(
+        "job", "run", "codex-bot", job.id, "--db", str(queue.path),
+        "--", sys.executable, "-c", script,
+        env={"ORCH_JOB_STATE_DIR": str(locked.parent.parent)},
+    )
+    try:
+        _, stderr = proc.communicate(timeout=20)
+        assert proc.returncode == 0, stderr
+        assert not locked.parent.exists()
+    finally:
+        if locked.exists():
+            locked.chmod(0o700)
+
+
 @pytest.mark.parametrize("state", ["queued", "done"])
 def test_cli_job_run_refuses_a_job_that_is_not_running(tmp_path: Path, state: str) -> None:
     queue = _queue(tmp_path)

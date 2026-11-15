@@ -44,6 +44,7 @@ from lib.harness_env import harness_env
 from lib.hook_t7 import T7Hook
 from lib.hook_t8 import T8Hook
 from lib.load import Finding
+from lib.scratch import remove as remove_scratch
 from lib.device_monitor import DeviceMonitor
 from lib.feeder import Feeder
 from lib.intake_live import GitHubIntakeClient, LinearIntakeClient
@@ -1677,7 +1678,8 @@ def _job_run_command(argv: list[str]) -> int:
         return made.path
 
     def teardown() -> None:
-        shutil.rmtree(scratch, ignore_errors=True)
+        if (failure := remove_scratch(scratch)) is not None:
+            log(failure)
         for path in reversed(created):
             with contextlib.suppress(OSError):
                 path.rmdir()
