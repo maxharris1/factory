@@ -5,6 +5,7 @@ cannot break that teardown."""
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -144,4 +145,58 @@ def test_the_guard_fails_a_test_that_leaves_an_untagged_child(tmp_path: Path) ->
     pid = int(record.read_text(encoding="utf-8"))
     assert result.returncode != 0, result.stdout + result.stderr
     assert f"{pid} HOME= sleep 60" in result.stdout
+    assert not alive(pid)
+
+
+SELF_HEAL = '''
+import os
+import signal
+import subprocess
+
+
+def _self_heal(command):
+    environment = {{"HOME": {home!r}, "ORCH_DB": {db!r}, "PATH": os.environ["PATH"],
+                    "ORCH_BIN": "/bin/true", "ORCH_HEAL_SECONDS": "60"}}
+    result = subprocess.run(["bash", {script!r}, command], env=environment,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_self_heal():
+    _self_heal("start")
+    with open({pidfile!r}) as source, open({record!r}, "w") as copy:
+        copy.write(source.read())
+    {stop}
+'''
+
+
+def _self_heal_run(tmp_path: Path, stop: str) -> tuple[subprocess.CompletedProcess, int]:
+    home = tmp_path / "home"
+    body = SELF_HEAL.format(home=str(home), db=str(tmp_path / "orch.db"),
+                            script=str(ROOT / "deploy/self-heal.sh"), stop=stop,
+                            pidfile=str(home / ".local/state/factory/self-heal.pid"),
+                            record=str(tmp_path / "pid"))
+    record = tmp_path / "pid"
+    pid = 0
+    try:
+        result = _run_guarded(tmp_path, body)
+        pid = int(record.read_text(encoding="utf-8"))
+        return result, pid
+    finally:
+        if pid and alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_the_guard_fails_a_test_that_leaves_a_scrubbed_self_heal_loop(tmp_path: Path) -> None:
+    result, pid = _self_heal_run(tmp_path, "pass")
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "left processes running" in result.stdout
+    assert f"{pid} HOME={tmp_path / 'home'}" in result.stdout
+    assert not alive(pid)
+
+
+def test_the_guard_passes_a_test_that_stops_its_self_heal_loop(tmp_path: Path) -> None:
+    result, pid = _self_heal_run(tmp_path, '_self_heal("stop")')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
     assert not alive(pid)
