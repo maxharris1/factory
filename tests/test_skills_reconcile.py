@@ -418,7 +418,7 @@ def test_a_waiter_does_not_clear_a_lagging_mark_on_its_own_box_row(
     assert rows(queue) == [("box", "codex-bot", "lagging", "preflight-lagging: box")]
 
 
-def test_an_install_skills_retry_waits_while_the_box_runs_a_job(
+def test_an_install_skills_retry_runs_while_the_box_runs_a_job(
     tmp_path: Path, box_behind_new_pin: tuple[Path, Path]
 ) -> None:
     from lib.device_pool import slots_in_use
@@ -460,26 +460,15 @@ def test_an_install_skills_retry_waits_while_the_box_runs_a_job(
     shutil.rmtree(conflict)
     enqueue(queue, "1")
     assert pool.claim("codex") is not None
-    before = installed.read_bytes()
 
-    busy = self_deploy.deploy(box, tmp_path / "state", **kw)
+    retry = self_deploy.deploy(box, tmp_path / "state", **kw)
 
-    assert busy.kind == self_deploy.BUSY
-    assert installed.read_bytes() == before
-    assert not (home / ".agents/skills/review-retry-skill").exists()
-    assert calls == [({}, 1)]
-    with queue.connect() as connection:
-        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "running"
-        connection.execute("UPDATE jobs SET state = 'done'")
-        connection.execute("DELETE FROM device_slots")
-        connection.commit()
-
-    idle = self_deploy.deploy(box, tmp_path / "state", **kw)
-
-    assert idle.kind == self_deploy.UP_TO_DATE
-    assert calls == [({}, 1), ({}, 0)]
+    assert retry.kind == self_deploy.UP_TO_DATE
+    assert calls == [({}, 1), ({"box": 1}, 0)]
     assert b"Merged content." in installed.read_bytes()
     assert pstack_pin.installed_errors(box, home) == []
+    with queue.connect() as connection:
+        assert connection.execute("SELECT state FROM jobs").fetchone()[0] == "running"
 
 
 def account_checkout_config(tmp_path: Path) -> MachinesConfig:

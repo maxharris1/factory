@@ -1,0 +1,9 @@
+decision	choice	why
+deploy rule	box deploys whatever its job count; the deploying mark still blocks placement during the move	smallest change; a bounded wait (option B) adds stored state and with a 2-minute timer any grace over about 2 minutes misses ac-1's 5-minute bound
+running job safety	rely on orch job run holding its code in memory; guard with an AST test of function-level lib imports on the job-run path	encodes the safety claim as a check so a later lazy import fails CI
+ac-2 proof	end-to-end test runs this commit's bin/orch job run from a box clone, deploys a lib/ change under it, then orch job done from the moved checkout	exercises the real cross-version path instead of a fake
+ac-3 proof	box_behind_origin plus pool.claim with a job still running	box_behind_origin is the lagging gate skill_preflight.check runs for a box start; the Repo fixture has no skills.lock for the full check
+remote devices	unchanged; lib/device_deploy.py keeps its drain-first rule	no criterion names a remote; remote starts unblock once the box stops lagging
+machines argument	dropped from self_deploy.deploy and run_pass	its only use was the job count
+implementation owner	main job wrote the diff instead of a poteto-agent delegate	small two-file change on one code path under a 60-minute wall-clock budget
+red then green	the five changed tests fail on origin/main's self_deploy.py with outcome busy and pass after	the guard test passes on both by design

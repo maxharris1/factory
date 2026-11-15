@@ -31,13 +31,13 @@ marks the target lagging, so placement skips that device until
 `orch heal devices` brings it up to date. The check is skipped when the box
 HEAD cannot be read. A remote start is also refused while the box checkout
 itself is behind its fetched origin/main (`preflight-lagging: box ...`), so
-a busy or refused box deploy never lets a remote run the old commit. On the
-box the checkout's HEAD is compared with its own fetched origin/main
-instead: a box HEAD behind it (self-deploy has not moved it yet, say a job
-was running) fails the same way, until it deploys. A box factory_root other
-than the box checkout (a per-account checkout, #345) must also sit at the
-box HEAD, the same rule as a remote, and is refused while the box checkout
-lags its origin/main; the waiter's idle sync moves it.
+a pending or refused box deploy never lets a remote run the old commit. On
+the box the checkout's HEAD is compared with its own fetched origin/main
+instead: a box HEAD behind it (self-deploy has not moved it yet) fails the
+same way, until it deploys. A box factory_root other than the box checkout
+(a per-account checkout, #345) must also sit at the box HEAD, the same rule
+as a remote, and is refused while the box checkout lags its origin/main; the
+waiter's idle sync moves it.
 A box HEAD with commits origin/main lacks is not refused here; self-deploy
 escalates it and health flags it.
 
