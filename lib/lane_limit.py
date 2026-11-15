@@ -188,6 +188,11 @@ def until(limit: UsageLimit, readings: list[usage_readings.Reading], now: float)
     return int(now) + DEFAULT_LIMIT_SECONDS, "default"
 
 
+def _valid(found: list[usage_readings.Reading]) -> list[usage_readings.Reading]:
+    checked = (usage_readings.from_row(r.window, r.used, r.resets_at, r.observed_at) for r in found)
+    return [r for r in checked if r is not None]
+
+
 def readings(connection: sqlite3.Connection, harness: str, bot: str) -> list[usage_readings.Reading]:
     if not _has_table(connection, usage_readings.TABLE):
         return []
@@ -198,7 +203,7 @@ def readings(connection: sqlite3.Connection, harness: str, bot: str) -> list[usa
         """,
         (harness, bot),
     ).fetchall()
-    return [r for r in (usage_readings.from_row(*row) for row in rows) if r is not None]
+    return _valid([usage_readings.Reading(*row) for row in rows])
 
 
 def record(
@@ -233,10 +238,15 @@ def record(
     return active(connection, recipient, now)
 
 
-def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
-    """Fold the account's stored readings into its per-window evidence, then
-    move each of its limits that has newer evidence to when every window is
-    free, in the caller's transaction."""
+def reevaluate(
+    connection: sqlite3.Connection,
+    harness: str,
+    bot: str,
+    incoming: list[usage_readings.Reading],
+) -> None:
+    """Fold the incoming and stored readings into the account's per-window
+    evidence, then move each of its limits that has newer evidence to when
+    every window is free, in the caller's transaction."""
     connection.execute(EVIDENCE_DDL)
     connection.executemany(
         f"""
@@ -248,7 +258,7 @@ def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
         """,
         [
             (harness, bot, r.window, r.observed_at, r.observed_at if r.used < 1.0 else r.resets_at)
-            for r in readings(connection, harness, bot)
+            for r in [*_valid(incoming), *readings(connection, harness, bot)]
             if r.used is not None
         ],
     )
@@ -261,10 +271,12 @@ def reevaluate(connection: sqlite3.Connection, harness: str, bot: str) -> None:
     if not evidence:
         return
     newest = max(observed for observed, _ in evidence)
-    free = math.ceil(max(free_at for _, free_at in evidence))
+    free = max(free_at for _, free_at in evidence)
+    all_free = free <= newest
+    until_sql = "MIN(until, ?)" if all_free else "?"
     connection.execute(
-        f"UPDATE {TABLE} SET until = ? WHERE harness = ? AND bot = ? AND limited_at < ?",
-        (free, harness, bot, newest),
+        f"UPDATE {TABLE} SET until = {until_sql} WHERE harness = ? AND bot = ? AND limited_at < ?",
+        (math.ceil(free), harness, bot, newest),
     )
 
 
