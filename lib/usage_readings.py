@@ -226,7 +226,7 @@ def store(
             for r in readings
         ],
     )
-    lane_limit.reevaluate(connection, harness, bot)
+    lane_limit.reevaluate(connection, harness, bot, readings)
 
 
 def from_row(window: object, used: object, resets_at: object, observed_at: object) -> Reading | None:
