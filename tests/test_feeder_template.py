@@ -95,6 +95,9 @@ def test_a_fenced_template_does_not_count() -> None:
         "Merges cleanly with the other PRs in the lane.",
         "No conflicts with any open pull request.",
         "PR #157 is merged first.",
+        "Pull request #157 is merged first.",
+        "Waits for pull requests #3 and #4.",
+        "Lands after PR 12.",
         "Lands after https://github.com/owner/app/pull/12 does.",
     ],
 )
@@ -103,6 +106,71 @@ def test_an_other_prs_criterion_is_refused(criterion: str) -> None:
     assert {defect.code for defect in parsed.defects} == {"other-prs-criterion"}
     assert criterion in parsed.defects[0].reason
     assert "Blocked by" in parsed.defects[0].reason
+
+
+@pytest.mark.parametrize(
+    ("lines", "joined"),
+    [
+        (("- [ ] No conflicts with", "  any open pull request."), "No conflicts with any open pull request."),
+        (("- [ ] No conflicts with", "any open pull request."), "No conflicts with any open pull request."),
+        (("1. Lands after", "", "   pull request #12."), "Lands after pull request #12."),
+    ],
+    ids=["indented", "lazy", "after-blank"],
+)
+def test_a_wrapped_other_prs_criterion_is_refused(lines: tuple[str, ...], joined: str) -> None:
+    parsed = parse_intake(body(criteria=lines), ())
+    assert {defect.code for defect in parsed.defects} == {"other-prs-criterion"}
+    assert joined in parsed.defects[0].reason
+
+
+def test_wrapped_items_stay_separate_items() -> None:
+    parsed = parse_intake(
+        body(criteria=("- [ ] The feeder", "  refuses it.", "", "Notes after the list.",
+                       "- [ ] ops: Max restarts", "  the poller.")),
+        (),
+    )
+    assert parsed.criteria == ("The feeder refuses it.",)
+    assert parsed.ops_criteria == ("Max restarts the poller.",)
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "Users can manually trigger the retry from the dashboard.",
+        "Operators can edit the list by hand.",
+        "The dispatcher can restart the stuck job.",
+    ],
+)
+def test_functionality_that_mentions_manual_work_is_a_builder_criterion(criterion: str) -> None:
+    parsed = parse_intake(body(criteria=(f"- [ ] {criterion}",)), ())
+    assert parsed.defects == ()
+    assert parsed.criteria == (criterion,)
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    ["Manually rotate the key.", "By hand, clear the stale lock.", "Restart the poller.",
+     "Max sets ORCH_LIMIT to 3.", "The operator installs the poller."],
+)
+def test_an_operator_step_is_an_ops_criterion(criterion: str) -> None:
+    parsed = parse_intake(body(criteria=("- [ ] It works.", f"- [ ] {criterion}")), ())
+    assert parsed.ops_criteria == (criterion,)
+
+
+@pytest.mark.parametrize(
+    ("criterion", "expected"),
+    [
+        ("No conflicts with\n  any open pull request.", (0, 1, 0)),
+        ("Pull request #157 is merged first.", (0, 1, 0)),
+        ("Users can manually trigger the retry from the dashboard.", (1, 0, 1)),
+    ],
+    ids=["wrapped", "spelled-out", "user-manual"],
+)
+def test_the_feeder_classifies_review_repros(tmp_path: Path, criterion: str, expected) -> None:
+    feeder, _, github, _ = make_feeder(tmp_path)
+    github.issues[HOME] = [issue(7, body=body(criteria=("- [ ] " + criterion,)), template=False)]
+    report = feeder.feed_once()
+    assert (len(report.fed), report.refused, len(github.pulls)) == expected
 
 
 def test_a_plain_issue_reference_is_not_an_other_prs_criterion() -> None:

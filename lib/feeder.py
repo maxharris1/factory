@@ -178,7 +178,6 @@ _FENCE = re.compile(r"^\s*(```|~~~)")
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _CRITERIA_HEADING = re.compile(r"^(?:\*\*|__)?acceptance\s+criteria(?:\*\*|__)?:?$", re.IGNORECASE)
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s*)?(.*)$")
-_EMPTY_CHECKBOX = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[[ xX]\]\s*$")
 _FIELD = r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?\s*{name}\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(?P<value>.*?)\s*$"
 _RISK_LINE = re.compile(_FIELD.format(name=r"risk"), re.IGNORECASE)
 _PLAN_LINE = re.compile(_FIELD.format(name=r"plan\s+first(?:\s*\(yes\s*/\s*no\))?"), re.IGNORECASE)
@@ -189,13 +188,13 @@ _OTHER_PRS = (
         re.IGNORECASE,
     ),
     re.compile(r"\bmerges?\s+(?:cleanly|without\s+(?:a\s+)?conflicts?)\s+(?:against|with)\b", re.IGNORECASE),
-    re.compile(r"\bPR\s*#\d+\b", re.IGNORECASE),
+    re.compile(r"\b(?:PRs?|pull\s+requests?)\s*(?:#|number\s+|no\.\s*)?\d+\b", re.IGNORECASE),
     re.compile(r"/pull/\d+\b"),
 )
 _OPS_TAG = re.compile(r"^(?:ops\s*:|\(ops\)|\[ops\])\s*", re.IGNORECASE)
 _OPS_ACTION = re.compile(
-    r"\bby\s+hand\b|\bmanually\b|\bon\s+the\s+box\b|\bMax\s+(?:runs|installs|restarts|sets)\b|"
-    r"\brestart\s+the\b|\binstall\s+the\s+poller\b",
+    r"^(?:manually|by\s+hand)\b|^(?:restart|install|reboot|rotate)\s+the\b|\bon\s+the\s+box\b|"
+    r"\b(?:Max|the\s+operator|an\s+operator)\s+(?:runs|installs|restarts|sets|rotates|deploys)\b",
     re.IGNORECASE,
 )
 
@@ -242,20 +241,34 @@ def _field(lines: Sequence[str], pattern: re.Pattern[str]) -> str | None:
 def _criteria_items(lines: Sequence[str]) -> list[str]:
     items: list[str] = []
     level: int | None = None
+    open_item = blank = False
     for line in lines:
         heading = _HEADING.match(line)
         if heading:
+            open_item = blank = False
             depth = len(heading.group(1))
             if level is not None and depth <= level:
                 level = None
             if level is None and 2 <= depth <= 4 and _CRITERIA_HEADING.match(heading.group(2)):
                 level = depth
             continue
-        if level is None or _EMPTY_CHECKBOX.match(line):
+        if level is None:
+            continue
+        if not line.strip():
+            blank = True
             continue
         item = _LIST_ITEM.match(line)
-        if item and item.group(1).strip():
-            items.append(item.group(1).strip())
+        if item:
+            current = item.group(1).strip()
+            if current:
+                items.append(current)
+            open_item, blank = bool(current), False
+            continue
+        if open_item and (not blank or line[:1].isspace()):
+            items[-1] = f"{items[-1]} {line.strip()}"
+        else:
+            open_item = False
+        blank = False
     return items
 
 
