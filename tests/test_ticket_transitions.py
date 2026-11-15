@@ -204,7 +204,7 @@ def test_journey_owners_survive_jobs_enqueued_before_their_transition(
             for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
         tracked_at = connection.execute("SELECT tracked_at FROM tracked_tickets").fetchone()[0]
-    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"], r["source"]) for r in _rows(board)]
     assert any(job.created_at < row.at for job in jobs for row in rows if job.action == "build"
                and row.to_state == "building"), "the build is enqueued before its transition"
 
@@ -241,7 +241,7 @@ def test_a_legacy_tickets_first_row_keeps_the_older_review_on_its_own_visit(
             JobStep(r["action"], r["recipient"], r["created_at"], None, None)
             for r in connection.execute("SELECT * FROM jobs ORDER BY created_at, rowid")
         ]
-    rows = [Transition(r["from_state"], r["to_state"], r["at"]) for r in _rows(board)]
+    rows = [Transition(r["from_state"], r["to_state"], r["at"], r["source"]) for r in _rows(board)]
     assert [(row.from_state, row.to_state) for row in rows] == [("ship", "review")]
 
     result = job_flow(load_chart(), jobs, "review", board.now[0], rows, None)

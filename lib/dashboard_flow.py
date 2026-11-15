@@ -54,6 +54,7 @@ JOB_STATES = {
     "refused": "refused",
     "awaiting-ok": "awaiting-ok",
 }
+QUEUES_JOB_BEFORE_ROW = "set-state"
 # Plain words under a state's name. Only text: states and transitions all
 # come from the chart.
 GLOSS = {
@@ -176,6 +177,7 @@ class Transition(NamedTuple):
     from_state: str | None
     to_state: str
     at: float
+    source: str
 
 
 def chart_visits(
@@ -343,6 +345,8 @@ def _first_row_floor(
     )
     if not _every_path_visits(chart, last_state, first.from_state, first.to_state):
         return last_other_job
+    if first.source != QUEUES_JOB_BEFORE_ROW:
+        return first.at
     kept_by_old_visit, *later = sorted(
         (step.created_at, step.attempt) for state, step in steps
         if state == first.to_state and last_other_job < step.created_at < first.at

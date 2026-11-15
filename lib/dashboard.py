@@ -1543,7 +1543,7 @@ def _add_job_tickets(
     recorded: dict[tuple[str, str], list[Transition]] = {key: [] for key in wanted}
     if "ticket_transitions" in tables:
         for row in connection.execute(
-            "SELECT repo, ticket_id, from_state, to_state, at FROM ticket_transitions "
+            "SELECT repo, ticket_id, from_state, to_state, at, source FROM ticket_transitions "
             f"WHERE ticket_id IN ({marks}) ORDER BY at, id",
             ids,
         ):
@@ -1555,6 +1555,7 @@ def _add_job_tickets(
                     else _enum(row["from_state"], WORKFLOW_STATES),
                     _enum(row["to_state"], WORKFLOW_STATES),
                     float(at),
+                    str(row["source"]),
                 ))
     tracked_at: dict[tuple[str, str], float] = {}
     if "tracked_tickets" in tables:
