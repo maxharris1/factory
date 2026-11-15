@@ -1,0 +1,12 @@
+decision	choice	why
+T2 on pending CI (choice A)	queue the review and handle the ready; record no CI result yet	one review job by construction; the ready is handled and the review dedupe key backs it up
+T2 on red CI at ready time (choice D)	today's CI fix, no review	a known-red head goes straight to the fix, which is faster; the ticket's point is to stop waiting on pending CI
+T3 REVISE on pending CI (rejected C)	wait: the verdict stays unhandled (revise-ci-pending)	a red result after the REVISE would otherwise go unrecorded or need a second fix job
+T3 REVISE on red CI	one fix job whose instruction is the verdict link plus the CI log	AC-3 asks for one fix job carrying both
+T3 at the cap	no CI wait when the REVISE caps the ticket	no fix job follows, so CI has nothing to gate
+T4 APPROVE on red CI	record red, queue the CI fix, state fixing, round not used	a gate retry is not a round (SPEC section 8); no blocked wake fires
+T4 APPROVE on green CI	record green before ship	a green verdict head resets the red count, as a green ready does today
+live vs recorded CI	T3 and T4 decide on the live CI status and take only the count from _record_ci_result	a head recorded green whose rerun went red must not hang or skip the fix
+stuck counter	no new counter; every path records through _record_ci_result and checks count >= 3	ci-red-3 keeps today's meaning, one count per head
+T2 refactor	CI-red tail split into _ci_red_stuck and _queue_ci_fix, shared by T2, T3 and T4	same dedupe key and wake text; the off path is byte-identical
+TLA model	model/Orchestrator.tla unchanged	it abstracts CI on that SHA; the T4-red-to-fixing edge is a follow-up if the reviewer wants it

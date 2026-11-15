@@ -15,7 +15,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import Comment, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 
@@ -108,22 +108,25 @@ class ReadyMixin:
         ):
             return True, "stale-ready-verdict"
         result = ticket.ci.get(head) or ticket.ci.get(reported_head)
-        if result is None or result.status == "pending":
+        pending = result is None or result.status == "pending"
+        if pending:
             if (
                 (result is None or not result.reported)
                 and ticket.mergeable_state == "dirty"
                 and state not in WATCHED_STATES
             ):
                 return False, self._queue_base_update(ticket, comment, head, review_round)
-            return False, "ci-pending"
+            if not ticket.factory.start_before_ci:
+                return False, "ci-pending"
         if reentry is not None:
             if not self._reenter_after_handoff(ticket, reentry):
                 return True, "stale-ready"
             review_round = reentry
-        timeout_seconds = ticket.job_timeout_minutes * 60
-        recorded_status, count = self._record_ci_result(ticket, head, result.status)
+        recorded_status, count = (
+            ("pending", 0) if pending else self._record_ci_result(ticket, head, result.status)
+        )
         generation = self._generation(ticket.repo, ticket.ticket_id)
-        if recorded_status == "success":
+        if recorded_status in ("pending", "success"):
             queued, answered = self._queue_review(
                 ticket, comment, head=head, generation=generation
             )
@@ -133,19 +136,45 @@ class ReadyMixin:
                 self._leave_merge_queue(ticket, "update-rereview")
             self._set_workflow_state(ticket, "review")
             return True, "answered-review" if answered else "queued-review"
-        if count >= 3:
-            self._mark_stuck_and_wake(
-                repo=ticket.repo,
-                ticket_id=ticket.ticket_id,
-                source_comment_id=comment.id,
-                timeout_seconds=timeout_seconds,
-                reason="ci-red-3",
-                detail=self._project_wake_detail(
-                    ticket,
-                    f"CI failed three times in a row; latest head {head}",
-                ),
-            )
+        assert result is not None
+        if self._ci_red_stuck(ticket, comment, head, count):
             return True, "stuck-ci-red-3"
+        self._queue_ci_fix(ticket, comment, head, result, review_round, generation)
+        if rereview:
+            self._leave_merge_queue(ticket, "update-ci-red")
+        if reentry is not None or rereview:
+            self._set_workflow_state(ticket, "fixing")
+        return True, "queued-ci-fix"
+
+    def _ci_red_stuck(
+        self, ticket: TrackedTicket, comment: Comment, head: str, count: int
+    ) -> bool:
+        """On the third red head in a row (count from _record_ci_result),
+        mark the ticket stuck (ci-red-3) and wake Grok."""
+        if count < 3:
+            return False
+        self._mark_stuck_and_wake(
+            repo=ticket.repo,
+            ticket_id=ticket.ticket_id,
+            source_comment_id=comment.id,
+            timeout_seconds=ticket.job_timeout_minutes * 60,
+            reason="ci-red-3",
+            detail=self._project_wake_detail(
+                ticket,
+                f"CI failed three times in a row; latest head {head}",
+            ),
+        )
+        return True
+
+    def _queue_ci_fix(
+        self,
+        ticket: TrackedTicket,
+        comment: Comment,
+        head: str,
+        result: CIResult,
+        review_round: int,
+        generation: int,
+    ) -> None:
         self._enqueue_or_flag(
             ticket,
             comment,
@@ -155,7 +184,7 @@ class ReadyMixin:
                 action="fix",
                 recipient=ticket.factory.builder_harness,
                 source_comment_id=comment.id,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=ticket.job_timeout_minutes * 60,
                 generation=generation,
                 head=head,
                 detail=self._job_detail(
@@ -171,11 +200,6 @@ class ReadyMixin:
                 f"g{generation}"
             ),
         )
-        if rereview:
-            self._leave_merge_queue(ticket, "update-ci-red")
-        if reentry is not None or rereview:
-            self._set_workflow_state(ticket, "fixing")
-        return True, "queued-ci-fix"
 
     def _reenter_after_handoff(self, ticket: TrackedTicket, approved_round: int) -> bool:
         """#108: a trusted ready after handoff re-enters review. The approved
