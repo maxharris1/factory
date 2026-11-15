@@ -274,6 +274,86 @@ def test_a_side_without_a_final_newline_is_matched_byte_for_byte(
     assert result.trivial is trivial, result.reason
 
 
+@pytest.mark.parametrize("resolved,expected", [
+    ("ourstheirs", True), ("ours\rtheirs\r", False),
+])
+def test_shared_crlf_eof(tmp_path: Path, resolved: str, expected: bool):
+    repo = Repo(tmp_path / "r")
+    (repo.root / "docs").mkdir()
+    repo.write("docs/SPEC.md", "base\r\n")
+    repo.base = repo.commit("CRLF base")
+    approved, _ = repo.branches(
+        [("docs/SPEC.md", "base\r\n", "ours")],
+        [("docs/SPEC.md", "base\r\n", "theirs")],
+    )
+    head = repo.merge_main(lambda r: r.write("docs/SPEC.md", resolved))
+    result = classify(repo.gitdir, approved, head, "refs/heads/main",
+                      ("docs/SPEC.md",))
+    assert result.trivial is expected, (resolved, result)
+
+
+CRLF_EOF_CASES = [
+    ("ours", "theirs", "ourstheirs", True),
+    ("ours", "theirs", "theirsours", True),
+    ("ours", "theirs", "ours", True),
+    ("ours", "theirs", "theirs", True),
+    ("ours", "theirs", "ours\r\ntheirs\r\n", False),
+    ("ours", "theirs", "ours\rtheirs\r", False),
+    ("ours", "theirs", "ours\ntheirs\n", False),
+    ("ours", "theirs", "ours\r\n", False),
+    ("ours", "theirs", "ours\r", False),
+    ("ours\r\n", "theirs", "ours\r\ntheirs", True),
+    ("ours\r\n", "theirs", "theirsours\r\n", True),
+    ("ours\r\n", "theirs", "ours\r\n", True),
+    ("ours\r\n", "theirs", "theirs", True),
+    ("ours\r\n", "theirs", "ours\r\ntheirs\r\n", False),
+    ("ours\r\n", "theirs", "ours\r\ntheirs\r", False),
+    ("ours\r\n", "theirs", "theirs\r", False),
+    ("ours", "theirs\r\n", "ourstheirs\r\n", True),
+    ("ours", "theirs\r\n", "theirs\r\nours", True),
+    ("ours", "theirs\r\n", "ours\rtheirs\r\n", False),
+    ("ours", "theirs\r\n", "ours\r\ntheirs\r\n", False),
+]
+
+
+@pytest.mark.parametrize("before", ["", "line\r\n"])
+@pytest.mark.parametrize(("ours", "theirs", "resolved", "trivial"), CRLF_EOF_CASES)
+def test_a_crlf_side_without_a_final_newline_is_matched_byte_for_byte(
+    tmp_path: Path, before: str, ours: str, theirs: str, resolved: str, trivial: bool
+) -> None:
+    repo = Repo(tmp_path / "r")
+    (repo.root / "docs").mkdir()
+    repo.write("docs/SPEC.md", before + "base\r\n")
+    repo.base = repo.commit("CRLF docs")
+    approved, _ = repo.branches(
+        [("docs/SPEC.md", before + "base\r\n", before + ours)],
+        [("docs/SPEC.md", before + "base\r\n", before + theirs)],
+    )
+    head = repo.merge_main(lambda r: r.write("docs/SPEC.md", before + resolved))
+    result = run_shared(repo, approved, head, SHARED)
+    assert result.trivial is trivial, result.reason
+
+
+@pytest.mark.parametrize("base", ["base", "base\n", "base\r\n"])
+@pytest.mark.parametrize(
+    ("resolved", "trivial"),
+    [("ours\rtheirs", True), ("ourstheirs", False), ("ours\r\ntheirs", False)],
+)
+def test_a_side_ending_in_a_bare_cr_keeps_its_cr(
+    tmp_path: Path, base: str, resolved: str, trivial: bool
+) -> None:
+    repo = Repo(tmp_path / "r")
+    (repo.root / "docs").mkdir()
+    repo.write("docs/SPEC.md", base)
+    repo.base = repo.commit("docs base")
+    approved, _ = repo.branches(
+        [("docs/SPEC.md", base, "ours\r")], [("docs/SPEC.md", base, "theirs")]
+    )
+    head = repo.merge_main(lambda r: r.write("docs/SPEC.md", resolved))
+    result = run_shared(repo, approved, head, SHARED)
+    assert result.trivial is trivial, result.reason
+
+
 @pytest.mark.parametrize(("resolved", "trivial"), [("ours", True), ("ours\n", False)])
 def test_a_one_side_resolution_without_a_final_newline_outside_shared_paths(
     tmp_path: Path, resolved: str, trivial: bool
