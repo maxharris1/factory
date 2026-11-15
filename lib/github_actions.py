@@ -45,8 +45,10 @@ clone and no cache.
 - file_issue and comment_once (issue #259): GET issues?state=all&since=
   (the row's time less an hour, for clock skew) or the PR's comments, and
   return the earlier write when a body carries the marker line; only then
-  POST. The lookup is a REST list, not the lagging search index, so a
-  retry after a crash between the write and its record finds the write.
+  POST. Only an issue (not a PR) or comment that the gh login (GET user,
+  read once) wrote counts, so no one else's text can pose as the write.
+  The lookup is a REST list, not the lagging search index, so a retry
+  after a crash between the write and its record finds the write.
 
 A GitHub ticket_id is the PR number. Every error is a GitHubAdapterError,
 which is a ShipError. Its safe_detail never holds gh's stdout or stderr,
@@ -197,6 +199,7 @@ class GitHubReviewActions:
             "gh",
         )
         self.cache_ttl = cache_ttl
+        self.login: str | None = None
 
     def set_state(self, ticket: TrackedTicket, state: str) -> None:
         if state not in STATES:
@@ -418,7 +421,12 @@ class GitHubReviewActions:
             for item in page:
                 raw = _object(item)
                 body_text = raw.get("body")
-                if isinstance(body_text, str) and has_marker(body_text, marker):
+                if (
+                    isinstance(body_text, str)
+                    and has_marker(body_text, marker)
+                    and "pull_request" not in raw
+                    and _object(raw.get("user")).get("login") == self._login()
+                ):
                     return _issue_number(raw.get("number"))
         args = ["-X", "POST", issues, "-f", f"title={title}", "-f", f"body={body}"]
         for label in labels:
@@ -427,11 +435,22 @@ class GitHubReviewActions:
 
     def comment_once(self, ticket: TrackedTicket, body: str, marker: str) -> None:
         number = _pr_number(ticket)
-        if any(has_marker(comment.body, marker) for comment in self.list_comments(ticket.repo, number)):
+        if any(
+            has_marker(comment.body, marker) and comment.author == self._login()
+            for comment in self.list_comments(ticket.repo, number)
+        ):
             return
         self._call(
             "-X", "POST", f"{_repo_path(ticket.repo)}/issues/{number}/comments", "-f", f"body={body}"
         )
+
+    def _login(self) -> str:
+        if self.login is None:
+            login = _object(self._json("user")).get("login")
+            if not isinstance(login, str) or _LOGIN.fullmatch(login) is None:
+                raise GitHubAdapterError("gh user has no valid login")
+            self.login = login
+        return self.login
 
     def list_comments(self, repo: str, number: str) -> tuple[Comment, ...]:
         """Every issue comment, all pages, ordered by (created_at, int id)."""

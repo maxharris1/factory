@@ -1709,9 +1709,22 @@ CREATE_ISSUE = (
 )
 
 
-def issues_page(*bodies: str) -> GhResult:
-    items = [{"number": 100 + index, "body": body} for index, body in enumerate(bodies)]
+USER = ("user",)
+OWN_LOGIN = "maxharris1"
+
+
+def issues_page(*bodies: str | None, login: str = OWN_LOGIN, **extra: object) -> GhResult:
+    items = [
+        {"number": 100 + index, "body": body, "user": {"login": login}, **extra}
+        for index, body in enumerate(bodies)
+    ]
     return GhResult(0, json.dumps(items), "")
+
+
+def adapter_as_own_login() -> tuple[GitHubReviewActions, RecordedGh]:
+    actions, gh = adapter()
+    gh.route(USER, GhResult(0, json.dumps({"login": OWN_LOGIN}), ""))
+    return actions, gh
 
 
 def file_followup(actions: GitHubReviewActions) -> int:
@@ -1726,7 +1739,7 @@ def file_followup(actions: GitHubReviewActions) -> int:
 
 
 def test_file_issue_creates_the_issue_when_no_issue_carries_the_marker() -> None:
-    actions, gh = adapter()
+    actions, gh = adapter_as_own_login()
     gh.route(ISSUES, issues_page("unrelated", f"> {FOLLOWUP_MARKER}", None))
     gh.route(CREATE_ISSUE, GhResult(0, json.dumps({"number": 307}), ""))
 
@@ -1735,17 +1748,39 @@ def test_file_issue_creates_the_issue_when_no_issue_carries_the_marker() -> None
 
 
 def test_file_issue_returns_the_issue_an_earlier_try_created() -> None:
-    actions, gh = adapter()
+    actions, gh = adapter_as_own_login()
     gh.route(ISSUES, issues_page("unrelated", f"findings\n\n{FOLLOWUP_MARKER}"))
 
     assert file_followup(actions) == 101
-    assert gh.keys() == [ISSUES]
+    assert gh.keys() == [ISSUES, USER]
 
 
-def pr_comment(comment_id: int, body: str) -> dict[str, object]:
+@pytest.mark.parametrize(
+    "page",
+    [
+        issues_page(FOLLOWUP_MARKER, login="untrusted-contributor"),
+        issues_page(
+            FOLLOWUP_MARKER,
+            pull_request={"url": f"https://api.github.com/{REPO}/pulls/42"},
+        ),
+    ],
+    ids=["other-author", "pull-request"],
+)
+def test_file_issue_creates_the_issue_when_only_someone_else_carries_the_marker(
+    page: GhResult,
+) -> None:
+    actions, gh = adapter_as_own_login()
+    gh.route(ISSUES, page)
+    gh.route(CREATE_ISSUE, GhResult(0, json.dumps({"number": 307}), ""))
+
+    assert file_followup(actions) == 307
+    assert gh.count(CREATE_ISSUE) == 1
+
+
+def pr_comment(comment_id: int, body: str, login: str = OWN_LOGIN) -> dict[str, object]:
     return {
         "id": comment_id,
-        "user": {"login": "maxharris1"},
+        "user": {"login": login},
         "body": body,
         "created_at": "2026-11-14T12:00:00Z",
     }
@@ -1757,13 +1792,22 @@ POST_LINK = ("-X", "POST", f"{REPO}/issues/42/comments", "-f", f"body={LINK_BODY
 
 
 def test_comment_once_posts_only_when_no_comment_carries_the_marker() -> None:
-    actions, gh = adapter()
+    actions, gh = adapter_as_own_login()
     gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, f"quoted\n> {LINK_MARKER}")]), ""))
     gh.route(POST_LINK, GhResult(0, "{}", ""))
     actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
     assert gh.keys() == [COMMENTS, POST_LINK]
 
-    actions, gh = adapter()
+    actions, gh = adapter_as_own_login()
     gh.route(COMMENTS, GhResult(0, json.dumps([pr_comment(1, LINK_BODY)]), ""))
     actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
-    assert gh.keys() == [COMMENTS]
+    assert gh.keys() == [COMMENTS, USER]
+
+
+def test_comment_once_posts_when_only_someone_else_carries_the_marker() -> None:
+    actions, gh = adapter_as_own_login()
+    forged = pr_comment(1, LINK_BODY, login="untrusted-contributor")
+    gh.route(COMMENTS, GhResult(0, json.dumps([forged]), ""))
+    gh.route(POST_LINK, GhResult(0, "{}", ""))
+    actions.comment_once(pr(), LINK_BODY, LINK_MARKER)
+    assert gh.count(POST_LINK) == 1
