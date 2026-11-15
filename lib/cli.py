@@ -34,6 +34,7 @@ from lib import (
 )
 from lib.dashboard_cli import main as dashboard_main
 from lib.dashboard_push import LivePusher, PollPusher, poll_pusher_for
+from lib.dispatch.helpers import _retry_of
 from lib.dispatcher import Dispatcher, PollLoop, ReviewShipper, ShipError
 from lib.eval_report import EvalError, build_metrics, build_report, render, render_metrics
 from lib.factory_md import EXAMPLE_PATHS, load_factory_md
@@ -310,9 +311,12 @@ health [--db PATH] [--machines PATH] [--orch PATH] [--json]
   live waiter on an eligible device ("no waiter for <harness>"). A
   component machines.yml or orch.yml expects that has never beaten is
   down. A poller, waiter or listener whose heartbeat names another commit
-  than the checkout shows "stale code". Reads orch.health.db beside the
-  database. Exits 3 when a component is down or a queued job has no
-  waiter, 1 when orch.health.db cannot be read, else 0.
+  than the checkout shows "stale code". Also measures disk and inode use
+  of the box's filesystems and, over SSH, of each probed device's
+  workdir_root, with an inode alert at 85%. Reads orch.health.db beside
+  the database. Exits 3 when a component is down, a queued job has no
+  waiter or inode use is at 85% or more, 1 when orch.health.db cannot be
+  read, else 0.
 health forget <component> [--db PATH] [--device NAME] [--bot BOT]
   Remove a retired component's rows.
 
@@ -1881,16 +1885,6 @@ def _job_row(queue: SQLiteJobQueue, job_id: str) -> tuple[str, str | None, int, 
     if row is None:
         raise WaitError(f"unknown job {job_id!r}")
     return str(row["repo"]), row["head"], int(row["timeout_seconds"]), row["detail"]
-
-
-def _retry_of(detail: str | None) -> str | None:
-    """The failed job a T6 retry repeats (its detail's retry_of), if any."""
-    try:
-        value = json.loads(detail) if detail else None
-    except ValueError:
-        return None
-    retry_of = value.get("retry_of") if isinstance(value, dict) else None
-    return retry_of if isinstance(retry_of, str) else None
 
 
 def _stdin_brief() -> bytes:

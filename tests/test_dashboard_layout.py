@@ -628,6 +628,19 @@ def test_no_secret_reaches_any_page(tmp_path: Path) -> None:
     assert str(ROOT) not in text  # no local paths either
 
 
+
+def test_no_device_checkout_path_reaches_any_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db, log = seeded(tmp_path)
+    box = dashboard.component_health.DeviceSync("box", "", "/srv/factory", "a" * 40, "a" * 40,
+                                                "synced", "", None, False)
+    monkeypatch.setattr(dashboard.component_health, "box_sync", lambda device, root: box)
+    snapshot = collect_snapshot(db, log, now=NOW)
+    assert [device["device"] for device in snapshot["health"]["devices"]] == ["box"]
+    out = tmp_path / "out"
+    write_snapshot(out, snapshot)
+    text = "".join(path.read_text(encoding="utf-8") for path in out.iterdir())
+    assert "/srv/factory" not in text
+
 # --- the page script, against a tiny DOM -------------------------------------------------
 
 HARNESS = r"""

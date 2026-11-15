@@ -12,9 +12,10 @@ with green CI does not ship while the PR is held:
   the current head on every poll, so a PR that grows into those files
   gets held.
 
-The hold clears on a kind=ok head=<40-char sha> comment from the approver
-whose head covers the current head by the ship rule (the same commit, or
-an equal git patch-id --stable), or, for a label-only hold, by the
+The hold clears on a comment from the approver, either kind=ok
+head=<40-char sha> or a first line of /ok <40-char sha>, whose
+head covers the current head by the ship rule (the same commit, or an
+equal git patch-id --stable), or, for a label-only hold, by the
 approver removing the label. An ok does not clear a label hold whose
 label was labeled at or after the latest covering ok: a label put back
 after the ok holds the PR again, and still holds it once someone other
@@ -38,6 +39,7 @@ from lib.factory_md import HoldConfig
 from lib.handoff import HandoffError, parse_comment
 
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SLASH_OK = re.compile(r"/ok[ \t]+([0-9a-f]{40})")
 
 
 _GLOB_REGEX = {"**/": "(?:[^/]+/)*", "**": ".*", "*": "[^/]*", "?": "[^/]"}
@@ -214,18 +216,22 @@ def _approver_ok(
             continue
         if getattr(item, "edited_at", None) is not None:
             continue
-        try:
-            fields = parse_comment(str(getattr(item, "body", ""))).as_dict()
-        except HandoffError:
-            continue
-        if fields["kind"] != "ok":
-            continue
-        head = fields.get("head", "")
-        if _FULL_SHA.fullmatch(head) is None:
-            continue
-        if covers(head):
+        head = _ok_head(str(getattr(item, "body", "")))
+        if head is not None and _FULL_SHA.fullmatch(head) and covers(head):
             return float(getattr(item, "created_at", 0))
     return None
+
+
+def _ok_head(body: str) -> str | None:
+    lines = body.strip().splitlines()
+    slash = _SLASH_OK.fullmatch(lines[0].strip()) if lines else None
+    if slash is not None:
+        return slash.group(1)
+    try:
+        fields = parse_comment(body).as_dict()
+    except HandoffError:
+        return None
+    return fields.get("head") if fields["kind"] == "ok" else None
 
 
 def _latest_label_event(

@@ -7,14 +7,18 @@ thread sleeps for real.
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat
+import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,7 +30,7 @@ from lib.dashboard import collect_snapshot
 from lib.dashboard_page import PAGES, render_pages
 from lib.machines_yml import load_machines_yml
 from lib.queue import JobRequest, SQLiteJobQueue
-from lib.remote import SSH_UNREACHABLE
+from lib.remote import SSH_UNREACHABLE, Exchanged
 from lib.status import main as status_main
 from tests.test_wait import restore_signals  # noqa: F401  (fixture)
 
@@ -631,7 +635,9 @@ def test_orch_status_has_a_health_section(tmp_path: Path, monkeypatch) -> None:
     assert "build -> codex queued 30s [no waiter for codex]" in text
 
 
-def test_orch_health_exits_3_when_something_needs_attention(tmp_path: Path, capsys) -> None:
+def test_orch_health_exits_3_when_something_needs_attention(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=10)))
     db, queue = make_db(tmp_path)
     machines = machines_file(tmp_path, ONLY_CODEX)
     now = time.time()
@@ -656,6 +662,240 @@ def test_orch_health_forget_removes_a_retired_components_rows(tmp_path: Path) ->
     assert cli_main(["health", "forget", "waiter", "--db", str(db), "--bot", "cursor-bot"]) == 0
     assert [r.component for r in health.read_heartbeats(db) or ()] == ["poller"]
 
+
+# --- storage (#395) ------------------------------------------------------------------------
+
+GNU_DF = """\
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/vdb         133587600 63189528  70381688      48% /
+Filesystem      Inodes   IUsed  IFree IUse% Mounted on
+/dev/vdb       2048000 1740800 307200   85% /
+"""
+GNU_DF_OVERFULL = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/vdb 4000 3960 -40 102% /work
+Filesystem Inodes IUsed IFree IUse% Mounted on
+/dev/vdb 1000 900 100 90% /work
+"""
+GNU_DF_WRAPPED = """\
+Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/mapper/a-very-long-volume-name 1000 900 100 90% /srv
+Filesystem      Inodes   IUsed  IFree IUse% Mounted on
+/dev/mapper/a-very-long-volume-name
+                  1000     500    500   50% /srv
+"""
+BSD_DF = """\
+Filesystem 1024-blocks      Used Available Capacity Mounted on
+/dev/disk3s5 971350180 400000000 571350180    42% /System/Volumes/Data
+Filesystem   512-blocks      Used  Available Capacity  iused     ifree %iused  Mounted on
+/dev/disk3s5 1942700360 800000000 1142700360    42% 1000000 9000000   10%   /System/Volumes/Data
+"""
+BSD_DF_OVERFULL = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/disk4s1 4000 3960 -40 102% /Volumes/Work
+Filesystem 512-blocks Used Available Capacity iused ifree %iused Mounted on
+/dev/disk4s1 8000 7920 -80 102% 900 100 90% /Volumes/Work
+"""
+
+BSD_DF_SPACED_MOUNT = """\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/disk4s1 1000 300 700 30% /Volumes/Work Disk
+Filesystem 512-blocks Used Available Capacity iused ifree %iused Mounted on
+/dev/disk4s1 2000 600 1400 30% 900 100 90% /Volumes/Work Disk
+"""
+GNU_DF_SPACED_NAMES = """\
+Filesystem     1024-blocks Used Available Capacity Mounted on
+//nas/team share 1000 300 700 30% /mnt/team share 2
+Filesystem      Inodes IUsed IFree IUse% Mounted on
+//nas/team share 1000 860 140 86% /mnt/team share 2
+"""
+
+
+@pytest.mark.parametrize("text, expected", [
+    (GNU_DF, (48, 85)),
+    (GNU_DF_OVERFULL, (102, 90)),
+    (GNU_DF_WRAPPED, (90, 50)),
+    (BSD_DF, (42, 10)),
+    (BSD_DF_OVERFULL, (102, 90)),
+    (BSD_DF_SPACED_MOUNT, (30, 90)),
+    (GNU_DF_SPACED_NAMES, (30, 86)),
+    ("df: /nowhere: No such file or directory\n", (None, None)),
+])
+def test_parse_df_reads_disk_and_inode_use_from_gnu_and_bsd_df(text: str, expected) -> None:
+    assert health.parse_df(text) == expected
+
+
+def statvfs(*, inodes_used: int, files: int = 1000, used_blocks: int = 300) -> SimpleNamespace:
+    return SimpleNamespace(f_blocks=1000, f_bfree=1000 - used_blocks, f_bavail=1000 - used_blocks,
+                           f_files=files, f_ffree=files - inodes_used)
+
+
+@pytest.mark.parametrize("used, percent, alert", [(840, 84, False), (841, 85, True), (850, 85, True),
+                                                  (1000, 100, True)])
+def test_box_storage_alerts_at_85_percent_inode_use(tmp_path: Path, used: int, percent: int,
+                                                    alert: bool) -> None:
+    [entry] = health.box_storage("box", [tmp_path, tmp_path / ".."],
+                                 statvfs=lambda path: statvfs(inodes_used=used))
+    assert (entry.device, entry.disk, entry.inodes, entry.alert) == ("box", 30, percent, alert)
+    assert Path(entry.path) == health._mount(tmp_path)
+
+
+def test_a_filesystem_without_inode_counts_reports_unknown_not_an_alert(tmp_path: Path) -> None:
+    [entry] = health.box_storage("box", [tmp_path], statvfs=lambda path: statvfs(inodes_used=0, files=0))
+    assert entry.inodes is None and not entry.alert
+
+
+class DfTransport:
+    def __init__(self, outputs: dict[str, Exchanged]):
+        self.outputs = outputs
+        self.calls: list[list[str]] = []
+
+    def exchange(self, argv, *, timeout: float, input: bytes = b"") -> Exchanged:
+        self.calls.append(list(argv))
+        return self.outputs[argv[argv.index("--") + 1]]
+
+
+def test_remote_storage_runs_df_over_ssh_in_the_devices_workdir(tmp_path: Path) -> None:
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, GNU_DF.encode(), "")})
+    [target] = health.probe_targets(machines_config(tmp_path))
+    entry = health.remote_storage(transport, target)
+    assert entry == health.Storage("pc", "/home/codex-bot/factory-work", 48, 85)
+    assert entry.alert
+    argv = transport.calls[0]
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv
+    assert argv[-1] == health.df_script("/home/codex-bot/factory-work")
+
+
+def test_a_device_workdir_on_a_mount_with_spaces_reports_and_alerts(tmp_path: Path) -> None:
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, BSD_DF_SPACED_MOUNT.encode(), "")})
+    [target] = health.probe_targets(machines_config(tmp_path))
+    entry = health.remote_storage(transport, target)
+    assert (entry.disk, entry.inodes, entry.alert, entry.error) == (30, 90, True, None)
+
+
+def test_an_unreachable_device_reports_unknown_storage_without_an_alert(tmp_path: Path) -> None:
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(SSH_UNREACHABLE, b"", "timed out")})
+    [target] = health.probe_targets(machines_config(tmp_path))
+    entry = health.remote_storage(transport, target)
+    assert (entry.disk, entry.inodes, entry.alert, entry.error) == (None, None, False, "df exited 255")
+
+
+def test_orch_health_reports_box_and_device_inode_use_and_alerts_at_85(tmp_path: Path,
+                                                                       monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=120)))
+    db, _ = make_db(tmp_path)
+    now = time.time()
+    for component, device in (("poller", "box"), ("device-probe", "pc")):
+        store(db, now).beat(component, device, pid=101, started_at=now, version="unknown")
+    store(db, now).beat("waiter", "box", bot="codex-bot", pid=102, started_at=now, version="unknown")
+    store(db, now).beat("waiter", "box", bot="claude-bot", pid=103, started_at=now, version="unknown")
+    store(db, now).beat("waiter", "box", bot="cursor-bot", pid=104, started_at=now, version="unknown")
+    store(db, now).beat("dashboard", "box", pid=105, started_at=now, version="unknown")
+    df = GNU_DF.replace("1740800 307200   85%", "1000000 1048000   49%")
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, df.encode(), "")})
+    args = ["--db", str(db), "--machines", str(machines_file(tmp_path)), "--orch", str(ORCH_EXAMPLE)]
+
+    out = io.StringIO()
+    assert health.main(args, stdout=out, transport=transport) == 0
+    text = out.getvalue()
+    box_mount = health._mount(health.ROOT)
+    assert f"\n  storage box {box_mount}: disk 30%, inodes 12%\n" in text
+    assert "\n  storage pc /home/codex-bot/factory-work: disk 48%, inodes 49%" in text
+    assert "inode alert" not in text
+
+    transport.outputs["pc-wsl-codex-bot"] = Exchanged(0, GNU_DF.encode(), "")
+    out = io.StringIO()
+    assert health.main(args, stdout=out, transport=transport) == 3
+    text = out.getvalue()
+    assert ", 1 inode alert)" in text.splitlines()[0]
+    assert ("  storage pc /home/codex-bot/factory-work: disk 48%, inodes 85% "
+            "(inode alert: at or over 85%)") in text
+
+    out = io.StringIO()
+    assert health.main([*args, "--json"], stdout=out, transport=transport) == 3
+    data = json.loads(out.getvalue())
+    assert data["storage_alerts"] == 1
+    assert data["thresholds"]["inode_alert_percent"] == 85
+    assert {"device": "pc", "path": "/home/codex-bot/factory-work", "disk_percent": 48,
+            "inode_percent": 85, "alert": True, "error": None} in data["storage"]
+    assert data["storage"][0]["device"] == "box" and data["storage"][0]["alert"] is False
+
+
+def test_orch_health_alerts_when_the_box_reaches_85_percent_inodes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=900)))
+    db, _ = make_db(tmp_path)
+    now = time.time()
+    store(db, now).beat("poller", "box", pid=101, started_at=now, version="unknown")
+    store(db, now).beat("waiter", "box", bot="codex-bot", pid=102, started_at=now, version="unknown")
+    out = io.StringIO()
+    code = health.main(["--db", str(db), "--machines", str(machines_file(tmp_path, ONLY_CODEX))],
+                       stdout=out, transport=DfTransport({}))
+    assert code == 3
+    assert f"  storage box {health._mount(health.ROOT)}: disk 30%, inodes 90% (inode alert" in out.getvalue()
+
+
+def test_orch_health_shows_storage_alerts_before_any_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(health, "box_storage", functools.partial(
+        health.box_storage, statvfs=lambda path: statvfs(inodes_used=900)))
+    db, _ = make_db(tmp_path)
+    transport = DfTransport({"pc-wsl-codex-bot": Exchanged(0, GNU_DF_OVERFULL.encode(), "")})
+    out = io.StringIO()
+    code = health.main(["--db", str(db), "--machines", str(machines_file(tmp_path))],
+                       stdout=out, transport=transport)
+    text = out.getvalue()
+    assert code == 3
+    assert "no heartbeats recorded yet" in text
+    assert f"  storage box {health._mount(health.ROOT)}: disk 30%, inodes 90% (inode alert" in text
+    assert "  storage pc /home/codex-bot/factory-work: disk 102%, inodes 90% (inode alert" in text
+
+
+@pytest.mark.parametrize("report", [
+    health.HealthReport(known=False),
+    health.HealthReport(known=False, error="health table unreadable"),
+])
+def test_every_health_text_lists_storage(report) -> None:
+    storage = (health.Storage("pc", "/work", 40, 90),)
+    lines = health.render_lines(replace(report, storage=storage), NOW)
+    assert "  storage pc /work: disk 40%, inodes 90% (inode alert: at or over 85%)" in lines
+
+
+GERMAN_DF = """\
+Dateisystem 1024-Blöcke Benutzt Verfügbar Kapazität Eingehängt auf
+/dev/sdf 1000 120 880 12% /
+Dateisystem Inodes IBenutzt IFrei IUse% Eingehängt auf
+/dev/sdf 1000 70 930 7% /
+"""
+
+
+def test_df_reads_english_headers_whatever_the_devices_locale(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_df = bin_dir / "df"
+    fake_df.write_text(
+        "#!/bin/sh\n"
+        f"[ \"$LC_ALL\" = C ] && printf '%s' {shlex.quote(GNU_DF)} && exit 0\n"
+        f"printf '%s' {shlex.quote(GERMAN_DF)}\n")
+    fake_df.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "LANG": "de_DE.UTF-8", "LC_ALL": "de_DE.UTF-8"}
+    run = subprocess.run(["sh", "-c", health.df_script("/work")], env=env, capture_output=True,
+                         text=True, check=True)
+    assert health.parse_df(run.stdout) == (48, 85)
+
+
+
+@pytest.mark.parametrize("variable", ["DF_BLOCK_SIZE", "BLOCK_SIZE", "BLOCKSIZE"])
+def test_df_reports_inode_use_when_the_device_asks_for_human_readable_sizes(
+        tmp_path: Path, variable: str) -> None:
+    st = os.statvfs(tmp_path)
+    expected = health._df_percent(st.f_files - st.f_ffree, st.f_ffree)
+    if expected is None:
+        pytest.skip("this filesystem reports no inode counts")
+    env = {**os.environ, variable: "human-readable"}
+    run = subprocess.run(["sh", "-c", health.df_script(str(tmp_path))], env=env,
+                         capture_output=True, text=True, check=True)
+    assert health.parse_df(run.stdout)[1] == expected
 
 # --- the components wire their heartbeats in ------------------------------------------------
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import replace
@@ -16,6 +17,7 @@ from lib.dispatch.helpers import (
     _detail_round_number,
     _has_questions,
     _matching_head,
+    _retry_of,
     _round_number,
     _scope,
     _state_for_action,
@@ -240,6 +242,7 @@ class QuestionsMixin:
         action: str,
         recipient: str,
         *,
+        queued_at: float,
         head: str | None = None,
         round_number: int | None = None,
     ) -> Comment | None:
@@ -247,16 +250,19 @@ class QuestionsMixin:
         action job comment queues for recipient, or None (#108, #66).
 
         Only the answer that job's step accepts counts: a plan for a plan, a
-        ready for a build or fix (at a new head when the job has one, as
-        _posted_handoff reads it), and for a review a REVISE or APPROVE
-        naming head at round_number. It must come from a login trusted for recipient's bot
-        and role, and not have been handled as rejected. With an intact
+        ready for a build or fix, and for a review a REVISE or APPROVE naming
+        head at round_number. It must come from a login trusted for
+        recipient's bot and role, and not have been handled as rejected. With an intact
         database no such answer exists yet when a comment is handled; it is
         found on a replay (a lost or restored database) or when both
         comments landed while the poller was down.
         """
         kind, role = _ANSWERS[action]
         after = _comment_order(comment)
+        try:
+            source_head = parse_comment(comment.body).as_dict().get("head")
+        except HandoffError:
+            source_head = None
         for item in sorted(ticket.comments, key=_comment_order):
             if _comment_order(item) <= after:
                 continue
@@ -278,7 +284,16 @@ class QuestionsMixin:
                     # #71: T3 and T4 act on no other verdict (BLOCKED), so
                     # it answers no review (Codex PR #112 r5 F1).
                     continue
-            elif head is not None and _matching_head(reported, head) is not None:
+            elif head is not None and (
+                _matching_head(reported, head) is not None
+                or (
+                    _matching_head(reported, source_head) is not None
+                    and (
+                        item.created_at < math.floor(queued_at)
+                        or self._handled_before(ticket, item.id, queued_at)
+                    )
+                )
+            ):
                 continue
             handled = self._handled_outcome(ticket, item.id)
             if handled is not None and handled.startswith(_REJECTED_OUTCOMES):
@@ -290,6 +305,20 @@ class QuestionsMixin:
                 continue
             return item
         return None
+
+    def _first_queued_at(self, job: Job) -> float:
+        queued_at = job.created_at
+        retry_of = _retry_of(job.request.detail)
+        with self._connect() as connection:
+            while retry_of is not None:
+                row = connection.execute(
+                    "SELECT created_at, detail FROM jobs WHERE id = ?", (retry_of,)
+                ).fetchone()
+                if row is None:
+                    break
+                queued_at = min(queued_at, float(row["created_at"]))
+                retry_of = _retry_of(row["detail"])
+        return queued_at
 
     def _cancel_answered_jobs(self, ticket: TrackedTicket) -> None:
         """Cancel this ticket's queued steps that a later trusted comment
@@ -323,6 +352,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
+                queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             )
@@ -393,6 +423,7 @@ class QuestionsMixin:
                 source,
                 job.request.action,
                 job.request.recipient,
+                queued_at=self._first_queued_at(job),
                 head=job.request.head,
                 round_number=_detail_round_number(job.request.detail),
             ) is None:
@@ -459,6 +490,7 @@ class QuestionsMixin:
                     source,
                     job.request.action,
                     job.request.recipient,
+                    queued_at=self._first_queued_at(job),
                     head=job.request.head,
                     round_number=review_round + 1,
                 )

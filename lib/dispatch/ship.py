@@ -413,6 +413,10 @@ class ShipMixin:
                 """,
                 (*scope, comment_id),
             )
+            connection.execute(
+                "DELETE FROM handled_times WHERE repo = ? AND ticket_id = ? AND comment_id = ?",
+                (*scope, comment_id),
+            )
             connection.commit()
         self.clear_attention(ticket.repo, ticket.ticket_id, "ship-failed")
 
