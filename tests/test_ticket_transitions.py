@@ -36,6 +36,8 @@ WRITERS = {
     "plan-gap": "lib/dispatch/plan.py",
     "t3": "lib/dispatch/verdict/t3.py",
     "cap-resume": "lib/dispatch/caps/resume.py",
+    "blocked-resume": "lib/dispatch/caps/resume.py",
+    "t-blocked": "lib/dispatch/verdict/blocked.py",
     "retry": "lib/dispatch/retry.py",
 }
 

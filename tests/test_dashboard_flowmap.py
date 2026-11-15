@@ -60,7 +60,7 @@ def test_every_chart_edge_has_a_route_that_crosses_no_node():
 
 
 def test_stop_states_sit_on_the_bottom_rail():
-    stops = {"refused", "abandoned", "stuck", "blocked"}
+    stops = {"refused", "abandoned", "stuck"}
     rail = LAYOUT["rail"]["y"]
     for name, node in NODES.items():
         assert node["stop"] == (name in stops), name

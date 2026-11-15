@@ -295,12 +295,14 @@ def test_review_at_another_head_leaves_a_stray_verdict_unregistered(tmp_path: Pa
 
 def test_stray_revise_does_not_stale_a_registered_fix_ready(tmp_path: Path) -> None:
     dispatcher, queue, _, _ = _registered_approval(tmp_path)
-    snapshot = _verdict_ticket("approve-1", "BLOCKED")
+    snapshot = _verdict_ticket("approve-1", "REVISE")
     _enqueue(queue, "fix", "claude", HEAD)
     fix = _claim(queue, "claude")
     queue.finish(fix.id, owner="claude", handoff_comment_id="ready-2")
     ready = comment("ready-2", READY.format(head=HEAD), author="claude-login", created_at=350)
-    dispatcher.process(_with_stray_revise(replace(snapshot, comments=(*snapshot.comments, ready))))
+    body = VERDICT.format(round="2/3", head=HEAD, verdict="REVISE", risk="high")
+    stray = comment("stray", body, author="codex-login", created_at=400)
+    dispatcher.process(replace(snapshot, comments=(*snapshot.comments, ready, stray)))
 
     assert handled_outcome(queue, "stray") == "rejected-unregistered-verdict"
     assert handled_outcome(queue, "ready-2") == "queued-review"

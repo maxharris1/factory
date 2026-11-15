@@ -2,7 +2,6 @@
 
 Events:
 
-- kind=verdict verdict=BLOCKED from the ticket's reviewer bot.
 - kind=stuck from any trusted bot. Its state= names the stop: blocked,
   capped or refused; anything else is stuck.
 - A comment with a header-shaped line (one starting with <!-- orch:v)
@@ -12,8 +11,8 @@ Events:
 blocked and capped wake once per ticket and head: the reported head, or
 the PR head when the report names none. Short heads are not expanded.
 stuck wakes once per ticket, refused once per ticket, and an unparsed
-comment once per comment. Config refused after intake, and capped from
-T3, call Dispatcher.wake_grok_once directly.
+comment once per comment. Config refused after intake, capped from T3 and
+a reviewer's verdict=BLOCKED (#188) call Dispatcher.wake_grok_once directly.
 """
 
 from __future__ import annotations
@@ -41,15 +40,7 @@ class T7Hook:
     ) -> tuple[bool, str] | None:
         if fields is None:
             return self._unparsed(dispatcher, ticket, comment)
-        if fields["kind"] == "verdict" and fields.get("verdict") == "BLOCKED":
-            reviewer = f"{ticket.factory.reviewer_harness}-bot"
-            if not dispatcher._trusted(
-                ticket, comment, fields, reviewer, role="reviewer"
-            ):
-                return True, "rejected-blocked-author"
-            reason = "blocked"
-            detail = f"verdict=BLOCKED from {reviewer}"
-        elif fields["kind"] == "stuck":
+        if fields["kind"] == "stuck":
             sender = fields.get("from")
             trusted = dispatcher._trusted_bots(comment)
             if sender is None or sender not in trusted:

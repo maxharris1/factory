@@ -180,6 +180,7 @@ def test_blocked_at_the_cap_is_never_granted(tmp_path: Path) -> None:
     flow.now[0] += 10
     flow.comments.append(comment("blocked-3", body, author="codex-login", created_at=flow.now[0]))
     flow.dispatcher.process(flow.snapshot())
+    assert flow.state()["workflow_state"] == "blocked"
     assert flow.state()["cap_extra"] == 0
     assert job_count(flow.queue, "fix") == 2
     assert flow.actions.posted == []

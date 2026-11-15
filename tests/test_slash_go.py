@@ -214,7 +214,7 @@ def test_slash_go_from_a_stranger_is_ignored_without_a_wake(tmp_path: Path) -> N
     assert jobs(flow) == before
 
 
-@pytest.mark.parametrize("state", ["building", "review", "fixing", "handed-off", "merge-queue", "blocked"])
+@pytest.mark.parametrize("state", ["building", "review", "fixing", "handed-off", "merge-queue"])
 def test_slash_go_on_a_ticket_with_no_target_is_ignored(tmp_path: Path, state: str) -> None:
     flow = AppFlow(tmp_path, enabled=True)
     assert flow.go("go-1") == "queued-build"
