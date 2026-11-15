@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 from lib.dispatch.constants import GROK_WAKE_REASONS
 from lib.dispatch.helpers import (
     _ANSWERS,
+    _REJECTED_OUTCOMES,
     _comment_link,
     _detail_round_number,
     _grok_logical_key,
@@ -193,11 +194,28 @@ class DetailMixin:
         from lib.evidence.instructions import instructions_evidence
 
         state = connection.execute(
-            "SELECT plan_gap_count FROM ticket_state WHERE repo = ? AND ticket_id = ?",
+            """
+            SELECT plan_gap_count, paused_question_id FROM ticket_state
+            WHERE repo = ? AND ticket_id = ?
+            """,
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
+        handled = dict(
+            connection.execute(
+                """
+                SELECT comment_id, outcome FROM handled_comments
+                WHERE repo = ? AND ticket_id = ?
+                """,
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+        )
         findings = findings_evidence(
-            comments=ticket.comments,
+            comments=[
+                item
+                for item in ticket.comments
+                if item.id == comment.id
+                or (item.id in handled and not handled[item.id].startswith(_REJECTED_OUTCOMES))
+            ],
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
             current_round=_detail_round_number(request.detail) or 1,
@@ -237,7 +255,13 @@ class DetailMixin:
                     action=request.action,
                     detail=detail,
                     prior_detail=(
-                        self._newest_earlier_detail(connection, ticket, comment, request.action)
+                        self._resumed_step_detail(
+                            connection,
+                            ticket,
+                            comment,
+                            request.action,
+                            state["paused_question_id"] if state is not None else None,
+                        )
                         if resume
                         else None
                     ),
@@ -252,22 +276,24 @@ class DetailMixin:
             request, detail=json.dumps(detail, separators=(",", ":"), sort_keys=True)
         )
 
-    def _newest_earlier_detail(
+    def _resumed_step_detail(
         self,
         connection: sqlite3.Connection,
         ticket: TrackedTicket,
         comment: Comment,
         action: str,
+        question_id: str | None,
     ) -> dict[str, object] | None:
         row = connection.execute(
             """
             SELECT detail FROM jobs
             WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
               AND source_comment_id != ?
+              AND (? IS NULL OR handoff_comment_id = ?)
             ORDER BY created_at DESC, rowid DESC
             LIMIT 1
             """,
-            (ticket.repo.lower(), ticket.ticket_id, action, comment.id),
+            (ticket.repo.lower(), ticket.ticket_id, action, comment.id, question_id, question_id),
         ).fetchone()
         return json.loads(row["detail"] or "{}") if row is not None else None
 

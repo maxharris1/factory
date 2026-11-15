@@ -4,9 +4,11 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from lib.dispatcher import CIResult, TrackedTicket
 from lib.queue import Job
-from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment
+from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
 from tests.test_github_actions import CHECKS, HEAD, STATUS, adapter, served
 from tests.test_rounds_and_caps import HEADS, Flow
 
@@ -94,6 +96,45 @@ def test_review_fix_carries_the_blocking_finding(tmp_path: Path) -> None:
     assert bundle["findings"]["reviewed_head"] == HEADS[1]
 
 
+APPROVE = (
+    "<!-- orch:v1 kind=verdict from=codex-bot role=reviewer "
+    "round=1/3 head={head} verdict=APPROVE ac=met risk=high -->\n"
+    "Approve.\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("body", "edited_at", "rejection"),
+    [
+        (REVISE.format(head=HEADS[8]).replace("f-1", "f-999"), None, "stale-revise"),
+        (APPROVE.format(head=HEADS[1]), 1.0, "rejected-edited"),
+    ],
+)
+def test_a_rejected_verdict_does_not_change_the_findings(
+    tmp_path: Path, body: str, edited_at: float | None, rejection: str
+) -> None:
+    flow = built(tmp_path)
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    assert flow.post("revise-1", REVISE.format(head=HEADS[1]), "codex-login") == "queued-review-fix"
+    flow.finish("claude")
+    flow.now[0] += 10
+    flow.comments.append(
+        replace(
+            comment("rejected", body, author="codex-login", created_at=flow.now[0]),
+            edited_at=edited_at,
+        )
+    )
+    flow.dispatcher.process(flow.snapshot())
+    assert handled_outcome(flow.queue, "rejected") == rejection
+
+    assert flow.ready(HEADS[2]) == "queued-review"
+
+    findings = evidence(claim(flow, "codex"))["findings"]
+    assert [item["id"] for item in findings["findings"]] == ["f-1"]
+    assert findings["reviewed_head"] == HEADS[1]
+
+
 def test_extra_round_carries_the_go_and_the_last_fix_instruction(tmp_path: Path) -> None:
     flow = Flow(tmp_path)
     flow.to_cap()
@@ -128,6 +169,39 @@ def test_answers_resume_carries_the_answer_and_the_plan_attempt(tmp_path: Path) 
         "Answers.",
         2,
     )
+
+
+def test_clarify_resume_carries_the_paused_steps_instruction(tmp_path: Path) -> None:
+    dispatcher, queue = setup(tmp_path)
+    go = comment(
+        "go", "<!-- orch:v1 kind=go from=grok-bot role=orchestrator -->\nHelp.",
+        author="grok-login", created_at=1,
+    )
+    dispatcher.process(ticket(go))
+    paused = queue.claim("grok")
+    assert paused is not None
+    queue.finish(paused.id, owner="grok", handoff_comment_id="q")
+    question = comment(
+        "q",
+        QUESTIONS.replace(
+            "from=claude-bot role=builder", "from=grok-bot role=orchestrator state=waiting-max"
+        ),
+        author="grok-login",
+        created_at=2,
+    )
+    dispatcher.process(ticket(go, question))
+    wake = queue.claim("grok")
+    assert wake is not None
+    queue.finish(wake.id, owner="grok", handoff_comment_id="a")
+    answers = comment("a", ANSWERS, author="grok-login", created_at=3)
+    dispatcher.process(ticket(go, question, answers))
+    assert handled_outcome(queue, "a") == "resumed-clarify"
+
+    resumed = queue.claim("grok")
+    assert resumed is not None
+    assert evidence(resumed)["instructions"]["prior_instruction"] == json.loads(
+        paused.request.detail or "{}"
+    )["instruction"]
 
 
 def test_plan_and_build_details_are_unchanged(tmp_path: Path) -> None:
