@@ -100,7 +100,6 @@ class TrackedTicket:
     mergeable: bool | None = None
     mergeable_state: str | None = None
     closed: bool = False
-    # #259: the project's GitHub intake label, put on a filed follow-up ticket.
     intake_label: str | None = None
 
     def __post_init__(self) -> None:

@@ -1,5 +1,3 @@
-"""Follow-up findings from review round N (issue #259)."""
-
 from __future__ import annotations
 
 import copy
@@ -191,7 +189,6 @@ def test_review_brief_from_the_follow_up_round_defines_the_tag(round_text: str) 
 
 
 HEAD = "a" * 40
-# seed_review_job finishes the review job with this handoff comment id.
 VERDICT_ID = f"verdict-{HEAD}"
 FOLLOWUP_A = "1. [follow-up] lib/a.py:10 breaks the path-format rule from round 2.\n   Repro: `x`."
 FOLLOWUP_B = "2. [follow-up] lib/c.py:7 breaks the exception rule from round 3."
@@ -199,8 +196,6 @@ MINOR = "3. [minor] lib/b.py:3 naming."
 
 
 class FollowupActions(FakeReviewActions):
-    """Tracker fake that keeps what it wrote and honors the marker lookup."""
-
     def __init__(self) -> None:
         super().__init__()
         self.issues: dict[int, tuple[str, str, tuple[str, ...]]] = {}

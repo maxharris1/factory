@@ -4,6 +4,7 @@ import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1691,8 +1692,7 @@ def test_ci_status_says_whether_anything_reported(
 
 
 FOLLOWUP_MARKER = "<!-- orch-followup verdict=99 -->"
-# 2026-11-14T12:00:00Z; the lookup starts an hour earlier for clock skew.
-FOLLOWUP_SINCE = 1794657600.0
+FOLLOWUP_SINCE = datetime(2026, 11, 14, 12, tzinfo=timezone.utc).timestamp()
 ISSUES = ("--paginate", f"{REPO}/issues?state=all&since=2026-11-14T11:00:00Z&per_page=100")
 CREATE_ISSUE = (
     "-X",

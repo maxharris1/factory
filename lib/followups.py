@@ -69,9 +69,7 @@ def followup_issue(
         f"{repo}#{pr}: {verdict_url}\nBlocked by: #{pr}\n\n"
     )
     marker = followup_marker(comment_id)
-    # A `> ` prefix keeps every finding line from being read as a feeder gate
-    # line or a code fence (lib/feeder_gates.py), so only our Blocked by counts.
-    quoted = "\n\n".join(_quote(finding) for finding in findings)
+    quoted = "\n\n".join(_defuse_gate_lines(finding) for finding in findings)
     room = ISSUE_BODY_LIMIT - len(head) - len(marker) - 2
     if len(quoted) > room:
         room -= len(_CUT_NOTE) + 2
@@ -91,5 +89,5 @@ def has_marker(body: str | None, marker: str) -> bool:
     return any(line.strip() == marker for line in (body or "").splitlines())
 
 
-def _quote(text: str) -> str:
+def _defuse_gate_lines(text: str) -> str:
     return "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
