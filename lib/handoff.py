@@ -154,6 +154,8 @@ def parse_header_line(line: str) -> dict[str, str]:
             raise HandoffError(f"missing required key {key!r}")
     if kind == "verdict" and found.get("verdict") == "APPROVE" and "head" not in found:
         raise HandoffError("missing required key 'head'")
+    if kind == "verdict" and found.get("verdict") == "APPROVE" and found.get("ac") == "unmet":
+        raise HandoffError("APPROVE needs ac=met; got ac=unmet")
     return {key: found[key] for key in KEYS if key in found}
 
 
