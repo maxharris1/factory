@@ -690,8 +690,6 @@ class ReadyMixin:
         return str(row["head"])
 
     def _rebase_scope(self, ticket: TrackedTicket, head: str) -> RebaseScope | None:
-        """#207: the fork points when head rewrote the last reviewed head. A
-        missing or failing check gives None, and the review still goes ahead."""
         last = self._latest_review_head(ticket)
         if last is None or last == head or self.rebase_classifier is None:
             return None

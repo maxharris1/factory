@@ -512,8 +512,6 @@ class DetailMixin:
 
 
 def _review_bases(details: list[str]) -> dict[int, str]:
-    """#207: each round's merge base with the base branch, as recorded by the
-    rebase scope of a review job (its own round, and the round before)."""
     bases: dict[int, str] = {}
     for text in details:
         detail = json.loads(text)

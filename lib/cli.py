@@ -959,7 +959,6 @@ def _classify_update(
 
 
 def _rebase_check(repo: str, base: str, last: str, head: str) -> RebaseScope | None:
-    """#207: whether head rewrote the last reviewed head, on the waiter's bare clone."""
     clone = worktrees.fetched_clone(
         worktrees.work_root(None), repo, (last, head), worktrees.url_template(None)
     )
