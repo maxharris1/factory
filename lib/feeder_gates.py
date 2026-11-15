@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-from lib.hold import glob_matches
+from lib.hold import glob_matches, glob_can_match_under
 
 Tracker = Literal["github", "linear"]
 
@@ -179,18 +179,13 @@ def matches_at_or_under(patterns: Iterable[str], path: str) -> bool:
         return True
     if not path.endswith("/"):
         return False
-    parts = path.removesuffix("/").split("/")
-    for pattern in patterns:
-        steps = pattern.removesuffix("/").split("/")
-        for step, part in zip(steps, parts):
-            if "**" in step:
-                return True
-            if not glob_matches(step, part):
-                break
-        else:
-            if len(steps) > len(parts):
-                return True
-    return False
+    return any(
+        glob_can_match_under(form, path)
+        for pattern in patterns
+        for form in (
+            (pattern[:-1], pattern[:-1] + "/**") if pattern.endswith("/") else (pattern,)
+        )
+    )
 
 
 class Progress(Enum):

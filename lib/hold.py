@@ -30,7 +30,7 @@ is everything under ``a/``, ``a/**/b`` includes ``a/b``).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -40,31 +40,75 @@ from lib.handoff import HandoffError, parse_comment
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+_GLOB_REGEX = {"**/": "(?:[^/]+/)*", "**": ".*", "*": "[^/]*", "?": "[^/]"}
+_REPEATS = frozenset({"**/", "**", "*"})
+
+
 @lru_cache(maxsize=256)
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    out: list[str] = []
+def _glob_tokens(pattern: str) -> tuple[str, ...]:
+    tokens: list[str] = []
     index = 0
     while index < len(pattern):
-        if pattern.startswith("**/", index):
-            out.append("(?:[^/]+/)*")
-            index += 3
-        elif pattern.startswith("**", index):
-            out.append(".*")
-            index += 2
-        elif pattern[index] == "*":
-            out.append("[^/]*")
-            index += 1
-        elif pattern[index] == "?":
-            out.append("[^/]")
-            index += 1
-        else:
-            out.append(re.escape(pattern[index]))
-            index += 1
-    return re.compile("".join(out), re.DOTALL)
+        token = next(
+            (wild for wild in _GLOB_REGEX if pattern.startswith(wild, index)), pattern[index]
+        )
+        tokens.append(token)
+        index += len(token)
+    return tuple(tokens)
+
+
+@lru_cache(maxsize=256)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    return re.compile(
+        "".join(_GLOB_REGEX.get(token, re.escape(token)) for token in _glob_tokens(pattern)),
+        re.DOTALL,
+    )
 
 
 def glob_matches(pattern: str, path: str) -> bool:
     return _glob_regex(pattern).fullmatch(path) is not None
+
+
+def glob_can_match_under(pattern: str, prefix: str) -> bool:
+    tokens = _glob_tokens(pattern)
+    states = _skip_repeats(tokens, {(0, False)})
+    for char in prefix:
+        states = _skip_repeats(
+            tokens, {after for state in states for after in _glob_step(tokens, state, char)}
+        )
+    return bool(states)
+
+
+def _glob_step(
+    tokens: tuple[str, ...], state: tuple[int, bool], char: str
+) -> Iterator[tuple[int, bool]]:
+    index, in_segment = state
+    if in_segment:
+        yield (index, char != "/")
+        return
+    if index == len(tokens):
+        return
+    token = tokens[index]
+    if token == "**" or (token == "*" and char != "/"):
+        yield (index, False)
+    elif token == "**/" and char != "/":
+        yield (index, True)
+    elif token == "?" and char != "/" or token == char:
+        yield (index + 1, False)
+
+
+def _skip_repeats(
+    tokens: tuple[str, ...], states: set[tuple[int, bool]]
+) -> set[tuple[int, bool]]:
+    pending = list(states)
+    while pending:
+        index, in_segment = pending.pop()
+        if not in_segment and index < len(tokens) and tokens[index] in _REPEATS:
+            skipped = (index + 1, False)
+            if skipped not in states:
+                states.add(skipped)
+                pending.append(skipped)
+    return states
 
 
 def held_paths(patterns: Sequence[str], files: Iterable[str]) -> tuple[str, ...]:

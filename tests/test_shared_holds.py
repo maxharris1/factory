@@ -141,6 +141,13 @@ def test_an_exclusive_path_keeps_one_holder_from_either_side() -> None:
         ("model/*.yml", "model/", "model/x.json", None),
         ("docs/**/*.sql", "lib/", "lib/", None),
         ("lib/**", "lib/", "lib/", "waiting on file lib/ held by #1"),
+        ("model**/", "lib/", "lib/", None),
+        ("a**b/", "lib/", "lib/", None),
+        ("lib/m**/", "lib/x/", "lib/x/", None),
+        ("lib/m**/", "lib/", "lib/", "waiting on file lib/ held by #1"),
+        ("l**/x.sql", "lib/", "lib/", "waiting on file lib/ held by #1"),
+        ("**lib/x", "lib/", "lib/", "waiting on file lib/ held by #1"),
+        ("**/model/", "lib/", "lib/", "waiting on file lib/ held by #1"),
     ],
 )
 def test_an_exclusive_path_under_the_overlap_of_two_declarations_keeps_one_holder(
@@ -278,3 +285,15 @@ def test_parent_directory_declarations_wait_on_an_exclusive_descendant(tmp_path:
     assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1"]
     assert states(tmp_path)["2"] == ("waiting-blocked", "waiting on file lib/ held by #1")
     assert not any(" shares " in line for line in log)
+
+
+def test_an_exclusive_glob_that_cannot_reach_a_directory_keeps_its_holder_limit(
+    tmp_path: Path,
+) -> None:
+    text = FACTORY_MD.replace(PIN, "feeder:\n  exclusive_paths: [model**/]\n")
+    feeder, github, _ = logged_feeder(tmp_path, text)
+    github.issues[HOME] = [
+        issue(1, created_at=1.0, body="Touches: lib/"),
+        issue(2, created_at=2.0, body="Touches: lib/"),
+    ]
+    assert fed_heads(github, feeder.feed_once()) == ["factory/issue-1", "factory/issue-2"]
