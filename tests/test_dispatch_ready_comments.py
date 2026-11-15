@@ -6,6 +6,7 @@ import pytest
 
 from lib.dispatch.constants import STOPPED_POLL_SECONDS
 from lib.dispatcher import Dispatcher
+from lib.handoff_check import expected_for, problems
 from lib.hook_t7 import T7Hook
 from tests.merge_queue_support import APPROVE, TRUSTED_LOGINS, VERDICT, sha
 from tests.test_review_before_ci import (
@@ -404,3 +405,44 @@ def test_an_interrupted_retry_never_takes_the_earlier_attempts_verdict(tmp_path:
     fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
     assert board.outcome("red-ready") == "ci-red-in-flight"
     assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
+
+
+@pytest.mark.job_bound
+@pytest.mark.parametrize("missing", ["verdict_heads_floor", "verdict_heads"])
+@pytest.mark.parametrize(
+    ("asked", "outcome"),
+    [("No questions.", "no-questions"), ("Which head should I review?", "waiting-max")],
+)
+def test_a_reviews_own_questions_handoff_never_answers_the_review(
+    tmp_path: Path, missing: str, asked: str, outcome: str
+) -> None:
+    board = board_with(tmp_path, on=True)
+    pr = board.open("42", sha(1))
+    pr.push(pr.head, ci="pending")
+    board.go(pr, "go")
+    board.poll()
+    build = board.claim("claude")
+    board.ready(pr, pr.head, "111111")
+    board.queue.finish(build.id, owner="claude", handoff_comment_id="111111")
+    board.poll()
+    assert board.outcome("111111") == "queued-review"
+    review = board.claim("codex")
+    body = f"<!-- orch:v1 kind=questions from=codex-bot role=reviewer -->\n{asked}"
+    raw = {
+        "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+        "user": {"login": "codex-login"},
+        "body": body,
+    }
+    expected = expected_for(review, "codex-bot")
+    assert problems(expected, "123456", lambda _: raw, TRUSTED_LOGINS["github"]) == []
+    board.post(pr, "123456", body, "codex-login")
+    board.queue.finish(review.id, owner="codex", handoff_comment_id="123456")
+    board.poll()
+    assert board.outcome("123456") == outcome
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True
+    pr.comments.remove(next(item for item in pr.comments if item.id == "123456"))
+    _upgrade_from(board, missing)
+    _restart(board, tmp_path)
+    pr.push(pr.head, ci="failure")
+
+    assert board.dispatcher._ci_failure_carried(board.snapshot(pr), pr.head) is True

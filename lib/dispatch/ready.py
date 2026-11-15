@@ -12,6 +12,7 @@ from lib.dispatch.helpers import (
     _detail_round_number,
     _has_questions,
     _matching_head,
+    _questions_outcome,
     _round_number,
     _scope,
 )
@@ -584,7 +585,7 @@ class ReadyMixin:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT verdict.comment_id, recorded.head
+                SELECT verdict.comment_id, verdict.outcome, recorded.head
                 FROM handled_comments AS verdict
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
@@ -615,7 +616,7 @@ class ReadyMixin:
         return any(
             _matching_head(str(row["head"]), head) is not None
             if row["head"] is not None
-            else row["comment_id"] not in visible
+            else row["comment_id"] not in visible and not _questions_outcome(str(row["outcome"]))
             for row in rows
         )
 
