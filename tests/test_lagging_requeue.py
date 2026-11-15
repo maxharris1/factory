@@ -37,6 +37,7 @@ from tests.test_skill_preflight import (
     lock_root,
     sync_rows,
 )
+from lib.usage_readings import Reading, store
 from tests.test_usage_limit import _feed
 from tests.test_waiter import state
 
@@ -252,6 +253,27 @@ def test_time_in_a_usage_limited_lane_never_counts_toward_the_lagging_bound(
         at += 30
         factory.poll(at)
         factory.device.waiter.step()
+    assert factory.stuck() == (1, "device-lagging")
+    assert [job[1:] for job in factory.jobs()] == [("failed", 1)], "no attempt 2"
+
+
+def test_healthy_readings_after_a_pause_ends_never_extend_the_lagging_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_root: Path
+) -> None:
+    factory = Factory(tmp_path, monkeypatch, lock_root)
+    job_id, started = factory.device.run_one()
+    assert started is None
+    ended = int(START) + 60
+    with sqlite3.connect(factory.device.db) as connection:
+        lane_limit.record(connection, job_id=job_id, harness="claude", bot="claude-bot",
+                          limit=lane_limit.UsageLimit(ended), now=START + 1)
+    at = START
+    while at < ended + LAGGING_WAIT_SECONDS + 300:
+        at += 30
+        with sqlite3.connect(factory.device.db) as connection:
+            store(connection, harness="claude", bot="claude-bot", device="remote", job_id="healthy",
+                  readings=[Reading("five_hour", 0.5, int(at) + 3600, at)])
+        factory.poll(at)
     assert factory.stuck() == (1, "device-lagging")
     assert [job[1:] for job in factory.jobs()] == [("failed", 1)], "no attempt 2"
 

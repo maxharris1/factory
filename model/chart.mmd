@@ -62,7 +62,7 @@ stateDiagram-v2
   s9 --> s15: REVISE, under the round cap
   s13 --> s12: post-merge fails, follow-up filed or post-merge passes
   s14 --> s9: head changed and the patch differs
-  s14 --> s16: ship = merge and the PR is held
+  s14 --> s16: ship = merge or handoff and the PR is held
   s14 --> s17: ship = handoff
   s14 --> s18: APPROVE, finish_line merge
   s14 --> s7: ship = merge
@@ -73,6 +73,8 @@ stateDiagram-v2
   s5 --> s15: answer, same step resumes
   s16 --> s9: head changed and the patch differs
   s16 --> s15: REVISE, under the round cap or PR dirty or behind, base update
+  s16 --> s17: approver's OK at the head, ship = handoff, finish_line ready-for-review
+  s16 --> s18: approver's OK at the head, finish_line merge
   s16 --> s7: approver's OK at the head, or approver removes a label-only hold
   s17 --> s7: PR merged
   s17 --> s9: trusted ready at a new head, within the effective cap
