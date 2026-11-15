@@ -210,13 +210,9 @@ def test_job_failed_twice_wake_links_the_queueing_comment_after_a_restart(
         if at == 110.0:
             dispatcher.reconcile_jobs()
 
-    class Unavailable(FakeSource):
-        def tracked_tickets(self, refs):
-            raise RuntimeError("ticket API temporarily unavailable")
-
     delivery = FakeGrokDelivery()
     restarted, _ = setup(tmp_path, now=now, grok_delivery=delivery)
-    restarted.poll_once(Unavailable())
+    restarted.poll_once(FakeSource(on_pr()))
 
     [wake] = delivery.jobs
     assert detail(wake)["job_id"] == build.id
