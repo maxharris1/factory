@@ -80,8 +80,10 @@ class FollowupsMixin:
                 """,
                 key,
             ).fetchall()
+        if not rows:
+            return
+        actions = self._review_actions(ticket)
         for row in rows:
-            actions = self._review_actions(ticket)
             comment_id = str(row["comment_id"])
             issue_number = row["issue_number"]
             if row["status"] == "pending":
