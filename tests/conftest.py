@@ -10,10 +10,6 @@ process unless a test overrides `_skill_preflight`, as
 tests/test_skill_preflight.py does. A waiter a test starts as its own
 process runs the real preflight, so HOME is a session home holding the
 pinned skills, installed as install-skills does.
-
-No `ORCH_*`, `FACTORY_*`, `LINEAR_WEBHOOK_*` or `XDG_*` name from the
-calling shell reaches a test (#299): a box job exports ORCH_DB and friends
-at the live state dir, and a deploy script a test runs would act on it.
 """
 
 from __future__ import annotations
@@ -30,15 +26,17 @@ from pathlib import Path
 
 import pytest
 
-SCRUBBED_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
+LIVE_STATE_ENV_PREFIXES = ("ORCH_", "FACTORY_", "LINEAR_WEBHOOK_", "XDG_")
+_live_state_env: dict[str, str] = {}
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _a_scrub_live_factory_env():
-    scrubbed = {name: os.environ.pop(name) for name in list(os.environ)
-                if name.startswith(SCRUBBED_PREFIXES)}
-    yield
-    os.environ.update(scrubbed)
+def pytest_configure(config: pytest.Config) -> None:
+    _live_state_env.update({name: os.environ.pop(name) for name in list(os.environ)
+                            if name.startswith(LIVE_STATE_ENV_PREFIXES)})
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    os.environ.update(_live_state_env)
 
 
 def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
@@ -55,36 +53,30 @@ def sandbox_env(home: Path, **extra: str) -> dict[str, str]:
     }
 
 
-def reap_state(home: Path) -> None:
-    state = home / ".local/state/factory"
-    pids = set()
-    for path in (*state.glob("*.pid"), *state.glob("*.lock")):
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
-        if text.isdigit():
-            pids.add(int(text))
-    started_here = [pid for pid in pids if _home_of(pid) == str(home)]
+def reap_home(home: Path) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid in started_here:
-            try:
-                if os.getpgid(pid) == pid:
-                    os.killpg(pid, sig)
-                else:
+        deadline = time.monotonic() + 2
+        while (pids := _homed(home)) and time.monotonic() < deadline:
+            for pid in pids:
+                try:
                     os.kill(pid, sig)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+
+
+def _homed(home: Path) -> list[int]:
+    needle = f"HOME={home}".encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                environ = (entry / "environ").read_bytes()
             except OSError:
-                pass
-        if sig == signal.SIGTERM and started_here:
-            time.sleep(0.2)
-
-
-def _home_of(pid: int) -> str | None:
-    try:
-        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    except OSError:
-        return None
-    for entry in environ:
-        if entry.startswith(b"HOME="):
-            return entry[5:].decode(errors="replace")
-    return None
+                continue
+            if needle in environ.split(b"\0"):
+                found.append(int(entry.name))
+    return found
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -147,7 +139,7 @@ def _fake_gh_store(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_local_overlay(_a_scrub_live_factory_env):
+def _no_local_overlay():
     """No host's orch.local.yml or machines.local.yml leaks into a test (#107).
     Overlay tests clear ORCH_NO_LOCAL_OVERLAY with monkeypatch.delenv."""
     previous = os.environ.get("ORCH_NO_LOCAL_OVERLAY")
@@ -160,7 +152,7 @@ def _no_local_overlay(_a_scrub_live_factory_env):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_real_db_backup(_a_scrub_live_factory_env, tmp_path_factory: pytest.TempPathFactory):
+def _no_real_db_backup(tmp_path_factory: pytest.TempPathFactory):
     """#66: `orch poll` backs up after every cycle; never to the real
     ~/.local/share/factory/backup. Tests that need a path set their own."""
     backup = tmp_path_factory.mktemp("db-backup") / "orch.db"

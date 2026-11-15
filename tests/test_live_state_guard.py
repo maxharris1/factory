@@ -1,136 +1,120 @@
-"""#299: the deploy and waiter-service tests leave the live factory alone.
-
-A box job exports ORCH_DB, ORCH_WAITER_DRAIN and friends at the live
-~/.local/state/factory. This runs tests/test_deploy.py and
-tests/test_waiter_service.py in a child pytest with those names pointed at a
-decoy state dir, then checks that neither the decoy nor the real live dir
-changed and that nothing the child started is still running.
-"""
-
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import time
+from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
+from tests.procs import alive
+
 ROOT = Path(__file__).resolve().parents[1]
-REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
-LIVE = REAL_HOME / ".local/state/factory"
+REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
 GUARDED = ("tests/test_deploy.py", "tests/test_waiter_service.py")
+SENTINELS = {"waiter-claude-bot.pid": "1599481", "waiter-codex-bot.pid": "1599548",
+             "poller.pid": "1599600", "self-heal.pid": "1599700"}
 
 
-def _pidfiles(state: Path) -> dict[str, bytes]:
-    if not state.is_dir():
-        return {}
-    return {path.name: path.read_bytes() for path in sorted(state.glob("*.pid"))}
+@dataclass(frozen=True)
+class GuardedRun:
+    returncode: int
+    output: str
+    changed: dict[str, tuple[bytes | None, bytes | None]]
+    strays: list[str]
 
 
-def _read(pid: int, name: str) -> list[str]:
-    try:
-        raw = Path(f"/proc/{pid}/{name}").read_bytes()
-    except OSError:
-        return []
-    return raw.decode(errors="replace").split("\0")
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes()
+            for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def _environ(pid: int) -> dict[str, str]:
-    return dict(entry.split("=", 1) for entry in _read(pid, "environ") if "=" in entry)
-
-
-def _home(pid: int) -> str:
-    return _environ(pid).get("HOME", "")
-
-
-def _processes() -> dict[int, tuple[str, dict[str, str]]]:
-    found = {}
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
-            pid = int(entry.name)
-            found[pid] = (" ".join(_read(pid, "cmdline")).strip(), _environ(pid))
-    return found
-
-
-def _strays(before: set[int], inner: Path, decoy: Path) -> dict[int, str]:
-    strays = {}
-    for pid, (argv, environ) in _processes().items():
-        if pid in before or pid == os.getpid():
-            continue
-        home = environ.get("HOME", "")
-        state = environ.get("ORCH_STATE_DIR") or f"{home}/.local/state/factory"
-        ours = home.startswith((str(inner), str(decoy))) or str(inner) in argv
-        live_supervisor = ("_supervise" in argv and Path(home) != REAL_HOME
-                           and (Path(state) == LIVE or state.startswith(str(decoy))))
-        if ours or live_supervisor:
-            strays[pid] = f"{pid} HOME={home} STATE={state} {argv}"
-    return strays
-
-
-def _live_pidfiles_naming_us(before: dict[str, bytes], inner: Path, decoy: Path) -> dict[str, str]:
-    changed = {}
-    for name, value in _pidfiles(LIVE).items():
-        text = value.decode(errors="replace").strip()
-        if before.get(name) != value and text.isdigit():
-            if _home(int(text)).startswith((str(inner), str(decoy))):
-                changed[name] = text
-    return changed
-
-
-def _kill(pids) -> None:
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-
-def test_the_deploy_and_waiter_tests_leave_the_live_state_alone(tmp_path: Path) -> None:
-    decoy = tmp_path / "decoy"
-    state = decoy / "state"
-    state.mkdir(parents=True)
-    for name, value in (("waiter-claude-bot.pid", "1599481"), ("waiter-codex-bot.pid", "1599548"),
-                        ("poller.pid", "1599600"), ("self-heal.pid", "1599700")):
-        (state / name).write_text(f"{value}\n", encoding="utf-8")
-    decoy_before = {path.name: path.read_bytes() for path in state.iterdir()}
-    live_before = _pidfiles(LIVE)
-    inner = Path(tempfile.mkdtemp(prefix="pytest-live-guard-", dir="/tmp"))
+def _run_guarded(tests: tuple[str, ...], scratch: Path) -> GuardedRun:
+    home = scratch / "home"
+    live = home / ".local/state/factory"
+    live.mkdir(parents=True)
+    for name, pid in SENTINELS.items():
+        (live / name).write_text(f"{pid}\n", encoding="utf-8")
+    before = _snapshot(home)
+    basetemp = Path(tempfile.mkdtemp(prefix="pytest-live-guard-", dir="/tmp"))
+    report = scratch / "strays.json"
     environment = {
         **os.environ,
-        "ORCH_STATE_DIR": str(state),
-        "ORCH_DB": str(state / "orch.db"),
-        "ORCH_WAITER_DRAIN": str(state / "waiter-claude-bot.drain"),
-        "XDG_STATE_HOME": str(decoy / "xdg-state"),
-        "XDG_CONFIG_HOME": str(decoy / "xdg-config"),
+        "HOME": str(home),
+        "ORCH_STATE_DIR": str(live),
+        "ORCH_DB": str(live / "orch.db"),
+        "ORCH_WAITER_DRAIN": str(live / "waiter-claude-bot.drain"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
     }
-    before = set(_processes())
-    strays: dict[int, str] = {}
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-             f"--basetemp={inner}", *GUARDED],
+            [sys.executable, "-m", "tests.subreaper", str(report), "--",
+             sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             f"--basetemp={basetemp}", *tests],
             cwd=ROOT, env=environment, text=True, capture_output=True, timeout=900, check=False,
         )
-        assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
-
-        deadline = time.monotonic() + 10
-        while True:
-            strays = _strays(before, inner, decoy)
-            if not strays or time.monotonic() > deadline:
-                break
-            time.sleep(0.2)
-        assert strays == {}, "\n".join(strays.values())
-        assert {path.name: path.read_bytes() for path in state.iterdir()} == decoy_before
-        assert not (decoy / "xdg-state").exists() and not (decoy / "xdg-config").exists()
-        assert _live_pidfiles_naming_us(live_before, inner, decoy) == {}
     finally:
-        _kill(strays or _strays(before, inner, decoy))
-        shutil.rmtree(inner, ignore_errors=True)
+        shutil.rmtree(basetemp, ignore_errors=True)
+    after = _snapshot(home)
+    changed = {name: (before.get(name), after.get(name))
+               for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    return GuardedRun(result.returncode, result.stdout[-4000:] + result.stderr[-2000:],
+                      changed, json.loads(report.read_text(encoding="utf-8")))
+
+
+@pytest.mark.timeout(900)
+def test_the_deploy_and_waiter_tests_leave_the_live_state_alone(tmp_path: Path) -> None:
+    run = _run_guarded(GUARDED, tmp_path)
+
+    assert run.returncode == 0, run.output
+    assert run.changed == {}
+    assert run.strays == []
+
+
+LIVE_STATE = "Path.home() / '.local/state/factory'"
+MUTATIONS = {
+    "delete": (f"({LIVE_STATE} / 'poller.pid').unlink()", "poller.pid"),
+    "overwrite": (f"({LIVE_STATE} / 'poller.pid').write_text('999999999\\n')", "poller.pid"),
+    "add": (f"({LIVE_STATE} / 'new-supervisor.pid').write_text('999999999\\n')",
+            "new-supervisor.pid"),
+}
+
+
+@pytest.mark.parametrize("mutation", sorted(MUTATIONS))
+def test_the_guard_fails_a_run_that_touches_a_live_pidfile(tmp_path: Path, mutation: str) -> None:
+    probe = tmp_path / f"test_{mutation}.py"
+    probe.write_text("from pathlib import Path\n\n\ndef test_mutate():\n"
+                     f"    {MUTATIONS[mutation][0]}\n", encoding="utf-8")
+
+    run = _run_guarded((str(probe),), tmp_path)
+
+    assert run.returncode == 0, run.output
+    assert list(run.changed) == [f".local/state/factory/{MUTATIONS[mutation][1]}"]
+
+
+def test_the_guard_fails_a_run_that_leaves_a_supervisor_under_the_real_home(tmp_path: Path) -> None:
+    probe = tmp_path / "test_leak.py"
+    probe.write_text(
+        "import os, pwd, subprocess\n\n\ndef test_leak():\n"
+        "    subprocess.Popen(['/bin/bash', '-c', 'sleep 60 & wait', 'deploy/waiter-service.sh',"
+        " 'claude-bot', '_supervise'], start_new_session=True,"
+        " env={'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'PATH': '/usr/bin:/bin'})\n",
+        encoding="utf-8")
+
+    run = _run_guarded((str(probe),), tmp_path)
+
+    assert run.returncode == 0, run.output
+    supervisors = [stray for stray in run.strays if "_supervise" in stray]
+    assert len(supervisors) == 1, run.strays
+    assert f"HOME={REAL_HOME} " in supervisors[0]
+    assert not alive(int(supervisors[0].split()[0]))
 
 
 ENV_ARGUMENT = re.compile(r"env=\{\*\*os\.environ|env=os\.environ|\bos\.environ\.(?:items|copy)\(\)")

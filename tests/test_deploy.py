@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import reap_state, sandbox_env
+from tests.conftest import reap_home, sandbox_env
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,7 +105,6 @@ python.chmod(0o755)
         FAKE_VENV_PYTHON=FAKE_VENV_PYTHON,
         ORCH_CONFIG=str(orch_config),
         PATH=f"{fake_bin}:/usr/bin:/bin",
-        # Never a real crontab or systemd; autostart tests point these at fakes.
         ORCH_CRONTAB=str(fake_bin / "no-such-crontab"),
         ORCH_SYSTEMCTL=str(fake_bin / "no-such-systemctl"),
     )
@@ -536,23 +535,23 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
     pidfile = tmp_path / ".local/state/factory/poller.pid"
     source = ["bash", "-c", "set -e; . deploy/profile.sh; printf ok"]
 
-    off = subprocess.run(
-        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
-        capture_output=True, timeout=30, check=False,
-    )
-    assert off.returncode == 0 and off.stdout == "ok", off.stderr
-    time.sleep(0.5)
-    assert not pidfile.exists()
-
-    (config / "poller-autostart").touch()
-    started = time.monotonic()
-    on = subprocess.run(
-        source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
-        capture_output=True, timeout=30, check=False,
-    )
-    assert on.returncode == 0 and on.stdout == "ok", on.stderr
-    assert time.monotonic() - started < 5  # the hook does not block the shell
     try:
+        off = subprocess.run(
+            source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+            capture_output=True, timeout=30, check=False,
+        )
+        assert off.returncode == 0 and off.stdout == "ok", off.stderr
+        time.sleep(0.5)
+        assert not pidfile.exists()
+
+        (config / "poller-autostart").touch()
+        started = time.monotonic()
+        on = subprocess.run(
+            source, cwd=ROOT, env=_profile_env(tmp_path), text=True,
+            capture_output=True, timeout=30, check=False,
+        )
+        assert on.returncode == 0 and on.stdout == "ok", on.stderr
+        assert time.monotonic() - started < 5
         deadline = time.monotonic() + 15
         while not pidfile.exists():
             assert time.monotonic() < deadline, (
@@ -560,9 +559,11 @@ def test_profile_hook_runs_ensure_only_when_autostart_is_on(tmp_path: Path) -> N
             ).read_text() if (tmp_path / ".local/state/factory/poller-service.log").exists() else "no log"
             time.sleep(0.1)
     finally:
-        subprocess.run(["bash", "deploy/poller-service.sh", "stop"], cwd=ROOT,
-                       env=_profile_env(tmp_path), capture_output=True, timeout=60, check=False)
-        reap_state(tmp_path)
+        try:
+            subprocess.run(["bash", "deploy/poller-service.sh", "stop"], cwd=ROOT,
+                           env=_profile_env(tmp_path), capture_output=True, timeout=60, check=False)
+        finally:
+            reap_home(tmp_path)
 
 
 # --- #107: profile, self-heal and legacy launchers ---------------------------------------------
@@ -693,11 +694,14 @@ def test_install_retires_the_legacy_launchers(tmp_path: Path) -> None:
         "0 3 * * * /usr/bin/true # keep\n",
         encoding="utf-8")
     poller_env = sandbox_env(tmp_path)
-    pollers = [subprocess.Popen(["/bin/sh", str(poller)], env=poller_env) for _ in range(20)]
-    children = [_child(tmp_path / f"child-{proc.pid}") for proc in pollers]
+    pollers: list[subprocess.Popen] = []
+    children: list[int] = []
     bystander = subprocess.Popen(["/bin/sh", "-c", f"sleep 60 # {poller}"],
                                  start_new_session=True)
     try:
+        pollers.extend(subprocess.Popen(["/bin/sh", str(poller)], env=poller_env)
+                       for _ in range(20))
+        children.extend(_child(tmp_path / f"child-{proc.pid}") for proc in pollers)
         result = _install(environment)
 
         assert result.returncode == 0, result.stderr
@@ -781,17 +785,17 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
     lock = tmp_path / ".local/state/factory/linear-webhook-listener.lock"
     (tmp_path / ".config/factory/self-heal-autostart").unlink()
 
-    off = subprocess.run(source, cwd=ROOT, env=env, text=True,
-                         capture_output=True, timeout=30, check=False)
-    assert off.returncode == 0 and off.stdout == "ok", off.stderr
-    time.sleep(0.5)
-    assert not lock.exists()
-
-    (tmp_path / ".config/factory/linear-webhook-autostart").touch()
-    on = subprocess.run(source, cwd=ROOT, env=env, text=True,
-                        capture_output=True, timeout=30, check=False)
-    assert on.returncode == 0 and on.stdout == "ok", on.stderr
     try:
+        off = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                             capture_output=True, timeout=30, check=False)
+        assert off.returncode == 0 and off.stdout == "ok", off.stderr
+        time.sleep(0.5)
+        assert not lock.exists()
+
+        (tmp_path / ".config/factory/linear-webhook-autostart").touch()
+        on = subprocess.run(source, cwd=ROOT, env=env, text=True,
+                            capture_output=True, timeout=30, check=False)
+        assert on.returncode == 0 and on.stdout == "ok", on.stderr
         deadline = time.monotonic() + 15
         while not (tmp_path / ".local/state/factory/linear-webhook-listener.pid").exists():
             assert time.monotonic() < deadline, "the profile hook never started the listener loop"
@@ -800,9 +804,11 @@ def test_install_copies_the_linear_service_and_the_profile_runs_its_ensure(
                                 capture_output=True, timeout=30, check=False)
         assert status.returncode == 0, status.stdout + status.stderr
     finally:
-        stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
-                                 capture_output=True, timeout=60, check=False)
-        reap_state(tmp_path)
+        try:
+            stopped = subprocess.run([str(installed), "stop"], env=env, text=True,
+                                     capture_output=True, timeout=60, check=False)
+        finally:
+            reap_home(tmp_path)
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
 
 

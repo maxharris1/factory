@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import reap_state, sandbox_env
+from tests.conftest import reap_home, sandbox_env
 from tests.procs import alive
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,14 +68,16 @@ def home(tmp_path: Path):
     try:
         yield home
     finally:
-        for bot in ("claude-bot", "codex-bot"):
-            _service(home, bot, "stop")
-        for pid in _all_starts(home):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        reap_state(home)
+        try:
+            for bot in ("claude-bot", "codex-bot"):
+                _service(home, bot, "stop")
+        finally:
+            for pid in _all_starts(home):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            reap_home(home)
 
 
 def _service(home: Path, *args: str, cron: Path | None = None, **extra: str):
@@ -364,6 +366,6 @@ def test_install_profile_hook_ensures_each_autostarted_waiter(tmp_path: Path) ->
                        env=sandbox_env(home, PATH="/usr/bin:/bin"), check=True, timeout=30)
         _wait_for(lambda: marker.exists() and len(marker.read_text().splitlines()) == 2)
     finally:
-        reap_state(home)
+        reap_home(home)
     assert sorted(marker.read_text().splitlines()) == ["claude-bot ensure", "codex-bot ensure"]
     assert "bogus" not in marker.read_text()
