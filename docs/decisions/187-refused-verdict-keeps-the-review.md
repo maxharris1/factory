@@ -1,0 +1,3 @@
+- **Decision:** A `verdict=APPROVE` with `ac=unmet` fails to parse, so it never ships. A verdict the dispatcher refuses changes no state or round, wakes Grok Bot with its outcome, and queues the refused done review once more as attempt 2. An APPROVE with no `ac` still parses and ships: requiring `ac=met` on every APPROVE failed 429 existing tests and is left for a follow-up.
+- **When:** 2026-11-15 ET, by Factory decided (technical)
+- **Source:** https://github.com/maxharris1/factory/pull/379#issuecomment-6894964312
