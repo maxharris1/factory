@@ -347,3 +347,18 @@ def test_a_failed_health_pass_still_starts_the_device_deploy(home: Path) -> None
 
     assert result.returncode == 1
     assert [call["argv"][:2] for call in _detached(home, 1)] == [["heal", "devices"]]
+
+
+def test_once_starts_the_device_deploy_where_setsid_is_missing(home: Path, tmp_path: Path) -> None:
+    tools = tmp_path / "no-setsid-bin"
+    tools.mkdir()
+    for directory in (Path("/usr/bin"), Path("/bin")):
+        for tool in directory.iterdir():
+            if tool.name != "setsid" and not (tools / tool.name).exists():
+                (tools / tool.name).symlink_to(tool)
+
+    result = _run(home, "once", PATH=str(tools))
+
+    assert result.returncode == 0, result.stderr
+    assert "unbound variable" not in result.stderr
+    assert [call["argv"][:2] for call in _detached(home, 1)] == [["heal", "devices"]]

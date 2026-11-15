@@ -135,9 +135,11 @@ service_lock() {
 }
 
 detached() {
-    local detach=()
-    command -v setsid >/dev/null 2>&1 && detach=(setsid)
-    "${detach[@]}" nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    else
+        nohup "$@" >>"$LOG" 2>&1 </dev/null 8>&- 9>&- &
+    fi
 }
 
 head_sha() {
