@@ -1,0 +1,8 @@
+decision	choice	why
+baseline on main	Case 1 [False] fails (update_failures 2, stuck 1); Case 2 fails at delay .1 (approval dropped, second review)	matches the ticket; recorded before any code change
+Case 2 probe classifier	add a fifth parameter (_shared) to the probe's lambda, nothing else changed	#261 made _classify_update pass shared_paths, so the 4-argument lambda raised TypeError, the check failed closed and even the delay=1.1 control failed on main; with the parameter, delay=1.1 carries and merges on main and only delay=.1 fails
+TU attribution	handoff id, else the newest update job that started (slot: not never_started; no slot: running/done/failed and no failed-unstarted event)	plan option A; orders jobs only against each other, never a job time against a comment time
+T6 update path	drop the created_at filter for update-from-main; require TU to name the job, the ready to follow the job's source comment, and no update-failure outcome	without the time filter the original build ready (before the update flow) was attributed to the retry and marked it done-from-ready; the source-comment floor compares comments with comments on one clock
+T6 rule (b)	kept, tested with a retry whose head moved	in the normal flow the retry is queued at the failed ready's head so the head check already drops it; rule (b) covers a retry queued at a later head; removing it fails test_a_ready_handled_as_an_update_failure_is_no_later_jobs_handoff
+scope cut	created_at filter stays for build, fix and review in T6	same whole-second weakness, but out of this ticket; follow-up
+model	unchanged	attribution adds or removes no transition

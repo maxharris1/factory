@@ -15,6 +15,13 @@ from lib.dispatch.errors_text import safe_ship_error
 from lib.dispatch.helpers import _comment_order, _matching_head, _queue_state, _scope
 from lib.dispatch.types import Comment, RetryableStateError, ShipError, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
+from lib.job_state import (
+    FAILED_UNSTARTED,
+    JOB_EVENTS_TABLE,
+    has_job_events,
+    never_started,
+    read_placements,
+)
 from lib.queue import JobRequest
 from lib.update_check import UpdateClass
 
@@ -346,31 +353,38 @@ class MergeQueueMixin:
             )
 
     def _update_job_before(self, ticket: TrackedTicket, comment: Comment) -> str | None:
-        """The update-from-main attempt a ready came from: the job that
-        handed it off, else the latest job that has run and was queued no
-        later than the ready's whole second. A job still queued (a retry not
-        yet claimed) or cancelled unclaimed never ran, so it posted nothing."""
+        """The update-from-main attempt a ready came from (TU attribution).
+
+        The job whose recorded handoff is this comment. Failing that, the
+        one fallback: the newest update job that started. A job with a
+        device slot started once a worker was recorded on it; a job with no
+        slot started once claimed, unless it failed unstarted. A job still
+        queued, or claimed with no worker yet, never ran, so it posted
+        nothing. Job times are never compared with the comment's."""
         with self._connect() as connection:
-            job = connection.execute(
+            jobs = connection.execute(
                 """
-                SELECT id FROM jobs
+                SELECT id, state, handoff_comment_id FROM jobs
                 WHERE lower(repo) = ? AND ticket_id = ? AND action = 'update-from-main'
-                  AND (
-                    handoff_comment_id = ?
-                    OR (state IN ('running', 'done', 'failed') AND created_at < ? + 1)
-                  )
-                ORDER BY handoff_comment_id = ? DESC, created_at DESC, id DESC
-                LIMIT 1
+                ORDER BY created_at DESC, id DESC
                 """,
-                (
-                    ticket.repo.lower(),
-                    ticket.ticket_id,
-                    comment.id,
-                    comment.created_at,
-                    comment.id,
-                ),
-            ).fetchone()
-        return None if job is None else str(job["id"])
+                (ticket.repo.lower(), ticket.ticket_id),
+            ).fetchall()
+            for job in jobs:
+                if job["handoff_comment_id"] == comment.id:
+                    return str(job["id"])
+            placements = read_placements(connection)
+            unstarted = _failed_unstarted(connection, [str(job["id"]) for job in jobs])
+        for job in jobs:
+            job_id = str(job["id"])
+            placement = placements.get(job_id)
+            if placement is not None:
+                started = not never_started(placement)
+            else:
+                started = job["state"] in ("running", "done", "failed") and job_id not in unstarted
+            if started:
+                return job_id
+        return None
 
     def _update_unanswered(self, ticket: TrackedTicket) -> tuple[str, str] | None:
         """Why the latest update-from-main job counts as failed though it
@@ -746,3 +760,16 @@ class MergeQueueMixin:
             ):
                 return True
         return False
+
+
+def _failed_unstarted(connection: sqlite3.Connection, job_ids: list[str]) -> set[str]:
+    if not job_ids or not has_job_events(connection):
+        return set()
+    marks = ", ".join("?" for _ in job_ids)
+    return {
+        str(row[0])
+        for row in connection.execute(
+            f"SELECT job_id FROM {JOB_EVENTS_TABLE} WHERE event = ? AND job_id IN ({marks})",
+            (FAILED_UNSTARTED, *job_ids),
+        )
+    }
