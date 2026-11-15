@@ -1,12 +1,5 @@
 """#193: T6 reconciles every result kind before a retry, and never retries in waiting-max.
 
-A failed harness job that already posted its plan, questions, ready or
-verdict is done with it. Inside poll_once, T6 reads the ticket again
-uncached before a retry; a source with no uncached read counts only a read
-that began at or after the failure. A harness job that fails while its
-ticket waits on Max is never retried: Max's answers resume the paused step,
-once, even after they clear waiting-max.
-
 Every test drives the real Dispatcher through poll_once on a fake clock and
 a fake source. Nothing reaches GitHub or the live orch.db.
 """

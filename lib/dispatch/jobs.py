@@ -699,7 +699,7 @@ class JobsMixin:
         # #91 (PR #88), #105, #193: the job may have posted its result and
         # then failed. That result stands: done, never retried.
         key = (job.request.repo.lower(), job.request.ticket_id)
-        if self._settled_by(job, self._posted_handoff(job, self._polled.get(key))):
+        if self._holds_retry(job, self._posted_handoff(job, self._polled.get(key))):
             return
         if job.request.recipient != "grok" and self._waiting_max(job):
             self._record_job_event_once(
@@ -717,7 +717,7 @@ class JobsMixin:
             )
             self.queue.mark_failure_handled(job.id)
             return
-        if self._settled_by(job, self._authoritative_handoff(job)):
+        if self._holds_retry(job, self._authoritative_handoff(job)):
             return
         if self._restored_failure_waits(job):
             return
@@ -972,8 +972,6 @@ class JobsMixin:
         return row is not None and row["workflow_state"] == "waiting-max"
 
     def _resumed_by_answers(self, job: Job) -> bool:
-        """#193: answers queued the same step after this job was queued, so
-        the resume replaces it, even once waiting-max is cleared."""
         with self._connect() as connection:
             return connection.execute(
                 """
@@ -990,8 +988,7 @@ class JobsMixin:
                 ),
             ).fetchone() is not None
 
-    def _settled_by(self, job: Job, handoff: Comment | object | None) -> bool:
-        """Act on a _posted_handoff result: True when T6 must not retry now."""
+    def _holds_retry(self, job: Job, handoff: Comment | object | None) -> bool:
         if handoff is None:
             return False
         if handoff is _HANDOFF_UNREAD:
@@ -1013,11 +1010,6 @@ class JobsMixin:
         return True
 
     def _authoritative_handoff(self, job: Job) -> Comment | object | None:
-        """#193: inside poll_once, the result an uncached read of a tracked
-        ticket shows, since the poll's read can be a cached document from
-        before the failure. With no uncached reader, the poll's read counts
-        only when it began at or after the failure. _NO_READ_SINCE_FAILURE
-        when no such read exists."""
         if self._read_started is None or job.request.action not in _SETTLING_KINDS:
             return None
         tracker = self._tracker(job.request.repo, job.request.ticket_id)
@@ -1044,7 +1036,7 @@ class JobsMixin:
     def _posted_handoff(self, job: Job, ticket: TrackedTicket | None) -> Comment | object | None:
         """The result a failed harness job already posted (#91, #105, #193).
 
-        Read from the given ticket read (None for none), posted no earlier than the
+        Read from `ticket`, posted no earlier than the
         job was queued, from a login trusted for its `from` and `role`, of a
         kind in _SETTLING_KINDS for the job's action, and not already
         rejected when it was handled (stale, superseded, ...). A ready stale
