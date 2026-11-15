@@ -292,8 +292,7 @@ def all_active(connection: sqlite3.Connection, now: float) -> list[LaneLimit]:
 
 
 def paused_through(connection: sqlite3.Connection, now: float) -> dict[str, float]:
-    """How far each recipient's latest limit has paused its lane: its end
-    once lifted, else now. Time up to it is waiting, never lag."""
+    """Time up to each recipient's value is lane-limit waiting, never lag."""
     if not _has_table(connection, TABLE):
         return {}
     rows = connection.execute(f"SELECT recipient, until FROM {TABLE}").fetchall()
