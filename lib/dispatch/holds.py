@@ -130,9 +130,7 @@ class HoldsMixin:
         decision = self._hold_decision(ticket, head)
         return decision if decision.blocks else None
 
-    def _hold_applies(self, ticket: TrackedTicket, head: str) -> bool:
-        """A hold is in play at head, cleared or not: red CI then leaves
-        the APPROVE unconsumed."""
+    def _hold_in_play(self, ticket: TrackedTicket, head: str) -> bool:
         if ticket.factory.ship != "merge" or ticket.factory.hold is None:
             return False
         decision = self._hold_decision(ticket, head)

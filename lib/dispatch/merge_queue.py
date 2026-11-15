@@ -295,16 +295,15 @@ class MergeQueueMixin:
             self._queue_update(ticket, row)
             return
         head = ticket.current_head
-        wait = self._queue_head_wait(ticket, row, head)
+        wait = self._queue_head_wait_reason(ticket, row, head)
         if wait is not None:
             self._log_queue_wait(ticket, head, wait)
             return
         self._merge_queue_head(ticket, row, head)
 
-    def _queue_head_wait(
+    def _queue_head_wait_reason(
         self, ticket: TrackedTicket, row: sqlite3.Row, head: str | None
     ) -> str | None:
-        """Why the queue head does not merge this poll, or None to merge."""
         if ticket.mergeable_state in ("dirty", "behind"):
             return "base update out"
         if head is None:
@@ -333,9 +332,9 @@ class MergeQueueMixin:
 
     def _log_queue_wait(self, ticket: TrackedTicket, head: str | None, reason: str) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
-        if self._queue_waits.get(key) == (head, reason):
+        if self._logged_queue_waits.get(key) == (head, reason):
             return
-        self._queue_waits[key] = (head, reason)
+        self._logged_queue_waits[key] = (head, reason)
         if self.log is not None:
             self.log(
                 f"merge-queue: {ticket.repo}#{ticket.ticket_id} waits at "
@@ -435,7 +434,7 @@ class MergeQueueMixin:
             connection.execute("BEGIN IMMEDIATE")
             self._enter_merged(connection, ticket.repo, ticket.ticket_id, "merge-queue")
             connection.commit()
-        self._queue_waits.pop((ticket.repo.lower(), ticket.ticket_id), None)
+        self._logged_queue_waits.pop((ticket.repo.lower(), ticket.ticket_id), None)
         if self.log is not None:
             self.log(f"merged: {ticket.repo}#{ticket.ticket_id} at {head[:12]} (merge queue)")
         try:

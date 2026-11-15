@@ -1,6 +1,3 @@
-"""#323: a held PR on a ship: merge, finish_line: merge repo merges from
-the merge queue once the approver's ok covers its head."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -112,8 +109,6 @@ def test_the_queue_logs_each_wait_reason_once_per_head(tmp_path: Path) -> None:
 
 
 class GitHubMergeActions(BoardActions):
-    """The board's fake, except merge sends the real adapter's gh calls."""
-
     def __init__(self, board: Board, github: GitHubReviewActions):
         super().__init__(board)
         self.github = github
