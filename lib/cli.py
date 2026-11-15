@@ -56,7 +56,8 @@ from lib.orch_yml import (
 from lib.poll_source import LivePollSource, PollSourceError
 from lib.pstack_models import rules_text
 from lib.pstack_pin import Mode, doctor, install_skills, remove_claude_extras, unstable_checkout
-from lib.queue import SLOTS_TABLE, QueueError, SQLiteJobQueue
+from lib.handoff_check import ReadError, expected_for, gh_reader, problems as handoff_problems
+from lib.queue import MAX_INVALID_HANDOFFS, SLOTS_TABLE, QueueError, SQLiteJobQueue, job_from_row
 from lib.remote import SshTransport
 from lib.state_backup import BackupError, CycleBackup, backup, default_backup_path, restore
 from lib.status import main as status_main
@@ -251,9 +252,16 @@ job cancel <job-id> [--db PATH] [--reason TEXT]
   (a running one's worker must be stopped first) and 2 for an unknown one.
 job heartbeat <bot> <job-id> [--db PATH]
 job done <bot> <job-id> (--handoff COMMENT-ID | --failed) [--db PATH]
+         [--orch PATH]
   heartbeat keeps a running job out of the T6 timeout. done finishes it
   with the handoff comment ID; --failed hands it to T6. Repeating the
-  same done is a no-op.
+  same done is a no-op. --handoff first reads the comment from GitHub
+  and checks it against the job (#191): the repo, the PR, an author that
+  orch.yml's trusted_logins lets speak for <bot>, and the header's kind,
+  from, role, head and round. One that does not fit is submitted-invalid:
+  exit 1, the job keeps running, and the ticket is flagged needs-attention
+  once; the third fails the job for T6. A GitHub read that fails exits 1
+  and changes nothing.
 
 gc [--work-root DIR] [--older-than HOURS] [--dry-run]
   Report and remove job worktrees older than HOURS (default 24) whose
@@ -309,7 +317,18 @@ heal --health-json PATH|- [--state DIR] [--deploy DIR] [--config DIR]
   component in 30 minutes. Logs to self-heal.log in the state directory
   and escalates to the Factory webhook when a component cannot be fixed or
   flaps. Never calls an LLM and never signals a job. deploy/self-heal.sh
-  runs it every 2 minutes.
+  runs it every 2 minutes. A stale-code waiter is drained first
+  (waiter-<bot>.drain: it claims nothing and confirms in
+  waiter-<bot>.drain.ack) and restarted only once it has confirmed and has
+  no running job.
+heal deploy [--state DIR] [--checkout DIR] [--machines PATH] [--orch PATH]
+            [--device NAME] [--dry-run]
+  Fast-forward the checkout to origin/main (issue #219), keeping local
+  edits to machines.yml, orch.yml and deploy/install.sh. Only the
+  checkout's owner pulls. A conflict, local commits or other local edits
+  leave the checkout unchanged and escalate once. Runs
+  `deploy/install.sh --update` when deploy/ or requirements.txt changed.
+  deploy/self-heal.sh runs it before each heal pass.
 
 status [--db PATH] [--machines PATH] [--orch PATH]
   Print the queue, each device's slots and running jobs, Grok wakes,
@@ -589,6 +608,7 @@ def _wait_autostart(
             machines=args.machines if args.machines is not None else ROOT / "machines.yml",
             log=log,
             approvals=policy,
+            drain=waiter.drain_marker(args.bot),
         )
     except (WaitError, waiter.WaiterError) as exc:
         print(f"orch wait: {exc}", file=sys.stderr)
@@ -633,6 +653,7 @@ def _poll(argv: list[str]) -> int:
                     lambda *error: dispatcher.record_poll_error(*error),
                 ),
                 pusher,
+                _merge_kick(dispatcher, args.orch),
             )
             if args.once:
                 PollLoop(dispatcher, source).run(max_polls=1, after_poll=after_poll)
@@ -677,16 +698,41 @@ def _poll(argv: list[str]) -> int:
 
 
 class _AfterPoll:
-    """The poll loop's after-cycle hook: the #66 backup, then the dashboard push."""
+    """The poll loop's after-cycle hook: the #66 backup, the dashboard push,
+    then the #219 self-deploy kick after a merge of the factory's own repo."""
 
-    def __init__(self, backup: Callable[[], None], pusher: PollPusher | None) -> None:
+    def __init__(
+        self,
+        backup: Callable[[], None],
+        pusher: PollPusher | None,
+        kick: Callable[[], None] | None = None,
+    ) -> None:
         self.backup = backup
         self.pusher = pusher
+        self.kick = kick
 
     def __call__(self) -> None:
         self.backup()
         if self.pusher is not None:
             self.pusher()
+        if self.kick is not None:
+            self.kick()
+
+
+def _merge_kick(dispatcher: Dispatcher, orch_path: Path | None) -> Callable[[], None]:
+    """#219: after a cycle that merged a PR of this checkout's own repo,
+    start `deploy/self-heal.sh kick`; the webhook and Linear secrets stay
+    out of its environment (self-heal.sh reads webhook.env itself)."""
+    from lib import heal, self_deploy
+
+    return self_deploy.MergeKick(
+        lambda: dispatcher.merged_this_poll,
+        repo=self_deploy.own_repo(ROOT),
+        on_error=lambda exc: dispatcher.record_poll_error(
+            "self-deploy", "-", f"kick:{type(exc).__name__}"
+        ),
+        secret_names=heal._webhook(orch_path).secret_names,
+    )
 
 
 def _dashboard_pusher(db_path: Path, orch_path: Path | None) -> PollPusher | None:
@@ -1040,6 +1086,7 @@ def _job(argv: list[str]) -> int:
         sub.add_argument("bot")
         sub.add_argument("job_id")
         sub.add_argument("--db", type=Path)
+    done.add_argument("--orch", type=Path)
     outcome = done.add_mutually_exclusive_group(required=True)
     outcome.add_argument("--handoff", dest="handoff")
     outcome.add_argument("--failed", action="store_true")
@@ -1061,6 +1108,9 @@ def _job(argv: list[str]) -> int:
             code, message = settled
             print(f"{prog}: {message}" if code else message, file=sys.stderr if code else sys.stdout)
             return code
+        refused = _check_handoff(queue, args, prog)
+        if refused is not None:
+            return refused
     try:
         if args.command == "heartbeat":
             retry_locked(
@@ -1078,11 +1128,65 @@ def _job(argv: list[str]) -> int:
                 handoff_comment_id=args.handoff,
             )
         )
+        if args.handoff is not None:
+            queue.clear_invalid_handoff(job.id)
     except (QueueError, sqlite3.Error, OSError) as exc:
         print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
         return 1
     print(f"{job.state} {job.id}")
     return 0
+
+
+def _check_handoff(queue: SQLiteJobQueue, args: argparse.Namespace, prog: str) -> int | None:
+    """#191: the handoff comment must fit the job before it is done.
+
+    None when it does. A read that fails (GitHub, orch.yml) exits 1 and
+    records nothing; a handoff that does not fit is submitted-invalid,
+    exits 1, and the MAX_INVALID_HANDOFFS-th fails the job for T6."""
+    if args.handoff is None:
+        return None
+    try:
+        with queue.connect() as connection:
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (args.job_id,)).fetchone()
+        if row is None or row["state"] != "running":
+            return None
+        config_path = args.orch if args.orch is not None else ROOT / "orch.yml"
+        config, findings = load_orch_yml(config_path, allow_placeholders=True)
+        errors = [item.message for item in findings if item.severity == "error"]
+        if config is None or errors:
+            raise ValueError(f"{config_path}: {errors[0] if errors else 'invalid configuration'}")
+        found = handoff_problems(
+            expected_for(job_from_row(row), args.bot),
+            args.handoff,
+            gh_reader(),
+            config.trusted_logins,
+        )
+        if not found:
+            return None
+        count, job = retry_locked(
+            lambda: queue.record_invalid_handoff(
+                args.job_id,
+                owner=recipient_for(args.bot),
+                comment_id=args.handoff,
+                detail="; ".join(found),
+            )
+        )
+    except (ReadError, ValueError, sqlite3.Error, OSError) as exc:
+        print(f"{prog}: {' '.join(str(exc).split()) or type(exc).__name__}", file=sys.stderr)
+        return 1
+    print(f"{prog}: submitted-invalid {args.handoff}: {'; '.join(found)}", file=sys.stderr)
+    if job.state == "failed":
+        print(
+            f"{prog}: {count} invalid handoffs; job {job.id} is failed for T6",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{prog}: invalid handoff {count} of {MAX_INVALID_HANDOFFS}; the job is still "
+            "running: post a handoff that fits it and run orch job done again",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def _job_cancel(argv: list[str]) -> int:

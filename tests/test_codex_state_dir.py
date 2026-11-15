@@ -31,6 +31,7 @@ from lib import codex_sandbox
 from lib.codex_sandbox import DeviceCommand, for_device, state_dirs, with_state_dir
 from lib.queue import SQLiteJobQueue
 from tests import test_remote_start as remote_start
+from tests.handoff_store import harness_comment_id
 from tests.test_brief import FACTORY_MD
 from tests.test_waiter import (
     FAKE_GH,
@@ -219,7 +220,7 @@ if not writable:
     print("orch job done: attempt to write a readonly database", flush=True)
     sys.exit(0)  # codex itself exits 0 after its turn
 subprocess.run([sys.executable, os.environ["FAKE_ORCH"], "job", "done",
-                os.environ["ORCH_JOB_BOT"], job, "--handoff", "c-" + job[:6]], check=True)
+                os.environ["ORCH_JOB_BOT"], job, "--handoff", subprocess.check_output([sys.executable, os.environ["FAKE_POST_HANDOFF"], os.environ["ORCH_DB"], job], text=True).strip()], check=True)
 """
 
 
@@ -315,7 +316,7 @@ def test_a_sandboxed_codex_job_finishes_done_because_the_state_dir_was_added(
                               "workspace-write", "-"], stderr
     assert record["writable"] is True
     assert Path(record["cwd"]).is_relative_to(tmp_path / "work")  # the job worktree
-    assert _job_row(db, job_id) == ("done", f"c-{job_id[:6]}")
+    assert _job_row(db, job_id) == ("done", harness_comment_id(job_id))
 
 
 def test_a_box_local_manual_add_dir_stopgap_still_works_and_is_not_doubled(
@@ -328,7 +329,7 @@ def test_a_box_local_manual_add_dir_stopgap_still_works_and_is_not_doubled(
 
     assert record["argv"] == ["exec", "--json", *command[2:]], stderr
     assert _add_dirs(record["argv"]) == [str(tmp_path)]
-    assert _job_row(db, job_id) == ("done", f"c-{job_id[:6]}")
+    assert _job_row(db, job_id) == ("done", harness_comment_id(job_id))
 
 
 def test_without_the_state_dir_the_fake_sandbox_fails_the_job_as_before(

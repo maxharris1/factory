@@ -72,7 +72,7 @@ def test_a_healthy_component_is_left_alone() -> None:
 ])
 def test_stale_code_restarts_an_idle_component(name: str, bot: str, service: str) -> None:
     (action,) = heal.decide(report(component(name, bot=bot, version="0123456789ab")), {},
-                            facts(), NOW)
+                            facts(drain_acked={"codex-bot": CHECKOUT}), NOW)
     assert (action.kind, action.service) == (RESTART, service)
     assert action.reason == "stale code: running 0123456789ab, checkout ba9876543210"
 
