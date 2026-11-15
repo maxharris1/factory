@@ -120,7 +120,7 @@ Phase 1 runs on one machine: the box. Phase 2 adds Max's other Tailscale devices
 
 ## 4. Ticket lifecycle and transitions
 
-Max starts a ticket by handing it to Grok Bot (a GitHub pull request in Phase 1, a Linear issue, or a description that becomes a ticket on that project's tracker). An `orch:state/` label on an issue is not polled. A ticket also enters by itself through the backlog feeder (issue #85) when its project has an `intake` in `orch.yml` (section 7): a GitHub issue carrying the intake label (default `factory:ready`) applied by a trusted login, or a Linear issue a trusted Linear user moves to the intake state. The chat in which Max and a bot file such a ticket is its questions step. For each one, while its builder harness has room, the feeder opens a branch from base with an empty start commit and one draft PR titled `#<issue>: <title>` (`<KEY>: <title>` for a Linear ticket, issue #115) ("Fixes <ticket>"; GitHub-ticket repos label it `factory` and `orch:state/<building|planning>`), posts a brief rendered from the ticket body plus `factory.md`, then a `kind=go` (state=planning when the ticket names more than 3 files, else building; risk=high on a `risk:high` label, else low), all as the orchestrator; on a Linear project brief and go go on the Linear issue. It is idempotent, keyed on the ticket, so a re-poll never opens a second PR. Otherwise Grok Bot reads `factory.md`, writes the brief, and always runs the questions step. After product questions are answered, or when there are none, Grok Bot posts `orch:go`, a handoff comment with `kind=go`. That is the mechanical start of build or plan. Max does not have to type "go" a second time unless he is restarting a capped or stuck ticket.
+Max starts a ticket by handing it to Grok Bot (a GitHub pull request in Phase 1, a Linear issue, or a description that becomes a ticket on that project's tracker). An `orch:state/` label on an issue is not polled. A ticket also enters by itself through the backlog feeder (issue #85) when its project has an `intake` in `orch.yml` (section 7): a GitHub issue carrying the intake label (default `factory:ready`) applied by a trusted login, or a Linear issue a trusted Linear user moves to the intake state. The chat in which Max and a bot file such a ticket is its questions step. For each one, while its builder harness has room, the feeder opens a branch from base with an empty start commit and one draft PR titled `#<issue>: <title>` (`<KEY>: <title>` for a Linear ticket, issue #115) ("Fixes <ticket>"; GitHub-ticket repos label it `factory` and `orch:state/<building|planning>`), posts a brief rendered from the ticket body plus `factory.md`, then a `kind=go` (state=planning when the ticket names more than 3 files, else building; risk=high on a `risk:high` label, else low), all as the orchestrator; on a Linear project brief and go go on the Linear issue. It is idempotent, keyed on the ticket, so a re-poll never opens a second PR. It feeds in build order (issue #258): priority tier, then urgent, then bug, then the ticket that unblocks the most open intake tickets, then the oldest (section 7). Otherwise Grok Bot reads `factory.md`, writes the brief, and always runs the questions step. After product questions are answered, or when there are none, Grok Bot posts `orch:go`, a handoff comment with `kind=go`. That is the mechanical start of build or plan. Max does not have to type "go" a second time unless he is restarting a capped or stuck ticket.
 
 ### 4.1 States
 
@@ -417,6 +417,9 @@ projects:
     #   label: factory:ready          # GitHub projects; default shown
     #   linear_state: In Progress     # Linear projects (required there)
     #   trusted: [login-or-user-id]   # default: trusted_logins / trusted_linear_users keys
+    #   priority_labels: [priority:p0, priority:p1]  # build order tiers (#258); default none
+    #   priority_from_linear: false   # Linear projects: priority Urgent..Low as tiers 0-3
+    #   critical_path_order: true     # inside a tier, the ticket that unblocks most first
 # Optional Linear webhook listener (issue #55). Absent means none, and the
 # poller behaves as it did before the listener existed.
 # linear_webhook:
@@ -613,9 +616,23 @@ and only a brief or go posted by an author orch.yml trusts as `grok-bot`. It fee
 while the jobs queued for h, plus tickets it fed for h in the last 10
 minutes whose job is not queued yet, are fewer than the free slots on enabled devices that list h,
 so the queue never floods; a ticket whose feed failed midway resumes first
-under the same bound. It feeds urgent tickets (an `urgent` label or
-Linear priority Urgent) first, then `bug`, then the oldest, and refreshes
-the claim order of tickets already fed each poll. A ticket not fed yet is
+under the same bound. It feeds in build order (issue #258). First the
+priority tier: `priority_labels` is an ordered list of label names, a
+ticket's tier is the index of the first one it carries (case-insensitive),
+and with `priority_from_linear: true` (Linear projects only; `check-config`
+refuses it elsewhere) a ticket with no listed label takes Linear priority
+1-4 as tier 0-3. A ticket with no tier sorts after every tier, so a project
+with neither key orders as before. Inside a tier: urgent tickets (an
+`urgent` label or Linear priority Urgent), then `bug`, then the ticket that
+unblocks the most open intake tickets (`critical_path_order`, default
+`true`: those whose `Blocked by` names it or its PR, the unstarted ones in
+its repo that share a `Touches:` path with it outside `shared_paths`, and
+every ticket blocked by one of those, transitively; counted from the gate
+lines and feeder rows the poll already read, with no extra tracker call),
+then the oldest. It refreshes the claim order of tickets already fed each
+poll with the same tier and count, and the queue claims in that order (a
+resumed paused step after urgent, before bug). `orch status` and the
+dashboard feeder block and queue rail show a ticket's tier as `tier N`. A ticket not fed yet is
 gated by its own lines (issue #156): every `Blocked by` ref (and, on Linear,
 every blocks relation) must be done (a PR merged; an issue closed completed or
 with a merged linked PR; a Linear issue completed), and no ticket in flight

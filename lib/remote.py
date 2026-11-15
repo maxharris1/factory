@@ -698,23 +698,57 @@ _DETACH = (
     'exec env "ORCH_WORKER_TAG=$t" perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@"; }; '
 )
 
+# #199 r1: the run's deadline on the device, so it holds when the box's
+# runner dies. $1 the wrapper's pid, $2 the budget and $3 the grace (whole
+# seconds), $4 and $5 the stop and kill scripts (stop_script), $6 the check
+# script (check_script). It runs in a session of its own, without the tag
+# (no check counts it, no stop of the start's groups reaches it). The run
+# lives while the wrapper does or (#199 r2) the check finds a process of it,
+# so a worker the wrapper left behind keeps the deadline going. Past the
+# budget it runs the stop script; past the grace after that, the kill
+# script, again each second until the run is gone.
+_DEADLINE = (
+    'W=$1; B=$2; G=$3; C=$6; trap "" TERM INT HUP; '
+    'late() { [ "$(date +%s)" -ge "$1" ]; }; '
+    'live() { kill -0 "$W" 2>/dev/null && return 0; sh -c "$C" > /dev/null 2>&1; [ $? -eq 1 ]; }; '
+    'e=$(( $(date +%s) + B )); '
+    'while live; do late "$e" && break; sleep 1; done; '
+    'live || exit 0; '
+    'sh -c "$4"; e=$(( $(date +%s) + G )); '
+    'while live; do late "$e" && break; sleep 1; done; '
+    'while live; do sh -c "$5"; sleep 1; done'
+)
+
+_WRITE_RESULT_PAST_STOPS = (
+    'trap "" TERM INT; '
+    f"awk {shlex.quote(HANDOFF_AWK)} "
+    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
+    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+)
+
 # The wrapper: the run's own monitor, detached by the launch. $1 the run's
-# directory, $2 the detacher, $3 the start script. It starts the start
-# (lib/remote.py start_script, which records the worker and execs the
-# harness) in a session of its own with the brief as its stdin and its
-# output in `log`, records both pids, waits for it (again after a SIGTERM,
-# which it catches so the start keeps default handling), then writes
-# `handoff` and `exit`, each through a temporary file.
+# directory, $2 the detacher, $3 the start script, then (#199 r1) $4 the
+# budget in whole seconds (empty: none), $5 the grace, $6 and $7 the stop
+# and kill scripts, $8 the check script. It starts the start (lib/remote.py start_script, which
+# records the worker and execs the harness) in a session of its own with
+# the brief as its stdin and its output in `log`, records both pids, starts
+# its deadline (_DEADLINE) when it has a budget, waits for the start (again
+# after a SIGTERM, which it catches so the start keeps default handling),
+# then writes `handoff` and `exit`, each through a temporary file.
 _WRAPPER = (
     'T=$1; S=$2; x=$3; t=$ORCH_WORKER_TAG; s=; trap "s=1" TERM INT; '
     + _DETACH
     + 'detach sh -c "$x" < "$T/stdin" > "$T/log" 2>&1 & c=$!; '
     'printf "%s %s\\n" "$$" "$c" > "$T/pid.tmp" && mv -f -- "$T/pid.tmp" "$T/pid"; '
+    'if [ -n "$4" ]; then '
+    f'set -- sh -c {shlex.quote(_DEADLINE)} orch-deadline "$$" "$4" "$5" "$6" "$7" "$8"; '
+    'if [ "$S" = setsid ]; then env -u ORCH_WORKER_TAG setsid "$@" '
+    '< /dev/null > /dev/null 2>&1 & '
+    'else env -u ORCH_WORKER_TAG perl -MPOSIX -e "POSIX::setsid(); exec @ARGV or exit 127" "$@" '
+    '< /dev/null > /dev/null 2>&1 & fi; fi; '
     'while :; do s=; wait "$c"; r=$?; '
     'if [ -n "$s" ] && kill -0 "$c" 2>/dev/null; then continue; fi; break; done; '
-    f"awk {shlex.quote(HANDOFF_AWK)} "
-    '"$T/log" > "$T/handoff.tmp" 2>/dev/null; mv -f -- "$T/handoff.tmp" "$T/handoff"; '
-    'printf "%s\\n" "$r" > "$T/exit.tmp" && mv -f -- "$T/exit.tmp" "$T/exit"'
+    + _WRITE_RESULT_PAST_STOPS
 )
 
 
@@ -733,7 +767,15 @@ def env_clear_script(target: RemoteTarget) -> str:
     return _sh(f"rm -f -- {shlex.quote(run_file(target, ENV_FILE))}")
 
 
-def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int) -> str:
+def launch_script(
+    target: RemoteTarget,
+    start: str,
+    *,
+    size: int,
+    not_after: int,
+    budget: int | None = None,
+    grace: int = 30,
+) -> str:
     """The short call that starts `start` detached, once per tag.
 
     The brief (exactly `size` bytes) comes on stdin. Prints one
@@ -745,10 +787,22 @@ def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int
     ran). A launch that reaches the device after not_after (the box's epoch
     seconds) is refused unless its tag already ran. Like the start, it runs
     under `exec env ORCH_WORKER_TAG=<tag>`, so a check finds it running.
+
+    #199 r1: with a budget (whole seconds), the device stops the run once it
+    is past it (stop_script), and kills it `grace` seconds later
+    (stop_script with kill), whether or not the box still follows it.
     """
     tag = target.require_tag()
     if size < 0 or not_after <= 0:
         raise RemoteError("a launch needs the brief's size and a deadline")
+    if (budget is not None and budget <= 0) or grace < 0:
+        raise RemoteError("a launch's budget must be above 0 and its grace not below 0")
+    limits = (
+        f"{budget} {grace} {shlex.quote(stop_script(target))} "
+        f"{shlex.quote(stop_script(target, kill=True))} {shlex.quote(check_script(target))}"
+        if budget is not None
+        else "''"
+    )
     mark = LAUNCH_MARK
     launcher = (
         f"t={tag}; R={shlex.quote(run_dir(target))}; T=\"$R/$t\"; "
@@ -775,7 +829,7 @@ def launch_script(target: RemoteTarget, start: str, *, size: int, not_after: int
         f'|| {{ echo {START_REFUSED} > "$T/exit"; say refused current; exit 0; }}; '
         + _DETACH
         + f"detach sh -c {shlex.quote(_WRAPPER)} orch-run \"$T\" \"$S\" {shlex.quote(start)} "
-        "< /dev/null > /dev/null 2>&1 & "
+        f"{limits} < /dev/null > /dev/null 2>&1 & "
         "k=0; while [ ! -e \"$T/pid\" ] && [ ! -e \"$T/exit\" ] && [ \"$k\" -lt 100 ]; do "
         "sleep 0.1 2>/dev/null || sleep 1; k=$((k+1)); done; "
         'if [ -e "$T/pid" ]; then say started; '
