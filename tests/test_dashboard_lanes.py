@@ -405,9 +405,11 @@ class Browser:
           if (link && / live/.test(' ' + link.className)) document.fonts.ready.then(function () { done(true); });
           else setTimeout(wait, 50); })(); })""")
 
-    def screenshot(self, path: Path, width: int) -> None:
-        height = self.eval("document.documentElement.scrollHeight")
-        self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
+    def screenshot(self, path: Path, width: int, full_page: bool = True) -> None:
+        if full_page:
+            height = self.eval("document.documentElement.scrollHeight")
+            self.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=False)
+        self.eval("new Promise(function (done) { requestAnimationFrame(function () { requestAnimationFrame(done); }); })")
         path.write_bytes(base64.b64decode(self.call("Page.captureScreenshot", format="png")["data"]))
 
     def close(self) -> None:
@@ -436,8 +438,20 @@ def test_fifteen_slots_fit_above_the_fold_at_1440x900(tmp_path: Path, browser: B
     for row in rows:
         assert len({top for top, _ in row["tiles"]}) <= 2, f"{row['device']} wraps onto a second row"
     assert browser.eval("innerHeight") == FOLD
-    bottom = max(b for row in rows for _, b in row["tiles"])
-    assert bottom <= FOLD, f"the last slot ends at {bottom}px, below the {FOLD}px fold"
+    visible = browser.eval("""(function () {
+      var floor = document.getElementById('statusline').getBoundingClientRect().top;
+      return [].map.call(document.querySelectorAll('#lanes .tile'), function (tile) {
+        var b = tile.getBoundingClientRect(), x = b.left + b.width / 2, y = b.bottom - 4;
+        var hit = document.elementFromPoint(x, y);
+        return {device: tile.closest('[data-device]').getAttribute('data-device'), bottom: b.bottom, floor: floor,
+                own: !!hit && tile.contains(hit)};
+      });
+    })()""")
+    hidden = [t for t in visible if t["bottom"] > t["floor"] or not t["own"]]
+    assert not hidden, f"slots under the status line or off screen at 1440x{FOLD}: {hidden}"
+    clipped = browser.eval("""[].filter.call(document.querySelectorAll('#lanes .tile-l3 .action, #lanes .tile-l3 .t'),
+      function (e) { return e.scrollWidth > e.clientWidth; }).map(function (e) { return e.textContent; })""")
+    assert not clipped, f"line 3 cuts the job's action or elapsed time: {clipped}"
 
 
 @needs_chrome
@@ -462,7 +476,7 @@ def write_screenshots(out: Path) -> list[Path]:
         for name, width in zip(SHOTS, (1440, 375)):
             chrome.open(html, width)
             paths.append(out.resolve() / name)
-            chrome.screenshot(paths[-1], width)
+            chrome.screenshot(paths[-1], width, full_page=width < 1440)
         return paths
     finally:
         chrome.close()
