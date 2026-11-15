@@ -408,9 +408,9 @@ def test_a_failed_scratch_removal_is_retried_until_it_succeeds(tmp_path: Path) -
     assert not scratch.exists()
 
 
-@pytest.mark.parametrize("restart", [False, True], ids=["same-waiter", "replaced-waiter"])
+@pytest.mark.parametrize("replaced", ["never", "after-scratch", "before-scratch"])
 def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
-    tmp_path: Path, restart: bool
+    tmp_path: Path, replaced: str
 ) -> None:
     from tests.test_job_run import _orch
 
@@ -420,6 +420,9 @@ def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
     assert waiter.pool.claim("claude")[0].id == job_id
     job_dir = tmp_path / "state" / "jobs" / job_id
     ready, release, result = (tmp_path / name for name in ("ready", "release", "result"))
+    if replaced == "before-scratch":
+        waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
+        waiter.step()
     harness = (
         "import os, pathlib, time\n"
         "scratch = pathlib.Path(os.environ['TMPDIR'])\n"
@@ -435,14 +438,15 @@ def test_a_killed_runner_leaves_the_scratch_of_its_live_harness_until_it_ends(
     try:
         _wait_for(ready.exists, 10, runner)
         worker = int(ready.read_text())
-        waiter._children[job_id] = runner
+        if replaced != "before-scratch":
+            waiter._children[job_id] = runner
         runner.kill()
         runner.wait(5)
-        waiter._reap()
+        waiter.step()
         assert alive(worker)
         assert state(db, job_id) == "running"
         assert (job_dir / "tmp" / "needed").is_file()
-        if restart:
+        if replaced == "after-scratch":
             waiter = make_waiter(tmp_path, queue, db, FakeSpawn())
             waiter.step()
             assert (job_dir / "tmp" / "needed").is_file()
