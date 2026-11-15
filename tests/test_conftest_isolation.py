@@ -200,3 +200,29 @@ def test_the_guard_passes_a_test_that_stops_its_self_heal_loop(tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
     assert not alive(pid)
+
+
+MASKED_SIGNAL_TEST = '''
+import os
+import signal
+import time
+
+
+def test_a_signal_the_main_thread_blocks_waits_for_it():
+    fired = []
+    previous = signal.signal(signal.SIGUSR1, lambda *_: fired.append(True))
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    try:
+        os.kill(os.getpid(), signal.SIGUSR1)
+        time.sleep(0.3)
+        assert fired == [], "a harness thread took a signal the main thread blocks"
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})
+        signal.signal(signal.SIGUSR1, previous)
+    assert fired == [True]
+'''
+
+
+def test_harness_threads_leave_process_signals_to_the_main_thread(tmp_path: Path) -> None:
+    result = _run_guarded(tmp_path, MASKED_SIGNAL_TEST)
+    assert result.returncode == 0, result.stdout + result.stderr

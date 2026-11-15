@@ -179,6 +179,7 @@ def reap_orphans() -> None:
 
 
 def _reap_orphans_forever() -> None:
+    signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
     while True:
         reap_orphans()
         threading.Event().wait(ORPHAN_POLL_SECONDS)
