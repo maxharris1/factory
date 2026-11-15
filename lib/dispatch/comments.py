@@ -26,6 +26,7 @@ from lib.handoff import HandoffError, parse_comment
 
 class CommentsMixin:
     def process(self, ticket: TrackedTicket) -> None:
+        self._remember_links(ticket, ticket.comments)
         try:
             ticket = self._routed(ticket)
         except RouteError as error:
@@ -68,7 +69,6 @@ class CommentsMixin:
         comments: list[Comment],
     ) -> None:
         key = (ticket.repo.lower(), ticket.ticket_id)
-        self._remember_links(ticket, comments)
         for comment in comments:
             # A ready may re-read the ticket uncached (T2); later comments
             # then see the fresh head.
@@ -338,7 +338,7 @@ class CommentsMixin:
                 (ticket.repo.lower(), ticket.ticket_id, comment_id, outcome),
             )
 
-    def _remember_links(self, ticket: TrackedTicket, comments: list[Comment]) -> None:
+    def _remember_links(self, ticket: TrackedTicket, comments: Sequence[Comment]) -> None:
         with self._connect() as connection:
             connection.executemany(
                 """
