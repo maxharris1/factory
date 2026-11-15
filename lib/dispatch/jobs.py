@@ -19,6 +19,7 @@ from lib.dispatch.helpers import (
     _UPDATE_NO_HANDOFF_OUTCOMES,
     _append_detail,
     _comment_order,
+    _detail_plan_round,
     _detail_project_bot,
     _detail_round,
     _detail_round_number,
@@ -26,6 +27,7 @@ from lib.dispatch.helpers import (
     _merge_only,
     _queue_state,
     _retry_detail,
+    _round_number,
     _scope,
 )
 from lib.dispatch.transitions import write_workflow_state
@@ -1049,6 +1051,7 @@ class JobsMixin:
         (as a prefix, like every head compare) and round, or its questions; a
         review job with no round or no head takes none. A builder's is from
         the job's recipient; its questions count unless T5 found none in them.
+        A plan counts only for the round the job posts, the one T1P accepts.
         A build or fix job's ready is at a new head: one other than the job's
         own, or any head for a job that has none. That ready counts once T2
         routed it, or while it waits on CI at the polled PR head. One T2 left
@@ -1097,6 +1100,10 @@ class JobsMixin:
             if kind not in kinds:
                 continue
             if not self._trusted(ticket, item, fields, bot, role=role):
+                continue
+            if kind == "plan" and _round_number(fields.get("round")) != _detail_plan_round(
+                job.request.detail
+            ):
                 continue
             outcome = self._handled_outcome(ticket, item.id)
             if kind == "questions":

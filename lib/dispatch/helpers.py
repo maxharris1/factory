@@ -224,6 +224,18 @@ def _detail_round_number(detail: str | None) -> int | None:
     return _round_number(context.get("round")) if isinstance(context, dict) else None
 
 
+def plan_round(detail: Mapping[str, object]) -> int:
+    return 2 if str(detail.get("instruction") or "").startswith("round=2/2") else 1
+
+
+def _detail_plan_round(detail: str | None) -> int:
+    try:
+        context = json.loads(detail) if detail else {}
+    except ValueError:
+        context = {}
+    return plan_round(context if isinstance(context, dict) else {})
+
+
 def _detail_round(detail: str | None) -> str | None:
     """The round field a job's detail JSON carries ("N/CAP")."""
     if not detail:

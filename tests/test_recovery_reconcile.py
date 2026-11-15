@@ -516,3 +516,42 @@ def test_a_failed_review_that_posted_questions_resumes_once_after_answers(tmp_pa
         )
         queued = [row for row in board.rows("review") if row[0] == "queued"]
         assert queued == [("queued", 1)], f"cached={cached}: one resumed review, {board.rows('review')}"
+
+
+def test_a_plan_from_another_round_does_not_settle_a_failed_plan_job(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    plan_job = board.start("planning")
+    before = board.snapshot()
+    board.post("plan-2", PLAN.format(round=2, ac="met"))
+    after = board.snapshot()
+    board.fail(plan_job)
+
+    class Fresh(Source):
+        def fresh_ticket(self, ref: TicketRef) -> TrackedTicket:
+            return after
+
+    board.dispatcher.poll_once(Fresh(before, board.now))
+    assert board.rows("plan") == [("failed", 1), ("queued", 2)], board.rows("plan")
+    assert "done-from-plan" not in board.events(plan_job)
+
+
+def test_the_gap_report_that_queued_round_two_does_not_settle_its_failure(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    first = board.start("planning")
+    board.comments.append(
+        comment("plan-1", PLAN.format(round=1, ac="unmet"), author="claude-login", created_at=200.0)
+    )
+    board.now[0] = 200.25
+    board.queue.finish(first, owner="claude", handoff_comment_id="plan-1")
+    snapshot = board.snapshot()
+    board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+    second = board.queue.claim("claude")
+    assert second is not None and second.request.action == "plan"
+    assert second.created_at == 200.25 and "round=2/2" in second.request.detail
+    board.now[0] = 200.5
+    board.fail(second.id)
+    board.now[0] = 201.0
+    snapshot = board.snapshot()
+    board.dispatcher.poll_once(FakeSource(snapshot, github=(snapshot,)))
+    assert board.rows("plan") == [("done", 1), ("failed", 1), ("queued", 2)], board.rows("plan")
+    assert board.workflow_state() == "planning"
