@@ -9,7 +9,6 @@ from dataclasses import asdict, replace
 from lib.dispatch.constants import GROK_WAKE_REASONS
 from lib.dispatch.helpers import (
     _ANSWERS,
-    _REJECTED_OUTCOMES,
     _comment_link,
     _detail_round_number,
     _grok_logical_key,
@@ -200,21 +199,24 @@ class DetailMixin:
             """,
             (ticket.repo.lower(), ticket.ticket_id),
         ).fetchone()
-        handled = dict(
-            connection.execute(
+        scope = (ticket.repo.lower(), ticket.ticket_id)
+        accepted = {
+            row[0]
+            for row in connection.execute(
                 """
-                SELECT comment_id, outcome FROM handled_comments
-                WHERE repo = ? AND ticket_id = ?
+                SELECT comment_id FROM review_events WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT comment_id FROM ship_intents WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT approve_comment_id FROM ship_holds
+                    WHERE lower(repo) = ? AND ticket_id = ?
+                UNION SELECT source_comment_id FROM jobs
+                    WHERE lower(repo) = ? AND ticket_id = ? AND action = 'review'
                 """,
-                (ticket.repo.lower(), ticket.ticket_id),
-            ).fetchall()
-        )
+                scope * 4,
+            )
+        }
         findings = findings_evidence(
             comments=[
-                item
-                for item in ticket.comments
-                if item.id == comment.id
-                or (item.id in handled and not handled[item.id].startswith(_REJECTED_OUTCOMES))
+                item for item in ticket.comments if item.id == comment.id or item.id in accepted
             ],
             trusted_logins=self.trusted_logins,
             reviewer=f"{ticket.factory.reviewer_harness}-bot",
@@ -289,11 +291,19 @@ class DetailMixin:
             SELECT detail FROM jobs
             WHERE lower(repo) = ? AND ticket_id = ? AND action = ?
               AND source_comment_id != ?
-              AND (? IS NULL OR handoff_comment_id = ?)
-            ORDER BY created_at DESC, rowid DESC
+              AND (? IS NULL OR handoff_comment_id = ? OR handoff_comment_id IS NULL)
+            ORDER BY coalesce(handoff_comment_id = ?, 0) DESC, created_at DESC, rowid DESC
             LIMIT 1
             """,
-            (ticket.repo.lower(), ticket.ticket_id, action, comment.id, question_id, question_id),
+            (
+                ticket.repo.lower(),
+                ticket.ticket_id,
+                action,
+                comment.id,
+                question_id,
+                question_id,
+                question_id,
+            ),
         ).fetchone()
         return json.loads(row["detail"] or "{}") if row is not None else None
 

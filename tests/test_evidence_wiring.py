@@ -10,6 +10,7 @@ from lib.dispatcher import CIResult, TrackedTicket
 from lib.queue import Job
 from tests.test_dispatcher import ANSWERS, GO, PLAN, QUESTIONS, comment, handled_outcome, setup, ticket
 from tests.test_github_actions import CHECKS, HEAD, STATUS, adapter, served
+from tests.test_lifecycle import Flow as LifecycleFlow
 from tests.test_rounds_and_caps import HEADS, Flow
 
 BRIEF = (
@@ -133,6 +134,37 @@ def test_a_rejected_verdict_does_not_change_the_findings(
     findings = evidence(claim(flow, "codex"))["findings"]
     assert [item["id"] for item in findings["findings"]] == ["f-1"]
     assert findings["reviewed_head"] == HEADS[1]
+
+
+def test_an_ignored_verdict_after_handoff_does_not_change_the_findings(tmp_path: Path) -> None:
+    flow = LifecycleFlow(tmp_path)
+    flow.hand_off_at(1)
+    late = REVISE.format(head=HEADS[8]).replace("f-1", "f-999")
+    assert flow.post("ignored-revise", late, "codex-login") == "after-handoff"
+
+    assert flow.ready(HEADS[5]) == "queued-review"
+
+    findings = evidence(claim(flow, "codex"))["findings"]
+    assert findings["findings"] == []
+    assert findings["reviewed_head"] == HEADS[1]
+
+
+def test_answers_before_the_paused_fix_records_its_handoff_keep_the_instruction(
+    tmp_path: Path,
+) -> None:
+    flow = built(tmp_path)
+    assert flow.ready(HEADS[1]) == "queued-review"
+    flow.finish("codex")
+    assert flow.post("revise-1", REVISE.format(head=HEADS[1]), "codex-login") == "queued-review-fix"
+    paused = claim(flow, "claude")
+    assert flow.post("q", QUESTIONS, "claude-login") == "waiting-max"
+
+    assert flow.post("a", ANSWERS, "grok-login") == "resumed-fix"
+
+    resumed = claim(flow, "claude")
+    instructions = evidence(resumed)["instructions"]
+    assert instructions["prior_instruction"] == json.loads(paused.request.detail or "{}")["instruction"]
+    assert [item["id"] for item in evidence(resumed)["findings"]["findings"]] == ["f-1"]
 
 
 def test_extra_round_carries_the_go_and_the_last_fix_instruction(tmp_path: Path) -> None:
