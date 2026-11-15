@@ -38,9 +38,9 @@ from lib.handoff import HandoffError, parse_comment
 _TAGGED = re.compile(r"^\[(blocking|closed)\]\s+([*_`]*f-([1-9][0-9]*)(?=[*_`]*(?:\W|$)).*)$", re.IGNORECASE)
 _RULE = re.compile(r"\brule:\s*(.+?)(?:\.(?:\s|$)|$)", re.IGNORECASE)
 _ROUND = re.compile(r"^([1-9][0-9]*)")
-_MARKDOWN = MarkdownIt("commonmark")
+_MARKDOWN = MarkdownIt("commonmark").enable("table")
 _CRITERION = re.compile(
-    r"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*)(?![0-9])[*_`]*\s*"
+    r"^(?P<tag>\[blocking\]\s+)?[*_`]*ac-(?P<n>[1-9][0-9]*)(?![0-9A-Za-z]|-[0-9A-Za-z])[*_`]*+(?![0-9A-Za-z])\s*"
     r"(?:[:,|\u2013\u2014-]\s*)?[*_`]*(?P<status>unmet\b)?",
     re.IGNORECASE,
 )
@@ -144,13 +144,22 @@ def _entries(body: str) -> list[str]:
     tokens = _MARKDOWN.parse(body)
     entries: list[str] = []
     quoted = 0
+    row: list[str] = []
     for index, token in enumerate(tokens):
         if token.type == "blockquote_open":
             quoted += 1
         elif token.type == "blockquote_close":
             quoted -= 1
-        elif token.type == "inline" and not quoted:
-            entries.extend(_list_item_lead(tokens, index) + _table_rows(token))
+        elif quoted:
+            continue
+        elif token.type == "tr_open":
+            row = []
+        elif token.type == "inline" and tokens[index - 1].type == "td_open":
+            row.append(token.content.strip())
+        elif token.type == "tr_close" and row:
+            entries.append(" | ".join(row))
+        elif token.type == "inline":
+            entries.extend(_list_item_lead(tokens, index))
     return entries
 
 
@@ -158,13 +167,6 @@ def _list_item_lead(tokens: list[Token], index: int) -> list[str]:
     opener = [token.type for token in tokens[max(index - 2, 0) : index]]
     opens_item = opener == ["list_item_open", "paragraph_open"]
     return [" ".join(tokens[index].content.split())] if opens_item else []
-
-
-def _table_rows(inline: Token) -> list[str]:
-    if inline.level != 1:
-        return []
-    rows = (line.strip() for line in inline.content.splitlines())
-    return [row[1:].strip() for row in rows if row.startswith("|")]
 
 
 def _tagged_items(body: str) -> list[tuple[str, int, str]]:

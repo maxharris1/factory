@@ -78,7 +78,9 @@ class RepeatBlockMixin:
                 continue
             number = _round_number(handoff.as_dict().get("round"))
             if number is not None and number < (reported_round or 0):
-                found.append(_EarlierRevise(number, item, blocking_ids(handoff.body)))
+                named = repeat_id(handoff)
+                blocking = blocking_ids(handoff.body) | ({named} if named else set())
+                found.append(_EarlierRevise(number, item, blocking))
         return sorted(found, key=lambda entry: (entry.round, entry.comment.created_at), reverse=True)
 
     def _t3_repeat(

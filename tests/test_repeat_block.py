@@ -112,8 +112,10 @@ def test_a_reused_blocking_id_in_consecutive_revises_parks(tmp_path: Path, bodie
         ("- ac-2: met.\n", "- ac-2: met.\n"),
         (AC2 + F1, "- ac-2: met. The previously unmet requirement now passes.\n" + F2),
         ("ac-2 was unmet in an old review.\n" + F1, "ac-2 was unmet in an old review.\n" + F2),
+        (AC2, "# | ac-2 | unmet |\n\n" + F2),
+        (AC2, "- [blocking] ac-2suffix: a different identifier.\n" + F2),
     ],
-    ids=["free-text-same-rule", "not-consecutive", "minor", "code-block", "met", "now-met", "prose"],
+    ids=["free-text-same-rule", "not-consecutive", "minor", "code-block", "met", "now-met", "prose", "heading", "id-prefix"],
 )
 def test_no_repeat_id_or_reused_id_takes_the_fix_path(tmp_path: Path, bodies: tuple[str, ...]) -> None:
     flow = AppFlow(tmp_path, enabled=True)
@@ -146,6 +148,20 @@ def test_a_repeat_after_maxs_release_parks_again(tmp_path: Path) -> None:
     assert revise(flow, "3/3", "revise-3", body=F1) == "waiting-max-repeat"
 
     assert_parked(flow, fixes, "revise-3", 3)
+    assert len(repeat_wakes(flow)) == 2
+
+
+def test_a_released_named_repeat_still_blocks_the_next_round(tmp_path: Path) -> None:
+    flow = AppFlow(tmp_path, enabled=True)
+    to_first_review(flow)
+    assert revise(flow, "1/3", "revise-1", " repeat=f-1", body="Still failing.\n") == "waiting-max-repeat"
+    assert flow.post("go-max", "/go", MAX) == "resumed-fix"
+    next_review(flow, 1)
+    fixes = job_count(flow.queue, "fix")
+
+    assert revise(flow, "2/3", "revise-2", body=F1) == "waiting-max-repeat"
+
+    assert_parked(flow, fixes, "revise-2", 2)
     assert len(repeat_wakes(flow)) == 2
 
 
@@ -274,6 +290,11 @@ def test_maxs_go_at_the_cap_also_grants_the_next_round(tmp_path: Path) -> None:
         ("## ac-2: unmet\n", set()),
         ("> - ac-2: unmet\n> - [blocking] f-1: quoted.\n", set()),
         ("| ac-3 | met | was unmet |\n", set()),
+        ("id | status\n--- | ---\nac-3 | unmet\n", {"ac-3"}),
+        ("| ac-3 | unmet |\n| --- | --- |\n| ac-4 | met |\n", set()),
+        ("# | ac-2 | unmet |\n", set()),
+        ("- [blocking] ac-2suffix: other.\n- ac-3-b: unmet\n- **ac-4**x: unmet\n", set()),
+        ("- [blocking] **ac-2**: x.\n- __ac-3__: unmet\n", {"ac-2", "ac-3"}),
     ],
 )
 def test_blocking_ids(body: str, expected: set[str]) -> None:
