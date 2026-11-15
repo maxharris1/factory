@@ -1535,8 +1535,6 @@ class LivePollSource:
         return None if undecided else False
 
     def _blob_text(self, repo: str, identifier: str, sha: object) -> str | None:
-        """#292: a PR file's head text by its blob sha; None when the sha is
-        not a blob id or the blob cannot be read."""
         if not isinstance(sha, str) or not BLOB_SHA.fullmatch(sha):
             return None
         try:
@@ -2125,7 +2123,7 @@ def _sql_patch_risk(patch: str, read_source: Callable[[], str | None]) -> bool |
     whole = not (len(hunks) == 1 and hunks[0].old_start <= 1 and hunks[0].new_start <= 1)
     if whole:
         source = read_source()
-        body = None if source is None else _whole_body(source, hunks)
+        body = None if source is None else _patch_over_source(source, hunks)
         if body is None:
             return None
     else:
@@ -2136,9 +2134,7 @@ def _sql_patch_risk(patch: str, read_source: Callable[[], str | None]) -> bool |
     return None if None in verdicts else False
 
 
-def _whole_body(source: str, hunks: Sequence[Hunk]) -> list[str] | None:
-    """#292: the hunks spread over the head file as one diff body from line 1,
-    the untouched lines as context; None when the file does not match them."""
+def _patch_over_source(source: str, hunks: Sequence[Hunk]) -> list[str] | None:
     lines = source.split("\n")
     if lines[-1] == "":
         lines.pop()
