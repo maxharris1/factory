@@ -382,9 +382,11 @@ class CommentsMixin:
         with self._connect() as connection:
             connection.executemany(
                 """
-                INSERT OR IGNORE INTO verdict_heads (
+                INSERT INTO verdict_heads (
                     repo, ticket_id, comment_id, head, review_round, posted_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (repo, ticket_id, comment_id) DO UPDATE
+                SET posted_at = COALESCE(verdict_heads.posted_at, excluded.posted_at)
                 """,
                 rows,
             )

@@ -557,7 +557,7 @@ class ReadyMixin:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT recorded.head FROM handled_comments AS verdict
+                SELECT verdict.comment_id, recorded.head FROM handled_comments AS verdict
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
                   AND verdict.outcome != 'rejected-edited'
@@ -576,8 +576,11 @@ class ReadyMixin:
                 """,
                 (ticket.repo.lower(), ticket.ticket_id, review_queued_at, review_round, ready_id),
             ).fetchall()
+        visible = {comment.id for comment in ticket.comments}
         return any(
-            row["head"] is None or _matching_head(str(row["head"]), head) is not None
+            _matching_head(str(row["head"]), head) is not None
+            if row["head"] is not None
+            else row["comment_id"] not in visible
             for row in rows
         )
 

@@ -136,3 +136,91 @@ def test_a_reviews_own_verdict_handled_stale_still_answers_it(tmp_path: Path) ->
     assert fix is not None, "the red ready after an answered review left no runnable CI fix"
     assert fix.request.source_comment_id == "red-back-at-older"
     assert CI_LOG in instruction({"detail": fix.request.detail})
+
+
+def _restart(board, tmp_path: Path) -> None:
+    board.dispatcher = Dispatcher(
+        tmp_path / "d.db",
+        board.queue,
+        trusted_logins=TRUSTED_LOGINS,
+        review_actions=board.actions,
+        grok_delivery=board.grok,
+        log=board.log.append,
+    )
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_an_upgrade_backfills_the_post_time_of_a_verdict_recorded_before_it(
+    tmp_path: Path, upgrade: bool
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    revise = VERDICT.format(round="1/3", head=older, verdict="REVISE", risk="high")
+    board.post(pr, "old-stale-revise", revise, "codex-login")
+    board.poll()
+    assert board.outcome("old-stale-revise") is None
+    hidden = pr.comments.pop()
+    if upgrade:
+        with board.queue.connect() as connection:
+            connection.execute("ALTER TABLE verdict_heads DROP COLUMN posted_at")
+        _restart(board, tmp_path)
+    pr.push(sha(2), ci="failure")
+    board.post(pr, "approve-older", APPROVE.format(round="1/3", head=older), "codex-login")
+    board.poll()
+    assert board.outcome("approve-older") == "approve-ci-red-fix"
+    board.finish("claude")
+    pr.push(older, ci="failure")
+    board.ready(pr, older, "first-return")
+    board.poll()
+    board.finish("claude")
+    pr.push(older, ci="pending")
+    board.ready(pr, older, "new-review-ready")
+    board.poll()
+    board.finish("codex")
+    pr.push(sha(2), ci="pending")
+    pr.comments.append(hidden)
+    board.poll()
+    assert board.outcome("old-stale-revise").startswith("stale-")
+    with board.queue.connect() as connection:
+        posted_at = connection.execute(
+            "SELECT posted_at FROM verdict_heads WHERE comment_id = 'old-stale-revise'"
+        ).fetchone()[0]
+    assert posted_at == hidden.created_at
+
+    pr.push(older, ci="failure")
+    board.ready(pr, older, "red-ready-before-new-verdict")
+    board.poll()
+    board.post(pr, "new-revise", revise, "codex-login")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert [job["source_comment_id"] for job in fixes] == ["new-revise"]
+    assert CI_LOG in instruction(fixes[0])
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_an_upgrade_never_counts_a_handled_builder_ready_as_the_reviews_verdict(
+    tmp_path: Path, upgrade: bool
+) -> None:
+    board = board_with(tmp_path, on=True)
+    older = sha(1)
+    pr = built_with_ci_pending(board, older)
+    reviewed_at_pending_ci(board, pr, older)
+    board.ready(pr, sha(2), "wrong-head-ready")
+    board.poll()
+    assert board.outcome("wrong-head-ready") == "stale-ready-head"
+    if upgrade:
+        with board.queue.connect() as connection:
+            connection.execute("DROP TABLE verdict_heads")
+        _restart(board, tmp_path)
+    pr.push(older, ci="failure")
+    board.ready(pr, older, "red-ready-before-verdict")
+    board.poll()
+    board.revise(pr, "1/3")
+    board.poll()
+
+    fixes = [job for job in board.jobs("fix") if job["state"] in ("queued", "running")]
+    assert [job["source_comment_id"] for job in fixes] == ["revise-42-1/3"]
+    assert CI_LOG in instruction(fixes[0])
