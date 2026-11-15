@@ -12,7 +12,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, TrackedTicket
+from lib.dispatch.types import AlreadyMergedShip, CIResult, Comment, Registration, TrackedTicket
 
 
 class T4Mixin:
@@ -24,6 +24,11 @@ class T4Mixin:
     ) -> tuple[bool, str]:
         if not self._trusted_reviewer(ticket, comment, fields):
             return True, "rejected-approve-author"
+        registration = self._registration(ticket, comment, "verdict")
+        if registration is Registration.UNREGISTERED:
+            return True, "rejected-unregistered-verdict"
+        if registration is Registration.PENDING:
+            return False, "verdict-awaiting-registration"
         current_head = ticket.current_head
         if current_head is None:
             return False, "pr-head-unavailable"

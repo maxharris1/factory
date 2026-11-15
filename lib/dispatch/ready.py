@@ -16,7 +16,7 @@ from lib.dispatch.helpers import (
     _round_number,
     _scope,
 )
-from lib.dispatch.types import CIResult, Comment, TrackedTicket
+from lib.dispatch.types import CIResult, Comment, Registration, TrackedTicket
 from lib.handoff import HandoffError, parse_comment
 from lib.queue import JobRequest
 from lib.update_check import UpdateScope
@@ -44,6 +44,15 @@ class ReadyMixin:
         expected = f"{builder_harness}-bot"
         if not self._trusted(ticket, comment, fields, expected, role="builder"):
             return True, "rejected-ready-author"
+        registration = (
+            Registration.REGISTERED
+            if ticket.ready_starts_review and self._job_builder_harness(ticket) is None
+            else self._registration(ticket, comment, "ready")
+        )
+        if registration is Registration.UNREGISTERED:
+            return True, "rejected-unregistered-ready"
+        if registration is Registration.PENDING:
+            return False, "ready-awaiting-registration"
         state, review_round = self._review_context(ticket)
         if state in ("planning", "plan-check"):
             return True, "rejected-ready-in-planning"
@@ -277,7 +286,6 @@ class ReadyMixin:
         records as answered (answered-review, no claimable job) so that
         verdict can then act.
         """
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         next_round = review_round + 1
         last_round = min(
             self._effective_cap(ticket),
@@ -335,7 +343,7 @@ class ReadyMixin:
                 )
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
-                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and self._counted_verdict(ticket, item, fields)
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
                 if _comment_order(item) <= _comment_order(ready):
@@ -373,7 +381,6 @@ class ReadyMixin:
             or _matching_head(str(paused["paused_head"] or ""), head) is None
         ):
             return False
-        reviewer = f"{ticket.factory.reviewer_harness}-bot"
         for item in ticket.comments:
             if _comment_order(item) <= _comment_order(ready):
                 continue
@@ -387,7 +394,7 @@ class ReadyMixin:
                 and round_number > review_round
                 and fields.get("kind") == "verdict"
                 and fields.get("verdict") in ("REVISE", "APPROVE")
-                and self._trusted(ticket, item, fields, reviewer, role="reviewer")
+                and self._counted_verdict(ticket, item, fields)
                 and _matching_head(fields.get("head") or "", head) is not None
             ):
                 return True
@@ -573,7 +580,7 @@ class ReadyMixin:
                 FROM handled_comments AS verdict
                 LEFT JOIN verdict_heads AS recorded USING (repo, ticket_id, comment_id)
                 WHERE verdict.repo = ? AND verdict.ticket_id = ?
-                  AND verdict.outcome != 'rejected-edited'
+                  AND verdict.outcome NOT IN ('rejected-edited', 'rejected-unregistered-verdict')
                   AND NOT COALESCE(recorded.posted_at < ?, 0)
                   AND (
                       recorded.review_round = ?

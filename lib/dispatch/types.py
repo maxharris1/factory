@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 from lib.factory_md import FactoryConfig
@@ -16,6 +17,12 @@ if TYPE_CHECKING:
     from lib.dispatcher import Dispatcher
 
 
+class Registration(Enum):
+    REGISTERED = "registered"
+    PENDING = "pending"
+    UNREGISTERED = "unregistered"
+
+
 @dataclass(frozen=True)
 class Comment:
     id: str
@@ -24,6 +31,12 @@ class Comment:
     created_at: float
     url: str | None = None
     edited_at: float | None = None
+
+
+@dataclass(frozen=True)
+class HandoffCandidate:
+    comment: Comment
+    unread: bool
 
 
 @dataclass(frozen=True)
