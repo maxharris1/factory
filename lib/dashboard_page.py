@@ -62,7 +62,7 @@ FONTS = (
 
 CSS = "".join((
     common.CSS_BASE, shell.CSS, common.CSS_PANEL, lanes.CSS, common.CSS_PARTS, shell.CSS_NAV,
-    lanes.CSS_LINKS, ticket_detail.CSS, common.CSS_MISC, shell.CSS_PX,
+    tickets.CSS, ticket_detail.CSS, common.CSS_MISC, shell.CSS_PX,
     common.CSS_TAIL,
 ))
 SCRIPT = "".join((

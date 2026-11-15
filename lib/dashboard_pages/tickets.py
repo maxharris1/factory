@@ -30,6 +30,13 @@ SCRIPT_TICKETS = r"""
 """
 
 
+CSS = """\
+a.queue-item{color:inherit;text-decoration:none}
+.queue-item{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;width:100%}
+.queue-item:hover .ticket{color:var(--brand)}
+"""
+
+
 SCRIPT_JOBS = r"""
   // --- job page -----------------------------------------------------------------
 
