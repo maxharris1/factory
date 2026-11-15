@@ -45,6 +45,8 @@ from lib.waiter import (
     local_only,
 )
 from tests import fake_runner
+from tests.child_reaper import descendants
+from tests.procs import alive
 from tests.test_brief import FACTORY_MD, detail
 from tests.test_wait import GO, dispatcher_for, tracked
 
@@ -1306,11 +1308,14 @@ def test_the_waiter_lock_frees_when_the_waiter_dies_even_with_runs_alive(
     proc, db, queue = autostart["proc"], autostart["db"], autostart["queue"]
     job_id = enqueue(queue, "a", head=None)
     _wait_for(lambda: _running(db, job_id), 20, proc)
+    runs = descendants(proc.pid)
     proc.kill()
     proc.wait(10)
     fd = waiter_module.hold_waiter_lock(db, "claude-bot")
     os.close(fd)
     assert state(db, job_id) == "running"
+    (autostart["harness_dir"] / f"{job_id}.crash").touch()
+    _wait_for(lambda: not any(alive(pid) for pid in runs), 20)
 
 
 def test_hold_waiter_lock_refuses_a_second_holder_in_process(tmp_path: Path) -> None:
